@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -12,6 +13,19 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
+// Same guarded include as pressure_limited_poller.h: this is an installed public header, so it must
+// not hard-fail to compile where spdlog is unavailable.
+#if __has_include(<spdlog/spdlog.h>)
+#include <spdlog/spdlog.h>
+#elif __has_include("spdlog/spdlog.h")
+#include "spdlog/spdlog.h"
+#else
+namespace spdlog {
+template <typename... Args> inline void info(const char*, Args&&...) {}
+template <typename... Args> inline void warn(const char*, Args&&...) {}
+template <typename... Args> inline void error(const char*, Args&&...) {}
+} // namespace spdlog
+#endif
 #include <yams/daemon/components/knowledge_graph_completion.h>
 #include <yams/daemon/ipc/ipc_protocol_requests.h>
 #include <yams/integrity/repair_manager.h>
@@ -217,18 +231,94 @@ public:
         return get_or_create_channel<T>(name, capacity);
     }
 
+    /// A channel name was requested at a capacity other than the one it already has.
+    ///
+    /// get_or_create_channel() returns the existing channel and ignores the requested capacity, so
+    /// the first requester silently sizes a channel for the whole process. Call sites that disagree
+    /// about the same name were previously invisible; record the disagreement instead of dropping
+    /// it, because new call sites keep reintroducing the pattern.
+    struct CapacityMismatch {
+        std::string name;
+        std::size_t actual;
+        std::size_t requested;
+    };
+
+#ifdef YAMS_TESTING
+    /// Capacity disagreements observed so far, in first-seen order, at most once per distinct
+    /// (name, actual, requested). Empty means every reuse of an existing channel agreed on its
+    /// size.
+    ///
+    /// Test-facing: no production caller exists. The production-facing part of this diagnostic is
+    /// the warn emitted in get_or_create_channel, which stays enabled in all builds. If the daemon
+    /// later wants to surface these in status/doctor, add an ungated accessor then rather than
+    /// leaving one on the public API unused.
+    ///
+    /// Not const, matching get_channel(): mu_ is a plain std::mutex.
+    std::vector<CapacityMismatch> capacity_mismatches() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return capacityMismatches_;
+    }
+#endif
+
     template <typename T>
     std::shared_ptr<SpscQueue<T>> get_or_create_channel(const std::string& name,
                                                         std::size_t capacity) {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = chans_.find(name);
-        if (it != chans_.end()) {
-            return std::static_pointer_cast<SpscQueue<T>>(it->second);
+        const std::size_t requested = capacity ? capacity : kDefaultChannelCapacity;
+        std::size_t actualCapacity = requested;
+        bool newlyRecorded = false;
+        std::shared_ptr<SpscQueue<T>> result;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            auto it = chans_.find(name);
+            if (it == chans_.end()) {
+                result = std::make_shared<SpscQueue<T>>(requested);
+                chans_.emplace(name, ChannelEntry{result, requested});
+            } else {
+                // The capacity is read from the entry, never through the cast: a name is not
+                // guaranteed to map to one T (see ChannelEntry), so capacity() could not be called
+                // safely here. The cast itself is itself unvalidated, but that risk is unchanged
+                // from what callers already accepted for a doubly-registered name.
+                result = std::static_pointer_cast<SpscQueue<T>>(it->second.channel);
+                actualCapacity = it->second.capacity;
+                if (actualCapacity != requested) {
+                    newlyRecorded = recordCapacityMismatchLocked(name, actualCapacity, requested);
+                }
+            }
         }
-        auto q = std::make_shared<SpscQueue<T>>(capacity ? capacity : 1000);
-        chans_[name] = q;
-        return q;
+        // Logged outside the lock: a sink must not be able to re-enter the bus while mu_ is held.
+        if (newlyRecorded) {
+            spdlog::warn("[InternalEventBus] channel '{}' already exists with capacity {} but {} "
+                         "was requested; the existing channel wins and the requested capacity is "
+                         "ignored",
+                         name, actualCapacity, requested);
+        }
+        return result;
     }
+
+#ifdef YAMS_TESTING
+    /// Drop a channel from the registry. Existing holders keep their shared_ptr; the next
+    /// get_or_create_channel() for this name creates a fresh queue at the capacity it requests.
+    ///
+    /// Test-only, deliberately. This is not safe as a runtime API: existing holders keep their
+    /// shared_ptr, so calling it while producers or consumers are live creates two queues for one
+    /// name and silently splits or drops events between the old holders and the next
+    /// get_or_create_channel(). Gating it behind YAMS_TESTING keeps that footgun off the production
+    /// surface (Copilot review finding on #170).
+    ///
+    /// Its test purpose: get_or_create_channel ignores the requested capacity on a name hit, so a
+    /// channel created with a small capacity earlier otherwise pins that capacity for the whole
+    /// process.
+    ///
+    /// Also drops this name's recorded disagreements: the list is meant to describe disagreements
+    /// about rings that are still registered, so a removed-then-recreated channel must not leave a
+    /// stale entry behind and make queries order-dependent.
+    bool remove_channel(const std::string& name) {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::erase_if(capacityMismatches_,
+                      [&name](const CapacityMismatch& m) { return m.name == name; });
+        return chans_.erase(name) > 0;
+    }
+#endif
 
     // Non-creating accessor: returns nullptr if channel doesn't exist.
     // Use for observability paths (status/metrics) to avoid side effects.
@@ -238,7 +328,7 @@ public:
         if (it == chans_.end()) {
             return nullptr;
         }
-        return std::static_pointer_cast<SpscQueue<T>>(it->second);
+        return std::static_pointer_cast<SpscQueue<T>>(it->second.channel);
     }
 
     // Common event types
@@ -315,13 +405,6 @@ public:
         std::string knowledgeGraphToken;
         std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
     };
-    struct SymbolExtractionJob {
-        std::string hash;
-        int64_t documentId{-1};
-        std::string filePath;
-        std::string language;
-        std::shared_ptr<std::vector<std::byte>> contentBytes;
-    };
     struct EntityExtractionJob {
         std::string hash;
         int64_t documentId{-1};
@@ -388,8 +471,37 @@ public:
 
 private:
     InternalEventBus() = default;
+
+    static constexpr std::size_t kDefaultChannelCapacity = 1000;
+
+    /// One registry slot. The capacity is stored beside the erased pointer instead of being read
+    /// back through a cast, because a name is **not** guaranteed to map to a single T:
+    /// "model.events" is registered as SpscQueue<ModelReadyEvent> at
+    /// plugins/onnx/model_provider.cpp:1076 and as SpscQueue<ModelLoadFailedEvent> at
+    /// :1089/:1266/:1503. Calling capacity() through static_pointer_cast<SpscQueue<T>> for the
+    /// second group would be a wrong-type member access on a reachable production path.
+    struct ChannelEntry {
+        std::shared_ptr<void> channel;
+        std::size_t capacity{0};
+    };
+
+    /// Records a distinct (name, actual, requested) disagreement; true when newly recorded, so the
+    /// caller can log it after releasing the lock. Requires mu_ to be held.
+    bool recordCapacityMismatchLocked(const std::string& name, std::size_t actual,
+                                      std::size_t requested) {
+        for (const auto& m : capacityMismatches_) {
+            if (m.name == name && m.actual == actual && m.requested == requested) {
+                return false;
+            }
+        }
+        capacityMismatches_.push_back(CapacityMismatch{name, actual, requested});
+        return true;
+    }
+
     std::mutex mu_;
-    std::unordered_map<std::string, std::shared_ptr<void>> chans_;
+    std::unordered_map<std::string, ChannelEntry> chans_;
+    // Distinct capacity disagreements, in first-seen order. Guarded by mu_.
+    std::vector<CapacityMismatch> capacityMismatches_;
     // Simple counters for doctor/status
     std::atomic<std::uint64_t> embedQueued_{0};
     std::atomic<std::uint64_t> embedDropped_{0};
@@ -413,9 +525,6 @@ private:
     std::atomic<std::uint64_t> kgQueued_{0};
     std::atomic<std::uint64_t> kgDropped_{0};
     std::atomic<std::uint64_t> kgConsumed_{0};
-    std::atomic<std::uint64_t> symbolQueued_{0};
-    std::atomic<std::uint64_t> symbolDropped_{0};
-    std::atomic<std::uint64_t> symbolConsumed_{0};
     std::atomic<std::uint64_t> entityQueued_{0};
     std::atomic<std::uint64_t> entityDropped_{0};
     std::atomic<std::uint64_t> entityConsumed_{0};
@@ -483,9 +592,6 @@ public:
     void incKgQueued() { kgQueued_.fetch_add(1, std::memory_order_relaxed); }
     void incKgDropped() { kgDropped_.fetch_add(1, std::memory_order_relaxed); }
     void incKgConsumed() { kgConsumed_.fetch_add(1, std::memory_order_relaxed); }
-    void incSymbolQueued() { symbolQueued_.fetch_add(1, std::memory_order_relaxed); }
-    void incSymbolDropped() { symbolDropped_.fetch_add(1, std::memory_order_relaxed); }
-    void incSymbolConsumed() { symbolConsumed_.fetch_add(1, std::memory_order_relaxed); }
     void incEntityQueued() { entityQueued_.fetch_add(1, std::memory_order_relaxed); }
     void incEntityDropped() { entityDropped_.fetch_add(1, std::memory_order_relaxed); }
     void incEntityConsumed() { entityConsumed_.fetch_add(1, std::memory_order_relaxed); }
@@ -529,9 +635,6 @@ public:
     std::uint64_t kgQueued() const { return kgQueued_.load(std::memory_order_relaxed); }
     std::uint64_t kgDropped() const { return kgDropped_.load(std::memory_order_relaxed); }
     std::uint64_t kgConsumed() const { return kgConsumed_.load(std::memory_order_relaxed); }
-    std::uint64_t symbolQueued() const { return symbolQueued_.load(std::memory_order_relaxed); }
-    std::uint64_t symbolDropped() const { return symbolDropped_.load(std::memory_order_relaxed); }
-    std::uint64_t symbolConsumed() const { return symbolConsumed_.load(std::memory_order_relaxed); }
     std::uint64_t entityQueued() const { return entityQueued_.load(std::memory_order_relaxed); }
     std::uint64_t entityDropped() const { return entityDropped_.load(std::memory_order_relaxed); }
     std::uint64_t entityConsumed() const { return entityConsumed_.load(std::memory_order_relaxed); }

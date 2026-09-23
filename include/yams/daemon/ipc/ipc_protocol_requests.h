@@ -60,8 +60,9 @@ struct SearchRequest {
     // Session scoping (controls hot/cold path behavior)
     bool useSession = false;
     std::string sessionName = {};
-    bool globalSearch = false;   // Session-isolated memory (PBI-082): bypass session isolation
-    bool symbolRank = true;      // Enable automatic symbol ranking boost for code-like queries
+    bool globalSearch = false; // Session-isolated memory (PBI-082): bypass session isolation
+    bool symbolRank =
+        true; // Ignored since v0.20 (symbol ranking removed); kept for wire compatibility
     std::string instanceId = {}; // Instance-level isolation (UUID of MCP connection)
     std::string collection = {}; // Scope to a named corpus (collection metadata key)
 

@@ -4589,7 +4589,6 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         opts.limit = static_cast<std::size_t>(k);
         const auto queryTimeout = configuredBenchQueryTimeout(searchType);
         opts.timeout = queryTimeout;
-        opts.symbolRank = true;
         opts.allowFuzzyRetry = false;
         opts.allowLiteralTextRetry = false;
         const bool benchDiagEnabled = []() -> bool {
@@ -4722,8 +4721,6 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
         if (benchDiagEnabled) {
             debugEntry.diagnostics.push_back("searchType=" + opts.searchType);
-            debugEntry.diagnostics.push_back(std::string("symbolRank=") +
-                                             (opts.symbolRank ? "true" : "false"));
             debugEntry.diagnostics.push_back("limit=" + std::to_string(opts.limit));
             debugEntry.diagnostics.push_back(
                 "timeout_ms=" +
@@ -4821,7 +4818,6 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                 shadow.searchType = opts.searchType;
                 shadow.limit = opts.limit;
                 shadow.timeout = opts.timeout;
-                shadow.symbolRank = opts.symbolRank;
                 shadow.allowFuzzyRetry = false;
                 shadow.allowLiteralTextRetry = false;
 
@@ -5308,6 +5304,8 @@ struct BenchFixture {
             return trimCopy(std::string(fallbackName));
         };
 
+        std::unordered_set<std::string> topologyInputHashes;
+        std::size_t duplicateContentDocuments = 0;
         for (const auto& docPath : documentPaths) {
             auto docResult = metadataRepo->findDocumentByExactPath(docPath);
             if (!docResult) {
@@ -5315,21 +5313,28 @@ struct BenchFixture {
                                          docResult.error().message);
             }
             auto resolvedDoc = std::move(docResult.value());
-            if (!resolvedDoc.has_value() && warmDataDir) {
+            // Content-addressed ingest stores identical files once (warm caches rebase paths,
+            // and corpora such as nfcorpus contain duplicate texts), so fall back to the
+            // content hash to find the surviving document.
+            if (!resolvedDoc.has_value()) {
                 const auto contentHash = contentHasher.hashFile(docPath);
                 auto hashResult = metadataRepo->getDocumentByHash(contentHash);
                 if (!hashResult) {
-                    throw std::runtime_error("Failed to resolve warm-cache benchmark document " +
-                                             docPath +
+                    throw std::runtime_error("Failed to resolve benchmark document " + docPath +
                                              " by content hash: " + hashResult.error().message);
                 }
                 resolvedDoc = std::move(hashResult.value());
-                if (resolvedDoc.has_value()) {
+                if (resolvedDoc.has_value() && warmDataDir) {
                     ++warmPathRebases;
                 }
             }
             if (!resolvedDoc.has_value()) {
                 throw std::runtime_error("Benchmark document missing from metadata: " + docPath);
+            }
+            // A duplicate-content file resolves to a document already added as a topology input.
+            if (!topologyInputHashes.insert(resolvedDoc->sha256Hash).second) {
+                ++duplicateContentDocuments;
+                continue;
             }
 
             const auto& doc = *resolvedDoc;
@@ -5404,6 +5409,10 @@ struct BenchFixture {
             }
             docs.push_back({doc.sha256Hash, fs::path(docPath).stem().string(), text, headerText,
                             themeText, embedding, doc.id, nodeIdResult.value()});
+        }
+        if (duplicateContentDocuments > 0) {
+            spdlog::info("Topology benchmark skipped {} duplicate-content documents",
+                         duplicateContentDocuments);
         }
         if (warmPathRebases > 0) {
             spdlog::info("Resolved {} cloned warm-cache documents by stable content hash",
@@ -6235,6 +6244,19 @@ struct BenchFixture {
                 std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT");
             const char* topologyAnnCandidateLimitEnv =
                 std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_ANN_CANDIDATE_LIMIT");
+            const auto envSet = [](const std::optional<std::string>& value) {
+                return value.has_value() && !value->empty();
+            };
+            const auto topologyBqCandidateLimitEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT");
+            const auto topologyBqPrefixDimEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_PREFIX_DIM");
+            const auto topologySgcHopsEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_SGC_HOPS");
+            const auto simeonOuterMaxSimEnv =
+                yams::config::getenv_optional("YAMS_BENCH_SIMEON_OUTER_MAXSIM");
+            const auto graphCommunitySourceEnv =
+                yams::config::getenv_optional("YAMS_BENCH_GRAPH_COMMUNITY_SOURCE");
             const char* topologyExpansionOutputLimitEnv =
                 std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION_OUTPUT_LIMIT");
             const char* topologyGraphWeightedSeedRankingEnv =
@@ -6260,7 +6282,8 @@ struct BenchFixture {
             const bool writeTopologyEngineConfig =
                 (topologyEngineEnv && *topologyEngineEnv) ||
                 (topologyRepresentativesEnv && *topologyRepresentativesEnv) ||
-                (topologyBoundarySpillEnv && *topologyBoundarySpillEnv);
+                (topologyBoundarySpillEnv && *topologyBoundarySpillEnv) ||
+                envSet(topologySgcHopsEnv);
             const bool writeTopologyRouteConfig =
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA") != nullptr) ||
@@ -6270,6 +6293,8 @@ struct BenchFixture {
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS") != nullptr) ||
                 (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) ||
                 (topologyAnnCandidateLimitEnv && *topologyAnnCandidateLimitEnv) ||
+                envSet(topologyBqCandidateLimitEnv) || envSet(topologyBqPrefixDimEnv) ||
+                envSet(graphCommunitySourceEnv) ||
                 (topologyExpansionOutputLimitEnv && *topologyExpansionOutputLimitEnv) ||
                 (topologyGraphWeightedSeedRankingEnv && *topologyGraphWeightedSeedRankingEnv) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP") != nullptr) ||
@@ -6550,6 +6575,12 @@ struct BenchFixture {
                     }
                     yams::bench::writeTopologyDisabledEmbeddingSelection(configOut,
                                                                          topologyDisabled);
+                    if (envSet(simeonOuterMaxSimEnv)) {
+                        configOut << "\n[search]\n";
+                        configOut << "simeon_rerank_outer_maxsim = "
+                                  << (envTruthy(simeonOuterMaxSimEnv->c_str()) ? "true" : "false")
+                                  << "\n";
+                    }
                     configOut << "\n[vector_database]\n";
                     configOut << "search_engine = \"" << g_benchmark_search_engine << "\"\n";
                     if (std::getenv("YAMS_BENCH_SIMEON_PQ_RERANK_FACTOR") != nullptr) {
@@ -6604,6 +6635,22 @@ struct BenchFixture {
                             configOut << "ann_candidate_limit = "
                                       << parseSizeEnvOrDefault(
                                              "YAMS_BENCH_TOPOLOGY_ROUTE_ANN_CANDIDATE_LIMIT", 64)
+                                      << "\n";
+                        }
+                        if (envSet(topologyBqCandidateLimitEnv)) {
+                            configOut << "bq_candidate_limit = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT", 0)
+                                      << "\n";
+                        }
+                        if (envSet(graphCommunitySourceEnv)) {
+                            configOut << "graph_community_source = \"" << *graphCommunitySourceEnv
+                                      << "\"\n";
+                        }
+                        if (envSet(topologyBqPrefixDimEnv)) {
+                            configOut << "bq_prefix_dim = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_ROUTE_BQ_PREFIX_DIM", 0)
                                       << "\n";
                         }
                         configOut << "adaptive_probe_score_gap = "
@@ -6718,6 +6765,11 @@ struct BenchFixture {
                             configOut << "routing_representatives = "
                                       << parseSizeEnvOrDefault(
                                              "YAMS_BENCH_TOPOLOGY_ROUTING_REPRESENTATIVES", 1)
+                                      << "\n";
+                        }
+                        if (envSet(topologySgcHopsEnv)) {
+                            configOut << "sgc_hops = "
+                                      << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_SGC_HOPS", 0)
                                       << "\n";
                         }
                         if (topologyBoundarySpillEnv && *topologyBoundarySpillEnv) {
@@ -8673,15 +8725,14 @@ struct BenchFixture {
                 spdlog::warn("GetStats failed: {}", statsRes.error().message);
             }
 
-            auto doSanitySearch = [&](std::string label, std::string query, std::string searchType,
-                                      bool symbolRank) {
+            auto doSanitySearch = [&](std::string label, std::string query,
+                                      std::string searchType) {
                 yams::cli::search_runner::DaemonSearchOptions opts;
                 opts.query = std::move(query);
                 opts.searchType = std::move(searchType);
                 opts.limit = 25;
                 const auto queryTimeout = configuredBenchQueryTimeout(opts.searchType);
                 opts.timeout = queryTimeout;
-                opts.symbolRank = symbolRank;
                 opts.allowFuzzyRetry = false;
                 opts.allowLiteralTextRetry = false;
 
@@ -8719,15 +8770,15 @@ struct BenchFixture {
             };
 
             // Keyword search should return something if FTS is populated.
-            doSanitySearch("__sanity_keyword_the__", "the", "keyword", false);
+            doSanitySearch("__sanity_keyword_the__", "the", "keyword");
 
             // Hybrid search without symbol rank to avoid symbol-only decisions.
-            doSanitySearch("__sanity_hybrid_the__", "the", "hybrid", false);
+            doSanitySearch("__sanity_hybrid_the__", "the", "hybrid");
 
             // If BEIR corpus is used, easily-searchable token is doc id.
             if (useBEIR && beirCorpus && !beirCorpus->dataset.documents.empty()) {
                 const auto& firstDocId = beirCorpus->dataset.documents.begin()->first;
-                doSanitySearch("__sanity_keyword_docid__", firstDocId, "keyword", false);
+                doSanitySearch("__sanity_keyword_docid__", firstDocId, "keyword");
             }
         }
 

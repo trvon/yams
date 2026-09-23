@@ -30,7 +30,6 @@ class ExternalEntityProviderAdapter;
 namespace yams::daemon {
 class AbiPluginHost;
 class AbiEntityExtractorAdapter;
-class AbiSymbolExtractorAdapter;
 class DaemonLifecycleFsm;
 class IModelProvider;
 class PostIngestQueue;
@@ -49,7 +48,7 @@ std::string adjustOnnxConfigJson(const std::string& configJson, std::size_t defa
  * - Plugin host and loader ownership
  * - Trust management
  * - Plugin autoloading from configured directories
- * - Interface adoption (model provider, content extractors, symbol extractors)
+ * - Interface adoption (model provider, content extractors, entity extractors)
  * - FSM tracking (PluginHostFsm, EmbeddingProviderFsm)
  *
  * ## Thread Safety
@@ -222,13 +221,6 @@ public:
     Result<size_t> adoptContentExtractors();
 
     /**
-     * @brief Adopt symbol extractors from loaded plugins.
-     *
-     * @return Number of extractors adopted
-     */
-    Result<size_t> adoptSymbolExtractors();
-
-    /**
      * @brief Adopt entity providers from loaded external plugins.
      *
      * Entity providers extract KG entities (nodes, edges, aliases) from binary files.
@@ -256,10 +248,6 @@ public:
     const std::vector<std::shared_ptr<extraction::IContentExtractor>>&
     getContentExtractors() const {
         return contentExtractors_;
-    }
-
-    const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& getSymbolExtractors() const {
-        return symbolExtractors_;
     }
 
     const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& getEntityProviders() const {
@@ -399,7 +387,6 @@ private:
     std::string adoptedProviderPluginName_;
     std::string embeddingModelName_;
     std::vector<std::shared_ptr<extraction::IContentExtractor>> contentExtractors_;
-    std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     std::vector<std::shared_ptr<AbiEntityExtractorAdapter>> entityExtractors_;
     std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders_;
     PostIngestQueue* postIngestQueue_{nullptr};

@@ -1,11 +1,19 @@
+#include <yams/profiling.h>
+#include <yams/topology/topology_codec.h>
 #include <yams/topology/topology_metadata_store.h>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
+
+#include <algorithm>
 
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace yams::topology {
@@ -17,254 +25,193 @@ using json = nlohmann::json;
 constexpr std::string_view kLatestSnapshotNodeKey = "topology:snapshot:latest";
 constexpr std::string_view kSnapshotNodePrefix = "topology:snapshot:";
 constexpr std::string_view kClusterIdKey = "topology.cluster_id";
-constexpr std::string_view kParentClusterIdKey = "topology.parent_cluster_id";
-constexpr std::string_view kClusterLevelKey = "topology.cluster_level";
-constexpr std::string_view kPersistenceKey = "topology.persistence_score";
-constexpr std::string_view kCohesionKey = "topology.cohesion_score";
-constexpr std::string_view kBridgeKey = "topology.bridge_score";
-constexpr std::string_view kRoleKey = "topology.role";
-constexpr std::string_view kOverlapKey = "topology.overlap_cluster_ids_json";
 constexpr std::string_view kSnapshotIdKey = "topology.snapshot_id";
 
-const std::array<std::string_view, 9>& topologyMetadataKeys() {
-    static const std::array<std::string_view, 9> keys = {
-        kSnapshotIdKey,   kClusterIdKey,   kParentClusterIdKey,
-        kClusterLevelKey, kPersistenceKey, kCohesionKey,
-        kBridgeKey,       kRoleKey,        kOverlapKey};
+// Only these per-document keys are written; migration 41 pruned the structural keys, which now
+// live solely in the snapshot node.
+const std::array<std::string_view, 2>& topologyMetadataKeys() {
+    static const std::array<std::string_view, 2> keys = {kSnapshotIdKey, kClusterIdKey};
     return keys;
-}
-
-const char* roleToString(DocumentTopologyRole role) {
-    switch (role) {
-        case DocumentTopologyRole::Core:
-            return "core";
-        case DocumentTopologyRole::Bridge:
-            return "bridge";
-        case DocumentTopologyRole::Medoid:
-            return "medoid";
-        case DocumentTopologyRole::Outlier:
-            return "outlier";
-    }
-    return "core";
-}
-
-DocumentTopologyRole roleFromString(std::string_view value) {
-    if (value == "bridge") {
-        return DocumentTopologyRole::Bridge;
-    }
-    if (value == "medoid") {
-        return DocumentTopologyRole::Medoid;
-    }
-    if (value == "outlier") {
-        return DocumentTopologyRole::Outlier;
-    }
-    return DocumentTopologyRole::Core;
-}
-
-const char* inputKindToString(TopologyInputKind kind) {
-    switch (kind) {
-        case TopologyInputKind::SemanticNeighborGraph:
-            return "semantic_neighbor_graph";
-        case TopologyInputKind::EmbeddingNeighborhood:
-            return "embedding_neighborhood";
-        case TopologyInputKind::Hybrid:
-            return "hybrid";
-    }
-    return "hybrid";
-}
-
-TopologyInputKind inputKindFromString(std::string_view value) {
-    if (value == "semantic_neighbor_graph") {
-        return TopologyInputKind::SemanticNeighborGraph;
-    }
-    if (value == "embedding_neighborhood") {
-        return TopologyInputKind::EmbeddingNeighborhood;
-    }
-    return TopologyInputKind::Hybrid;
-}
-
-json membershipToJson(const DocumentClusterMembership& membership) {
-    json j = json::object();
-    j["document_hash"] = membership.documentHash;
-    j["cluster_id"] = membership.clusterId;
-    if (membership.parentClusterId.has_value()) {
-        j["parent_cluster_id"] = *membership.parentClusterId;
-    } else {
-        j["parent_cluster_id"] = nullptr;
-    }
-    j["cluster_level"] = membership.clusterLevel;
-    j["persistence_score"] = membership.persistenceScore;
-    j["cohesion_score"] = membership.cohesionScore;
-    j["bridge_score"] = membership.bridgeScore;
-    j["role"] = roleToString(membership.role);
-    j["overlap_cluster_ids"] = membership.overlapClusterIds;
-    return j;
-}
-
-DocumentClusterMembership membershipFromJson(const json& j) {
-    DocumentClusterMembership membership;
-    membership.documentHash = j.value("document_hash", "");
-    membership.clusterId = j.value("cluster_id", "");
-    if (j.contains("parent_cluster_id") && !j["parent_cluster_id"].is_null()) {
-        membership.parentClusterId = j["parent_cluster_id"].get<std::string>();
-    }
-    membership.clusterLevel = j.value("cluster_level", std::size_t{0});
-    membership.persistenceScore = j.value("persistence_score", 0.0);
-    membership.cohesionScore = j.value("cohesion_score", 0.0);
-    membership.bridgeScore = j.value("bridge_score", 0.0);
-    membership.role = roleFromString(j.value("role", std::string{"core"}));
-    if (j.contains("overlap_cluster_ids") && j["overlap_cluster_ids"].is_array()) {
-        membership.overlapClusterIds = j["overlap_cluster_ids"].get<std::vector<std::string>>();
-    }
-    return membership;
-}
-
-json representativeToJson(const ClusterRepresentative& representative) {
-    return json{{"cluster_id", representative.clusterId},
-                {"document_hash", representative.documentHash},
-                {"file_path", representative.filePath},
-                {"representative_score", representative.representativeScore}};
-}
-
-ClusterRepresentative representativeFromJson(const json& j) {
-    ClusterRepresentative representative;
-    representative.clusterId = j.value("cluster_id", "");
-    representative.documentHash = j.value("document_hash", "");
-    representative.filePath = j.value("file_path", "");
-    representative.representativeScore = j.value("representative_score", 0.0);
-    return representative;
-}
-
-json routingRepresentativeToJson(const ClusterRoutingRepresentative& representative) {
-    return json{{"document_hash", representative.documentHash},
-                {"embedding", representative.embedding}};
-}
-
-ClusterRoutingRepresentative routingRepresentativeFromJson(const json& j) {
-    ClusterRoutingRepresentative representative;
-    representative.documentHash = j.value("document_hash", "");
-    if (j.contains("embedding") && j["embedding"].is_array()) {
-        representative.embedding = j["embedding"].get<std::vector<float>>();
-    }
-    return representative;
-}
-
-json clusterToJson(const ClusterArtifact& cluster) {
-    json j = json::object();
-    j["cluster_id"] = cluster.clusterId;
-    if (cluster.parentClusterId.has_value()) {
-        j["parent_cluster_id"] = *cluster.parentClusterId;
-    } else {
-        j["parent_cluster_id"] = nullptr;
-    }
-    j["level"] = cluster.level;
-    j["member_count"] = cluster.memberCount;
-    j["persistence_score"] = cluster.persistenceScore;
-    j["cohesion_score"] = cluster.cohesionScore;
-    j["density_score"] = cluster.densityScore;
-    j["bridge_mass"] = cluster.bridgeMass;
-    j["protected_pair_count"] = cluster.protectedPairCount;
-    j["preserved_protected_pair_count"] = cluster.preservedProtectedPairCount;
-    j["member_document_hashes"] = cluster.memberDocumentHashes;
-    j["overlap_cluster_ids"] = cluster.overlapClusterIds;
-    if (cluster.medoid.has_value()) {
-        j["medoid"] = representativeToJson(*cluster.medoid);
-    }
-    if (!cluster.centroidEmbedding.empty()) {
-        j["centroid_embedding"] = cluster.centroidEmbedding;
-    }
-    if (!cluster.routingRepresentatives.empty()) {
-        j["routing_representatives"] = json::array();
-        for (const auto& representative : cluster.routingRepresentatives) {
-            j["routing_representatives"].push_back(routingRepresentativeToJson(representative));
-        }
-    }
-    return j;
-}
-
-ClusterArtifact clusterFromJson(const json& j) {
-    ClusterArtifact cluster;
-    cluster.clusterId = j.value("cluster_id", "");
-    if (j.contains("parent_cluster_id") && !j["parent_cluster_id"].is_null()) {
-        cluster.parentClusterId = j["parent_cluster_id"].get<std::string>();
-    }
-    cluster.level = j.value("level", std::size_t{0});
-    cluster.memberCount = j.value("member_count", std::size_t{0});
-    cluster.persistenceScore = j.value("persistence_score", 0.0);
-    cluster.cohesionScore = j.value("cohesion_score", 0.0);
-    cluster.densityScore = j.value("density_score", 0.0);
-    cluster.bridgeMass = j.value("bridge_mass", 0.0);
-    cluster.protectedPairCount = j.value("protected_pair_count", std::size_t{0});
-    cluster.preservedProtectedPairCount = j.value("preserved_protected_pair_count", std::size_t{0});
-    if (j.contains("medoid") && j["medoid"].is_object()) {
-        cluster.medoid = representativeFromJson(j["medoid"]);
-    }
-    if (j.contains("member_document_hashes") && j["member_document_hashes"].is_array()) {
-        cluster.memberDocumentHashes = j["member_document_hashes"].get<std::vector<std::string>>();
-    }
-    if (j.contains("overlap_cluster_ids") && j["overlap_cluster_ids"].is_array()) {
-        cluster.overlapClusterIds = j["overlap_cluster_ids"].get<std::vector<std::string>>();
-    }
-    if (j.contains("centroid_embedding") && j["centroid_embedding"].is_array()) {
-        cluster.centroidEmbedding = j["centroid_embedding"].get<std::vector<float>>();
-    }
-    if (j.contains("routing_representatives") && j["routing_representatives"].is_array()) {
-        for (const auto& representative : j["routing_representatives"]) {
-            if (representative.is_object()) {
-                cluster.routingRepresentatives.push_back(
-                    routingRepresentativeFromJson(representative));
-            }
-        }
-    }
-    return cluster;
-}
-
-json batchToJson(const TopologyArtifactBatch& batch) {
-    json j{{"snapshot_id", batch.snapshotId},
-           {"algorithm", batch.algorithm},
-           {"input_kind", inputKindToString(batch.inputKind)},
-           {"embedding_space_identity", batch.embeddingSpaceIdentity},
-           {"protected_relation_identity", batch.protectedRelationIdentity},
-           {"generated_at_unix_seconds", batch.generatedAtUnixSeconds},
-           {"topology_epoch", batch.topologyEpoch}};
-    j["clusters"] = json::array();
-    for (const auto& cluster : batch.clusters) {
-        j["clusters"].push_back(clusterToJson(cluster));
-    }
-    j["memberships"] = json::array();
-    for (const auto& membership : batch.memberships) {
-        j["memberships"].push_back(membershipToJson(membership));
-    }
-    return j;
-}
-
-Result<TopologyArtifactBatch> batchFromJson(const json& j) {
-    if (!j.is_object()) {
-        return Error{ErrorCode::InvalidData, "topology batch JSON must be an object"};
-    }
-    TopologyArtifactBatch batch;
-    batch.snapshotId = j.value("snapshot_id", "");
-    batch.algorithm = j.value("algorithm", "");
-    batch.inputKind = inputKindFromString(j.value("input_kind", std::string{"hybrid"}));
-    batch.embeddingSpaceIdentity = j.value("embedding_space_identity", "");
-    batch.protectedRelationIdentity = j.value("protected_relation_identity", "");
-    batch.generatedAtUnixSeconds = j.value("generated_at_unix_seconds", uint64_t{0});
-    batch.topologyEpoch = j.value("topology_epoch", uint64_t{0});
-    if (j.contains("clusters") && j["clusters"].is_array()) {
-        for (const auto& clusterJson : j["clusters"]) {
-            batch.clusters.push_back(clusterFromJson(clusterJson));
-        }
-    }
-    if (j.contains("memberships") && j["memberships"].is_array()) {
-        for (const auto& membershipJson : j["memberships"]) {
-            batch.memberships.push_back(membershipFromJson(membershipJson));
-        }
-    }
-    return batch;
 }
 
 std::string snapshotNodeKey(std::string_view snapshotId) {
     return std::string(kSnapshotNodePrefix) + std::string(snapshotId);
+}
+
+constexpr std::string_view kClusterNodePrefix = "topology:cluster:";
+constexpr std::string_view kClusterNodeType = "topology_cluster";
+constexpr std::string_view kSnapshotNodeType = "topology_snapshot";
+constexpr std::size_t kNodeScanPage = 512;
+
+std::string clusterNodeKey(std::string_view clusterId) {
+    return std::string(kClusterNodePrefix) + std::string(clusterId);
+}
+
+float unitWeight(double value) {
+    return static_cast<float>(std::clamp(value, 0.0, 1.0));
+}
+
+/// Replace the cluster graph with the batch's clusters in one KG write batch: cluster nodes,
+/// document member_of / medoid_of / overlaps edges, and cluster subcluster_of hierarchy edges.
+/// Deleting the previous cluster nodes removes their edges through the foreign-key cascade.
+Result<void> materializeClusterGraph(metadata::KnowledgeGraphStore& kgStore,
+                                     const TopologyArtifactBatch& batch, std::int64_t nowSecs) {
+    YAMS_ZONE_SCOPED_N("topology::store::materializeClusterGraph");
+    std::vector<std::int64_t> staleClusterNodes;
+    for (std::size_t offset = 0;; offset += kNodeScanPage) {
+        auto page = kgStore.findNodesByType(kClusterNodeType, kNodeScanPage, offset);
+        if (!page) {
+            return page.error();
+        }
+        for (const auto& node : page.value()) {
+            staleClusterNodes.push_back(node.id);
+        }
+        if (page.value().size() < kNodeScanPage) {
+            break;
+        }
+    }
+
+    std::vector<std::string> docKeys;
+    docKeys.reserve(batch.memberships.size());
+    for (const auto& membership : batch.memberships) {
+        docKeys.push_back("doc:" + membership.documentHash);
+    }
+    std::unordered_map<std::string, std::int64_t> docNodeIds;
+    if (!docKeys.empty()) {
+        auto docNodes = kgStore.getNodesByKeys(docKeys);
+        if (!docNodes) {
+            return docNodes.error();
+        }
+        for (const auto& node : docNodes.value()) {
+            docNodeIds.emplace(node.nodeKey.substr(4), node.id); // strip "doc:"
+        }
+    }
+
+    auto writeBatch = kgStore.beginWriteBatch();
+    if (!writeBatch) {
+        return writeBatch.error();
+    }
+    auto& wb = *writeBatch.value();
+    for (const auto nodeId : staleClusterNodes) {
+        if (auto removed = wb.deleteNodeById(nodeId); !removed) {
+            return removed.error();
+        }
+    }
+
+    std::vector<metadata::KGNode> clusterNodes;
+    clusterNodes.reserve(batch.clusters.size());
+    for (const auto& cluster : batch.clusters) {
+        metadata::KGNode node;
+        node.nodeKey = clusterNodeKey(cluster.clusterId);
+        node.label = cluster.clusterId;
+        node.type = std::string(kClusterNodeType);
+        node.createdTime = nowSecs;
+        node.updatedTime = nowSecs;
+        node.properties =
+            json{{"snapshot_id", batch.snapshotId},     {"level", cluster.level},
+                 {"member_count", cluster.memberCount}, {"persistence", cluster.persistenceScore},
+                 {"cohesion", cluster.cohesionScore},   {"density", cluster.densityScore}}
+                .dump();
+        clusterNodes.push_back(std::move(node));
+    }
+    auto clusterIds = wb.upsertNodes(clusterNodes);
+    if (!clusterIds) {
+        return clusterIds.error();
+    }
+    std::unordered_map<std::string_view, std::int64_t> clusterNodeIds;
+    for (std::size_t i = 0; i < batch.clusters.size() && i < clusterIds.value().size(); ++i) {
+        clusterNodeIds.emplace(batch.clusters[i].clusterId, clusterIds.value()[i]);
+    }
+
+    std::vector<metadata::KGEdge> edges;
+    edges.reserve(batch.memberships.size() + batch.clusters.size() * 2);
+    const auto addEdge = [&](std::int64_t src, std::int64_t dst, std::string_view relation,
+                             float weight) {
+        edges.push_back(metadata::KGEdge{.srcNodeId = src,
+                                         .dstNodeId = dst,
+                                         .relation = std::string(relation),
+                                         .weight = weight,
+                                         .createdTime = nowSecs});
+    };
+    for (const auto& membership : batch.memberships) {
+        const auto doc = docNodeIds.find(membership.documentHash);
+        if (doc == docNodeIds.end()) {
+            continue;
+        }
+        if (const auto cluster = clusterNodeIds.find(membership.clusterId);
+            cluster != clusterNodeIds.end()) {
+            addEdge(doc->second, cluster->second, "member_of",
+                    unitWeight(membership.persistenceScore));
+        }
+        for (const auto& overlapId : membership.overlapClusterIds) {
+            if (const auto overlap = clusterNodeIds.find(overlapId);
+                overlap != clusterNodeIds.end()) {
+                addEdge(doc->second, overlap->second, "overlaps",
+                        unitWeight(membership.bridgeScore));
+            }
+        }
+    }
+    for (const auto& cluster : batch.clusters) {
+        const auto self = clusterNodeIds.find(cluster.clusterId);
+        if (self == clusterNodeIds.end()) {
+            continue;
+        }
+        if (cluster.medoid) {
+            if (const auto doc = docNodeIds.find(cluster.medoid->documentHash);
+                doc != docNodeIds.end()) {
+                addEdge(doc->second, self->second, "medoid_of",
+                        unitWeight(cluster.medoid->representativeScore));
+            }
+        }
+        if (cluster.parentClusterId) {
+            if (const auto parent = clusterNodeIds.find(*cluster.parentClusterId);
+                parent != clusterNodeIds.end()) {
+                addEdge(self->second, parent->second, "subcluster_of", 1.0F);
+            }
+        }
+    }
+    if (!edges.empty()) {
+        if (auto added = wb.addEdgesUnique(edges); !added) {
+            return added.error();
+        }
+    }
+    return wb.commit();
+}
+
+/// Keep the newest kRetainedSnapshots snapshot nodes (by insertion order) plus the one the
+/// latest pointer names; older compressed snapshots are removed.
+Result<void> pruneSnapshotNodes(metadata::KnowledgeGraphStore& kgStore, std::size_t retain,
+                                std::string_view latestSnapshotId) {
+    YAMS_ZONE_SCOPED_N("topology::store::pruneSnapshotNodes");
+    std::vector<std::pair<std::int64_t, std::string>> snapshots;
+    for (std::size_t offset = 0;; offset += kNodeScanPage) {
+        auto page = kgStore.findNodesByType(kSnapshotNodeType, kNodeScanPage, offset);
+        if (!page) {
+            return page.error();
+        }
+        for (const auto& node : page.value()) {
+            snapshots.emplace_back(node.id, node.nodeKey);
+        }
+        if (page.value().size() < kNodeScanPage) {
+            break;
+        }
+    }
+    if (snapshots.size() <= retain) {
+        return {};
+    }
+    std::ranges::sort(snapshots, [](const auto& lhs, const auto& rhs) {
+        return lhs.first > rhs.first; // newest first
+    });
+    const auto latestKey = snapshotNodeKey(latestSnapshotId);
+    for (std::size_t i = retain; i < snapshots.size(); ++i) {
+        if (snapshots[i].second == latestKey) {
+            continue;
+        }
+        if (auto removed = kgStore.deleteNodeById(snapshots[i].first); !removed) {
+            return removed.error();
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -275,6 +222,7 @@ MetadataKgTopologyArtifactStore::MetadataKgTopologyArtifactStore(
     : metadataRepo_(std::move(metadataRepo)), kgStore_(std::move(kgStore)) {}
 
 Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactBatch& batch) {
+    YAMS_ZONE_SCOPED_N("topology::store::storeBatch");
     if (!metadataRepo_) {
         return Error{ErrorCode::InvalidState,
                      "topology metadata store requires metadata repository"};
@@ -283,50 +231,67 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         return Error{ErrorCode::InvalidArgument, "topology batch requires non-empty snapshot id"};
     }
 
-    std::optional<TopologyArtifactBatch> previousBatch;
-    if (cachedLatest_.has_value()) {
-        previousBatch = cachedLatest_;
-    } else {
-        auto latestResult = loadLatest();
-        if (!latestResult) {
-            return latestResult.error();
-        }
-        previousBatch = std::move(latestResult.value());
+    std::lock_guard writeLock(writeMutex_);
+
+    auto previousResult = loadResidentLatest();
+    if (!previousResult) {
+        return previousResult.error();
+    }
+    const std::shared_ptr<const ResidentSnapshot> previous = std::move(previousResult.value());
+
+    std::vector<std::string> requestedHashes;
+    requestedHashes.reserve(batch.memberships.size());
+    for (const auto& membership : batch.memberships) {
+        requestedHashes.push_back(membership.documentHash);
     }
 
-    std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> metadataEntries;
-    metadataEntries.reserve(batch.memberships.size() * 9);
+    auto docsResult = metadataRepo_->batchGetDocumentsByHash(requestedHashes);
+    if (!docsResult) {
+        return docsResult.error();
+    }
+    const auto& docMap = docsResult.value();
     for (const auto& membership : batch.memberships) {
-        auto documentResult = metadataRepo_->getDocumentByHash(membership.documentHash);
-        if (!documentResult) {
-            return documentResult.error();
-        }
-        if (!documentResult.value().has_value()) {
+        if (!docMap.contains(membership.documentHash)) {
             return Error{ErrorCode::NotFound, "topology membership document not found for hash=" +
                                                   membership.documentHash};
         }
-        const auto documentId = documentResult.value()->id;
+    }
+
+    // Write order makes the latest pointer the commit point: the snapshot node is written first
+    // (an orphan is harmless if a later step fails), then per-document keys, then the pointer.
+    // A failure before the pointer leaves the previous snapshot authoritative.
+    const auto nowSecs = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+    if (kgStore_) {
+        metadata::KGNode snapshotNode;
+        snapshotNode.nodeKey = snapshotNodeKey(batch.snapshotId);
+        snapshotNode.label = batch.snapshotId;
+        snapshotNode.type = std::string{"topology_snapshot"};
+        snapshotNode.createdTime = nowSecs;
+        snapshotNode.updatedTime = nowSecs;
+        auto compRes = serializeTopologyBatchCompressed(batch);
+        if (!compRes) {
+            return compRes.error();
+        }
+        YAMS_PLOT("topology::snapshot_payload_bytes", static_cast<int64_t>(compRes.value().size()));
+        YAMS_PLOT("topology::snapshot_memberships", static_cast<int64_t>(batch.memberships.size()));
+        snapshotNode.properties = std::move(compRes.value());
+        auto snapshotResult = kgStore_->upsertNode(snapshotNode);
+        if (!snapshotResult) {
+            return snapshotResult.error();
+        }
+    }
+
+    std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> metadataEntries;
+    metadataEntries.reserve(batch.memberships.size() * 2);
+    for (const auto& membership : batch.memberships) {
+        const auto it = docMap.find(membership.documentHash);
+        const auto documentId = it->second.id;
         metadataEntries.emplace_back(documentId, std::string(kSnapshotIdKey),
                                      metadata::MetadataValue(batch.snapshotId));
         metadataEntries.emplace_back(documentId, std::string(kClusterIdKey),
                                      metadata::MetadataValue(membership.clusterId));
-        metadataEntries.emplace_back(
-            documentId, std::string(kParentClusterIdKey),
-            metadata::MetadataValue(membership.parentClusterId.value_or("")));
-        metadataEntries.emplace_back(
-            documentId, std::string(kClusterLevelKey),
-            metadata::MetadataValue(static_cast<int64_t>(membership.clusterLevel)));
-        metadataEntries.emplace_back(documentId, std::string(kPersistenceKey),
-                                     metadata::MetadataValue(membership.persistenceScore));
-        metadataEntries.emplace_back(documentId, std::string(kCohesionKey),
-                                     metadata::MetadataValue(membership.cohesionScore));
-        metadataEntries.emplace_back(documentId, std::string(kBridgeKey),
-                                     metadata::MetadataValue(membership.bridgeScore));
-        metadataEntries.emplace_back(documentId, std::string(kRoleKey),
-                                     metadata::MetadataValue(roleToString(membership.role)));
-        metadataEntries.emplace_back(
-            documentId, std::string(kOverlapKey),
-            metadata::MetadataValue(json(membership.overlapClusterIds).dump()));
     }
 
     if (!metadataEntries.empty()) {
@@ -336,24 +301,27 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         }
     }
 
-    if (previousBatch.has_value()) {
-        std::unordered_set<std::string> currentDocumentHashes;
-        currentDocumentHashes.reserve(batch.memberships.size());
-        for (const auto& membership : batch.memberships) {
-            currentDocumentHashes.insert(membership.documentHash);
+    if (previous) {
+        std::unordered_set<std::string> currentDocumentHashes(requestedHashes.begin(),
+                                                              requestedHashes.end());
+        std::vector<std::string> removedHashes;
+        for (const auto& previousMembership : previous->batch.memberships) {
+            if (!currentDocumentHashes.contains(previousMembership.documentHash)) {
+                removedHashes.push_back(previousMembership.documentHash);
+            }
         }
 
-        for (const auto& previousMembership : previousBatch->memberships) {
-            if (currentDocumentHashes.contains(previousMembership.documentHash)) {
-                continue;
-            }
-            auto documentResult = metadataRepo_->getDocumentByHash(previousMembership.documentHash);
-            if (!documentResult || !documentResult.value().has_value()) {
-                continue;
-            }
-            for (const auto key : topologyMetadataKeys()) {
-                auto removeResult =
-                    metadataRepo_->removeMetadata(documentResult.value()->id, std::string(key));
+        if (!removedHashes.empty()) {
+            auto removedDocsResult = metadataRepo_->batchGetDocumentsByHash(removedHashes);
+            if (removedDocsResult) {
+                std::vector<std::pair<int64_t, std::string>> removals;
+                removals.reserve(removedDocsResult.value().size() * topologyMetadataKeys().size());
+                for (const auto& [hash, docInfo] : removedDocsResult.value()) {
+                    for (const auto key : topologyMetadataKeys()) {
+                        removals.emplace_back(docInfo.id, std::string(key));
+                    }
+                }
+                auto removeResult = metadataRepo_->removeMetadataBatch(removals);
                 if (!removeResult) {
                     return removeResult.error();
                 }
@@ -362,21 +330,13 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
     }
 
     if (kgStore_) {
-        const auto nowSecs = std::chrono::duration_cast<std::chrono::seconds>(
-                                 std::chrono::system_clock::now().time_since_epoch())
-                                 .count();
-        metadata::KGNode snapshotNode;
-        snapshotNode.nodeKey = snapshotNodeKey(batch.snapshotId);
-        snapshotNode.label = batch.snapshotId;
-        snapshotNode.type = std::string{"topology_snapshot"};
-        snapshotNode.createdTime = nowSecs;
-        snapshotNode.updatedTime = nowSecs;
-        snapshotNode.properties = batchToJson(batch).dump();
-        auto snapshotResult = kgStore_->upsertNode(snapshotNode);
-        if (!snapshotResult) {
-            return snapshotResult.error();
+        // Written before the pointer flips, so a failure leaves the previous snapshot current.
+        if (auto graph = materializeClusterGraph(*kgStore_, batch, nowSecs); !graph) {
+            return graph.error();
         }
+    }
 
+    if (kgStore_) {
         metadata::KGNode latestNode;
         latestNode.nodeKey = std::string{kLatestSnapshotNodeKey};
         latestNode.label = std::string{"latest_topology_snapshot"};
@@ -390,44 +350,54 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         if (!latestResult) {
             return latestResult.error();
         }
+        // Retention is best effort: an old snapshot left behind is only wasted space.
+        if (auto pruned = pruneSnapshotNodes(*kgStore_, kRetainedSnapshots, batch.snapshotId);
+            !pruned) {
+            spdlog::warn("[topology] failed to prune old snapshot nodes: {}",
+                         pruned.error().message);
+        }
     }
 
-    cachedLatest_ = batch;
+    auto nextResident = makeResident(batch);
+    {
+        std::lock_guard lock(residentMutex_);
+        resident_ = std::move(nextResident);
+        ++residentGeneration_;
+    }
     return {};
 }
 
-Result<std::optional<TopologyArtifactBatch>>
-MetadataKgTopologyArtifactStore::loadLatest(std::string_view snapshotId) const {
-    if (snapshotId.empty()) {
-        if (kgStore_) {
-            auto latestNodeResult = kgStore_->getNodeByKey(kLatestSnapshotNodeKey);
-            if (!latestNodeResult) {
-                return latestNodeResult.error();
-            }
-            if (latestNodeResult.value().has_value() &&
-                latestNodeResult.value()->properties.has_value()) {
-                auto parsed = json::parse(*latestNodeResult.value()->properties, nullptr, false);
-                if (!parsed.is_discarded()) {
-                    const auto latestSnapshotId = parsed.value("snapshot_id", std::string{});
-                    if (!latestSnapshotId.empty()) {
-                        return loadLatest(latestSnapshotId);
-                    }
-                }
-            }
-        }
-        if (cachedLatest_.has_value()) {
-            return cachedLatest_;
-        }
-        return std::optional<TopologyArtifactBatch>{};
+std::shared_ptr<const MetadataKgTopologyArtifactStore::ResidentSnapshot>
+MetadataKgTopologyArtifactStore::makeResident(TopologyArtifactBatch batch) {
+    auto resident = std::make_shared<ResidentSnapshot>();
+    resident->batch = std::move(batch);
+    resident->membershipIndex.reserve(resident->batch.memberships.size());
+    for (std::size_t i = 0; i < resident->batch.memberships.size(); ++i) {
+        resident->membershipIndex.emplace(resident->batch.memberships[i].documentHash, i);
     }
+    return resident;
+}
 
-    if (cachedLatest_.has_value() && cachedLatest_->snapshotId == snapshotId) {
-        return cachedLatest_;
+std::shared_ptr<const TopologyArtifactBatch> MetadataKgTopologyArtifactStore::batchView(
+    const std::shared_ptr<const ResidentSnapshot>& resident) {
+    if (!resident) {
+        return {};
     }
+    // Aliasing constructor: the batch shares ownership with its resident snapshot.
+    return std::shared_ptr<const TopologyArtifactBatch>(resident, &resident->batch);
+}
+
+std::shared_ptr<const MetadataKgTopologyArtifactStore::ResidentSnapshot>
+MetadataKgTopologyArtifactStore::resident() const {
+    std::lock_guard lock(residentMutex_);
+    return resident_;
+}
+
+Result<std::optional<TopologyArtifactBatch>>
+MetadataKgTopologyArtifactStore::loadSnapshotById(std::string_view snapshotId) const {
     if (!kgStore_) {
         return std::optional<TopologyArtifactBatch>{};
     }
-
     auto snapshotNodeResult = kgStore_->getNodeByKey(snapshotNodeKey(snapshotId));
     if (!snapshotNodeResult) {
         return snapshotNodeResult.error();
@@ -436,21 +406,122 @@ MetadataKgTopologyArtifactStore::loadLatest(std::string_view snapshotId) const {
         !snapshotNodeResult.value()->properties.has_value()) {
         return std::optional<TopologyArtifactBatch>{};
     }
-
-    auto parsed = json::parse(*snapshotNodeResult.value()->properties, nullptr, false);
-    if (parsed.is_discarded()) {
-        return Error{ErrorCode::SerializationError, "failed to parse topology snapshot JSON"};
-    }
-    auto batchResult = batchFromJson(parsed);
+    auto batchResult = deserializeTopologyBatchCompressed(*snapshotNodeResult.value()->properties);
     if (!batchResult) {
         return batchResult.error();
     }
-    cachedLatest_ = batchResult.value();
-    return cachedLatest_;
+    return std::optional<TopologyArtifactBatch>{std::move(batchResult.value())};
+}
+
+Result<std::shared_ptr<const MetadataKgTopologyArtifactStore::ResidentSnapshot>>
+MetadataKgTopologyArtifactStore::loadResidentLatest() const {
+    YAMS_ZONE_SCOPED_N("topology::store::loadResidentLatest");
+    std::shared_ptr<const ResidentSnapshot> current;
+    std::uint64_t generation = 0;
+    {
+        std::lock_guard lock(residentMutex_);
+        current = resident_;
+        generation = residentGeneration_;
+    }
+    if (!kgStore_) {
+        return current;
+    }
+
+    auto latestNodeResult = kgStore_->getNodeByKey(kLatestSnapshotNodeKey);
+    if (!latestNodeResult) {
+        return latestNodeResult.error();
+    }
+    std::string latestSnapshotId;
+    if (latestNodeResult.value().has_value() && latestNodeResult.value()->properties.has_value()) {
+        auto parsed = json::parse(*latestNodeResult.value()->properties, nullptr, false);
+        if (!parsed.is_discarded() && parsed.is_object()) {
+            if (auto it = parsed.find("snapshot_id"); it != parsed.end() && it->is_string()) {
+                latestSnapshotId = it->get<std::string>();
+            }
+        }
+    }
+    if (latestSnapshotId.empty()) {
+        return current;
+    }
+    if (current && current->batch.snapshotId == latestSnapshotId) {
+        return current;
+    }
+
+    auto loaded = loadSnapshotById(latestSnapshotId);
+    if (!loaded) {
+        return loaded.error();
+    }
+    if (!loaded.value().has_value()) {
+        return current;
+    }
+    auto loadedResident = makeResident(std::move(*loaded.value()));
+    std::lock_guard lock(residentMutex_);
+    if (residentGeneration_ == generation) {
+        resident_ = loadedResident;
+        return loadedResident;
+    }
+    // A write landed while loading; it is newer than what storage returned.
+    return resident_;
+}
+
+Result<std::shared_ptr<const TopologyArtifactBatch>>
+MetadataKgTopologyArtifactStore::loadLatestShared(std::string_view snapshotId) const {
+    if (snapshotId.empty()) {
+        auto latest = loadResidentLatest();
+        if (!latest) {
+            return latest.error();
+        }
+        return batchView(latest.value());
+    }
+
+    if (auto current = resident(); current && current->batch.snapshotId == snapshotId) {
+        return batchView(current);
+    }
+    // Historical snapshots are returned without displacing the resident latest snapshot.
+    auto loaded = loadSnapshotById(snapshotId);
+    if (!loaded) {
+        return loaded.error();
+    }
+    if (!loaded.value().has_value()) {
+        return std::shared_ptr<const TopologyArtifactBatch>{};
+    }
+    return std::make_shared<const TopologyArtifactBatch>(std::move(*loaded.value()));
+}
+
+Result<std::optional<TopologyArtifactBatch>>
+MetadataKgTopologyArtifactStore::loadLatest(std::string_view snapshotId) const {
+    auto shared = loadLatestShared(snapshotId);
+    if (!shared) {
+        return shared.error();
+    }
+    if (!shared.value()) {
+        return std::optional<TopologyArtifactBatch>{};
+    }
+    return std::optional<TopologyArtifactBatch>{*shared.value()};
 }
 
 Result<std::vector<DocumentClusterMembership>> MetadataKgTopologyArtifactStore::loadMemberships(
     std::span<const std::string> documentHashes) const {
+    auto current = resident();
+    if (!current) {
+        auto latest = loadResidentLatest();
+        if (!latest) {
+            return latest.error();
+        }
+        current = std::move(latest.value());
+    }
+    if (current && !current->batch.memberships.empty()) {
+        std::vector<DocumentClusterMembership> memberships;
+        memberships.reserve(documentHashes.size());
+        for (const auto& hash : documentHashes) {
+            if (auto it = current->membershipIndex.find(hash);
+                it != current->membershipIndex.end()) {
+                memberships.push_back(current->batch.memberships[it->second]);
+            }
+        }
+        return memberships;
+    }
+
     if (!metadataRepo_) {
         return Error{ErrorCode::InvalidState,
                      "topology metadata store requires metadata repository"};
@@ -477,39 +548,12 @@ Result<std::vector<DocumentClusterMembership>> MetadataKgTopologyArtifactStore::
             continue;
         }
 
+        // Without a resident snapshot only the per-document cluster id survives (migration 41
+        // moved the structural fields into the snapshot node), so the remaining fields keep
+        // their defaults rather than reading keys that are no longer written.
         DocumentClusterMembership membership;
         membership.documentHash = hash;
         membership.clusterId = clusterIt->second.asString();
-        if (auto parentIt = allMetadata.find(std::string(kParentClusterIdKey));
-            parentIt != allMetadata.end() && !parentIt->second.asString().empty()) {
-            membership.parentClusterId = parentIt->second.asString();
-        }
-        if (auto levelIt = allMetadata.find(std::string(kClusterLevelKey));
-            levelIt != allMetadata.end()) {
-            membership.clusterLevel = static_cast<std::size_t>(levelIt->second.asInteger());
-        }
-        if (auto persistenceIt = allMetadata.find(std::string(kPersistenceKey));
-            persistenceIt != allMetadata.end()) {
-            membership.persistenceScore = persistenceIt->second.asReal();
-        }
-        if (auto cohesionIt = allMetadata.find(std::string(kCohesionKey));
-            cohesionIt != allMetadata.end()) {
-            membership.cohesionScore = cohesionIt->second.asReal();
-        }
-        if (auto bridgeIt = allMetadata.find(std::string(kBridgeKey));
-            bridgeIt != allMetadata.end()) {
-            membership.bridgeScore = bridgeIt->second.asReal();
-        }
-        if (auto roleIt = allMetadata.find(std::string(kRoleKey)); roleIt != allMetadata.end()) {
-            membership.role = roleFromString(roleIt->second.asString());
-        }
-        if (auto overlapIt = allMetadata.find(std::string(kOverlapKey));
-            overlapIt != allMetadata.end() && !overlapIt->second.asString().empty()) {
-            auto parsed = json::parse(overlapIt->second.asString(), nullptr, false);
-            if (!parsed.is_discarded() && parsed.is_array()) {
-                membership.overlapClusterIds = parsed.get<std::vector<std::string>>();
-            }
-        }
         memberships.push_back(std::move(membership));
     }
 

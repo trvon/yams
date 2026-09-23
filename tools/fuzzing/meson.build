@@ -1,29 +1,24 @@
 # YAMS Fuzzing Harnesses
 #
-# Builds fuzzers for AFL++ using libFuzzer compatibility mode.
-# AFL++ docs: "afl-clang-fast++ -fsanitize=fuzzer ... provides the fastest speed possible"
-#
-# Build with:
-#   ./tools/fuzzing/fuzz.sh build
+# Two engines share these targets (selected in the top-level meson.build):
+#   afl       - AFL++ in libFuzzer compatibility mode (afl-clang-fast++, Docker):
+#                 ./tools/fuzzing/fuzz.sh build
+#   libfuzzer - plain clang with the libFuzzer runtime; every project object is built with
+#               -fsanitize=fuzzer-no-link plus ASan/UBSan, harnesses link -fsanitize=fuzzer:
+#                 CC=clang CXX=clang++ meson setup build/fuzz -Dbuild-fuzzers=true \
+#                   -Dbuild-tests=false -Dbuild-plugins=false -Dbuild-cli=false
+#                 meson compile -C build/fuzz
+#               then ./tools/fuzzing/fuzz.sh local <target> (see fuzz.sh usage).
 
 cpp = meson.get_compiler('cpp')
 
-# Check if we're using AFL++ compiler wrappers
-# AFL++ automatically defines __AFL_COMPILER
-afl_check = cpp.compiles('''
-  #ifndef __AFL_COMPILER
-  #error "Not AFL++"
-  #endif
-  int main() { return 0; }
-''', name: 'AFL++ compiler check')
-
-if not afl_check
-  warning('AFL++ compiler not detected. Fuzzers require afl-clang-fast++')
-  warning('Run: ./tools/fuzzing/fuzz.sh build')
+if yams_fuzz_engine == 'none'
+  warning('No fuzzing engine detected. Use afl-clang-fast++ (./tools/fuzzing/fuzz.sh build) '
+    + 'or a clang that ships the libFuzzer runtime (e.g. Homebrew/apt LLVM).')
   subdir_done()
 endif
 
-message('AFL++ compiler detected - building fuzzers')
+message('Fuzzing engine ' + yams_fuzz_engine + ' detected - building fuzzers')
 
 # Fuzzers include Boost.Asio headers directly; ensure Boost include/link flags
 # are present when compiling the harnesses (static libraries don't propagate
@@ -50,8 +45,13 @@ seedgen = executable('seedgen',
 )
 
 # AFL++ libFuzzer compatibility mode flags
-# Per docs: "-fsanitize=fuzzer" provides automatic persistent mode
-fuzzer_args = ['-fsanitize=fuzzer']
+# Per docs: "-fsanitize=fuzzer" provides automatic persistent mode. AFL applies ASan through
+# AFL_USE_ASAN; plain libFuzzer builds link the sanitizer runtimes explicitly.
+if yams_fuzz_engine == 'afl'
+  fuzzer_args = ['-fsanitize=fuzzer']
+else
+  fuzzer_args = ['-fsanitize=fuzzer,address,undefined']
+endif
 
 # Controlled ABI plugin used by fuzz_plugin_abi_mount.
 # This keeps dlopen() deterministic and avoids loading random fuzz bytes as shared libs.
@@ -104,6 +104,33 @@ fuzz_p2p_delta = executable('fuzz_p2p_delta',
   include_directories: include_directories('../../include'),
   link_with: yams_daemon_lib,
   dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# Direct P2P lane over the FrameSource seam: frame JSON, connection strings and pins, the
+# handshake validators and acceptor, the delta receive paths with fuzzed session bounds, and the
+# full manager inbound session. Each harness traps on an oracle violation.
+foreach p2p_target : ['p2p_json', 'p2p_connstr', 'p2p_handshake', 'p2p_delta_stream',
+                      'p2p_inbound']
+  executable('fuzz_' + p2p_target,
+    'fuzz_' + p2p_target + '.cpp',
+    include_directories: include_directories('../../include'),
+    link_with: yams_daemon_lib,
+    dependencies: fuzz_deps,
+    cpp_args: fuzzer_args,
+    link_args: fuzzer_args,
+    build_by_default: true,
+  )
+endforeach
+
+# Topology snapshot decoder (untrusted persisted payloads).
+fuzz_topology_codec = executable('fuzz_topology_codec',
+  'fuzz_topology_codec.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps + [dependency('yams_topology')],
   cpp_args: fuzzer_args,
   link_args: fuzzer_args,
   build_by_default: true,
@@ -208,5 +235,9 @@ fuzz_download_jobs = executable('fuzz_download_jobs',
   build_by_default: true,
 )
 
-message('Fuzzing harnesses configured with AFL++ libFuzzer mode')
-message('ASAN enabled via AFL_USE_ASAN=1 environment variable')
+if yams_fuzz_engine == 'afl'
+  message('Fuzzing harnesses configured with AFL++ libFuzzer mode')
+  message('ASAN enabled via AFL_USE_ASAN=1 environment variable')
+else
+  message('Fuzzing harnesses configured with libFuzzer + ASan/UBSan')
+endif

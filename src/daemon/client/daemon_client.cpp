@@ -43,6 +43,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -2217,19 +2221,31 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         exePath = *daemonBinOverride;
     } else {
         std::filesystem::path selfExe;
+#if defined(__APPLE__)
+        char buffer[1024]{};
+        uint32_t size = sizeof(buffer);
+        if (_NSGetExecutablePath(buffer, &size) == 0) {
+            std::error_code ec;
+            auto can = std::filesystem::canonical(buffer, ec);
+            selfExe = ec ? std::filesystem::path(buffer) : can;
+        }
+#else
         char buffer[4096]{};
         const ssize_t length = ::readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
         if (length > 0) {
             buffer[length] = '\0';
             selfExe = std::filesystem::path(buffer);
         }
+#endif
         if (!selfExe.empty()) {
             const auto cliDir = selfExe.parent_path();
             const std::vector<std::filesystem::path> candidates = {
-                cliDir / "yams-daemon", cliDir.parent_path() / "yams-daemon",
+                cliDir / "yams-daemon",
+                cliDir.parent_path() / "yams-daemon",
                 cliDir.parent_path() / "daemon" / "yams-daemon",
                 cliDir.parent_path().parent_path() / "daemon" / "yams-daemon",
-                cliDir.parent_path().parent_path() / "yams-daemon"};
+                cliDir.parent_path().parent_path() / "yams-daemon",
+                cliDir.parent_path().parent_path() / "src" / "daemon" / "yams-daemon"};
             for (const auto& candidate : candidates) {
                 if (std::filesystem::exists(candidate)) {
                     exePath = candidate.string();

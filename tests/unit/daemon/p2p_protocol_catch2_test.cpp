@@ -166,6 +166,46 @@ TEST_CASE("p2p handshake control frame rejects excessive JSON nesting depth",
     CHECK_FALSE(validateHandshakeBytes(deep).has_value());
 }
 
+TEST_CASE("p2p control frames admit only non-negative integer numbers",
+          "[daemon][p2p][protocol][fuzz]") {
+    // Found by fuzz_p2p_handshake: a hello whose integer field overflowed to a JSON float reached
+    // get<std::uint32_t>(), an undefined float-to-integer conversion before authentication.
+    const nlohmann::json hello{{"type", "hello"},
+                               {"protocol", yams::daemon::p2p::kP2pProtocolVersion},
+                               {"schema_version", yams::daemon::p2p::kP2pEnvelopeSchemaVersion},
+                               {"node_id", "node-a"},
+                               {"corpus_id", "corpus"},
+                               {"corpus_epoch", 1},
+                               {"max_writer_advance", 32},
+                               {"max_writer_window_bytes", 4096}};
+    REQUIRE(validateHandshakeJson(hello).has_value());
+
+    const auto rejectsRaw = [](std::string text) {
+        return !validateHandshakeBytes(std::move(text)).has_value();
+    };
+    CHECK(rejectsRaw("{\"type\":\"hello\",\"protocol\":"
+                     "355555555555555555555555555555555555555555555,\"schema_version\":4,"
+                     "\"node_id\":\"node-a\",\"corpus_id\":\"corpus\",\"corpus_epoch\":1,"
+                     "\"max_writer_advance\":32,\"max_writer_window_bytes\":4096}"));
+
+    auto fractional = hello;
+    fractional["corpus_epoch"] = 1.0;
+    CHECK_FALSE(validateHandshakeJson(fractional).has_value());
+
+    auto negative = hello;
+    negative["max_writer_advance"] = -1;
+    CHECK_FALSE(validateHandshakeJson(negative).has_value());
+
+    auto nestedFloat = hello;
+    nestedFloat["extra"] = nlohmann::json::array({nlohmann::json::array({2.5})});
+    CHECK_FALSE(validateHandshakeJson(nestedFloat).has_value());
+
+    auto wideProtocol = hello;
+    wideProtocol["protocol"] =
+        std::uint64_t{yams::daemon::p2p::kP2pProtocolVersion} + (std::uint64_t{1} << 32);
+    CHECK_FALSE(validateHandshakeJson(wideProtocol).has_value());
+}
+
 TEST_CASE("P2P handshake freezes a bounded authenticated writer prefix",
           "[daemon][p2p][handshake][window][commitment]") {
     auto serverConfig = config("server-node");

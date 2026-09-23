@@ -30,6 +30,7 @@
 
 #include "../../../include/yams/daemon/components/db_integrity_stamp.h"
 #include "../../../src/daemon/components/service_manager/bootstrap_status.h"
+#include <yams/crypto/hasher.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -39,9 +40,8 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
-#include <yams/memory_sync/writer_auth.h>
 #include <yams/memory_sync/memory_sync_service.h>
-#include <yams/crypto/hasher.h>
+#include <yams/memory_sync/writer_auth.h>
 #include <yams/metadata/database.h>
 
 namespace fs = std::filesystem;
@@ -703,6 +703,11 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects symbolic-link P2
         REQUIRE(output.good());
         output << generated.value().publicKeyPem;
     }
+    // Trust files must not be group/other-writable; set it explicitly so the result does not
+    // depend on the process umask (002 on Debian-style user-private-group systems).
+    constexpr auto kTrustFilePerms = fs::perms::owner_read | fs::perms::owner_write |
+                                     fs::perms::group_read | fs::perms::others_read;
+    fs::permissions(publicKey, kTrustFilePerms, fs::perm_options::replace);
     const auto manifest = testDir_ / "writers.json";
     {
         nlohmann::json content{
@@ -721,6 +726,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects symbolic-link P2
         REQUIRE(output.good());
         output << content.dump();
     }
+    fs::permissions(manifest, kTrustFilePerms, fs::perm_options::replace);
     const auto identity = testDir_ / "identity.pem";
     fs::create_symlink(victim, identity);
 

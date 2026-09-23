@@ -1381,7 +1381,6 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
                 // Per-stage inflight counts
                 out.extractionInFlight = pq->extractionInFlight();
                 out.kgInFlight = pq->kgInFlight();
-                out.symbolInFlight = pq->symbolInFlight();
                 out.entityInFlight = pq->entityInFlight();
                 // File/directory add tracking
                 out.filesAdded = pq->filesAdded();
@@ -1390,7 +1389,6 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
                 out.directoriesProcessed = pq->directoriesProcessed();
                 // Per-stage queue depths (approximate, from channel sizes)
                 out.kgQueueDepth = pq->kgQueueDepth();
-                out.symbolQueueDepth = pq->symbolQueueDepth();
                 out.entityQueueDepth = pq->entityQueueDepth();
                 out.titleQueueDepth = pq->titleQueueDepth();
                 out.titleInFlight = pq->titleInFlight();
@@ -1398,17 +1396,13 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
                 // Dynamic concurrency limits (PBI-05a)
                 out.postExtractionLimit = TuneAdvisor::postExtractionConcurrent();
                 out.postKgLimit = TuneAdvisor::postKgConcurrent();
-                out.postSymbolLimit = TuneAdvisor::postSymbolConcurrent();
                 out.postEntityLimit = TuneAdvisor::postEntityConcurrent();
                 out.postEmbedLimit = TuneAdvisor::postEmbedConcurrent();
-                // Combined enrich (symbol+entity+title)
-                out.postEnrichLimit = TuneAdvisor::postSymbolConcurrent() +
-                                      TuneAdvisor::postEntityConcurrent() +
-                                      TuneAdvisor::postTitleConcurrent();
-                out.enrichInflight =
-                    pq->symbolInFlight() + pq->entityInFlight() + pq->titleInFlight();
-                out.enrichQueueDepth =
-                    pq->symbolQueueDepth() + pq->entityQueueDepth() + pq->titleQueueDepth();
+                // Combined enrich (entity+title)
+                out.postEnrichLimit =
+                    TuneAdvisor::postEntityConcurrent() + TuneAdvisor::postTitleConcurrent();
+                out.enrichInflight = pq->entityInFlight() + pq->titleInFlight();
+                out.enrichQueueDepth = pq->entityQueueDepth() + pq->titleQueueDepth();
 
                 // Gradient limiter per-stage metrics
                 out.gradientLimitersEnabled = TuneAdvisor::enableGradientLimiters();
@@ -1423,7 +1417,6 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
                     };
                     out.glExtraction = readLimiter(pq->extractionLimiter());
                     out.glKg = readLimiter(pq->kgLimiter());
-                    out.glSymbol = readLimiter(pq->symbolLimiter());
                     out.glEntity = readLimiter(pq->entityLimiter());
                     out.glTitle = readLimiter(pq->titleLimiter());
                     out.glEmbed = readLimiter(pq->embedLimiter());
@@ -1625,10 +1618,6 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
         out.fts5Queued = bus.fts5Queued();
         out.fts5Dropped = bus.fts5Dropped();
         out.fts5Consumed = bus.fts5Consumed();
-        // Symbol extraction
-        out.symbolQueued = bus.symbolQueued();
-        out.symbolDropped = bus.symbolDropped();
-        out.symbolConsumed = bus.symbolConsumed();
         // Deferred ingestion queue depth
         try {
             auto ch = bus.get_or_create_channel<InternalEventBus::StoreDocumentTask>(

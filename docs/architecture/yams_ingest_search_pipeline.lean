@@ -18,7 +18,7 @@ structure PipelineConfig where
   textExtraction : Bool := true
   contentIndex : Bool := true
   kgCore : Bool := true              -- document/path/blob graph nodes and edges
-  symbolGraph : Bool := true         -- code symbols and references
+  symbolGraph : Bool := false        -- code symbols and references (removed in v0.20)
   nlEntityGraph : Bool := true       -- GLiNER / NLP entities and aliases
   titleInference : Bool := true      -- GLiNER title inference
   embeddings : Bool := true

@@ -596,8 +596,6 @@ private:
             sample.embedInferWarnCount = getCount(std::string(metrics::kEmbedInferWarnCount));
             sample.kgQueued = getCount(std::string(metrics::kKgQueueDepth));
             sample.kgInflight = getCount(std::string(metrics::kKgInflight));
-            sample.symbolQueued = getCount(std::string(metrics::kSymbolQueueDepth));
-            sample.symbolInflight = getCount(std::string(metrics::kSymbolInflight));
             sample.entityQueued = getCount(std::string(metrics::kEntityQueueDepth));
             sample.entityInflight = getCount(std::string(metrics::kEntityInflight));
             sample.titleQueued = getCount(std::string(metrics::kTitleQueueDepth));
@@ -651,7 +649,6 @@ private:
 
             // Dropped counters
             sample.kgDropped = getCount(std::string(metrics::kKgDropped));
-            sample.symbolDropped = getCount(std::string(metrics::kSymbolDropped));
             sample.entityDropped = getCount(std::string(metrics::kEntityDropped));
             sample.titleDropped = getCount(std::string(metrics::kTitleDropped));
 
@@ -1024,12 +1021,10 @@ bool waitForDrain(std::chrono::milliseconds timeout, bool embeddingsEnabled,
 
         if (scope == DrainScope::Full) {
             kgQueued = getCount(std::string(metrics::kKgQueueDepth));
-            symbolQueued = getCount(std::string(metrics::kSymbolQueueDepth));
             entityQueued = getCount(std::string(metrics::kEntityQueueDepth));
             titleQueued = getCount(std::string(metrics::kTitleQueueDepth));
 
             kgInflight = getCount(std::string(metrics::kKgInflight));
-            symbolInflight = getCount(std::string(metrics::kSymbolInflight));
             entityInflight = getCount(std::string(metrics::kEntityInflight));
             titleInflight = getCount(std::string(metrics::kTitleInflight));
 

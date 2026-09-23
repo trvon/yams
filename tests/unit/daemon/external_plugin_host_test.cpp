@@ -483,7 +483,7 @@ TEST_CASE("ExternalPluginHost - Plugin Manifest Interfaces Parsing",
         manifest["version"] = "1.0.0";
         manifest["capabilities"] = {
             {"content_extraction", {{"formats", nlohmann::json::array({"text/plain"})}}},
-            {"symbol_extraction", {{"languages", nlohmann::json::array({"python"})}}}};
+            {"graph_store", nlohmann::json::object()}};
         manifest["entry"] = {{"fallback_cmd", nlohmann::json::array({"python", "plugin.py"})}};
 
         std::ofstream manifestFile(pluginDir / "yams-plugin.json");
@@ -502,8 +502,33 @@ TEST_CASE("ExternalPluginHost - Plugin Manifest Interfaces Parsing",
         REQUIRE((desc.interfaces.size() == 2));
         CHECK((std::find(desc.interfaces.begin(), desc.interfaces.end(), "content_extractor_v1") !=
                desc.interfaces.end()));
-        CHECK((std::find(desc.interfaces.begin(), desc.interfaces.end(), "symbol_extractor_v1") !=
+        CHECK((std::find(desc.interfaces.begin(), desc.interfaces.end(), "graph_store_v1") !=
                desc.interfaces.end()));
+    }
+
+    SECTION("Manifests declaring the removed symbol extraction capability are refused") {
+        auto pluginDir = fixture.tempDir_ / "symbol_plugin";
+        fs::create_directories(pluginDir);
+
+        nlohmann::json manifest;
+        manifest["name"] = "symbol_plugin";
+        manifest["version"] = "1.0.0";
+        manifest["capabilities"] = {
+            {"symbol_extraction", {{"languages", nlohmann::json::array({"python"})}}}};
+        manifest["entry"] = {{"fallback_cmd", nlohmann::json::array({"python", "plugin.py"})}};
+
+        std::ofstream manifestFile(pluginDir / "yams-plugin.json");
+        manifestFile << manifest.dump(2);
+        manifestFile.close();
+
+        std::ofstream pluginFile(pluginDir / "plugin.py");
+        pluginFile << "# Dummy plugin";
+        pluginFile.close();
+
+        auto result = host.scanTarget(pluginDir);
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::NotSupported));
+        CHECK((result.error().message.find("symbol_extractor_v1") != std::string::npos));
     }
 }
 

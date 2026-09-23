@@ -111,6 +111,10 @@ public:
         std::optional<std::size_t> maxSeedDocuments;
         std::optional<std::size_t> representativeLimit;
         std::optional<std::size_t> annCandidateLimit;
+        std::optional<std::size_t> bqCandidateLimit;
+        std::optional<std::size_t> bqPrefixDimension;
+        // reciprocal_edges | topology_snapshot: source of the graph-rerank community signal.
+        std::optional<std::string> graphCommunitySource;
         std::optional<float> adaptiveProbeScoreGap;
         std::optional<float> narrowMinBoundaryMargin;
         std::optional<std::size_t> maxDocs;
@@ -148,6 +152,9 @@ public:
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
         std::optional<std::size_t> routingRepresentativeCount;
+        /// SGC feature-smoothing hops before clustering (0 disables).
+        std::optional<std::size_t> sgcHops;
+        std::optional<bool> sgcNormalize;
         std::optional<bool> boundarySpillEnabled;
         std::optional<std::size_t> boundarySpillLimit;
         std::optional<double> boundarySpillDistanceRatio;
@@ -187,7 +194,6 @@ public:
         std::optional<std::uint32_t> embedConcurrent;
         std::optional<std::uint32_t> extractionConcurrent;
         std::optional<std::uint32_t> kgConcurrent;
-        std::optional<std::uint32_t> symbolConcurrent;
         std::optional<std::uint32_t> entityConcurrent;
         std::optional<std::uint32_t> titleConcurrent;
         std::optional<std::uint32_t> batchSize;
@@ -235,6 +241,7 @@ public:
 
     struct RerankerBackendPolicy {
         std::optional<std::string> backend;
+        std::optional<bool> simeonOuterMaxSim;
     };
 
     struct InstrumentationPolicy {
@@ -401,7 +408,6 @@ public:
     static std::string resolveRerankerModel(const DaemonConfig& config);
 
     /// Compatibility lookup retained for installed consumers; typed plugin policy is preferred.
-    static bool isSymbolExtractionEnabled(const DaemonConfig& config);
 
     /**
      * @brief Detect if embedding preload on startup is configured.

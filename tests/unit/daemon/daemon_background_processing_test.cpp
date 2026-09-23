@@ -66,33 +66,54 @@ void stopAndResetQueue(std::unique_ptr<PostIngestQueue>& queue) {
     queue.reset();
 }
 
-/// Drain leftover items from the singleton post_ingest channel to prevent
-/// cross-test interference (tasks enqueued by a previous test that the previous
-/// queue didn't consume before stopping).
-void drainPostIngestChannel() {
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", 32);
-    InternalEventBus::PostIngestTask drain;
-    while (channel->try_pop(drain)) {
+/// Drain and remove a channel, so the next requester gets a queue at the capacity it declares.
+///
+/// get_or_create_channel() returns an existing channel and ignores the requested capacity, so a
+/// channel created here at some incidental capacity pins that capacity for every later case: a
+/// queue built for a larger ring silently received the smaller one, the producer blocked until the
+/// poller drained, and batch boundaries became a function of runner load (flaky exact-count
+/// assertions). Dropping the channel is what makes each case's own capacity take effect.
+template <typename T> void drainAndRemoveChannel(const std::string& name) {
+    auto& bus = InternalEventBus::instance();
+    if (auto existing = bus.get_channel<T>(name)) {
+        T drain;
+        while (existing->try_pop(drain)) {
+        }
     }
+    bus.remove_channel(name);
+}
+
+/// Removes a channel when the enclosing scope ends.
+///
+/// A case may deliberately size a channel smaller than production does, to fill it quickly or to
+/// force backpressure. What it must not do is leave that ring registered: the bus is a process-wide
+/// singleton, so a later case asking for the production capacity silently receives the smaller ring
+/// and its producer can block. Pair this with the deliberate capacity.
+class ScopedChannelRemoval {
+public:
+    explicit ScopedChannelRemoval(std::string name) : name_(std::move(name)) {}
+    ~ScopedChannelRemoval() { InternalEventBus::instance().remove_channel(name_); }
+    ScopedChannelRemoval(const ScopedChannelRemoval&) = delete;
+    ScopedChannelRemoval& operator=(const ScopedChannelRemoval&) = delete;
+    ScopedChannelRemoval(ScopedChannelRemoval&&) = delete;
+    ScopedChannelRemoval& operator=(ScopedChannelRemoval&&) = delete;
+
+private:
+    std::string name_;
+};
+
+/// Drain leftover items from the singleton post_ingest channel to prevent cross-test interference
+/// (tasks enqueued by a previous test that the previous queue didn't consume before stopping).
+void drainPostIngestChannel() {
+    drainAndRemoveChannel<InternalEventBus::PostIngestTask>("post_ingest");
 }
 
 void drainEmbedJobsChannel() {
-    auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-        "embed_jobs", 2048);
-    InternalEventBus::EmbedJob drain;
-    while (channel->try_pop(drain)) {
-    }
+    drainAndRemoveChannel<InternalEventBus::EmbedJob>("embed_jobs");
 }
 
 void drainStoreDocumentChannel() {
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-            "store_document_tasks", 64);
-    InternalEventBus::StoreDocumentTask drain;
-    while (channel->try_pop(drain)) {
-    }
+    drainAndRemoveChannel<InternalEventBus::StoreDocumentTask>("store_document_tasks");
 }
 
 class StoreDocumentChannelGuard {
@@ -872,6 +893,10 @@ TEST_CASE("PostIngestQueue full KG channel does not block WorkCoordinator progre
     InternalEventBus::KgJob drained;
     while (kgChannel->try_pop(drained)) {
     }
+    // Drop the ring as well as its contents. The 32 here is deliberate - this case wants a channel
+    // it can fill quickly - but leaving it registered pins kg_jobs to 32 for every later case, and
+    // a queue configured with capacity_ == 0 asks for boundedStageChannelCapacity(16384) instead.
+    InternalEventBus::instance().remove_channel("kg_jobs");
 }
 
 TEST_CASE("PostIngestQueue accounts deferred KG jobs when its scheduler is unavailable",
@@ -917,6 +942,8 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
     SECTION("Process single task successfully") {
         drainEmbedJobsChannel();
+        // 2048 is this case's own choice; the guard keeps it from outliving the heading.
+        ScopedChannelRemoval embedChannelRemoval{"embed_jobs"};
         auto embedChannel =
             InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
                 "embed_jobs", 2048);
@@ -1067,6 +1094,11 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
         docs.push_back(doc);
     }
 
+    // Establish 2048 for this case before guarding it. Without this drain the name may already be
+    // registered at production size, and get_or_create_channel would silently keep that larger ring
+    // instead - so the guard would protect a capacity this case never actually got.
+    drainEmbedJobsChannel();
+    ScopedChannelRemoval embedChannelRemoval{"embed_jobs"};
     auto embedChannel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
                                                                                        2048);
@@ -1429,6 +1461,16 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
     CHECK(metrics.batches.contentIndexEntries == kDocCount);
     CHECK(metrics.batches.contentIndexMaxEntries == 16);
 
+    // This case's result depends on the ring it declared for post_ingest, not on whatever capacity
+    // an earlier case left registered for that process-wide singleton channel. A recorded
+    // disagreement means the declared capacity was silently ignored - which is exactly what let a
+    // 31-slot ring serve a case arranged for 64 and produce 4 batches instead of 3 on a loaded
+    // runner. Guards the drain-then-remove behaviour in drainPostIngestChannel().
+    const auto capacityMismatches = InternalEventBus::instance().capacity_mismatches();
+    CHECK(std::none_of(
+        capacityMismatches.begin(), capacityMismatches.end(),
+        [](const InternalEventBus::CapacityMismatch& m) { return m.name == "post_ingest"; }));
+
     stopAndResetQueue(queue);
     coordinator.stop();
     coordinator.join();
@@ -1607,4 +1649,54 @@ TEST_CASE("InternalEventBus: MPMC queue correctness under concurrent load",
         REQUIRE((produced.load() == kProducers * kPerProducer));
         REQUIRE((consumed.load() == kProducers * kPerProducer));
     }
+}
+
+// =============================================================================
+// InternalEventBus capacity-mismatch diagnostic
+// =============================================================================
+
+TEST_CASE("InternalEventBus records capacity disagreements on channel reuse",
+          "[daemon][background][bus][mismatch]") {
+    auto& bus = InternalEventBus::instance();
+    // A name no production code and no other case in this binary uses.
+    constexpr const char* kProbe = "capacity_mismatch_probe";
+
+    bus.remove_channel(kProbe);
+    const std::size_t before = bus.capacity_mismatches().size();
+
+    // Creating a channel is not a disagreement.
+    auto first = bus.get_or_create_channel<InternalEventBus::Fts5Job>(kProbe, 8);
+    REQUIRE((first != nullptr));
+    CHECK(first->capacity() == 8);
+    CHECK(bus.capacity_mismatches().size() == before);
+
+    // Neither is reusing it at the capacity it already has.
+    auto sameAgain = bus.get_or_create_channel<InternalEventBus::Fts5Job>(kProbe, 8);
+    CHECK(sameAgain == first);
+    CHECK(bus.capacity_mismatches().size() == before);
+
+    // Reuse at a different capacity is recorded, and the registered ring still wins.
+    auto reused = bus.get_or_create_channel<InternalEventBus::Fts5Job>(kProbe, 64);
+    CHECK(reused == first);
+    CHECK(reused->capacity() == 8);
+
+    const auto recorded = bus.capacity_mismatches();
+    REQUIRE(recorded.size() == before + 1);
+    CHECK(recorded.back().name == kProbe);
+    CHECK(recorded.back().actual == 8);
+    CHECK(recorded.back().requested == 64);
+
+    // Repeating the same disagreement is not recorded twice.
+    (void)bus.get_or_create_channel<InternalEventBus::Fts5Job>(kProbe, 64);
+    CHECK(bus.capacity_mismatches().size() == before + 1);
+
+    // A second, different disagreement for the same name is still recorded, so a name is not
+    // permanently suppressed by its first entry.
+    (void)bus.get_or_create_channel<InternalEventBus::Fts5Job>(kProbe, 128);
+    CHECK(bus.capacity_mismatches().size() == before + 2);
+
+    // Dropping the channel drops its records: the list describes live disagreements, so a later
+    // assertion cannot depend on which cases ran first.
+    bus.remove_channel(kProbe);
+    CHECK(bus.capacity_mismatches().size() == before);
 }

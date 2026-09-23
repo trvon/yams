@@ -45,7 +45,7 @@ struct CorpusStats {
     double symbolDensity{0.0}; // symbolCount / docCount (entities per document)
 
     // Entity counts split by extractor source.
-    // nativeSymbolCount: treesitter code symbols (extractor = 'symbol_extractor_v1')
+    // nativeSymbolCount: legacy code symbols (extractor = 'symbol_extractor_v1', removed v0.20)
     // nerEntityCount: GLiNER NER annotations (extractor LIKE 'gliner%')
     // Keeping symbolCount as the unfiltered total so hasKnowledgeGraph() still works.
     int64_t nativeSymbolCount{0};
@@ -75,6 +75,11 @@ struct CorpusStats {
     // --- KG topology richness ---
     int64_t kgEdgeCount{0};
     double kgEdgeDensity{0.0};
+    // Relational edges only: excludes embedding kNN (semantic_neighbor), file lineage and
+    // layout, text segments, and entity-to-document attachments, which exist on any indexed
+    // corpus and say nothing about knowledge-graph structure.
+    int64_t kgRelationalEdgeCount{0};
+    double kgRelationalEdgeDensity{0.0};
     int64_t kgAliasCount{0};
     double kgAliasDensity{0.0};
 
@@ -125,7 +130,7 @@ struct CorpusStats {
     [[nodiscard]] bool hasFtsIndexing() const noexcept { return ftsIndexedCoverage > 0.5; }
     [[nodiscard]] bool hasTitles() const noexcept { return titleCoverage > 0.1; }
     [[nodiscard]] bool hasRichGraphTopology() const noexcept {
-        return kgEdgeDensity > 2.0 || kgAliasDensity > 1.0;
+        return kgRelationalEdgeDensity > 2.0 || kgAliasDensity > 1.0;
     }
 
     // Size classification for FSM
@@ -139,9 +144,10 @@ struct CorpusStats {
     // negatives from deep absolute filesystem paths — a corpus at /Users/x/papers/ with
     // all files in one folder has pathDepthAvg≈10 but pathRelativeDepthAvg≈0.
     //
-    // Uses nativeSymbolDensity (treesitter code symbols only) to avoid false negatives
-    // from GLiNER NER annotations, which are expected to be high in scientific prose
-    // corpora and must not be conflated with code structure signals.
+    // Uses nativeSymbolDensity (native code-symbol entities only) rather than all KG entities
+    // so GLiNER NER annotations, which are expected to be high in scientific prose corpora,
+    // are not conflated with code structure signals. No in-tree extractor has produced native
+    // code symbols since v0.20, so this term is zero unless a corpus predates that release.
     [[nodiscard]] bool isScientific() const noexcept {
         const bool flatPaths = pathRelativeDepthAvg < 1.5;
         const bool lowCodeStructure = tagCoverage < 0.1 && nativeSymbolDensity < 0.1;
@@ -183,6 +189,8 @@ struct CorpusStats {
         j["language_coverage"] = languageCoverage;
         j["kg_edge_count"] = kgEdgeCount;
         j["kg_edge_density"] = kgEdgeDensity;
+        j["kg_relational_edge_count"] = kgRelationalEdgeCount;
+        j["kg_relational_edge_density"] = kgRelationalEdgeDensity;
         j["kg_alias_count"] = kgAliasCount;
         j["kg_alias_density"] = kgAliasDensity;
         j["computed_at_ms"] = computedAtMs;
@@ -290,6 +298,10 @@ struct CorpusStats {
             stats.kgEdgeCount = j["kg_edge_count"].get<int64_t>();
         if (j.contains("kg_edge_density"))
             stats.kgEdgeDensity = j["kg_edge_density"].get<double>();
+        if (j.contains("kg_relational_edge_count"))
+            stats.kgRelationalEdgeCount = j["kg_relational_edge_count"].get<int64_t>();
+        if (j.contains("kg_relational_edge_density"))
+            stats.kgRelationalEdgeDensity = j["kg_relational_edge_density"].get<double>();
         if (j.contains("kg_alias_count"))
             stats.kgAliasCount = j["kg_alias_count"].get<int64_t>();
         if (j.contains("kg_alias_density"))

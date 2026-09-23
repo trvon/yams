@@ -42,28 +42,6 @@ const std::vector<RerankerModel> kRerankerModels = {
 const std::vector<std::string> kRerankerTokenizerFiles = {"tokenizer.json", "config.json",
                                                           "tokenizer_config.json"};
 
-const std::vector<GrammarInfo> kSupportedGrammars = {
-    {"c", "tree-sitter/tree-sitter-c", "C language", true},
-    {"cpp", "tree-sitter/tree-sitter-cpp", "C++ language", true},
-    {"python", "tree-sitter/tree-sitter-python", "Python language", true},
-    {"javascript", "tree-sitter/tree-sitter-javascript", "JavaScript/JSX", true},
-    {"typescript", "tree-sitter/tree-sitter-typescript", "TypeScript/TSX", true},
-    {"rust", "tree-sitter/tree-sitter-rust", "Rust language", true},
-    {"go", "tree-sitter/tree-sitter-go", "Go language", true},
-    {"swift", "alex-pinkus/tree-sitter-swift", "Swift language", true},
-    {"java", "tree-sitter/tree-sitter-java", "Java language", false},
-    {"csharp", "tree-sitter/tree-sitter-c-sharp", "C# language", false},
-    {"php", "tree-sitter/tree-sitter-php", "PHP language", false},
-    {"kotlin", "fwcd/tree-sitter-kotlin", "Kotlin language", false},
-    {"perl", "tree-sitter-perl/tree-sitter-perl", "Perl language", false},
-    {"r", "r-lib/tree-sitter-r", "R language", false},
-    {"dart", "UserNobody14/tree-sitter-dart", "Dart/Flutter", false},
-    {"sql", "DerekStride/tree-sitter-sql", "SQL queries", false},
-    {"solidity", "JoranHonig/tree-sitter-solidity", "Solidity (Ethereum)", false},
-    {"p4", "prona-p4-learning-platform/tree-sitter-p4", "P4 network language", false},
-    {"zig", "maxxnino/tree-sitter-zig", "Zig language", false},
-};
-
 constexpr std::string_view kYamsSkillContent = R"skill(---
 name: yams
 description: Code indexing, semantic search, and knowledge graph for project memory
@@ -267,10 +245,6 @@ const std::vector<RerankerModel>& rerankerModels() {
 
 const std::vector<std::string>& rerankerTokenizerFiles() {
     return kRerankerTokenizerFiles;
-}
-
-const std::vector<GrammarInfo>& supportedGrammars() {
-    return kSupportedGrammars;
 }
 
 std::string_view yamsSkillContent() {

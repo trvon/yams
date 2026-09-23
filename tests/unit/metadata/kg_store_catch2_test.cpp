@@ -15,6 +15,7 @@
 #include <yams/metadata/kg_topology_analysis.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/migration.h>
 
 using namespace yams;
 using namespace yams::metadata;
@@ -130,7 +131,8 @@ struct KGStoreRepoFixture {
         pool_ = std::make_unique<ConnectionPool>(dbPath_.string(), poolCfg);
         auto initResult = pool_->initialize();
         REQUIRE((initResult.has_value()));
-        repo_ = std::make_unique<MetadataRepository>(*pool_);
+        repo_ = std::make_unique<MetadataRepository>(
+            *pool_, nullptr, MetadataRepository::SchemaBootstrapMode::EnsureSchema);
     }
 
     ~KGStoreRepoFixture() {
@@ -980,7 +982,7 @@ TEST_CASE("KG Store: orphan cleanup removes invalid rows and preserves valid row
     CHECK((validEntities.value()[0].entityText == "ValidEntity"));
 }
 
-TEST_CASE("KG Store: document hash and extraction state helpers handle missing and updated rows",
+TEST_CASE("KG Store: document hash helpers handle missing and present rows",
           "[unit][metadata][kg]") {
     KGStoreRepoFixture fix;
 
@@ -994,207 +996,6 @@ TEST_CASE("KG Store: document hash and extraction state helpers handle missing a
     auto missingHashById = fix.store_->getDocumentHashById(docId + 1000);
     REQUIRE((missingHashById.has_value()));
     CHECK_FALSE(missingHashById.value().has_value());
-
-    auto missingState = fix.store_->getSymbolExtractionState("hash-state-doc");
-    REQUIRE((missingState.has_value()));
-    CHECK_FALSE(missingState.value().has_value());
-
-    auto missingDocumentState = fix.store_->getSymbolExtractionState("hash-missing-doc");
-    REQUIRE((missingDocumentState.has_value()));
-    CHECK_FALSE(missingDocumentState.value().has_value());
-
-    SymbolExtractionState initialState;
-    initialState.documentId = 999999;
-    initialState.extractorId = "symbol_extractor:v1";
-    initialState.extractorConfigHash = "config-a";
-    initialState.extractedAt = 111;
-    initialState.status = "complete";
-    initialState.entityCount = 2;
-    REQUIRE((fix.store_->upsertSymbolExtractionState("hash-state-doc", initialState).has_value()));
-
-    auto storedState = fix.store_->getSymbolExtractionState("hash-state-doc");
-    REQUIRE((storedState.has_value()));
-    REQUIRE((storedState.value().has_value()));
-    CHECK((storedState.value()->documentId == docId));
-    CHECK((storedState.value()->extractorId == "symbol_extractor:v1"));
-    REQUIRE((storedState.value()->extractorConfigHash.has_value()));
-    CHECK((storedState.value()->extractorConfigHash.value() == "config-a"));
-    CHECK((storedState.value()->extractedAt == 111));
-    CHECK((storedState.value()->status == "complete"));
-    CHECK((storedState.value()->entityCount == 2));
-    CHECK((storedState.value()->errorMessage.value_or("") == ""));
-
-    SymbolExtractionState updatedState;
-    updatedState.documentId = -1;
-    updatedState.extractorId = "symbol_extractor:v2";
-    updatedState.extractorConfigHash = "config-b";
-    updatedState.extractedAt = 222;
-    updatedState.status = "failed";
-    updatedState.entityCount = 5;
-    updatedState.errorMessage = "syntax error";
-    REQUIRE((fix.store_->upsertSymbolExtractionState("hash-state-doc", updatedState).has_value()));
-
-    auto refreshedState = fix.store_->getSymbolExtractionState("hash-state-doc");
-    REQUIRE((refreshedState.has_value()));
-    REQUIRE((refreshedState.value().has_value()));
-    CHECK((refreshedState.value()->documentId == docId));
-    CHECK((refreshedState.value()->extractorId == "symbol_extractor:v2"));
-    REQUIRE((refreshedState.value()->extractorConfigHash.has_value()));
-    CHECK((refreshedState.value()->extractorConfigHash.value() == "config-b"));
-    CHECK((refreshedState.value()->extractedAt == 222));
-    CHECK((refreshedState.value()->status == "failed"));
-    CHECK((refreshedState.value()->entityCount == 5));
-    REQUIRE((refreshedState.value()->errorMessage.has_value()));
-    CHECK((refreshedState.value()->errorMessage.value() == "syntax error"));
-
-    auto missingUpsert = fix.store_->upsertSymbolExtractionState("hash-no-document", updatedState);
-    REQUIRE_FALSE((missingUpsert.has_value()));
-    CHECK((missingUpsert.error().code == ErrorCode::NotFound));
-    CHECK((missingUpsert.error().message.find("hash-no-document") != std::string::npos));
-}
-
-TEST_CASE("KG Store: symbol metadata queries support update, filter, pagination, and delete",
-          "[unit][metadata][kg]") {
-    KGStoreRepoFixture fix;
-
-    fix.insertDocument("hash-symbol-a", "/tmp/symbol-a.cpp");
-    fix.insertDocument("hash-symbol-b", "/tmp/symbol-b.cpp");
-
-    auto makeSymbol = [](std::string documentHash, std::string filePath, std::string symbolName,
-                         std::string qualifiedName, std::string kind,
-                         std::optional<std::string> returnType = std::nullopt,
-                         std::optional<std::string> documentation = std::nullopt) {
-        SymbolMetadata symbol;
-        symbol.documentHash = std::move(documentHash);
-        symbol.filePath = std::move(filePath);
-        symbol.symbolName = std::move(symbolName);
-        symbol.qualifiedName = std::move(qualifiedName);
-        symbol.kind = std::move(kind);
-        symbol.startLine = 10;
-        symbol.endLine = 20;
-        symbol.startOffset = 100;
-        symbol.endOffset = 200;
-        symbol.returnType = std::move(returnType);
-        symbol.parameters = std::string("[\"int\"]");
-        symbol.documentation = std::move(documentation);
-        return symbol;
-    };
-
-    std::vector<SymbolMetadata> initialSymbols{
-        makeSymbol("hash-symbol-a", "/tmp/symbol-a.cpp", "Alpha", "ns::Alpha", "class",
-                   std::nullopt, "alpha-doc"),
-        makeSymbol("hash-symbol-a", "/tmp/symbol-a.cpp", "buildAlpha", "ns::buildAlpha", "function",
-                   "Widget", "builder-doc"),
-        makeSymbol("hash-symbol-b", "/tmp/symbol-b.cpp", "Beta", "ns::Beta", "function", "int",
-                   "beta-doc"),
-    };
-    REQUIRE((fix.store_->upsertSymbolMetadata(initialSymbols).has_value()));
-
-    auto allSymbols =
-        fix.store_->querySymbolMetadata(std::nullopt, std::nullopt, std::nullopt, 10, 0);
-    REQUIRE((allSymbols.has_value()));
-    REQUIRE((allSymbols.value().size() == 3));
-    CHECK((allSymbols.value()[0].qualifiedName == "ns::Alpha"));
-    CHECK((allSymbols.value()[1].qualifiedName == "ns::Beta"));
-    CHECK((allSymbols.value()[2].qualifiedName == "ns::buildAlpha"));
-
-    auto fileMatches =
-        fix.store_->querySymbolMetadata("symbol-a.cpp", std::nullopt, std::nullopt, 10, 0);
-    REQUIRE((fileMatches.has_value()));
-    REQUIRE((fileMatches.value().size() == 2));
-
-    auto functionMatches =
-        fix.store_->querySymbolMetadata(std::nullopt, "function", std::nullopt, 10, 0);
-    REQUIRE((functionMatches.has_value()));
-    REQUIRE((functionMatches.value().size() == 2));
-    CHECK((functionMatches.value()[0].qualifiedName == "ns::Beta"));
-    CHECK((functionMatches.value()[1].qualifiedName == "ns::buildAlpha"));
-
-    auto nameMatches = fix.store_->querySymbolMetadata(std::nullopt, std::nullopt, "Alpha", 10, 0);
-    REQUIRE((nameMatches.has_value()));
-    REQUIRE((nameMatches.value().size() == 2));
-    CHECK((nameMatches.value()[0].qualifiedName == "ns::Alpha"));
-    CHECK((nameMatches.value()[1].qualifiedName == "ns::buildAlpha"));
-
-    auto pagedSymbols =
-        fix.store_->querySymbolMetadata(std::nullopt, std::nullopt, std::nullopt, 1, 1);
-    REQUIRE((pagedSymbols.has_value()));
-    REQUIRE((pagedSymbols.value().size() == 1));
-    CHECK((pagedSymbols.value()[0].qualifiedName == "ns::Beta"));
-
-    auto updateBatchResult = fix.store_->beginWriteBatch();
-    REQUIRE((updateBatchResult.has_value()));
-    auto updateBatch = std::move(updateBatchResult).value();
-    REQUIRE((updateBatch
-                 ->upsertSymbolMetadata(
-                     {makeSymbol("hash-symbol-a", "/tmp/renamed-symbol-a.cpp", "buildAlpha",
-                                 "ns::buildAlpha", "method", "WidgetRef", "updated-builder-doc")})
-                 .has_value()));
-    REQUIRE((updateBatch->commit().has_value()));
-
-    auto updatedMatch =
-        fix.store_->querySymbolMetadata("renamed-symbol-a.cpp", "method", "buildAlpha", 10, 0);
-    REQUIRE((updatedMatch.has_value()));
-    REQUIRE((updatedMatch.value().size() == 1));
-    CHECK((updatedMatch.value()[0].qualifiedName == "ns::buildAlpha"));
-    REQUIRE((updatedMatch.value()[0].returnType.has_value()));
-    CHECK((updatedMatch.value()[0].returnType.value() == "WidgetRef"));
-    REQUIRE((updatedMatch.value()[0].documentation.has_value()));
-    CHECK((updatedMatch.value()[0].documentation.value() == "updated-builder-doc"));
-
-    auto deletedCount = fix.store_->deleteSymbolMetadataForDocument("hash-symbol-a");
-    REQUIRE((deletedCount.has_value()));
-    CHECK((deletedCount.value() == 2));
-
-    auto remainingSymbols =
-        fix.store_->querySymbolMetadata(std::nullopt, std::nullopt, std::nullopt, 10, 0);
-    REQUIRE((remainingSymbols.has_value()));
-    REQUIRE((remainingSymbols.value().size() == 1));
-    CHECK((remainingSymbols.value()[0].documentHash == "hash-symbol-b"));
-
-    auto missingDelete = fix.store_->deleteSymbolMetadataForDocument("hash-missing-symbols");
-    REQUIRE((missingDelete.has_value()));
-    CHECK((missingDelete.value() == 0));
-}
-
-TEST_CASE("KG Store: symbol lookup falls back while the optional FTS capability is unavailable",
-          "[unit][metadata][kg][symbols]") {
-    KGStoreRepoFixture fix;
-    fix.insertDocument("hash-symbol-fallback", "/tmp/write-coordinator.cpp");
-
-    SymbolMetadata symbol;
-    symbol.documentHash = "hash-symbol-fallback";
-    symbol.filePath = "/tmp/write-coordinator.cpp";
-    symbol.symbolName = "WriteCoordinator";
-    symbol.qualifiedName = "yams::daemon::WriteCoordinator";
-    symbol.kind = "class";
-    REQUIRE(fix.store_->upsertSymbolMetadata({symbol}).has_value());
-
-    auto dropFts = fix.pool_->withConnection([](Database& db) -> Result<void> {
-        for (const auto* sql : {"DROP TRIGGER IF EXISTS symbol_metadata_ai",
-                                "DROP TRIGGER IF EXISTS symbol_metadata_ad",
-                                "DROP TRIGGER IF EXISTS symbol_metadata_au",
-                                "DROP TABLE IF EXISTS symbol_metadata_fts"}) {
-            auto result = db.execute(sql);
-            if (!result) {
-                return result;
-            }
-        }
-        return {};
-    });
-    REQUIRE(dropFts.has_value());
-
-    auto byName = fix.store_->querySymbolMetadata(std::nullopt, std::nullopt, "Coordinator", 10, 0);
-    REQUIRE(byName.has_value());
-    REQUIRE(byName.value().size() == 1);
-    CHECK(byName.value().front().qualifiedName == "yams::daemon::WriteCoordinator");
-
-    auto byPath =
-        fix.store_->querySymbolMetadata("coordinator.cpp", std::nullopt, std::nullopt, 10, 0);
-    INFO((byPath.has_value() ? std::string{} : byPath.error().message));
-    REQUIRE(byPath.has_value());
-    REQUIRE(byPath.value().size() == 1);
-    CHECK(byPath.value().front().documentHash == "hash-symbol-fallback");
 }
 
 TEST_CASE("KG Store: maintenance helpers summarize graph state and search labels",
@@ -1306,7 +1107,7 @@ TEST_CASE("KG Store: healthCheck uses read pool instead of the write pool",
     std::filesystem::remove(dbPath, ec);
 }
 
-TEST_CASE("KG Store: symbol lookup and readiness snapshot use the read pool",
+TEST_CASE("KG Store: construction and readiness snapshot use the read pool",
           "[unit][metadata][kg][contention]") {
     const auto dbPath = tempDbPath("kg_store_symbol_read_pool_");
 
@@ -1340,18 +1141,6 @@ TEST_CASE("KG Store: symbol lookup and readiness snapshot use the read pool",
     auto storeResult = storeFuture.get();
     REQUIRE((storeResult.has_value()));
     auto store = std::move(storeResult.value());
-
-    auto heldWriteForSymbolResult = writePool->acquire();
-    REQUIRE((heldWriteForSymbolResult.has_value()));
-    auto heldWriteForSymbol = std::move(heldWriteForSymbolResult.value());
-
-    auto symbolFuture = std::async(std::launch::async, [&]() {
-        return store->querySymbolMetadata(std::nullopt, std::nullopt, "Coordinator", 10, 0);
-    });
-    const auto symbolStatus = symbolFuture.wait_for(std::chrono::milliseconds(500));
-    heldWriteForSymbol.reset();
-    REQUIRE((symbolStatus == std::future_status::ready));
-    REQUIRE((symbolFuture.get().has_value()));
 
     auto heldWriteForSnapshotResult = writePool->acquire();
     REQUIRE((heldWriteForSnapshotResult.has_value()));

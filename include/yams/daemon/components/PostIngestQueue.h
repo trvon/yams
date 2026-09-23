@@ -209,8 +209,6 @@ public:
 
         // Dispatch flags (determined during preparation)
         bool shouldDispatchKg = true;
-        bool shouldDispatchSymbol = false;
-        std::string symbolLanguage;
         bool shouldDispatchEntity = false;
         bool shouldDispatchTitle = false;
         bool preserveTitle = false;
@@ -361,7 +359,7 @@ public:
     enum class Stage : std::uint8_t {
         Extraction = 0, // Text/content extraction
         KnowledgeGraph, // KG triple generation
-        Symbol,         // Symbol extraction
+        Symbol,         // Retired in v0.20 (symbol extraction); slot kept for stable indices
         Entity,         // Entity extraction (binary analysis)
         Title           // Title extraction (GLiNER)
     };
@@ -398,9 +396,6 @@ public:
     void setExtractors(std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors) {
         extractors_ = std::move(extractors);
     }
-
-    // Set extension-to-language map for symbol extraction (from plugin capabilities)
-    void setSymbolExtensionMap(std::unordered_map<std::string, std::string> extMap);
 
     // Set entity providers for binary entity extraction
     void setEntityProviders(std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> providers);
@@ -472,7 +467,6 @@ private:
 
     boost::asio::awaitable<void> channelPoller();
     boost::asio::awaitable<void> kgPoller();
-    boost::asio::awaitable<void> symbolPoller();
     boost::asio::awaitable<void> entityPoller();
     boost::asio::awaitable<void> titlePoller();
 
@@ -481,11 +475,9 @@ private:
     std::variant<PreparedMetadataEntry, ExtractionFailure> prepareMetadataEntry(
         const std::string& hash, const std::string& mime, const metadata::DocumentInfo& info,
         const std::vector<std::string>& tags,
-        const std::unordered_map<std::string, std::string>& symbolExtensionMap,
         const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders);
 
     void processKnowledgeGraphBatch(std::vector<InternalEventBus::KgJob>&& jobs);
-    void processSymbolExtractionBatch(std::vector<InternalEventBus::SymbolExtractionJob>&& jobs);
     void processEntityExtractionBatch(std::vector<InternalEventBus::EntityExtractionJob>&& jobs);
     void processTitleExtractionBatch(std::vector<InternalEventBus::TitleExtractionJob>&& jobs);
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
@@ -497,13 +489,10 @@ private:
     void schedulePendingKgDrain();
     boost::asio::awaitable<void> drainPendingKgJobs();
     std::size_t cancelPendingKgJobs(bool countAsDrop, const char* reason) noexcept;
-    void dispatchToSymbolChannel(const std::string& hash, int64_t docId,
-                                 const std::string& filePath, const std::string& language,
-                                 std::shared_ptr<std::vector<std::byte>> contentBytes);
     void dispatchToEntityChannel(const std::string& hash, int64_t docId,
                                  const std::string& filePath, const std::string& extension,
                                  std::shared_ptr<std::vector<std::byte>> contentBytes);
-    // contentBytes may alias a buffer shared with the KG and symbol channels; the stage
+    // contentBytes may alias a buffer shared with the KG channel; the stage
     // reads it in place and must never move out of it.
     void processEntityExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& extension,
@@ -637,9 +626,6 @@ private:
 
     static constexpr double kAlpha_ = 0.2;
 
-    mutable std::mutex extMapMutex_;
-    std::unordered_map<std::string, std::string> symbolExtensionMap_;
-
     mutable std::mutex entityMutex_;
     std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders_;
 
@@ -659,7 +645,6 @@ private:
     std::deque<InternalEventBus::KgJob> pendingKgJobs_;
     std::atomic<std::uint64_t> pendingKgDropped_{0};
     std::atomic<bool> pendingKgDrainScheduled_{false};
-    std::shared_ptr<SpscQueue<InternalEventBus::SymbolExtractionJob>> symbolChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::EntityExtractionJob>> entityChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::TitleExtractionJob>> titleChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedChannel_;
@@ -671,7 +656,6 @@ private:
     mutable std::mutex wakeTimerMutex_;
     std::shared_ptr<boost::asio::steady_timer> extractionWakeTimer_;
     std::shared_ptr<boost::asio::steady_timer> kgWakeTimer_;
-    std::shared_ptr<boost::asio::steady_timer> symbolWakeTimer_;
     std::shared_ptr<boost::asio::steady_timer> entityWakeTimer_;
     std::shared_ptr<boost::asio::steady_timer> titleWakeTimer_;
     void setWakeTimer(Stage stage, std::shared_ptr<boost::asio::steady_timer> timer);
@@ -742,19 +726,16 @@ private:
         DispatchTimingAccumulator embedEnqueue;
         DispatchTimingAccumulator contentLoad;
         DispatchTimingAccumulator kgDispatch;
-        DispatchTimingAccumulator symbolDispatch;
         DispatchTimingAccumulator entityDispatch;
         DispatchTimingAccumulator titleDispatch;
     };
 
     struct PreparedDispatchPlan {
         bool dispatchKg{false};
-        bool dispatchSymbol{false};
         bool dispatchEntity{false};
         bool dispatchTitle{false};
         bool dispatchEmbed{false};
         bool loadContentForNonEmbedding{false};
-        std::string symbolLanguage;
     };
 
     PreparedDispatchPlan buildDispatchPlan(const PreparedMetadataEntry& prepared,
@@ -768,9 +749,8 @@ private:
                                     std::shared_ptr<std::vector<std::byte>> contentBytes,
                                     DispatchTimingSet& timings);
 
-    /// Snapshot stage config under locks (symbol extension map + entity providers)
+    /// Snapshot stage config under locks (entity providers)
     struct StageConfigSnapshot {
-        std::unordered_map<std::string, std::string> symbolExtensionMap;
         std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders;
     };
     StageConfigSnapshot snapshotStageConfig();
@@ -779,7 +759,7 @@ private:
     void commitBatchResults(std::vector<PreparedMetadataEntry>& successes,
                             std::vector<ExtractionFailure>& failures);
 
-    /// Dispatch successes to downstream channels (KG, symbol, entity, title)
+    /// Dispatch successes to downstream channels (KG, entity, title)
     void dispatchSuccesses(const std::vector<PreparedMetadataEntry>& successes);
 
     /// Get document info from cache or DB

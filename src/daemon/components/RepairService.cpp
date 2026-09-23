@@ -15,7 +15,6 @@
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/metric_keys.h>
-#include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/extraction/extraction_util.h>
@@ -305,10 +304,6 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
     ctx.getEmbeddingQueuedJobs = [services] { return services->getEmbeddingQueuedJobs(); };
     ctx.getEmbeddingInFlightJobs = [services] { return services->getEmbeddingInFlightJobs(); };
     ctx.getContentExtractors = [services] { return services->getContentExtractors(); };
-    ctx.getSymbolExtractors =
-        [services]() -> const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& {
-        return services->getSymbolExtractors();
-    };
     ctx.resolvePreferredModel = [services] { return services->resolvePreferredModel(); };
     ctx.getEmbeddingModelName = [services] { return services->getEmbeddingModelName(); };
     ctx.rebuildTopologyArtifacts = [services](const std::string& reason, bool dryRun,

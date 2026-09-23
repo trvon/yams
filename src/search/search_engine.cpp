@@ -1130,8 +1130,9 @@ public:
         if (metadataRepo_ && kgStore_) {
             auto store = std::make_shared<yams::topology::MetadataKgTopologyArtifactStore>(
                 metadataRepo_, kgStore_);
-            topologySnapshotCache_ = std::make_shared<TopologyRoutingSnapshotCache>(
-                [store]() { return store->loadLatest(); });
+            topologySnapshotCache_ =
+                std::make_shared<TopologyRoutingSnapshotCache>(TopologyRoutingSharedSnapshotLoader{
+                    [store]() { return store->loadLatestShared(); }});
         }
     }
 
@@ -1191,8 +1192,10 @@ public:
 
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner) { tuner_ = std::move(tuner); }
 
-    void setCrossReranker(SearchEngine::CrossRerankScorer scorer) {
+    void setCrossReranker(SearchEngine::CrossRerankScorer scorer, std::string scoringMode) {
         crossReranker_ = std::move(scorer);
+        crossRerankScoringMode_ = crossReranker_ && !scoringMode.empty() ? std::move(scoringMode)
+                                                                         : std::string("unknown");
     }
 
     void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
@@ -1264,6 +1267,7 @@ private:
     EntityExtractionFunc conceptExtractor_; // GLiNER concept extractor (optional)
     std::shared_ptr<SearchTuner> tuner_;    // Adaptive runtime tuner (optional)
     SearchEngine::CrossRerankScorer crossReranker_;
+    std::string crossRerankScoringMode_ = "unknown";
     std::unique_ptr<SimeonLexicalBackend> simeonLexical_;
     // Per-profile simeon bandit arms. Each corpus profile learns independently
     // which simeon recipe works best via UCB1 from proxy rewards. Training-free.
@@ -3619,13 +3623,33 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 std::size_t graphLargestCommunity = 0;
                 double graphCommunitySignalMass = 0.0;
                 std::size_t graphCommunityBoostedDocs = 0;
-                const auto communitySupport = computeReciprocalCommunitySupport(
-                    kgStore_, candidateIds,
-                    std::max<std::size_t>(8, workingConfig.graphMaxNeighbors),
-                    workingConfig.graphCommunityReferenceSize, &graphCommunitySupportedDocs,
-                    &graphCommunityEdges, &graphLargestCommunity,
-                    workingConfig.graphCommunityDecayHalfLifeDays,
-                    workingConfig.graphCommunityMinEdgeWeight);
+                std::vector<float> communitySupport;
+                const char* graphCommunitySourceUsed = "reciprocal_edges";
+                if (workingConfig.graphCommunitySource ==
+                        SearchEngineConfig::GraphCommunitySource::TopologySnapshot &&
+                    topologySnapshotCache_) {
+                    // Co-membership from the resident snapshot: no per-candidate edge reads.
+                    auto lookup = topologySnapshotCache_->get(0, false);
+                    if (lookup && lookup.value().snapshot) {
+                        TopologyCommunityStats communityStats;
+                        communitySupport = topologyCommunitySupport(
+                            *lookup.value().snapshot, candidateIds,
+                            workingConfig.graphCommunityReferenceSize, &communityStats);
+                        graphCommunitySupportedDocs = communityStats.supportedDocs;
+                        graphLargestCommunity = communityStats.largestCommunity;
+                        graphCommunitySourceUsed = "topology_snapshot";
+                    }
+                }
+                if (communitySupport.empty()) {
+                    communitySupport = computeReciprocalCommunitySupport(
+                        kgStore_, candidateIds,
+                        std::max<std::size_t>(8, workingConfig.graphMaxNeighbors),
+                        workingConfig.graphCommunityReferenceSize, &graphCommunitySupportedDocs,
+                        &graphCommunityEdges, &graphLargestCommunity,
+                        workingConfig.graphCommunityDecayHalfLifeDays,
+                        workingConfig.graphCommunityMinEdgeWeight);
+                }
+                response.debugStats["graph_community_source"] = graphCommunitySourceUsed;
 
                 std::vector<float> rawSignals(rerankWindow, 0.0f);
                 std::vector<float> lexicalAnchors(rerankWindow, 0.0f);
@@ -3899,6 +3923,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["cross_rerank_window"] = std::to_string(rerankWindow);
         response.debugStats["cross_rerank_snippet_max_chars"] =
             std::to_string(workingConfig.rerankSnippetMaxChars);
+        response.debugStats["cross_rerank_scoring_mode"] = crossRerankScoringMode_;
+        response.debugStats["cross_rerank_simeon_outer_maxsim"] =
+            crossRerankScoringMode_ == "simeon_outer_maxsim" ? "1" : "0";
 
         const auto crossStart = std::chrono::steady_clock::now();
         auto outcome = detail::applyCrossRerank(response.results, query, workingConfig,
@@ -5507,8 +5534,8 @@ void SearchEngine::setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend>
     pImpl_->setSimeonLexicalBackend(std::move(backend));
 }
 
-void SearchEngine::setCrossReranker(CrossRerankScorer scorer) {
-    pImpl_->setCrossReranker(std::move(scorer));
+void SearchEngine::setCrossReranker(CrossRerankScorer scorer, std::string scoringMode) {
+    pImpl_->setCrossReranker(std::move(scorer), std::move(scoringMode));
 }
 
 void SearchEngine::setSearchTuner(std::shared_ptr<SearchTuner> tuner) {

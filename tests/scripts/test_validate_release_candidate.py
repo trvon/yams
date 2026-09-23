@@ -52,7 +52,11 @@ class ReleaseCandidateTests(unittest.TestCase):
             ["git", *args],
             cwd=self.repo,
             # Hooks export GIT_DIR even across cwd changes; never mutate the caller.
-            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            },
             check=True,
             capture_output=True,
             text=True,
@@ -83,6 +87,10 @@ class ReleaseCandidateTests(unittest.TestCase):
         self.assertEqual(report.commit_count, 1)
         self.assertEqual(report.base_sha, self.base)
         self.assertEqual(report.candidate_sha, self.candidate)
+        markdown = report.markdown()
+        self.assertIn("Promotion Merge Policy", markdown)
+        self.assertIn("Create a merge commit", markdown)
+        self.assertIn("NEVER Squash and Merge", markdown)
 
     def test_rejects_divergent_candidate(self) -> None:
         self.git("checkout", "-q", "--detach", self.base + "^")
@@ -110,6 +118,7 @@ class ReleaseCandidateTests(unittest.TestCase):
         self.assertIn(current_main, message)
         self.assertIn("resolve conflicts", message)
         self.assertIn("rerun", message)
+        self.assertIn("Never squash-merge", message)
         self.assertEqual(self.git("rev-parse", "HEAD"), current_main)
         self.assertEqual(self.git("status", "--porcelain"), before_status)
         self.assertFalse((self.repo / ".git" / "MERGE_HEAD").exists())
@@ -124,7 +133,9 @@ class ReleaseCandidateTests(unittest.TestCase):
         self.git("merge", "--no-ff", "-m", "Merge current main", current_main)
         reconciled = self.git("rev-parse", "HEAD")
 
-        report = candidate_module.validate_candidate(self.repo, current_main, reconciled)
+        report = candidate_module.validate_candidate(
+            self.repo, current_main, reconciled
+        )
 
         self.assertEqual(report.base_sha, current_main)
         self.assertEqual(report.candidate_sha, reconciled)

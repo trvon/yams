@@ -1773,7 +1773,9 @@ TEST_CASE("SearchTuner: path enumeration activates for rich KG",
     stats.proseRatio = 0.90f;
     stats.codeRatio = 0.05f;
     stats.symbolDensity = 0.8f; // graphRichness base
-    stats.kgEdgeDensity = 3.5;  // hasRichGraphTopology() requires > 2.0
+    stats.kgEdgeCount = 7000;
+    stats.kgEdgeDensity = 3.5;
+    stats.kgRelationalEdgeDensity = 3.5; // hasRichGraphTopology() requires > 2.0
     stats.embeddingCoverage = 0.80f;
     stats.pathRelativeDepthAvg = 0.5;
     stats.tagCoverage = 0.02f;
@@ -1792,7 +1794,9 @@ TEST_CASE("SearchTuner: path enumeration off for sparse KG",
     stats.proseRatio = 0.90f;
     stats.codeRatio = 0.05f;
     stats.symbolDensity = 0.2f; // low density
-    stats.kgEdgeDensity = 0.8;  // below hasRichGraphTopology() threshold
+    stats.kgEdgeCount = 1600;
+    stats.kgEdgeDensity = 0.8;
+    stats.kgRelationalEdgeDensity = 0.8; // below hasRichGraphTopology() threshold
     stats.embeddingCoverage = 0.80f;
     stats.pathRelativeDepthAvg = 0.5;
     stats.tagCoverage = 0.02f;
@@ -2132,6 +2136,8 @@ TEST_CASE("SearchTuner: SciFact-like corpus with rich edges activates graph full
     stats.symbolDensity = 33.3;
     stats.kgEdgeCount = 450000;
     stats.kgEdgeDensity = 86.8;
+    stats.kgRelationalEdgeCount = 60000;
+    stats.kgRelationalEdgeDensity = 11.6;
     stats.kgAliasCount = 250000;
     stats.kgAliasDensity = 48.2;
     stats.pathRelativeDepthAvg = 0.0;
@@ -2222,4 +2228,31 @@ TEST_CASE("CorpusStats: JSON roundtrip preserves new signals", "[unit][search_tu
     CHECK((restored.kgEdgeDensity == 3.0));
     CHECK((restored.kgAliasCount == 150));
     CHECK((restored.kgAliasDensity == 1.5));
+}
+
+TEST_CASE("SearchTuner: embedding-neighbour edges alone do not enable graph scoring",
+          "[unit][search_tuner][r7_signals]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.proseRatio = 0.90;
+    stats.codeRatio = 0.05;
+    stats.nerEntityDensity = 0.0;
+    stats.nativeSymbolDensity = 0.0;
+    stats.symbolDensity = 0.0;
+    // ~16 semantic_neighbor edges per document (8-NN written both ways), no relations.
+    stats.kgEdgeCount = 32000;
+    stats.kgEdgeDensity = 16.0;
+    stats.kgRelationalEdgeCount = 0;
+    stats.kgRelationalEdgeDensity = 0.0;
+    stats.embeddingCoverage = 1.0;
+    stats.pathRelativeDepthAvg = 0.0;
+    stats.tagCoverage = 0.0;
+
+    REQUIRE(stats.isScientific());
+    CHECK_FALSE(stats.hasRichGraphTopology());
+
+    SearchTuner tuner(stats);
+    const auto& p = tuner.getParams();
+    CHECK_FALSE(p.graphEnablePathEnumeration);
+    CHECK_FALSE(p.enableGraphQueryExpansion);
 }

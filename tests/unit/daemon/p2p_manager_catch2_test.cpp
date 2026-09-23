@@ -165,6 +165,18 @@ TEST_CASE("P2P connection strings are strict and IPv6 aware", "[daemon][p2p][man
         CAPTURE(invalid);
         CHECK_FALSE(yams::daemon::p2p::parseP2pConnectionString(invalid).has_value());
     }
+
+    // Found by fuzz_p2p_connstr: hosts with brackets, spaces or non-ASCII bytes were accepted and
+    // could not be rendered back to a connection string by endpoint().
+    for (const std::string invalid :
+         {std::string("[[\xff]:5"), std::string("gh ost:443"), std::string("[fd00::1 ]:443"),
+          std::string("ghost\x01:443"), std::string("[a]b]:443"), std::string("\xc3\xa9:443")}) {
+        CAPTURE(invalid);
+        CHECK_FALSE(yams::daemon::p2p::parseP2pConnectionString(invalid).has_value());
+    }
+    auto zoned = yams::daemon::p2p::parseP2pConnectionString("[fe80::1%en0]:443");
+    REQUIRE(zoned.has_value());
+    CHECK(zoned.value().endpoint() == "[fe80::1%en0]:443");
 }
 
 TEST_CASE("P2P manager defaults to rejecting first contact", "[daemon][p2p][security]") {

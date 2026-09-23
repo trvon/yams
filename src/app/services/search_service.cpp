@@ -27,7 +27,6 @@
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_execution_context.h>
 #include <yams/search/search_facets.h>
-#include <yams/search/symbol_enrichment.h>
 
 #include <algorithm>
 #include <atomic>
@@ -581,20 +580,6 @@ public:
             // Ignore config errors; keep enhancements disabled.
             enhancedCfg_ = {};
         }
-
-        // PBI-074: Initialize symbol enricher for ranking boost
-        if (ctx_.kgStore) {
-            symbolEnricher_ = std::make_shared<yams::search::SymbolEnricher>(ctx_.kgStore);
-        }
-
-        // Symbol weight configurable via env var (default 0.15 = 15% boost)
-        if (const char* w = std::getenv("YAMS_SYMBOL_WEIGHT")) { // NOLINT(concurrency-mt-unsafe)
-            try {
-                symbolWeight_ = std::stof(w);
-                symbolWeight_ = std::max(0.0f, std::min(1.0f, symbolWeight_));
-            } catch (...) { // NOLINT(bugprone-empty-catch)
-            }
-        }
     }
 
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) override {
@@ -1112,8 +1097,6 @@ private:
     EnhancedConfig enhancedCfg_{}; // off by default
     EnhancedSearchExecutor enhanced_;
     std::shared_ptr<yams::search::HotzoneManager> hotzones_;
-    std::shared_ptr<yams::search::SymbolEnricher> symbolEnricher_;
-    float symbolWeight_{0.15f};
 
     std::string resolveSearchType(const SearchRequest& req,
                                   search::QueryRetrievalMode retrievalMode,
@@ -1915,10 +1898,6 @@ private:
         for (const auto& [key, value] : engineResponse.debugStats) {
             resp.searchStats[key] = value;
         }
-        resp.searchStats["symbol_rank_requested"] = req.symbolRank ? "true" : "false";
-        resp.searchStats["symbol_rank_available"] =
-            symbolEnricher_ && symbolWeight_ > 0.0f ? "true" : "false";
-        resp.searchStats["symbol_rank_boosted_results"] = "0";
 
         if (resp.isDegraded) {
             spdlog::info(
@@ -1949,9 +1928,6 @@ private:
             std::atomic<size_t> next{0};
             std::vector<std::optional<SearchItem>> slots(n);
 
-            // Store hash for post-processing symbol enrichment
-            std::vector<std::string> hashes(n);
-
             auto worker = [&]() {
                 YAMS_ZONE_SCOPED_N("search_service::result_shape_worker");
                 while (true) {
@@ -1973,10 +1949,6 @@ private:
                     it.keywordScore = r.keywordScore;
                     it.kgEntityScore = r.kgScore;
                     it.structuralScore = r.pathScore;
-                    // tagScore and symbolScore mapped to SearchItem if needed
-
-                    // Store hash for symbol enrichment post-processing
-                    hashes[i] = r.document.sha256Hash;
 
                     slots[i] = std::move(it);
                 }
@@ -1990,89 +1962,9 @@ private:
                 th.join();
             resp.results.reserve(n);
 
-            // Build result vector and track original indices for hash lookup
-            std::vector<size_t> originalIndices;
-            originalIndices.reserve(n);
             for (size_t i = 0; i < n; ++i) {
                 if (slots[i].has_value()) {
                     resp.results.push_back(std::move(*slots[i]));
-                    originalIndices.push_back(i);
-                }
-            }
-
-            // PBI-074: Apply symbol enrichment to TOP-K results only (post-processing)
-            // This avoids the N+1 query problem by only enriching a small subset
-            if (req.symbolRank && symbolEnricher_ && symbolWeight_ > 0.0f &&
-                !resp.results.empty()) {
-                YAMS_ZONE_SCOPED_N("search_service::symbol_enrichment_topk");
-                constexpr size_t kSymbolEnrichLimit = 25;
-                const size_t enrichCount = std::min(resp.results.size(), kSymbolEnrichLimit);
-                const std::string& queryText = req.query;
-                std::string queryLower = queryText;
-                std::transform(queryLower.begin(), queryLower.end(), queryLower.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                bool boosted = false;
-                size_t boostedResults = 0;
-
-                for (size_t i = 0; i < enrichCount; ++i) {
-                    auto& it = resp.results[i];
-                    const size_t origIdx = originalIndices[i];
-
-                    yams::search::SearchResultItem enrichItem;
-                    enrichItem.path = it.path;
-                    enrichItem.metadata["sha256_hash"] = hashes[origIdx];
-
-                    if (symbolEnricher_->enrichResult(enrichItem, queryText)) {
-                        if (enrichItem.symbolContext && enrichItem.symbolContext->isSymbolQuery) {
-                            bool queryMatchesSymbol = false;
-                            if (!queryLower.empty()) {
-                                for (const auto& symbol : enrichItem.symbolContext->symbols) {
-                                    std::string nameLower = symbol.name;
-                                    std::transform(nameLower.begin(), nameLower.end(),
-                                                   nameLower.begin(), [](unsigned char c) {
-                                                       return static_cast<char>(std::tolower(c));
-                                                   });
-                                    std::string qualifiedLower = symbol.qualifiedName;
-                                    std::transform(qualifiedLower.begin(), qualifiedLower.end(),
-                                                   qualifiedLower.begin(), [](unsigned char c) {
-                                                       return static_cast<char>(std::tolower(c));
-                                                   });
-
-                                    if ((!nameLower.empty() &&
-                                         queryLower.find(nameLower) != std::string::npos) ||
-                                        (!qualifiedLower.empty() &&
-                                         queryLower.find(qualifiedLower) != std::string::npos)) {
-                                        queryMatchesSymbol = true;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (!queryMatchesSymbol) {
-                                continue;
-                            }
-
-                            const float symbolScore =
-                                std::clamp(enrichItem.symbolContext->symbolScore, 0.0f, 1.0f);
-                            const float definitionScore =
-                                std::clamp(enrichItem.symbolContext->definitionScore, 1.0f, 1.5f);
-
-                            float boost = 1.0f + (symbolWeight_ * symbolScore);
-                            boost *= (1.0f + (definitionScore - 1.0f) * 0.35f);
-                            boost = std::clamp(boost, 1.0f, 1.35f);
-                            it.score *= boost;
-                            boosted = boosted || (boost != 1.0f);
-                            boostedResults += boost != 1.0f ? 1 : 0;
-                        }
-                    }
-                }
-                resp.searchStats["symbol_rank_boosted_results"] = std::to_string(boostedResults);
-
-                // Re-sort after symbol boost applied
-                if (boosted) {
-                    std::sort(
-                        resp.results.begin(), resp.results.end(),
-                        [](const SearchItem& a, const SearchItem& b) { return a.score > b.score; });
                 }
             }
         }

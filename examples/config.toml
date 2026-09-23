@@ -807,17 +807,6 @@ ca_path = ""
 # Proxy URL (e.g., http://user:pass@host:port) or empty
 url = ""
 
-[plugins.symbol_extraction]
-# Enable Tree-sitter based symbol extraction plugins (runtime toggle)
-enable = true
-# Auto-download missing Tree-sitter grammar shared objects on first use
-auto_download_grammars = true
-# Optional: restrict languages processed by the symbol extractor plugin
-# languages = ["cpp", "python", "c", "go", "rust", "js", "ts"]
-# Optional: override grammar .so paths per language
-# grammar_paths.cpp = "/usr/lib/libtree-sitter-cpp.so"
-# grammar_paths.python = "/usr/lib/libtree-sitter-python.so"
-
 [cli.streaming]
 # Enable streaming for large payloads on CLI <-> daemon IPC
 enable = true

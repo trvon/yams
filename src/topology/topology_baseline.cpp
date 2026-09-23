@@ -1,6 +1,9 @@
+#include <yams/profiling.h>
 #include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_representatives.h>
+#include <yams/topology/topology_sgc.h>
+#include <yams/vector/binary_quantization.h>
 #include <yams/vector/static_cosine_ann_index.h>
 
 #include "protected_relation_identity_internal.h"
@@ -274,17 +277,32 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
         return batch;
     }
 
+    std::vector<TopologyDocumentInput> smoothedDocuments;
+    std::span<const TopologyDocumentInput> effectiveDocuments = documents;
+    if (config.sgcHops > 0 && documents.size() >= 2) {
+        smoothedDocuments.assign(documents.begin(), documents.end());
+        applySGCSmoothing(smoothedDocuments, config, config.sgcHops);
+        if (config.sgcNormalize) {
+            for (auto& doc : smoothedDocuments) {
+                if (!doc.embedding.empty()) {
+                    detail::normalizeVector(doc.embedding);
+                }
+            }
+        }
+        effectiveDocuments = smoothedDocuments;
+    }
+
     std::unordered_map<std::string, std::size_t> indexByHash;
-    indexByHash.reserve(documents.size());
-    for (std::size_t i = 0; i < documents.size(); ++i) {
-        if (!documents[i].documentHash.empty()) {
-            indexByHash[documents[i].documentHash] = i;
+    indexByHash.reserve(effectiveDocuments.size());
+    for (std::size_t i = 0; i < effectiveDocuments.size(); ++i) {
+        if (!effectiveDocuments[i].documentHash.empty()) {
+            indexByHash[effectiveDocuments[i].documentHash] = i;
         }
     }
 
     std::unordered_map<detail::PairKey, float, detail::PairKeyHash> pairWeights;
-    for (std::size_t i = 0; i < documents.size(); ++i) {
-        for (const auto& neighbor : documents[i].neighbors) {
+    for (std::size_t i = 0; i < effectiveDocuments.size(); ++i) {
+        for (const auto& neighbor : effectiveDocuments[i].neighbors) {
             if (neighbor.documentHash.empty()) {
                 continue;
             }
@@ -313,14 +331,14 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
         }
     }
 
-    Adjacency adjacency(documents.size());
+    Adjacency adjacency(effectiveDocuments.size());
     std::vector<detail::ProtectedRelationObservation> relationObservations;
     relationObservations.reserve(pairWeights.size());
     for (const auto& [key, weight] : pairWeights) {
         adjacency[key.first].push_back({key.second, weight});
         adjacency[key.second].push_back({key.first, weight});
-        const std::string_view firstHash = documents[key.first].documentHash;
-        const std::string_view secondHash = documents[key.second].documentHash;
+        const std::string_view firstHash = effectiveDocuments[key.first].documentHash;
+        const std::string_view secondHash = effectiveDocuments[key.second].documentHash;
         const auto endpoints = std::minmax(firstHash, secondHash);
         relationObservations.push_back(detail::ProtectedRelationObservation{
             .lhs = endpoints.first,
@@ -332,11 +350,11 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
         detail::protectedRelationIdentityFromObservations(std::move(relationObservations));
 
     // BFS connected components over the filtered undirected graph.
-    std::vector<bool> visited(documents.size(), false);
+    std::vector<bool> visited(effectiveDocuments.size(), false);
     std::vector<std::vector<std::size_t>> components;
     SplitScratch splitScratch;
-    components.reserve(documents.size());
-    for (std::size_t root = 0; root < documents.size(); ++root) {
+    components.reserve(effectiveDocuments.size());
+    for (std::size_t root = 0; root < effectiveDocuments.size(); ++root) {
         if (visited[root]) {
             continue;
         }
@@ -355,22 +373,23 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
                 }
             }
         }
-        sortComponentByHash(component, documents);
+        sortComponentByHash(component, effectiveDocuments);
         for (auto& piece : splitOversizedComponent(component, config.maxComponentDocs, adjacency,
-                                                   documents, splitScratch)) {
+                                                   effectiveDocuments, splitScratch)) {
             components.emplace_back();
             components.back().swap(piece);
         }
     }
 
-    batch.memberships.reserve(documents.size());
+    batch.memberships.reserve(effectiveDocuments.size());
     for (const auto& component : components) {
-        emitComponent(batch, component, adjacency, documents, config.routingRepresentativeCount);
+        emitComponent(batch, component, adjacency, effectiveDocuments,
+                      config.routingRepresentativeCount);
     }
 
     std::ranges::sort(batch.clusters, {}, &ClusterArtifact::clusterId);
     std::ranges::sort(batch.memberships, {}, &DocumentClusterMembership::documentHash);
-    (void)applyOrthogonalBoundarySpill(documents, config, batch);
+    (void)applyOrthogonalBoundarySpill(effectiveDocuments, config, batch);
 
     return batch;
 }
@@ -728,12 +747,18 @@ float vectorNorm(const std::vector<float>& a) {
 Result<std::vector<ClusterRoute>>
 SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                                  const TopologyArtifactBatch& artifacts) const {
-    const auto index = buildRouteIndex(artifacts, request.denseAnnCandidateLimit > 0);
+    const auto index =
+        buildRouteIndex(artifacts, request.denseAnnCandidateLimit > 0,
+                        request.bqCandidateLimit > 0 || request.denseAnnCandidateLimit > 0,
+                        request.bqPrefixDimension);
     return route(request, artifacts, index);
 }
 
 SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifacts,
-                                                            bool buildDenseAnnIndex) {
+                                                            bool buildDenseAnnIndex,
+                                                            bool buildBqIndex,
+                                                            std::size_t bqPrefixDimension) {
+    YAMS_ZONE_SCOPED_N("topology::route::buildIndex");
     SparseRouteIndex index;
     index.centroidNorms.reserve(artifacts.clusters.size());
     index.routingRepresentativeNorms.reserve(artifacts.clusters.size());
@@ -768,6 +793,15 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifa
         auto annIndex = yams::vector::StaticCosineAnnIndex::build(centroidIds, centroids);
         if (annIndex) {
             index.centroidAnnIndex = std::move(annIndex).value();
+        }
+    }
+    if (buildBqIndex && !centroids.empty()) {
+        auto bqIndex =
+            yams::vector::BinaryQuantizedIndex::build(centroidIds, centroids, bqPrefixDimension);
+        if (bqIndex) {
+            index.centroidBqIndex = std::move(bqIndex).value();
+            YAMS_PLOT("topology::bq_index_bytes",
+                      static_cast<int64_t>(index.centroidBqIndex->memoryUsageBytes()));
         }
     }
 
@@ -807,6 +841,7 @@ Result<std::vector<ClusterRoute>>
 SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                                  const TopologyArtifactBatch& artifacts,
                                  const SparseRouteIndex& index, SparseRouteWork* work) const {
+    YAMS_ZONE_SCOPED_N("topology::route");
     if (index.centroidNorms.size() != artifacts.clusters.size() ||
         index.routingRepresentativeNorms.size() != artifacts.clusters.size()) {
         return Error{ErrorCode::InvalidArgument,
@@ -877,10 +912,45 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
     }
 
     std::vector<bool> routeCandidates(artifacts.clusters.size(), true);
-    const bool denseAnnEligible = alpha < 1.0F && queryNorm > 0.0F && request.limit > 0 &&
-                                  request.denseAnnCandidateLimit > 0 && index.centroidAnnIndex &&
+    const bool bqRequested = alpha < 1.0F && queryNorm > 0.0F && request.limit > 0 &&
+                             request.bqCandidateLimit > 0 && index.centroidBqIndex &&
+                             artifacts.clusters.size() > request.bqCandidateLimit;
+    const bool denseAnnEligible = !bqRequested && alpha < 1.0F && queryNorm > 0.0F &&
+                                  request.limit > 0 && request.denseAnnCandidateLimit > 0 &&
+                                  index.centroidAnnIndex &&
                                   artifacts.clusters.size() > request.denseAnnCandidateLimit;
-    if (denseAnnEligible) {
+    const bool bqFallbackEligible =
+        !denseAnnEligible && !bqRequested && alpha < 1.0F && queryNorm > 0.0F &&
+        request.limit > 0 && request.denseAnnCandidateLimit > 0 && !index.centroidAnnIndex &&
+        index.centroidBqIndex && artifacts.clusters.size() > request.denseAnnCandidateLimit;
+
+    if (bqRequested || bqFallbackEligible) {
+        const auto candidateLimit = std::min(
+            artifacts.clusters.size(),
+            std::max(bqRequested ? request.bqCandidateLimit : request.denseAnnCandidateLimit,
+                     request.limit));
+        auto bqHits = index.centroidBqIndex->search(request.queryEmbedding, candidateLimit);
+        // An empty shortlist means BQ could not score the query (e.g. a dimension mismatch);
+        // keep the exhaustive candidate set, as the dense ANN branch does when it fails.
+        if (!bqHits.empty()) {
+            std::fill(routeCandidates.begin(), routeCandidates.end(), false);
+            for (const auto& hit : bqHits) {
+                if (hit.id < routeCandidates.size()) {
+                    routeCandidates[hit.id] = true;
+                }
+            }
+            for (std::size_t clusterIndex = 0; clusterIndex < signals.size(); ++clusterIndex) {
+                if (signals[clusterIndex].sparseMass > 0.0) {
+                    routeCandidates[clusterIndex] = true;
+                }
+            }
+            if (work != nullptr) {
+                work->bqUsed = true;
+                work->bqCandidates = bqHits.size();
+                work->bqDistanceEvaluations = index.centroidBqIndex->size();
+            }
+        }
+    } else if (denseAnnEligible) {
         const auto candidateLimit = std::min(
             artifacts.clusters.size(), std::max(request.denseAnnCandidateLimit, request.limit));
         auto annResult = index.centroidAnnIndex->search(request.queryEmbedding, candidateLimit);

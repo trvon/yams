@@ -549,8 +549,6 @@ ConfigMigrator::getLatestConfigDefaults() {
 
             {"experimental", {{"enable", "false"}}},
 
-            {"plugins.symbol_extraction", {{"enable", "true"}, {"auto_download_grammars", "true"}}},
-
             {"daemon.models",
              {{"max_loaded_models", "4"},
               {"hot_pool_size", "2"},
@@ -770,7 +768,6 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "daemon.graph_prune",
                                              "cli.streaming",
                                              "cli.pool",
-                                             "plugins.symbol_extraction",
                                              "experimental",
                                              "classification",
                                              "search.hotzones",

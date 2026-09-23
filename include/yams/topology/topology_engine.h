@@ -2,6 +2,7 @@
 
 #include <yams/topology/topology_artifacts.h>
 
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -18,6 +19,20 @@ public:
 
     virtual Result<std::optional<TopologyArtifactBatch>>
     loadLatest(std::string_view snapshotId = {}) const = 0;
+
+    /// Shared, immutable view of a snapshot; null when none exists. Stores that keep a resident
+    /// snapshot override this to hand out that instance instead of a copy.
+    virtual Result<std::shared_ptr<const TopologyArtifactBatch>>
+    loadLatestShared(std::string_view snapshotId = {}) const {
+        auto loaded = loadLatest(snapshotId);
+        if (!loaded) {
+            return loaded.error();
+        }
+        if (!loaded.value().has_value()) {
+            return std::shared_ptr<const TopologyArtifactBatch>{};
+        }
+        return std::make_shared<const TopologyArtifactBatch>(std::move(*loaded.value()));
+    }
 
     virtual Result<std::vector<DocumentClusterMembership>>
     loadMemberships(std::span<const std::string> documentHashes) const = 0;

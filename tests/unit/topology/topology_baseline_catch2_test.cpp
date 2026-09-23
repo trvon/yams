@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <numbers>
 #include <string>
@@ -687,6 +688,129 @@ TEST_CASE("Sparse-guided exact routing can omit the centroid ANN index",
     CHECK_FALSE(work.denseAnnUsed);
     CHECK(work.denseAnnDistanceEvaluations == 0U);
     CHECK(work.exactRepresentativeDistanceEvaluations == batch.clusters.size());
+}
+
+TEST_CASE("Sparse-guided topology routing shortlists centroids with 1-bit binary quantization (BQ)",
+          "[unit][topology][routing][bq]") {
+    TopologyArtifactBatch batch;
+    constexpr std::size_t clusterCount = 128;
+    batch.clusters.reserve(clusterCount);
+    for (std::size_t index = 0; index < clusterCount; ++index) {
+        const auto angle = static_cast<float>(index) * 2.0F * std::numbers::pi_v<float> /
+                           static_cast<float>(clusterCount);
+        batch.clusters.push_back(ClusterArtifact{
+            .clusterId = "cluster-" + std::to_string(index),
+            .memberCount = 1,
+            .memberDocumentHashes = {"doc-" + std::to_string(index)},
+            .centroidEmbedding = {std::cos(angle), std::sin(angle)},
+        });
+    }
+
+    const auto routeIndex = SparseGuidedClusterRouter::buildRouteIndex(batch);
+    REQUIRE(routeIndex.centroidBqIndex != nullptr);
+
+    SparseGuidedClusterRouter router;
+    TopologyRouteRequest request;
+    request.limit = 1;
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.sparseDenseAlpha = 0.0F;
+    request.bqCandidateLimit = 8;
+    SparseRouteWork work;
+
+    auto routed = router.route(request, batch, routeIndex, &work);
+
+    REQUIRE(routed.has_value());
+    REQUIRE(routed.value().size() == 1U);
+    CHECK(routed.value().front().clusterId == "cluster-0");
+    CHECK(work.bqUsed);
+    CHECK(work.bqCandidates <= 8U);
+    CHECK(work.bqDistanceEvaluations == clusterCount);
+    CHECK(work.exactRepresentativeDistanceEvaluations <= 8U);
+}
+
+TEST_CASE("Sparse-guided topology routing falls back to BQ when ANN index is omitted",
+          "[unit][topology][routing][bq][fallback]") {
+    TopologyArtifactBatch batch;
+    constexpr std::size_t clusterCount = 64;
+    batch.clusters.reserve(clusterCount);
+    for (std::size_t index = 0; index < clusterCount; ++index) {
+        const auto angle = static_cast<float>(index) * 2.0F * std::numbers::pi_v<float> /
+                           static_cast<float>(clusterCount);
+        batch.clusters.push_back(ClusterArtifact{
+            .clusterId = "cluster-" + std::to_string(index),
+            .memberCount = 1,
+            .memberDocumentHashes = {"doc-" + std::to_string(index)},
+            .centroidEmbedding = {std::cos(angle), std::sin(angle)},
+        });
+    }
+
+    const auto routeIndex = SparseGuidedClusterRouter::buildRouteIndex(batch, false, true);
+    REQUIRE(routeIndex.centroidAnnIndex == nullptr);
+    REQUIRE(routeIndex.centroidBqIndex != nullptr);
+
+    SparseGuidedClusterRouter router;
+    TopologyRouteRequest request;
+    request.limit = 1;
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.sparseDenseAlpha = 0.0F;
+    request.denseAnnCandidateLimit = 8;
+    SparseRouteWork work;
+
+    auto routed = router.route(request, batch, routeIndex, &work);
+
+    REQUIRE(routed.has_value());
+    REQUIRE(routed.value().size() == 1U);
+    CHECK(routed.value().front().clusterId == "cluster-0");
+    CHECK_FALSE(work.denseAnnUsed);
+    CHECK(work.bqUsed);
+    CHECK(work.bqCandidates <= 8U);
+    CHECK(work.exactRepresentativeDistanceEvaluations <= 8U);
+}
+
+TEST_CASE("Sparse-guided topology routing ignores BQ when the query cannot be scored",
+          "[unit][topology][routing][bq]") {
+    TopologyArtifactBatch batch;
+    constexpr std::size_t clusterCount = 32;
+    for (std::size_t index = 0; index < clusterCount; ++index) {
+        const auto angle = static_cast<float>(index) * 2.0F * std::numbers::pi_v<float> /
+                           static_cast<float>(clusterCount);
+        batch.clusters.push_back(ClusterArtifact{
+            .clusterId = "cluster-" + std::to_string(index),
+            .memberCount = 1,
+            .memberDocumentHashes = {"doc-" + std::to_string(index)},
+            .centroidEmbedding = {std::cos(angle), std::sin(angle), 0.5F},
+        });
+    }
+    const auto routeIndex = SparseGuidedClusterRouter::buildRouteIndex(batch, false, true);
+    REQUIRE(routeIndex.centroidBqIndex != nullptr);
+
+    SparseGuidedClusterRouter router;
+    TopologyRouteRequest request;
+    request.limit = 3;
+    // Shorter than the indexed dimension: BQ cannot quantize it.
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.sparseDenseAlpha = 0.0F;
+    request.seedDocumentHashes = {"doc-5"};
+
+    auto exhaustive = router.route(request, batch, routeIndex, nullptr);
+    REQUIRE(exhaustive.has_value());
+
+    for (const bool viaFallback : {false, true}) {
+        auto bqRequest = request;
+        if (viaFallback) {
+            bqRequest.denseAnnCandidateLimit = 4;
+        } else {
+            bqRequest.bqCandidateLimit = 4;
+        }
+        SparseRouteWork work;
+        auto routed = router.route(bqRequest, batch, routeIndex, &work);
+        REQUIRE(routed.has_value());
+        CHECK_FALSE(work.bqUsed);
+        REQUIRE(routed.value().size() == exhaustive.value().size());
+        for (std::size_t i = 0; i < routed.value().size(); ++i) {
+            CHECK(routed.value()[i].clusterId == exhaustive.value()[i].clusterId);
+        }
+    }
 }
 
 TEST_CASE("Topology construction emits a deterministic bounded diverse routing cover",
@@ -1447,4 +1571,150 @@ TEST_CASE("Topology baseline minEdgeScore filters weak links",
     const auto byDoc = clusterByDocument(result.value());
     CHECK((byDoc.at("a") == byDoc.at("b")));
     CHECK((byDoc.at("a") != byDoc.at("c")));
+}
+
+TEST_CASE("Topology baseline applies SGC feature smoothing (Lean SGC.lean)",
+          "[unit][topology][baseline][sgc]") {
+    ConnectedComponentTopologyEngine engine;
+    TopologyBuildConfig config;
+    config.reciprocalOnly = true;
+    config.minEdgeScore = 0.5;
+    config.maxComponentDocs = 0;
+    config.sgcHops = 1;
+    config.sgcNormalize = true;
+
+    // Triangle of connected docs with orthogonal embeddings
+    std::vector<TopologyDocumentInput> docs{
+        TopologyDocumentInput{
+            .documentHash = "doc-1",
+            .filePath = "/1",
+            .embedding = {1.0F, 0.0F, 0.0F, 0.0F},
+            .neighbors = {{.documentHash = "doc-2", .score = 0.8F, .reciprocal = true},
+                          {.documentHash = "doc-3", .score = 0.8F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "doc-2",
+            .filePath = "/2",
+            .embedding = {0.0F, 1.0F, 0.0F, 0.0F},
+            .neighbors = {{.documentHash = "doc-1", .score = 0.8F, .reciprocal = true},
+                          {.documentHash = "doc-3", .score = 0.8F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "doc-3",
+            .filePath = "/3",
+            .embedding = {0.0F, 0.0F, 1.0F, 0.0F},
+            .neighbors = {{.documentHash = "doc-1", .score = 0.8F, .reciprocal = true},
+                          {.documentHash = "doc-2", .score = 0.8F, .reciprocal = true}}},
+    };
+
+    auto smoothed = engine.buildArtifacts(docs, config);
+    REQUIRE(smoothed.has_value());
+    requireWellFormedBatch(smoothed.value());
+    CHECK(smoothed.value().memberships.size() == 3);
+    CHECK(smoothed.value().clusters.size() == 1);
+
+    const auto& cluster = smoothed.value().clusters.front();
+    CHECK(cluster.memberCount == 3);
+    REQUIRE(cluster.centroidEmbedding.size() == 4);
+
+    // With SGC 1-hop smoothing, neighbor embeddings blend into each other,
+    // so centroid components are balanced and non-zero.
+    CHECK(cluster.centroidEmbedding[0] > 0.1F);
+    CHECK(cluster.centroidEmbedding[1] > 0.1F);
+    CHECK(cluster.centroidEmbedding[2] > 0.1F);
+
+    // Verify sgcHops = 0 baseline leaves centroid as standard mean
+    config.sgcHops = 0;
+    auto unsmoothed = engine.buildArtifacts(docs, config);
+    REQUIRE(unsmoothed.has_value());
+    requireWellFormedBatch(unsmoothed.value());
+    CHECK(unsmoothed.value().clusters.size() == 1);
+}
+
+namespace {
+
+std::int64_t addDocNode(TopologyFixture& fix, const std::string& hash) {
+    REQUIRE(fix.repository->insertDocument(makeDocumentWithPath("/repo/" + hash + ".md", hash))
+                .has_value());
+    metadata::KGNode node;
+    node.nodeKey = "doc:" + hash;
+    node.label = hash;
+    node.type = std::string{"document"};
+    auto id = fix.kgStore->upsertNode(node);
+    REQUIRE(id.has_value());
+    return id.value();
+}
+
+std::map<std::string, const TopologyDocumentInput*>
+byHash(const std::vector<TopologyDocumentInput>& docs) {
+    std::map<std::string, const TopologyDocumentInput*> out;
+    for (const auto& doc : docs) {
+        out[doc.documentHash] = &doc;
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Topology extractor marks only mutual kNN edges reciprocal",
+          "[unit][topology][extractor][knn]") {
+    TopologyFixture fix;
+    const auto a = addDocNode(fix, "aaa");
+    const auto b = addDocNode(fix, "bbb");
+    const auto c = addDocNode(fix, "ccc");
+
+    // kNN edges point from a document to its neighbours: a and b list each other, a lists c
+    // but c does not list a.
+    std::vector<metadata::KGEdge> edges{
+        {.srcNodeId = a, .dstNodeId = b, .relation = "semantic_neighbor", .weight = 0.9F},
+        {.srcNodeId = b, .dstNodeId = a, .relation = "semantic_neighbor", .weight = 0.9F},
+        {.srcNodeId = a, .dstNodeId = c, .relation = "semantic_neighbor", .weight = 0.6F}};
+    REQUIRE(fix.kgStore->addEdgesUnique(edges).has_value());
+
+    TopologyInputExtractor extractor(fix.repository, fix.kgStore, nullptr);
+    auto extracted = extractor.extract(TopologyExtractionConfig{.limit = 10,
+                                                                .maxNeighborsPerDocument = 8,
+                                                                .includeEmbeddings = false,
+                                                                .includeMetadata = false});
+    REQUIRE(extracted.has_value());
+    const auto docs = byHash(extracted.value());
+    REQUIRE(docs.contains("aaa"));
+    const auto& aNeighbors = docs.at("aaa")->neighbors;
+    REQUIRE(aNeighbors.size() == 2U);
+    CHECK(aNeighbors[0].documentHash == "bbb");
+    CHECK(aNeighbors[0].reciprocal);
+    CHECK(aNeighbors[1].documentHash == "ccc");
+    CHECK_FALSE(aNeighbors[1].reciprocal);
+    // c lists no neighbours of its own; an incoming edge is not a kNN neighbour of c.
+    REQUIRE(docs.contains("ccc"));
+    CHECK(docs.at("ccc")->neighbors.empty());
+}
+
+TEST_CASE("Topology extractor keeps a hub's own neighbours despite many incoming edges",
+          "[unit][topology][extractor][knn]") {
+    TopologyFixture fix;
+    const auto hub = addDocNode(fix, "hub");
+    const auto target = addDocNode(fix, "target");
+
+    // Forty documents list the hub first (inserted before the hub's own kNN edge).
+    std::vector<metadata::KGEdge> edges;
+    for (int i = 0; i < 40; ++i) {
+        const auto src = addDocNode(fix, "src" + std::to_string(i));
+        edges.push_back(
+            {.srcNodeId = src, .dstNodeId = hub, .relation = "semantic_neighbor", .weight = 0.95F});
+    }
+    edges.push_back(
+        {.srcNodeId = hub, .dstNodeId = target, .relation = "semantic_neighbor", .weight = 0.5F});
+    REQUIRE(fix.kgStore->addEdgesUnique(edges).has_value());
+
+    TopologyInputExtractor extractor(fix.repository, fix.kgStore, nullptr);
+    auto extracted = extractor.extract(TopologyExtractionConfig{.documentHashes = {"hub"},
+                                                                .maxNeighborsPerDocument = 8,
+                                                                .includeEmbeddings = false,
+                                                                .includeMetadata = false});
+    REQUIRE(extracted.has_value());
+    const auto docs = byHash(extracted.value());
+    REQUIRE(docs.contains("hub"));
+    const auto& hubNeighbors = docs.at("hub")->neighbors;
+    REQUIRE(hubNeighbors.size() == 1U);
+    CHECK(hubNeighbors[0].documentHash == "target");
+    CHECK_FALSE(hubNeighbors[0].reciprocal);
 }

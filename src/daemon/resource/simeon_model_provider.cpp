@@ -1,26 +1,63 @@
 #include <yams/daemon/resource/simeon_model_provider.h>
 
+#include "simeon_fragments.h"
+
+#include <yams/profiling.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/simeon_embedding_backend.h>
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace yams::daemon {
 
 namespace {
 
+// Fragment budgets for outer MaxSim: per document, per query, and across one rerank call.
+constexpr std::size_t kMaxDocumentFragments = 8;
+constexpr std::size_t kMaxQueryFragments = 4;
+constexpr std::size_t kMaxFragmentsPerCall = 256;
+
+inline float computeCosineSimilarity(std::span<const float> a, std::span<const float> b) {
+    if (a.size() != b.size() || a.empty()) {
+        return 0.0f;
+    }
+    double dot = 0.0;
+    double aMag = 0.0;
+    double bMag = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const double av = static_cast<double>(a[i]);
+        const double bv = static_cast<double>(b[i]);
+        dot += av * bv;
+        aMag += av * av;
+        bMag += bv * bv;
+    }
+    const double denom = std::sqrt(aMag) * std::sqrt(bMag);
+    if (denom <= 0.0) {
+        return 0.0f;
+    }
+    return static_cast<float>(dot / denom);
+}
+
 class SimeonModelProvider final : public IModelProvider {
 public:
-    explicit SimeonModelProvider(std::size_t embeddingDim) : embeddingDim_(embeddingDim) {
+    explicit SimeonModelProvider(
+        std::size_t embeddingDim,
+        SimeonScoringMode scoringMode = SimeonScoringMode::SingleVectorCosine)
+        : embeddingDim_(embeddingDim), scoringMode_(scoringMode) {
         vector::EmbeddingConfig cfg;
         cfg.backend = vector::EmbeddingConfig::Backend::Simeon;
         cfg.embedding_dim = embeddingDim_;
@@ -67,13 +104,19 @@ public:
         return generateBatchEmbeddings(texts);
     }
 
-    Result<std::vector<float>> scoreDocuments(const std::string& query,
-                                              const std::vector<std::string>& documents) override {
-        if (!backend_)
-            return Error{ErrorCode::NotInitialized, "SimeonModelProvider not initialized"};
-        if (documents.empty())
-            return std::vector<float>{};
+    void setScoringMode(SimeonScoringMode mode) noexcept {
+        std::lock_guard<std::mutex> lock(mu_);
+        scoringMode_ = mode;
+    }
 
+    [[nodiscard]] SimeonScoringMode scoringMode() const noexcept {
+        std::lock_guard<std::mutex> lock(mu_);
+        return scoringMode_;
+    }
+
+    Result<std::vector<float>>
+    scoreDocumentsSingleVectorCosine(const std::string& query,
+                                     const std::vector<std::string>& documents) {
         auto qEmbed = backend_->generateEmbedding(query);
         if (!qEmbed)
             return qEmbed.error();
@@ -88,33 +131,108 @@ public:
 
         std::vector<float> scores;
         scores.reserve(ds.size());
-        double qMag = 0.0;
-        for (float f : q)
-            qMag += static_cast<double>(f) * static_cast<double>(f);
-        qMag = std::sqrt(qMag);
-        if (qMag == 0.0)
-            qMag = 1.0;
-
         for (const auto& d : ds) {
-            if (d.size() != q.size()) {
-                scores.push_back(0.0f);
-                continue;
-            }
-            double dot = 0.0;
-            double dMag = 0.0;
-            for (std::size_t i = 0; i < q.size(); ++i) {
-                const double a = static_cast<double>(q[i]);
-                const double b = static_cast<double>(d[i]);
-                dot += a * b;
-                dMag += b * b;
-            }
-            dMag = std::sqrt(dMag);
-            const double denom = qMag * (dMag == 0.0 ? 1.0 : dMag);
-            scores.push_back(static_cast<float>(dot / denom));
+            scores.push_back(computeCosineSimilarity(q, d));
         }
 
         requestCount_ += documents.size();
         return scores;
+    }
+
+    Result<std::vector<float>>
+    scoreDocumentsOuterMaxSim(const std::string& query, const std::vector<std::string>& documents) {
+        YAMS_ZONE_SCOPED_N("simeon::rerank::outerMaxSim");
+        auto queryFragments = detail::selectMaxSimFragments(query, kMaxQueryFragments);
+        if (queryFragments.empty()) {
+            queryFragments.push_back(query);
+        }
+
+        auto qEmbeds = backend_->generateEmbeddings(std::span<const std::string>(queryFragments));
+        if (!qEmbeds) {
+            return qEmbeds.error();
+        }
+        const auto& qs = qEmbeds.value();
+        if (qs.size() != queryFragments.size()) {
+            return Error{ErrorCode::InternalError,
+                         "SimeonModelProvider: query embedding count mismatch"};
+        }
+
+        std::vector<std::string> flatFragments;
+        std::vector<std::pair<std::size_t, std::size_t>> docSpans;
+        docSpans.reserve(documents.size());
+
+        const auto perDocument = detail::fragmentsPerDocument(
+            documents.size(), kMaxDocumentFragments, kMaxFragmentsPerCall);
+        for (const auto& doc : documents) {
+            auto frags = detail::selectMaxSimFragments(doc, perDocument);
+            if (frags.empty()) {
+                frags.push_back(doc);
+            }
+            std::size_t startIdx = flatFragments.size();
+            for (auto& f : frags) {
+                flatFragments.push_back(std::move(f));
+            }
+            std::size_t endIdx = flatFragments.size();
+            docSpans.emplace_back(startIdx, endIdx);
+        }
+
+        auto dEmbeds = backend_->generateEmbeddings(std::span<const std::string>(flatFragments));
+        if (!dEmbeds) {
+            return dEmbeds.error();
+        }
+        const auto& ds = dEmbeds.value();
+        if (ds.size() != flatFragments.size()) {
+            return Error{ErrorCode::InternalError,
+                         "SimeonModelProvider: fragment embedding count mismatch"};
+        }
+
+        std::vector<float> scores;
+        scores.reserve(documents.size());
+
+        for (std::size_t docIdx = 0; docIdx < documents.size(); ++docIdx) {
+            const auto [startIdx, endIdx] = docSpans[docIdx];
+            if (startIdx >= endIdx) {
+                scores.push_back(0.0f);
+                continue;
+            }
+
+            double qSimSum = 0.0;
+            for (const auto& qVec : qs) {
+                float maxSim = -std::numeric_limits<float>::infinity();
+                for (std::size_t fi = startIdx; fi < endIdx; ++fi) {
+                    float sim = computeCosineSimilarity(qVec, ds[fi]);
+                    if (sim > maxSim) {
+                        maxSim = sim;
+                    }
+                }
+                if (std::isfinite(maxSim)) {
+                    qSimSum += static_cast<double>(maxSim);
+                }
+            }
+            scores.push_back(static_cast<float>(qSimSum / static_cast<double>(qs.size())));
+        }
+
+        requestCount_ += documents.size();
+        return scores;
+    }
+
+    Result<std::vector<float>> scoreDocuments(const std::string& query,
+                                              const std::vector<std::string>& documents) override {
+        if (!backend_)
+            return Error{ErrorCode::NotInitialized, "SimeonModelProvider not initialized"};
+        if (documents.empty())
+            return std::vector<float>{};
+
+        SimeonScoringMode mode;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            mode = scoringMode_;
+        }
+
+        if (mode == SimeonScoringMode::FragmentOuterMaxSim) {
+            return scoreDocumentsOuterMaxSim(query, documents);
+        }
+        return scoreDocumentsSingleVectorCosine(query, documents);
     }
 
     Result<void> loadModel(const std::string& modelName) override {
@@ -216,6 +334,7 @@ private:
     std::unique_ptr<vector::IEmbeddingBackend> backend_;
     std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator_;
     std::size_t embeddingDim_{384};
+    SimeonScoringMode scoringMode_{SimeonScoringMode::SingleVectorCosine};
     std::unordered_set<std::string> loaded_;
     std::chrono::system_clock::time_point loadTime_{};
     std::atomic<std::size_t> requestCount_{0};
@@ -223,8 +342,15 @@ private:
 
 } // namespace
 
-std::unique_ptr<IModelProvider> makeSimeonModelProvider(std::size_t embeddingDim) {
-    return std::make_unique<SimeonModelProvider>(embeddingDim ? embeddingDim : 1024);
+std::unique_ptr<IModelProvider> makeSimeonModelProvider(std::size_t embeddingDim,
+                                                        SimeonScoringMode scoringMode) {
+    return std::make_unique<SimeonModelProvider>(embeddingDim ? embeddingDim : 1024, scoringMode);
+}
+
+void setSimeonScoringMode(IModelProvider& provider, SimeonScoringMode mode) noexcept {
+    if (auto* simeon = dynamic_cast<SimeonModelProvider*>(&provider)) {
+        simeon->setScoringMode(mode);
+    }
 }
 
 void forceLinkSimeonProvider() noexcept {}

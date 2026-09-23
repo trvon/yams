@@ -5,6 +5,8 @@
 #include <yams/daemon/p2p/p2p_transport.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
+#include "p2p_frame_source.h"
+
 // pi-lens-ignore: fatal error
 #include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
@@ -291,19 +293,82 @@ Error transportError(const TimedOperation& operation, std::string_view action,
                  std::string(action) + " failed: " + operation.error.message()};
 }
 
-std::array<std::byte, 4> encodeLength(std::size_t length) {
+} // namespace
+
+namespace detail {
+
+std::array<std::byte, kFrameLengthPrefixBytes> encodeLength(std::size_t length) {
     return {std::byte((length >> 24U) & 0xffU), std::byte((length >> 16U) & 0xffU),
             std::byte((length >> 8U) & 0xffU), std::byte(length & 0xffU)};
 }
 
-std::size_t decodeLength(const std::array<std::byte, 4>& header) {
+std::size_t decodeLength(const std::array<std::byte, kFrameLengthPrefixBytes>& header) {
     return (std::size_t(static_cast<unsigned char>(header[0])) << 24U) |
            (std::size_t(static_cast<unsigned char>(header[1])) << 16U) |
            (std::size_t(static_cast<unsigned char>(header[2])) << 8U) |
            std::size_t(static_cast<unsigned char>(header[3]));
 }
 
-} // namespace
+void appendFrame(std::vector<std::byte>& out, std::span<const std::byte> payload) {
+    const auto header = encodeLength(payload.size());
+    out.insert(out.end(), header.begin(), header.end());
+    out.insert(out.end(), payload.begin(), payload.end());
+}
+
+Result<std::vector<std::byte>> BufferFrameSource::readFrame(std::chrono::milliseconds timeout,
+                                                            std::size_t maxFrameBytes) {
+    if (closed_) {
+        return Error{ErrorCode::OperationCancelled, "p2p channel is closed"};
+    }
+    if (!validOperationTimeout(timeout)) {
+        return Error{ErrorCode::InvalidArgument,
+                     "p2p frame timeout must be within supported bounds"};
+    }
+    if (remainingBytes() < kFrameLengthPrefixBytes) {
+        offset_ = input_.size();
+        return Error{ErrorCode::NotFound, "p2p peer closed the channel"};
+    }
+    std::array<std::byte, kFrameLengthPrefixBytes> header{};
+    std::copy_n(input_.begin() + static_cast<std::ptrdiff_t>(offset_), header.size(),
+                header.begin());
+    offset_ += header.size();
+    const std::size_t payloadSize = decodeLength(header);
+    if (payloadSize > maxFrameBytes) {
+        close(); // Mirrors P2pConnection: a desynchronized channel is never reused.
+        return Error{ErrorCode::InvalidData, "p2p frame exceeds configured size limit"};
+    }
+    if (remainingBytes() < payloadSize) {
+        offset_ = input_.size();
+        return Error{ErrorCode::NotFound, "p2p peer closed the channel"};
+    }
+    const auto begin = input_.begin() + static_cast<std::ptrdiff_t>(offset_);
+    std::vector<std::byte> payload(begin, begin + static_cast<std::ptrdiff_t>(payloadSize));
+    offset_ += payloadSize;
+    ++framesRead_;
+    return payload;
+}
+
+Result<void> BufferFrameSource::writeFrame(std::span<const std::byte> payload,
+                                           std::chrono::milliseconds timeout,
+                                           std::size_t maxFrameBytes) {
+    if (closed_) {
+        return Error{ErrorCode::OperationCancelled, "p2p channel is closed"};
+    }
+    if (payload.size() > maxFrameBytes || payload.size() > UINT32_MAX) {
+        return Error{ErrorCode::InvalidArgument, "p2p frame exceeds configured size limit"};
+    }
+    if (!validOperationTimeout(timeout)) {
+        return Error{ErrorCode::InvalidArgument,
+                     "p2p frame timeout must be within supported bounds"};
+    }
+    if (recordWrites_) {
+        appendFrame(written_, payload);
+    }
+    ++framesWritten_;
+    return {};
+}
+
+} // namespace detail
 
 class TlsIdentity::Impl {
 public:
@@ -501,7 +566,7 @@ public:
         if (!bounded) {
             return bounded.error();
         }
-        const auto header = encodeLength(payload.size());
+        const auto header = detail::encodeLength(payload.size());
         std::array<boost::asio::const_buffer, 2> buffers{
             boost::asio::buffer(header), boost::asio::buffer(payload.data(), payload.size())};
         const auto operation = runOperation(bounded.value(), [&](auto completion) {
@@ -529,7 +594,7 @@ public:
         if (!bounded) {
             return bounded.error();
         }
-        std::array<std::byte, 4> header{};
+        std::array<std::byte, detail::kFrameLengthPrefixBytes> header{};
         auto operation = runOperation(bounded.value(), [&](auto completion) {
             boost::asio::async_read(*stream, boost::asio::buffer(header), std::move(completion));
         });
@@ -537,7 +602,7 @@ public:
             return transportError(operation, "p2p frame header read",
                                   closed.load(std::memory_order_acquire));
         }
-        const std::size_t payloadSize = decodeLength(header);
+        const std::size_t payloadSize = detail::decodeLength(header);
         if (payloadSize > maxFrameBytes) {
             close(); // Framing is desynchronized; never reuse this channel.
             return Error{ErrorCode::InvalidData, "p2p frame exceeds configured size limit"};

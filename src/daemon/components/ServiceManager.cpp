@@ -75,6 +75,7 @@
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/PluginManager.h>
+#include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -83,13 +84,12 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/metric_keys.h>
-#include <yams/daemon/shutdown_budget.h>
-#include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/daemon/resource/simeon_model_provider.h>
+#include <yams/daemon/shutdown_budget.h>
 #include <yams/extraction/builtin_text_content_extractor.h>
 #include <yams/integrity/repair_manager.h>
 #include <yams/metadata/metadata_insert_writer.h>
@@ -1236,7 +1236,6 @@ void ServiceManager::clearCachedServiceState() {
         std::lock_guard lock(contentExtractorsMutex_);
         contentExtractors_.clear();
     }
-    symbolExtractors_.clear();
     cachedQueryConceptExtractor_ = {};
     searchEngineManager_.clearEngine();
     searchComponent_.reset();
@@ -2444,17 +2443,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     if (!refreshedExtractors.empty()) {
                         piq->setExtractors(refreshedExtractors);
                     }
-                    std::unordered_map<std::string, std::string> extMap;
-                    for (const auto& extractor : pluginManager_->getSymbolExtractors()) {
-                        if (!extractor)
-                            continue;
-                        for (const auto& [ext, lang] : extractor->getSupportedExtensions()) {
-                            extMap[ext] = lang;
-                        }
-                    }
-                    if (!extMap.empty()) {
-                        piq->setSymbolExtensionMap(std::move(extMap));
-                    }
                     if (auto titleExtractor =
                             createGlinerExtractionFunc(pluginManager_->getEntityExtractors())) {
                         piq->setTitleExtractor(std::move(titleExtractor));
@@ -3530,8 +3518,9 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
     }
 
     std::string rerankerBackend = "auto";
-    if (auto policy = ConfigResolver::resolveRerankerBackendPolicy(config_); policy.backend) {
-        rerankerBackend = *policy.backend;
+    auto rerankerPolicy = ConfigResolver::resolveRerankerBackendPolicy(config_);
+    if (rerankerPolicy.backend) {
+        rerankerBackend = *rerankerPolicy.backend;
     }
     if (const std::string env = yams::config::getenv_copy("YAMS_SEARCH_RERANKER_BACKEND");
         !env.empty()) {
@@ -3543,6 +3532,13 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
     auto modelProvider = loadModelProvider();
     const bool storedAvailable = modelProvider && modelProvider->isAvailable();
 
+    bool outerMaxSim = engine ? engine->getConfig().simeonRerankOuterMaxSim : false;
+    if (rerankerPolicy.simeonOuterMaxSim) {
+        outerMaxSim = *rerankerPolicy.simeonOuterMaxSim;
+    }
+    const auto simeonMode = outerMaxSim ? SimeonScoringMode::FragmentOuterMaxSim
+                                        : SimeonScoringMode::SingleVectorCosine;
+
     std::shared_ptr<IModelProvider> reranker;
     if (rerankerBackend == "none" || rerankerBackend == "off") {
         reranker = nullptr;
@@ -3552,7 +3548,9 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
         }
     } else if (rerankerBackend == "simeon") {
         if (!simeonRerankerProvider_) {
-            simeonRerankerProvider_ = makeSimeonModelProvider();
+            simeonRerankerProvider_ = makeSimeonModelProvider(1024, simeonMode);
+        } else {
+            setSimeonScoringMode(*simeonRerankerProvider_, simeonMode);
         }
         if (simeonRerankerProvider_ && simeonRerankerProvider_->isAvailable()) {
             reranker = simeonRerankerProvider_;
@@ -3562,7 +3560,9 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
             reranker = modelProvider;
         } else {
             if (!simeonRerankerProvider_) {
-                simeonRerankerProvider_ = makeSimeonModelProvider();
+                simeonRerankerProvider_ = makeSimeonModelProvider(1024, simeonMode);
+            } else {
+                setSimeonScoringMode(*simeonRerankerProvider_, simeonMode);
             }
             if (simeonRerankerProvider_ && simeonRerankerProvider_->isAvailable()) {
                 reranker = simeonRerankerProvider_;
@@ -3571,6 +3571,10 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
     }
 
     if (reranker) {
+        std::string scoringMode = "model";
+        if (reranker == simeonRerankerProvider_) {
+            scoringMode = outerMaxSim ? "simeon_outer_maxsim" : "simeon_cosine";
+        }
         std::weak_ptr<IModelProvider> weakProvider = reranker;
         engine->setCrossReranker(
             [weakProvider](const std::string& query, const std::vector<std::string>& documents)
@@ -3580,9 +3584,10 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
                     return Error{ErrorCode::NotInitialized, "model provider unavailable"};
                 }
                 return provider->scoreDocuments(query, documents);
-            });
-        spdlog::debug("[{}] reranker wired to search engine (backend={})", contextLabel,
-                      rerankerBackend);
+            },
+            scoringMode);
+        spdlog::debug("[{}] reranker wired to search engine (backend={}, mode={})", contextLabel,
+                      rerankerBackend, scoringMode);
     } else {
         engine->setCrossReranker({});
         spdlog::debug("[{}] reranker unavailable (backend={})", contextLabel, rerankerBackend);
@@ -4335,8 +4340,9 @@ void ServiceManager::requestSemanticTopologyMaintenance(const std::string& reaso
                 spdlog::warn("[ServiceManager] Semantic topology maintenance failed: {}",
                              maintenance.error().message);
             } else if (maintenance.value().semanticEdgesPruned > 0) {
-                spdlog::info("[ServiceManager] Pruned {} one-way semantic_neighbor edges after {}",
-                             maintenance.value().semanticEdgesPruned, reason);
+                spdlog::info(
+                    "[ServiceManager] Pruned {} self-loop semantic_neighbor edges after {}",
+                    maintenance.value().semanticEdgesPruned, reason);
             }
         }
     });

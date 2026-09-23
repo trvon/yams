@@ -166,7 +166,6 @@ def main() -> int:
         "yams_search_benchmarks",
         "yams_api_benchmarks",
         "multi_client_ingestion_bench",
-        "symbol_extraction_bench",
     ]
     if not args.skip_build:
         build_cmd = ["meson", "compile", "-C", str(build_dir), "-j4", *targets]
@@ -310,19 +309,6 @@ def main() -> int:
                 "-C",
                 str(build_dir),
                 "multi_client_ingestion_bench",
-                "--print-errorlogs",
-            ],
-            timeout_sec=args.timeout,
-        ),
-        BenchRun(
-            "symbol_extraction_bench",
-            "extraction/plugins",
-            [
-                "meson",
-                "test",
-                "-C",
-                str(build_dir),
-                "symbol_extraction_bench",
                 "--print-errorlogs",
             ],
             timeout_sec=args.timeout,

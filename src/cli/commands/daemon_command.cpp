@@ -55,6 +55,10 @@
 #include <vector>
 #include <sys/types.h>
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 #ifdef _WIN32
 #include <process.h>
 #include <windows.h>
@@ -844,6 +848,13 @@ private:
                 DWORD n = GetModuleFileNameW(NULL, buf, MAX_PATH);
                 if (n > 0 && n < MAX_PATH) {
                     selfExe = fs::path(buf);
+                }
+#elif defined(__APPLE__)
+                char buf[1024]{};
+                uint32_t size = sizeof(buf);
+                if (_NSGetExecutablePath(buf, &size) == 0) {
+                    auto can = fs::canonical(buf, ec);
+                    selfExe = ec ? fs::path(buf) : can;
                 }
 #else
                 char buf[4096]{};
@@ -2144,7 +2155,21 @@ private:
         }
         // Same candidate resolution as startDaemon: look next to the running CLI binary first.
         std::string selfExe;
-#if !defined(_WIN32)
+#ifdef _WIN32
+        wchar_t buf[MAX_PATH];
+        DWORD n = GetModuleFileNameW(NULL, buf, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            selfExe = fs::path(buf).string();
+        }
+#elif defined(__APPLE__)
+        char buf[1024]{};
+        uint32_t size = sizeof(buf);
+        if (_NSGetExecutablePath(buf, &size) == 0) {
+            std::error_code ec;
+            auto can = fs::canonical(buf, ec);
+            selfExe = ec ? std::string(buf) : can.string();
+        }
+#else
         char buf[PATH_MAX] = {0};
         ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
         if (n > 0) {
@@ -2155,13 +2180,21 @@ private:
         if (!selfExe.empty()) {
             auto cliDir = fs::path(selfExe).parent_path();
 #ifdef _WIN32
-            std::vector<fs::path> candidates = {cliDir / "yams-daemon.exe",
-                                                cliDir.parent_path() / "yams-daemon.exe"};
+            std::vector<fs::path> candidates = {
+                cliDir / "yams-daemon.exe",
+                cliDir.parent_path() / "yams-daemon.exe",
+                cliDir.parent_path() / "daemon" / "yams-daemon.exe",
+                cliDir.parent_path().parent_path() / "daemon" / "yams-daemon.exe",
+                cliDir.parent_path().parent_path() / "yams-daemon.exe",
+                cliDir.parent_path().parent_path() / "src" / "daemon" / "yams-daemon.exe"};
 #else
             std::vector<fs::path> candidates = {
-                cliDir / "yams-daemon", cliDir.parent_path() / "yams-daemon",
+                cliDir / "yams-daemon",
+                cliDir.parent_path() / "yams-daemon",
                 cliDir.parent_path() / "daemon" / "yams-daemon",
-                cliDir.parent_path().parent_path() / "daemon" / "yams-daemon"};
+                cliDir.parent_path().parent_path() / "daemon" / "yams-daemon",
+                cliDir.parent_path().parent_path() / "yams-daemon",
+                cliDir.parent_path().parent_path() / "src" / "daemon" / "yams-daemon"};
 #endif
             for (const auto& p : candidates) {
                 std::error_code ec;

@@ -46,7 +46,8 @@ inline void remove_sqlite_artifacts(const std::filesystem::path& dbPath) {
 
 class MetadataDbTemplate {
 public:
-    explicit MetadataDbTemplate(std::string_view prefix = "yams_metadata_template_")
+    explicit MetadataDbTemplate(std::string_view prefix = "yams_metadata_template_",
+                                std::optional<int> targetVersion = std::nullopt)
         : templatePath_(make_temp_sqlite_path(prefix)) {
         metadata::Database db;
         auto openResult = db.open(templatePath_.string(), metadata::ConnectionMode::Create);
@@ -64,7 +65,8 @@ public:
         }
 
         manager.registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
-        auto migrateResult = manager.migrate();
+        auto migrateResult =
+            targetVersion.has_value() ? manager.migrateTo(*targetVersion) : manager.migrate();
         if (!migrateResult) {
             db.close();
             throw std::runtime_error("failed to migrate metadata template db: " +

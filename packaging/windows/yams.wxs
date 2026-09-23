@@ -64,9 +64,6 @@
               <Component Id="S3Plugin" Guid="F2A3B4C5-9D0E-4F6A-B7C8-D9E0F1A2B3C4">
                 <File Id="s3_plugin_dll" Source="$(var.StageDir)\lib\yams\plugins\yams_object_storage_s3.dll" KeyPath="yes" />
               </Component>
-              <Component Id="SymbolPlugin" Guid="A3B4C5D6-0E1F-4A7B-C8D9-E0F1A2B3C4D5">
-                <File Id="symbol_plugin_dll" Source="$(var.StageDir)\lib\yams\plugins\yams_symbol_extractor.dll" KeyPath="yes" />
-              </Component>
             </Directory>
           </Directory>
         </Directory>
@@ -85,7 +82,6 @@
       <!-- Plugins -->
       <ComponentRef Id="OnnxPlugin" />
       <ComponentRef Id="S3Plugin" />
-      <ComponentRef Id="SymbolPlugin" />
     </Feature>
 
     <!-- UI with license agreement -->

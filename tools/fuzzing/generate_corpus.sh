@@ -1,5 +1,6 @@
 #!/bin/bash
-# Generate seed corpus from existing protocol tests
+# Generate seed corpus from existing protocol tests.
+# Usage: generate_corpus.sh [path/to/local/seedgen]
 
 set -euo pipefail
 
@@ -103,8 +104,16 @@ job-download-123
 EOF
 head -c 96 /dev/urandom > "${CORPUS_DIR}/download_jobs/03_random.bin"
 
+echo "Generating framed direct-P2P session and topology snapshot seeds..."
+python3 "${SCRIPT_DIR}/p2p_seeds.py" "${CORPUS_DIR}"
+cp "${CORPUS_DIR}/p2p_protocol/"*.json "${CORPUS_DIR}/p2p_json/" 2>/dev/null || true
+cp "${CORPUS_DIR}/p2p_delta/"*.json "${CORPUS_DIR}/p2p_json/" 2>/dev/null || true
+
 echo "Generating structured IPC seeds (Search/Grep/Delete) via seedgen (if available)..."
-if docker image inspect yams-fuzz >/dev/null 2>&1; then
+LOCAL_SEEDGEN="${1:-}"
+if [[ -n "$LOCAL_SEEDGEN" && -x "$LOCAL_SEEDGEN" ]]; then
+	"$LOCAL_SEEDGEN" --out "${CORPUS_DIR}" --max-seeds 40 || true
+elif docker image inspect yams-fuzz >/dev/null 2>&1; then
 	"${SCRIPT_DIR}/fuzz.sh" exec /src/build/fuzzing/tools/fuzzing/seedgen --out /fuzz/corpus --max-seeds 40 || true
 else
 	echo "Note: Docker image yams-fuzz not found; run ./tools/fuzzing/fuzz.sh build to enable structured seeds."

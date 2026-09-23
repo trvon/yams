@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <tuple>
 
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
@@ -346,6 +347,22 @@ TEST_CASE("ConfigResolver wires [tuning] keys for every setter that was env-only
                           {"work_coordinator_threads", "11"},
                           {"embed_channel_capacity", "4096"},
                           {"connection_lifetime_s", "1234"}};
+    // Several defaults derive from the host's core count and can equal a sentinel below
+    // (e.g. onnx_max_concurrent is 7 on a 48-thread host), so "reverted" means "back to the
+    // value observed before the override", not "different from the sentinel".
+    const auto defaults = [] {
+        return std::make_tuple(
+            TuneAdvisor::connectionSlotsMin(), TuneAdvisor::connectionSlotsMax(),
+            TuneAdvisor::connectionSlotsScaleStep(), TuneAdvisor::cpuHighThresholdPercent(),
+            TuneAdvisor::onnxMaxConcurrent(), TuneAdvisor::onnxGlinerReserved(),
+            TuneAdvisor::onnxEmbedReserved(), TuneAdvisor::onnxRerankerReserved(),
+            TuneAdvisor::onnxSessionsPerModel(false), TuneAdvisor::modelEvictWarningThreshold(),
+            TuneAdvisor::maxIngestWorkers(), TuneAdvisor::storeDocumentChannelCapacity(),
+            TuneAdvisor::workCoordinatorThreads(), TuneAdvisor::embedChannelCapacity(),
+            TuneAdvisor::connectionLifetimeSeconds());
+    };
+    const auto before = defaults();
+
     TuningConfig base;
     const auto resolved = ConfigResolver::applyRuntimeTuning(sections, base);
 
@@ -372,21 +389,7 @@ TEST_CASE("ConfigResolver wires [tuning] keys for every setter that was env-only
     // A reload that drops the keys reverts every one of them.
     sections["tuning"] = {};
     (void)ConfigResolver::applyRuntimeTuning(sections, base);
-    CHECK((TuneAdvisor::connectionSlotsMin() != 300u));
-    CHECK((TuneAdvisor::connectionSlotsMax() != 5000u));
-    CHECK((TuneAdvisor::connectionSlotsScaleStep() != 24u));
-    CHECK((TuneAdvisor::cpuHighThresholdPercent() != Catch::Approx(77.5)));
-    CHECK((TuneAdvisor::onnxMaxConcurrent() != 7u));
-    CHECK((TuneAdvisor::onnxGlinerReserved() != 2u));
-    CHECK((TuneAdvisor::onnxEmbedReserved() != 3u));
-    CHECK((TuneAdvisor::onnxRerankerReserved() != 4u));
-    CHECK((TuneAdvisor::onnxSessionsPerModel(false) != 5u));
-    CHECK((TuneAdvisor::modelEvictWarningThreshold() != Catch::Approx(0.61)));
-    CHECK((TuneAdvisor::maxIngestWorkers() != 9u));
-    CHECK((TuneAdvisor::storeDocumentChannelCapacity() != 1024u));
-    CHECK((TuneAdvisor::workCoordinatorThreads() != 11u));
-    CHECK((TuneAdvisor::embedChannelCapacity() != 4096u));
-    CHECK((TuneAdvisor::connectionLifetimeSeconds() != 1234u));
+    CHECK((defaults() == before));
 }
 
 TEST_CASE("Typed post-ingest configuration outranks the compatibility environment",
@@ -701,7 +704,6 @@ batch_size = 32
     DaemonConfig daemonConfig;
     daemonConfig.configFilePath = configPath;
     CHECK((ConfigResolver::resolveRerankerModel(daemonConfig) == "compat-reranker"));
-    CHECK_FALSE(ConfigResolver::isSymbolExtractionEnabled(daemonConfig));
 
     const auto caps = ConfigResolver::resolvePostIngestCaps();
     REQUIRE(caps.totalConcurrent.has_value());
@@ -1036,6 +1038,8 @@ TEST_CASE_METHOD(ConfigResolverFixture,
 [topology]
 engine = "connected"
 routing_representatives = 4
+sgc_hops = 2
+sgc_normalize = false
 boundary_spill = true
 boundary_spill_limit = 1
 boundary_spill_distance_ratio = +1.2
@@ -1060,6 +1064,10 @@ minhash_alpha = 0.15
     CHECK((*policy.engine == "connected"));
     REQUIRE(policy.routingRepresentativeCount.has_value());
     CHECK((*policy.routingRepresentativeCount == 4));
+    REQUIRE(policy.sgcHops.has_value());
+    CHECK((*policy.sgcHops == 2));
+    REQUIRE(policy.sgcNormalize.has_value());
+    CHECK_FALSE(*policy.sgcNormalize);
     REQUIRE(policy.boundarySpillEnabled.has_value());
     CHECK(*policy.boundarySpillEnabled);
     REQUIRE(policy.boundarySpillLimit.has_value());
@@ -1091,6 +1099,9 @@ max_clusters = 3
 max_seed_documents = 24
 representative_limit = 2
 ann_candidate_limit = 16
+bq_candidate_limit = 12
+bq_prefix_dim = 64
+graph_community_source = topology_snapshot
 adaptive_probe_score_gap = 0.07
 narrow_min_boundary_margin = 0.03
 max_docs = 42
@@ -1130,6 +1141,12 @@ rrf_k = 33
     CHECK((*policy.representativeLimit == 2U));
     REQUIRE(policy.annCandidateLimit.has_value());
     CHECK((*policy.annCandidateLimit == 16U));
+    REQUIRE(policy.bqCandidateLimit.has_value());
+    CHECK((*policy.bqCandidateLimit == 12U));
+    REQUIRE(policy.bqPrefixDimension.has_value());
+    CHECK((*policy.bqPrefixDimension == 64U));
+    REQUIRE(policy.graphCommunitySource.has_value());
+    CHECK((*policy.graphCommunitySource == "topology_snapshot"));
     REQUIRE(policy.adaptiveProbeScoreGap.has_value());
     CHECK((*policy.adaptiveProbeScoreGap == Catch::Approx(0.07F)));
     REQUIRE(policy.narrowMinBoundaryMargin.has_value());

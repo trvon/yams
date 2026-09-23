@@ -234,7 +234,6 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
             }
             try {
                 const auto contentExtractorCount = serviceManager->getContentExtractors().size();
-                const auto symbolExtractorCount = serviceManager->getSymbolExtractors().size();
                 const auto entityExtractorCount = serviceManager->getEntityExtractors().size();
                 const bool titleExtractorReady = serviceManager->hasTitleExtractor();
 
@@ -244,13 +243,11 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                 }
 
                 setVal(metrics::kContentExtractorsLoaded, contentExtractorCount);
-                setVal(metrics::kSymbolExtractorsLoaded, symbolExtractorCount);
                 setVal(metrics::kEntityExtractorsLoaded, entityExtractorCount);
                 setVal(metrics::kTitleExtractorEnabled, titleExtractorReady ? 1 : 0);
                 setVal(metrics::kPluginSkippedCount, skippedPlugins);
 
                 setReady(readiness::kContentExtractorsReady, contentExtractorCount > 0);
-                setReady(readiness::kSymbolExtractorsReady, symbolExtractorCount > 0);
                 setReady(readiness::kEntityExtractorsReady, entityExtractorCount > 0);
                 setReady(readiness::kTitleExtractorReady, titleExtractorReady);
             } catch (...) { // NOLINT(bugprone-empty-catch)
@@ -338,8 +335,6 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         setVal(metrics::kKgConsumed, snap.kgConsumed);
         setVal(metrics::kKgInflight, snap.kgInFlight);
         setVal(metrics::kKgQueueDepth, snap.kgQueueDepth);
-        setVal(metrics::kSymbolInflight, snap.symbolInFlight);
-        setVal(metrics::kSymbolQueueDepth, snap.symbolQueueDepth);
         setVal(metrics::kEntityQueued, snap.entityQueued);
         setVal(metrics::kEntityDropped, snap.entityDropped);
         setVal(metrics::kEntityConsumed, snap.entityConsumed);
@@ -354,9 +349,6 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         setVal(metrics::kFts5Queued, snap.fts5Queued);
         setVal(metrics::kFts5Dropped, snap.fts5Dropped);
         setVal(metrics::kFts5Consumed, snap.fts5Consumed);
-        setVal(metrics::kSymbolQueued, snap.symbolQueued);
-        setVal(metrics::kSymbolDropped, snap.symbolDropped);
-        setVal(metrics::kSymbolConsumed, snap.symbolConsumed);
         setVal(metrics::kStreamTotal, snap.streamTotal);
         setVal(metrics::kStreamBatches, snap.streamBatches);
         setVal(metrics::kStreamKeepalives, snap.streamKeepalives);
@@ -402,7 +394,6 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         setVal(metrics::kDirectoriesProcessed, static_cast<size_t>(snap.directoriesProcessed));
         setVal(metrics::kPostExtractionLimit, snap.postExtractionLimit);
         setVal(metrics::kPostKgLimit, snap.postKgLimit);
-        setVal(metrics::kPostSymbolLimit, snap.postSymbolLimit);
         setVal(metrics::kPostEntityLimit, snap.postEntityLimit);
         setVal(metrics::kPostEnrichLimit, snap.postEnrichLimit);
         setVal(metrics::kEnrichInflight, snap.enrichInflight);
@@ -787,7 +778,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 if (serviceManager_) {
                     const auto contentExtractorCount =
                         serviceManager_->getContentExtractors().size();
-                    const auto symbolExtractorCount = serviceManager_->getSymbolExtractors().size();
                     const auto entityExtractorCount = serviceManager_->getEntityExtractors().size();
                     const bool titleExtractorReady = serviceManager_->hasTitleExtractor();
                     std::size_t skippedPlugins = 0;
@@ -797,8 +787,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
 
                     res.requestCounts[std::string(metrics::kContentExtractorsLoaded)] =
                         contentExtractorCount;
-                    res.requestCounts[std::string(metrics::kSymbolExtractorsLoaded)] =
-                        symbolExtractorCount;
                     res.requestCounts[std::string(metrics::kEntityExtractorsLoaded)] =
                         entityExtractorCount;
                     res.requestCounts[std::string(metrics::kTitleExtractorEnabled)] =
@@ -807,8 +795,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
 
                     res.readinessStates[std::string(readiness::kContentExtractorsReady)] =
                         contentExtractorCount > 0;
-                    res.readinessStates[std::string(readiness::kSymbolExtractorsReady)] =
-                        symbolExtractorCount > 0;
                     res.readinessStates[std::string(readiness::kEntityExtractorsReady)] =
                         entityExtractorCount > 0;
                     res.readinessStates[std::string(readiness::kTitleExtractorReady)] =
@@ -1277,8 +1263,6 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                         std::to_string(stats.extractionStatusesUpdated);
                     response.additionalStats["write_embedding_statuses_updated"] =
                         std::to_string(stats.embeddingStatusesUpdated);
-                    response.additionalStats["write_symbol_extraction_states_updated"] =
-                        std::to_string(stats.symbolExtractionStatesUpdated);
                     response.additionalStats["kg_write_edges_deleted"] =
                         std::to_string(stats.edgesDeleted);
                     response.additionalStats["kg_write_nodes_deleted"] =

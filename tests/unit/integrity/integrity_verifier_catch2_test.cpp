@@ -345,3 +345,17 @@ TEST_CASE_METHOD(IntegrityVerifierFixture, "MoveConstructorAndAssignment",
 
     CHECK_FALSE(verifier3.isRunning());
 }
+
+// Regression: the pool used to set its stop flag without holding the queue mutex, so a worker
+// between the wait predicate check and blocking could miss the shutdown notify and join()
+// hung forever (seen as sporadic integrity_catch2 timeouts under parallel load). Churn
+// construction/destruction so a reintroduced lost wakeup shows up as a hang/timeout here.
+TEST_CASE_METHOD(IntegrityVerifierFixture, "Verifier shutdown does not lose the stop wakeup",
+                 "[integrity][verifier][shutdown]") {
+    VerificationConfig config;
+    config.maxConcurrentVerifications = 8;
+    for (int i = 0; i < 400; ++i) {
+        IntegrityVerifier churn(*storageEngine, *refCounter, config);
+        CHECK_FALSE(churn.isRunning());
+    }
+}

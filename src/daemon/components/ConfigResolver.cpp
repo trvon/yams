@@ -871,6 +871,16 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.ann_candidate_limit"); it != kv.end()) {
                 policy.annCandidateLimit = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.bq_candidate_limit"); it != kv.end()) {
+                policy.bqCandidateLimit = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.bq_prefix_dim"); it != kv.end()) {
+                policy.bqPrefixDimension = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.graph_community_source");
+                it != kv.end() && !it->second.empty()) {
+                policy.graphCommunitySource = it->second;
+            }
             if (auto it = kv.find("search.topology.adaptive_probe_score_gap"); it != kv.end()) {
                 policy.adaptiveProbeScoreGap = parseFloat(it->second);
             }
@@ -1037,6 +1047,12 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         if (auto it = kv.find("topology.routing_representatives"); it != kv.end()) {
             policy.routingRepresentativeCount = parseSize(it->second);
         }
+        if (auto it = kv.find("topology.sgc_hops"); it != kv.end()) {
+            policy.sgcHops = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.sgc_normalize"); it != kv.end()) {
+            policy.sgcNormalize = parseBoolValue(it->second);
+        }
         if (auto it = kv.find("topology.boundary_spill"); it != kv.end()) {
             policy.boundarySpillEnabled = parseBoolValue(it->second);
         }
@@ -1178,8 +1194,12 @@ ConfigResolver::resolveRerankerBackendPolicy(const DaemonConfig& config) {
             if (auto it = kv.find("search.reranker_backend");
                 it != kv.end() && !it->second.empty()) {
                 policy.backend = normalize(it->second);
-                return policy;
             }
+            if (auto it = kv.find("search.simeon_rerank_outer_maxsim");
+                it != kv.end() && !it->second.empty()) {
+                policy.simeonOuterMaxSim = parseTomlBool(it->second);
+            }
+            return policy;
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for reranker backend: {}", e.what());
@@ -1718,7 +1738,6 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     applyPostIngestCap("embed_concurrent", 1, 32, &TuneAdvisor::setPostEmbedConcurrent);
     applyPostIngestCap("extraction_concurrent", 1, 64, &TuneAdvisor::setPostExtractionConcurrent);
     applyPostIngestCap("kg_concurrent", 1, 64, &TuneAdvisor::setPostKgConcurrent);
-    applyPostIngestCap("symbol_concurrent", 1, 32, &TuneAdvisor::setPostSymbolConcurrent);
     applyPostIngestCap("entity_concurrent", 1, 16, &TuneAdvisor::setPostEntityConcurrent);
     applyPostIngestCap("title_concurrent", 1, 16, &TuneAdvisor::setPostTitleConcurrent);
     applyPostIngestCap("batch_size", 1, 256, &TuneAdvisor::setPostIngestBatchSize);
@@ -2085,10 +2104,6 @@ ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
         if (const auto it = values.find("tuning.post_ingest.kg_concurrent"); it != values.end()) {
             caps.kgConcurrent = parseBounded(it->second, 1, 64);
         }
-        if (const auto it = values.find("tuning.post_ingest.symbol_concurrent");
-            it != values.end()) {
-            caps.symbolConcurrent = parseBounded(it->second, 1, 32);
-        }
         if (const auto it = values.find("tuning.post_ingest.entity_concurrent");
             it != values.end()) {
             caps.entityConcurrent = parseBounded(it->second, 1, 16);
@@ -2157,22 +2172,6 @@ std::string ConfigResolver::resolveRerankerModel(const DaemonConfig& config) {
         spdlog::debug("Error reading config for reranker model: {}", error.what());
     }
     return {};
-}
-
-bool ConfigResolver::isSymbolExtractionEnabled(const DaemonConfig& config) {
-    try {
-        const auto configPath =
-            !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
-        const auto values = yams::config::parse_simple_toml(configPath);
-        if (const auto it = values.find("plugins.symbol_extraction.enable"); it != values.end()) {
-            return parseTomlBool(it->second).value_or(true);
-        }
-    } catch (const std::exception& error) {
-        spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: {}", error.what());
-    } catch (...) {
-        spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: unknown error");
-    }
-    return true;
 }
 
 int ConfigResolver::readTimeoutMs(const char* envName, int defaultMs, int minMs) {

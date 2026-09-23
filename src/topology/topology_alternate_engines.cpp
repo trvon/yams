@@ -1,6 +1,7 @@
 #include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_alternate_engines.h>
 #include <yams/topology/topology_representatives.h>
+#include <yams/topology/topology_sgc.h>
 
 #include "topology_build_utils.h"
 
@@ -609,18 +610,33 @@ LouvainTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> doc
         return batch;
     }
 
+    std::vector<TopologyDocumentInput> smoothedDocuments;
+    std::span<const TopologyDocumentInput> effectiveDocs = documents;
+    if (config.sgcHops > 0 && documents.size() >= 2) {
+        smoothedDocuments.assign(documents.begin(), documents.end());
+        applySGCSmoothing(smoothedDocuments, config, config.sgcHops);
+        if (config.sgcNormalize) {
+            for (auto& doc : smoothedDocuments) {
+                if (!doc.embedding.empty()) {
+                    detail::normalizeVector(doc.embedding);
+                }
+            }
+        }
+        effectiveDocs = smoothedDocuments;
+    }
+
     std::unordered_map<std::string, std::size_t> indexByHash;
-    indexByHash.reserve(documents.size());
-    for (std::size_t i = 0; i < documents.size(); ++i) {
-        if (!documents[i].documentHash.empty()) {
-            indexByHash[documents[i].documentHash] = i;
+    indexByHash.reserve(effectiveDocs.size());
+    for (std::size_t i = 0; i < effectiveDocs.size(); ++i) {
+        if (!effectiveDocs[i].documentHash.empty()) {
+            indexByHash[effectiveDocs[i].documentHash] = i;
         }
     }
-    auto pairWeights = buildPairWeights(documents, indexByHash, config);
-    auto adjacency = makeAdjacency(documents.size(), pairWeights);
-    auto assignment = runLouvain(documents, adjacency);
+    auto pairWeights = buildPairWeights(effectiveDocs, indexByHash, config);
+    auto adjacency = makeAdjacency(effectiveDocs.size(), pairWeights);
+    auto assignment = runLouvain(effectiveDocs, adjacency);
     auto batch =
-        buildBatchFromAssignment(documents, assignment, pairWeights, "louvain_v1", ts, config);
+        buildBatchFromAssignment(effectiveDocs, assignment, pairWeights, "louvain_v1", ts, config);
     batch.inputKind = config.inputKind;
     return batch;
 }
@@ -659,17 +675,32 @@ KMeansTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> docu
         return batch;
     }
 
+    std::vector<TopologyDocumentInput> smoothedDocuments;
+    std::span<const TopologyDocumentInput> effectiveDocs = documents;
+    if (config.sgcHops > 0 && documents.size() >= 2) {
+        smoothedDocuments.assign(documents.begin(), documents.end());
+        applySGCSmoothing(smoothedDocuments, config, config.sgcHops);
+        if (config.sgcNormalize) {
+            for (auto& doc : smoothedDocuments) {
+                if (!doc.embedding.empty()) {
+                    detail::normalizeVector(doc.embedding);
+                }
+            }
+        }
+        effectiveDocs = smoothedDocuments;
+    }
+
     std::unordered_map<std::string, std::size_t> indexByHash;
-    indexByHash.reserve(documents.size());
-    for (std::size_t i = 0; i < documents.size(); ++i) {
-        if (!documents[i].documentHash.empty()) {
-            indexByHash[documents[i].documentHash] = i;
+    indexByHash.reserve(effectiveDocs.size());
+    for (std::size_t i = 0; i < effectiveDocs.size(); ++i) {
+        if (!effectiveDocs[i].documentHash.empty()) {
+            indexByHash[effectiveDocs[i].documentHash] = i;
         }
     }
-    auto pairWeights = buildPairWeights(documents, indexByHash, config);
-    auto assignment = runKMeans(documents, config.kmeansK, config.kmeansMaxIterations);
+    auto pairWeights = buildPairWeights(effectiveDocs, indexByHash, config);
+    auto assignment = runKMeans(effectiveDocs, config.kmeansK, config.kmeansMaxIterations);
     auto batch =
-        buildBatchFromAssignment(documents, assignment, pairWeights, "kmeans_v1", ts, config);
+        buildBatchFromAssignment(effectiveDocs, assignment, pairWeights, "kmeans_v1", ts, config);
     batch.inputKind = config.inputKind;
     return batch;
 }

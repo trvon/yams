@@ -44,6 +44,12 @@ class CandidateReport:
                     "agree, and no release version has been pre-bumped."
                 ),
                 "",
+                "### Promotion Merge Policy",
+                "",
+                "- **Merge Strategy**: Use **'Create a merge commit'** (`git merge --no-ff`) or fast-forward (`git merge --ff-only`).",
+                "- **NEVER Squash and Merge**: Squash-merging experimental into main destroys individual commit metadata, breaking Release Please changelog generation and breaking Git ancestry for future promotions.",
+                "- **Back-Merge Requirement**: Any commits landing directly on main must be back-merged immediately into experimental.",
+                "",
             )
         )
 
@@ -55,7 +61,11 @@ def run_git(
         ["git", *arguments],
         cwd=root,
         # The explicit root owns this read, not a caller's Git-hook environment.
-        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_")
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -166,17 +176,22 @@ def validate_candidate(root: Path, base: str, candidate: str) -> CandidateReport
         root, "merge-base", "--is-ancestor", base_sha, candidate_sha, check=False
     )
     if ancestry.returncode not in (0, 1):
-        raise CandidateError("could not determine candidate ancestry; inspect repository integrity")
+        raise CandidateError(
+            "could not determine candidate ancestry; inspect repository integrity"
+        )
     if ancestry.returncode == 1:
         missing = int(
-            run_git(root, "rev-list", "--count", f"{candidate_sha}..{base_sha}").stdout.strip()
+            run_git(
+                root, "rev-list", "--count", f"{candidate_sha}..{base_sha}"
+            ).stdout.strip()
         )
         raise CandidateError(
             "candidate must contain the complete base history: "
             f"{missing} base commit(s) from main {base_sha} are missing from {candidate_sha}. "
             "Merge current main into the candidate branch, resolve conflicts while preserving "
             "both branches' changes, then rerun validation on the resulting immutable SHA. "
-            "This preflight does not merge or modify either branch."
+            "This preflight does not merge or modify either branch. "
+            "Note: Never squash-merge promotions into main, as squashing severs commit ancestry."
         )
 
     commit_count = int(

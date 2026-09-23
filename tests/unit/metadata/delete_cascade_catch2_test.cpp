@@ -183,31 +183,6 @@ TEST_CASE("delete-cascade: document_content and metadata rows cascade via FK",
         (f.scalar("SELECT COUNT(*) FROM metadata WHERE document_id = " + std::to_string(id)) == 0));
 }
 
-TEST_CASE("delete-cascade: symbol_metadata cascades on document delete",
-          "[metadata][delete][cascade][symbols]") {
-    DeleteCascadeFixture f;
-    const std::string hash(64, 'c');
-    const int64_t id = f.insertDoc("/corpus/sym.cpp", hash, "int f(){}");
-
-    SymbolMetadata sym;
-    sym.documentHash = hash;
-    sym.filePath = "/corpus/sym.cpp";
-    sym.symbolName = "f";
-    sym.qualifiedName = "f";
-    sym.kind = "function";
-    sym.startLine = 1;
-    sym.endLine = 1;
-    REQUIRE((f.kgStore->upsertSymbolMetadata({sym}).has_value()));
-
-    REQUIRE((f.scalar("SELECT COUNT(*) FROM symbol_metadata WHERE document_hash = '" + hash +
-                      "'") == 1));
-
-    REQUIRE((f.metadataRepo->deleteDocument(id).has_value()));
-
-    CHECK((f.scalar("SELECT COUNT(*) FROM symbol_metadata WHERE document_hash = '" + hash + "'") ==
-           0));
-}
-
 // Finding D (fixed): canonical + reference nodes (and edges between them) are cleaned by the
 // path-based cleanup the delete path now performs (deleteNodesForSourceFile +
 // deleteEdgesForSourceFile), in addition to deleteNodesForDocumentHash.

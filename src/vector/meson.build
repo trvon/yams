@@ -78,9 +78,11 @@ int main() {
 ''', name: 'compiler target is ARM/ARM64')
 
 if target_is_x86
-  # Compiler support does not prove the deployment CPU supports AVX/FMA. Keep generic release
-  # binaries at the baseline ISA until sqlite-vec and all callers provide runtime dispatch.
-  message('x86 sqlite-vec SIMD: disabled pending runtime CPU dispatch')
+  # Compiler support does not prove the deployment CPU supports AVX/FMA, so generic release
+  # binaries stay at the baseline ISA (no SQLITE_VEC_ENABLE_AVX). sqlite-vec's float distance
+  # kernels still use AVX2+FMA through per-function target attributes after a CPUID check
+  # (sqlite-vec-cpp/simd/x86_dispatch.hpp).
+  message('x86 sqlite-vec SIMD: baseline ISA with runtime AVX2+FMA float kernels')
 elif target_is_arm and host_cpu == 'aarch64'
   # NEON is baseline on AArch64. DotProd is guaranteed on Apple Silicon but not generic Linux or
   # Windows AArch64, so do not raise their deployment ISA from a compiler-only probe.
@@ -116,7 +118,7 @@ srcs = [
   'batch_metrics.cpp',
   'document_chunker.cpp',
   'vector_utils.cpp',
-  'static_cosine_ann_index.cpp',
+  'binary_quantization.cpp',
   'vector_schema_migration.cpp',
   'mock_embedding_provider.cpp',
   'embedding_provider_registry.cpp',
@@ -200,9 +202,29 @@ if target_is_arm and host_cpu == 'aarch64'
   )
   simeon_extra_libs += simeon_neon_lib
 elif target_is_x86
-  # pq.cpp selects SIMEON_HAS_AVX2 at compile time instead of consulting active_simd_tier().
-  # Keep x86 scalar until every call site uses runtime CPUID dispatch.
-  message('x86 Simeon AVX2: disabled pending runtime CPU dispatch')
+  # Only arch/avx2.cpp is built with AVX2/FMA codegen; every other TU stays at the baseline
+  # ISA, and simeon's active_simd_tier() checks CPUID once before any dispatcher (including
+  # pq.cpp's training kernels) selects the AVX2 tier. Generic x86-64 binaries stay portable.
+  simeon_avx2_args = cpp_comp.get_argument_syntax() == 'msvc' ? ['/arch:AVX2'] : ['-mavx2', '-mfma']
+  simeon_avx2_probe = '''
+#include <immintrin.h>
+int main() {
+    __m256 a = _mm256_set1_ps(1.0f);
+    a = _mm256_fmadd_ps(a, a, a);
+    return static_cast<int>(_mm256_cvtss_f32(a));
+}
+'''
+  if cpp_comp.compiles(simeon_avx2_probe, args: simeon_avx2_args, name: 'Simeon AVX2+FMA kernels')
+    simeon_simd_defines += '-DSIMEON_HAS_AVX2=1'
+    simeon_avx2_lib = static_library('yams_simeon_avx2',
+      [join_paths(simeon_dir, 'src', 'arch', 'avx2.cpp')],
+      include_directories: simeon_inc,
+      cpp_args: simeon_simd_defines + simeon_avx2_args,
+      install: false,
+    )
+    simeon_extra_libs += simeon_avx2_lib
+    message('x86 Simeon AVX2: enabled with runtime CPUID dispatch')
+  endif
 endif
 
 simeon_common_lib = static_library('yams_simeon_common',
@@ -258,21 +280,34 @@ if host_machine.system() == 'windows'
 endif
 
 sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
-  ['sqlite_vec_backend.cpp'],
+  ['sqlite_vec_backend.cpp', 'static_cosine_ann_index.cpp'],
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
   dependencies: deps_vec + vector_platform_deps,
-  # This TU instantiates sqlite-vec's header-only HNSW distance templates, so it needs the same
-  # feature defines and codegen flags as the sqlite-vec implementation library.
+  # Every TU that includes sqlite-vec's header-only HNSW/distance templates must live here: the
+  # inline kernels change body with SQLITE_VEC_ENABLE_*, so compiling one elsewhere without these
+  # defines is an ODR violation and can silently link the scalar kernel.
   cpp_args: vector_cppargs + sqlite_vec_feature_cppargs + vec_simd_cppargs + simeon_simd_defines,
   install: false,
 )
 
+# Tracy profiling (optional, -Denable-profiling=true), mirroring src/search so the YAMS_* zones
+# in this library emit. Zero-cost when off: profiling.h compiles to nothing without TRACY_ENABLE.
+vector_tracy_args = []
+vector_tracy_deps = []
+if get_option('enable-profiling')
+  vector_tracy_dep = dependency('tracy', modules: ['Tracy::TracyClient'], required: false, static: true)
+  if vector_tracy_dep.found()
+    vector_tracy_args += ['-DTRACY_ENABLE']
+    vector_tracy_deps += vector_tracy_dep
+  endif
+endif
+
 yams_vector = static_library('yams_vector',
   srcs,
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
-  dependencies: deps_vec + vector_platform_deps,
+  dependencies: deps_vec + vector_platform_deps + vector_tracy_deps,
   link_with: [simeon_vector_lib, simeon_common_lib, sqlite_vec_backend_lib] + simeon_extra_libs + sqlite_vec_cpp_lib,
-  cpp_args: vector_cppargs + simeon_simd_defines,
+  cpp_args: vector_cppargs + simeon_simd_defines + vector_tracy_args,
   install: true,
 )
 

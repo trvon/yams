@@ -15,8 +15,9 @@ only what is specific to this repository.
 Engineering on YAMS itself, plus scoped non-destructive bug-bounty research.
 Dogfood YAMS as the distributed memory across sessions, agents, and handoffs —
 `yams grep`/`search`/`graph` before local discovery, always (see the retrieval
-contract in the prompt; the graph here is rich: function-level nodes with
-`calls`/`defined_in` edges, so "who uses X" is one `yams graph --explore`).
+contract in the prompt). The graph holds document, path, version, entity, and
+semantic-neighbor relations; code-symbol nodes and `calls`/`defined_in` edges
+were removed in v0.20, so answer "who uses X" with `yams grep`.
 
 ## Development Memory
 

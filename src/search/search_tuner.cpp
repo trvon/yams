@@ -258,14 +258,16 @@ void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& 
     // GLiNER NER entity density alone can be very high on scientific corpora
     // without meaningful structural edges — using it as the sole richness proxy
     // would over-activate graph reranking and path enumeration on flat prose.
-    const float kgEdgeDensityAvailable = stats.kgEdgeDensity > 0.0
-                                             ? static_cast<float>(stats.kgEdgeDensity)
+    // Once edges are reconciled (any kg_edges rows), richness is the relational-edge density,
+    // which may legitimately be zero on flat prose; embedding kNN edges alone are not richness.
+    const float kgEdgeDensityAvailable = stats.kgEdgeCount > 0
+                                             ? static_cast<float>(stats.kgRelationalEdgeDensity)
                                              : static_cast<float>(stats.symbolDensity);
     const float graphRichness = std::clamp((kgEdgeDensityAvailable - 0.1f) / 1.5f, 0.0f, 1.0f);
 
     // When only NER entities exist but no edges, damp graph activation
     const bool nerOnlyNoEdges = stats.nerEntityDensity > 0.1 && stats.nativeSymbolDensity < 0.1 &&
-                                stats.kgEdgeDensity < 0.5;
+                                stats.kgRelationalEdgeDensity < 0.5;
     const float effectiveRichness = nerOnlyNoEdges ? graphRichness * 0.35f : graphRichness;
 
     // Multiplicative scaling preserves profile weight ratios (unlike the

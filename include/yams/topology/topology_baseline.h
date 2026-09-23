@@ -6,7 +6,8 @@
 
 namespace yams::vector {
 class StaticCosineAnnIndex;
-}
+class BinaryQuantizedIndex;
+} // namespace yams::vector
 
 namespace yams::topology {
 
@@ -17,6 +18,7 @@ struct SparseRouteIndex {
     std::vector<float> centroidNorms;
     std::vector<std::vector<float>> routingRepresentativeNorms;
     std::shared_ptr<const yams::vector::StaticCosineAnnIndex> centroidAnnIndex;
+    std::shared_ptr<const yams::vector::BinaryQuantizedIndex> centroidBqIndex;
 };
 
 struct SparseRouteWork {
@@ -28,6 +30,9 @@ struct SparseRouteWork {
     std::size_t denseAnnDistanceEvaluations{0};
     std::size_t denseAnnCandidates{0};
     bool denseAnnUsed{false};
+    std::size_t bqDistanceEvaluations{0};
+    std::size_t bqCandidates{0};
+    bool bqUsed{false};
 };
 
 class ConnectedComponentTopologyEngine final : public ITopologyEngine {
@@ -61,9 +66,11 @@ public:
 // cluster).
 class SparseGuidedClusterRouter final {
 public:
-    /// Build immutable exact-routing structures and optionally the centroid ANN shortlist.
+    /// Build immutable exact-routing structures and optionally the centroid ANN/BQ shortlist.
     [[nodiscard]] static SparseRouteIndex buildRouteIndex(const TopologyArtifactBatch& artifacts,
-                                                          bool buildDenseAnnIndex = true);
+                                                          bool buildDenseAnnIndex = true,
+                                                          bool buildBqIndex = true,
+                                                          std::size_t bqPrefixDimension = 0);
 
     Result<std::vector<ClusterRoute>> route(const TopologyRouteRequest& request,
                                             const TopologyArtifactBatch& artifacts) const;

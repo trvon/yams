@@ -59,10 +59,6 @@ else
     'cli_responsiveness_under_load_test.cpp',
   )
 
-  entity_graph_integration_srcs = files(
-    'entity_graph_service_integration_catch2_test.cpp',
-  )
-
   ghidra_kg_entity_ingestion_srcs = files(
     'ghidra_kg_entity_ingestion_test.cpp',
   )
@@ -458,29 +454,12 @@ else
       args: ['--allow-running-no-tests'],
     )
 
-    entity_graph_integration_exe = executable('yams_entity_graph_integration_tests_catch2',
-      entity_graph_integration_srcs,
-      include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
-      cpp_args: ['-DYAMS_TESTING=1'],
-      install: false,
-    )
-
     # KG tests need vectors enabled, but still disable session watcher
     _kg_test_env = {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'YAMS_DISABLE_SESSION_WATCHER': '1',
       'TSAN_OPTIONS': _test_tsan_options,
     }
-
-    test('entity_graph_integration',
-      entity_graph_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'kg', 'pbi-009'],
-      env: _kg_test_env,
-      is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
-      args: ['--allow-running-no-tests'],
-    )
 
     ghidra_kg_entity_ingestion_exe = executable('yams_ghidra_kg_entity_ingestion_tests_catch2',
       ghidra_kg_entity_ingestion_srcs,

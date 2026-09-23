@@ -8,21 +8,27 @@
 // pi-lens-ignore: fatal error
 #include <yams/daemon/p2p/p2p_transport.h>
 
+#include "p2p_frame_source.h"
+
+#include <cstdint>
 #include <cstring>
+#include <limits>
+#include <stdexcept>
+#include <string>
 #include <string_view>
+#include <type_traits>
 
 namespace yams::daemon::p2p::detail {
 
 using Json = nlohmann::json;
 
-inline Result<void> writeJson(P2pConnection& connection, const Json& json,
+inline Result<void> writeJson(FrameSource& frames, const Json& json,
                               std::chrono::milliseconds timeout) {
     try {
         const std::string text = json.dump();
-        return connection.writeFrame(
-            std::span<const std::byte>(reinterpret_cast<const std::byte*>(text.data()),
-                                       text.size()),
-            timeout);
+        return frames.writeFrame(std::span<const std::byte>(
+                                     reinterpret_cast<const std::byte*>(text.data()), text.size()),
+                                 timeout, kP2pMaxControlFrameBytes);
     } catch (const std::exception& error) {
         return Error{ErrorCode::SerializationError, error.what()};
     }
@@ -62,13 +68,50 @@ inline bool exceedsJsonNestingDepth(std::string_view text, std::size_t maxDepth)
     return false;
 }
 
+/// Direct-P2P frames carry only strings, booleans, and non-negative integers. A float or a
+/// negative number anywhere is rejected at the frame boundary: converting an out-of-range float
+/// to an unsigned field is undefined behaviour, and a negative value would silently wrap.
+inline bool containsNonUnsignedNumber(const Json& value) {
+    if (value.is_number_float() || (value.is_number_integer() && !value.is_number_unsigned())) {
+        return true;
+    }
+    if (value.is_structured()) {
+        for (const auto& child : value) {
+            if (containsNonUnsignedNumber(child)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Read a required unsigned integer field, refusing values that do not fit the target type
+/// instead of truncating them (a truncated protocol number could pass a version check).
+template <typename T> T unsignedField(const Json& object, const char* key) {
+    static_assert(std::is_unsigned_v<T>);
+    const auto& value = object.at(key);
+    if (!value.is_number_unsigned()) {
+        throw std::invalid_argument(std::string("p2p field is not an unsigned integer: ") + key);
+    }
+    const auto raw = value.get<std::uint64_t>();
+    if (raw > std::numeric_limits<T>::max()) {
+        throw std::out_of_range(std::string("p2p field is out of range: ") + key);
+    }
+    return static_cast<T>(raw);
+}
+
 inline Result<Json> parseJsonFrame(std::span<const std::byte> frame) {
     try {
         const std::string_view text(reinterpret_cast<const char*>(frame.data()), frame.size());
         if (exceedsJsonNestingDepth(text, kMaxP2pJsonNestingDepth)) {
             return Error{ErrorCode::ValidationError, "p2p JSON exceeds maximum nesting depth"};
         }
-        return Json::parse(text);
+        auto parsed = Json::parse(text);
+        if (containsNonUnsignedNumber(parsed)) {
+            return Error{ErrorCode::ValidationError,
+                         "p2p JSON numbers must be non-negative integers"};
+        }
+        return parsed;
     } catch (const std::exception& error) {
         return Error{ErrorCode::SerializationError,
                      std::string("invalid p2p JSON: ") + error.what()};
@@ -82,9 +125,8 @@ struct JsonFrame {
 
 /// Read and parse one control frame, retaining the exact wire payload size so callers can
 /// account for bytes actually received rather than a compact re-serialization.
-inline Result<JsonFrame> readJsonFrame(P2pConnection& connection,
-                                       std::chrono::milliseconds timeout) {
-    auto frame = connection.readFrame(timeout);
+inline Result<JsonFrame> readJsonFrame(FrameSource& frames, std::chrono::milliseconds timeout) {
+    auto frame = frames.readFrame(timeout, kP2pMaxControlFrameBytes);
     if (!frame) {
         return frame.error();
     }
@@ -95,8 +137,8 @@ inline Result<JsonFrame> readJsonFrame(P2pConnection& connection,
     return JsonFrame{std::move(parsed.value()), frame.value().size()};
 }
 
-inline Result<Json> readJson(P2pConnection& connection, std::chrono::milliseconds timeout) {
-    auto frame = connection.readFrame(timeout);
+inline Result<Json> readJson(FrameSource& frames, std::chrono::milliseconds timeout) {
+    auto frame = frames.readFrame(timeout, kP2pMaxControlFrameBytes);
     if (!frame) {
         return frame.error();
     }
