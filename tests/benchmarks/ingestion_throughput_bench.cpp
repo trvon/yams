@@ -794,9 +794,6 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     const auto baseKgQueued = bus.kgQueued();
     const auto baseKgConsumed = bus.kgConsumed();
     const auto baseKgDropped = bus.kgDropped();
-    const auto baseSymbolQueued = bus.symbolQueued();
-    const auto baseSymbolConsumed = bus.symbolConsumed();
-    const auto baseSymbolDropped = bus.symbolDropped();
     const auto baseEntityQueued = bus.entityQueued();
     const auto baseEntityConsumed = bus.entityConsumed();
     const auto baseEntityDropped = bus.entityDropped();
@@ -881,9 +878,6 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     result.kgQueued = bus.kgQueued() - baseKgQueued;
     result.kgConsumed = bus.kgConsumed() - baseKgConsumed;
     result.kgDropped = bus.kgDropped() - baseKgDropped;
-    result.symbolQueued = bus.symbolQueued() - baseSymbolQueued;
-    result.symbolConsumed = bus.symbolConsumed() - baseSymbolConsumed;
-    result.symbolDropped = bus.symbolDropped() - baseSymbolDropped;
     result.entityQueued = bus.entityQueued() - baseEntityQueued;
     result.entityConsumed = bus.entityConsumed() - baseEntityConsumed;
     result.entityDropped = bus.entityDropped() - baseEntityDropped;

@@ -1,12 +1,13 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/search/string_interner.h>
-#include <yams/vector/binary_quantization.h>
 #include <yams/search/topology_routing_session.h>
 #include <yams/topology/topology_artifacts.h>
+#include <yams/vector/binary_quantization.h>
 
 #include <string>
 #include <vector>
@@ -147,4 +148,42 @@ TEST_CASE("TopologyRoutingSnapshotCache zero-copy flyweight index maps",
     REQUIRE(prefixed->sparseRouteIndex.centroidBqIndex);
     CHECK(prefixed->sparseRouteIndex.centroidBqIndex->dimension() == 1U);
     CHECK(prefixed->artifacts.get() == upgraded->artifacts.get());
+}
+
+TEST_CASE("topologyCommunitySupport scores candidates that share a snapshot cluster",
+          "[unit][search][topology][community]") {
+    auto batch = std::make_shared<TopologyArtifactBatch>();
+    const auto member = [](std::string hash, std::string cluster) {
+        yams::topology::DocumentClusterMembership m;
+        m.documentHash = std::move(hash);
+        m.clusterId = std::move(cluster);
+        return m;
+    };
+    batch->memberships = {member("a", "c1"), member("b", "c1"), member("c", "c1"),
+                          member("d", "c2"), member("e", "c3")};
+    TopologyRoutingSnapshot snapshot;
+    snapshot.artifacts = batch;
+    for (std::size_t i = 0; i < batch->memberships.size(); ++i) {
+        snapshot.membershipsByDocumentHash.emplace(batch->memberships[i].documentHash, i);
+    }
+
+    // a, b, c share c1; d and e are alone in their clusters; x is not in the snapshot.
+    const std::vector<std::string> candidates{"a", "d", "b", "x", "c", "e"};
+    yams::search::TopologyCommunityStats stats;
+    const auto support = yams::search::topologyCommunitySupport(snapshot, candidates, 8.0F, &stats);
+    REQUIRE(support.size() == candidates.size());
+    CHECK(support[0] == Catch::Approx(2.0F / 7.0F));
+    CHECK(support[2] == Catch::Approx(2.0F / 7.0F));
+    CHECK(support[4] == Catch::Approx(2.0F / 7.0F));
+    CHECK(support[1] == 0.0F);
+    CHECK(support[3] == 0.0F);
+    CHECK(support[5] == 0.0F);
+    CHECK(stats.communities == 1U);
+    CHECK(stats.supportedDocs == 3U);
+    CHECK(stats.largestCommunity == 3U);
+
+    SECTION("Without a reference size the candidate count normalizes") {
+        const auto relative = yams::search::topologyCommunitySupport(snapshot, candidates, 0.0F);
+        CHECK(relative[0] == Catch::Approx(2.0F / 5.0F));
+    }
 }

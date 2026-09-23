@@ -127,6 +127,33 @@ struct CorpusStatsFixture {
         REQUIRE(result.has_value());
     }
 
+    // Insert `count` kg_edges rows with the given relation between two fresh nodes each.
+    void addEdges(const std::string& relation, int count) {
+        auto result = pool_->withConnection([&](auto& db) -> yams::Result<void> {
+            for (int i = 0; i < count; ++i) {
+                for (const auto* side : {"src", "dst"}) {
+                    auto node = db.prepare("INSERT INTO kg_nodes (node_key, label, type) "
+                                           "VALUES (?, ?, 'test')");
+                    REQUIRE(node.has_value());
+                    const std::string key =
+                        relation + ":" + std::to_string(i) + ":" + std::string(side);
+                    REQUIRE(node.value().bindAll(key, key).has_value());
+                    REQUIRE(node.value().step().has_value());
+                }
+                auto edge =
+                    db.prepare("INSERT INTO kg_edges (src_node_id, dst_node_id, relation, weight) "
+                               "VALUES ((SELECT id FROM kg_nodes WHERE node_key = ?), "
+                               "(SELECT id FROM kg_nodes WHERE node_key = ?), ?, 1.0)");
+                REQUIRE(edge.has_value());
+                const std::string base = relation + ":" + std::to_string(i) + ":";
+                REQUIRE(edge.value().bindAll(base + "src", base + "dst", relation).has_value());
+                REQUIRE(edge.value().step().has_value());
+            }
+            return {};
+        });
+        REQUIRE(result.has_value());
+    }
+
     std::filesystem::path dbPath_;
     std::unique_ptr<ConnectionPool> pool_;
     std::unique_ptr<MetadataRepository> repository_;
@@ -835,4 +862,38 @@ TEST_CASE("SearchTuner: tuningStateToString covers all states",
         CHECK(name != std::string("UNKNOWN"));
         CHECK(!name.empty());
     }
+}
+
+TEST_CASE("getCorpusStats: embedding and attachment edges are not rich graph topology",
+          "[unit][corpus_stats][integration]") {
+    CorpusStatsFixture fix;
+    fix.insertDocument("/paper1.txt", "hash1", 5000);
+    fix.insertDocument("/paper2.txt", "hash2", 6000);
+
+    // Embedding kNN, file lineage and entity attachments exist on any indexed prose corpus;
+    // they must not make it look like a rich knowledge graph.
+    fix.addEdges("semantic_neighbor", 32);
+    fix.addEdges("has_version", 4);
+    fix.addEdges("mentioned_in", 12);
+
+    auto stats = fix.repository_->getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().kgEdgeCount == 48);
+    CHECK(stats.value().kgRelationalEdgeCount == 0);
+    CHECK_FALSE(stats.value().hasRichGraphTopology());
+}
+
+TEST_CASE("getCorpusStats: entity relations count as rich graph topology",
+          "[unit][corpus_stats][integration]") {
+    CorpusStatsFixture fix;
+    fix.insertDocument("/paper1.txt", "hash1", 5000);
+    fix.insertDocument("/paper2.txt", "hash2", 6000);
+    fix.addEdges("semantic_neighbor", 32);
+    fix.addEdges("co_mentioned_with", 6);
+
+    auto stats = fix.repository_->getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().kgRelationalEdgeCount == 6);
+    CHECK(stats.value().kgRelationalEdgeDensity == Approx(3.0).margin(0.01));
+    CHECK(stats.value().hasRichGraphTopology());
 }

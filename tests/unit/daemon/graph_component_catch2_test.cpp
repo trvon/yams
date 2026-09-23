@@ -29,10 +29,8 @@ namespace {
 
 // Test fixture helper for GraphComponent tests
 struct GraphComponentTestFixture {
-    explicit GraphComponentTestFixture(bool useV39 = false) {
-        dbPath = (useV39 ? yams::test::v39_metadata_db_template()
-                         : yams::test::migrated_metadata_db_template())
-                     .clone("yams_graph_component_db_");
+    GraphComponentTestFixture() {
+        dbPath = yams::test::migrated_metadata_db_template().clone("yams_graph_component_db_");
         testDir = dbPath.parent_path() / dbPath.stem();
         std::filesystem::create_directories(testDir);
 
@@ -302,7 +300,7 @@ TEST_CASE("GraphComponent: validateGraph flags one-way semantic neighborhoods",
           report.value().issues.end());
 }
 
-TEST_CASE("GraphComponent: maintainSemanticTopology prunes one-way semantic edges",
+TEST_CASE("GraphComponent: maintainSemanticTopology keeps one-way kNN edges and drops self-loops",
           "[daemon][graph][repair]") {
     GraphComponentTestFixture fixture;
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);
@@ -329,18 +327,24 @@ TEST_CASE("GraphComponent: maintainSemanticTopology prunes one-way semantic edge
                                   KGEdge{.srcNodeId = ids.value()[2],
                                          .dstNodeId = ids.value()[3],
                                          .relation = "semantic_neighbor",
-                                         .weight = 0.93f}})
+                                         .weight = 0.93f},
+                                  // A self-loop is invalid and is removed.
+                                  KGEdge{.srcNodeId = ids.value()[3],
+                                         .dstNodeId = ids.value()[3],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 1.0f}})
                 .has_value());
 
     auto maintenance = component.maintainSemanticTopology(false);
     REQUIRE(maintenance.has_value());
-    CHECK(maintenance.value().semanticEdgesPruned == 3);
+    // One-way edges are ordinary (non-mutual) kNN edges and are kept.
+    CHECK(maintenance.value().semanticEdgesPruned == 1);
     CHECK(maintenance.value().reciprocalCommunities == 0);
     CHECK(maintenance.value().largestReciprocalCommunity == 0);
 
     auto topology = analyzeDocumentTopology(fixture.kgStore.get());
     REQUIRE(topology.has_value());
-    CHECK(topology->semanticEdgeCount == 0);
+    CHECK(topology->semanticEdgeCount == 3);
     CHECK(topology->reciprocalCommunityCount == 0);
 }
 
@@ -381,7 +385,7 @@ TEST_CASE("GraphComponent: maintainSemanticTopology keeps reciprocal communities
     CHECK(topology->reciprocalCommunityCount == 1);
 }
 
-TEST_CASE("GraphComponent: scoped semantic maintenance prunes only dirty incident one-way edges",
+TEST_CASE("GraphComponent: scoped semantic maintenance keeps one-way kNN edges",
           "[daemon][graph][repair]") {
     GraphComponentTestFixture fixture;
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);
@@ -398,12 +402,12 @@ TEST_CASE("GraphComponent: scoped semantic maintenance prunes only dirty inciden
 
     REQUIRE(fixture.kgStore
                 ->addEdgesUnique({
-                    // Dirty incident one-way edge: should be pruned.
+                    // Dirty incident one-way edge: an ordinary kNN edge, kept.
                     KGEdge{.srcNodeId = ids.value()[0],
                            .dstNodeId = ids.value()[1],
                            .relation = "semantic_neighbor",
                            .weight = 0.95f},
-                    // Non-dirty one-way edge: should be left for a future scoped/global pass.
+                    // Non-dirty one-way edge: outside the scoped region, kept.
                     KGEdge{.srcNodeId = ids.value()[2],
                            .dstNodeId = ids.value()[3],
                            .relation = "semantic_neighbor",
@@ -413,11 +417,12 @@ TEST_CASE("GraphComponent: scoped semantic maintenance prunes only dirty inciden
 
     auto maintenance = component.maintainSemanticTopologyForDocuments({"a"}, false);
     REQUIRE(maintenance.has_value());
-    CHECK(maintenance.value().semanticEdgesPruned == 1);
+    CHECK(maintenance.value().semanticEdgesPruned == 0);
 
     auto aEdges = fixture.kgStore->getEdgesFrom(ids.value()[0], "semantic_neighbor");
     REQUIRE(aEdges.has_value());
-    CHECK(aEdges.value().empty());
+    REQUIRE(aEdges.value().size() == 1);
+    CHECK(aEdges.value().front().dstNodeId == ids.value()[1]);
 
     auto cEdges = fixture.kgStore->getEdgesFrom(ids.value()[2], "semantic_neighbor");
     REQUIRE(cEdges.has_value());
@@ -537,192 +542,6 @@ TEST_CASE("GraphComponent: Dedupe predicate detects existing doc entities",
     CHECK(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-abc"));
     CHECK_FALSE(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-missing"));
     CHECK_FALSE(GraphComponent::shouldSkipEntityExtraction(nullptr, "hash-abc"));
-}
-
-TEST_CASE("GraphComponent: Versioned extraction state dedupe", "[daemon][graph][dedupe]") {
-    GraphComponentTestFixture fixture(true);
-
-    // Create a document in the database
-    DocumentInfo doc;
-    doc.fileName = "file.cpp";
-    doc.filePath = "/test/file.cpp";
-    doc.fileExtension = "cpp";
-    doc.fileSize = 100;
-    doc.sha256Hash = "hash-versioned";
-    doc.mimeType = "text/x-c++";
-    doc.setCreatedTime(1);
-    doc.setModifiedTime(1);
-    doc.setIndexedTime(1);
-    auto docIdRes = fixture.metadataRepo->insertDocument(doc);
-    REQUIRE(docIdRes.has_value());
-
-    SECTION("Skip extraction when state is 'complete' with no extractor ID specified") {
-        SymbolExtractionState state;
-        state.extractorId = "extractor_v1";
-        state.extractedAt = 1000;
-        state.status = "complete";
-        state.entityCount = 5;
-
-        auto upsertRes = fixture.kgStore->upsertSymbolExtractionState("hash-versioned", state);
-        REQUIRE(upsertRes.has_value());
-
-        // Should skip when no expected extractor specified
-        CHECK(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-versioned"));
-    }
-
-    SECTION("Legacy completion cannot acknowledge a tracked admission") {
-        SymbolExtractionState state;
-        state.extractorId = "extractor_v1";
-        state.status = "complete";
-        state.entityCount = 5;
-        REQUIRE(fixture.kgStore->upsertSymbolExtractionState("hash-versioned", state));
-        REQUIRE(fixture.metadataRepo->setMetadata(docIdRes.value(), "yams:kg_enrichment",
-                                                  MetadataValue("pending:current")));
-        GraphComponent graph(fixture.metadataRepo, fixture.kgStore);
-        REQUIRE(graph.initialize());
-        // No worker or daemon: submission fails, but the legacy skip path would succeed.
-        graph.testing_setEntityService(std::make_shared<EntityGraphService>(nullptr, 1));
-        GraphComponent::EntityExtractionJob job;
-        job.documentHash = "hash-versioned";
-        job.documentDbId = docIdRes.value();
-        REQUIRE(graph.submitEntityExtraction(job));
-        job.knowledgeGraphToken = "current";
-        REQUIRE_FALSE(graph.submitEntityExtraction(job));
-        auto marker = fixture.metadataRepo->getMetadata(docIdRes.value(), "yams:kg_enrichment");
-        REQUIRE(marker);
-        REQUIRE(marker.value());
-        CHECK(marker.value()->value == "pending:current");
-    }
-
-    SECTION("Skip extraction when extractor version matches") {
-        SymbolExtractionState state;
-        state.extractorId = "extractor_v2";
-        state.extractedAt = 2000;
-        state.status = "complete";
-        state.entityCount = 0; // Even with 0 symbols!
-
-        auto upsertRes = fixture.kgStore->upsertSymbolExtractionState("hash-versioned", state);
-        REQUIRE(upsertRes.has_value());
-
-        // Should skip when extractor matches
-        CHECK(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-versioned",
-                                                         "extractor_v2"));
-    }
-
-    SECTION("Re-extract when extractor version differs") {
-        SymbolExtractionState state;
-        state.extractorId = "extractor_v1";
-        state.extractedAt = 1000;
-        state.status = "complete";
-        state.entityCount = 10;
-
-        auto upsertRes = fixture.kgStore->upsertSymbolExtractionState("hash-versioned", state);
-        REQUIRE(upsertRes.has_value());
-
-        // Should NOT skip when extractor version differs
-        CHECK_FALSE(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-versioned",
-                                                               "extractor_v2"));
-    }
-
-    SECTION("Re-extract when status is 'failed'") {
-        SymbolExtractionState state;
-        state.extractorId = "extractor_v1";
-        state.extractedAt = 1000;
-        state.status = "failed";
-        state.entityCount = 0;
-        state.errorMessage = "Some error";
-
-        auto upsertRes = fixture.kgStore->upsertSymbolExtractionState("hash-versioned", state);
-        REQUIRE(upsertRes.has_value());
-
-        // Should NOT skip when status is failed
-        CHECK_FALSE(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-versioned"));
-    }
-
-    SECTION("No state recorded - should not skip") {
-        // No extraction state recorded for this document
-        CHECK_FALSE(
-            GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-no-state-recorded"));
-    }
-}
-
-TEST_CASE("GraphComponent: Extraction state get/upsert roundtrip",
-          "[daemon][graph][extraction-state]") {
-    GraphComponentTestFixture fixture(true);
-
-    // Create a document in the database
-    DocumentInfo doc;
-    doc.fileName = "state.cpp";
-    doc.filePath = "/test/state.cpp";
-    doc.fileExtension = "cpp";
-    doc.fileSize = 100;
-    doc.sha256Hash = "hash-state";
-    doc.mimeType = "text/x-c++";
-    doc.setCreatedTime(1);
-    doc.setModifiedTime(1);
-    doc.setIndexedTime(1);
-    auto docIdRes = fixture.metadataRepo->insertDocument(doc);
-    REQUIRE(docIdRes.has_value());
-
-    SECTION("Initial state is empty") {
-        auto getRes = fixture.kgStore->getSymbolExtractionState("hash-state");
-        REQUIRE(getRes.has_value());
-        CHECK_FALSE(getRes.value().has_value()); // No state recorded
-    }
-
-    SECTION("Upsert and retrieve state") {
-        SymbolExtractionState state;
-        state.extractorId = "test_extractor:v1.2.3";
-        state.extractorConfigHash = "config-abc";
-        state.extractedAt = 1234567890;
-        state.status = "complete";
-        state.entityCount = 42;
-
-        auto upsertRes = fixture.kgStore->upsertSymbolExtractionState("hash-state", state);
-        REQUIRE(upsertRes.has_value());
-
-        auto getRes = fixture.kgStore->getSymbolExtractionState("hash-state");
-        REQUIRE(getRes.has_value());
-        REQUIRE(getRes.value().has_value());
-
-        const auto& retrieved = getRes.value().value();
-        CHECK(retrieved.extractorId == "test_extractor:v1.2.3");
-        CHECK(retrieved.extractorConfigHash.value_or("") == "config-abc");
-        CHECK(retrieved.extractedAt == 1234567890);
-        CHECK(retrieved.status == "complete");
-        CHECK(retrieved.entityCount == 42);
-    }
-
-    SECTION("Upsert updates existing state") {
-        // First upsert
-        SymbolExtractionState state1;
-        state1.extractorId = "v1";
-        state1.extractedAt = 1000;
-        state1.status = "complete";
-        state1.entityCount = 10;
-
-        auto upsertRes1 = fixture.kgStore->upsertSymbolExtractionState("hash-state", state1);
-        REQUIRE(upsertRes1.has_value());
-
-        // Second upsert should update
-        SymbolExtractionState state2;
-        state2.extractorId = "v2";
-        state2.extractedAt = 2000;
-        state2.status = "complete";
-        state2.entityCount = 20;
-
-        auto upsertRes2 = fixture.kgStore->upsertSymbolExtractionState("hash-state", state2);
-        REQUIRE(upsertRes2.has_value());
-
-        auto getRes = fixture.kgStore->getSymbolExtractionState("hash-state");
-        REQUIRE(getRes.has_value());
-        REQUIRE(getRes.value().has_value());
-
-        const auto& retrieved = getRes.value().value();
-        CHECK(retrieved.extractorId == "v2");
-        CHECK(retrieved.extractedAt == 2000);
-        CHECK(retrieved.entityCount == 20);
-    }
 }
 
 TEST_CASE("GraphComponent: Document ingestion when not initialized", "[daemon][graph][ingestion]") {
@@ -1219,155 +1038,6 @@ TEST_CASE("KnowledgeGraphStore: getNodeTypeCounts empty", "[daemon][graph][query
     REQUIRE(result.value().empty());
 }
 
-TEST_CASE("GraphComponent reconcileSymbolReferences links placeholders to definitions",
-          "[daemon][graph]") {
-    GraphComponentTestFixture fixture(true);
-    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
-    REQUIRE(component.initialize().has_value());
-
-    // Canonical definition: document + symbol_metadata + canonical node.
-    const std::string filePath = (fixture.testDir / "callee.cpp").string();
-    DocumentInfo doc;
-    doc.filePath = filePath;
-    const auto derived = computePathDerivedValues(filePath);
-    doc.fileName = "callee.cpp";
-    doc.fileExtension = ".cpp";
-    doc.fileSize = 1;
-    doc.sha256Hash = "hash-demo-callee";
-    doc.mimeType = "text/plain";
-    doc.pathPrefix = derived.pathPrefix;
-    doc.reversePath = derived.reversePath;
-    doc.pathHash = derived.pathHash;
-    doc.parentHash = derived.parentHash;
-    doc.pathDepth = derived.pathDepth;
-    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-    doc.createdTime = now;
-    doc.modifiedTime = now;
-    doc.indexedTime = now;
-    REQUIRE(fixture.metadataRepo->insertDocument(doc).has_value());
-
-    SymbolMetadata sym;
-    sym.documentHash = doc.sha256Hash;
-    sym.filePath = filePath;
-    sym.symbolName = "callee";
-    sym.qualifiedName = "demo::callee";
-    sym.kind = "function";
-    sym.startLine = 1;
-    sym.endLine = 1;
-    REQUIRE(fixture.kgStore->upsertSymbolMetadata({sym}).has_value());
-
-    KGNode canonical;
-    canonical.nodeKey = "function:demo::callee@" + filePath;
-    canonical.label = "callee";
-    canonical.type = "function";
-    const auto canonicalId = fixture.kgStore->upsertNode(canonical);
-    REQUIRE(canonicalId.has_value());
-
-    KGNode placeholder;
-    placeholder.nodeKey = "symbol_ref:demo::callee";
-    placeholder.label = "demo::callee";
-    placeholder.type = "symbol_reference";
-    const auto refId = fixture.kgStore->upsertNode(placeholder);
-    REQUIRE(refId.has_value());
-
-    auto result = component.reconcileSymbolReferences(false);
-    REQUIRE(result.has_value());
-    CHECK(result.value().referencesLinked == 1);
-
-    auto edges =
-        fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
-    REQUIRE(edges.has_value());
-    REQUIRE(edges.value().size() == 1);
-    CHECK(edges.value().front().dstNodeId == canonicalId.value());
-
-    // Idempotent: a second pass adds no duplicate edge.
-    REQUIRE(component.reconcileSymbolReferences(false).has_value());
-    auto edges2 =
-        fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
-    REQUIRE(edges2.has_value());
-    CHECK(edges2.value().size() == 1);
-
-    // Dry-run on a fresh placeholder makes no change.
-    KGNode placeholder2;
-    placeholder2.nodeKey = "symbol_ref:demo::callee::dup";
-    placeholder2.label = "demo::callee";
-    placeholder2.type = "symbol_reference";
-    const auto ref2 = fixture.kgStore->upsertNode(placeholder2);
-    REQUIRE(ref2.has_value());
-    auto dry = component.reconcileSymbolReferences(true);
-    REQUIRE(dry.has_value());
-    auto edgesDry =
-        fixture.kgStore->getEdgesFrom(ref2.value(), std::string_view("resolves_to"), 10, 0);
-    REQUIRE(edgesDry.has_value());
-    CHECK(edgesDry.value().empty());
-}
-
-TEST_CASE("GraphComponent reconcileSymbolReferences is idempotent (no double-count on re-run)",
-          "[daemon][graph][reconcile][idempotency]") {
-    GraphComponentTestFixture fixture(true);
-    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
-    REQUIRE(component.initialize().has_value());
-
-    const std::string filePath = (fixture.testDir / "callee2.cpp").string();
-    DocumentInfo doc;
-    doc.filePath = filePath;
-    const auto derived = computePathDerivedValues(filePath);
-    doc.fileName = "callee2.cpp";
-    doc.fileExtension = ".cpp";
-    doc.fileSize = 1;
-    doc.sha256Hash = "hash-demo-callee2";
-    doc.mimeType = "text/plain";
-    doc.pathPrefix = derived.pathPrefix;
-    doc.reversePath = derived.reversePath;
-    doc.pathHash = derived.pathHash;
-    doc.parentHash = derived.parentHash;
-    doc.pathDepth = derived.pathDepth;
-    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-    doc.createdTime = now;
-    doc.modifiedTime = now;
-    doc.indexedTime = now;
-    REQUIRE(fixture.metadataRepo->insertDocument(doc).has_value());
-
-    SymbolMetadata sym;
-    sym.documentHash = doc.sha256Hash;
-    sym.filePath = filePath;
-    sym.symbolName = "callee2";
-    sym.qualifiedName = "demo::callee2";
-    sym.kind = "function";
-    sym.startLine = 1;
-    sym.endLine = 1;
-    REQUIRE(fixture.kgStore->upsertSymbolMetadata({sym}).has_value());
-
-    KGNode canonical;
-    canonical.nodeKey = "function:demo::callee2@" + filePath;
-    canonical.label = "callee2";
-    canonical.type = "function";
-    REQUIRE(fixture.kgStore->upsertNode(canonical).has_value());
-
-    KGNode placeholder;
-    placeholder.nodeKey = "symbol_ref:demo::callee2";
-    placeholder.label = "demo::callee2";
-    placeholder.type = "symbol_reference";
-    const auto refId = fixture.kgStore->upsertNode(placeholder);
-    REQUIRE(refId.has_value());
-
-    auto first = component.reconcileSymbolReferences(false);
-    REQUIRE(first.has_value());
-    CHECK(first.value().referencesLinked == 1);
-
-    auto second = component.reconcileSymbolReferences(false);
-    REQUIRE(second.has_value());
-
-    auto edges =
-        fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
-    REQUIRE(edges.has_value());
-    CHECK(edges.value().size() == 1);
-
-    // FIXED: counts converge — the second pass links nothing new.
-    CHECK(second.value().referencesLinked == 0);
-    CHECK(second.value().referencesAlreadyLinked == 1);
-}
-
 TEST_CASE("GraphComponent: repairGraph removes orphaned KG nodes after document deletion",
           "[daemon][graph][repair][orphan]") {
     GraphComponentTestFixture fixture;
@@ -1424,78 +1094,6 @@ TEST_CASE("GraphComponent: repairGraph removes orphaned KG nodes after document 
     CHECK_FALSE(canonAfter.value().has_value());
 }
 
-TEST_CASE("GraphComponent: repairGraph removes dangling resolves_to after canonical deletion",
-          "[daemon][graph][reconcile][dangling]") {
-    GraphComponentTestFixture fixture(true);
-    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
-    REQUIRE(component.initialize().has_value());
-
-    const std::string filePath = (fixture.testDir / "callee3.cpp").string();
-    DocumentInfo doc;
-    doc.filePath = filePath;
-    const auto derived = computePathDerivedValues(filePath);
-    doc.fileName = "callee3.cpp";
-    doc.fileExtension = ".cpp";
-    doc.fileSize = 1;
-    doc.sha256Hash = "hash-demo-callee3";
-    doc.mimeType = "text/plain";
-    doc.pathPrefix = derived.pathPrefix;
-    doc.reversePath = derived.reversePath;
-    doc.pathHash = derived.pathHash;
-    doc.parentHash = derived.parentHash;
-    doc.pathDepth = derived.pathDepth;
-    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-    doc.createdTime = now;
-    doc.modifiedTime = now;
-    doc.indexedTime = now;
-    auto docId = fixture.metadataRepo->insertDocument(doc);
-    REQUIRE(docId.has_value());
-
-    SymbolMetadata sym;
-    sym.documentHash = doc.sha256Hash;
-    sym.filePath = filePath;
-    sym.symbolName = "callee3";
-    sym.qualifiedName = "demo::callee3";
-    sym.kind = "function";
-    sym.startLine = 1;
-    sym.endLine = 1;
-    REQUIRE(fixture.kgStore->upsertSymbolMetadata({sym}).has_value());
-
-    KGNode canonical;
-    canonical.nodeKey = "function:demo::callee3@" + filePath;
-    canonical.label = "callee3";
-    canonical.type = "function";
-    canonical.properties =
-        nlohmann::json{{"qualified_name", "demo::callee3"}, {"file_path", filePath}}.dump();
-    REQUIRE(fixture.kgStore->upsertNode(canonical).has_value());
-
-    KGNode placeholder;
-    placeholder.nodeKey = "symbol_ref:demo::callee3";
-    placeholder.label = "demo::callee3";
-    placeholder.type = "symbol_reference";
-    const auto refId = fixture.kgStore->upsertNode(placeholder);
-    REQUIRE(refId.has_value());
-
-    REQUIRE(component.reconcileSymbolReferences(false).has_value());
-    {
-        auto edges =
-            fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
-        REQUIRE(edges.has_value());
-        REQUIRE(edges.value().size() == 1);
-    }
-
-    // Delete the canonical definition's document -> canonical node orphaned.
-    REQUIRE(fixture.metadataRepo->deleteDocument(docId.value()).has_value());
-
-    REQUIRE(component.repairGraph(false).has_value());
-
-    // FIXED: orphaned canonical is removed and the resolves_to edge cascades away.
-    auto edgesAfter =
-        fixture.kgStore->getEdgesFrom(refId.value(), std::string_view("resolves_to"), 10, 0);
-    REQUIRE(edgesAfter.has_value());
-    CHECK(edgesAfter.value().empty());
-}
-
 TEST_CASE("GraphComponent: repairGraph aborts promptly on cancellation",
           "[daemon][graph][repair][cancel]") {
     GraphComponentTestFixture fixture;
@@ -1534,9 +1132,4 @@ TEST_CASE("GraphComponent: repairGraph aborts promptly on cancellation",
         }
     }
     CHECK(sawCancel);
-
-    // reconcileSymbolReferences honors cancellation too.
-    auto rec = component.reconcileSymbolReferences(false, &cancel);
-    REQUIRE(rec.has_value());
-    CHECK(rec.value().skipped);
 }

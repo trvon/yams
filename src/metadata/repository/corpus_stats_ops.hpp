@@ -112,6 +112,8 @@ inline void resetCorpusStatsForNoDocuments(storage::CorpusStats& stats) {
     stats.languageCoverage = 0.0;
     stats.kgEdgeCount = 0;
     stats.kgEdgeDensity = 0.0;
+    stats.kgRelationalEdgeCount = 0;
+    stats.kgRelationalEdgeDensity = 0.0;
     stats.kgAliasCount = 0;
     stats.kgAliasDensity = 0.0;
     stats.avgDocLengthBytes = 0.0;
@@ -154,6 +156,9 @@ inline storage::CorpusStats applyCorpusStatsOnlineOverlay(storage::CorpusStats s
         stats.kgEdgeCount = std::max<int64_t>(live.kgEdgeCount, 0);
         stats.kgEdgeDensity =
             static_cast<double>(stats.kgEdgeCount) / static_cast<double>(stats.docCount);
+        // No live relational counter exists; keep the reconciled count, rescaled to live docs.
+        stats.kgRelationalEdgeDensity =
+            static_cast<double>(stats.kgRelationalEdgeCount) / static_cast<double>(stats.docCount);
         stats.kgAliasCount = std::max<int64_t>(live.kgAliasCount, 0);
         stats.kgAliasDensity =
             static_cast<double>(stats.kgAliasCount) / static_cast<double>(stats.docCount);

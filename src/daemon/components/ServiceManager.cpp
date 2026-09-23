@@ -1236,7 +1236,6 @@ void ServiceManager::clearCachedServiceState() {
         std::lock_guard lock(contentExtractorsMutex_);
         contentExtractors_.clear();
     }
-    symbolExtractors_.clear();
     cachedQueryConceptExtractor_ = {};
     searchEngineManager_.clearEngine();
     searchComponent_.reset();
@@ -2443,17 +2442,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 if (piq) {
                     if (!refreshedExtractors.empty()) {
                         piq->setExtractors(refreshedExtractors);
-                    }
-                    std::unordered_map<std::string, std::string> extMap;
-                    for (const auto& extractor : pluginManager_->getSymbolExtractors()) {
-                        if (!extractor)
-                            continue;
-                        for (const auto& [ext, lang] : extractor->getSupportedExtensions()) {
-                            extMap[ext] = lang;
-                        }
-                    }
-                    if (!extMap.empty()) {
-                        piq->setSymbolExtensionMap(std::move(extMap));
                     }
                     if (auto titleExtractor =
                             createGlinerExtractionFunc(pluginManager_->getEntityExtractors())) {
@@ -4347,8 +4335,9 @@ void ServiceManager::requestSemanticTopologyMaintenance(const std::string& reaso
                 spdlog::warn("[ServiceManager] Semantic topology maintenance failed: {}",
                              maintenance.error().message);
             } else if (maintenance.value().semanticEdgesPruned > 0) {
-                spdlog::info("[ServiceManager] Pruned {} one-way semantic_neighbor edges after {}",
-                             maintenance.value().semanticEdgesPruned, reason);
+                spdlog::info(
+                    "[ServiceManager] Pruned {} self-loop semantic_neighbor edges after {}",
+                    maintenance.value().semanticEdgesPruned, reason);
             }
         }
     });

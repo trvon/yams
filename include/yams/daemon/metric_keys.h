@@ -46,14 +46,8 @@ constexpr std::string_view kKgJobsCapacity = "kg_jobs_capacity";
 constexpr std::string_view kKgJobsFillPct = "kg_jobs_fill_pct";
 
 // Symbol Stage metrics
-constexpr std::string_view kSymbolQueued = "symbol_queued";
-constexpr std::string_view kSymbolDropped = "symbol_dropped";
-constexpr std::string_view kSymbolConsumed = "symbol_consumed";
-constexpr std::string_view kSymbolInflight = "symbol_inflight";
-constexpr std::string_view kSymbolQueueDepth = "symbol_queue_depth";
-constexpr std::string_view kPostSymbolLimit = "post_symbol_limit";
 
-// Enrich (combined symbol+entity+title) metrics
+// Enrich (combined entity+title) metrics
 constexpr std::string_view kPostEnrichLimit = "post_enrich_limit";
 constexpr std::string_view kEnrichInflight = "enrich_inflight";
 constexpr std::string_view kEnrichQueueDepth = "enrich_queue_depth";
@@ -223,7 +217,6 @@ constexpr std::string_view kEmbeddingState = "embedding_state";
 constexpr std::string_view kPluginHostState = "plugin_host_state";
 constexpr std::string_view kPluginSkippedCount = "plugin_skipped_count";
 constexpr std::string_view kContentExtractorsLoaded = "content_extractors_loaded";
-constexpr std::string_view kSymbolExtractorsLoaded = "symbol_extractors_loaded";
 constexpr std::string_view kEntityExtractorsLoaded = "entity_extractors_loaded";
 constexpr std::string_view kTitleExtractorEnabled = "title_extractor_enabled";
 constexpr std::string_view kPostIngestUseBus = "post_ingest_use_bus";
@@ -352,7 +345,6 @@ constexpr std::string_view kEmbeddingDegraded = "embedding_degraded";
 constexpr std::string_view kPluginsReady = "plugins_ready";
 constexpr std::string_view kPluginsDegraded = "plugins_degraded";
 constexpr std::string_view kContentExtractorsReady = "content_extractors_ready";
-constexpr std::string_view kSymbolExtractorsReady = "symbol_extractors_ready";
 constexpr std::string_view kEntityExtractorsReady = "entity_extractors_ready";
 constexpr std::string_view kTitleExtractorReady = "title_extractor_ready";
 constexpr std::string_view kPluginWarningsPresent = "plugin_warnings_present";

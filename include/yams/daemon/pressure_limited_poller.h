@@ -242,7 +242,7 @@ private:
 };
 
 /// Generic pressure-limited poller coroutine.
-/// Replaces channelPoller, kgPoller, symbolPoller, entityPoller, titlePoller.
+/// Replaces channelPoller, kgPoller, entityPoller, titlePoller.
 template <typename Task>
 boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>> channel,
                                                  PressureLimitedPollerConfig<Task> cfg) {

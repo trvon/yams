@@ -141,42 +141,6 @@ struct AliasResolution {
     float score = 1.0f; // 1.0 for exact, else FTS-derived or heuristic
 };
 
-/**
- * Symbol extraction state for a document.
- * Tracks whether extraction was performed and by which extractor version,
- * enabling versioned dedupe (skip if already extracted with same version).
- */
-struct SymbolExtractionState {
-    std::int64_t documentId = 0;
-    std::string extractorId;                        // e.g., "symbol_extractor_treesitter:v1"
-    std::optional<std::string> extractorConfigHash; // hash of grammar/config versions
-    std::int64_t extractedAt = 0;                   // Unix timestamp
-    std::string status = "complete";                // complete|failed|pending
-    std::int64_t entityCount = 0;                   // number of symbols extracted
-    std::optional<std::string> errorMessage;
-};
-
-/**
- * Symbol metadata record for fast SQL-based filtering and lookup.
- * Populated alongside kg_nodes and entity_vectors during symbol extraction.
- * Provides indexed access to symbol attributes without JSON parsing.
- */
-struct SymbolMetadata {
-    std::int64_t symbolId = 0;                // Auto-generated primary key
-    std::string documentHash;                 // Links to documents.sha256_hash
-    std::string filePath;                     // Source file path
-    std::string symbolName;                   // Simple symbol name (e.g., "processTask")
-    std::string qualifiedName;                // Fully qualified (e.g., "yams::daemon::processTask")
-    std::string kind;                         // "function", "class", "method", "variable", etc.
-    std::optional<std::int32_t> startLine;    // 1-based line number
-    std::optional<std::int32_t> endLine;      // 1-based line number
-    std::optional<std::int32_t> startOffset;  // Byte offset from file start
-    std::optional<std::int32_t> endOffset;    // Byte offset from file start
-    std::optional<std::string> returnType;    // Return type for functions/methods
-    std::optional<std::string> parameters;    // JSON array of parameter types
-    std::optional<std::string> documentation; // Extracted docstring/comment
-};
-
 struct KGEntityCountSnapshot {
     std::int64_t totalCount{0};
     std::int64_t nativeSymbolCount{0};
@@ -238,7 +202,6 @@ public:
         virtual Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) = 0;
         virtual Result<std::int64_t> deleteOrphanedEdges() = 0;
         virtual Result<std::int64_t> deleteOrphanedDocEntities() = 0;
-        virtual Result<void> upsertSymbolMetadata(const std::vector<SymbolMetadata>& symbols) = 0;
         virtual Result<void> commit() = 0;
     };
 
@@ -423,44 +386,11 @@ public:
     virtual Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) = 0;
 
     // -----------------------------------------------------------------------------
-    // Symbol Extraction State (versioned dedupe)
-    // -----------------------------------------------------------------------------
-
-    // Get symbol extraction state for a document by its hash.
-    // Returns nullopt if no extraction has been recorded.
-    virtual Result<std::optional<SymbolExtractionState>>
-    getSymbolExtractionState(std::string_view documentHash) = 0;
-
-    // Upsert symbol extraction state. Uses document hash to resolve document_id internally.
-    // If extraction already recorded, updates the row; otherwise inserts.
-    virtual Result<void> upsertSymbolExtractionState(std::string_view documentHash,
-                                                     const SymbolExtractionState& state) = 0;
-
-    // -----------------------------------------------------------------------------
-    // Symbol Metadata (fast SQL-indexed symbol lookup)
-    // -----------------------------------------------------------------------------
-
-    // Upsert symbol metadata records for a document. Replaces existing records for the document.
-    // Called after symbol extraction to populate the indexed symbol_metadata table.
-    virtual Result<void> upsertSymbolMetadata(const std::vector<SymbolMetadata>& symbols) = 0;
-
-    // Delete all symbol metadata for a document hash (for re-extraction or document deletion).
-    virtual Result<std::int64_t> deleteSymbolMetadataForDocument(std::string_view documentHash) = 0;
-
-    // Query symbol metadata by various criteria. Returns matching symbols.
-    // Useful for pre-filtering before expensive vector search.
-    virtual Result<std::vector<SymbolMetadata>>
-    querySymbolMetadata(std::optional<std::string_view> filePath = std::nullopt,
-                        std::optional<std::string_view> kind = std::nullopt,
-                        std::optional<std::string_view> namePattern = std::nullopt,
-                        std::size_t limit = 100, std::size_t offset = 0) = 0;
-
-    // -----------------------------------------------------------------------------
     // Document/File Cleanup (for cascade on delete and re-indexing)
     // -----------------------------------------------------------------------------
 
     // Delete KG nodes associated with a document hash (for cascade cleanup on document deletion).
-    // This deletes the doc:<hash> node and any symbol nodes with matching document_hash property.
+    // This deletes the doc:<hash> node and any nodes with a matching document_hash property.
     // Returns the count of nodes deleted.
     virtual Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) = 0;
 
@@ -517,8 +447,8 @@ public:
     }
 
     // Delete KG nodes whose properties.file_path or properties.source_file matches the given
-    // path. Covers canonical symbol nodes and unresolved reference nodes that carry no
-    // document_hash (so deleteNodesForDocumentHash misses them). Edges cascade via FK.
+    // path. Covers file-bound nodes that carry no document_hash (so deleteNodesForDocumentHash
+    // misses them). Edges cascade via FK.
     virtual Result<std::int64_t> deleteNodesForSourceFile(std::string_view filePath) = 0;
 
     // Delete all edges where properties.source_file matches the given path.
@@ -527,7 +457,7 @@ public:
     virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
 
     // Delete document-bound nodes whose backing document no longer exists: doc:/blob: nodes,
-    // nodes carrying document_hash, and symbol/reference nodes carrying file_path/source_file.
+    // nodes carrying document_hash, and nodes carrying file_path/source_file.
     // Set-based against the documents table (same DB); edges cascade via FK. Returns count.
     virtual Result<std::int64_t> deleteOrphanedNodes() = 0;
 
@@ -632,7 +562,7 @@ Result<std::unique_ptr<KnowledgeGraphStore>>
 makeSqliteKnowledgeGraphStore(ConnectionPool& pool, const KnowledgeGraphStoreConfig& cfg = {});
 
 // Create a SQLite-backed store with distinct write and read pools. The store does not own either
-// pool and routes read-only KG/symbol/readiness operations through readPool.
+// pool and routes read-only KG/readiness operations through readPool.
 Result<std::unique_ptr<KnowledgeGraphStore>>
 makeSqliteKnowledgeGraphStore(ConnectionPool& writePool, ConnectionPool& readPool,
                               const KnowledgeGraphStoreConfig& cfg = {});

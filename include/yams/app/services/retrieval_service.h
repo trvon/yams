@@ -193,7 +193,6 @@ struct SearchOptions {
     bool useSession = false;
     std::string sessionName;
     bool globalSearch = false;
-    bool symbolRank = true;
 };
 
 class RetrievalService {

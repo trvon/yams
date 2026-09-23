@@ -404,3 +404,110 @@ TEST_CASE("MetadataKgTopologyArtifactStore clears topology keys for dropped docu
     CHECK_FALSE(metaB.value().contains("topology.snapshot_id"));
     CHECK_FALSE(metaB.value().contains("topology.cluster_id"));
 }
+
+namespace {
+
+void addDocGraphNode(TestFixture& fixture, const std::string& hash) {
+    KGNode node;
+    node.nodeKey = "doc:" + hash;
+    node.label = hash;
+    node.type = std::string{"document"};
+    REQUIRE(fixture.kgStore->upsertNode(node).has_value());
+}
+
+std::int64_t nodeIdForKey(TestFixture& fixture, const std::string& key) {
+    auto node = fixture.kgStore->getNodeByKey(key);
+    REQUIRE(node.has_value());
+    REQUIRE(node.value().has_value());
+    return node.value()->id;
+}
+
+} // namespace
+
+TEST_CASE("MetadataKgTopologyArtifactStore materializes clusters in the knowledge graph",
+          "[unit][topology][store][graph]") {
+    TestFixture fixture;
+    fixture.addDocument("hash_a", "/repo/a.md");
+    fixture.addDocument("hash_b", "/repo/b.md");
+    addDocGraphNode(fixture, "hash_a");
+    addDocGraphNode(fixture, "hash_b");
+
+    auto batch = makeTwoDocBatch("snap-1", 1);
+    batch.clusters[0].medoid = ClusterRepresentative{.clusterId = batch.clusters[0].clusterId,
+                                                     .documentHash = "hash_a",
+                                                     .filePath = "/repo/a.md",
+                                                     .representativeScore = 0.9};
+    ClusterArtifact child;
+    child.clusterId = "child-cluster";
+    child.parentClusterId = batch.clusters[0].clusterId;
+    child.level = 1;
+    child.memberCount = 1;
+    child.memberDocumentHashes = {"hash_b"};
+    batch.clusters.push_back(child);
+    batch.memberships[1].overlapClusterIds = {"child-cluster"};
+
+    MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+    REQUIRE(store.storeBatch(batch).has_value());
+
+    const auto clusterId = nodeIdForKey(fixture, "topology:cluster:cluster-snap-1");
+    const auto childId = nodeIdForKey(fixture, "topology:cluster:child-cluster");
+    const auto docA = nodeIdForKey(fixture, "doc:hash_a");
+    const auto docB = nodeIdForKey(fixture, "doc:hash_b");
+
+    auto members = fixture.kgStore->getEdgesTo(clusterId, std::string_view{"member_of"}, 10, 0);
+    REQUIRE(members.has_value());
+    CHECK(members.value().size() == 2U);
+
+    auto medoid = fixture.kgStore->getEdgesFrom(docA, std::string_view{"medoid_of"}, 10, 0);
+    REQUIRE(medoid.has_value());
+    REQUIRE(medoid.value().size() == 1U);
+    CHECK(medoid.value().front().dstNodeId == clusterId);
+
+    auto overlaps = fixture.kgStore->getEdgesFrom(docB, std::string_view{"overlaps"}, 10, 0);
+    REQUIRE(overlaps.has_value());
+    REQUIRE(overlaps.value().size() == 1U);
+    CHECK(overlaps.value().front().dstNodeId == childId);
+
+    auto parent = fixture.kgStore->getEdgesFrom(childId, std::string_view{"subcluster_of"}, 10, 0);
+    REQUIRE(parent.has_value());
+    REQUIRE(parent.value().size() == 1U);
+    CHECK(parent.value().front().dstNodeId == clusterId);
+
+    SECTION("A newer snapshot replaces the previous cluster graph") {
+        REQUIRE(store.storeBatch(makeTwoDocBatch("snap-2", 2)).has_value());
+        auto stale = fixture.kgStore->getNodeByKey("topology:cluster:cluster-snap-1");
+        REQUIRE(stale.has_value());
+        CHECK_FALSE(stale.value().has_value());
+        auto staleChild = fixture.kgStore->getNodeByKey("topology:cluster:child-cluster");
+        REQUIRE(staleChild.has_value());
+        CHECK_FALSE(staleChild.value().has_value());
+        const auto fresh = nodeIdForKey(fixture, "topology:cluster:cluster-snap-2");
+        auto freshMembers =
+            fixture.kgStore->getEdgesTo(fresh, std::string_view{"member_of"}, 10, 0);
+        REQUIRE(freshMembers.has_value());
+        CHECK(freshMembers.value().size() == 2U);
+    }
+}
+
+TEST_CASE("MetadataKgTopologyArtifactStore retains a bounded number of snapshots",
+          "[unit][topology][store][graph]") {
+    TestFixture fixture;
+    fixture.addDocument("hash_a", "/repo/a.md");
+    fixture.addDocument("hash_b", "/repo/b.md");
+
+    MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+    for (int i = 1; i <= 6; ++i) {
+        REQUIRE(store.storeBatch(makeTwoDocBatch("snap-" + std::to_string(i), i)).has_value());
+    }
+    auto snapshots = fixture.kgStore->countNodesByType("topology_snapshot");
+    REQUIRE(snapshots.has_value());
+    CHECK(snapshots.value() == MetadataKgTopologyArtifactStore::kRetainedSnapshots);
+    // The newest snapshots survive, including the one the latest pointer names.
+    auto latest = store.loadLatestShared();
+    REQUIRE(latest.has_value());
+    REQUIRE(latest.value());
+    CHECK(latest.value()->snapshotId == "snap-6");
+    auto oldest = fixture.kgStore->getNodeByKey("topology:snapshot:snap-1");
+    REQUIRE(oldest.has_value());
+    CHECK_FALSE(oldest.value().has_value());
+}

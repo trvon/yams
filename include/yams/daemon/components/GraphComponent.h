@@ -32,12 +32,10 @@ class ServiceManager;
 
 class GraphComponent {
 public:
-    // Check if entity extraction should be skipped for a document.
-    // If expectedExtractorId is provided, also checks that extraction was done with same version.
-    // Returns true if extraction should be skipped (already done with matching version).
+    // Check if entity extraction should be skipped for a document: returns true when the
+    // document already has doc entities in the knowledge graph.
     static bool shouldSkipEntityExtraction(const std::shared_ptr<metadata::KnowledgeGraphStore>& kg,
-                                           const std::string& documentHash,
-                                           const std::string& expectedExtractorId = {});
+                                           const std::string& documentHash);
     GraphComponent(std::shared_ptr<metadata::MetadataRepository> metadataRepo,
                    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore,
                    ServiceManager* serviceManager = nullptr);
@@ -81,8 +79,6 @@ public:
         uint64_t nodesCreated{0};
         uint64_t nodesUpdated{0};
         uint64_t edgesCreated{0};
-        uint64_t referencesLinked{0};
-        uint64_t referencesAmbiguous{0};
         uint64_t errors{0};
         std::vector<std::string> issues;
     };
@@ -120,20 +116,6 @@ public:
     };
     Result<SemanticTopologyMaintenanceStats> maintainSemanticTopology(bool dryRun = false);
 
-    // Link symbol_reference placeholder nodes to their canonical definition nodes via
-    // `resolves_to` edges (best-effort, exact-name, skip-ambiguous). One-time backfill that lets
-    // graph navigation map call-site placeholders to definitions without query-time name guessing.
-    struct ReferenceReconcileStats {
-        uint64_t referencesScanned{0};
-        uint64_t referencesLinked{0};
-        uint64_t referencesAlreadyLinked{0};
-        uint64_t referencesAmbiguous{0};
-        uint64_t referencesUnresolved{0};
-        bool skipped{false};
-    };
-    Result<ReferenceReconcileStats>
-    reconcileSymbolReferences(bool dryRun = false,
-                              const std::atomic<bool>* cancelRequested = nullptr);
     Result<SemanticTopologyMaintenanceStats>
     maintainSemanticTopologyForDocuments(const std::vector<std::string>& documentHashes,
                                          bool dryRun = false);
@@ -154,8 +136,6 @@ public:
 #endif
 
 private:
-    std::string resolveSymbolExtractorIdForLanguage(const std::string& language) const;
-
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<app::services::IGraphQueryService> queryService_;

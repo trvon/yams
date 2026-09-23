@@ -668,13 +668,10 @@ TEST_CASE("SearchService: hybrid search", "[unit][services][search]") {
 
     auto request = f.createBasicSearchRequest("python programming");
     request.type = "hybrid";
-    request.symbolRank = false;
     auto result = runAwait(f.searchService->search(request));
     REQUIRE(result);
     CHECK(result.value().total >= kZeroTotal);
-    CHECK((result.value().searchStats.at("symbol_rank_requested") == "false"));
-    CHECK((result.value().searchStats.at("symbol_rank_available") == "true"));
-    CHECK((result.value().searchStats.at("symbol_rank_boosted_results") == "0"));
+    CHECK_FALSE(result.value().searchStats.contains("symbol_rank_requested"));
     for (const auto& doc : result.value().results) {
         CHECK(doc.score > 0.0);
     }

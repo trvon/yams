@@ -383,6 +383,19 @@ topologyRoutingPolicyFingerprint(std::string_view representationFingerprint,
     bool reciprocalOnly,
     std::span<const yams::topology::WeightedDocumentSeed> weightedSeedDocuments = {});
 
+/// Candidate community support from topology co-membership: candidates that share a snapshot
+/// cluster form a community, scored (size - 1) / (referenceSize - 1) (or / (candidates - 1)
+/// when referenceSize <= 1), clamped to [0, 1]. Candidates outside the snapshot get 0.
+struct TopologyCommunityStats {
+    std::size_t supportedDocs = 0;
+    std::size_t largestCommunity = 0;
+    std::size_t communities = 0;
+};
+[[nodiscard]] std::vector<float>
+topologyCommunitySupport(const TopologyRoutingSnapshot& snapshot,
+                         const std::vector<std::string>& candidateHashes, float referenceSize,
+                         TopologyCommunityStats* stats = nullptr);
+
 TopologyRoutingSessionResult
 runTopologyRoutingSession(const TopologyRoutingSessionRequest& request,
                           const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,

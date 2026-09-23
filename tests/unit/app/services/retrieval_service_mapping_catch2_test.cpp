@@ -299,7 +299,6 @@ TEST_CASE("RetrievalService testing helpers map GetInit and Search options",
     search.useSession = true;
     search.sessionName = "session";
     search.globalSearch = true;
-    search.symbolRank = false;
 
     const auto out = testing::makeSearchRequestForTest(search);
     CHECK(out.query == search.query);
@@ -339,5 +338,4 @@ TEST_CASE("RetrievalService testing helpers map GetInit and Search options",
     CHECK(out.useSession == search.useSession);
     CHECK(out.sessionName == search.sessionName);
     CHECK(out.globalSearch == search.globalSearch);
-    CHECK(out.symbolRank == search.symbolRank);
 }

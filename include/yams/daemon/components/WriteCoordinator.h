@@ -65,7 +65,6 @@ struct DeferredKGBatch {
     std::vector<metadata::KGAlias> aliases;
     std::vector<DeferredDocEntity> deferredDocEntities;
     std::vector<metadata::DocEntity> docEntities;
-    std::vector<metadata::SymbolMetadata> symbolMetadata;
     std::optional<std::int64_t> documentIdToDelete;
     std::optional<std::string> sourceFileToDelete;
 
@@ -94,9 +93,6 @@ struct AddDocEntitiesOp {
 };
 struct AddDeferredDocEntitiesOp {
     std::vector<DeferredDocEntityOp> entities;
-};
-struct UpsertSymbolMetadataOp {
-    std::vector<metadata::SymbolMetadata> symbols;
 };
 struct DeleteDocEntitiesForDocumentOp {
     std::int64_t documentId;
@@ -149,10 +145,6 @@ struct CompleteDocumentEmbeddingsByHashesOp {
     // Use either legacy hashes or derivations, not both.
     std::vector<metadata::EmbeddingDerivationToken> derivations;
 };
-struct UpsertSymbolExtractionStateOp {
-    std::string documentHash;
-    metadata::SymbolExtractionState state;
-};
 struct InsertRelationshipOp {
     metadata::DocumentRelationship relationship;
 };
@@ -168,13 +160,12 @@ struct AcknowledgeKnowledgeGraphOp {
 
 using WriteOp =
     std::variant<UpsertNodesOp, AddEdgesOp, AddDeferredEdgesOp, AddAliasesOp, AddDocEntitiesOp,
-                 AddDeferredDocEntitiesOp, UpsertSymbolMetadataOp, DeleteDocEntitiesForDocumentOp,
-                 DeleteNodeByIdOp, DeleteNodesForDocumentHashOp, DeleteEdgesForSourceFileOp,
-                 DeleteEdgesByRelationOp, DeleteOrphanedEdgesOp, DeleteOrphanedDocEntitiesOp,
-                 UpdateRepairStatusOp, UpsertTreeSnapshotOp, SetMetadataBatchOp,
-                 UpdateExtractionStatusOp, UpdateEmbeddingStatusByHashOp,
-                 UpdateEmbeddingStatusByHashesOp, CompleteDocumentEmbeddingsByHashesOp,
-                 UpsertSymbolExtractionStateOp, InsertRelationshipOp, AddSymSpellTermsOp,
+                 AddDeferredDocEntitiesOp, DeleteDocEntitiesForDocumentOp, DeleteNodeByIdOp,
+                 DeleteNodesForDocumentHashOp, DeleteEdgesForSourceFileOp, DeleteEdgesByRelationOp,
+                 DeleteOrphanedEdgesOp, DeleteOrphanedDocEntitiesOp, UpdateRepairStatusOp,
+                 UpsertTreeSnapshotOp, SetMetadataBatchOp, UpdateExtractionStatusOp,
+                 UpdateEmbeddingStatusByHashOp, UpdateEmbeddingStatusByHashesOp,
+                 CompleteDocumentEmbeddingsByHashesOp, InsertRelationshipOp, AddSymSpellTermsOp,
                  AcknowledgeKnowledgeGraphOp>;
 
 struct WriteBatch {
@@ -213,8 +204,6 @@ makeWriteBatchFromDeferredKGBatch(std::unique_ptr<DeferredKGBatch> batch, std::s
         wb->ops.emplace_back(AddDeferredDocEntitiesOp{std::move(batch->deferredDocEntities)});
     if (!batch->docEntities.empty())
         wb->ops.emplace_back(AddDocEntitiesOp{std::move(batch->docEntities)});
-    if (!batch->symbolMetadata.empty())
-        wb->ops.emplace_back(UpsertSymbolMetadataOp{std::move(batch->symbolMetadata)});
     if (batch->documentIdToDelete.has_value())
         wb->ops.emplace_back(DeleteDocEntitiesForDocumentOp{*batch->documentIdToDelete});
     if (batch->sourceFileToDelete.has_value())
@@ -256,7 +245,6 @@ public:
         std::uint64_t metadataEntriesSet = 0;
         std::uint64_t extractionStatusesUpdated = 0;
         std::uint64_t embeddingStatusesUpdated = 0;
-        std::uint64_t symbolExtractionStatesUpdated = 0;
         std::uint64_t relationshipsInserted = 0;
         std::uint64_t symSpellTermsAdded = 0;
         std::uint64_t nodesUpserted = 0;
@@ -264,7 +252,6 @@ public:
         std::uint64_t edgesAdded = 0;
         std::uint64_t aliasesAdded = 0;
         std::uint64_t docEntitiesAdded = 0;
-        std::uint64_t symbolsUpserted = 0;
         std::uint64_t edgesDeleted = 0;
         std::uint64_t docEntitiesDeleted = 0;
         std::uint64_t edgesCoalesced = 0;
@@ -325,8 +312,6 @@ private:
                          AddDeferredDocEntitiesOp& op,
                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
-                         UpsertSymbolMetadataOp& op);
-    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                          DeleteDocEntitiesForDocumentOp& op);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, DeleteNodeByIdOp& op);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
@@ -346,7 +331,6 @@ private:
     Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashOp& op);
     Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashesOp& op);
     Result<void> applyMetadataOp(CompleteDocumentEmbeddingsByHashesOp& op);
-    Result<void> applyMetadataOp(UpsertSymbolExtractionStateOp& op);
     Result<void> applyMetadataOp(InsertRelationshipOp& op);
     Result<void> applyMetadataOp(AddSymSpellTermsOp& op);
     Result<void> applyMetadataOp(AcknowledgeKnowledgeGraphOp& op);

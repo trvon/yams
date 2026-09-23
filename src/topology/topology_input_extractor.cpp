@@ -433,35 +433,44 @@ std::vector<TopologyNeighbor> collectNeighborsForDocument(metadata::KnowledgeGra
                                                           std::int64_t nodeId,
                                                           std::size_t maxNeighborsPerDocument,
                                                           TopologyExtractionStats* stats) {
-    auto edgeResult = kgStore.getEdgesBidirectional(
-        nodeId, std::string_view{"semantic_neighbor"},
-        std::max<std::size_t>(maxNeighborsPerDocument * 4, maxNeighborsPerDocument));
-    if (!edgeResult) {
+    // semantic_neighbor edges point from a document to its own k nearest neighbours, so the
+    // outgoing edges are this document's neighbours and an incoming edge from the same node
+    // makes the pair mutual. Fetch them separately (strongest first): a hub's many incoming
+    // edges must not crowd its own neighbours out of a shared window.
+    constexpr std::string_view kSemanticNeighbor{"semantic_neighbor"};
+    auto outgoingResult = kgStore.getEdgesFrom(nodeId, kSemanticNeighbor,
+                                               std::max<std::size_t>(maxNeighborsPerDocument, 1));
+    if (!outgoingResult) {
+        return {};
+    }
+    // Mutual edges carry the pair's similarity, so they rank near the top of the incoming list.
+    auto incomingResult = kgStore.getEdgesTo(nodeId, kSemanticNeighbor,
+                                             std::max<std::size_t>(maxNeighborsPerDocument * 4, 1));
+    if (!incomingResult) {
         return {};
     }
 
     if (stats != nullptr) {
-        stats->neighborEdgesScanned += edgeResult.value().size();
+        stats->neighborEdgesScanned +=
+            outgoingResult.value().size() + incomingResult.value().size();
     }
 
     std::unordered_map<std::int64_t, float> outgoingScores;
     std::unordered_set<std::int64_t> incomingIds;
     std::vector<std::int64_t> neighborNodeIds;
-    neighborNodeIds.reserve(edgeResult.value().size());
+    neighborNodeIds.reserve(outgoingResult.value().size());
 
-    for (const auto& edge : edgeResult.value()) {
-        if (edge.srcNodeId == nodeId) {
-            auto it = outgoingScores.find(edge.dstNodeId);
-            if (it == outgoingScores.end()) {
-                outgoingScores.emplace(edge.dstNodeId, edge.weight);
-                neighborNodeIds.push_back(edge.dstNodeId);
-            } else {
-                it->second = std::max(it->second, edge.weight);
-            }
+    for (const auto& edge : outgoingResult.value()) {
+        auto it = outgoingScores.find(edge.dstNodeId);
+        if (it == outgoingScores.end()) {
+            outgoingScores.emplace(edge.dstNodeId, edge.weight);
+            neighborNodeIds.push_back(edge.dstNodeId);
+        } else {
+            it->second = std::max(it->second, edge.weight);
         }
-        if (edge.dstNodeId == nodeId) {
-            incomingIds.insert(edge.srcNodeId);
-        }
+    }
+    for (const auto& edge : incomingResult.value()) {
+        incomingIds.insert(edge.srcNodeId);
     }
 
     if (neighborNodeIds.empty()) {

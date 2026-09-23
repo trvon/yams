@@ -58,7 +58,6 @@
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/p2p/p2p_manager.h>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
-#include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
@@ -404,13 +403,6 @@ public:
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> getContentExtractors() const {
         std::lock_guard lock(contentExtractorsMutex_);
         return contentExtractors_;
-    }
-    // Symbol extractors (ABI adapters) - delegate to PluginManager
-    const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& getSymbolExtractors() const {
-        if (pluginManager_) {
-            return pluginManager_->getSymbolExtractors();
-        }
-        return symbolExtractors_; // Empty fallback
     }
 
     // NL Entity extractors (ABI adapters, e.g., Glint) - delegate to PluginManager
@@ -938,7 +930,6 @@ private:
     TopologyManager topologyManager_;
     mutable std::mutex contentExtractorsMutex_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
-    std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     mutable std::mutex tuningConfigMutex_;
     TuningConfig tuningConfig_{};
     mutable std::mutex runtimeTuningStatusMutex_;
