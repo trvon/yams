@@ -962,7 +962,8 @@ jobs:
           $env:YAMS_NINJA_JOBS = "2"
 
           # Run the build via setup.ps1
-          .\setup.ps1 -BuildType Release
+          # ONNX Runtime is deprecated and opt-in; release artifacts still ship it for now.
+          .\setup.ps1 -BuildType Release -WithOnnx
 
           # Set BUILD_DIR for subsequent steps
           "BUILD_DIR=build/release" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -1043,7 +1044,8 @@ jobs:
           VERSION="${{ steps.meta.outputs.version }}"
           echo "Setting version: ${VERSION}"
 
-          ./setup.sh Release
+          # ONNX Runtime is deprecated and opt-in; release artifacts still ship it for now.
+          ./setup.sh Release --with-onnx
           # Source Conan build env so meson compile uses the same Meson version
           # that setup.sh used for meson setup (Conan provides Meson 1.10.x which
           # creates build.dat incompatible with older system Meson).

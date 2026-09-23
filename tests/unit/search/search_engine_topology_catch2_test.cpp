@@ -1470,6 +1470,54 @@ TEST_CASE("SearchEngine cross reranker promotes lower fused candidate",
     CHECK((debug.at("cross_rerank_replace_scores") == "1"));
 }
 
+TEST_CASE("SearchEngine reports the scoring mode of the wired cross reranker",
+          "[search][rerank][catch2]") {
+    TopologySearchFixture fix;
+    fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
+    fix.addDocument("x2", "alpha two", {0.9F, 0.1F});
+
+    SearchEngineConfig config;
+    config.includeDebugInfo = true;
+    config.enableParallelExecution = false;
+    config.enableGraphRerank = false;
+    config.enableReranking = true;
+    config.rerankTopK = 2;
+    // The daemon resolves the scoring mode from reranker policy, which can differ from the
+    // engine config; the debug stat must describe the scorer that actually ran.
+    config.simeonRerankOuterMaxSim = false;
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, nullptr, fix.kgStore, config);
+    auto scorer = [](const std::string&,
+                     const std::vector<std::string>& documents) -> Result<std::vector<float>> {
+        return std::vector<float>(documents.size(), 0.5F);
+    };
+
+    SearchParams params;
+    params.limit = 2;
+
+    SECTION("mode supplied by the wiring wins over the engine config") {
+        engine.setCrossReranker(scorer, "simeon_outer_maxsim");
+        auto response = engine.searchWithResponse("alpha", params);
+        REQUIRE(response.has_value());
+        const auto& debug = response.value().debugStats;
+        CHECK((debug.at("cross_rerank_scoring_mode") == "simeon_outer_maxsim"));
+        CHECK((debug.at("cross_rerank_simeon_outer_maxsim") == "1"));
+    }
+
+    SECTION("an unlabelled scorer reports an unknown mode") {
+        engine.setCrossReranker(scorer);
+        auto response = engine.searchWithResponse("alpha", params);
+        REQUIRE(response.has_value());
+        const auto& debug = response.value().debugStats;
+        CHECK((debug.at("cross_rerank_scoring_mode") == "unknown"));
+        CHECK((debug.at("cross_rerank_simeon_outer_maxsim") == "0"));
+    }
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-do-while, readability-function-cognitive-complexity)
 
 TEST_CASE("Topology routing options preserve the typed product configuration",

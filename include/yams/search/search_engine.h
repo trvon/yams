@@ -74,7 +74,9 @@ public:
     void setConceptExtractor(EntityExtractionFunc extractor);
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner);
     void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend);
-    void setCrossReranker(CrossRerankScorer scorer);
+    /// @param scoringMode label reported as the `cross_rerank_scoring_mode` debug stat; callers
+    ///        that resolve the scorer's mode outside SearchEngineConfig must pass it here.
+    void setCrossReranker(CrossRerankScorer scorer, std::string scoringMode = {});
     std::shared_ptr<SearchTuner> getSearchTuner() const;
     SimeonLexicalStatus getSimeonLexicalStatus() const;
 

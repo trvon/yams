@@ -3,7 +3,8 @@
 # Unified build script for YAMS
 #
 # Usage: ./setup.sh [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan]
-#        ./setup.sh Release --with-tests [--offline] [--system-deps]
+#        ./setup.sh Release --with-tests [--with-onnx] [--offline] [--system-deps]
+#   --with-onnx: Build the deprecated ONNX Runtime integration (off by default)
 #   build_type: Release (default), Debug, Profiling, or Fuzzing (TODO)
 #   --coverage: Enable code coverage instrumentation (Debug builds only)
 #   --tsan: Enable ThreadSanitizer for race detection (default for Debug builds)
@@ -86,6 +87,7 @@ ENABLE_TSAN="${ENABLE_TSAN:-}" # Preserve environment variable if set
 ENABLE_ASAN="${ENABLE_ASAN:-}" # Preserve environment variable if set
 BUILD_TYPE_INPUT=""
 ENABLE_RELEASE_TESTS=false
+ENABLE_ONNX=false
 TSAN_EXPLICIT=false
 ASAN_EXPLICIT=false
 
@@ -131,6 +133,12 @@ while [[ $# -gt 0 ]]; do
 		ENABLE_RELEASE_TESTS=true
 		shift
 		;;
+	--with-onnx)
+		# ONNX Runtime is deprecated and opt-in: it adds a heavy onnxruntime
+		# dependency (built from source for some GPU providers).
+		ENABLE_ONNX=true
+		shift
+		;;
 	--offline)
 		ENABLE_OFFLINE=true
 		shift
@@ -148,13 +156,19 @@ while [[ $# -gt 0 ]]; do
 		shift
 		;;
 	*)
-		echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan] [--with-tests] [--offline] [--system-deps]" >&2
+		echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan] [--with-tests] [--with-onnx] [--offline] [--system-deps]" >&2
 		exit 1
 		;;
 	esac
 done
 
 BUILD_TYPE_INPUT=${BUILD_TYPE_INPUT:-Release}
+
+# ONNX Runtime is deprecated and opt-in (--with-onnx). YAMS_DISABLE_ONNX=true still
+# forces it off for older scripts.
+if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
+	ENABLE_ONNX=false
+fi
 BUILD_TYPE_INPUT_LOWER=$(echo "${BUILD_TYPE_INPUT}" | tr '[:upper:]' '[:lower:]')
 
 case "${BUILD_TYPE_INPUT_LOWER}" in
@@ -424,7 +438,8 @@ if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
 	CONAN_SUBDIR="build-profiling"
 	# Conan often writes profiling/debug toolchains under a nested build-debug directory
 	CONAN_ALT_SUBDIR="build-debug"
-	BUILD_TYPE_MESON_LOWER="debug"
+	# Profile optimized code: -O0 zone timings do not predict release hot spots.
+	BUILD_TYPE_MESON_LOWER="debugoptimized"
 elif [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 	BUILD_DIR="build/fuzzing"
 	CONAN_SUBDIR="build-fuzzing"
@@ -488,8 +503,8 @@ if [[ "${USE_SYSTEM_DEPS}" != "true" ]]; then
 	echo "--- Exporting custom Conan recipes... ---"
 
 	# Export custom onnxruntime recipe if it exists
-	if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
-		echo "Skipping onnxruntime recipe export (YAMS_DISABLE_ONNX=true)"
+	if [[ "${ENABLE_ONNX}" != "true" ]]; then
+		echo "Skipping onnxruntime recipe export (ONNX disabled)"
 	elif [[ -f "conan/onnxruntime/conanfile.py" ]]; then
 		# Avoid sporadic Conan cache race/collision errors by retrying export once.
 		echo "Exporting onnxruntime/1.23.0 from conan/onnxruntime/"
@@ -526,11 +541,11 @@ if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
 	CONAN_ARGS+=(-o "tracy/*:enable=True")
 fi
 
-# Handle optional feature flags from environment
-if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
-	echo "ONNX support disabled (YAMS_DISABLE_ONNX=true)"
+if [[ "${ENABLE_ONNX}" != "true" ]]; then
+	echo "ONNX support disabled (deprecated; pass --with-onnx to build it)"
 	CONAN_ARGS+=(-o "yams/*:enable_onnx=False")
 else
+	CONAN_ARGS+=(-o "yams/*:enable_onnx=True")
 	# --- Detect system-installed onnxruntime ---
 	# Override with YAMS_USE_SYSTEM_ONNX=true|false|auto (default: auto)
 	# When auto, we detect system onnxruntime and use it if found.
@@ -938,7 +953,9 @@ if [[ "${LIBCXX_HARDENING}" != "none" ]]; then
 fi
 
 # Handle optional feature flags for Meson (must match Conan options)
-if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
+if [[ "${ENABLE_ONNX}" == "true" ]]; then
+	MESON_OPTIONS+=("-Denable-onnx=enabled")
+else
 	MESON_OPTIONS+=("-Denable-onnx=disabled")
 	MESON_OPTIONS+=("-Dplugin-onnx=false")
 fi
@@ -1028,7 +1045,10 @@ fi
 
 # ThreadSanitizer: default enabled for Debug builds, can be overridden with --tsan/--no-tsan
 if [[ -z "${ENABLE_TSAN}" ]]; then
-	if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
+	# Profiling stays uninstrumented so Tracy timings are not TSAN-distorted (opt in with --tsan).
+	if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
+		ENABLE_TSAN=false
+	elif [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 		ENABLE_TSAN=true
 	else
 		ENABLE_TSAN=false
@@ -1140,9 +1160,8 @@ if command -v zig >/dev/null 2>&1; then
 	fi
 fi
 
-# Auto-enable Glint NL entity extractor plugin (GLiNER-based)
-# Requires ONNX Runtime which is already a dependency
-if [[ "${YAMS_DISABLE_ONNX:-}" != "true" ]]; then
+# Glint NL entity extractor plugin (GLiNER-based) requires ONNX Runtime.
+if [[ "${ENABLE_ONNX}" == "true" ]]; then
 	echo "Enabling Glint NL entity extractor plugin"
 	MESON_OPTIONS+=("-Dplugin-glint=true")
 fi

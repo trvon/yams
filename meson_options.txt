@@ -2,7 +2,7 @@ option('build-cli', type: 'boolean', value: true, description: 'Build CLI tools'
 option('build-mcp-server', type: 'boolean', value: true, description: 'Build MCP server')
 option('wasi', type: 'boolean', value: false, description: 'Build a WASI-friendly subset (no daemon IPC, no dynamic plugins, limited features)')
 option('enable-lzma', type: 'feature', value: 'auto', description: 'Enable LZMA via liblzma (xz)')
-option('enable-onnx', type: 'feature', value: 'auto', description: 'ONNX Runtime integration in vector library (auto-detect)')
+option('enable-onnx', type: 'feature', value: 'disabled', description: 'ONNX Runtime integration in vector library (deprecated; opt in with enabled or auto)')
 option('require-fts5', type: 'boolean', value: true, description: 'Fail configure if sqlite3 lacks FTS5')
 option('require-sqlite-vec', type: 'boolean', value: true, description: 'Require sqlite-vec-cpp submodule for static vector DB; when true and not found, Meson will error out (recommended). Set to false only if providing a runtime module via YAMS_SQLITE_VEC_MODULE.')
 option('database-backend', type: 'combo', choices: ['libsql', 'sqlite'], value: 'libsql', description: 'Database backend: libsql (default, MVCC concurrent writes) or sqlite (standard SQLite3)')

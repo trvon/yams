@@ -81,7 +81,7 @@ build() {
     export CC=clang
     export CXX=clang++
 
-    bash ./setup.sh Release
+    bash ./setup.sh Release --with-onnx
 
     # Source Conan build env for meson compile compatibility
     local conan_env=""

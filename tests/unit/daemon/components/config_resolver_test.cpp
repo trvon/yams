@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <tuple>
 
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
@@ -346,6 +347,22 @@ TEST_CASE("ConfigResolver wires [tuning] keys for every setter that was env-only
                           {"work_coordinator_threads", "11"},
                           {"embed_channel_capacity", "4096"},
                           {"connection_lifetime_s", "1234"}};
+    // Several defaults derive from the host's core count and can equal a sentinel below
+    // (e.g. onnx_max_concurrent is 7 on a 48-thread host), so "reverted" means "back to the
+    // value observed before the override", not "different from the sentinel".
+    const auto defaults = [] {
+        return std::make_tuple(
+            TuneAdvisor::connectionSlotsMin(), TuneAdvisor::connectionSlotsMax(),
+            TuneAdvisor::connectionSlotsScaleStep(), TuneAdvisor::cpuHighThresholdPercent(),
+            TuneAdvisor::onnxMaxConcurrent(), TuneAdvisor::onnxGlinerReserved(),
+            TuneAdvisor::onnxEmbedReserved(), TuneAdvisor::onnxRerankerReserved(),
+            TuneAdvisor::onnxSessionsPerModel(false), TuneAdvisor::modelEvictWarningThreshold(),
+            TuneAdvisor::maxIngestWorkers(), TuneAdvisor::storeDocumentChannelCapacity(),
+            TuneAdvisor::workCoordinatorThreads(), TuneAdvisor::embedChannelCapacity(),
+            TuneAdvisor::connectionLifetimeSeconds());
+    };
+    const auto before = defaults();
+
     TuningConfig base;
     const auto resolved = ConfigResolver::applyRuntimeTuning(sections, base);
 
@@ -372,21 +389,7 @@ TEST_CASE("ConfigResolver wires [tuning] keys for every setter that was env-only
     // A reload that drops the keys reverts every one of them.
     sections["tuning"] = {};
     (void)ConfigResolver::applyRuntimeTuning(sections, base);
-    CHECK((TuneAdvisor::connectionSlotsMin() != 300u));
-    CHECK((TuneAdvisor::connectionSlotsMax() != 5000u));
-    CHECK((TuneAdvisor::connectionSlotsScaleStep() != 24u));
-    CHECK((TuneAdvisor::cpuHighThresholdPercent() != Catch::Approx(77.5)));
-    CHECK((TuneAdvisor::onnxMaxConcurrent() != 7u));
-    CHECK((TuneAdvisor::onnxGlinerReserved() != 2u));
-    CHECK((TuneAdvisor::onnxEmbedReserved() != 3u));
-    CHECK((TuneAdvisor::onnxRerankerReserved() != 4u));
-    CHECK((TuneAdvisor::onnxSessionsPerModel(false) != 5u));
-    CHECK((TuneAdvisor::modelEvictWarningThreshold() != Catch::Approx(0.61)));
-    CHECK((TuneAdvisor::maxIngestWorkers() != 9u));
-    CHECK((TuneAdvisor::storeDocumentChannelCapacity() != 1024u));
-    CHECK((TuneAdvisor::workCoordinatorThreads() != 11u));
-    CHECK((TuneAdvisor::embedChannelCapacity() != 4096u));
-    CHECK((TuneAdvisor::connectionLifetimeSeconds() != 1234u));
+    CHECK((defaults() == before));
 }
 
 TEST_CASE("Typed post-ingest configuration outranks the compatibility environment",

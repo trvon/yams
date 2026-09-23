@@ -64,7 +64,7 @@ class YamsConan(ConanFile):
         "build_tests": False,
         "build_benchmarks": False,
         "enable_profiling": False,
-        "enable_onnx": True,
+        "enable_onnx": False,  # deprecated; opt in with setup.sh --with-onnx
         "enable_re2": True,
     }
 
