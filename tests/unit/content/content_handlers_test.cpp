@@ -162,6 +162,39 @@ TEST_CASE("EncodingDetector: Latin1 to UTF-8 conversion", "[content][encoding]")
 // Content Handler Registry Tests
 // ===========================================================================
 
+TEST_CASE("EncodingDetector: keeps the unit after an unpaired high surrogate",
+          "[content][encoding]") {
+    // UTF-16LE: D800 (high surrogate) followed by 'A' (0x0041) instead of a low surrogate.
+    std::string utf16le;
+    utf16le.push_back(static_cast<char>(0x00));
+    utf16le.push_back(static_cast<char>(0xD8));
+    utf16le.push_back('A');
+    utf16le.push_back(static_cast<char>(0x00));
+    auto out = EncodingDetector::convertToUtf8(utf16le, "UTF-16LE");
+    REQUIRE(out.has_value());
+    CHECK(out.value() == "\xEF\xBF\xBD"
+                         "A");
+}
+
+TEST_CASE("EncodingDetector: rejects malformed UTF-8 as UTF-8", "[content][encoding]") {
+    // Overlong, out-of-range lead, surrogate and above-U+10FFFF sequences are not UTF-8, so
+    // the text must go through conversion instead of reaching the index as invalid UTF-8.
+    const std::string cases[] = {
+        std::string("ab\xC0\x80", 4),         std::string("ab\xF5\x80\x80\x80", 6),
+        std::string("ab\xED\xA0\x80", 5),     std::string("ab\xE0\x80\x80", 5),
+        std::string("ab\xF4\x90\x80\x80", 6),
+    };
+    for (const auto& text : cases) {
+        const auto* bytes = reinterpret_cast<const std::byte*>(text.data());
+        CHECK(EncodingDetector::detectEncoding(std::span<const std::byte>(bytes, text.size())) !=
+              "UTF-8");
+    }
+    const std::string valid = "caf\xC3\xA9 \xF0\x9F\x98\x80";
+    const auto* bytes = reinterpret_cast<const std::byte*>(valid.data());
+    CHECK(EncodingDetector::detectEncoding(std::span<const std::byte>(bytes, valid.size())) ==
+          "UTF-8");
+}
+
 TEST_CASE("ContentHandlerRegistry: Initialization and handler registration",
           "[content][registry]") {
     ContentHandlerFixture fixture;
