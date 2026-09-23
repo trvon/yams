@@ -871,6 +871,12 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.ann_candidate_limit"); it != kv.end()) {
                 policy.annCandidateLimit = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.bq_candidate_limit"); it != kv.end()) {
+                policy.bqCandidateLimit = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.bq_prefix_dim"); it != kv.end()) {
+                policy.bqPrefixDimension = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.adaptive_probe_score_gap"); it != kv.end()) {
                 policy.adaptiveProbeScoreGap = parseFloat(it->second);
             }
@@ -1036,6 +1042,12 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         }
         if (auto it = kv.find("topology.routing_representatives"); it != kv.end()) {
             policy.routingRepresentativeCount = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.sgc_hops"); it != kv.end()) {
+            policy.sgcHops = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.sgc_normalize"); it != kv.end()) {
+            policy.sgcNormalize = parseBoolValue(it->second);
         }
         if (auto it = kv.find("topology.boundary_spill"); it != kv.end()) {
             policy.boundarySpillEnabled = parseBoolValue(it->second);

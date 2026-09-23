@@ -1036,6 +1036,8 @@ TEST_CASE_METHOD(ConfigResolverFixture,
 [topology]
 engine = "connected"
 routing_representatives = 4
+sgc_hops = 2
+sgc_normalize = false
 boundary_spill = true
 boundary_spill_limit = 1
 boundary_spill_distance_ratio = +1.2
@@ -1060,6 +1062,10 @@ minhash_alpha = 0.15
     CHECK((*policy.engine == "connected"));
     REQUIRE(policy.routingRepresentativeCount.has_value());
     CHECK((*policy.routingRepresentativeCount == 4));
+    REQUIRE(policy.sgcHops.has_value());
+    CHECK((*policy.sgcHops == 2));
+    REQUIRE(policy.sgcNormalize.has_value());
+    CHECK_FALSE(*policy.sgcNormalize);
     REQUIRE(policy.boundarySpillEnabled.has_value());
     CHECK(*policy.boundarySpillEnabled);
     REQUIRE(policy.boundarySpillLimit.has_value());
@@ -1091,6 +1097,8 @@ max_clusters = 3
 max_seed_documents = 24
 representative_limit = 2
 ann_candidate_limit = 16
+bq_candidate_limit = 12
+bq_prefix_dim = 64
 adaptive_probe_score_gap = 0.07
 narrow_min_boundary_margin = 0.03
 max_docs = 42
@@ -1130,6 +1138,10 @@ rrf_k = 33
     CHECK((*policy.representativeLimit == 2U));
     REQUIRE(policy.annCandidateLimit.has_value());
     CHECK((*policy.annCandidateLimit == 16U));
+    REQUIRE(policy.bqCandidateLimit.has_value());
+    CHECK((*policy.bqCandidateLimit == 12U));
+    REQUIRE(policy.bqPrefixDimension.has_value());
+    CHECK((*policy.bqPrefixDimension == 64U));
     REQUIRE(policy.adaptiveProbeScoreGap.has_value());
     CHECK((*policy.adaptiveProbeScoreGap == Catch::Approx(0.07F)));
     REQUIRE(policy.narrowMinBoundaryMargin.has_value());

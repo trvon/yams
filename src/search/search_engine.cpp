@@ -1130,8 +1130,9 @@ public:
         if (metadataRepo_ && kgStore_) {
             auto store = std::make_shared<yams::topology::MetadataKgTopologyArtifactStore>(
                 metadataRepo_, kgStore_);
-            topologySnapshotCache_ = std::make_shared<TopologyRoutingSnapshotCache>(
-                [store]() { return store->loadLatest(); });
+            topologySnapshotCache_ =
+                std::make_shared<TopologyRoutingSnapshotCache>(TopologyRoutingSharedSnapshotLoader{
+                    [store]() { return store->loadLatestShared(); }});
         }
     }
 

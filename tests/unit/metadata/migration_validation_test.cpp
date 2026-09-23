@@ -572,3 +572,148 @@ TEST_CASE("Migration v40 drops symbol extraction subsystem and prunes graph",
             })
             .has_value());
 }
+
+namespace {
+
+Result<int> countRows(Database& db, const std::string& sql) {
+    auto stmtR = db.prepare(sql);
+    if (!stmtR)
+        return stmtR.error();
+    auto stmt = std::move(stmtR).value();
+    if (auto s = stmt.step(); !s)
+        return s.error();
+    return stmt.getInt(0);
+}
+
+// Migrates to v39, seeds two topology snapshots plus an optional pointer, then applies v40 and
+// returns how many snapshot nodes survived.
+Result<int> snapshotsSurvivingV40(Database& db, const char* pointerSql) {
+    MigrationManager mm(db);
+    if (auto init = mm.initialize(); !init)
+        return init.error();
+    mm.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+    if (auto to39 = mm.migrateTo(39); !to39)
+        return to39.error();
+    auto seeded = db.execute(R"(
+        INSERT INTO kg_nodes (node_key, label, type, properties) VALUES
+            ('topology:snapshot:snap-a', 'snap-a', 'topology_snapshot', '{}'),
+            ('topology:snapshot:snap-b', 'snap-b', 'topology_snapshot', '{}');
+    )");
+    if (!seeded)
+        return seeded.error();
+    if (pointerSql != nullptr) {
+        if (auto pointer = db.execute(pointerSql); !pointer)
+            return pointer.error();
+    }
+    if (auto to40 = mm.migrateTo(40); !to40)
+        return to40.error();
+    return countRows(db, "SELECT COUNT(*) FROM kg_nodes WHERE type = 'topology_snapshot'");
+}
+
+} // namespace
+
+TEST_CASE("Migration v40 keeps topology snapshots when the latest pointer is unusable",
+          "[catch2][unit][metadata][migration][v40]") {
+    MigrationTestFixture fixture;
+    auto pool = fixture.getPool();
+
+    SECTION("No latest pointer") {
+        auto survived =
+            pool->withConnection([](Database& db) { return snapshotsSurvivingV40(db, nullptr); });
+        REQUIRE(survived.has_value());
+        CHECK(survived.value() == 2);
+    }
+
+    SECTION("Malformed pointer JSON") {
+        auto survived = pool->withConnection([](Database& db) {
+            return snapshotsSurvivingV40(
+                db, "INSERT INTO kg_nodes (node_key, label, type, properties) VALUES "
+                    "('topology:snapshot:latest', 'latest', 'topology_snapshot_pointer', "
+                    "'{not json');");
+        });
+        REQUIRE(survived.has_value());
+        CHECK(survived.value() == 2);
+    }
+
+    SECTION("Pointer names a snapshot that does not exist") {
+        auto survived = pool->withConnection([](Database& db) {
+            return snapshotsSurvivingV40(
+                db, "INSERT INTO kg_nodes (node_key, label, type, properties) VALUES "
+                    "('topology:snapshot:latest', 'latest', 'topology_snapshot_pointer', "
+                    "'{\"snapshot_id\":\"snap-missing\"}');");
+        });
+        REQUIRE(survived.has_value());
+        CHECK(survived.value() == 2);
+    }
+
+    SECTION("Valid pointer keeps only the named snapshot") {
+        auto survived = pool->withConnection([](Database& db) {
+            return snapshotsSurvivingV40(
+                db, "INSERT INTO kg_nodes (node_key, label, type, properties) VALUES "
+                    "('topology:snapshot:latest', 'latest', 'topology_snapshot_pointer', "
+                    "'{\"snapshot_id\":\"snap-b\"}');");
+        });
+        REQUIRE(survived.has_value());
+        CHECK(survived.value() == 1);
+    }
+}
+
+TEST_CASE("Migration v41 bypasses only lowercase topology keys and restores counts on rollback",
+          "[catch2][unit][metadata][migration][v41]") {
+    MigrationTestFixture fixture;
+    auto pool = fixture.getPool();
+
+    auto run = pool->withConnection([](Database& db) -> Result<void> {
+        MigrationManager mm(db);
+        if (auto r = mm.initialize(); !r)
+            return r.error();
+        mm.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+        if (auto r = mm.migrateTo(40); !r)
+            return r.error();
+        if (auto r = db.execute(R"(
+                INSERT INTO documents (id, file_path, file_name, file_size, sha256_hash)
+                VALUES (1, '/a.md', 'a.md', 1, 'hash-a'), (2, '/b.md', 'b.md', 1, 'hash-b');
+                INSERT INTO metadata (document_id, key, value, value_type) VALUES
+                    (1, 'topology.cluster_id', 'c1', 'string'),
+                    (2, 'topology.cluster_id', 'c1', 'string');
+            )");
+            !r)
+            return r.error();
+        if (auto r = mm.migrateTo(41); !r)
+            return r.error();
+
+        // Up: topology counts are gone.
+        auto afterUp = countRows(db, "SELECT COUNT(*) FROM metadata_value_counts "
+                                     "WHERE key = 'topology.cluster_id'");
+        if (!afterUp)
+            return afterUp.error();
+        if (afterUp.value() != 0)
+            return Error{ErrorCode::InvalidData, "topology counts not cleared"};
+
+        // A user key that only differs in case is still counted.
+        if (auto r = db.execute("INSERT INTO metadata (document_id, key, value, value_type) "
+                                "VALUES (1, 'Topology.Owner', 'alice', 'string');");
+            !r)
+            return r.error();
+        auto userKey = countRows(db, "SELECT COALESCE(SUM(count), 0) FROM metadata_value_counts "
+                                     "WHERE key = 'Topology.Owner'");
+        if (!userKey)
+            return userKey.error();
+        if (userKey.value() != 1)
+            return Error{ErrorCode::InvalidData, "case-different user key was not counted"};
+
+        // Down: counts are rebuilt from the remaining rows.
+        if (auto r = mm.rollbackTo(40); !r)
+            return r.error();
+        auto afterDown = countRows(db, "SELECT COALESCE(SUM(count), 0) FROM metadata_value_counts "
+                                       "WHERE key = 'topology.cluster_id' AND value = 'c1'");
+        if (!afterDown)
+            return afterDown.error();
+        if (afterDown.value() != 2)
+            return Error{ErrorCode::InvalidData, "rollback did not restore topology counts: " +
+                                                     std::to_string(afterDown.value())};
+        return Result<void>();
+    });
+    INFO((run ? std::string{} : run.error().message));
+    REQUIRE(run.has_value());
+}

@@ -478,6 +478,12 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.annCandidateLimit) {
             opts.config.topologyRoutingAnnCandidateLimit = *tp.annCandidateLimit;
         }
+        if (tp.bqCandidateLimit) {
+            opts.config.topologyRoutingBqCandidateLimit = *tp.bqCandidateLimit;
+        }
+        if (tp.bqPrefixDimension) {
+            opts.config.topologyRoutingBqPrefixDimension = *tp.bqPrefixDimension;
+        }
         if (tp.adaptiveProbeScoreGap) {
             opts.config.topologyAdaptiveProbeScoreGap = std::max(0.0F, *tp.adaptiveProbeScoreGap);
         }

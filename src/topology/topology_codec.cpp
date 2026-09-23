@@ -1,12 +1,14 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/profiling.h>
 #include <yams/topology/topology_codec.h>
 
 #include <nlohmann/json.hpp>
-#include <yams/core/assert.hpp>
 #include <yams/compression/compressor_interface.h>
+#include <yams/core/assert.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
@@ -30,6 +32,18 @@ inline uint32_t toU32(size_t n) {
 constexpr uint32_t kTopologyBinaryMagic = 0x59414D54; // 'Y','A','M','T'
 constexpr uint32_t kTopologyBinaryVersion = 1;
 constexpr uint32_t kNullStringId = 0xFFFFFFFF;
+
+// Lower bounds on encoded record sizes, used to validate counts before reserving.
+constexpr size_t kMinStringBytes = 4;    // length prefix
+constexpr size_t kMinStringRefBytes = 4; // string-table index
+constexpr size_t kMinFloatBytes = 4;
+constexpr size_t kMinRoutingRepBytes = 4 + 4; // hash index + embedding dim
+constexpr size_t kMinClusterBytes = 4 * 4 + 8 * 4 + 4 * 2 + 1 + 4 * 4;
+constexpr size_t kMinMembershipBytes = 4 * 4 + 8 * 3 + 1 + 4;
+
+// Upper bound on a decompressed topology snapshot; also bounded by a compression-ratio cap.
+constexpr size_t kMaxSnapshotUncompressedBytes = size_t{1} << 30; // 1 GiB
+constexpr size_t kMaxSnapshotCompressionRatio = 1000;
 
 [[maybe_unused]] const char* roleToString(DocumentTopologyRole role) {
     switch (role) {
@@ -228,7 +242,23 @@ class ByteReader {
 public:
     explicit ByteReader(std::span<const std::byte> data) : data_(data), pos_(0) {}
 
-    bool hasRemaining(size_t bytes) const { return pos_ + bytes <= data_.size(); }
+    bool hasRemaining(size_t bytes) const { return bytes <= data_.size() - pos_; }
+    bool atEnd() const { return pos_ == data_.size(); }
+
+    // Reads an element count and rejects counts that cannot fit in the remaining bytes, so
+    // corrupt payloads cannot drive reserve() into huge allocations.
+    Result<uint32_t> readCount(size_t minElementBytes, std::string_view what) {
+        auto count = readU32();
+        if (!count) {
+            return count.error();
+        }
+        const size_t remaining = data_.size() - pos_;
+        if (minElementBytes > 0 && count.value() > remaining / minElementBytes) {
+            return Error{ErrorCode::InvalidData, "Topology binary " + std::string(what) +
+                                                     " count exceeds remaining payload"};
+        }
+        return count;
+    }
 
     Result<uint8_t> readU8() {
         if (!hasRemaining(1)) {
@@ -404,6 +434,7 @@ Result<std::vector<std::byte>> decodeBase64(std::string_view s) {
 }
 
 Result<std::vector<std::byte>> serializeTopologyBatchBinary(const TopologyArtifactBatch& batch) {
+    YAMS_ZONE_SCOPED_N("topology::codec::serializeBinary");
     ByteWriter writer;
     writer.reserve(1024 + batch.clusters.size() * 128 + batch.memberships.size() * 64);
 
@@ -550,6 +581,7 @@ Result<std::vector<std::byte>> serializeTopologyBatchBinary(const TopologyArtifa
 }
 
 Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std::byte> bytes) {
+    YAMS_ZONE_SCOPED_N("topology::codec::deserializeBinary");
     ByteReader reader(bytes);
 
     // 1. Header
@@ -621,7 +653,7 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
     batch.protectedRelationIdentity = std::move(protRel.value());
 
     // 3. String Table
-    auto stringCountRes = reader.readU32();
+    auto stringCountRes = reader.readCount(kMinStringBytes, "string table");
     if (!stringCountRes) {
         return stringCountRes.error();
     }
@@ -656,7 +688,7 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
     };
 
     // 4. Clusters
-    auto clusterCountRes = reader.readU32();
+    auto clusterCountRes = reader.readCount(kMinClusterBytes, "cluster");
     if (!clusterCountRes) {
         return clusterCountRes.error();
     }
@@ -759,7 +791,7 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
             cluster.medoid = std::move(medoid);
         }
 
-        auto memberHashCount = reader.readU32();
+        auto memberHashCount = reader.readCount(kMinStringRefBytes, "member hash");
         if (!memberHashCount)
             return memberHashCount.error();
         cluster.memberDocumentHashes.reserve(memberHashCount.value());
@@ -773,7 +805,7 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
             cluster.memberDocumentHashes.push_back(*hStr.value());
         }
 
-        auto overlapCount = reader.readU32();
+        auto overlapCount = reader.readCount(kMinStringRefBytes, "overlap cluster");
         if (!overlapCount)
             return overlapCount.error();
         cluster.overlapClusterIds.reserve(overlapCount.value());
@@ -787,7 +819,7 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
             cluster.overlapClusterIds.push_back(*oStr.value());
         }
 
-        auto centroidDim = reader.readU32();
+        auto centroidDim = reader.readCount(kMinFloatBytes, "centroid dimension");
         if (!centroidDim)
             return centroidDim.error();
         cluster.centroidEmbedding.reserve(centroidDim.value());
@@ -798,7 +830,7 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
             cluster.centroidEmbedding.push_back(f.value());
         }
 
-        auto routingRepCount = reader.readU32();
+        auto routingRepCount = reader.readCount(kMinRoutingRepBytes, "routing representative");
         if (!routingRepCount)
             return routingRepCount.error();
         cluster.routingRepresentatives.reserve(routingRepCount.value());
@@ -812,7 +844,7 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
                 return rStr.error();
             rep.documentHash = *rStr.value();
 
-            auto rDim = reader.readU32();
+            auto rDim = reader.readCount(kMinFloatBytes, "routing embedding dimension");
             if (!rDim)
                 return rDim.error();
             rep.embedding.reserve(rDim.value());
@@ -829,7 +861,7 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
     }
 
     // 5. Memberships
-    auto membershipCountRes = reader.readU32();
+    auto membershipCountRes = reader.readCount(kMinMembershipBytes, "membership");
     if (!membershipCountRes) {
         return membershipCountRes.error();
     }
@@ -888,7 +920,7 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
             return role.error();
         membership.role = static_cast<DocumentTopologyRole>(role.value());
 
-        auto overlapCount = reader.readU32();
+        auto overlapCount = reader.readCount(kMinStringRefBytes, "overlap cluster");
         if (!overlapCount)
             return overlapCount.error();
         membership.overlapClusterIds.reserve(overlapCount.value());
@@ -905,11 +937,15 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
         batch.memberships.push_back(std::move(membership));
     }
 
+    if (!reader.atEnd()) {
+        return Error{ErrorCode::InvalidData, "Trailing bytes after topology binary payload"};
+    }
     return batch;
 }
 
 Result<std::string> serializeTopologyBatchCompressed(const TopologyArtifactBatch& batch,
                                                      int compressionLevel) {
+    YAMS_ZONE_SCOPED_N("topology::codec::serializeCompressed");
     auto binaryRes = serializeTopologyBatchBinary(batch);
     if (!binaryRes) {
         return binaryRes.error();
@@ -946,7 +982,112 @@ Result<std::string> serializeTopologyBatchCompressed(const TopologyArtifactBatch
     return envelope.dump();
 }
 
+namespace {
+
+// Typed envelope accessors: a present field of the wrong type is corruption, not a default.
+Result<std::string> envelopeString(const json& envelope, const char* key, std::string fallback) {
+    auto it = envelope.find(key);
+    if (it == envelope.end()) {
+        return fallback;
+    }
+    if (!it->is_string()) {
+        return Error{ErrorCode::InvalidData, std::string("Topology snapshot envelope field '") +
+                                                 key + "' must be a string"};
+    }
+    return it->get<std::string>();
+}
+
+Result<size_t> envelopeUnsigned(const json& envelope, const char* key) {
+    auto it = envelope.find(key);
+    if (it == envelope.end()) {
+        return size_t{0};
+    }
+    if (!it->is_number_unsigned()) {
+        return Error{ErrorCode::InvalidData, std::string("Topology snapshot envelope field '") +
+                                                 key + "' must be an unsigned integer"};
+    }
+    const auto value = it->get<uint64_t>();
+    if (value > std::numeric_limits<size_t>::max()) {
+        return Error{ErrorCode::InvalidData,
+                     std::string("Topology snapshot envelope field '") + key + "' is too large"};
+    }
+    return static_cast<size_t>(value);
+}
+
+bool startsWithTopologyMagic(std::span<const std::byte> bytes) {
+    if (bytes.size() < 4) {
+        return false;
+    }
+    uint32_t magic = 0;
+    for (int i = 0; i < 4; ++i) {
+        magic |= static_cast<uint32_t>(static_cast<uint8_t>(bytes[i])) << (i * 8);
+    }
+    return magic == kTopologyBinaryMagic;
+}
+
+Result<TopologyArtifactBatch> deserializeCompressedEnvelope(const json& envelope) {
+    auto b64 = envelopeString(envelope, "data_b64", "");
+    if (!b64) {
+        return b64.error();
+    }
+    if (b64.value().empty()) {
+        return Error{ErrorCode::InvalidData, "Compressed topology snapshot missing data_b64"};
+    }
+    auto compAlgo = envelopeString(envelope, "compression", "zstd");
+    if (!compAlgo) {
+        return compAlgo.error();
+    }
+    auto expectedSize = envelopeUnsigned(envelope, "uncompressed_bytes");
+    if (!expectedSize) {
+        return expectedSize.error();
+    }
+
+    auto decodedBytes = decodeBase64(b64.value());
+    if (!decodedBytes) {
+        return decodedBytes.error();
+    }
+    const auto& compressed = decodedBytes.value();
+
+    // Data stored uncompressed (tiny batch where the compressor opted out of a zstd frame) is
+    // deserialized directly.
+    if (compAlgo.value() == "none" || startsWithTopologyMagic(compressed)) {
+        return deserializeTopologyBatchBinary(compressed);
+    }
+    if (compAlgo.value() != "zstd") {
+        return Error{ErrorCode::InvalidData,
+                     "Unsupported topology snapshot compression: " + compAlgo.value()};
+    }
+
+    // The envelope's size hint is untrusted: bound it before it sizes the output buffer.
+    const size_t maxByRatio =
+        compressed.size() > kMaxSnapshotUncompressedBytes / kMaxSnapshotCompressionRatio
+            ? kMaxSnapshotUncompressedBytes
+            : compressed.size() * kMaxSnapshotCompressionRatio;
+    if (expectedSize.value() > std::min(kMaxSnapshotUncompressedBytes, maxByRatio)) {
+        return Error{ErrorCode::InvalidData,
+                     "Topology snapshot uncompressed_bytes exceeds the allowed bound"};
+    }
+
+    auto compressor = compression::CompressionRegistry::instance().createCompressor(
+        compression::CompressionAlgorithm::Zstandard);
+    if (!compressor) {
+        return Error{ErrorCode::InternalError, "Failed to create Zstandard compressor"};
+    }
+    auto decompressed = compressor->decompress(compressed, expectedSize.value());
+    if (!decompressed) {
+        return decompressed.error();
+    }
+    if (expectedSize.value() != 0 && decompressed.value().size() != expectedSize.value()) {
+        return Error{ErrorCode::InvalidData,
+                     "Topology snapshot decompressed size does not match uncompressed_bytes"};
+    }
+    return deserializeTopologyBatchBinary(decompressed.value());
+}
+
+} // namespace
+
 Result<TopologyArtifactBatch> deserializeTopologyBatchCompressed(std::string_view payload) {
+    YAMS_ZONE_SCOPED_N("topology::codec::deserializeCompressed");
     if (payload.empty()) {
         return Error{ErrorCode::InvalidArgument, "Empty topology snapshot payload"};
     }
@@ -956,48 +1097,23 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchCompressed(std::string_vie
         return Error{ErrorCode::SerializationError, "Failed to parse topology snapshot JSON"};
     }
 
-    if (parsed.is_object() && parsed.value("format", "") == "zstd_binary_v1") {
-        std::string b64 = parsed.value("data_b64", "");
-        if (b64.empty()) {
-            return Error{ErrorCode::InvalidData, "Compressed topology snapshot missing data_b64"};
+    if (parsed.is_object() && parsed.contains("format")) {
+        auto format = envelopeString(parsed, "format", "");
+        if (!format) {
+            return format.error();
         }
-
-        auto decodedBytes = decodeBase64(b64);
-        if (!decodedBytes) {
-            return decodedBytes.error();
+        if (format.value() == "zstd_binary_v1") {
+            return deserializeCompressedEnvelope(parsed);
         }
-
-        // If data was stored uncompressed (e.g. tiny batch where compressor opted out of zstd
-        // frame), or starts with topology binary magic, deserialize directly without invoking zstd.
-        std::string compAlgo = parsed.value("compression", "zstd");
-        if (compAlgo == "none") {
-            return deserializeTopologyBatchBinary(decodedBytes.value());
-        }
-        if (decodedBytes.value().size() >= 4) {
-            uint32_t magic = 0;
-            std::memcpy(&magic, decodedBytes.value().data(), sizeof(magic));
-            if (magic == kTopologyBinaryMagic) {
-                return deserializeTopologyBatchBinary(decodedBytes.value());
-            }
-        }
-
-        auto compressor = compression::CompressionRegistry::instance().createCompressor(
-            compression::CompressionAlgorithm::Zstandard);
-        if (!compressor) {
-            return Error{ErrorCode::InternalError, "Failed to create Zstandard compressor"};
-        }
-
-        size_t expectedSize = parsed.value("uncompressed_bytes", size_t{0});
-        auto decompressed = compressor->decompress(decodedBytes.value(), expectedSize);
-        if (!decompressed) {
-            return decompressed.error();
-        }
-
-        return deserializeTopologyBatchBinary(decompressed.value());
     }
 
-    // Fallback: legacy uncompressed JSON
-    return legacyBatchFromJson(parsed);
+    // Fallback: legacy uncompressed JSON. Its field accessors throw on wrong-typed values.
+    try {
+        return legacyBatchFromJson(parsed);
+    } catch (const json::exception& e) {
+        return Error{ErrorCode::InvalidData,
+                     std::string("Malformed legacy topology snapshot JSON: ") + e.what()};
+    }
 }
 
 } // namespace yams::topology

@@ -550,6 +550,8 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     buildConfig.reciprocalOnly = true;
     buildConfig.maxNeighborsPerDocument = extractionConfig.maxNeighborsPerDocument;
     buildConfig.routingRepresentativeCount = routingRepresentativeCount();
+    buildConfig.sgcHops = sgcHops();
+    buildConfig.sgcNormalize = sgcNormalize();
     buildConfig.allowOverlap = boundarySpillEnabled_.load(std::memory_order_acquire);
     buildConfig.overlapLimit = boundarySpillLimit_.load(std::memory_order_acquire);
     buildConfig.overlapBoundaryDistanceRatio =

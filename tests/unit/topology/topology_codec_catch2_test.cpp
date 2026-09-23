@@ -323,3 +323,134 @@ TEST_CASE("Topology codec robustness on corrupted payloads", "[topology][codec][
         CHECK(!res);
     }
 }
+
+namespace {
+
+void appendU32(std::vector<std::byte>& out, uint32_t v) {
+    for (int i = 0; i < 4; ++i) {
+        out.push_back(static_cast<std::byte>((v >> (i * 8)) & 0xFF));
+    }
+}
+
+void appendU64(std::vector<std::byte>& out, uint64_t v) {
+    for (int i = 0; i < 8; ++i) {
+        out.push_back(static_cast<std::byte>((v >> (i * 8)) & 0xFF));
+    }
+}
+
+// Valid header up to (but excluding) the string-table count.
+std::vector<std::byte> binaryHeaderPrefix() {
+    std::vector<std::byte> out;
+    appendU32(out, 0x59414D54); // magic
+    appendU32(out, 1);          // version
+    out.push_back(std::byte{0});
+    out.push_back(std::byte{0});
+    out.push_back(std::byte{0});
+    out.push_back(std::byte{0});
+    appendU64(out, 0);
+    appendU64(out, 0);
+    for (int i = 0; i < 4; ++i) {
+        appendU32(out, 0); // empty metadata strings
+    }
+    return out;
+}
+
+std::string envelopeFor(const nlohmann::json& overrides) {
+    auto batch = createSampleBatch();
+    auto compressed = serializeTopologyBatchCompressed(batch);
+    REQUIRE(compressed);
+    auto envelope = nlohmann::json::parse(compressed.value());
+    for (auto it = overrides.begin(); it != overrides.end(); ++it) {
+        envelope[it.key()] = it.value();
+    }
+    return envelope.dump();
+}
+
+} // namespace
+
+TEST_CASE("Topology binary decode rejects hostile counts without throwing",
+          "[topology][codec][catch2]") {
+    SECTION("String table count larger than remaining bytes") {
+        auto bytes = binaryHeaderPrefix();
+        appendU32(bytes, 0xFFFFFFFFu);
+        auto res = deserializeTopologyBatchBinary(bytes);
+        CHECK(!res);
+    }
+
+    SECTION("Cluster count larger than remaining bytes") {
+        auto bytes = binaryHeaderPrefix();
+        appendU32(bytes, 0); // empty string table
+        appendU32(bytes, 0xFFFFFFFFu);
+        auto res = deserializeTopologyBatchBinary(bytes);
+        CHECK(!res);
+    }
+
+    SECTION("Membership count larger than remaining bytes") {
+        auto bytes = binaryHeaderPrefix();
+        appendU32(bytes, 0); // empty string table
+        appendU32(bytes, 0); // no clusters
+        appendU32(bytes, 0xFFFFFFFFu);
+        auto res = deserializeTopologyBatchBinary(bytes);
+        CHECK(!res);
+    }
+
+    SECTION("Trailing bytes after a complete batch") {
+        auto binary = serializeTopologyBatchBinary(createSampleBatch());
+        REQUIRE(binary);
+        auto bytes = binary.value();
+        bytes.push_back(std::byte{0x00});
+        auto res = deserializeTopologyBatchBinary(bytes);
+        CHECK(!res);
+    }
+
+    SECTION("Every truncation of a valid batch fails cleanly") {
+        auto binary = serializeTopologyBatchBinary(createSampleBatch());
+        REQUIRE(binary);
+        const auto& full = binary.value();
+        for (size_t len = 0; len < full.size(); ++len) {
+            auto res = deserializeTopologyBatchBinary(std::span(full.data(), len));
+            CHECK(!res);
+        }
+    }
+}
+
+TEST_CASE("Topology compressed envelope rejects malformed fields without throwing",
+          "[topology][codec][catch2]") {
+    SECTION("Wrong-typed format field") {
+        auto res = deserializeTopologyBatchCompressed(R"({"format": 7})");
+        CHECK(!res);
+    }
+
+    SECTION("Wrong-typed compression field") {
+        auto res = deserializeTopologyBatchCompressed(envelopeFor({{"compression", 1}}));
+        CHECK(!res);
+    }
+
+    SECTION("Negative uncompressed_bytes") {
+        auto res = deserializeTopologyBatchCompressed(envelopeFor({{"uncompressed_bytes", -1}}));
+        CHECK(!res);
+    }
+
+    SECTION("String uncompressed_bytes") {
+        auto res = deserializeTopologyBatchCompressed(envelopeFor({{"uncompressed_bytes", "10"}}));
+        CHECK(!res);
+    }
+
+    SECTION("Absurd uncompressed_bytes") {
+        auto res = deserializeTopologyBatchCompressed(
+            envelopeFor({{"uncompressed_bytes", uint64_t{8} * 1024 * 1024 * 1024}}));
+        CHECK(!res);
+    }
+
+    SECTION("Legacy JSON with wrong-typed fields") {
+        auto res = deserializeTopologyBatchCompressed(
+            R"({"snapshot_id": 3, "clusters": [{"cluster_id": []}]})");
+        CHECK(!res);
+    }
+
+    SECTION("Legacy JSON with wrong-typed nested member list") {
+        auto res = deserializeTopologyBatchCompressed(
+            R"({"snapshot_id": "s", "clusters": [{"cluster_id": "c", "member_document_hashes": [1, 2]}]})");
+        CHECK(!res);
+    }
+}

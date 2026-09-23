@@ -268,12 +268,24 @@ sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
   install: false,
 )
 
+# Tracy profiling (optional, -Denable-profiling=true), mirroring src/search so the YAMS_* zones
+# in this library emit. Zero-cost when off: profiling.h compiles to nothing without TRACY_ENABLE.
+vector_tracy_args = []
+vector_tracy_deps = []
+if get_option('enable-profiling')
+  vector_tracy_dep = dependency('tracy', modules: ['Tracy::TracyClient'], required: false, static: true)
+  if vector_tracy_dep.found()
+    vector_tracy_args += ['-DTRACY_ENABLE']
+    vector_tracy_deps += vector_tracy_dep
+  endif
+endif
+
 yams_vector = static_library('yams_vector',
   srcs,
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
-  dependencies: deps_vec + vector_platform_deps,
+  dependencies: deps_vec + vector_platform_deps + vector_tracy_deps,
   link_with: [simeon_vector_lib, simeon_common_lib, sqlite_vec_backend_lib] + simeon_extra_libs + sqlite_vec_cpp_lib,
-  cpp_args: vector_cppargs + simeon_simd_defines,
+  cpp_args: vector_cppargs + simeon_simd_defines + vector_tracy_args,
   install: true,
 )
 

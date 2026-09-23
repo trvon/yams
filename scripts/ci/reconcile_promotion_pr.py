@@ -56,25 +56,9 @@ def trusted_context(env, event):
     repo = object_value(object_value(event).get("repository"))
     if repo.get("full_name") != REPOSITORY or repo.get("default_branch") != "main":
         raise PolicyError("Unexpected repository/default branch")
-    name = env.get("GITHUB_EVENT_NAME")
-    if name == "workflow_dispatch":
-        return True
-    if name != "workflow_run" or event.get("action") != "requested":
-        raise PolicyError("Expected a requested Tests run or main-only manual recovery")
-    run = object_value(event.get("workflow_run"))
-    if (
-        run.get("name") != "Tests"
-        or run.get("path") != ".github/workflows/tests.yml"
-        or run.get("event") != "push"
-        or run.get("head_branch") != "experimental"
-        or object_value(run.get("head_repository")).get("full_name") != REPOSITORY
-    ):
-        raise PolicyError(
-            "Expected a canonical experimental push to the Tests workflow"
-        )
-    sha(run.get("head_sha"))
-    # Success, mergeability and ancestry are intentionally NOT creation conditions.
-    return False
+    # Draft promotion is manual-only: a maintainer dispatch from main is the sole trigger.
+    if env.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
+        raise PolicyError("Expected a main-only manual workflow_dispatch")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -182,7 +166,7 @@ This is an initial snapshot. Future runs leave existing PR text and state untouc
 
 
 def reconcile(api, env, event, *, apply=False):
-    manual = trusted_context(env, event)  # Before even read-only API requests.
+    trusted_context(env, event)  # Before even read-only API requests.
     base = sha(object_value(api.call("GET", "git/ref/heads/main"))["object"]["sha"])
     head = sha(
         object_value(api.call("GET", "git/ref/heads/experimental"))["object"]["sha"]
@@ -211,10 +195,8 @@ def reconcile(api, env, event, *, apply=False):
     opened = list_pulls(api, "open")
     if opened:
         return existing_summary(opened)
-    if not manual:
-        closed = list_pulls(api, "closed")
-        if any(sha(pr["head"].get("sha")) == head for pr in closed):
-            return {**summary, "action": "closed-current-head"}
+    # A maintainer dispatch is an explicit request, so a previously closed PR for the same head
+    # does not block recreating the draft.
     if not apply:
         return {**summary, "action": "would-create"}
     try:

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <yams/search/search_engine_config.h>
-#include <yams/search/string_interner.h>
 #include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_artifacts.h>
 #include <yams/topology/topology_baseline.h>
@@ -47,7 +46,8 @@ struct TopologyRoutingSnapshot {
     yams::topology::ProtectedRelationCoverIndex protectedRelationCover;
     yams::topology::SparseRouteIndex sparseRouteIndex;
     bool denseAnnBuildAttempted = false;
-    std::shared_ptr<StringInterner> interner;
+    /// Coordinate prefix the centroid BQ index was built over (0 = full dimension).
+    std::size_t bqPrefixDimension = 0;
 };
 
 struct TopologyRoutingSnapshotLookup {
@@ -57,17 +57,22 @@ struct TopologyRoutingSnapshotLookup {
 
 using TopologyRoutingSnapshotLoader =
     std::function<Result<std::optional<yams::topology::TopologyArtifactBatch>>()>;
+/// Loader that hands out the store's resident snapshot instead of a copy (null when none).
+using TopologyRoutingSharedSnapshotLoader =
+    std::function<Result<std::shared_ptr<const yams::topology::TopologyArtifactBatch>>()>;
 
 /// Thread-safe, epoch-aware cache for an immutable, prevalidated routing snapshot.
 class TopologyRoutingSnapshotCache {
 public:
     explicit TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader);
+    explicit TopologyRoutingSnapshotCache(TopologyRoutingSharedSnapshotLoader loader);
 
     [[nodiscard]] Result<TopologyRoutingSnapshotLookup> get(std::uint64_t expectedEpoch = 0,
-                                                            bool requireDenseAnnIndex = true);
+                                                            bool requireDenseAnnIndex = true,
+                                                            std::size_t bqPrefixDimension = 0);
 
 private:
-    TopologyRoutingSnapshotLoader loader_;
+    TopologyRoutingSharedSnapshotLoader loader_;
     std::mutex mutex_;
     std::shared_ptr<const TopologyRoutingSnapshot> cached_;
 };
@@ -98,6 +103,11 @@ struct TopologyRoutingOptions {
     std::size_t maxSeedDocuments = 32;
     std::size_t representativeLimit = 0;
     std::size_t denseAnnCandidateLimit = 0;
+    /// Centroid shortlist size for 1-bit BQ pre-filtering; zero disables explicit BQ routing.
+    std::size_t bqCandidateLimit = 0;
+    /// Leading coordinate prefix for the BQ index; only meaningful for Matryoshka-trained
+    /// embeddings. Zero uses the full dimension.
+    std::size_t bqPrefixDimension = 0;
     float adaptiveProbeScoreGap = 0.0F;
     float narrowMinBoundaryMargin = 0.0F;
     /// Maximum documents in a materialized route allowed set or expansion result.
@@ -301,6 +311,8 @@ struct TopologyRoutingSessionResult {
     bool routeAnnUsed = false;
     std::size_t routeAnnCandidates = 0;
     std::size_t routeAnnDistanceEvaluations = 0;
+    bool routeBqUsed = false;
+    std::size_t routeBqCandidates = 0;
     std::size_t routeExactRepresentativeDistanceEvaluations = 0;
     TopologyRouteCertificate certificate;
     std::vector<TopologyRouteEvidence> routeEvidence;
