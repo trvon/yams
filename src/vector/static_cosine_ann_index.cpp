@@ -3,6 +3,12 @@
 #include <sqlite-vec-cpp/distances/inner_product.hpp>
 #include <sqlite-vec-cpp/index/hnsw.hpp>
 
+// sqlite-vec's inline distance kernels change body with SQLITE_VEC_ENABLE_*; building this TU
+// without the flags its library uses is an ODR violation (see src/vector/meson.build).
+#if defined(__aarch64__) && !defined(SQLITE_VEC_ENABLE_NEON)
+#error "static_cosine_ann_index.cpp must be built with the sqlite-vec feature defines"
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <exception>

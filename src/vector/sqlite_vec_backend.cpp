@@ -3955,8 +3955,6 @@ private:
                                                std::chrono::steady_clock::now() - lutStart)
                                                .count());
         }
-        const size_t m = it->second->pq.m();
-
         std::vector<std::size_t> candidateIndices;
         if (candidateHashes != nullptr) {
             const auto lookupStart = std::chrono::steady_clock::now();
@@ -4013,17 +4011,20 @@ private:
         std::vector<std::pair<float, std::size_t>> scores;
         scores.reserve(candidateCount);
         const auto scoringStart = std::chrono::steady_clock::now();
-        const auto scoreIndex = [&](std::size_t index) {
-            const float approxScore = pqQuery.inner_product(it->second->codes.data() + (index * m));
-            scores.emplace_back(approxScore, index);
-        };
+        // Batched ADC scans are bit-identical to per-code inner_product(), so ranking and
+        // tie-breaks are unchanged; they only hide the LUT add-chain latency.
+        std::vector<float> approxScores(candidateCount);
+        const std::uint8_t* codes = it->second->codes.data();
         if (candidateHashes == nullptr) {
-            for (std::size_t index = 0; index < it->second->rowids.size(); ++index) {
-                scoreIndex(index);
+            pqQuery.inner_product_batch(codes, candidateCount, approxScores.data());
+            for (std::size_t index = 0; index < candidateCount; ++index) {
+                scores.emplace_back(approxScores[index], index);
             }
         } else {
-            for (const auto index : candidateIndices) {
-                scoreIndex(index);
+            pqQuery.inner_product_gather(codes, candidateIndices.data(), candidateCount,
+                                         approxScores.data());
+            for (std::size_t i = 0; i < candidateCount; ++i) {
+                scores.emplace_back(approxScores[i], candidateIndices[i]);
             }
         }
         if (diagnostics != nullptr) {

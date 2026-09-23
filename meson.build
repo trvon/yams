@@ -378,15 +378,20 @@ if not cli11_resolved_dep.found()
   cli11_resolved_dep = dependency('CLI11', method: 'cmake', required: false)
 endif
 
-onnxruntime_resolved_dep = dependency('onnxruntime', method: 'pkg-config', required: false)
-if not onnxruntime_resolved_dep.found()
-  onnxruntime_resolved_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
-endif
-if not onnxruntime_resolved_dep.found()
-  onnxruntime_resolved_dep = dependency('onnxruntime', required: false)
-endif
-if not onnxruntime_resolved_dep.found()
-  onnxruntime_resolved_dep = dependency('libonnxruntime', required: false)
+# ONNX Runtime is deprecated and opt-in: skip discovery entirely when disabled so a stray
+# system/Homebrew onnxruntime cannot leak into default builds.
+onnxruntime_resolved_dep = dependency('', required: false)
+if not get_option('enable-onnx').disabled()
+  onnxruntime_resolved_dep = dependency('onnxruntime', method: 'pkg-config', required: false)
+  if not onnxruntime_resolved_dep.found()
+    onnxruntime_resolved_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
+  endif
+  if not onnxruntime_resolved_dep.found()
+    onnxruntime_resolved_dep = dependency('onnxruntime', required: false)
+  endif
+  if not onnxruntime_resolved_dep.found()
+    onnxruntime_resolved_dep = dependency('libonnxruntime', required: false)
+  endif
 endif
 
 # Normalize ONNX Runtime linkage to the current library location instead of any stale

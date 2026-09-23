@@ -95,7 +95,13 @@ public:
     }
 
     ~VerificationThreadPool() {
-        stop = true;
+        {
+            // Publish stop under the queue mutex: a worker that has evaluated the wait
+            // predicate but not yet blocked would otherwise miss notify_all() and join()
+            // would hang forever.
+            std::lock_guard lock(queueMutex);
+            stop = true;
+        }
         condition.notify_all();
 
         for (auto& worker : workers) {

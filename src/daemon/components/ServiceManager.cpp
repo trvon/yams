@@ -3571,6 +3571,10 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
     }
 
     if (reranker) {
+        std::string scoringMode = "model";
+        if (reranker == simeonRerankerProvider_) {
+            scoringMode = outerMaxSim ? "simeon_outer_maxsim" : "simeon_cosine";
+        }
         std::weak_ptr<IModelProvider> weakProvider = reranker;
         engine->setCrossReranker(
             [weakProvider](const std::string& query, const std::vector<std::string>& documents)
@@ -3580,9 +3584,10 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
                     return Error{ErrorCode::NotInitialized, "model provider unavailable"};
                 }
                 return provider->scoreDocuments(query, documents);
-            });
-        spdlog::debug("[{}] reranker wired to search engine (backend={})", contextLabel,
-                      rerankerBackend);
+            },
+            scoringMode);
+        spdlog::debug("[{}] reranker wired to search engine (backend={}, mode={})", contextLabel,
+                      rerankerBackend, scoringMode);
     } else {
         engine->setCrossReranker({});
         spdlog::debug("[{}] reranker unavailable (backend={})", contextLabel, rerankerBackend);
