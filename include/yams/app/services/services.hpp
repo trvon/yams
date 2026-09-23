@@ -255,7 +255,6 @@ struct SearchRequest {
     int vectorStageTimeoutMs{0};
     int keywordStageTimeoutMs{0};
     int snippetHydrationTimeoutMs{0};
-    bool symbolRank{true};
 
     // Host-provided request cancellation. This is runtime state, not user configuration.
     std::shared_ptr<const std::atomic<bool>> cancellationSignal;

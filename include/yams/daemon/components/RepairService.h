@@ -48,7 +48,6 @@ class WriteCoordinator;
 class ServiceManager;
 struct StateComponent;
 class GraphComponent;
-class AbiSymbolExtractorAdapter;
 class PostIngestQueue;
 class IModelProvider;
 class VectorIndexCoordinator;
@@ -73,8 +72,6 @@ struct RepairServiceContext {
     std::function<std::size_t()> getEmbeddingInFlightJobs;
     std::function<std::vector<std::shared_ptr<extraction::IContentExtractor>>()>
         getContentExtractors;
-    std::function<const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>&()>
-        getSymbolExtractors;
     std::function<std::string()> resolvePreferredModel;
     std::function<std::string()> getEmbeddingModelName;
     std::function<Result<TopologyManager::RebuildStats>(const std::string&, bool,
@@ -336,11 +333,9 @@ private:
     };
     KgCleanupStats cleanOrphanedKgEntries(bool dryRun, bool verbose, const ProgressFn& progress);
 
-    // ── Symbol extraction scheduling (ported from RepairCoordinator) ──
+    // ── Scheduling accessors ──
     virtual std::shared_ptr<GraphComponent> getGraphComponentForScheduling() const;
     virtual std::shared_ptr<metadata::KnowledgeGraphStore> getKgStoreForScheduling() const;
-    virtual const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>&
-    getSymbolExtractorsForScheduling() const;
 
     // ── Token gating ──
     bool tryAcquireToken() {

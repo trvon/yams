@@ -1,6 +1,7 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/profiling.h>
 #include <yams/topology/topology_codec.h>
 
 #include <nlohmann/json.hpp>
@@ -433,6 +434,7 @@ Result<std::vector<std::byte>> decodeBase64(std::string_view s) {
 }
 
 Result<std::vector<std::byte>> serializeTopologyBatchBinary(const TopologyArtifactBatch& batch) {
+    YAMS_ZONE_SCOPED_N("topology::codec::serializeBinary");
     ByteWriter writer;
     writer.reserve(1024 + batch.clusters.size() * 128 + batch.memberships.size() * 64);
 
@@ -579,6 +581,7 @@ Result<std::vector<std::byte>> serializeTopologyBatchBinary(const TopologyArtifa
 }
 
 Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std::byte> bytes) {
+    YAMS_ZONE_SCOPED_N("topology::codec::deserializeBinary");
     ByteReader reader(bytes);
 
     // 1. Header
@@ -942,6 +945,7 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
 
 Result<std::string> serializeTopologyBatchCompressed(const TopologyArtifactBatch& batch,
                                                      int compressionLevel) {
+    YAMS_ZONE_SCOPED_N("topology::codec::serializeCompressed");
     auto binaryRes = serializeTopologyBatchBinary(batch);
     if (!binaryRes) {
         return binaryRes.error();
@@ -1083,6 +1087,7 @@ Result<TopologyArtifactBatch> deserializeCompressedEnvelope(const json& envelope
 } // namespace
 
 Result<TopologyArtifactBatch> deserializeTopologyBatchCompressed(std::string_view payload) {
+    YAMS_ZONE_SCOPED_N("topology::codec::deserializeCompressed");
     if (payload.empty()) {
         return Error{ErrorCode::InvalidArgument, "Empty topology snapshot payload"};
     }

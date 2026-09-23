@@ -5,7 +5,6 @@
 #include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WriteCoordinator.h>
-#include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/metadata/kg_topology_analysis.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -187,46 +186,16 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         return Result<void>();
     }
 
-    // Need ServiceManager to access content store and symbol extractors
+    // Need ServiceManager to access the NL entity extractors
     if (!serviceManager_) {
         spdlog::debug("[GraphComponent] No service manager, skipping extraction");
         return Result<void>();
     }
 
-    // Get content store to load document content
-    auto contentStore = serviceManager_->getContentStore();
-    if (!contentStore) {
-        spdlog::debug("[GraphComponent] No content store available");
-        return Result<void>();
-    }
-
-    // Detect language from file extension
-    std::string language;
-    if (!ctx.filePath.empty()) {
-        std::filesystem::path path(ctx.filePath);
-        std::string ext = path.extension().string();
-        if (!ext.empty() && ext[0] == '.') {
-            ext = ext.substr(1);
-        }
-
-        // Query symbol extractors for language mapping
-        const auto& extractors = serviceManager_->getSymbolExtractors();
-        for (const auto& extractor : extractors) {
-            if (!extractor)
-                continue;
-            auto supported = extractor->getSupportedExtensions();
-            auto it = supported.find(ext);
-            if (it != supported.end()) {
-                language = it->second;
-                break;
-            }
-        }
-    }
-
-    // Check if NL entity extractors support this file type (for non-code files)
+    // Check if NL entity extractors support this file type
     bool hasNlExtractor = false;
     std::string contentType;
-    if (language.empty() && !ctx.filePath.empty()) {
+    if (!ctx.filePath.empty()) {
         std::filesystem::path path(ctx.filePath);
         std::string ext = path.extension().string();
 
@@ -251,39 +220,20 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         }
     }
 
-    // Skip if no language detected AND no NL extractor supports the content type
-    if (language.empty() && !hasNlExtractor) {
+    // Skip if no NL extractor supports the content type
+    if (!hasNlExtractor) {
         spdlog::debug(
-            "[GraphComponent] No language/extractor for {} (ext='{}'), skipping extraction",
-            ctx.filePath,
+            "[GraphComponent] No extractor for {} (ext='{}'), skipping extraction", ctx.filePath,
             ctx.filePath.empty() ? "" : std::filesystem::path(ctx.filePath).extension().string());
         return acknowledgeKnowledgeGraph(metadataRepo_, ctx.documentDbId, ctx.knowledgeGraphToken,
                                          ctx.knowledgeGraphCompletion);
     }
 
-    std::vector<std::byte> bytes;
-    if (ctx.contentBytes) {
-        bytes = *ctx.contentBytes;
-    } else {
-        // Load document content
-        auto contentResult = contentStore->retrieveBytes(ctx.documentHash);
-        if (!contentResult) {
-            spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
-                         ctx.documentHash.substr(0, 12), contentResult.error().message);
-            return contentResult.error();
-        }
-        bytes = std::move(contentResult.value());
-    }
-
-    // Convert bytes to UTF-8 string
-    std::string contentUtf8(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-
-    // Submit for entity extraction
+    // The graph stage only records completion (NL entities are written by the PostIngestQueue
+    // title+NL stage since v0.20), so the job carries no document content.
     EntityExtractionJob job;
     job.documentHash = ctx.documentHash;
     job.filePath = ctx.filePath;
-    job.contentUtf8 = std::move(contentUtf8);
-    job.language = language; // Keep copy for logging
     job.documentDbId = ctx.documentDbId;
     job.knowledgeGraphToken = ctx.knowledgeGraphToken;
     job.knowledgeGraphCompletion = ctx.knowledgeGraphCompletion;
@@ -293,9 +243,8 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         spdlog::warn("[GraphComponent] Failed to submit extraction for {}: {}",
                      ctx.documentHash.substr(0, 12), submitResult.error().message);
     } else {
-        spdlog::info("[GraphComponent] Queued entity extraction for {} ({}) lang={} nl={}",
-                     ctx.filePath, ctx.documentHash.substr(0, 12),
-                     language.empty() ? "(none)" : language, hasNlExtractor ? "yes" : "no");
+        spdlog::debug("[GraphComponent] Queued graph completion for {} ({})", ctx.filePath,
+                      ctx.documentHash.substr(0, 12));
     }
 
     return submitResult;
@@ -325,22 +274,6 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
         return Error{ErrorCode::NotInitialized,
                      "GraphComponent batch ingest requires entity service + service manager"};
     }
-    auto contentStore = serviceManager_->getContentStore();
-    if (!contentStore) {
-        return Error{ErrorCode::NotInitialized, "ContentStore unavailable"};
-    }
-
-    std::unordered_map<std::string, std::string> extToLang;
-    {
-        const auto& extractors = serviceManager_->getSymbolExtractors();
-        for (const auto& extractor : extractors) {
-            if (!extractor)
-                continue;
-            for (const auto& [ext, lang] : extractor->getSupportedExtensions()) {
-                extToLang.emplace(ext, lang);
-            }
-        }
-    }
     const auto& nlExtractors = serviceManager_->getEntityExtractors();
     auto nlSupports = [&](std::string_view contentType) {
         for (const auto& ex : nlExtractors) {
@@ -360,7 +293,6 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
             continue;
         }
 
-        std::string language;
         std::string ext;
         if (!ctx.filePath.empty()) {
             std::filesystem::path path(ctx.filePath);
@@ -368,13 +300,10 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
             if (!ext.empty() && ext[0] == '.') {
                 ext = ext.substr(1);
             }
-            if (auto it = extToLang.find(ext); it != extToLang.end()) {
-                language = it->second;
-            }
         }
 
         bool hasNlExtractor = false;
-        if (language.empty() && !ctx.filePath.empty()) {
+        if (!ctx.filePath.empty()) {
             std::string_view contentType;
             if (ext == "md" || ext == "markdown") {
                 contentType = "text/markdown";
@@ -388,44 +317,18 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
             }
         }
 
-        if (language.empty() && !hasNlExtractor) {
-            spdlog::debug(
-                "[GraphComponent] No language/extractor for {} (ext='{}'), skipping extraction",
-                ctx.filePath, ext);
+        if (!hasNlExtractor) {
+            spdlog::debug("[GraphComponent] No extractor for {} (ext='{}'), skipping extraction",
+                          ctx.filePath, ext);
             acknowledge(ctx);
             skipped++;
             continue;
         }
 
-        const std::byte* dataPtr = nullptr;
-        std::size_t dataLen = 0;
-        std::vector<std::byte> ownedFallback;
-        if (ctx.contentBytes) {
-            dataPtr = ctx.contentBytes->data();
-            dataLen = ctx.contentBytes->size();
-        } else {
-            auto contentResult = contentStore->retrieveBytes(ctx.documentHash);
-            if (!contentResult) {
-                spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
-                             ctx.documentHash.substr(0, 12), contentResult.error().message);
-                if (!firstError)
-                    firstError = contentResult.error();
-                skipped++;
-                continue;
-            }
-            ownedFallback = std::move(contentResult.value());
-            dataPtr = ownedFallback.data();
-            dataLen = ownedFallback.size();
-        }
-
-        std::string contentUtf8(reinterpret_cast<const char*>(dataPtr), dataLen);
-
-        // Build extraction job
+        // Completion-only job: the graph stage no longer reads document content.
         EntityExtractionJob job;
         job.documentHash = std::move(ctx.documentHash);
         job.filePath = std::move(ctx.filePath);
-        job.contentUtf8 = std::move(contentUtf8);
-        job.language = std::move(language);
         job.documentDbId = ctx.documentDbId;
         job.knowledgeGraphToken = std::move(ctx.knowledgeGraphToken);
         job.knowledgeGraphCompletion = std::move(ctx.knowledgeGraphCompletion);
@@ -471,31 +374,12 @@ GraphComponent::onTreeDiffApplied(int64_t diffId,
 }
 
 bool GraphComponent::shouldSkipEntityExtraction(
-    const std::shared_ptr<metadata::KnowledgeGraphStore>& kg, const std::string& documentHash,
-    const std::string& expectedExtractorId) {
+    const std::shared_ptr<metadata::KnowledgeGraphStore>& kg, const std::string& documentHash) {
     if (!kg || documentHash.empty()) {
         return false;
     }
 
-    // Check the new extraction state table first
-    auto stateRes = kg->getSymbolExtractionState(documentHash);
-    if (stateRes.has_value() && stateRes.value().has_value()) {
-        const auto& state = stateRes.value().value();
-        // Skip if extraction completed successfully
-        if (state.status == "complete") {
-            // If we have an expected extractor ID, only skip if it matches
-            if (!expectedExtractorId.empty() && state.extractorId != expectedExtractorId) {
-                spdlog::debug(
-                    "[GraphComponent] Extractor version changed: {} -> {}, will re-extract",
-                    state.extractorId, expectedExtractorId);
-                return false; // Version mismatch, need to re-extract
-            }
-            return true; // Already extracted with matching or any version
-        }
-    }
-
-    // Fallback: check kg_doc_entities for backward compatibility with existing data
-    // This handles databases that were populated before the state table existed
+    // A document that already has doc entities was extracted before.
     auto docIdRes = kg->getDocumentIdByHash(documentHash);
     if (!docIdRes.has_value() || !docIdRes.value().has_value()) {
         return false;
@@ -515,12 +399,9 @@ Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
         return Error{ErrorCode::NotSupported, "EntityGraphService not available"};
     }
 
-    const std::string expectedExtractorId = resolveSymbolExtractorIdForLanguage(job.language);
-
-    // Legacy extractor state is recorded at submission, before deferred KG writes commit.
-    // It cannot certify a token-bearing admission: let that work reach the commit boundary.
-    if (job.knowledgeGraphToken.empty() &&
-        shouldSkipEntityExtraction(kgStore_, job.documentHash, expectedExtractorId)) {
+    // Existing doc entities cannot certify a token-bearing admission: let that work reach the
+    // commit boundary.
+    if (job.knowledgeGraphToken.empty() && shouldSkipEntityExtraction(kgStore_, job.documentHash)) {
         spdlog::debug("[GraphComponent] Skip entity extraction for {} (already extracted)",
                       job.documentHash.substr(0, 12));
         return acknowledgeKnowledgeGraph(metadataRepo_, job.documentDbId, job.knowledgeGraphToken);
@@ -538,21 +419,6 @@ Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
     };
 
     return entityService_->submitExtraction(std::move(entityJob));
-}
-
-std::string GraphComponent::resolveSymbolExtractorIdForLanguage(const std::string& language) const {
-    YAMS_ZONE_SCOPED_N("GraphComponent::resolveSymbolExtractorIdForLanguage");
-    if (!serviceManager_ || language.empty()) {
-        return {};
-    }
-
-    const auto& extractors = serviceManager_->getSymbolExtractors();
-    for (const auto& extractor : extractors) {
-        if (extractor && extractor->supportsLanguage(language)) {
-            return extractor->getExtractorId();
-        }
-    }
-    return {};
 }
 
 Result<GraphComponent::RepairStats>
@@ -965,149 +831,9 @@ GraphComponent::repairGraph(bool dryRun, RepairProgressFn progress,
         }
     }
 
-    auto reconcileResult = reconcileSymbolReferences(dryRun, cancelRequested);
-    if (!reconcileResult) {
-        ++stats.errors;
-        stats.issues.push_back("symbol reference reconciliation failed: " +
-                               reconcileResult.error().message);
-    } else {
-        const auto& rc = reconcileResult.value();
-        stats.referencesLinked += rc.referencesLinked;
-        stats.referencesAmbiguous += rc.referencesAmbiguous;
-        stats.edgesCreated += rc.referencesLinked;
-        stats.issues.push_back("reconciled " + std::to_string(rc.referencesLinked) +
-                               " symbol references (" + std::to_string(rc.referencesAmbiguous) +
-                               " ambiguous, " + std::to_string(rc.referencesUnresolved) +
-                               " unresolved, " + std::to_string(rc.referencesScanned) +
-                               " scanned)");
-    }
-
     if (dryRun) {
         stats.issues.push_back(
             "dry-run: changes were rolled back (counts reflect attempted writes)");
-    }
-    return stats;
-}
-
-Result<GraphComponent::ReferenceReconcileStats>
-GraphComponent::reconcileSymbolReferences(bool dryRun, const std::atomic<bool>* cancelRequested) {
-    if (!initialized_ || !kgStore_) {
-        return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
-    }
-
-    ReferenceReconcileStats stats;
-    constexpr std::size_t kPage = 500;
-    std::size_t offset = 0;
-    std::vector<metadata::KGEdge> pending;
-    const auto canceled = [&]() {
-        return cancelRequested != nullptr && cancelRequested->load(std::memory_order_relaxed);
-    };
-
-    const auto flush = [&]() -> Result<void> {
-        if (pending.empty() || dryRun) {
-            pending.clear();
-            return Result<void>();
-        }
-        auto res = kgStore_->addEdgesUnique(pending);
-        pending.clear();
-        return res;
-    };
-
-    while (true) {
-        if (canceled()) {
-            if (auto res = flush(); !res) {
-                return res.error();
-            }
-            stats.skipped = true;
-            return stats;
-        }
-        auto nodesRes = kgStore_->findNodesByType("symbol_reference", kPage, offset);
-        if (!nodesRes) {
-            return nodesRes.error();
-        }
-        const auto& nodes = nodesRes.value();
-        if (nodes.empty()) {
-            break;
-        }
-        for (const auto& ref : nodes) {
-            ++stats.referencesScanned;
-            const auto surface = ref.label.value_or(std::string{});
-            if (surface.empty()) {
-                ++stats.referencesUnresolved;
-                continue;
-            }
-            std::string simple = surface;
-            if (const auto pos = surface.rfind("::");
-                pos != std::string::npos && pos + 2 < surface.size()) {
-                simple = surface.substr(pos + 2);
-            }
-
-            auto candRes = kgStore_->querySymbolMetadata(std::nullopt, std::nullopt, simple, 50, 0);
-            if (!candRes) {
-                return candRes.error();
-            }
-            const metadata::SymbolMetadata* match = nullptr;
-            std::size_t matchCount = 0;
-            for (const auto& cand : candRes.value()) {
-                const bool exact = cand.qualifiedName == surface ||
-                                   (surface == simple && cand.symbolName == simple);
-                if (exact) {
-                    ++matchCount;
-                    match = &cand;
-                }
-            }
-            if (matchCount == 0) {
-                ++stats.referencesUnresolved;
-                continue;
-            }
-            if (matchCount > 1) {
-                ++stats.referencesAmbiguous;
-                continue;
-            }
-
-            const std::string canonicalKey =
-                match->kind + ":" + match->qualifiedName + "@" + match->filePath;
-            auto nodeRes = kgStore_->getNodeByKey(canonicalKey);
-            if (!nodeRes) {
-                return nodeRes.error();
-            }
-            if (!nodeRes.value().has_value() || nodeRes.value()->id == ref.id) {
-                ++stats.referencesUnresolved;
-                continue;
-            }
-
-            // Idempotent: only count/create a link when this placeholder is not already
-            // resolved, so counts converge to 0 on a clean graph (addEdgesUnique dedupes the
-            // edge but cannot report whether a row was new).
-            auto existing = kgStore_->getEdgesFrom(ref.id, std::string_view("resolves_to"), 1, 0);
-            if (!existing) {
-                return existing.error();
-            }
-            if (!existing.value().empty()) {
-                ++stats.referencesAlreadyLinked;
-                continue;
-            }
-
-            metadata::KGEdge edge;
-            edge.srcNodeId = ref.id;
-            edge.dstNodeId = nodeRes.value()->id;
-            edge.relation = "resolves_to";
-            edge.weight = 0.9F;
-            pending.push_back(std::move(edge));
-            ++stats.referencesLinked;
-            if (pending.size() >= 256) {
-                if (auto res = flush(); !res) {
-                    return res.error();
-                }
-            }
-        }
-        offset += nodes.size();
-        if (nodes.size() < kPage) {
-            break;
-        }
-    }
-    if (auto res = flush(); !res) {
-        return res.error();
     }
     return stats;
 }

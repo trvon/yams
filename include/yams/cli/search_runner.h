@@ -23,7 +23,6 @@ struct DaemonSearchOptions {
     double similarity{0.7};
 
     bool showLineNumbers{false};
-    bool symbolRank{true};
 
     // Server-side filters
     std::vector<std::string> pathPatterns;

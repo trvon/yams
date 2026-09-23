@@ -162,6 +162,19 @@ public:
     [[nodiscard]] std::size_t routingRepresentativeCount() const noexcept {
         return routingRepresentativeCount_.load(std::memory_order_acquire);
     }
+    /// SGC smoothing before clustering. Hops are capped: repeated propagation over-smooths
+    /// features toward the graph's stationary distribution.
+    static constexpr std::size_t kMaxSgcHops = 4;
+    void setSgcPolicy(std::size_t hops, bool normalize) noexcept {
+        sgcHops_.store(std::min(hops, kMaxSgcHops), std::memory_order_release);
+        sgcNormalize_.store(normalize, std::memory_order_release);
+    }
+    [[nodiscard]] std::size_t sgcHops() const noexcept {
+        return sgcHops_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] bool sgcNormalize() const noexcept {
+        return sgcNormalize_.load(std::memory_order_acquire);
+    }
     void setBoundarySpillPolicy(bool enabled, std::size_t limit, double distanceRatio,
                                 double residualPenalty) noexcept {
         boundarySpillLimit_.store(limit, std::memory_order_release);
@@ -220,6 +233,8 @@ private:
     std::atomic<std::int64_t> lastRebuildEndSteadyMillis_{0};
     std::atomic<std::int64_t> rebuildMinIntervalMs_{0};
     std::atomic<std::size_t> routingRepresentativeCount_{1};
+    std::atomic<std::size_t> sgcHops_{0};
+    std::atomic<bool> sgcNormalize_{true};
     std::atomic<bool> boundarySpillEnabled_{false};
     std::atomic<std::size_t> boundarySpillLimit_{1};
     std::atomic<double> boundarySpillDistanceRatio_{1.05};

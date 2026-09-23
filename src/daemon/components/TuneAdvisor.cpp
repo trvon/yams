@@ -2340,9 +2340,10 @@ TuneAdvisor::postIngestBudgetedConcurrency(bool includeDynamicCaps) {
             resolveOverride(postKgConcurrentOverride_, "YAMS_POST_KG_CONCURRENT", kMaxCaps[1])) {
         clampLocked(1, *v);
     }
-    if (auto v = resolveOverride(postSymbolConcurrentOverride_, "YAMS_POST_SYMBOL_CONCURRENT",
-                                 kMaxCaps[2])) {
-        clampLocked(2, *v);
+    // Stage 2 (symbol extraction) was retired in v0.20: it has no config key or environment
+    // override, and its slot is never active outside tests.
+    if (const auto v = postSymbolConcurrentOverride_.load(std::memory_order_relaxed); v > 0) {
+        clampLocked(2, std::min(v, kMaxCaps[2]));
     }
     if (auto v = resolveOverride(postEntityConcurrentOverride_, "YAMS_POST_ENTITY_CONCURRENT",
                                  kMaxCaps[3])) {

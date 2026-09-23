@@ -1,3 +1,4 @@
+#include <yams/profiling.h>
 #include <yams/topology/topology_codec.h>
 #include <yams/topology/topology_metadata_store.h>
 
@@ -42,6 +43,7 @@ MetadataKgTopologyArtifactStore::MetadataKgTopologyArtifactStore(
     : metadataRepo_(std::move(metadataRepo)), kgStore_(std::move(kgStore)) {}
 
 Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactBatch& batch) {
+    YAMS_ZONE_SCOPED_N("topology::store::storeBatch");
     if (!metadataRepo_) {
         return Error{ErrorCode::InvalidState,
                      "topology metadata store requires metadata repository"};
@@ -93,6 +95,8 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         if (!compRes) {
             return compRes.error();
         }
+        YAMS_PLOT("topology::snapshot_payload_bytes", static_cast<int64_t>(compRes.value().size()));
+        YAMS_PLOT("topology::snapshot_memberships", static_cast<int64_t>(batch.memberships.size()));
         snapshotNode.properties = std::move(compRes.value());
         auto snapshotResult = kgStore_->upsertNode(snapshotNode);
         if (!snapshotResult) {
@@ -219,6 +223,7 @@ MetadataKgTopologyArtifactStore::loadSnapshotById(std::string_view snapshotId) c
 
 Result<std::shared_ptr<const MetadataKgTopologyArtifactStore::ResidentSnapshot>>
 MetadataKgTopologyArtifactStore::loadResidentLatest() const {
+    YAMS_ZONE_SCOPED_N("topology::store::loadResidentLatest");
     std::shared_ptr<const ResidentSnapshot> current;
     std::uint64_t generation = 0;
     {

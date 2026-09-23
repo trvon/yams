@@ -11,11 +11,13 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -187,20 +189,6 @@ bool queryMentionsTests(const std::string& query) {
     return lowered.find("test") != std::string::npos || lowered.find("spec") != std::string::npos;
 }
 
-bool looksLikePathQuery(const std::string& query) {
-    if (query.empty()) {
-        return false;
-    }
-    if (query.find('/') != std::string::npos || query.find('\\') != std::string::npos) {
-        return true;
-    }
-    if (query.find_first_of(" \t\n\r") != std::string::npos) {
-        return false;
-    }
-    const auto ext = std::filesystem::path(query).extension().string();
-    return !ext.empty() && ext.size() <= 10;
-}
-
 std::string languageFromPath(const std::string& path) {
     const auto ext = lowerAscii(std::filesystem::path(path).extension().string());
     if (ext == ".cpp" || ext == ".cc" || ext == ".cxx" || ext == ".hpp" || ext == ".h")
@@ -280,22 +268,6 @@ std::optional<std::int32_t> tryExtractIntProperty(const metadata::KGNode& node,
     }
 }
 
-bool nodeWithinScope(const metadata::KGNode& node, std::string_view scopePathPrefix) {
-    if (scopePathPrefix.empty()) {
-        return true;
-    }
-    if (const auto filePath = tryExtractStringProperty(node, "file_path")) {
-        return pathWithinScope(*filePath, scopePathPrefix);
-    }
-    if (const auto sourceFile = tryExtractStringProperty(node, "source_file")) {
-        return pathWithinScope(*sourceFile, scopePathPrefix);
-    }
-    if (const auto sourcePath = metadata::sourcePathFromNodeKey(node.nodeKey)) {
-        return pathWithinScope(*sourcePath, scopePathPrefix);
-    }
-    return false;
-}
-
 std::optional<std::string> filePathFromNodeKey(std::string_view nodeKey) {
     auto at = nodeKey.rfind('@');
     if (at == std::string_view::npos || at + 1 >= nodeKey.size()) {
@@ -344,6 +316,11 @@ GraphContextSymbol makeContextSymbol(const metadata::KGNode& node, const std::st
     auto filePath = tryExtractStringProperty(node, "file_path");
     if (!filePath.has_value()) {
         filePath = tryExtractStringProperty(node, "source_file");
+    }
+    if (!filePath.has_value()) {
+        // Path nodes written at ingest carry the file under "path"; they let file-path queries
+        // resolve now that code-symbol nodes are no longer produced.
+        filePath = tryExtractStringProperty(node, "path");
     }
     if (!filePath.has_value()) {
         filePath = filePathFromNodeKey(node.nodeKey);
@@ -404,33 +381,6 @@ std::string lineNumberedContent(const std::vector<std::string>& lines, std::size
         emitted += rendered.size();
     }
     return out.str();
-}
-
-GraphContextSymbol makeContextSymbol(const metadata::SymbolMetadata& sym,
-                                     const std::string& query) {
-    GraphContextSymbol out;
-    out.label = sym.symbolName;
-    out.qualifiedName = sym.qualifiedName;
-    out.kind = sym.kind;
-    out.filePath = sym.filePath;
-    out.startLine = sym.startLine;
-    out.endLine = sym.endLine;
-    out.nodeKey = sym.kind + ":" + sym.qualifiedName + "@" + sym.filePath;
-    out.exactMatch = lowerAscii(sym.symbolName) == lowerAscii(query) ||
-                     lowerAscii(sym.qualifiedName) == lowerAscii(query);
-    out.generatedOrCache = isGeneratedOrCachePath(sym.filePath);
-    out.testFile = isTestPath(sym.filePath);
-    out.score = out.exactMatch ? 100.0 : 50.0;
-    if (containsToken(sym.qualifiedName, query)) {
-        out.score += 20.0;
-    }
-    if (out.generatedOrCache) {
-        out.score -= 30.0;
-    }
-    if (out.testFile && !queryMentionsTests(query)) {
-        out.score -= 20.0;
-    }
-    return out;
 }
 
 Result<std::vector<GraphContextSymbol>>
@@ -539,10 +489,53 @@ lookupFallbackNodeSymbols(metadata::KnowledgeGraphStore& kgStore,
     return symbols;
 }
 
-const std::unordered_set<std::string>& impactRelations() {
-    static const std::unordered_set<std::string> kRelations = {"calls", "references", "inherits",
-                                                               "implements"};
-    return kRelations;
+// Candidate pool for explore relative to the symbol budget, before coverage ranking.
+constexpr std::size_t kExploreCandidatePoolFactor = 8;
+constexpr std::size_t kExploreMinCandidatePool = 64;
+
+// Order candidates by how many distinct query terms their file covers (across all of that
+// file's candidates), then by the terms the candidate itself covers, keeping the lookup score
+// order among ties. Multi-term queries then prefer the file that answers most of the query.
+void rankByQueryCoverage(std::vector<GraphContextSymbol>& symbols,
+                         const std::vector<std::string>& terms) {
+    if (terms.size() < 2 || symbols.size() < 2) {
+        return;
+    }
+    const auto termMask = [&](const GraphContextSymbol& symbol) {
+        std::uint64_t mask = 0;
+        const auto limit = std::min<std::size_t>(terms.size(), 64);
+        for (std::size_t i = 0; i < limit; ++i) {
+            if (containsToken(symbol.label, terms[i]) ||
+                containsToken(symbol.qualifiedName, terms[i]) ||
+                containsToken(symbol.filePath, terms[i])) {
+                mask |= std::uint64_t{1} << i;
+            }
+        }
+        return mask;
+    };
+    std::vector<std::uint64_t> masks;
+    masks.reserve(symbols.size());
+    std::unordered_map<std::string, std::uint64_t> fileMasks;
+    for (const auto& symbol : symbols) {
+        masks.push_back(termMask(symbol));
+        fileMasks[symbol.filePath] |= masks.back();
+    }
+    std::vector<std::size_t> order(symbols.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+        const auto lhsFile = std::popcount(fileMasks[symbols[lhs].filePath]);
+        const auto rhsFile = std::popcount(fileMasks[symbols[rhs].filePath]);
+        if (lhsFile != rhsFile) {
+            return lhsFile > rhsFile;
+        }
+        return std::popcount(masks[lhs]) > std::popcount(masks[rhs]);
+    });
+    std::vector<GraphContextSymbol> ranked;
+    ranked.reserve(symbols.size());
+    for (const auto index : order) {
+        ranked.push_back(std::move(symbols[index]));
+    }
+    symbols = std::move(ranked);
 }
 
 GraphContextRelation
@@ -588,136 +581,25 @@ public:
         }
 
         const auto terms = extractQueryTerms(req.query);
-        std::vector<GraphContextSymbol> symbols;
-        std::unordered_set<std::string> seenKeys;
-        std::unordered_map<std::string, std::unordered_set<std::string>> matchedTermsByFile;
-        const auto perTermLimit = std::max<std::size_t>(req.budget.maxSymbols, 16);
-        const bool pathQuery = looksLikePathQuery(req.query);
-        const bool hasScope = !req.scopePathPrefix.empty();
-        const auto queryScopedSymbols = [&](std::optional<std::string_view> filePath,
-                                            std::optional<std::string_view> namePattern)
-            -> Result<std::vector<metadata::SymbolMetadata>> {
-            if (!hasScope) {
-                return kgStore_->querySymbolMetadata(filePath, std::nullopt, namePattern,
-                                                     perTermLimit, 0);
-            }
-
-            constexpr std::size_t kScopedQueryPageSize = 64;
-            std::vector<metadata::SymbolMetadata> scoped;
-            std::size_t offset = 0;
-            while (scoped.size() < perTermLimit) {
-                auto page = kgStore_->querySymbolMetadata(filePath, std::nullopt, namePattern,
-                                                          kScopedQueryPageSize, offset);
-                if (!page) {
-                    return page.error();
-                }
-                for (auto& symbol : page.value()) {
-                    if (pathWithinScope(symbol.filePath, req.scopePathPrefix)) {
-                        scoped.push_back(symbol);
-                        if (scoped.size() == perTermLimit) {
-                            break;
-                        }
-                    }
-                }
-                if (page.value().size() < kScopedQueryPageSize) {
-                    break;
-                }
-                if (offset > std::numeric_limits<std::size_t>::max() - page.value().size()) {
-                    return Error{ErrorCode::InvalidData, "Symbol query pagination overflow"};
-                }
-                offset += page.value().size();
-            }
-            return scoped;
-        };
-        const auto addSymbols = [&](const std::vector<metadata::SymbolMetadata>& matches,
-                                    double filePathBoost, std::string_view matchedTerm = {}) {
-            for (const auto& sym : matches) {
-                if (!pathWithinScope(sym.filePath, req.scopePathPrefix)) {
-                    continue;
-                }
-                auto contextSymbol = makeContextSymbol(sym, req.query);
-                if (pathQuery && containsToken(sym.filePath, req.query)) {
-                    contextSymbol.score += filePathBoost;
-                    contextSymbol.exactMatch = lowerAscii(sym.filePath) == lowerAscii(req.query);
-                }
-                if (!req.includeTests && contextSymbol.testFile && !queryMentionsTests(req.query)) {
-                    continue;
-                }
-                if (!matchedTerm.empty() && !contextSymbol.filePath.empty()) {
-                    matchedTermsByFile[contextSymbol.filePath].insert(std::string(matchedTerm));
-                }
-                if (seenKeys.insert(contextSymbol.nodeKey).second) {
-                    symbols.push_back(std::move(contextSymbol));
-                }
-            }
-        };
-
-        if (pathQuery) {
-            auto filePathResult = queryScopedSymbols(req.query, std::nullopt);
-            if (!filePathResult) {
-                return filePathResult.error();
-            }
-            addSymbols(filePathResult.value(), 60.0);
+        // Label lookup fills its limit term by term, so an early broad term can crowd out nodes
+        // that match more of the query. Gather a wider pool, scope it, rank it by query-term
+        // coverage, then apply the symbol budget.
+        const std::size_t candidatePool = std::max<std::size_t>(
+            req.budget.maxSymbols * kExploreCandidatePoolFactor, kExploreMinCandidatePool);
+        auto matched =
+            lookupFallbackNodeSymbols(*kgStore_, terms, req.query, req.includeTests, candidatePool);
+        if (!matched) {
+            return matched.error();
         }
-
-        if (!pathQuery || symbols.empty()) {
-            for (const auto& term : terms) {
-                auto symResult = queryScopedSymbols(std::nullopt, term);
-                if (!symResult) {
-                    return symResult.error();
-                }
-                addSymbols(symResult.value(), 0.0, term);
-            }
-        }
-
-        if (!pathQuery && terms.size() > 1) {
-            static constexpr double kAdditionalTermCoverageBoost = 25.0;
-            for (auto& symbol : symbols) {
-                const auto it = matchedTermsByFile.find(symbol.filePath);
-                if (it != matchedTermsByFile.end() && it->second.size() > 1) {
-                    symbol.score +=
-                        static_cast<double>(it->second.size() - 1) * kAdditionalTermCoverageBoost;
-                }
-            }
-        }
-
-        std::stable_sort(symbols.begin(), symbols.end(), [](const auto& lhs, const auto& rhs) {
-            if (lhs.score != rhs.score) {
-                return lhs.score > rhs.score;
-            }
-            if (lhs.filePath != rhs.filePath) {
-                return lhs.filePath < rhs.filePath;
-            }
-            return lhs.qualifiedName < rhs.qualifiedName;
+        auto symbols = std::move(matched.value());
+        std::erase_if(symbols, [&](const auto& symbol) {
+            return !pathWithinScope(symbol.filePath, req.scopePathPrefix);
         });
-
+        rankByQueryCoverage(symbols, terms);
         response.totalSymbolsConsidered = symbols.size();
         if (symbols.empty()) {
-            auto fallbackSymbols = lookupFallbackNodeSymbols(
-                *kgStore_, terms, req.query, req.includeTests, req.budget.maxSymbols);
-            if (!fallbackSymbols) {
-                return fallbackSymbols.error();
-            }
-            if (fallbackSymbols.value().empty()) {
-                response.warnings.push_back(
-                    "No matching symbols found in symbol metadata or graph node labels");
-                response.warnings.push_back(
-                    "Graph explore depends on extracted symbol metadata; re-index the file or "
-                    "rerun extraction if results look incomplete");
-                return response;
-            }
-            response.warnings.push_back(
-                "Symbol metadata missing or stale; falling back to graph node labels and aliases");
-            symbols = std::move(fallbackSymbols.value());
-            std::erase_if(symbols, [&](const auto& symbol) {
-                return !pathWithinScope(symbol.filePath, req.scopePathPrefix);
-            });
-            if (symbols.empty()) {
-                response.warnings.push_back(
-                    "No fallback graph symbols matched the requested scope");
-                return response;
-            }
-            response.totalSymbolsConsidered = symbols.size();
+            response.warnings.push_back("No graph node labels or aliases matched the query");
+            return response;
         }
         if (symbols.size() > req.budget.maxSymbols) {
             symbols.resize(req.budget.maxSymbols);
@@ -938,63 +820,8 @@ public:
             return Error{ErrorCode::InvalidArgument, "graph impact requires a symbol"};
         }
 
-        auto entry = resolveEntrySymbols(req.symbol, std::nullopt, std::nullopt,
-                                         req.budget.maxSymbols, req.scopePathPrefix);
-        if (!entry) {
-            return entry.error();
-        }
-
-        std::vector<std::int64_t> seedIds;
-        std::unordered_set<std::int64_t> seedSeen;
-        // Seed from the literal query name first: callers reference the call-site surface form
-        // (`symbol_ref:<name>`), which does not always match the substring-resolved definition.
-        if (auto r = collectCallTargetNodeIds(simpleNameOf(req.symbol), req.symbol, seedSeen,
-                                              seedIds, req.scopePathPrefix);
-            !r) {
-            return r.error();
-        }
-        for (const auto& sym : entry.value()) {
-            auto id = nodeIdForSymbol(sym);
-            if (!id) {
-                return id.error();
-            }
-            if (id.value().has_value() && seedSeen.insert(*id.value()).second) {
-                seedIds.push_back(*id.value());
-            }
-            if (auto r = collectCallTargetNodeIds(sym.label, sym.qualifiedName, seedSeen, seedIds,
-                                                  req.scopePathPrefix);
-                !r) {
-                return r.error();
-            }
-        }
-        if (seedIds.empty()) {
-            response.warnings.push_back("No symbol matching '" + req.symbol +
-                                        "' found in the knowledge graph");
-            return response;
-        }
-
-        std::vector<metadata::KGNode> affected;
-        const auto depth = std::clamp<std::size_t>(req.depth == 0 ? 2 : req.depth, 1, 5);
-        if (auto r = collectReverseDependents(seedIds, depth, req.budget.maxSymbols, affected,
-                                              response.relationships, req.scopePathPrefix);
-            !r) {
-            return r.error();
-        }
-        YAMS_PLOT("graph_context::impact_affected", static_cast<int64_t>(affected.size()));
-        response.affectedSymbols.reserve(affected.size());
-        for (const auto& node : affected) {
-            response.affectedSymbols.push_back(makeContextSymbol(node, req.symbol, 0.0));
-        }
-        std::stable_sort(response.affectedSymbols.begin(), response.affectedSymbols.end(),
-                         [](const auto& lhs, const auto& rhs) {
-                             if (lhs.filePath != rhs.filePath) {
-                                 return lhs.filePath < rhs.filePath;
-                             }
-                             return lhs.qualifiedName < rhs.qualifiedName;
-                         });
-        if (response.affectedSymbols.size() >= req.budget.maxSymbols) {
-            response.truncated = true;
-        }
+        // The calls/references/inherits/implements edges this walked were code-symbol edges.
+        response.warnings.emplace_back(kImpactNeedsSymbolGraphWarning);
         return response;
     }
 
@@ -1011,87 +838,8 @@ public:
             return Error{ErrorCode::InvalidArgument, "affected tests requires changed files"};
         }
 
-        std::vector<std::string> seedNodeKeys;
-        const auto maxSeedSymbols = req.budget.maxSymbols;
-        for (const auto& file : req.changedFiles) {
-            if (seedNodeKeys.size() >= maxSeedSymbols) {
-                response.truncated = true;
-                break;
-            }
-            const auto remaining = maxSeedSymbols - seedNodeKeys.size();
-            const auto queryLimit =
-                remaining == std::numeric_limits<std::size_t>::max() ? remaining : remaining + 1;
-            auto syms =
-                kgStore_->querySymbolMetadata(file, std::nullopt, std::nullopt, queryLimit, 0);
-            if (!syms) {
-                return syms.error();
-            }
-            if (syms.value().size() > remaining) {
-                response.truncated = true;
-                syms.value().resize(remaining);
-            }
-            for (const auto& sym : syms.value()) {
-                seedNodeKeys.push_back(makeContextSymbol(sym, std::string{}).nodeKey);
-            }
-        }
-
-        auto seedNodes = kgStore_->getNodesByKeys(seedNodeKeys);
-        if (!seedNodes) {
-            return seedNodes.error();
-        }
-        std::vector<std::int64_t> seedIds;
-        std::unordered_set<std::int64_t> seedSeen;
-        seedIds.reserve(seedNodes.value().size());
-        for (const auto& node : seedNodes.value()) {
-            if (seedSeen.insert(node.id).second) {
-                seedIds.push_back(node.id);
-            }
-        }
-        if (!seedIds.empty()) {
-            auto reconciled =
-                kgStore_->getEdgesToBatch(seedIds, std::string_view("resolves_to"), 64);
-            if (!reconciled) {
-                return reconciled.error();
-            }
-            for (const auto& [definitionId, edges] : reconciled.value()) {
-                (void)definitionId;
-                for (const auto& edge : edges) {
-                    if (seedSeen.insert(edge.srcNodeId).second) {
-                        seedIds.push_back(edge.srcNodeId);
-                    }
-                }
-            }
-        }
-        if (seedIds.empty()) {
-            response.warnings.push_back(
-                "No indexed symbols found for the changed files; re-run extraction");
-            return response;
-        }
-
-        std::vector<metadata::KGNode> affected;
-        const auto depth = std::clamp<std::size_t>(req.depth == 0 ? 5 : req.depth, 1, 5);
-        if (auto r =
-                collectReverseDependents(seedIds, depth, 256, affected, response.relationships);
-            !r) {
-            return r.error();
-        }
-
-        std::unordered_set<std::string> testFiles;
-        for (const auto& node : affected) {
-            auto sym = makeContextSymbol(node, std::string{}, 0.0);
-            if (sym.filePath.empty()) {
-                continue;
-            }
-            const bool matchesPattern = !req.testPathPattern.empty() &&
-                                        sym.filePath.find(req.testPathPattern) != std::string::npos;
-            if (sym.testFile || matchesPattern) {
-                testFiles.insert(sym.filePath);
-            }
-        }
-        response.affectedTests.assign(testFiles.begin(), testFiles.end());
-        std::sort(response.affectedTests.begin(), response.affectedTests.end());
-        YAMS_PLOT("graph_context::affected_tests",
-                  static_cast<int64_t>(response.affectedTests.size()));
+        // Affected tests were found by walking reverse code-symbol edges from indexed symbols.
+        response.warnings.emplace_back(kAffectedTestsNeedSymbolGraphWarning);
         return response;
     }
 
@@ -1435,40 +1183,22 @@ private:
                         std::optional<std::int32_t> line, std::size_t limit,
                         std::string_view scopePathPrefix = {}) {
         YAMS_ZONE_SCOPED_N("graph_context::resolveEntrySymbols");
-        std::vector<GraphContextSymbol> out;
-        std::unordered_set<std::string> seen;
-        auto byName = kgStore_->querySymbolMetadata(std::nullopt, std::nullopt, name,
-                                                    std::max<std::size_t>(limit * 2, 16), 0);
-        if (!byName) {
-            return byName.error();
+        auto matched =
+            lookupFallbackNodeSymbols(*kgStore_, extractQueryTerms(name), name, true, limit);
+        if (!matched) {
+            return matched.error();
         }
-        for (const auto& sym : byName.value()) {
-            if (!pathWithinScope(sym.filePath, scopePathPrefix)) {
-                continue;
+        auto out = std::move(matched.value());
+        std::erase_if(out, [&](const auto& symbol) {
+            if (!pathWithinScope(symbol.filePath, scopePathPrefix)) {
+                return true;
             }
-            if (file.has_value() && sym.filePath.find(*file) == std::string::npos) {
-                continue;
+            if (file.has_value() && symbol.filePath.find(*file) == std::string::npos) {
+                return true;
             }
-            if (line.has_value() && sym.startLine.has_value() && sym.endLine.has_value() &&
-                (*line < *sym.startLine || *line > *sym.endLine)) {
-                continue;
-            }
-            auto contextSymbol = makeContextSymbol(sym, name);
-            if (seen.insert(contextSymbol.nodeKey).second) {
-                out.push_back(std::move(contextSymbol));
-            }
-        }
-        if (out.empty()) {
-            auto fallback =
-                lookupFallbackNodeSymbols(*kgStore_, extractQueryTerms(name), name, true, limit);
-            if (!fallback) {
-                return fallback.error();
-            }
-            out = std::move(fallback.value());
-            std::erase_if(out, [&](const auto& symbol) {
-                return !pathWithinScope(symbol.filePath, scopePathPrefix);
-            });
-        }
+            return line.has_value() && symbol.startLine.has_value() && symbol.endLine.has_value() &&
+                   (*line < *symbol.startLine || *line > *symbol.endLine);
+        });
         std::stable_sort(out.begin(), out.end(), [](const auto& lhs, const auto& rhs) {
             if (lhs.score != rhs.score) {
                 return lhs.score > rhs.score;
@@ -1499,178 +1229,6 @@ private:
             out.push_back(makeContextSymbol(node, std::string{}, 0.0));
         }
         return out;
-    }
-
-    // Cross-file calls land on `symbol_reference` placeholder nodes (and the per-snapshot
-    // version nodes), not the canonical definition node. To answer "who depends on X" we must
-    // seed reverse traversal from every node a caller could have referenced for X.
-    Result<void> collectCallTargetNodeIds(const std::string& simpleName,
-                                          const std::string& qualifiedName,
-                                          std::unordered_set<std::int64_t>& seedSet,
-                                          std::vector<std::int64_t>& seedIds,
-                                          std::string_view scopePathPrefix = {}) {
-        if (simpleName.empty()) {
-            return Result<void>();
-        }
-        auto matches = kgStore_->searchNodesByLabel(simpleName, 200, 0);
-        if (!matches) {
-            return matches.error();
-        }
-        const auto lowerSimple = lowerAscii(simpleName);
-        const auto lowerQualified = lowerAscii(qualifiedName);
-        const auto suffix = "::" + lowerSimple;
-        for (const auto& node : matches.value()) {
-            if (!nodeWithinScope(node, scopePathPrefix)) {
-                continue;
-            }
-            const auto& type = node.type;
-            const bool callTargetType = type == "symbol_reference" || type == "function" ||
-                                        type == "method" || type == "function_version" ||
-                                        type == "method_version" || type == "class" ||
-                                        type == "struct";
-            if (!callTargetType) {
-                continue;
-            }
-            const auto label = lowerAscii(node.label.value_or(std::string{}));
-            const bool nameMatch = label == lowerSimple ||
-                                   (!lowerQualified.empty() && label == lowerQualified) ||
-                                   (label.size() > suffix.size() && label.ends_with(suffix));
-            if (!nameMatch) {
-                continue;
-            }
-            if (seedSet.insert(node.id).second) {
-                seedIds.push_back(node.id);
-            }
-            // If a reconciliation pass linked placeholders to this definition, seed those
-            // deterministically (avoids relying solely on surface-form name matching).
-            const bool isDefinition =
-                type == "function" || type == "method" || type == "class" || type == "struct";
-            if (isDefinition) {
-                auto resolved =
-                    kgStore_->getEdgesTo(node.id, std::string_view("resolves_to"), 64, 0);
-                if (resolved) {
-                    for (const auto& edge : resolved.value()) {
-                        auto placeholder = kgStore_->getNodeById(edge.srcNodeId);
-                        if (!placeholder) {
-                            return placeholder.error();
-                        }
-                        if (!placeholder.value().has_value() ||
-                            !nodeWithinScope(*placeholder.value(), scopePathPrefix)) {
-                            continue;
-                        }
-                        if (seedSet.insert(edge.srcNodeId).second) {
-                            seedIds.push_back(edge.srcNodeId);
-                        }
-                    }
-                }
-            }
-        }
-        return Result<void>();
-    }
-
-    Result<void> collectReverseDependents(const std::vector<std::int64_t>& seedIds,
-                                          std::size_t depth, std::size_t maxNodes,
-                                          std::vector<metadata::KGNode>& affectedNodes,
-                                          std::vector<GraphContextRelation>& relationships,
-                                          std::string_view scopePathPrefix = {}) {
-        YAMS_ZONE_SCOPED_N("graph_context::collectReverseDependents");
-        if (seedIds.empty() || depth == 0 || maxNodes == 0) {
-            return Result<void>();
-        }
-        std::unordered_set<std::int64_t> visited(seedIds.begin(), seedIds.end());
-        std::unordered_set<std::int64_t> discovered;
-        std::unordered_set<std::int64_t> bridgeSeen(seedIds.begin(), seedIds.end());
-        std::vector<std::int64_t> frontier = seedIds;
-        std::vector<metadata::KGEdge> keptEdges;
-        const auto& relations = impactRelations();
-        static constexpr std::size_t kPerNode = 64;
-        std::size_t edgesExamined = 0;
-        std::size_t hopsReached = 0;
-
-        for (std::size_t d = 0; d < depth && !frontier.empty(); ++d) {
-            hopsReached = d + 1;
-            auto incoming = kgStore_->getEdgesToBatch(frontier, std::nullopt, kPerNode);
-            if (!incoming) {
-                return incoming.error();
-            }
-            std::vector<std::int64_t> callersThisHop;
-            for (const auto& [dstId, edges] : incoming.value()) {
-                for (const auto& edge : edges) {
-                    ++edgesExamined;
-                    if (!relations.contains(metadata::normalizeRelationName(edge.relation))) {
-                        continue;
-                    }
-                    auto sourceNode = kgStore_->getNodeById(edge.srcNodeId);
-                    if (!sourceNode) {
-                        return sourceNode.error();
-                    }
-                    if (!sourceNode.value().has_value() ||
-                        !nodeWithinScope(*sourceNode.value(), scopePathPrefix)) {
-                        continue;
-                    }
-                    keptEdges.push_back(edge);
-                    const auto srcId = edge.srcNodeId;
-                    if (!visited.contains(srcId) && discovered.size() < maxNodes) {
-                        visited.insert(srcId);
-                        discovered.insert(srcId);
-                        callersThisHop.push_back(srcId);
-                    }
-                }
-            }
-            // A caller is a version/canonical node that itself carries no incoming calls — its
-            // callers point at its `symbol_reference` placeholder. Bridge each discovered caller
-            // to its placeholders so the next hop can find who calls it.
-            std::vector<std::int64_t> nextFrontier;
-            if (d + 1 < depth && !callersThisHop.empty() && discovered.size() < maxNodes) {
-                auto callerNodes = kgStore_->getNodesByIds(callersThisHop);
-                if (!callerNodes) {
-                    return callerNodes.error();
-                }
-                for (const auto& node : callerNodes.value()) {
-                    const auto simple = node.label.value_or(std::string{});
-                    const auto qualified =
-                        tryExtractStringProperty(node, "qualified_name").value_or(simple);
-                    if (auto r = collectCallTargetNodeIds(simple, qualified, bridgeSeen,
-                                                          nextFrontier, scopePathPrefix);
-                        !r) {
-                        return r.error();
-                    }
-                }
-            }
-            frontier = std::move(nextFrontier);
-        }
-
-        YAMS_PLOT("graph_context::impact_seeds", static_cast<int64_t>(seedIds.size()));
-        YAMS_PLOT("graph_context::impact_edges_examined", static_cast<int64_t>(edgesExamined));
-        YAMS_PLOT("graph_context::impact_hops_reached", static_cast<int64_t>(hopsReached));
-
-        std::vector<std::int64_t> idsToHydrate(discovered.begin(), discovered.end());
-        idsToHydrate.insert(idsToHydrate.end(), seedIds.begin(), seedIds.end());
-        std::unordered_map<std::int64_t, metadata::KGNode> nodesById;
-        if (!idsToHydrate.empty()) {
-            auto nodes = kgStore_->getNodesByIds(idsToHydrate);
-            if (!nodes) {
-                return nodes.error();
-            }
-            for (auto& node : nodes.value()) {
-                nodesById.emplace(node.id, std::move(node));
-            }
-        }
-        affectedNodes.reserve(affectedNodes.size() + discovered.size());
-        for (const auto id : discovered) {
-            if (const auto it = nodesById.find(id); it != nodesById.end()) {
-                affectedNodes.push_back(it->second);
-            }
-        }
-        std::unordered_set<std::int64_t> seenEdge;
-        relationships.reserve(relationships.size() + keptEdges.size());
-        for (const auto& edge : keptEdges) {
-            if (!seenEdge.insert(edge.id).second) {
-                continue;
-            }
-            relationships.push_back(makeRelationFromEdge(edge, nodesById));
-        }
-        return Result<void>();
     }
 
     Result<void> shortestPathToAny(std::int64_t fromId,

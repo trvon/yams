@@ -33,6 +33,13 @@ void ServiceManager::configureTopologyRuntime() {
             spdlog::info("Topology routing representatives applied via config: {}",
                          topologyManager_.routingRepresentativeCount());
         }
+        if (enginePolicy.sgcHops || enginePolicy.sgcNormalize) {
+            topologyManager_.setSgcPolicy(
+                enginePolicy.sgcHops.value_or(topologyManager_.sgcHops()),
+                enginePolicy.sgcNormalize.value_or(topologyManager_.sgcNormalize()));
+            spdlog::info("Topology SGC smoothing applied via config: hops={} normalize={}",
+                         topologyManager_.sgcHops(), topologyManager_.sgcNormalize());
+        }
         if (enginePolicy.boundarySpillEnabled) {
             topologyManager_.setBoundarySpillPolicy(
                 *enginePolicy.boundarySpillEnabled, enginePolicy.boundarySpillLimit.value_or(1),

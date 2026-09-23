@@ -44,7 +44,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
         run: |
           set -euo pipefail
-          git fetch --force origin main experimental --tags
+          git fetch --force origin +refs/heads/main:refs/remotes/origin/main +refs/heads/experimental:refs/remotes/origin/experimental --tags
           base_sha="$(git rev-parse origin/main)"
           if [ "$EVENT_NAME" = "pull_request" ]; then
             candidate_sha="$PR_HEAD_SHA"

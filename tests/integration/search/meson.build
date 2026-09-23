@@ -8,10 +8,6 @@ else
     'hybrid_search_integration_test.cpp',
   )
 
-  symbol_search_integration_srcs = files(
-    'symbol_search_integration_test.cpp',
-  )
-
   fsm_tuning_integration_srcs = files(
     'fsm_tuning_benchmark_integration_test.cpp',
   )
@@ -47,29 +43,6 @@ else
       },
       is_parallel: false,
       timeout: 300,  # 5 minutes - allows time for daemon startup + embedding model load
-      # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
-      args: ['--allow-running-no-tests'],
-    )
-
-    # Symbol search integration tests
-    symbol_search_integration_exe = executable('yams_symbol_search_integration',
-      symbol_search_integration_srcs,
-      include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
-      cpp_args: ['-DYAMS_TESTING=1'],
-      install: false,
-    )
-
-    test('symbol_search_integration',
-      symbol_search_integration_exe,
-      suite: ['integration', 'search', 'symbols', 'kg', 'catch2'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_VECTORS': '1',  # Don't need embeddings for symbol tests
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
-      is_parallel: false,
-      timeout: 120,  # 2 minutes - symbol extraction can be slow
       # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
       args: ['--allow-running-no-tests'],
     )

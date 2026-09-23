@@ -28,7 +28,7 @@ def context():
         "GITHUB_WORKFLOW_REF": REPO
         + "/.github/workflows/draft-promotion.yml@refs/heads/main",
         "GITHUB_WORKFLOW_SHA": MAIN,
-        "GITHUB_EVENT_NAME": "workflow_run",
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
     }
 
 
@@ -139,18 +139,12 @@ class PromotionTests(unittest.TestCase):
         self.assertEqual(self.run_reconcile(api, apply=True)["action"], "no-changes")
         self.assertFalse(api.writes())
 
-    def test_closed_same_head_is_respected_unless_manually_requested(self):
+    def test_manual_dispatch_recreates_draft_despite_closed_same_head(self):
         api = FakeAPI()
         closed = pull()
         closed["state"] = "closed"
         api.closed = [closed]
-        self.assertEqual(
-            self.run_reconcile(api, apply=True)["action"], "closed-current-head"
-        )
-        self.assertFalse(api.writes())
-        env = context()
-        env["GITHUB_EVENT_NAME"] = "workflow_dispatch"
-        result = promotion.reconcile(api, env, event(), apply=True)
+        result = promotion.reconcile(api, context(), event(), apply=True)
         self.assertEqual(result["action"], "created")
 
     def test_trust_failures_do_not_even_read_api(self):
@@ -165,20 +159,10 @@ class PromotionTests(unittest.TestCase):
             env = context()
             env[key] = value
             variants.append((env, event()))
-        for key, value in [
-            ("event", "pull_request"),
-            ("head_branch", "main"),
-            ("head_repository", {"full_name": "fork/yams"}),
-            ("path", ".github/workflows/other.yml"),
-            ("name", "Pretend Tests"),
-            ("head_sha", "bad"),
-        ]:
-            ev = event()
-            ev["workflow_run"][key] = value
-            variants.append((context(), ev))
-        ev = event()
-        ev["action"] = "completed"
-        variants.append((context(), ev))
+        for name in ["workflow_run", "push", "pull_request"]:
+            env = context()
+            env["GITHUB_EVENT_NAME"] = name
+            variants.append((env, event()))
         ev = event()
         ev["repository"]["default_branch"] = "experimental"
         variants.append((context(), ev))

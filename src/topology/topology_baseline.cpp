@@ -1,3 +1,4 @@
+#include <yams/profiling.h>
 #include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_representatives.h>
@@ -757,6 +758,7 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifa
                                                             bool buildDenseAnnIndex,
                                                             bool buildBqIndex,
                                                             std::size_t bqPrefixDimension) {
+    YAMS_ZONE_SCOPED_N("topology::route::buildIndex");
     SparseRouteIndex index;
     index.centroidNorms.reserve(artifacts.clusters.size());
     index.routingRepresentativeNorms.reserve(artifacts.clusters.size());
@@ -798,6 +800,8 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifa
             yams::vector::BinaryQuantizedIndex::build(centroidIds, centroids, bqPrefixDimension);
         if (bqIndex) {
             index.centroidBqIndex = std::move(bqIndex).value();
+            YAMS_PLOT("topology::bq_index_bytes",
+                      static_cast<int64_t>(index.centroidBqIndex->memoryUsageBytes()));
         }
     }
 
@@ -837,6 +841,7 @@ Result<std::vector<ClusterRoute>>
 SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                                  const TopologyArtifactBatch& artifacts,
                                  const SparseRouteIndex& index, SparseRouteWork* work) const {
+    YAMS_ZONE_SCOPED_N("topology::route");
     if (index.centroidNorms.size() != artifacts.clusters.size() ||
         index.routingRepresentativeNorms.size() != artifacts.clusters.size()) {
         return Error{ErrorCode::InvalidArgument,
@@ -925,21 +930,25 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
             std::max(bqRequested ? request.bqCandidateLimit : request.denseAnnCandidateLimit,
                      request.limit));
         auto bqHits = index.centroidBqIndex->search(request.queryEmbedding, candidateLimit);
-        std::fill(routeCandidates.begin(), routeCandidates.end(), false);
-        for (const auto& hit : bqHits) {
-            if (hit.id < routeCandidates.size()) {
-                routeCandidates[hit.id] = true;
+        // An empty shortlist means BQ could not score the query (e.g. a dimension mismatch);
+        // keep the exhaustive candidate set, as the dense ANN branch does when it fails.
+        if (!bqHits.empty()) {
+            std::fill(routeCandidates.begin(), routeCandidates.end(), false);
+            for (const auto& hit : bqHits) {
+                if (hit.id < routeCandidates.size()) {
+                    routeCandidates[hit.id] = true;
+                }
             }
-        }
-        for (std::size_t clusterIndex = 0; clusterIndex < signals.size(); ++clusterIndex) {
-            if (signals[clusterIndex].sparseMass > 0.0) {
-                routeCandidates[clusterIndex] = true;
+            for (std::size_t clusterIndex = 0; clusterIndex < signals.size(); ++clusterIndex) {
+                if (signals[clusterIndex].sparseMass > 0.0) {
+                    routeCandidates[clusterIndex] = true;
+                }
             }
-        }
-        if (work != nullptr) {
-            work->bqUsed = true;
-            work->bqCandidates = bqHits.size();
-            work->bqDistanceEvaluations = index.centroidBqIndex->size();
+            if (work != nullptr) {
+                work->bqUsed = true;
+                work->bqCandidates = bqHits.size();
+                work->bqDistanceEvaluations = index.centroidBqIndex->size();
+            }
         }
     } else if (denseAnnEligible) {
         const auto candidateLimit = std::min(

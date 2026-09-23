@@ -386,7 +386,6 @@ struct MCPSearchRequest {
     std::string sessionName; // optional: target a specific session
 
     // Symbol ranking
-    bool symbolRank = true; // Enable automatic symbol ranking boost for code-like queries
 
     // CWD scoping
     std::string cwd; // optional: scope search to files under this directory

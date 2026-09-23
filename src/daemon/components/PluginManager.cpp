@@ -12,7 +12,6 @@
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
-#include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
@@ -21,7 +20,6 @@
 #include <yams/plugins/content_extractor_v1.h>
 #include <yams/plugins/entity_extractor_v2.h>
 #include <yams/plugins/model_provider_v1.h>
-#include <yams/plugins/symbol_extractor_v1.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -300,7 +298,6 @@ void PluginManager::shutdown() noexcept {
     // copies; shutdown is the quiesced path that safely releases them.
     modelProvider_.reset();
     contentExtractors_.clear();
-    symbolExtractors_.clear();
     entityExtractors_.clear();
     entityProviders_.clear();
     externalHost_.reset();
@@ -747,7 +744,6 @@ Result<void> PluginManager::unloadPlugin(const std::string& name) {
         }
         (void)adoptModelProvider();
         (void)adoptContentExtractors();
-        (void)adoptSymbolExtractors();
         (void)adoptEntityExtractors();
         (void)adoptEntityProviders();
         pluginHostFsm_.dispatch(PluginUnloadedEvent{name});
@@ -894,7 +890,6 @@ Result<size_t> PluginManager::autoloadPlugins() {
         }
 
         adoptContentExtractors();
-        adoptSymbolExtractors();
         adoptEntityExtractors();
         adoptEntityProviders();
 
@@ -1208,32 +1203,6 @@ Result<size_t> PluginManager::adoptContentExtractors() {
             }
         }
 
-        return Result<size_t>(adopted);
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::Unknown, e.what()};
-    }
-}
-
-Result<size_t> PluginManager::adoptSymbolExtractors() {
-    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
-    try {
-        // Clear existing extractors to avoid duplicates on re-adoption
-        symbolExtractors_.clear();
-
-        // Use getActivePluginHost() to get the correct host (shared or owned)
-        auto* host = getActivePluginHost();
-        if (!host) {
-            spdlog::warn("[PluginManager] No active plugin host for symbol extractor adoption");
-            return Result<size_t>(0);
-        }
-
-        size_t adopted =
-            adoptPluginInterfaceImpl<yams_symbol_extractor_v1, AbiSymbolExtractorAdapter,
-                                     AbiSymbolExtractorAdapter>(
-                host, "symbol_extractor_v1", YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION,
-                symbolExtractors_, [](const yams_symbol_extractor_v1* table) {
-                    return table->abi_version == YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION;
-                });
         return Result<size_t>(adopted);
     } catch (const std::exception& e) {
         return Error{ErrorCode::Unknown, e.what()};

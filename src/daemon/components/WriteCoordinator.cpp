@@ -357,7 +357,6 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                   std::is_same_v<T, UpdateEmbeddingStatusByHashOp> ||
                                   std::is_same_v<T, UpdateEmbeddingStatusByHashesOp> ||
                                   std::is_same_v<T, CompleteDocumentEmbeddingsByHashesOp> ||
-                                  std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
                                   std::is_same_v<T, InsertRelationshipOp> ||
                                   std::is_same_v<T, AddSymSpellTermsOp> ||
                                   std::is_same_v<T, AcknowledgeKnowledgeGraphOp>) {
@@ -431,7 +430,6 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                       std::is_same_v<T, UpdateEmbeddingStatusByHashOp> ||
                                       std::is_same_v<T, UpdateEmbeddingStatusByHashesOp> ||
                                       std::is_same_v<T, CompleteDocumentEmbeddingsByHashesOp> ||
-                                      std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
                                       std::is_same_v<T, InsertRelationshipOp> ||
                                       std::is_same_v<T, AddSymSpellTermsOp> ||
                                       std::is_same_v<T, AcknowledgeKnowledgeGraphOp>) {
@@ -599,7 +597,6 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         Result<void> r;
                         if constexpr (std::is_same_v<T, UpsertTreeSnapshotOp> ||
                                       std::is_same_v<T, InsertRelationshipOp> ||
-                                      std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
                                       std::is_same_v<T, AcknowledgeKnowledgeGraphOp>) {
                             r = applyMetadataOp(concrete);
                         } else if constexpr (std::is_same_v<T, AddSymSpellTermsOp>) {
@@ -1187,18 +1184,6 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
 }
 
 Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
-                                       UpsertSymbolMetadataOp& op) {
-    if (op.symbols.empty())
-        return Result<void>();
-    auto r = kgBatch.upsertSymbolMetadata(op.symbols);
-    if (r) {
-        std::lock_guard<std::mutex> lock(statsMutex_);
-        stats_.symbolsUpserted += op.symbols.size();
-    }
-    return r;
-}
-
-Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                                        DeleteDocEntitiesForDocumentOp& op) {
     return kgBatch.deleteDocEntitiesForDocument(op.documentId);
 }
@@ -1398,19 +1383,6 @@ Result<void> WriteCoordinator::applyMetadataOp(CompleteDocumentEmbeddingsByHashe
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.embeddingStatusesUpdated += op.hashes.size();
         stats_.repairStatusesUpdated += op.hashes.size();
-    }
-    return r;
-}
-
-Result<void> WriteCoordinator::applyMetadataOp(UpsertSymbolExtractionStateOp& op) {
-    if (!kg_)
-        return Error{ErrorCode::InvalidState, "KnowledgeGraphStore unavailable"};
-    if (op.documentHash.empty())
-        return Result<void>();
-    auto r = kg_->upsertSymbolExtractionState(op.documentHash, op.state);
-    if (r) {
-        std::lock_guard<std::mutex> lock(statsMutex_);
-        stats_.symbolExtractionStatesUpdated++;
     }
     return r;
 }

@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/topology/topology_artifacts.h>
@@ -256,4 +257,105 @@ TEST_CASE("topology::applySGCSmoothing shrinks intra-cluster variance", "[topolo
 
     CHECK(afterClusterA < beforeClusterA);
     CHECK(afterClusterB < beforeClusterB);
+}
+
+namespace {
+
+yams::topology::TopologyDocumentInput sgcDoc(std::string hash, std::vector<float> embedding,
+                                             std::vector<std::pair<std::string, float>> edges) {
+    yams::topology::TopologyDocumentInput doc;
+    doc.documentHash = std::move(hash);
+    doc.embedding = std::move(embedding);
+    for (auto& [to, score] : edges) {
+        doc.neighbors.push_back({.documentHash = to, .score = score, .reciprocal = true});
+    }
+    return doc;
+}
+
+} // namespace
+
+TEST_CASE("topology::applySGCSmoothing matches the normalized-adjacency closed form",
+          "[topology][sgc][catch2]") {
+    // Path graph 0 - 1 - 2 with unit weights. With self loops, D = diag(2, 3, 2) and
+    // S = D^-1/2 (A + I) D^-1/2. For x = e0, S x = [1/2, 1/sqrt(6), 0].
+    std::vector<yams::topology::TopologyDocumentInput> docs{
+        sgcDoc("a", {1.0F}, {{"b", 1.0F}}),
+        sgcDoc("b", {0.0F}, {{"a", 1.0F}, {"c", 1.0F}}),
+        sgcDoc("c", {0.0F}, {{"b", 1.0F}}),
+    };
+    yams::topology::TopologyBuildConfig cfg;
+    cfg.reciprocalOnly = true;
+    cfg.minEdgeScore = 0.0;
+
+    auto oneHop = docs;
+    yams::topology::applySGCSmoothing(oneHop, cfg, 1);
+    CHECK(oneHop[0].embedding[0] == Catch::Approx(0.5).epsilon(1e-6));
+    CHECK(oneHop[1].embedding[0] == Catch::Approx(1.0 / std::sqrt(6.0)).epsilon(1e-6));
+    CHECK(oneHop[2].embedding[0] == Catch::Approx(0.0).margin(1e-9));
+
+    // S^2 e0 = S [1/2, 1/sqrt(6), 0] = [1/4 + 1/6, 1/(2 sqrt 6) + 1/(3 sqrt 6), 1/6].
+    auto twoHop = docs;
+    yams::topology::applySGCSmoothing(twoHop, cfg, 2);
+    CHECK(twoHop[0].embedding[0] == Catch::Approx(0.25 + 1.0 / 6.0).epsilon(1e-6));
+    CHECK(twoHop[1].embedding[0] ==
+          Catch::Approx(1.0 / (2.0 * std::sqrt(6.0)) + 1.0 / (3.0 * std::sqrt(6.0))).epsilon(1e-6));
+    CHECK(twoHop[2].embedding[0] == Catch::Approx(1.0 / 6.0).epsilon(1e-6));
+}
+
+TEST_CASE("topology::applySGCSmoothing is independent of neighbor list order",
+          "[topology][sgc][catch2]") {
+    auto docs = buildTwoClusterFixture();
+    auto permuted = docs;
+    for (auto& doc : permuted) {
+        std::reverse(doc.neighbors.begin(), doc.neighbors.end());
+    }
+    std::reverse(permuted.begin(), permuted.end());
+
+    yams::topology::TopologyBuildConfig cfg;
+    cfg.reciprocalOnly = true;
+    yams::topology::applySGCSmoothing(docs, cfg, 2);
+    yams::topology::applySGCSmoothing(permuted, cfg, 2);
+
+    for (const auto& doc : docs) {
+        const auto it = std::find_if(permuted.begin(), permuted.end(), [&](const auto& other) {
+            return other.documentHash == doc.documentHash;
+        });
+        REQUIRE(it != permuted.end());
+        REQUIRE(it->embedding.size() == doc.embedding.size());
+        for (std::size_t d = 0; d < doc.embedding.size(); ++d) {
+            CAPTURE(doc.documentHash, d);
+            // Bitwise equality: summation order must not depend on input order.
+            CHECK(it->embedding[d] == doc.embedding[d]);
+        }
+    }
+}
+
+TEST_CASE("topology::applySGCSmoothing excludes documents without a usable embedding",
+          "[topology][sgc][catch2]") {
+    std::vector<yams::topology::TopologyDocumentInput> base{
+        sgcDoc("a", {1.0F, 0.0F}, {{"b", 1.0F}}),
+        sgcDoc("b", {0.0F, 1.0F}, {{"a", 1.0F}}),
+    };
+    auto withRagged = base;
+    // Strongly connected to "a" but with no embedding (and one with the wrong dimension).
+    withRagged[0].neighbors.push_back({.documentHash = "empty", .score = 1.0F, .reciprocal = true});
+    withRagged[0].neighbors.push_back({.documentHash = "short", .score = 1.0F, .reciprocal = true});
+    withRagged.push_back(sgcDoc("empty", {}, {{"a", 1.0F}}));
+    withRagged.push_back(sgcDoc("short", {3.0F}, {{"a", 1.0F}}));
+
+    yams::topology::TopologyBuildConfig cfg;
+    cfg.reciprocalOnly = true;
+    cfg.minEdgeScore = 0.0;
+    yams::topology::applySGCSmoothing(base, cfg, 1);
+    yams::topology::applySGCSmoothing(withRagged, cfg, 1);
+
+    for (std::size_t i = 0; i < base.size(); ++i) {
+        for (std::size_t d = 0; d < base[i].embedding.size(); ++d) {
+            CAPTURE(i, d);
+            CHECK(withRagged[i].embedding[d] == Catch::Approx(base[i].embedding[d]));
+        }
+    }
+    CHECK(withRagged[2].embedding.empty());
+    REQUIRE(withRagged[3].embedding.size() == 1U);
+    CHECK(withRagged[3].embedding[0] == 3.0F);
 }

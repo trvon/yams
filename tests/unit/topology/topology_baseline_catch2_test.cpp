@@ -766,6 +766,52 @@ TEST_CASE("Sparse-guided topology routing falls back to BQ when ANN index is omi
     CHECK(work.exactRepresentativeDistanceEvaluations <= 8U);
 }
 
+TEST_CASE("Sparse-guided topology routing ignores BQ when the query cannot be scored",
+          "[unit][topology][routing][bq]") {
+    TopologyArtifactBatch batch;
+    constexpr std::size_t clusterCount = 32;
+    for (std::size_t index = 0; index < clusterCount; ++index) {
+        const auto angle = static_cast<float>(index) * 2.0F * std::numbers::pi_v<float> /
+                           static_cast<float>(clusterCount);
+        batch.clusters.push_back(ClusterArtifact{
+            .clusterId = "cluster-" + std::to_string(index),
+            .memberCount = 1,
+            .memberDocumentHashes = {"doc-" + std::to_string(index)},
+            .centroidEmbedding = {std::cos(angle), std::sin(angle), 0.5F},
+        });
+    }
+    const auto routeIndex = SparseGuidedClusterRouter::buildRouteIndex(batch, false, true);
+    REQUIRE(routeIndex.centroidBqIndex != nullptr);
+
+    SparseGuidedClusterRouter router;
+    TopologyRouteRequest request;
+    request.limit = 3;
+    // Shorter than the indexed dimension: BQ cannot quantize it.
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.sparseDenseAlpha = 0.0F;
+    request.seedDocumentHashes = {"doc-5"};
+
+    auto exhaustive = router.route(request, batch, routeIndex, nullptr);
+    REQUIRE(exhaustive.has_value());
+
+    for (const bool viaFallback : {false, true}) {
+        auto bqRequest = request;
+        if (viaFallback) {
+            bqRequest.denseAnnCandidateLimit = 4;
+        } else {
+            bqRequest.bqCandidateLimit = 4;
+        }
+        SparseRouteWork work;
+        auto routed = router.route(bqRequest, batch, routeIndex, &work);
+        REQUIRE(routed.has_value());
+        CHECK_FALSE(work.bqUsed);
+        REQUIRE(routed.value().size() == exhaustive.value().size());
+        for (std::size_t i = 0; i < routed.value().size(); ++i) {
+            CHECK(routed.value()[i].clusterId == exhaustive.value()[i].clusterId);
+        }
+    }
+}
+
 TEST_CASE("Topology construction emits a deterministic bounded diverse routing cover",
           "[unit][topology][routing][representatives]") {
     ConnectedComponentTopologyEngine engine;

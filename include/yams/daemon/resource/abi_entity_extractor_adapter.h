@@ -13,7 +13,6 @@ namespace yams::daemon {
  * @brief Adapter for entity_extractor_v2 ABI plugins (like Glint).
  *
  * Wraps the C ABI vtable and provides a C++ interface for NL entity extraction.
- * Similar pattern to AbiSymbolExtractorAdapter.
  */
 class AbiEntityExtractorAdapter {
 public:

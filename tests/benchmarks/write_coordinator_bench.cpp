@@ -97,7 +97,6 @@ struct CoordinatorSnapshot {
     std::uint64_t metadataEntriesSet{0};
     std::uint64_t extractionStatusesUpdated{0};
     std::uint64_t embeddingStatusesUpdated{0};
-    std::uint64_t symbolExtractionStatesUpdated{0};
     std::uint64_t relationshipsInserted{0};
     std::uint64_t symSpellTermsAdded{0};
     std::uint64_t nodesUpserted{0};
@@ -118,7 +117,6 @@ struct CoordinatorSnapshot {
         snap.metadataEntriesSet = s.metadataEntriesSet;
         snap.extractionStatusesUpdated = s.extractionStatusesUpdated;
         snap.embeddingStatusesUpdated = s.embeddingStatusesUpdated;
-        snap.symbolExtractionStatesUpdated = s.symbolExtractionStatesUpdated;
         snap.relationshipsInserted = s.relationshipsInserted;
         snap.symSpellTermsAdded = s.symSpellTermsAdded;
         snap.nodesUpserted = s.nodesUpserted;
@@ -141,8 +139,6 @@ struct CoordinatorSnapshot {
         d.metadataEntriesSet = metadataEntriesSet - prev.metadataEntriesSet;
         d.extractionStatusesUpdated = extractionStatusesUpdated - prev.extractionStatusesUpdated;
         d.embeddingStatusesUpdated = embeddingStatusesUpdated - prev.embeddingStatusesUpdated;
-        d.symbolExtractionStatesUpdated =
-            symbolExtractionStatesUpdated - prev.symbolExtractionStatesUpdated;
         d.relationshipsInserted = relationshipsInserted - prev.relationshipsInserted;
         d.symSpellTermsAdded = symSpellTermsAdded - prev.symSpellTermsAdded;
         d.nodesUpserted = nodesUpserted - prev.nodesUpserted;
@@ -165,7 +161,6 @@ struct CoordinatorSnapshot {
             {"metadata_entries_set", metadataEntriesSet},
             {"extraction_statuses_updated", extractionStatusesUpdated},
             {"embedding_statuses_updated", embeddingStatusesUpdated},
-            {"symbol_extraction_states_updated", symbolExtractionStatesUpdated},
             {"relationships_inserted", relationshipsInserted},
             {"symspell_terms_added", symSpellTermsAdded},
             {"nodes_upserted", nodesUpserted},
@@ -428,9 +423,10 @@ TEST_CASE("WriteCoordinator KG dedup apply benchmark", "[bench][write-coordinato
     REQUIRE(outFile.is_open());
 
     auto runScenario = [&](bool dedup, int rep) -> json {
-        fs::path dir = fs::temp_directory_path() /
-                       ("wc_kg_dedup_bench_" +
-                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        fs::path dir =
+            fs::temp_directory_path() /
+            ("wc_kg_dedup_bench_" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         fs::create_directories(dir);
         auto dbPath = (dir / "kg.db").string();
 
@@ -489,9 +485,9 @@ TEST_CASE("WriteCoordinator KG dedup apply benchmark", "[bench][write-coordinato
             coordinator.enqueue(std::move(batch));
         }
         auto flushResult = coordinator.flush(std::chrono::minutes(5));
-        const auto wallMs = std::chrono::duration<double, std::milli>(
-                                std::chrono::steady_clock::now() - start)
-                                .count();
+        const auto wallMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                .count();
         REQUIRE(flushResult.has_value());
 
         const auto stats = coordinator.getStats();
