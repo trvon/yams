@@ -2908,9 +2908,11 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
 
     // Mode flags
     dreq.listTypes = req.listTypes;
-    dreq.listByType = !req.listType.empty();
-    dreq.nodeType = req.listType;
+    // list_type doubles as the node type for isolated mode; the dispatcher checks list-by-type
+    // first, so it must not also switch the request into listing when isolated is set.
     dreq.isolatedMode = req.isolated;
+    dreq.listByType = !req.listType.empty() && !req.isolated;
+    dreq.nodeType = req.listType;
     if (!req.relationFilters.empty()) {
         dreq.isolatedRelation = req.relationFilters.front();
     }

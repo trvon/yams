@@ -717,3 +717,75 @@ TEST_CASE("Migration v41 bypasses only lowercase topology keys and restores coun
     INFO((run ? std::string{} : run.error().message));
     REQUIRE(run.has_value());
 }
+
+// Migration 40 removes what the symbol extractor wrote. User-ingested graph data (MCP / IPC
+// graph ingest accepts any node type and relation) must survive even when it reuses symbol
+// type names ("class", "interface") or code relation names ("implements", "includes").
+TEST_CASE("Migration v40 preserves user graph data that reuses symbol names",
+          "[catch2][unit][metadata][migration][v40]") {
+    MigrationTestFixture fixture;
+    auto pool = fixture.getPool();
+    auto run = pool->withConnection([](Database& db) -> Result<void> {
+        MigrationManager mm(db);
+        if (auto init = mm.initialize(); !init)
+            return init.error();
+        mm.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+        if (auto to39 = mm.migrateTo(39); !to39)
+            return to39.error();
+        auto seeded = db.execute(R"(
+            INSERT INTO documents (id, file_path, file_name, file_size, sha256_hash)
+            VALUES (1, '/src/a.h', 'a.h', 10, 'hash-a');
+
+            INSERT INTO kg_nodes (id, node_key, label, type, properties) VALUES
+                (30, 'class:ServiceA', 'ServiceA', 'class', '{"source":"mcp"}'),
+                (31, 'interface:ApiB', 'ApiB', 'interface', '{"source":"mcp"}'),
+                (32, 'path:file:/src/a.h', 'a.h', 'file', '{}'),
+                (33, 'path:file:/src/b.h', 'b.h', 'file', '{}'),
+                (34, 'class:Widget@/src/a.h', 'Widget', 'class',
+                     '{"qualified_name":"ui::Widget","language":"cpp"}'),
+                (35, 'custom:extracted-class', 'Extracted', 'class', '{}');
+
+            INSERT INTO kg_edges (src_node_id, dst_node_id, relation, weight, properties) VALUES
+                (30, 31, 'implements', 1.0, '{"source":"mcp"}'),
+                (32, 33, 'includes', 1.0, '{"extractor":"symbol_extractor_v1"}'),
+                (34, 31, 'implements', 1.0, '{}');
+
+            INSERT INTO kg_doc_entities (document_id, entity_text, node_id, extractor) VALUES
+                (1, 'Extracted', 35, 'symbol_extractor_v1');
+        )");
+        if (!seeded)
+            return seeded.error();
+        if (auto to40 = mm.migrateTo(40); !to40)
+            return to40.error();
+
+        auto expect = [&](const char* sql, int want, const char* what) -> Result<void> {
+            auto got = countRows(db, sql);
+            if (!got)
+                return got.error();
+            if (got.value() != want)
+                return Error{ErrorCode::InvalidData,
+                             std::string(what) + ": got " + std::to_string(got.value())};
+            return Result<void>();
+        };
+        if (auto r = expect("SELECT COUNT(*) FROM kg_nodes WHERE id IN (30, 31)", 2,
+                            "user-ingested class/interface nodes");
+            !r)
+            return r;
+        if (auto r = expect("SELECT COUNT(*) FROM kg_edges WHERE src_node_id = 30 AND "
+                            "dst_node_id = 31 AND relation = 'implements'",
+                            1, "user-ingested implements edge");
+            !r)
+            return r;
+        if (auto r = expect("SELECT COUNT(*) FROM kg_nodes WHERE id IN (34, 35)", 0,
+                            "extractor symbol nodes (key shape / doc-entity provenance)");
+            !r)
+            return r;
+        if (auto r = expect("SELECT COUNT(*) FROM kg_edges WHERE relation = 'includes'", 0,
+                            "extractor-tagged includes edge");
+            !r)
+            return r;
+        return expect("SELECT COUNT(*) FROM kg_edges", 1, "remaining edges");
+    });
+    INFO((run ? std::string{} : run.error().message));
+    REQUIRE(run.has_value());
+}

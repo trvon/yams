@@ -3005,53 +3005,49 @@ Migration YamsMetadataMigrations::dropSymbolExtractionSubsystem() {
         DROP TABLE IF EXISTS symbol_metadata;
         DROP TABLE IF EXISTS document_symbol_extraction_state;
 
-        -- 2. Delete AST symbol edges by relation
-        DELETE FROM kg_edges WHERE relation IN (
-            'calls', 'defined_in', 'located_in',
-            'scoped_by', 'resolves_to', 'inherits', 'implements', 'includes'
+        -- 2. Identify what the symbol extractor wrote. Graph ingest (MCP/IPC) accepts any node
+        -- type and relation, so type or relation names alone would also delete user data such
+        -- as a 'class' node or an 'implements' edge. Extractor nodes are recognised by
+        -- provenance or by the key shapes it produced:
+        --   <kind>:<qualified>@<file>[@snap:<hash>]   canonical and version symbol nodes
+        --   symbol_ref:<name>                          unresolved reference nodes
+        -- plus any node its kg_doc_entities rows point at.
+        CREATE TEMP TABLE m40_symbol_nodes AS
+        SELECT id FROM kg_nodes
+        WHERE node_key NOT LIKE 'nl_entity:%' AND (
+            (type = 'symbol_reference' AND node_key LIKE 'symbol_ref:%')
+            OR (type IN (
+                'function', 'function_version', 'field', 'field_version',
+                'struct', 'struct_version', 'class', 'class_version',
+                'enum', 'enum_version', 'interface', 'interface_version',
+                'trait', 'trait_version', 'method', 'method_version',
+                'variable', 'variable_version'
+            ) AND node_key LIKE (CASE WHEN type LIKE '%\_version' ESCAPE '\'
+                                      THEN substr(type, 1, length(type) - 8)
+                                      ELSE type END) || ':%@%')
+            OR id IN (SELECT node_id FROM kg_doc_entities
+                      WHERE node_id IS NOT NULL
+                        AND extractor IN ('symbol_extractor_v1', 'treesitter'))
         );
 
-        -- 3. Delete any remaining edges connected to symbol nodes (e.g. contains edges to symbols)
-        DELETE FROM kg_edges WHERE src_node_id IN (
-            SELECT id FROM kg_nodes WHERE node_key NOT LIKE 'nl_entity:%' AND type IN (
-                'function', 'function_version', 'field', 'field_version',
-                'struct', 'struct_version', 'class', 'class_version',
-                'enum', 'enum_version', 'interface', 'interface_version',
-                'trait', 'trait_version', 'method', 'method_version',
-                'variable', 'variable_version', 'symbol_reference'
-            )
-        ) OR dst_node_id IN (
-            SELECT id FROM kg_nodes WHERE node_key NOT LIKE 'nl_entity:%' AND type IN (
-                'function', 'function_version', 'field', 'field_version',
-                'struct', 'struct_version', 'class', 'class_version',
-                'enum', 'enum_version', 'interface', 'interface_version',
-                'trait', 'trait_version', 'method', 'method_version',
-                'variable', 'variable_version', 'symbol_reference'
-            )
-        );
+        -- 3. Delete extractor edges: tagged with the extractor, or touching an extractor node.
+        DELETE FROM kg_edges
+        WHERE (CASE WHEN json_valid(properties)
+                    THEN json_extract(properties, '$.extractor') END)
+                  IN ('symbol_extractor_v1', 'treesitter')
+           OR src_node_id IN (SELECT id FROM m40_symbol_nodes)
+           OR dst_node_id IN (SELECT id FROM m40_symbol_nodes);
 
         -- 4. Delete symbol aliases and orphaned aliases
-        DELETE FROM kg_aliases WHERE node_id IN (
-            SELECT id FROM kg_nodes WHERE node_key NOT LIKE 'nl_entity:%' AND type IN (
-                'function', 'function_version', 'field', 'field_version',
-                'struct', 'struct_version', 'class', 'class_version',
-                'enum', 'enum_version', 'interface', 'interface_version',
-                'trait', 'trait_version', 'method', 'method_version',
-                'variable', 'variable_version', 'symbol_reference'
-            )
-        ) OR node_id NOT IN (SELECT id FROM kg_nodes);
+        DELETE FROM kg_aliases WHERE node_id IN (SELECT id FROM m40_symbol_nodes)
+            OR node_id NOT IN (SELECT id FROM kg_nodes);
 
         -- 5. Delete document entities from symbol extractor
         DELETE FROM kg_doc_entities WHERE extractor IN ('symbol_extractor_v1', 'treesitter');
 
-        -- 6. Delete symbol nodes (preserving any NL entity nodes whose canonical type is method)
-        DELETE FROM kg_nodes WHERE node_key NOT LIKE 'nl_entity:%' AND type IN (
-            'function', 'function_version', 'field', 'field_version',
-            'struct', 'struct_version', 'class', 'class_version',
-            'enum', 'enum_version', 'interface', 'interface_version',
-            'trait', 'trait_version', 'method', 'method_version',
-            'variable', 'variable_version', 'symbol_reference'
-        );
+        -- 6. Delete symbol nodes (NL entity nodes and user-ingested nodes are not in the set)
+        DELETE FROM kg_nodes WHERE id IN (SELECT id FROM m40_symbol_nodes);
+        DROP TABLE m40_symbol_nodes;
 
         -- 7. Prune historical topology snapshot nodes, keeping the one the latest pointer names.
         -- Only prune when the pointer is valid JSON and names a snapshot node that exists;

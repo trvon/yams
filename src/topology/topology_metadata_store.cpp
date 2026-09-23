@@ -233,11 +233,19 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
 
     std::lock_guard writeLock(writeMutex_);
 
-    auto previousResult = loadResidentLatest();
-    if (!previousResult) {
+    // The previous snapshot only identifies documents that left the topology. An undecodable
+    // one must not block every future rebuild: skip that cleanup and let this batch replace it.
+    std::shared_ptr<const ResidentSnapshot> previous;
+    if (auto previousResult = loadResidentLatest(); previousResult) {
+        previous = std::move(previousResult.value());
+    } else if (previousResult.error().code == ErrorCode::InvalidData ||
+               previousResult.error().code == ErrorCode::SerializationError) {
+        spdlog::warn("[TopologyStore] previous topology snapshot is undecodable ({}); storing "
+                     "snapshot {} without clearing keys of dropped documents",
+                     previousResult.error().message, batch.snapshotId);
+    } else {
         return previousResult.error();
     }
-    const std::shared_ptr<const ResidentSnapshot> previous = std::move(previousResult.value());
 
     std::vector<std::string> requestedHashes;
     requestedHashes.reserve(batch.memberships.size());
