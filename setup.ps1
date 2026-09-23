@@ -8,6 +8,9 @@ Param(
 
     [switch]$SystemDeps,
 
+    # ONNX Runtime is deprecated and opt-in.
+    [switch]$WithOnnx,
+
     [string]$Version = ''
 )
 
@@ -585,11 +588,13 @@ if ($BuildType -in @('Debug','Profiling','Fuzzing')) {
     $conanArgs += @('-o', '&:build_tests=True', '-o', '&:build_benchmarks=True')
 }
 
-# Optional feature flags (match environment knobs from setup.sh)
-if ($env:YAMS_DISABLE_ONNX -eq 'true') {
-    Write-Host 'ONNX support disabled (YAMS_DISABLE_ONNX=true)'
+# ONNX Runtime is deprecated and opt-in (-WithOnnx); YAMS_DISABLE_ONNX=true still forces it off.
+$enableOnnx = $WithOnnx.IsPresent -and ($env:YAMS_DISABLE_ONNX -ne 'true')
+if (-not $enableOnnx) {
+    Write-Host 'ONNX support disabled (deprecated; pass -WithOnnx to build it)'
     $conanArgs += @('-o', 'yams/*:enable_onnx=False')
 } else {
+    $conanArgs += @('-o', 'yams/*:enable_onnx=True')
     # Auto-detect GPU for ONNX acceleration
     # Override with YAMS_ONNX_GPU=cuda|directml|none
     $onnxGpu = $env:YAMS_ONNX_GPU
@@ -985,10 +990,9 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
         }
     }
 
-    # Auto-enable Glint NL entity extractor plugin (GLiNER-based)
-    # Requires ONNX Runtime which is already a dependency
+    # Glint NL entity extractor plugin (GLiNER-based) requires ONNX Runtime.
     $enableGlint = $false
-    if ($env:YAMS_DISABLE_ONNX -ne 'true') {
+    if ($enableOnnx) {
         Write-Host "Enabling Glint NL entity extractor plugin"
         $enableGlint = $true
     }
@@ -1072,6 +1076,7 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     $mesonArgs = @('setup', $buildDir, "--buildtype=$buildTypeLower", "--prefix=$InstallPrefix", "-Denable-modules=$enableModulesFlag", "-Ddatabase-backend=$dbBackend")
     if ($enableZyp) { $mesonArgs += '-Dplugin-zyp=true' }
     if ($enableGlint) { $mesonArgs += '-Dplugin-glint=true' }
+    if ($enableOnnx) { $mesonArgs += '-Denable-onnx=enabled' } else { $mesonArgs += @('-Denable-onnx=disabled', '-Dplugin-onnx=false') }
     if ($enableMobileBindingsArg) { $mesonArgs += $enableMobileBindingsArg }
     if ($mesonToolchainArg) { $mesonArgs += $mesonToolchainArg }
     if ($mesonToolchainFile) { $mesonArgs += $mesonToolchainFile }

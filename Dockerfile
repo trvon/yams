@@ -106,9 +106,9 @@ RUN --mount=type=cache,target=/root/.conan2 \
   echo "=== Build attempt $attempt ==="; \
   if [ "${BUILD_TESTS}" = "true" ]; then \
   echo "BUILD_TESTS=true: enabling Release tests"; \
-  SETUP_ARGS="Release --with-tests"; \
+  SETUP_ARGS="Release --with-tests --with-onnx"; \
   else \
-  SETUP_ARGS="Release"; \
+  SETUP_ARGS="Release --with-onnx"; \
   fi; \
   # shellcheck disable=SC2086
   if ./setup.sh ${SETUP_ARGS}; then \

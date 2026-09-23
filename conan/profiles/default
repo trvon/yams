@@ -8,7 +8,7 @@ compiler.cppstd=23
 build_type=Release
 
 [options]
-yams/*:enable_onnx=True
+yams/*:enable_onnx=False
 
 [conf]
 tools.cmake.cmaketoolchain:generator=Unix Makefiles
