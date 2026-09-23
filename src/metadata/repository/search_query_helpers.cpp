@@ -2,9 +2,13 @@
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
+#include <optional>
 #include <regex>
 #include <sstream>
+#include <string>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "search_query_helpers.hpp"
 
@@ -228,6 +232,193 @@ bool hasAdvancedFts5Operators(const std::string& query) {
     return sawOperatorToken && sawNonOperatorToken;
 }
 
+// Rebuild a query that uses FTS5 operators into a form FTS5 accepts, or nullopt when its
+// structure cannot be salvaged (unterminated phrase, unbalanced parentheses, dangling or
+// doubled operators). Operator words (AND/OR/NOT, NEAR(...)), quoted phrases, parentheses and
+// `column:term` filters are kept; any other term that is not an FTS5 bareword is quoted so
+// punctuation such as "IL-6" cannot break the expression.
+static std::optional<std::string> normalizeAdvancedFts5Query(const std::string& query) {
+    enum class Kind { Operand, Binary, Unary, Open, Close };
+    std::vector<std::pair<Kind, std::string>> tokens;
+
+    auto readPhrase = [&](size_t& i) -> std::optional<std::string> {
+        // query[i] == '"'; FTS5 escapes a quote inside a phrase as "".
+        std::string phrase = "\"";
+        for (++i; i < query.size(); ++i) {
+            if (query[i] == '"') {
+                if (i + 1 < query.size() && query[i + 1] == '"') {
+                    phrase += "\"\"";
+                    ++i;
+                    continue;
+                }
+                phrase += '"';
+                ++i;
+                return phrase;
+            }
+            phrase += query[i];
+        }
+        return std::nullopt; // unterminated
+    };
+    auto isSeparator = [](char c) {
+        return std::isspace(static_cast<unsigned char>(c)) || c == '(' || c == ')' || c == '"';
+    };
+
+    size_t i = 0;
+    while (i < query.size()) {
+        const char c = query[i];
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            ++i;
+            continue;
+        }
+        if (c == '(' || c == ')') {
+            tokens.emplace_back(c == '(' ? Kind::Open : Kind::Close, std::string(1, c));
+            ++i;
+            continue;
+        }
+        if (c == '"') {
+            auto phrase = readPhrase(i);
+            if (!phrase) {
+                return std::nullopt;
+            }
+            if (i < query.size() && query[i] == '*') {
+                phrase->push_back('*');
+                ++i;
+            }
+            tokens.emplace_back(Kind::Operand, std::move(*phrase));
+            continue;
+        }
+        size_t end = i;
+        while (end < query.size() && !isSeparator(query[end])) {
+            ++end;
+        }
+        std::string word = query.substr(i, end - i);
+        i = end;
+
+        if (word == "AND" || word == "OR") {
+            tokens.emplace_back(Kind::Binary, std::move(word));
+            continue;
+        }
+        if (word == "NOT") {
+            // FTS5 NOT is binary ("a NOT b"); position is validated below.
+            tokens.emplace_back(Kind::Unary, std::move(word));
+            continue;
+        }
+        if ((word == "NEAR" || word.rfind("NEAR/", 0) == 0) && i < query.size() &&
+            query[i] == '(') {
+            // NEAR(phrase phrase [, N]) is an operand; accept only well-formed groups.
+            const auto close = query.find(')', i);
+            if (close == std::string::npos) {
+                return std::nullopt;
+            }
+            const std::string inner = query.substr(i + 1, close - i - 1);
+            if (inner.find('(') != std::string::npos) {
+                return std::nullopt;
+            }
+            std::string group = word + "(";
+            std::string distance;
+            std::string terms = inner;
+            if (const auto comma = inner.rfind(','); comma != std::string::npos) {
+                distance = inner.substr(comma + 1);
+                terms = inner.substr(0, comma);
+                distance.erase(0, distance.find_first_not_of(" \t"));
+                distance.erase(distance.find_last_not_of(" \t") + 1);
+                if (distance.empty() ||
+                    !std::all_of(distance.begin(), distance.end(),
+                                 [](unsigned char d) { return std::isdigit(d) != 0; })) {
+                    return std::nullopt;
+                }
+            }
+            auto inside = normalizeAdvancedFts5Query(terms);
+            if (!inside || inside->empty() || inside->find_first_of("()") != std::string::npos ||
+                inside->find(" AND ") != std::string::npos ||
+                inside->find(" OR ") != std::string::npos ||
+                inside->find("NOT ") != std::string::npos) {
+                return std::nullopt;
+            }
+            group += *inside;
+            if (!distance.empty()) {
+                group += ", " + distance;
+            }
+            group += ")";
+            tokens.emplace_back(Kind::Operand, std::move(group));
+            i = close + 1;
+            continue;
+        }
+
+        bool prefix = false;
+        if (word.size() > 1 && word.back() == '*') {
+            prefix = true;
+            word.pop_back();
+        }
+        bool initial = false;
+        if (word.size() > 1 && word.front() == '^') {
+            initial = true;
+            word.erase(word.begin());
+        }
+        // column:term filter (documented power-user syntax); the column name must be an
+        // identifier and the term a bareword, otherwise the whole word is treated as text.
+        const auto colon = word.find(':');
+        if (!initial && colon != std::string::npos && colon > 0 && colon + 1 < word.size() &&
+            word[colon + 1] != ':') {
+            const std::string column = word.substr(0, colon);
+            const std::string term = word.substr(colon + 1);
+            // Only real FTS columns: "ratio:2" is text, not a filter on a missing column.
+            static const std::unordered_set<std::string> kFtsColumns = {
+                "content", "title", "content_type", "alias", "file_path"};
+            if (kFtsColumns.contains(column) && isFts5Bareword(term)) {
+                tokens.emplace_back(Kind::Operand, column + ":" + renderFts5Token(term, prefix));
+                continue;
+            }
+        }
+        std::string rendered = renderFts5Token(word, prefix);
+        if (initial) {
+            rendered.insert(rendered.begin(), '^');
+        }
+        tokens.emplace_back(Kind::Operand, std::move(rendered));
+    }
+
+    // Validate: operand (binary operand)*, with implicit AND between adjacent operands,
+    // balanced parentheses, and no operator at either end or next to a parenthesis.
+    int depth = 0;
+    bool expectOperand = true;
+    for (const auto& [kind, text] : tokens) {
+        switch (kind) {
+            case Kind::Operand:
+                expectOperand = false;
+                break;
+            case Kind::Binary:
+            case Kind::Unary:
+                if (expectOperand) {
+                    return std::nullopt;
+                }
+                expectOperand = true;
+                break;
+            case Kind::Open:
+                ++depth;
+                expectOperand = true;
+                break;
+            case Kind::Close:
+                if (expectOperand || --depth < 0) {
+                    return std::nullopt;
+                }
+                break;
+        }
+    }
+    if (depth != 0 || expectOperand) {
+        return std::nullopt;
+    }
+
+    std::string out;
+    for (const auto& [kind, text] : tokens) {
+        const bool glueRight = !out.empty() && out.back() == '(';
+        if (!out.empty() && !glueRight && kind != Kind::Close) {
+            out.push_back(' ');
+        }
+        out += text;
+    }
+    return out;
+}
+
 // Strip XML-style tags that leak from LLM output into search queries.
 // Handles:
 //   - Matched pairs:   <tag>content</tag>  → stripped entirely (tag + content)
@@ -283,7 +474,14 @@ std::string sanitizeFts5UserQuery(std::string query, bool allowPrefixWildcard) {
                 break;
             }
         }
-        return query.empty() ? "\"\"" : query;
+        if (query.empty()) {
+            return "\"\"";
+        }
+        // Operator syntax is honoured only when it forms a valid FTS5 expression; otherwise
+        // search the words literally rather than fail the query.
+        if (auto normalized = normalizeAdvancedFts5Query(query)) {
+            return *normalized;
+        }
     }
 
     return buildSimpleFts5Query(query, allowPrefixWildcard);

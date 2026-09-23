@@ -47,7 +47,10 @@ TEST_CASE("FTS5 sanitize - advanced operators passthrough", "[unit][metadata][ft
     using yams::metadata::sanitizeFTS5Query;
 
     CHECK(sanitizeFTS5Query("title:hello") == "title:hello");
-    CHECK(sanitizeFTS5Query("hello NEAR/2 world") == "hello NEAR/2 world");
+    // FTS5 has no infix NEAR/n (FTS3/4 syntax; FTS5 reports a syntax error), so the token is
+    // searched literally. The FTS5 form is NEAR(a b, n).
+    CHECK(sanitizeFTS5Query("hello NEAR/2 world") == "hello \"NEAR/2\" world");
+    CHECK(sanitizeFTS5Query("NEAR(hello world, 2)") == "NEAR(hello world, 2)");
     CHECK(sanitizeFTS5Query("\"exact phrase\"") == "\"exact phrase\"");
     CHECK(sanitizeFTS5Query("(foo OR bar) NOT baz") == "(foo OR bar) NOT baz");
 }
@@ -207,6 +210,22 @@ TEST_CASE("FTS5 sanitize - execute against real FTS5", "[unit][metadata][fts5][b
         "(CD34+) hematopoietic stem cells",
         "IL-6 and TNF-alpha cytokines",
         "Parkinson's disease treatment",
+        // Hostile inputs from MCP clients / CLI: unbalanced quotes and parens and dangling
+        // operators must still produce a valid MATCH expression.
+        "foo \"bar",
+        "\"",
+        "\"unterminated phrase",
+        "(foo OR bar",
+        "foo OR bar)",
+        "foo AND",
+        "NOT foo",
+        "foo OR OR bar",
+        "cells NEAR(",
+        "\"a\" \"b",
+        "col:value",
+        "ratio:2",
+        "IL-6 OR TNF-alpha",
+        "^foo",
     };
 
     for (const auto& query : testQueries) {
@@ -431,3 +450,16 @@ TEST_CASE("FTS5 smart mode detection", "[unit][metadata][fts5]") {
     CHECK_FALSE(isLikelyNaturalLanguageQueryForTest("status=200 logs"));
 }
 #endif
+
+// std::regex backtracking recursed once per character on long tag-bearing input and could
+// overflow the stack on queries from MCP clients.
+TEST_CASE("FTS5 sanitize - long tag-bearing input does not exhaust the stack",
+          "[unit][metadata][fts5]") {
+    using yams::metadata::sanitizeFTS5Query;
+
+    const std::string body(200000, 'x');
+    const auto unmatched = sanitizeFTS5Query("<a>" + body + "</b>");
+    CHECK(unmatched.find(body) != std::string::npos);
+    const auto matched = sanitizeFTS5Query("keep <think>" + body + "</think> this");
+    CHECK(matched == "keep this");
+}
