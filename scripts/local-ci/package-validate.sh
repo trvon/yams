@@ -145,9 +145,13 @@ validate_lane() {
 	if [ "${name}" = "arch" ]; then
 		platform_args=(--platform="${ARCH_DOCKER_PLATFORM:-linux/amd64}")
 	fi
+	local build_args=()
+	if [ "${name}" = "arch" ] && [ -n "${ARCH_BASE_IMAGE:-}" ]; then
+		build_args=(--build-arg "ARCH_BASE_IMAGE=${ARCH_BASE_IMAGE}")
+	fi
 
 	log "${name}: building substrate image from ${dockerfile#"${REPO_ROOT}"/}"
-	if ! docker build "${platform_args[@]}" -f "${dockerfile}" -t "${image}" "${REPO_ROOT}/packaging/systemd" >/dev/null; then
+	if ! docker build "${platform_args[@]}" "${build_args[@]}" -f "${dockerfile}" -t "${image}" "${REPO_ROOT}/packaging/systemd" >/dev/null; then
 		fail "${name}: failed to build substrate image"
 		return 1
 	fi
