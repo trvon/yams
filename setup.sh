@@ -443,6 +443,9 @@ if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
 elif [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 	BUILD_DIR="build/fuzzing"
 	CONAN_SUBDIR="build-fuzzing"
+	# Fuzzing uses Debug as the Conan build type, so Conan writes its toolchain under
+	# build-debug (same as Profiling).
+	CONAN_ALT_SUBDIR="build-debug"
 	BUILD_TYPE_MESON_LOWER="debug"
 elif [[ "${BUILD_TYPE}" == "Debug" ]]; then
 	BUILD_DIR="builddir"
