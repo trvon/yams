@@ -1,5 +1,7 @@
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <utility>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/extraction/html_text_extractor.h>
 
@@ -332,4 +334,32 @@ TEST_CASE("HtmlTextExtractor - Performance and memory",
         // Should complete in under 5 seconds (no exponential regex backtracking)
         REQUIRE(duration.count() < 5000);
     }
+}
+
+// Unclosed <script / <style / <!-- openers and runs of '<' without a closing '>' used to
+// rescan the rest of the document once per occurrence (quadratic). An ingested ~1 MB file
+// like this took minutes; the scans must stay linear.
+TEST_CASE("HtmlTextExtractor - Unclosed tags stay linear", "[extraction][html][robust]") {
+    HtmlTextExtractor extractor;
+    ExtractionConfig config;
+
+    std::string unclosed;
+    for (int i = 0; i < 150000; ++i) {
+        unclosed += "<script";
+    }
+    std::string comments;
+    for (int i = 0; i < 150000; ++i) {
+        comments += "<!---->x";
+    }
+    const std::string lessThan(1000000, '<');
+
+    const auto start = std::chrono::steady_clock::now();
+    for (const std::string* html :
+         {&std::as_const(unclosed), &std::as_const(comments), &lessThan}) {
+        auto result = extractor.extractFromBuffer(
+            std::as_bytes(std::span(html->data(), html->size())), config);
+        REQUIRE(result.has_value());
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    CHECK(elapsed < std::chrono::seconds(5));
 }

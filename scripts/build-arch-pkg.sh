@@ -260,12 +260,14 @@ build_main() {
 	export YAMS_CONAN_ARCH="${arch}"
 	export YAMS_BUILD_DIR="${meson_build_dir}"
 	export YAMS_ENABLE_MOBILE_BINDINGS=false
-	export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${VERSION} -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto ${MESON_EXTRA_ARGS:-}"
+	export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${VERSION} -Dwerror=false -Dwarning_level=2 ${MESON_EXTRA_ARGS:-}"
 	export YAMS_INSTALL_PREFIX="/usr"
 	export CC=clang
 	export CXX=clang++
 
-	bash ./setup.sh Release
+	# ONNX Runtime is opt-in in setup.sh; the Arch packages keep shipping the ONNX plugin
+	# (and ONNX-backed Glint) like the other release targets.
+	bash ./setup.sh Release --with-onnx
 
 	# Source Conan build env
 	local conan_env=""
@@ -298,6 +300,12 @@ build_main() {
 
 	# Prune development payload
 	bash scripts/prune-runtime-install.sh "${stage_root}/usr" 2>/dev/null || true
+
+	# Fail the package rather than silently shipping without the embedding provider.
+	if ! compgen -G "${stage_root}/usr/lib/yams/plugins/libyams_onnx_plugin.so*" >/dev/null; then
+		echo "error: ONNX plugin missing from Arch package stage (${stage_root}/usr/lib/yams/plugins)" >&2
+		exit 1
+	fi
 
 	# Install systemd unit + preset into stage.
 	install -Dm644 packaging/systemd/yams-daemon.service \

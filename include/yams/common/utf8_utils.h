@@ -1,65 +1,63 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 
 namespace yams::common {
 
-// Replace invalid UTF-8 byte sequences with '?' to satisfy Protobuf string constraints.
+// Length of the well-formed UTF-8 sequence starting at data[i], or 0 if it is malformed.
+// Rejects overlong encodings, UTF-16 surrogate code points (U+D800..U+DFFF) and values above
+// U+10FFFF, matching what protobuf accepts for proto3 string fields.
+inline size_t wellFormedUtf8Length(const unsigned char* data, size_t i, size_t size) noexcept {
+    const unsigned char c = data[i];
+    if (c < 0x80) {
+        return 1;
+    }
+    auto cont = [&](size_t k) { return (data[i + k] & 0xC0) == 0x80; };
+    if (c >= 0xC2 && c <= 0xDF) {
+        return i + 1 < size && cont(1) ? 2 : 0;
+    }
+    if (c >= 0xE0 && c <= 0xEF) {
+        if (i + 2 >= size || !cont(1) || !cont(2)) {
+            return 0;
+        }
+        const unsigned char c1 = data[i + 1];
+        if ((c == 0xE0 && c1 < 0xA0) || (c == 0xED && c1 >= 0xA0)) {
+            return 0; // overlong or surrogate
+        }
+        return 3;
+    }
+    if (c >= 0xF0 && c <= 0xF4) {
+        if (i + 3 >= size || !cont(1) || !cont(2) || !cont(3)) {
+            return 0;
+        }
+        const unsigned char c1 = data[i + 1];
+        if ((c == 0xF0 && c1 < 0x90) || (c == 0xF4 && c1 >= 0x90)) {
+            return 0; // overlong or above U+10FFFF
+        }
+        return 4;
+    }
+    return 0;
+}
+
+// Replace each byte that does not start a well-formed UTF-8 sequence with '?' so the result
+// satisfies Protobuf string constraints.
 inline std::string sanitizeUtf8(std::string_view input) {
     std::string out;
     out.reserve(input.size());
-
-    const unsigned char* data = reinterpret_cast<const unsigned char*>(input.data());
+    const auto* data = reinterpret_cast<const unsigned char*>(input.data());
+    const size_t size = input.size();
     size_t i = 0;
-    const size_t n = input.size();
-    while (i < n) {
-        unsigned char c = data[i];
-        if (c < 0x80) { // ASCII
-            out.push_back(static_cast<char>(c));
-            ++i;
-        } else if (c >= 0xC2 && c <= 0xDF && i + 1 < n) { // 2-byte sequence
-            unsigned char c1 = data[i + 1];
-            if ((c1 & 0xC0) == 0x80) {
-                out.push_back(static_cast<char>(c));
-                out.push_back(static_cast<char>(c1));
-                i += 2;
-            } else {
-                out.push_back('?');
-                ++i;
-            }
-        } else if (c >= 0xE0 && c <= 0xEF && i + 2 < n) { // 3-byte sequence
-            unsigned char c1 = data[i + 1];
-            unsigned char c2 = data[i + 2];
-            if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80) {
-                out.push_back(static_cast<char>(c));
-                out.push_back(static_cast<char>(c1));
-                out.push_back(static_cast<char>(c2));
-                i += 3;
-            } else {
-                out.push_back('?');
-                ++i;
-            }
-        } else if (c >= 0xF0 && c <= 0xF4 && i + 3 < n) { // 4-byte sequence
-            unsigned char c1 = data[i + 1];
-            unsigned char c2 = data[i + 2];
-            unsigned char c3 = data[i + 3];
-            if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80) {
-                out.push_back(static_cast<char>(c));
-                out.push_back(static_cast<char>(c1));
-                out.push_back(static_cast<char>(c2));
-                out.push_back(static_cast<char>(c3));
-                i += 4;
-            } else {
-                out.push_back('?');
-                ++i;
-            }
+    while (i < size) {
+        if (const size_t len = wellFormedUtf8Length(data, i, size); len > 0) {
+            out.append(input, i, len);
+            i += len;
         } else {
             out.push_back('?');
             ++i;
         }
     }
-
     return out;
 }
 
@@ -70,59 +68,18 @@ inline std::string sanitizeUtf8Strict(std::string_view input) {
 
     std::string out;
     out.reserve(input.size());
-
     const auto* data = reinterpret_cast<const unsigned char*>(input.data());
-    size_t i = 0;
     const size_t size = input.size();
+    size_t i = 0;
     while (i < size) {
-        const unsigned char c = data[i];
-        if (c < 0x80) {
-            out.push_back(static_cast<char>(c));
+        if (const size_t len = wellFormedUtf8Length(data, i, size); len > 0) {
+            out.append(input, i, len);
+            i += len;
+        } else {
+            out.append(kReplacement);
             ++i;
-            continue;
         }
-
-        if (c >= 0xC2 && c <= 0xDF && i + 1 < size) {
-            const unsigned char c1 = data[i + 1];
-            if ((c1 & 0xC0) == 0x80) {
-                out.append(input, i, 2);
-                i += 2;
-                continue;
-            }
-        }
-
-        if (c >= 0xE0 && c <= 0xEF && i + 2 < size) {
-            const unsigned char c1 = data[i + 1];
-            const unsigned char c2 = data[i + 2];
-            const bool validContinuation = (c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80;
-            const bool isOverlong = c == 0xE0 && c1 < 0xA0;
-            const bool isSurrogate = c == 0xED && c1 >= 0xA0;
-            if (validContinuation && !isOverlong && !isSurrogate) {
-                out.append(input, i, 3);
-                i += 3;
-                continue;
-            }
-        }
-
-        if (c >= 0xF0 && c <= 0xF4 && i + 3 < size) {
-            const unsigned char c1 = data[i + 1];
-            const unsigned char c2 = data[i + 2];
-            const unsigned char c3 = data[i + 3];
-            const bool validContinuation =
-                (c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80;
-            const bool isOverlong = c == 0xF0 && c1 < 0x90;
-            const bool isOutOfRange = c == 0xF4 && c1 >= 0x90;
-            if (validContinuation && !isOverlong && !isOutOfRange) {
-                out.append(input, i, 4);
-                i += 4;
-                continue;
-            }
-        }
-
-        out.append(kReplacement);
-        ++i;
     }
-
     return out;
 }
 
@@ -130,25 +87,16 @@ inline std::string sanitizeUtf8Strict(std::string_view input) {
 // If invalid, sanitize into `storage` and return a view to it.
 // Callers can hoist `storage` outside loops for capacity reuse.
 inline std::string_view ensureValidUtf8(std::string_view input, std::string& storage) {
-    const unsigned char* d = reinterpret_cast<const unsigned char*>(input.data());
+    const auto* data = reinterpret_cast<const unsigned char*>(input.data());
+    const size_t size = input.size();
     size_t i = 0;
-    const size_t n = input.size();
-    while (i < n) {
-        unsigned char c = d[i];
-        if (c < 0x80) {
-            ++i;
-        } else if (c >= 0xC2 && c <= 0xDF && i + 1 < n && (d[i + 1] & 0xC0) == 0x80) {
-            i += 2;
-        } else if (c >= 0xE0 && c <= 0xEF && i + 2 < n && (d[i + 1] & 0xC0) == 0x80 &&
-                   (d[i + 2] & 0xC0) == 0x80) {
-            i += 3;
-        } else if (c >= 0xF0 && c <= 0xF4 && i + 3 < n && (d[i + 1] & 0xC0) == 0x80 &&
-                   (d[i + 2] & 0xC0) == 0x80 && (d[i + 3] & 0xC0) == 0x80) {
-            i += 4;
-        } else {
+    while (i < size) {
+        const size_t len = wellFormedUtf8Length(data, i, size);
+        if (len == 0) {
             storage = sanitizeUtf8(input);
             return storage;
         }
+        i += len;
     }
     return input;
 }

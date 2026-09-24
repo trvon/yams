@@ -4742,7 +4742,28 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         CHECK(err.message == "Model provider not available");
     }
 
+    SECTION("embed documents refuses without a resolved data directory") {
+        // Repair used to fall back to a relative "vectors.db" and create it in the working
+        // directory when the data directory was not resolved.
+        auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-empty.onnx");
+        svc.__test_setModelProvider(provider);
+        svc.__test_setContentStore(std::make_shared<StubContentStore>());
+        svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
+        svc.__test_setResolvedDataDir({});
+        const auto strayDb = std::filesystem::current_path() / "vectors.db";
+        const bool existedBefore = std::filesystem::exists(strayDb);
+
+        EmbedDocumentsRequest req;
+        req.modelName = "repair-model";
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        CHECK(std::get<ErrorResponse>(resp).message.find("data directory") != std::string::npos);
+        CHECK(std::filesystem::exists(strayDb) == existedBefore);
+    }
+
     SECTION("embed documents returns success when repair finds no work") {
+        svc.__test_setResolvedDataDir(cfg.dataDir);
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-empty.onnx");
         svc.__test_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
@@ -4764,6 +4785,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     }
 
     SECTION("embed documents rejects non-empty hash lists that resolve to no daemon documents") {
+        svc.__test_setResolvedDataDir(cfg.dataDir);
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-missing-hashes.onnx");
         svc.__test_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
@@ -4868,6 +4890,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         configSvc.__test_setModelProvider(provider);
         configSvc.__test_setContentStore(std::make_shared<StubContentStore>());
         configSvc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
+        configSvc.__test_setResolvedDataDir(cfg.dataDir);
         RequestDispatcher configDispatcher(&lifecycle, &configSvc, &state);
 
         EmbedDocumentsRequest req;
@@ -5291,8 +5314,12 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         }
     }
 
-    SECTION("graph query isolated mode without a node type explains the removed symbol graph") {
+    SECTION("graph query isolated mode defaults to documents without semantic neighbours") {
         fixture.initMetadata();
+        auto docA = fixture.upsertNode("doc:isolated-a", "a", "document");
+        auto docB = fixture.upsertNode("doc:isolated-b", "b", "document");
+        fixture.upsertNode("doc:isolated-c", "c", "document");
+        fixture.addEdge(docA, docB, "semantic_neighbor");
 
         GraphQueryRequest req;
         req.isolatedMode = true;
@@ -5300,10 +5327,13 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
 
         auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
 
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::InvalidArgument);
-        CHECK(err.message.find("removed in v0.20") != std::string::npos);
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
+        const auto& graphResp = std::get<GraphQueryResponse>(resp);
+        CHECK(graphResp.originNode.label == "isolated:document:semantic_neighbor");
+        CHECK(graphResp.totalNodesFound == 2);
+        for (const auto& node : graphResp.connectedNodes) {
+            CHECK(node.nodeKey != "doc:isolated-b");
+        }
     }
 
     SECTION("graph query isolated mode reports store errors") {
@@ -5693,6 +5723,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
 
         auto lifecycleFsm = std::make_unique<DaemonLifecycleFsm>();
         auto svc = std::make_unique<ServiceManager>(cfg, *state, *lifecycleFsm);
+        // The data directory is only resolved during initialize(); tests that place plugins
+        // under it would otherwise write to the working directory.
+        svc->__test_setResolvedDataDir(cfg.dataDir);
         svc->__test_pluginScanComplete(0);
         REQUIRE(svc->getPluginHostFsmSnapshot().state == PluginHostState::Ready);
 

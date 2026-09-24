@@ -14,6 +14,10 @@ on:
       - "include/yams/daemon/p2p/**"
       - "src/topology/topology_codec.cpp"
       - "include/yams/topology/topology_codec.h"
+      - "src/metadata/repository/search_query_helpers.cpp"
+      - "include/yams/common/utf8_utils.h"
+      - "src/extraction/**"
+      - "src/compression/**"
       - "tools/fuzzing/**"
       - ".forgejo/workflows/fuzz-smoke.yml"
   push:
@@ -22,6 +26,10 @@ on:
     paths:
       - "src/daemon/p2p/**"
       - "src/topology/topology_codec.cpp"
+      - "src/metadata/repository/search_query_helpers.cpp"
+      - "include/yams/common/utf8_utils.h"
+      - "src/extraction/**"
+      - "src/compression/**"
       - "tools/fuzzing/**"
   schedule:
     - cron: "17 6 * * *"
@@ -85,7 +93,8 @@ jobs:
           if [ -f "$CONAN_BUILD_ENV" ]; then set +u; . "$CONAN_BUILD_ENV"; set -u; fi
           meson compile -C build/fuzzing -j 4 \
             fuzz_p2p_json fuzz_p2p_connstr fuzz_p2p_handshake fuzz_p2p_delta_stream \
-            fuzz_p2p_inbound fuzz_p2p_protocol fuzz_p2p_delta fuzz_topology_codec
+            fuzz_p2p_inbound fuzz_p2p_protocol fuzz_p2p_delta fuzz_topology_codec \
+            fuzz_fts5_query fuzz_utf8 fuzz_text_extractors fuzz_compressed_block
 
       - name: Generate seed corpus
         run: bash tools/fuzzing/generate_corpus.sh
@@ -95,7 +104,8 @@ jobs:
           set -u
           failed=""
           for target in p2p_json p2p_connstr p2p_handshake p2p_delta_stream p2p_inbound \
-                        p2p_protocol p2p_delta topology_codec; do
+                        p2p_protocol p2p_delta topology_codec fts5_query utf8 \
+                        text_extractors compressed_block; do
             echo "== fuzz_${target} (${FUZZ_SECONDS}s)"
             if ! FUZZ_BUILD_DIR=build/fuzzing ./tools/fuzzing/fuzz.sh local "$target" \
                 -max_total_time="${FUZZ_SECONDS}" -timeout=10 -rss_limit_mb=4096 \

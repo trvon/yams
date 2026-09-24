@@ -4,9 +4,6 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
-#if defined(YAMS_ENABLE_LZMA) && YAMS_ENABLE_LZMA
-#include "lzma_compressor.h"
-#endif
 #include "zstandard_compressor.h"
 #include <yams/compression/compressor_interface.h>
 
@@ -88,18 +85,6 @@ struct ZstdRegistrar {
         });
     }
 } zstdRegistrar;
-
-/**
- * @brief RAII registrar for LZMA (only when enabled)
- */
-#if defined(YAMS_ENABLE_LZMA) && YAMS_ENABLE_LZMA
-struct LzmaRegistrar {
-    LzmaRegistrar() {
-        CompressionRegistry::instance().registerCompressor(
-            CompressionAlgorithm::LZMA, []() { return std::make_unique<LZMACompressor>(); });
-    }
-} lzmaRegistrar;
-#endif
 
 /**
  * @brief RAII registrar for None (passthrough)

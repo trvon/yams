@@ -261,6 +261,10 @@ if get_option('build-fuzzers') and not wasi_enabled
       add_project_link_arguments(_fuzz_sanitizers, language: ['cpp', 'c'])
     endif
     add_project_arguments(_fuzz_instrument_args, language: ['cpp', 'c'])
+    if get_option('b_lundef') and host_machine.system() != 'darwin'
+      warning('libFuzzer builds need -Db_lundef=false: shared libraries reference sanitizer '
+        + 'and coverage symbols that only the fuzzer executable provides')
+    endif
   endif
   message('Fuzzing engine: ' + yams_fuzz_engine)
 endif

@@ -883,6 +883,25 @@ TEST_CASE("getCorpusStats: embedding and attachment edges are not rich graph top
     CHECK_FALSE(stats.value().hasRichGraphTopology());
 }
 
+TEST_CASE("getCorpusStats: materialized topology clusters are not rich graph topology",
+          "[unit][corpus_stats][integration]") {
+    CorpusStatsFixture fix;
+    fix.insertDocument("/paper1.txt", "hash1", 5000);
+    fix.insertDocument("/paper2.txt", "hash2", 6000);
+
+    // Topology rebuilds write cluster structure into the KG; derived from embeddings, it must
+    // not reopen graph-weight gates that are closed for corpora without real relations.
+    fix.addEdges("member_of", 8);
+    fix.addEdges("overlaps", 4);
+    fix.addEdges("medoid_of", 2);
+    fix.addEdges("subcluster_of", 2);
+
+    auto stats = fix.repository_->getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().kgRelationalEdgeCount == 0);
+    CHECK_FALSE(stats.value().hasRichGraphTopology());
+}
+
 TEST_CASE("getCorpusStats: entity relations count as rich graph topology",
           "[unit][corpus_stats][integration]") {
     CorpusStatsFixture fix;

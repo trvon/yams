@@ -1,3 +1,4 @@
+#include <yams/common/utf8_utils.h>
 #include <yams/extraction/text_extractor.h>
 
 #include <algorithm>
@@ -31,34 +32,17 @@ std::string EncodingDetector::detectEncoding(std::span<const std::byte> data, do
         }
     }
 
-    // Heuristic: check for valid UTF-8
+    // Heuristic: the data is UTF-8 only if every sequence is well-formed (no overlongs,
+    // surrogates, or values above U+10FFFF); otherwise it must go through conversion.
+    const auto* bytes = reinterpret_cast<const unsigned char*>(data.data());
     bool isValidUtf8 = true;
-    size_t i = 0;
-    while (i < data.size() && isValidUtf8) {
-        uint8_t byte = static_cast<uint8_t>(data[i]);
-        if (byte <= 0x7F) {
-            i++;
-        } else if ((byte & 0xE0) == 0xC0) {
-            if (i + 1 >= data.size() || (static_cast<uint8_t>(data[i + 1]) & 0xC0) != 0x80) {
-                isValidUtf8 = false;
-            }
-            i += 2;
-        } else if ((byte & 0xF0) == 0xE0) {
-            if (i + 2 >= data.size() || (static_cast<uint8_t>(data[i + 1]) & 0xC0) != 0x80 ||
-                (static_cast<uint8_t>(data[i + 2]) & 0xC0) != 0x80) {
-                isValidUtf8 = false;
-            }
-            i += 3;
-        } else if ((byte & 0xF8) == 0xF0) {
-            if (i + 3 >= data.size() || (static_cast<uint8_t>(data[i + 1]) & 0xC0) != 0x80 ||
-                (static_cast<uint8_t>(data[i + 2]) & 0xC0) != 0x80 ||
-                (static_cast<uint8_t>(data[i + 3]) & 0xC0) != 0x80) {
-                isValidUtf8 = false;
-            }
-            i += 4;
-        } else {
+    for (size_t i = 0; i < data.size();) {
+        const size_t len = common::wellFormedUtf8Length(bytes, i, data.size());
+        if (len == 0) {
             isValidUtf8 = false;
+            break;
         }
+        i += len;
     }
 
     if (isValidUtf8) {
@@ -132,11 +116,12 @@ Result<std::string> EncodingDetector::convertToUtf8(const std::string& text,
                 }
                 uint16_t w2 =
                     le ? (toBytes(i + 1) << 8 | toBytes(i)) : (toBytes(i) << 8 | toBytes(i + 1));
-                i += 2;
                 if (w2 < 0xDC00 || w2 > 0xDFFF) {
+                    // Unpaired high surrogate: replace it and decode the next unit normally.
                     appendUtf8FromCodepoint(0xFFFD, out);
                     continue;
                 }
+                i += 2;
                 uint32_t cp = 0x10000 + (((w - 0xD800) << 10) | (w2 - 0xDC00));
                 appendUtf8FromCodepoint(cp, out);
             } else if (w >= 0xDC00 && w <= 0xDFFF) {

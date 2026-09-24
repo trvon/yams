@@ -99,7 +99,9 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - LargeFileShouldC
     CHECK((decision.reason.find("Large file") != std::string::npos));
 }
 
-TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - OldFileShouldUseLZMA",
+// No LZMA compressor is built, so archival data uses Zstandard at the archive level instead of
+// selecting an unavailable algorithm (which stored the block uncompressed).
+TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - OldFileUsesArchiveZstandard",
                  "[compression][policy][catch2]") {
     auto metadata = createMetadata("old.txt", 1024ULL * 1024ULL);    // 1MB
     auto pattern = createAccessPattern(std::chrono::hours(24 * 35)); // 35 days old
@@ -107,15 +109,16 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - OldFileShouldUse
 
     auto decision = policy_->shouldCompress(metadata, pattern);
     CHECK(decision.shouldCompress);
-    CHECK((decision.algorithm == CompressionAlgorithm::LZMA));
+    CHECK((decision.algorithm == CompressionAlgorithm::Zstandard));
+    CHECK((decision.level == CompressionPolicy::Rules{}.archiveZstdLevel));
     CHECK((decision.reason.find("Old file") != std::string::npos));
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - ActiveFileShouldUseZstandard",
                  "[compression][policy][catch2]") {
     auto metadata = createMetadata("active.txt", 1024ULL * 1024ULL); // 1MB
-    auto pattern = createAccessPattern(std::chrono::hours(24 * 3)); // 3 days old
-    pattern.accessCount = 100;                                      // Frequently accessed
+    auto pattern = createAccessPattern(std::chrono::hours(24 * 3));  // 3 days old
+    pattern.accessCount = 100;                                       // Frequently accessed
 
     auto decision = policy_->shouldCompress(metadata, pattern);
     CHECK(decision.shouldCompress);
@@ -129,8 +132,7 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - ExcludedMimeType
 
     auto decision = policy_->shouldCompress(metadata, pattern);
     CHECK_FALSE(decision.shouldCompress);
-    CHECK((decision.reason.find("Content appears to be already compressed") !=
-           std::string::npos));
+    CHECK((decision.reason.find("Content appears to be already compressed") != std::string::npos));
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - ExcludedExtensions",
@@ -141,8 +143,7 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - ExcludedExtensio
 
     auto decision = policy_->shouldCompress(metadata, pattern);
     CHECK_FALSE(decision.shouldCompress);
-    CHECK((decision.reason.find("Content appears to be already compressed") !=
-           std::string::npos));
+    CHECK((decision.reason.find("Content appears to be already compressed") != std::string::npos));
 }
 
 TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - CompressibleTypes",
@@ -182,7 +183,7 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - FileTemperatureC
 
         auto decision = policy_->shouldCompress(metadata, pattern);
         CHECK(decision.shouldCompress);
-        CHECK((decision.algorithm == CompressionAlgorithm::LZMA));
+        CHECK((decision.algorithm == CompressionAlgorithm::Zstandard));
     }
 }
 
@@ -191,7 +192,7 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - CustomRules",
     CompressionPolicy::Rules customRules;
     disableLiveResourceGates(customRules);
     customRules.compressAfterAge = std::chrono::hours(1);
-    customRules.neverCompressBelow = 1024;         // 1KB
+    customRules.neverCompressBelow = 1024;               // 1KB
     customRules.alwaysCompressAbove = 1024ULL * 1024ULL; // 1MB
     customRules.defaultZstdLevel = 5;
     customRules.defaultLzmaLevel = 7;
@@ -209,12 +210,12 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - AlgorithmSelecti
                  "[compression][policy][catch2]") {
     auto metadata = createMetadata("test.txt", 100ULL * 1024ULL * 1024ULL); // 100MB
 
-    SECTION("Large file with low access should use LZMA") {
+    SECTION("Large file with low access uses Zstandard") {
         auto pattern = createAccessPattern(std::chrono::hours(24 * 100)); // 100 days old
         pattern.accessCount = 1; // 0.01 accesses/day (truly cold)
 
         auto algo = policy_->selectAlgorithm(metadata, pattern);
-        CHECK((algo == CompressionAlgorithm::LZMA));
+        CHECK((algo == CompressionAlgorithm::Zstandard));
     }
 
     SECTION("Large file with high access should use Zstandard") {

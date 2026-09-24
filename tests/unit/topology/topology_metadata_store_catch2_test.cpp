@@ -384,6 +384,34 @@ TEST_CASE("MetadataKgTopologyArtifactStore failed store leaves the prior snapsho
     CHECK(snapshotId.value()->asString() == "snap-good");
 }
 
+TEST_CASE("MetadataKgTopologyArtifactStore recovers from an undecodable latest snapshot",
+          "[unit][topology][store]") {
+    TestFixture fixture;
+    fixture.addDocument("hash_a", "/repo/a.md");
+    fixture.addDocument("hash_b", "/repo/b.md");
+    {
+        MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+        REQUIRE(store.storeBatch(makeTwoDocBatch("snap-1", 1)).has_value());
+    }
+
+    // A corrupt payload must not block every future rebuild: the previous snapshot is only
+    // needed to find documents that left the topology.
+    auto corrupted = fixture.pool->withConnection([](Database& db) -> Result<void> {
+        return db.execute("UPDATE kg_nodes SET properties = 'not a topology payload' "
+                          "WHERE node_key = 'topology:snapshot:snap-1'");
+    });
+    REQUIRE(corrupted.has_value());
+
+    MetadataKgTopologyArtifactStore reopened(fixture.repository, fixture.kgStore);
+    auto stored = reopened.storeBatch(makeTwoDocBatch("snap-2", 2));
+    INFO((stored ? std::string{} : stored.error().message));
+    REQUIRE(stored.has_value());
+    auto latest = reopened.loadLatestShared();
+    REQUIRE(latest.has_value());
+    REQUIRE(latest.value());
+    CHECK(latest.value()->snapshotId == "snap-2");
+}
+
 TEST_CASE("MetadataKgTopologyArtifactStore clears topology keys for dropped documents",
           "[unit][topology][store]") {
     TestFixture fixture;
