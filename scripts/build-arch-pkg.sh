@@ -260,7 +260,7 @@ build_main() {
 	export YAMS_CONAN_ARCH="${arch}"
 	export YAMS_BUILD_DIR="${meson_build_dir}"
 	export YAMS_ENABLE_MOBILE_BINDINGS=false
-	export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${VERSION} -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto ${MESON_EXTRA_ARGS:-}"
+	export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${VERSION} -Dwerror=false -Dwarning_level=2 ${MESON_EXTRA_ARGS:-}"
 	export YAMS_INSTALL_PREFIX="/usr"
 	export CC=clang
 	export CXX=clang++

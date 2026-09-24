@@ -103,7 +103,6 @@ while [[ $# -gt 0 ]]; do
     --no-tests) run_tests=0; enable_tests=0; shift;;
     --mock) mock=1; shift;;
     --full) suite=""; shift;;
-    --with-lzma) export YAMS_ENABLE_LZMA=1; shift;;
     --no-strict) strict=0; shift;;
     --strict) strict=1; shift;;
     -h|--help) usage;;
@@ -166,10 +165,6 @@ if [[ ${enable_tests} -eq 1 ]]; then
   meson_args+=("-Dbuild-tests=true")
 else
   meson_args+=("-Dbuild-tests=false")
-fi
-# LZMA enablement (Option A): default 'auto'; allow forcing on via --with-lzma
-if [[ ${YAMS_ENABLE_LZMA:-0} -eq 1 ]]; then
-  meson_args+=("-Denable-lzma=true")
 fi
 mkdir -p "${build_dir}"
 if [[ $strict -eq 1 ]]; then

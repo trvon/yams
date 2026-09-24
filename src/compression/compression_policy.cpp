@@ -158,28 +158,11 @@ CompressionDecision CompressionPolicy::shouldCompress(const api::ContentMetadata
     return CompressionDecision::compress(algo, level, reason);
 }
 
-CompressionAlgorithm CompressionPolicy::selectAlgorithm(const api::ContentMetadata& metadata,
-                                                        const AccessPattern& pattern) const {
-    auto age = pattern.totalAge();
-    auto temp = classifyTemperature(pattern);
-
-    // Use LZMA for cold/archival data
-    if (age >= rules_.archiveAfterAge || temp == FileTemperature::Cold) {
-        spdlog::debug("Selecting LZMA for cold/archival data: {} days old, {} accesses/day",
-                      age.count() / 24, pattern.accessFrequency());
-        return CompressionAlgorithm::LZMA;
-    }
-
-    // Use LZMA for large files that aren't accessed frequently
-    if (metadata.size >= rules_.preferZstdBelow &&
-        pattern.accessFrequency() < rules_.coldFileAccessesPerDay) {
-        spdlog::debug("Selecting LZMA for large inactive file: {} MB, {} accesses/day",
-                      metadata.size / (1024ULL * 1024ULL), pattern.accessFrequency());
-        return CompressionAlgorithm::LZMA;
-    }
-
-    // Default to Zstandard for active data
-    spdlog::debug("Selecting Zstandard for active data");
+CompressionAlgorithm CompressionPolicy::selectAlgorithm(const api::ContentMetadata& /*metadata*/,
+                                                        const AccessPattern& /*pattern*/) const {
+    // Zstandard is the only compressor built (the LZMA backend was never compiled into any
+    // build); selecting LZMA made cold/archival blocks fail to compress and get stored raw.
+    // selectLevel() raises the Zstandard level for archival and hot data instead.
     return CompressionAlgorithm::Zstandard;
 }
 
