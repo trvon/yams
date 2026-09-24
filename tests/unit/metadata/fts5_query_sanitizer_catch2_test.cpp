@@ -226,6 +226,11 @@ TEST_CASE("FTS5 sanitize - execute against real FTS5", "[unit][metadata][fts5][b
         "ratio:2",
         "IL-6 OR TNF-alpha",
         "^foo",
+        // Found by fuzz_fts5_query: FTS5 has no implicit AND next to a parenthesized group.
+        "(foo OR bar) N owoaz",
+        "bar (foo)",
+        "NEAR(a b) c",
+        "NEAR/\xa4(\x01zN<E<dn;tndi;tic)6*",
     };
 
     for (const auto& query : testQueries) {

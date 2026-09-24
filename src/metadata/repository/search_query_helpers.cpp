@@ -303,8 +303,7 @@ static std::optional<std::string> normalizeAdvancedFts5Query(const std::string& 
             tokens.emplace_back(Kind::Unary, std::move(word));
             continue;
         }
-        if ((word == "NEAR" || word.rfind("NEAR/", 0) == 0) && i < query.size() &&
-            query[i] == '(') {
+        if (word == "NEAR" && i < query.size() && query[i] == '(') {
             // NEAR(phrase phrase [, N]) is an operand; accept only well-formed groups.
             const auto close = query.find(')', i);
             if (close == std::string::npos) {
@@ -408,13 +407,28 @@ static std::optional<std::string> normalizeAdvancedFts5Query(const std::string& 
         return std::nullopt;
     }
 
+    // FTS5 only applies implicit AND between plain phrases; next to a parenthesized group or a
+    // NEAR(...) group the AND must be explicit.
+    auto isGroupOperand = [](const std::string& text) { return text.back() == ')'; };
     std::string out;
+    Kind previous = Kind::Open;
+    std::string previousText;
     for (const auto& [kind, text] : tokens) {
+        const bool startsOperand = kind == Kind::Operand || kind == Kind::Open;
+        const bool endedOperand =
+            !out.empty() && (previous == Kind::Operand || previous == Kind::Close);
+        if (startsOperand && endedOperand &&
+            (previous == Kind::Close || kind == Kind::Open || isGroupOperand(previousText) ||
+             (kind == Kind::Operand && isGroupOperand(text)))) {
+            out += " AND";
+        }
         const bool glueRight = !out.empty() && out.back() == '(';
         if (!out.empty() && !glueRight && kind != Kind::Close) {
             out.push_back(' ');
         }
         out += text;
+        previous = kind;
+        previousText = text;
     }
     return out;
 }
