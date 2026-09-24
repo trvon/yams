@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -467,4 +468,24 @@ TEST_CASE("FTS5 sanitize - long tag-bearing input does not exhaust the stack",
     CHECK(unmatched.find(body) != std::string::npos);
     const auto matched = sanitizeFTS5Query("keep <think>" + body + "</think> this");
     CHECK(matched == "keep this");
+}
+
+// Matched-pair tag stripping was a backtracking std::regex: every unmatched "<a>" opener rescanned
+// the rest of the query, so ~64 KB of "<a>x" from an MCP client took tens of seconds.
+TEST_CASE("FTS5 sanitize - unmatched tag openers stay linear", "[unit][metadata][fts5]") {
+    using yams::metadata::sanitizeFTS5Query;
+
+    std::string query;
+    for (int i = 0; i < 16000; ++i) {
+        query += "<a>x";
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const auto sanitized = sanitizeFTS5Query(query);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    CHECK_FALSE(sanitized.empty());
+    CHECK(elapsed < std::chrono::seconds(2));
+
+    // Semantics are unchanged: matched pairs drop with their content, orphans drop markup only.
+    CHECK(sanitizeFTS5Query("keep <think>drop me</think> this <b>tail") == "keep this tail");
+    CHECK(sanitizeFTS5Query("<a>one</a><a>two</b> three") == "two three");
 }

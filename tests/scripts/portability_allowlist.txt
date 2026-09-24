@@ -151,8 +151,8 @@ src/metadata/migration.cpp:1562:portability/env-read # reviewed raw environment 
 src/metadata/repository/search_ops.cpp:89:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:103:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:120:portability/env-read # reviewed raw environment read
-src/metadata/repository/search_query_helpers.cpp:505:portability/env-read # reviewed raw environment read
-src/metadata/repository/search_query_helpers.cpp:692:portability/env-read # reviewed raw environment read
+src/metadata/repository/search_query_helpers.cpp:564:portability/env-read # reviewed raw environment read
+src/metadata/repository/search_query_helpers.cpp:751:portability/env-read # reviewed raw environment read
 src/metadata/versioning_util.cpp:101:portability/env-read # reviewed raw environment read
 src/plugins/plugin_repo_client.cpp:62:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:379:portability/env-read # reviewed raw environment read

@@ -6,6 +6,8 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -440,11 +442,68 @@ static std::optional<std::string> normalizeAdvancedFts5Query(const std::string& 
 //   - Orphaned close:  </tag>              → strip tag markup only
 //   - Generic:         <foo_bar>           → strip tag markup only
 // Preserves mathematical comparisons like "x < 5" (requires letter after <).
+// Length of an XML-style tag name ([A-Za-z_][A-Za-z0-9_-]*) starting at pos, or 0.
+static size_t xmlTagNameLength(const std::string& text, size_t pos) {
+    auto isStart = [](unsigned char c) { return std::isalpha(c) != 0 || c == '_'; };
+    auto isRest = [](unsigned char c) { return std::isalnum(c) != 0 || c == '_' || c == '-'; };
+    if (pos >= text.size() || !isStart(static_cast<unsigned char>(text[pos]))) {
+        return 0;
+    }
+    size_t end = pos + 1;
+    while (end < text.size() && isRest(static_cast<unsigned char>(text[end]))) {
+        ++end;
+    }
+    return end - pos;
+}
+
+// Replace each "<name>...</name>" pair (shortest match, scanning left to right, like the lazy
+// regex it replaces) with a space. Closing tags are indexed once so every opener finds its
+// closer by binary search; a backtracking std::regex rescanned the tail for every unmatched
+// opener, which made long queries quadratic.
+static std::string stripMatchedXmlPairs(const std::string& input) {
+    std::unordered_map<std::string_view, std::vector<size_t>> closers;
+    for (size_t i = input.find("</"); i != std::string::npos; i = input.find("</", i + 1)) {
+        const size_t len = xmlTagNameLength(input, i + 2);
+        if (len > 0 && i + 2 + len < input.size() && input[i + 2 + len] == '>') {
+            closers[std::string_view(input).substr(i + 2, len)].push_back(i);
+        }
+    }
+    if (closers.empty()) {
+        return input;
+    }
+
+    std::string result;
+    result.reserve(input.size());
+    size_t copied = 0;
+    size_t pos = 0;
+    while ((pos = input.find('<', pos)) != std::string::npos) {
+        const size_t len = xmlTagNameLength(input, pos + 1);
+        if (len == 0 || pos + 1 + len >= input.size() || input[pos + 1 + len] != '>') {
+            ++pos;
+            continue;
+        }
+        const auto it = closers.find(std::string_view(input).substr(pos + 1, len));
+        const size_t contentStart = pos + len + 2;
+        if (it != closers.end()) {
+            const auto& positions = it->second;
+            const auto closer = std::lower_bound(positions.begin(), positions.end(), contentStart);
+            if (closer != positions.end()) {
+                result.append(input, copied, pos - copied);
+                result.push_back(' ');
+                copied = *closer + len + 3; // "</" + name + ">"
+                pos = copied;
+                continue;
+            }
+        }
+        ++pos;
+    }
+    result.append(input, copied, std::string::npos);
+    return result;
+}
+
 static std::string stripXmlTags(const std::string& input) {
     // Phase 1: strip matched pairs (tag + content between them)
-    static const std::regex matchedPair("<([a-zA-Z_][a-zA-Z0-9_-]*)>[\\s\\S]*?</\\1>",
-                                        std::regex::ECMAScript);
-    std::string result = std::regex_replace(input, matchedPair, " ");
+    std::string result = stripMatchedXmlPairs(input);
 
     // Phase 2: strip remaining orphaned opening/closing tags (markup only, keep surrounding text)
     static const std::regex orphanedTag("</?[a-zA-Z_][a-zA-Z0-9_-]*>", std::regex::ECMAScript);
