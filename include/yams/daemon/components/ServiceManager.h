@@ -701,6 +701,7 @@ public:
 
 #ifdef YAMS_TESTING
     // Test helpers: inject mock provider and tweak provider state/name.
+    void __test_setResolvedDataDir(std::filesystem::path dir) { resolvedDataDir_ = std::move(dir); }
     void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
         storeModelProvider(std::move(provider));
     }

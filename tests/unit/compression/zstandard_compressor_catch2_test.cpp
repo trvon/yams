@@ -1,6 +1,7 @@
 // Catch2 tests for Zstandard Compressor
 // Migrated from GTest: zstandard_compressor_test.cpp
 
+#include <zstd.h>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstring>
@@ -198,4 +199,50 @@ TEST_CASE_METHOD(ZstandardCompressorFixture, "ZstandardCompressor - VariousSizes
             CHECK(decompressResult.value().size() == testData.size());
         }
     }
+}
+
+// The expected size comes from an unchecksummed storage header; it must agree with the
+// content size the zstd frame records rather than drive a buffer allocation on its own.
+TEST_CASE_METHOD(ZstandardCompressorFixture,
+                 "ZstandardCompressor - Expected size must match the frame content size",
+                 "[compression][zstd][catch2]") {
+    std::vector<std::byte> data(64 * 1024, std::byte{'a'});
+    auto compressed = compressor_->compress(data);
+    REQUIRE(compressed.has_value());
+
+    auto inflated = compressor_->decompress(compressed.value().data, data.size() + 1);
+    CHECK_FALSE(inflated.has_value());
+
+    auto exact = compressor_->decompress(compressed.value().data, data.size());
+    REQUIRE(exact.has_value());
+    CHECK(exact.value() == data);
+}
+
+// Frames from the streaming compressor do not record a content size; decoding them with a
+// caller-provided size must grow with the real output and stop at that size.
+TEST_CASE_METHOD(ZstandardCompressorFixture,
+                 "ZstandardCompressor - Unknown-size frames are bounded by the expected size",
+                 "[compression][zstd][catch2]") {
+    std::vector<std::byte> data(256 * 1024, std::byte{'z'});
+    std::vector<std::byte> frame(ZSTD_compressBound(data.size()));
+    ZSTD_CCtx* cctx = ZSTD_createCCtx();
+    REQUIRE(cctx != nullptr);
+    ZSTD_inBuffer in{data.data(), data.size(), 0};
+    ZSTD_outBuffer out{frame.data(), frame.size(), 0};
+    // Feeding input before ending the frame leaves the content size unknown, as in the
+    // chunked streaming compressor.
+    REQUIRE_FALSE(ZSTD_isError(ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_continue)));
+    ZSTD_inBuffer none{nullptr, 0, 0};
+    const size_t left = ZSTD_compressStream2(cctx, &out, &none, ZSTD_e_end);
+    ZSTD_freeCCtx(cctx);
+    REQUIRE(left == 0);
+    frame.resize(out.pos);
+    REQUIRE(ZSTD_getFrameContentSize(frame.data(), frame.size()) == ZSTD_CONTENTSIZE_UNKNOWN);
+
+    auto exact = compressor_->decompress(frame, data.size());
+    REQUIRE(exact.has_value());
+    CHECK(exact.value() == data);
+
+    auto tooSmall = compressor_->decompress(frame, data.size() - 1);
+    CHECK_FALSE(tooSmall.has_value());
 }

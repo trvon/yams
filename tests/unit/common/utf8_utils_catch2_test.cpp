@@ -123,3 +123,35 @@ TEST_CASE("ensureValidUtf8 handles empty input", "[common][utf8][lazy]") {
     CHECK(result.empty());
     CHECK(storage.empty());
 }
+
+// sanitizeUtf8 feeds proto3 string fields, which reject overlong encodings, UTF-16 surrogates
+// and code points above U+10FFFF. Its output (and ensureValidUtf8's) must be well-formed UTF-8,
+// i.e. unchanged by the strict sanitizer.
+TEST_CASE("common::sanitizeUtf8 output is well-formed UTF-8", "[common][utf8][catch2]") {
+    using yams::common::ensureValidUtf8;
+    using yams::common::sanitizeUtf8;
+    using yams::common::sanitizeUtf8Strict;
+
+    const std::string cases[] = {
+        std::string("\xE0\x80\x80", 3),     // overlong 3-byte (U+0000)
+        std::string("\xE0\x9F\xBF", 3),     // overlong 3-byte (U+07FF)
+        std::string("\xED\xA0\x80", 3),     // UTF-16 high surrogate
+        std::string("\xED\xBF\xBF", 3),     // UTF-16 low surrogate
+        std::string("\xF0\x80\x80\x80", 4), // overlong 4-byte
+        std::string("\xF4\x90\x80\x80", 4), // above U+10FFFF
+        std::string("ok \xED\xA0\x80 tail", 10),
+    };
+    for (const auto& input : cases) {
+        const auto lenient = sanitizeUtf8(input);
+        INFO("input bytes: " << input.size());
+        CHECK(sanitizeUtf8Strict(lenient) == lenient);
+
+        std::string storage;
+        const std::string ensured(ensureValidUtf8(input, storage));
+        CHECK(sanitizeUtf8Strict(ensured) == ensured);
+    }
+    // Valid boundary code points are preserved.
+    const std::string valid =
+        "\xE0\xA0\x80\xED\x9F\xBF\xEE\x80\x80\xF0\x90\x80\x80\xF4\x8F\xBF\xBF";
+    CHECK(sanitizeUtf8(valid) == valid);
+}

@@ -23,9 +23,36 @@ mkdir -p \
 	"${CORPUS_DIR}/plugin_trust" \
 	"${CORPUS_DIR}/plugin_abi_mount" \
 	"${CORPUS_DIR}/plugin_abi_negotiation" \
-	"${CORPUS_DIR}/download_jobs"
+	"${CORPUS_DIR}/download_jobs" \
+	"${CORPUS_DIR}/fts5_query" \
+	"${CORPUS_DIR}/utf8" \
+	"${CORPUS_DIR}/text_extractors" \
+	"${CORPUS_DIR}/compressed_block"
 
 echo "Creating minimal seed inputs..."
+
+# FTS5 query seeds: first byte selects prefix-wildcard handling.
+printf '\x01dendritic cells (DCs)' >"${CORPUS_DIR}/fts5_query/01_plain.txt"
+printf '\x01(foo OR bar) NOT baz' >"${CORPUS_DIR}/fts5_query/02_operators.txt"
+printf '\x00title:report "exact phrase"' >"${CORPUS_DIR}/fts5_query/03_column_phrase.txt"
+printf '\x01NEAR(hello world, 2) IL-6*' >"${CORPUS_DIR}/fts5_query/04_near_prefix.txt"
+
+# UTF-8 / encoding seeds: valid multibyte, surrogate, overlong, UTF-16LE with BOM.
+printf 'caf\xc3\xa9 \xf0\x9f\x98\x80' >"${CORPUS_DIR}/utf8/01_valid.bin"
+printf 'a\xed\xa0\x80b\xe0\x80\x80c\xf4\x90\x80\x80' >"${CORPUS_DIR}/utf8/02_invalid.bin"
+printf '\xff\xfeH\x00i\x00\x00\xd8A\x00' >"${CORPUS_DIR}/utf8/03_utf16le.bin"
+
+# Text extractor seeds: HTML with scripts, comments and block tags.
+printf '<html><head><title>T</title><script>x</script><style>y</style></head><body><!-- c --><p>a</p><div>b &amp; c</div></body></html>' \
+	>"${CORPUS_DIR}/text_extractors/01_page.html"
+printf '<script<script<!--<<<' >"${CORPUS_DIR}/text_extractors/02_unclosed.html"
+
+# Compressed block seeds: mode 1 (round-trip) inputs; mode 0 headers are best found by the fuzzer.
+printf '\x01hello hello hello hello hello' >"${CORPUS_DIR}/compressed_block/01_roundtrip.bin"
+{
+	printf '\x01'
+	head -c 4096 /dev/zero | tr '\0' 'a'
+} >"${CORPUS_DIR}/compressed_block/02_repetitive.bin"
 
 # Minimal MessageFramer frame header (20 bytes)
 min_frame="${CORPUS_DIR}/ipc_protocol/01_min_frame.bin"

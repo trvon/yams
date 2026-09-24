@@ -9,8 +9,8 @@
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/vector_database.h>
 
-#include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -229,6 +229,12 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                         EmbeddingRepairProgressCallback progressCallback,
                         const yams::extraction::ContentExtractorList& extractors,
                         BeginBulkIngestCallback beginBulkIngest) {
+    // An empty data path would resolve vectors.db against the process working directory and
+    // create a stray database there (create_if_missing below).
+    if (config.dataPath.empty()) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Embedding repair requires a resolved data directory"};
+    }
     EmbeddingRepairStats stats;
 
     // If the daemon provides a coordinator-backed lease, hold it for the whole repair so that

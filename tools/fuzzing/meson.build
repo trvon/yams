@@ -5,7 +5,7 @@
 #                 ./tools/fuzzing/fuzz.sh build
 #   libfuzzer - plain clang with the libFuzzer runtime; every project object is built with
 #               -fsanitize=fuzzer-no-link plus ASan/UBSan, harnesses link -fsanitize=fuzzer:
-#                 CC=clang CXX=clang++ meson setup build/fuzz -Dbuild-fuzzers=true \
+#                 CC=clang CXX=clang++ meson setup build/fuzz -Dbuild-fuzzers=true -Db_lundef=false \
 #                   -Dbuild-tests=false -Dbuild-plugins=false -Dbuild-cli=false
 #                 meson compile -C build/fuzz
 #               then ./tools/fuzzing/fuzz.sh local <target> (see fuzz.sh usage).
@@ -131,6 +131,50 @@ fuzz_topology_codec = executable('fuzz_topology_codec',
   include_directories: include_directories('../../include'),
   link_with: yams_daemon_lib,
   dependencies: fuzz_deps + [dependency('yams_topology')],
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# FTS5 user-query sanitizer (MCP / CLI search text) against a real FTS5 table
+fuzz_fts5_query = executable('fuzz_fts5_query',
+  'fuzz_fts5_query.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps + [sqlite_dep],
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# UTF-8 sanitizers + encoding detection/conversion on ingested bytes
+fuzz_utf8 = executable('fuzz_utf8',
+  'fuzz_utf8.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# HTML / plain-text extractors, title and section detection on ingested bytes
+fuzz_text_extractors = executable('fuzz_text_extractors',
+  'fuzz_text_extractors.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# Stored compressed blocks (header + zstd/LZMA payload) and compressor round-trips
+fuzz_compressed_block = executable('fuzz_compressed_block',
+  'fuzz_compressed_block.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
   cpp_args: fuzzer_args,
   link_args: fuzzer_args,
   build_by_default: true,

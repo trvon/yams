@@ -76,7 +76,7 @@ build() {
     export YAMS_CONAN_ARCH="$(uname -m)"
     export YAMS_BUILD_DIR="${_yams_build_dir}"
     export YAMS_ENABLE_MOBILE_BINDINGS=false
-    export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${_pkgver} -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto"
+    export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${_pkgver} -Dwerror=false -Dwarning_level=2"
     export YAMS_INSTALL_PREFIX="/usr"
     export CC=clang
     export CXX=clang++

@@ -443,6 +443,9 @@ if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
 elif [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 	BUILD_DIR="build/fuzzing"
 	CONAN_SUBDIR="build-fuzzing"
+	# Fuzzing uses Debug as the Conan build type, so Conan writes its toolchain under
+	# build-debug (same as Profiling).
+	CONAN_ALT_SUBDIR="build-debug"
 	BUILD_TYPE_MESON_LOWER="debug"
 elif [[ "${BUILD_TYPE}" == "Debug" ]]; then
 	BUILD_DIR="builddir"
@@ -1125,6 +1128,9 @@ fi
 if [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 	MESON_OPTIONS+=(
 		"-Dbuild-fuzzers=true"
+		# Sanitizer and SanitizerCoverage symbols in shared libraries resolve against the
+		# fuzzer executable, so shared objects must not be linked with --no-undefined.
+		"-Db_lundef=false"
 	)
 	echo "Fuzzing targets enabled for Meson build"
 fi

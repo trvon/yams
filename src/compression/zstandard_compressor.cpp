@@ -112,23 +112,61 @@ public:
         return compResult;
     }
 
+    [[nodiscard]] Result<std::vector<std::byte>> decompressBounded(std::span<const std::byte> data,
+                                                                   size_t maxSize) {
+        if (const size_t reset = ZSTD_DCtx_reset(dctx.get(), ZSTD_reset_session_only);
+            ZSTD_isError(reset)) {
+            return makeZstdError("ZSTD_DCtx_reset", reset);
+        }
+        std::vector<std::byte> out;
+        std::vector<std::byte> chunk(ZSTD_DStreamOutSize());
+        ZSTD_inBuffer in{data.data(), data.size(), 0};
+        while (true) {
+            ZSTD_outBuffer ob{chunk.data(), chunk.size(), 0};
+            const size_t remaining = ZSTD_decompressStream(dctx.get(), &ob, &in);
+            if (ZSTD_isError(remaining)) {
+                return makeZstdError("ZSTD_decompressStream", remaining);
+            }
+            if (ob.pos > maxSize - out.size()) {
+                return Error{ErrorCode::InvalidData,
+                             fmt::format("Zstandard data decompresses beyond the expected {} bytes",
+                                         maxSize)};
+            }
+            out.insert(out.end(), chunk.begin(),
+                       chunk.begin() + static_cast<std::ptrdiff_t>(ob.pos));
+            if (remaining == 0) {
+                return out;
+            }
+            if (in.pos == in.size && ob.pos == 0) {
+                return Error{ErrorCode::InvalidData, "Truncated Zstandard frame"};
+            }
+        }
+    }
+
     [[nodiscard]] Result<std::vector<std::byte>> decompress(std::span<const std::byte> data,
                                                             size_t expectedSize) {
         if (!dctx) {
             return Error{ErrorCode::InvalidState, "Decompression context not initialized"};
         }
 
-        // Get the decompressed size
+        // Get the decompressed size. A caller-provided size usually comes from a storage header
+        // that has no checksum of its own, so it must agree with the size the frame records
+        // before it is allowed to size an allocation.
+        const unsigned long long frameSize = ZSTD_getFrameContentSize(data.data(), data.size());
+        if (frameSize == ZSTD_CONTENTSIZE_ERROR) {
+            return Error{ErrorCode::InvalidData, "Not a valid Zstandard frame"};
+        }
+        const bool frameSizeKnown = frameSize != ZSTD_CONTENTSIZE_UNKNOWN;
+        if (expectedSize != 0 && frameSizeKnown && frameSize != expectedSize) {
+            return Error{ErrorCode::InvalidData,
+                         fmt::format("Expected decompressed size {} disagrees with the Zstandard "
+                                     "frame content size {}",
+                                     expectedSize, frameSize)};
+        }
         size_t decompressedSize = expectedSize;
         if (decompressedSize == 0) {
-            decompressedSize = ZSTD_getFrameContentSize(data.data(), data.size());
-            if (decompressedSize == ZSTD_CONTENTSIZE_ERROR) {
-                return Error{ErrorCode::InvalidData, "Not a valid Zstandard frame"};
-            }
-            if (decompressedSize == ZSTD_CONTENTSIZE_UNKNOWN) {
-                // Start with a reasonable guess
-                decompressedSize = data.size() * 4;
-            }
+            // Start with a reasonable guess when the frame does not record its size.
+            decompressedSize = frameSizeKnown ? static_cast<size_t>(frameSize) : data.size() * 4;
         }
 
         // Sanity checks: prevent absurd allocations from corrupted frame headers
@@ -139,6 +177,12 @@ public:
             return Error{ErrorCode::InvalidData,
                          fmt::format("Reported decompressed size {} exceeds maximum allowed ({})",
                                      decompressedSize, kMaxAbsoluteSize)};
+        }
+
+        // The frame does not record its size (streaming compressor): decode incrementally so the
+        // buffer grows with real output, and fail once it passes the caller's expected size.
+        if (expectedSize != 0 && !frameSizeKnown) {
+            return decompressBounded(data, expectedSize);
         }
 
         // Ratio check only when parsing size from frame header (not caller-provided)
