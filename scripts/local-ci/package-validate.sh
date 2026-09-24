@@ -112,14 +112,20 @@ if ! command -v docker >/dev/null 2>&1; then
 	exit 2
 fi
 
+# A missing build dir must not abort under `set -e -o pipefail`; the lane then
+# reports "package not found" instead of the script exiting silently.
 discover_pkg() {
 	local pattern="$1"
-	find "${BUILD_DIR}" -maxdepth 4 -type f -name "${pattern}" 2>/dev/null | LC_ALL=C sort | tail -n1
+	[ -d "${BUILD_DIR}" ] || return 0
+	{ find "${BUILD_DIR}" -maxdepth 4 -type f -name "${pattern}" 2>/dev/null || true; } |
+		LC_ALL=C sort | tail -n1
 }
 
-[ -n "${DEB_PKG}" ] || DEB_PKG="$(discover_pkg 'yams-*.deb')"
-[ -n "${RPM_PKG}" ] || RPM_PKG="$(discover_pkg 'yams-*.rpm')"
-[ -n "${ARCH_PKG}" ] || ARCH_PKG="$(discover_pkg "yams-*-${ARCH_PKG_ARCH:-x86_64}.pkg.tar.zst")"
+if should_run_lane deb && [ -z "${DEB_PKG}" ]; then DEB_PKG="$(discover_pkg 'yams-*.deb')"; fi
+if should_run_lane rpm && [ -z "${RPM_PKG}" ]; then RPM_PKG="$(discover_pkg 'yams-*.rpm')"; fi
+if should_run_lane arch && [ -z "${ARCH_PKG}" ]; then
+	ARCH_PKG="$(discover_pkg "yams-*-${ARCH_PKG_ARCH:-x86_64}.pkg.tar.zst")"
+fi
 
 # Unique run tag so parallel invocations don't collide.
 RUN_TAG="$$"
@@ -139,9 +145,13 @@ validate_lane() {
 	if [ "${name}" = "arch" ]; then
 		platform_args=(--platform="${ARCH_DOCKER_PLATFORM:-linux/amd64}")
 	fi
+	local build_args=()
+	if [ "${name}" = "arch" ] && [ -n "${ARCH_BASE_IMAGE:-}" ]; then
+		build_args=(--build-arg "ARCH_BASE_IMAGE=${ARCH_BASE_IMAGE}")
+	fi
 
 	log "${name}: building substrate image from ${dockerfile#"${REPO_ROOT}"/}"
-	if ! docker build "${platform_args[@]}" -f "${dockerfile}" -t "${image}" "${REPO_ROOT}/packaging/systemd" >/dev/null; then
+	if ! docker build "${platform_args[@]}" "${build_args[@]}" -f "${dockerfile}" -t "${image}" "${REPO_ROOT}/packaging/systemd" >/dev/null; then
 		fail "${name}: failed to build substrate image"
 		return 1
 	fi
