@@ -359,6 +359,7 @@ jobs:
             arch_name: x86_64
             expected_host_arch: x86_64
             docker_platform: linux/amd64
+            arch_base_image: archlinux/archlinux:latest
           - os: arch-linux-hosted-aarch64
             runs_on: ubuntu-24.04-arm
             suffix: arch-aarch64
@@ -370,6 +371,7 @@ jobs:
             arch_name: aarch64
             expected_host_arch: aarch64
             docker_platform: linux/arm64
+            arch_base_image: ghcr.io/menci/archlinuxarm@sha256:95491e07ec919efcbb134e3b228b7e5869938448985becaeaa4dc0e728a6499a
     runs-on: ${{ matrix.runs_on }}
     env:
       BUILD_DIR: build/release
@@ -455,7 +457,9 @@ jobs:
 
           echo "Arch release channel=${channel} version=${version} host=${host_arch} platform=${docker_platform} build_dir=${build_dir} meson_build_dir=${meson_build_dir}"
 
-          docker build --platform "${docker_platform}" -t yams/ci-arch:latest -f docker/local-ci/arch-package.Dockerfile .
+          docker build --platform "${docker_platform}" \
+            --build-arg "ARCH_BASE_IMAGE=${{ matrix.arch_base_image }}" \
+            -t yams/ci-arch:latest -f docker/local-ci/arch-package.Dockerfile .
 
           mkdir -p "${build_dir}"
           docker run --rm \
@@ -495,6 +499,7 @@ jobs:
         shell: bash
         env:
           ARCH_DOCKER_PLATFORM: ${{ matrix.docker_platform }}
+          ARCH_BASE_IMAGE: ${{ matrix.arch_base_image }}
         run: |
           set -euo pipefail
           : "${ARCH_PKG_PATH:?ARCH_PKG_PATH not set}"

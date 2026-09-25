@@ -7,7 +7,10 @@
 # Pattern: mirrors packaging/systemd/debian-lane.Dockerfile and
 # packaging/systemd/fedora-lane.Dockerfile.
 
-FROM archlinux/archlinux:latest
+# archlinux/archlinux is amd64-only; aarch64 lanes pass an Arch Linux ARM
+# image (ghcr.io/menci/archlinuxarm, built from the official ALARM rootfs).
+ARG ARCH_BASE_IMAGE=archlinux/archlinux:latest
+FROM ${ARCH_BASE_IMAGE}
 
 ENV container=docker
 
@@ -16,6 +19,7 @@ RUN set -eux; \
     grep -q '^[[:space:]]*DownloadUser' /etc/pacman.conf && sed -i 's/^[[:space:]]*DownloadUser/# DownloadUser/' /etc/pacman.conf || true; \
     pacman-key --init 2>/dev/null || true; \
     pacman-key --populate archlinux 2>/dev/null || true; \
+    pacman-key --populate archlinuxarm 2>/dev/null || true; \
     pacman -Syu --noconfirm --needed; \
     pacman -S --noconfirm --needed \
         systemd \

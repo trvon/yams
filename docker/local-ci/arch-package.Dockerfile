@@ -7,7 +7,10 @@
 # Pattern: mirrors docker/local-ci/debian-package.Dockerfile.
 # Built and driven by scripts/local-ci/package-lane.sh (--only arch).
 
-FROM archlinux/archlinux:latest
+# archlinux/archlinux is amd64-only; aarch64 lanes pass an Arch Linux ARM
+# image (ghcr.io/menci/archlinuxarm, built from the official ALARM rootfs).
+ARG ARCH_BASE_IMAGE=archlinux/archlinux:latest
+FROM ${ARCH_BASE_IMAGE}
 
 ENV PATH="/root/.local/bin:${PATH}"
 
@@ -18,6 +21,7 @@ RUN set -euxo pipefail; \
     # Pacman keyring must be initialized before installing packages
     pacman-key --init 2>/dev/null || true; \
     pacman-key --populate archlinux 2>/dev/null || true; \
+    pacman-key --populate archlinuxarm 2>/dev/null || true; \
     pacman -Syu --noconfirm --needed; \
     pacman -S --noconfirm --needed \
         base-devel \
