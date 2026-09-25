@@ -321,6 +321,54 @@ TEST_CASE("TopologyManager does not reuse deleted prior members", "[daemon][topo
     }
 }
 
+TEST_CASE("TopologyManager incremental rebuilds honor the configured dirty-region expansion",
+          "[daemon][topology-manager][expansion]") {
+    // The mode had no path from config to the incremental rebuild, so every rebuild used the
+    // default. aaa and bbb are semantic neighbors in one prior cluster; a rebuild seeded from bbb
+    // pulls in that cluster's members only when the mode includes prior clusters.
+    RebuildFixture fixture;
+    fixture.addDocument("aaa");
+    fixture.addDocument("bbb");
+    fixture.addDocument("ccc");
+    auto aNode = fixture.kg->getNodeByKey("doc:aaa");
+    auto bNode = fixture.kg->getNodeByKey("doc:bbb");
+    REQUIRE(aNode.has_value());
+    REQUIRE(aNode.value().has_value());
+    REQUIRE(bNode.has_value());
+    REQUIRE(bNode.value().has_value());
+    yams::metadata::KGEdge forward;
+    forward.srcNodeId = aNode.value()->id;
+    forward.dstNodeId = bNode.value()->id;
+    forward.relation = "semantic_neighbor";
+    auto reverse = forward;
+    std::swap(reverse.srcNodeId, reverse.dstNodeId);
+    REQUIRE(fixture.kg->addEdgesUnique(std::vector{forward, reverse}).has_value());
+
+    TopologyManager manager(fixture.dependencies());
+    REQUIRE(manager.rebuildArtifacts("initial", false, {}, "connected").has_value());
+
+    auto expansionIssue = [&](const TopologyManager::RebuildStats& stats) {
+        for (const auto& issue : stats.issues) {
+            if (issue.starts_with("dirty-region expansion=")) {
+                return issue;
+            }
+        }
+        return std::string{};
+    };
+
+    SECTION("default includes the seed's prior cluster") {
+        auto result = manager.rebuildArtifacts("post_ingest_drain", true, {"bbb"}, "connected");
+        REQUIRE(result.has_value());
+        CHECK((expansionIssue(result.value()) == "dirty-region expansion=prior_cluster+neighbors"));
+    }
+    SECTION("neighbors_only stops at semantic neighbors") {
+        manager.setDirtyRegionExpansion(yams::topology::DirtyRegionExpansionMode::NeighborsOnly);
+        auto result = manager.rebuildArtifacts("post_ingest_drain", true, {"bbb"}, "connected");
+        REQUIRE(result.has_value());
+        CHECK((expansionIssue(result.value()) == "dirty-region expansion=neighbors"));
+    }
+}
+
 TEST_CASE("TopologyManager distinguishes an empty corpus from unready documents",
           "[daemon][topology-recovery]") {
     RebuildFixture fixture;

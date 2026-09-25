@@ -1088,6 +1088,42 @@ minhash_alpha = 0.15
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyEnginePolicy reads the dirty-region expansion",
+                 "[daemon][components][config][topology][catch2]") {
+    // TopologyBuildConfig::dirtyRegionExpansion had no config path, so incremental rebuilds
+    // always used the default and NeighborsOnly / Adaptive were unreachable.
+    SECTION("a recognized mode is resolved") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+dirty_region_expansion = "neighbors_only"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        REQUIRE(policy.dirtyRegionExpansion.has_value());
+        CHECK((*policy.dirtyRegionExpansion ==
+               yams::topology::DirtyRegionExpansionMode::NeighborsOnly));
+    }
+    SECTION("an unrecognized mode is ignored, not guessed") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+dirty_region_expansion = "sideways"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        CHECK_FALSE(policy.dirtyRegionExpansion.has_value());
+    }
+    SECTION("absent means the engine default") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+engine = "connected"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        CHECK_FALSE(policy.dirtyRegionExpansion.has_value());
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
                  "ConfigResolver::resolveTopologyRoutingPolicy reads populated TOML block",
                  "[daemon][components][config][topology_routing][catch2]") {
     auto configPath = writeToml("config.toml", R"TOML(

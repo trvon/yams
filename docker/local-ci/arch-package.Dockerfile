@@ -61,6 +61,14 @@ ENV PATH="/opt/venv/bin:${PATH}"
 ENV CC=clang \
     CXX=clang++
 
+# Boost's b2 clang toolset passes --target=arm64-pc-linux on aarch64. Clang
+# cannot map that triple to Arch Linux ARM's GCC install
+# (aarch64-unknown-linux-gnu), so it loses libstdc++ headers and crt objects.
+# Clang reads <triple>.cfg next to its binary; point that triple at the host GCC.
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+        printf -- '--gcc-triple=%s\n' "$(gcc -dumpmachine)" > /usr/bin/arm64-pc-linux.cfg; \
+    fi
+
 # Configure Conan baseline profile
 RUN conan profile detect --force && \
     conan remote list 2>/dev/null || conan remote add conancenter https://center.conan.io && \

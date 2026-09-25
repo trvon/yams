@@ -275,6 +275,10 @@ LIBCXX_HARDENING=${YAMS_LIBCXX_HARDENING:-none}
 # Check if using explicit Conan profile (CI mode)
 CONAN_HOST_PROFILE=${YAMS_CONAN_HOST_PROFILE:-}
 CONAN_ARCH=${YAMS_CONAN_ARCH:-}
+# Conan names 64-bit ARM "armv8"; callers often pass uname/pacman labels.
+case "${CONAN_ARCH}" in
+aarch64 | arm64) CONAN_ARCH="armv8" ;;
+esac
 CONAN_EXTRA_OPTIONS=${YAMS_CONAN_EXTRA_OPTIONS:-}
 USE_PROFILE=false
 

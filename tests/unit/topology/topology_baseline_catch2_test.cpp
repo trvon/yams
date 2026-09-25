@@ -443,6 +443,67 @@ TEST_CASE("Topology dirty regions include every protected overlap fiber",
     CHECK(containsHash(region.value().expandedDocumentHashes, "secondary-peer"));
 }
 
+TEST_CASE("Topology dirty-region expansion modes differ only in prior-cluster members",
+          "[unit][topology][update][expansion]") {
+    // Characterizes each mode now that TopologyManager can select it from config. Before,
+    // only PriorClusterAndNeighbors was ever produced, so NeighborsOnly and Adaptive ran nowhere.
+    TopologyArtifactBatch existing;
+    existing.clusters = {
+        ClusterArtifact{
+            .clusterId = "prior", .memberCount = 2, .memberDocumentHashes = {"seed", "peer"}},
+    };
+    existing.memberships = {
+        DocumentClusterMembership{.documentHash = "seed", .clusterId = "prior"},
+        DocumentClusterMembership{.documentHash = "peer", .clusterId = "prior"},
+    };
+    const std::vector<TopologyDocumentInput> changed{
+        TopologyDocumentInput{
+            .documentHash = "seed",
+            .neighbors = {{.documentHash = "neighbor", .score = 0.9F, .reciprocal = true}}},
+    };
+
+    ConnectedComponentTopologyEngine engine;
+    auto regionFor = [&](DirtyRegionExpansionMode mode) {
+        TopologyBuildConfig config;
+        config.dirtyRegionExpansion = mode;
+        auto region = engine.defineDirtyRegion(existing, changed, config);
+        REQUIRE(region.has_value());
+        return region.value();
+    };
+
+    const auto neighborsOnly = regionFor(DirtyRegionExpansionMode::NeighborsOnly);
+    CHECK(containsHash(neighborsOnly.expandedDocumentHashes, "neighbor"));
+    CHECK_FALSE(containsHash(neighborsOnly.expandedDocumentHashes, "peer"));
+    CHECK_FALSE(neighborsOnly.includedPriorClusterMembers);
+
+    const auto prior = regionFor(DirtyRegionExpansionMode::PriorClusterAndNeighbors);
+    CHECK(containsHash(prior.expandedDocumentHashes, "neighbor"));
+    CHECK(containsHash(prior.expandedDocumentHashes, "peer"));
+    CHECK(prior.includedPriorClusterMembers);
+
+    // Adaptive takes every branch PriorClusterAndNeighbors takes: it is not yet a distinct
+    // strategy. Pinned so a real adaptive policy has to change this test deliberately.
+    const auto adaptive = regionFor(DirtyRegionExpansionMode::Adaptive);
+    CHECK((adaptive.expandedDocumentHashes == prior.expandedDocumentHashes));
+}
+
+TEST_CASE("Dirty-region expansion modes round-trip through their config names",
+          "[unit][topology][update][expansion]") {
+    for (const auto mode :
+         {DirtyRegionExpansionMode::NeighborsOnly,
+          DirtyRegionExpansionMode::PriorClusterAndNeighbors, DirtyRegionExpansionMode::Adaptive}) {
+        const auto parsed = parseDirtyRegionExpansionMode(dirtyRegionExpansionModeName(mode));
+        REQUIRE(parsed.has_value());
+        CHECK((*parsed == mode));
+    }
+    CHECK((parseDirtyRegionExpansionMode("neighbors_only") ==
+           DirtyRegionExpansionMode::NeighborsOnly));
+    CHECK((parseDirtyRegionExpansionMode("Prior_Cluster_And_Neighbors") ==
+           DirtyRegionExpansionMode::PriorClusterAndNeighbors));
+    CHECK_FALSE(parseDirtyRegionExpansionMode("sideways").has_value());
+    CHECK_FALSE(parseDirtyRegionExpansionMode("").has_value());
+}
+
 TEST_CASE("Sparse-guided topology routing uses persisted cluster centroids",
           "[unit][topology][baseline]") {
     ConnectedComponentTopologyEngine engine;

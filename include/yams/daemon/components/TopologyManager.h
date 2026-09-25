@@ -175,6 +175,13 @@ public:
     [[nodiscard]] bool sgcNormalize() const noexcept {
         return sgcNormalize_.load(std::memory_order_acquire);
     }
+    /// How far an incremental rebuild grows its dirty region from the changed documents.
+    void setDirtyRegionExpansion(topology::DirtyRegionExpansionMode mode) noexcept {
+        dirtyRegionExpansion_.store(mode, std::memory_order_release);
+    }
+    [[nodiscard]] topology::DirtyRegionExpansionMode dirtyRegionExpansion() const noexcept {
+        return dirtyRegionExpansion_.load(std::memory_order_acquire);
+    }
     void setBoundarySpillPolicy(bool enabled, std::size_t limit, double distanceRatio,
                                 double residualPenalty) noexcept {
         boundarySpillLimit_.store(limit, std::memory_order_release);
@@ -234,6 +241,8 @@ private:
     std::atomic<std::int64_t> rebuildMinIntervalMs_{0};
     std::atomic<std::size_t> routingRepresentativeCount_{1};
     std::atomic<std::size_t> sgcHops_{0};
+    std::atomic<topology::DirtyRegionExpansionMode> dirtyRegionExpansion_{
+        topology::TopologyBuildConfig{}.dirtyRegionExpansion};
     std::atomic<bool> sgcNormalize_{true};
     std::atomic<bool> boundarySpillEnabled_{false};
     std::atomic<std::size_t> boundarySpillLimit_{1};
