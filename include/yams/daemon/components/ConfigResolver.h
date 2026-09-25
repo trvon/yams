@@ -12,6 +12,7 @@
 
 // pi-lens-ignore: fatal error
 #include <yams/daemon/components/TuningConfig.h>
+#include <yams/topology/topology_artifacts.h>
 #include <yams/vector/document_chunker.h>
 
 namespace yams::daemon {
@@ -168,6 +169,9 @@ public:
         std::optional<bool> featureMinHashSketch;
         std::optional<std::size_t> featureMinHashSketchDim;
         std::optional<float> featureMinHashAlpha;
+        /// `topology.dirty_region_expansion`: how far an incremental rebuild grows from its
+        /// changed documents. Unset keeps the engine default (prior cluster + neighbors).
+        std::optional<topology::DirtyRegionExpansionMode> dirtyRegionExpansion;
     };
 
     // Per-corpus adaptive tuner for the topology layer (Phase G). Disabled

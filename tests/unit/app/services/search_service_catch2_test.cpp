@@ -7,6 +7,7 @@
 #include "src/app/services/glob_matcher.h"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <yams/app/services/extract_scope.h>
 
 #ifdef _WIN32
 #include <process.h>
@@ -386,6 +387,32 @@ TEST_CASE("SearchService: basic text search", "[unit][services][search]") {
         CHECK_FALSE(doc.hash.empty());
         CHECK(doc.score >= 0.0);
     }
+}
+
+TEST_CASE("SearchService: a lines: qualifier shapes result snippets",
+          "[unit][services][search][extract-scope]") {
+    SearchServiceFixture f;
+    auto request = f.createBasicSearchRequest("programming lines:1-1");
+    request.showHash = true;
+
+    auto result = runAwait(f.searchService->search(request));
+    REQUIRE(result);
+    const auto& resp = result.value();
+    REQUIRE_FALSE(resp.results.empty());
+
+    for (const auto& item : resp.results) {
+        std::string expected;
+        for (const auto& [content, filename] : f.testDocuments) {
+            if (item.path.ends_with(filename)) {
+                expected = content.substr(0, content.find('\n'));
+            }
+        }
+        REQUIRE_FALSE(expected.empty());
+        CHECK((item.snippet == expected));
+    }
+    REQUIRE(resp.searchStats.contains("extract_scope"));
+    CHECK_THAT(resp.searchStats.at("extract_scope"),
+               Catch::Matchers::ContainsSubstring("lines:1-1 applied to"));
 }
 
 TEST_CASE("SearchService: relation metadata enrichment", "[unit][services][search][relations]") {
@@ -956,4 +983,113 @@ TEST_CASE("GlobMatcher keeps the search service glob semantics", "[unit][service
     for (int i = 0; i < 100; ++i) {
         CHECK(shared.matches("src/" + std::to_string(i) + "/file.cpp"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// lines:/pages:/section:/selector: qualifiers were parsed from the query and then ignored:
+// the query header promised "downstream snippet shaping" and nothing applied it.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+yams::app::services::SearchItem scopeItem(std::string hash, std::string path, std::string mime) {
+    yams::app::services::SearchItem item;
+    item.hash = std::move(hash);
+    item.path = std::move(path);
+    item.mimeType = std::move(mime);
+    item.snippet = "original snippet";
+    return item;
+}
+
+std::vector<std::byte> scopeBytes(std::string_view text) {
+    std::vector<std::byte> out(text.size());
+    std::memcpy(out.data(), text.data(), text.size());
+    return out;
+}
+
+yams::search::ExtractScope scopeOf(yams::search::ExtractScopeType type, std::string range = {}) {
+    yams::search::ExtractScope scope;
+    scope.type = type;
+    scope.range = std::move(range);
+    return scope;
+}
+
+} // namespace
+
+TEST_CASE("Extract scope: lines:<range> shapes each result's snippet to those lines",
+          "[unit][services][search][extract-scope]") {
+    using yams::app::services::applyExtractScope;
+    std::vector<yams::app::services::SearchItem> results{
+        scopeItem("text", "notes/a.md", "text/markdown"),
+        scopeItem("pdf", "papers/b.pdf", "application/pdf"),
+        scopeItem("huge", "logs/c.txt", "text/plain"),
+    };
+    auto read = [](const std::string& hash) -> yams::Result<std::vector<std::byte>> {
+        if (hash == "text") {
+            return scopeBytes("one\ntwo\nthree\nfour\n");
+        }
+        if (hash == "pdf") {
+            return scopeBytes("%PDF-1.7 binary");
+        }
+        return scopeBytes(std::string(64, 'x'));
+    };
+
+    const auto outcome = applyExtractScope(
+        results, scopeOf(yams::search::ExtractScopeType::Lines, "2-3"), read, /*maxBytes=*/32);
+
+    CHECK((results[0].snippet == "two\nthree"));
+    // No line-range handler for PDF, and the third exceeds the read cap: both keep their
+    // snippet and are counted, never silently presented as shaped.
+    CHECK((results[1].snippet == "original snippet"));
+    CHECK((results[2].snippet == "original snippet"));
+    CHECK((outcome.shaped == 1U));
+    CHECK((outcome.unshaped == 2U));
+    CHECK_THAT(outcome.note, Catch::Matchers::ContainsSubstring("lines:2-3 applied to 1 of 3"));
+}
+
+TEST_CASE("Extract scope: an invalid line range is reported, not applied",
+          "[unit][services][search][extract-scope]") {
+    std::vector<yams::app::services::SearchItem> results{
+        scopeItem("text", "notes/a.md", "text/markdown")};
+    auto read = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
+        return scopeBytes("one\ntwo\n");
+    };
+    const auto outcome = yams::app::services::applyExtractScope(
+        results, scopeOf(yams::search::ExtractScopeType::Lines, "two-five"), read);
+    CHECK((results[0].snippet == "original snippet"));
+    CHECK((outcome.shaped == 0U));
+    CHECK_THAT(outcome.note, Catch::Matchers::ContainsSubstring("invalid"));
+}
+
+TEST_CASE("Extract scope: pages, section and selector are reported as not applied",
+          "[unit][services][search][extract-scope]") {
+    std::vector<yams::app::services::SearchItem> results{
+        scopeItem("text", "notes/a.md", "text/markdown")};
+    bool read = false;
+    auto reader = [&](const std::string&) -> yams::Result<std::vector<std::byte>> {
+        read = true;
+        return scopeBytes("one\n");
+    };
+    const auto outcome = yams::app::services::applyExtractScope(
+        results, scopeOf(yams::search::ExtractScopeType::Pages, "1-2"), reader);
+    CHECK_FALSE(read);
+    CHECK((results[0].snippet == "original snippet"));
+    CHECK_THAT(outcome.note, Catch::Matchers::ContainsSubstring("pages:1-2"));
+    CHECK_THAT(outcome.note, Catch::Matchers::ContainsSubstring("not applied"));
+}
+
+TEST_CASE("Extract scope: a query without a scope qualifier changes nothing",
+          "[unit][services][search][extract-scope]") {
+    std::vector<yams::app::services::SearchItem> results{
+        scopeItem("text", "notes/a.md", "text/markdown")};
+    bool read = false;
+    auto reader = [&](const std::string&) -> yams::Result<std::vector<std::byte>> {
+        read = true;
+        return scopeBytes("one\n");
+    };
+    const auto outcome =
+        yams::app::services::applyExtractScope(results, yams::search::ExtractScope{}, reader);
+    CHECK_FALSE(read);
+    CHECK((results[0].snippet == "original snippet"));
+    CHECK(outcome.note.empty());
 }

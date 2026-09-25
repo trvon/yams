@@ -1050,6 +1050,14 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         if (auto it = kv.find("topology.sgc_hops"); it != kv.end()) {
             policy.sgcHops = parseSize(it->second);
         }
+        if (auto it = kv.find("topology.dirty_region_expansion"); it != kv.end()) {
+            policy.dirtyRegionExpansion = topology::parseDirtyRegionExpansionMode(it->second);
+            if (!policy.dirtyRegionExpansion) {
+                spdlog::warn("Ignoring topology.dirty_region_expansion='{}': expected "
+                             "neighbors_only, prior_cluster_and_neighbors or adaptive",
+                             it->second);
+            }
+        }
         if (auto it = kv.find("topology.sgc_normalize"); it != kv.end()) {
             policy.sgcNormalize = parseBoolValue(it->second);
         }

@@ -32,6 +32,7 @@ std::unique_ptr<IDiskWriter> makeDiskWriter();
 std::unique_ptr<IIntegrityVerifier> makeIntegrityVerifierSha256Only();
 std::unique_ptr<IResumeStore> makeInMemoryResumeStore();
 std::unique_ptr<IRateLimiter> makeRateLimiter();
+std::unique_ptr<IHttpAdapter> makeCurlHttpAdapter();
 } // namespace yams::downloader
 
 namespace {
@@ -894,6 +895,78 @@ TEST_CASE("DownloadManager: Cooperative cancellation stops fetch", "[downloader]
     REQUIRE_FALSE(result.ok());
     CHECK((result.error().code == ErrorCode::OperationCancelled));
     CHECK(httpPtr->cancelObserved);
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("DownloadManager: reports every progress stage in order",
+          "[downloader][progress][catch2]") {
+    // ProgressStage::Resolving and ::Verifying were declared, and the init, model and download
+    // commands render them, but the manager never emitted either: the probe and the checksum
+    // check ran silently. Only the manager's own events are checked; the fake adapter emits its
+    // own Downloading event from inside fetchRange.
+    auto tempDir = make_temp_dir("yams-dl-stages-");
+    StorageConfig storage{tempDir / "objects", tempDir / "staging"};
+    DownloaderConfig cfg;
+
+    auto http = std::make_unique<TestHttpAdapter>();
+    http->resumeSupported = false;
+    http->contentLength = 5;
+    http->payload = to_bytes("ABCDE");
+    auto disk = std::make_unique<FakeDiskWriter>(storage);
+    auto dm = makeDownloadManagerWithDependencies(storage, cfg, std::move(http), std::move(disk),
+                                                  nullptr, nullptr, nullptr);
+
+    DownloadRequest req;
+    req.url = "https://example.com/stages.bin";
+    req.checksum = Checksum{HashAlgo::Sha256,
+                            "f0393febe8baaa55e32f7be2a7cc180bf34e52137d99e056c817a9c07b8f239a"};
+
+    std::vector<ProgressStage> stages;
+    auto result = dm->download(req, [&](const ProgressEvent& ev) { stages.push_back(ev.stage); });
+    REQUIRE(result.ok());
+
+    auto indexOf = [&](ProgressStage stage) {
+        return std::find(stages.begin(), stages.end(), stage) - stages.begin();
+    };
+    const auto end = static_cast<std::ptrdiff_t>(stages.size());
+    REQUIRE(indexOf(ProgressStage::Resolving) < end);
+    REQUIRE(indexOf(ProgressStage::Connecting) < end);
+    REQUIRE(indexOf(ProgressStage::Verifying) < end);
+    REQUIRE(indexOf(ProgressStage::Finalizing) < end);
+    CHECK(indexOf(ProgressStage::Resolving) < indexOf(ProgressStage::Connecting));
+    CHECK(indexOf(ProgressStage::Connecting) < indexOf(ProgressStage::Verifying));
+    CHECK(indexOf(ProgressStage::Verifying) < indexOf(ProgressStage::Finalizing));
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("CurlHttpAdapter: a user cancel is reported as OperationCancelled",
+          "[downloader][cancel][curl][catch2]") {
+    // The fake adapter above returns OperationCancelled on its own, so the manager-level
+    // cancellation test never exercised the real adapter, which reported a user cancel as
+    // PolicyViolation. DownloadService only recognizes OperationCancelled, so a cancel reached
+    // callers as a network error. A file:// transfer drives the real curl write callback
+    // without a network.
+    auto tempDir = make_temp_dir("yams-dl-curl-cancel-");
+    const auto payloadPath = tempDir / "payload.bin";
+    {
+        std::ofstream out(payloadPath, std::ios::binary);
+        const std::string chunk(64 * 1024, 'x');
+        out.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+    }
+
+    auto http = makeCurlHttpAdapter();
+    REQUIRE(http);
+    const std::string url = "file://" + payloadPath.string();
+    auto result = http->fetchRange(
+        url, {}, 0, 0, TlsConfig{}, std::nullopt, std::chrono::milliseconds{5000},
+        [](std::span<const std::byte>) -> Expected<void> { return {}; }, [] { return true; }, {});
+
+    REQUIRE_FALSE(result.ok());
+    CHECK((result.error().code == ErrorCode::OperationCancelled));
 
     std::error_code ec;
     fs::remove_all(tempDir, ec);

@@ -5,6 +5,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/enhanced_search_executor.h>
+#include <yams/app/services/extract_scope.h>
 #include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/retrieval_path_policy.hpp>
 #include <yams/app/services/service_utils.hpp>
@@ -854,6 +855,25 @@ public:
             }
             if (!metadataOnlyResult) {
                 co_await hydrateSnippetsAsync_worker(normalizedReq, resp, &metadataTelemetry);
+            }
+            // lines:/pages:/section:/selector: were parsed above and then ignored. Shape the
+            // snippets the parser promised, after hydration so nothing overwrites them, and say
+            // what was (not) applied instead of silently dropping the qualifier.
+            if (parsed.scope.type != yams::search::ExtractScopeType::All) {
+                auto store = ctx_.store;
+                const auto outcome = applyExtractScope(
+                    resp.results, parsed.scope,
+                    [store](const std::string& hash) -> Result<std::vector<std::byte>> {
+                        if (!store) {
+                            return Error{ErrorCode::NotInitialized, "content store not available"};
+                        }
+                        return store->retrieveBytes(hash);
+                    });
+                if (!outcome.note.empty()) {
+                    resp.searchStats["extract_scope"] = outcome.note;
+                    resp.queryInfo = resp.queryInfo.empty() ? outcome.note
+                                                            : resp.queryInfo + "; " + outcome.note;
+                }
             }
             result = Result<SearchResponse>(std::move(resp));
         }
