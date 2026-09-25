@@ -511,6 +511,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         regionConfig.inputKind = topology::TopologyInputKind::Hybrid;
         regionConfig.reciprocalOnly = true;
         regionConfig.maxNeighborsPerDocument = seedConfig.maxNeighborsPerDocument;
+        regionConfig.dirtyRegionExpansion = dirtyRegionExpansion();
 
         auto seedExtracted = extractor->extract(seedConfig, &seedExtractionStats);
         if (!seedExtracted) {
@@ -552,6 +553,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     buildConfig.routingRepresentativeCount = routingRepresentativeCount();
     buildConfig.sgcHops = sgcHops();
     buildConfig.sgcNormalize = sgcNormalize();
+    buildConfig.dirtyRegionExpansion = dirtyRegionExpansion();
     buildConfig.allowOverlap = boundarySpillEnabled_.load(std::memory_order_acquire);
     buildConfig.overlapLimit = boundarySpillLimit_.load(std::memory_order_acquire);
     buildConfig.overlapBoundaryDistanceRatio =
