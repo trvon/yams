@@ -247,6 +247,19 @@ mode/expansion). Harness-only: `YAMS_BENCH_*`. Do not grow product `YAMS_*` for 
 - Submodule (`third_party/*`) PRs merge with a merge commit or rebase, never
   squash, and land before the YAMS PR that bumps the pointer, so the pinned SHA
   stays reachable from the submodule's default branch.
+- Merge method by PR kind:
+  - Feature PRs into `experimental`: squash is fine.
+  - Promotion PRs (`experimental` → `main`) and back-merges (`main` →
+    `experimental`): **merge commit only**. A squash copies the changes but not
+    the commits, so Release Candidate rejects the next candidate with
+    "candidate must contain the complete base history".
+- After every change to `main` (a promotion, a release PR, or a direct commit),
+  back-merge `main` into `experimental`. Check with
+  `git log --oneline origin/experimental..origin/main`, which must print nothing.
+- Promotion PR bodies must not contain `BEGIN_COMMIT_OVERRIDE`. Release Please
+  applies the override to every commit in the PR and repeats it in the notes.
+- To pin a version (for example, when a `feat` would otherwise bump the minor
+  version), add a `Release-As: X.Y.Z` footer to a commit on `main`.
 
 ## Patterns To Reuse (High Signal)
 
