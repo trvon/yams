@@ -32,6 +32,7 @@ std::unique_ptr<IDiskWriter> makeDiskWriter();
 std::unique_ptr<IIntegrityVerifier> makeIntegrityVerifierSha256Only();
 std::unique_ptr<IResumeStore> makeInMemoryResumeStore();
 std::unique_ptr<IRateLimiter> makeRateLimiter();
+std::unique_ptr<IHttpAdapter> makeCurlHttpAdapter();
 } // namespace yams::downloader
 
 namespace {
@@ -894,6 +895,35 @@ TEST_CASE("DownloadManager: Cooperative cancellation stops fetch", "[downloader]
     REQUIRE_FALSE(result.ok());
     CHECK((result.error().code == ErrorCode::OperationCancelled));
     CHECK(httpPtr->cancelObserved);
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("CurlHttpAdapter: a user cancel is reported as OperationCancelled",
+          "[downloader][cancel][curl][catch2]") {
+    // The fake adapter above returns OperationCancelled on its own, so the manager-level
+    // cancellation test never exercised the real adapter, which reported a user cancel as
+    // PolicyViolation. DownloadService only recognizes OperationCancelled, so a cancel reached
+    // callers as a network error. A file:// transfer drives the real curl write callback
+    // without a network.
+    auto tempDir = make_temp_dir("yams-dl-curl-cancel-");
+    const auto payloadPath = tempDir / "payload.bin";
+    {
+        std::ofstream out(payloadPath, std::ios::binary);
+        const std::string chunk(64 * 1024, 'x');
+        out.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+    }
+
+    auto http = makeCurlHttpAdapter();
+    REQUIRE(http);
+    const std::string url = "file://" + payloadPath.string();
+    auto result = http->fetchRange(
+        url, {}, 0, 0, TlsConfig{}, std::nullopt, std::chrono::milliseconds{5000},
+        [](std::span<const std::byte>) -> Expected<void> { return {}; }, [] { return true; }, {});
+
+    REQUIRE_FALSE(result.ok());
+    CHECK((result.error().code == ErrorCode::OperationCancelled));
 
     std::error_code ec;
     fs::remove_all(tempDir, ec);
