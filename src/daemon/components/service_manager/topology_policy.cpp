@@ -40,6 +40,12 @@ void ServiceManager::configureTopologyRuntime() {
             spdlog::info("Topology SGC smoothing applied via config: hops={} normalize={}",
                          topologyManager_.sgcHops(), topologyManager_.sgcNormalize());
         }
+        if (enginePolicy.dirtyRegionExpansion) {
+            topologyManager_.setDirtyRegionExpansion(*enginePolicy.dirtyRegionExpansion);
+            spdlog::info(
+                "Topology dirty-region expansion applied via config: {}",
+                topology::dirtyRegionExpansionModeName(topologyManager_.dirtyRegionExpansion()));
+        }
         if (enginePolicy.boundarySpillEnabled) {
             topologyManager_.setBoundarySpillPolicy(
                 *enginePolicy.boundarySpillEnabled, enginePolicy.boundarySpillLimit.value_or(1),

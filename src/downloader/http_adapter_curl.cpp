@@ -459,7 +459,9 @@ public:
         curl_easy_cleanup(curl);
 
         if (wctx.cancelRequested) {
-            return Error{ErrorCode::PolicyViolation, "Transfer cancelled by user"};
+            // OperationCancelled, not PolicyViolation: callers (DownloadService) map only this
+            // code to a cancellation, so anything else surfaced a user cancel as a network error.
+            return Error{ErrorCode::OperationCancelled, "Transfer cancelled by user"};
         }
         if (rc != CURLE_OK) {
             return makeCurlError(rc, "fetchRange(GET)");

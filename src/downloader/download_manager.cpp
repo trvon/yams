@@ -409,6 +409,12 @@ public:
             std::optional<std::string> currentLastModified{};
             std::optional<std::string> currentContentType{};
             std::optional<std::string> suggestedFilename{};
+            if (onProgress) {
+                ProgressEvent ev;
+                ev.url = request.url;
+                ev.stage = ProgressStage::Resolving;
+                onProgress(ev);
+            }
             {
                 auto pr = http_->probe(request.url, request.headers, resumeSupported, contentLength,
                                        currentEtag, currentLastModified, currentContentType,
@@ -616,7 +622,15 @@ public:
                 return sr.error();
             }
 
-            // Integrity finalize
+            // Integrity finalize (and checksum verification when one was requested)
+            if (onProgress) {
+                ProgressEvent ev;
+                ev.url = request.url;
+                ev.downloadedBytes = written;
+                ev.totalBytes = totalBytes;
+                ev.stage = ProgressStage::Verifying;
+                onProgress(ev);
+            }
             auto digest = integ_->finalize(); // algo: Sha256 MVP
             if (digest.hex.empty()) {
                 disk_->cleanup(stagingFile);

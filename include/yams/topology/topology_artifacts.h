@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -28,6 +29,47 @@ enum class DirtyRegionExpansionMode : uint8_t {
     PriorClusterAndNeighbors,
     Adaptive,
 };
+
+/// Config spelling of a DirtyRegionExpansionMode (TOML `topology.dirty_region_expansion`).
+[[nodiscard]] constexpr std::string_view
+dirtyRegionExpansionModeName(DirtyRegionExpansionMode mode) noexcept {
+    switch (mode) {
+        case DirtyRegionExpansionMode::NeighborsOnly:
+            return "neighbors_only";
+        case DirtyRegionExpansionMode::PriorClusterAndNeighbors:
+            return "prior_cluster_and_neighbors";
+        case DirtyRegionExpansionMode::Adaptive:
+            return "adaptive";
+    }
+    return "prior_cluster_and_neighbors";
+}
+
+/// Parse a config spelling (case-insensitive); nullopt for anything unrecognized, so a typo is
+/// reported instead of silently selecting a strategy.
+[[nodiscard]] inline std::optional<DirtyRegionExpansionMode>
+parseDirtyRegionExpansionMode(std::string_view name) noexcept {
+    auto equalsIgnoreCase = [](std::string_view lhs, std::string_view rhs) {
+        if (lhs.size() != rhs.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < lhs.size(); ++i) {
+            const auto a =
+                lhs[i] >= 'A' && lhs[i] <= 'Z' ? static_cast<char>(lhs[i] - 'A' + 'a') : lhs[i];
+            if (a != rhs[i]) {
+                return false;
+            }
+        }
+        return true;
+    };
+    for (const auto mode :
+         {DirtyRegionExpansionMode::NeighborsOnly,
+          DirtyRegionExpansionMode::PriorClusterAndNeighbors, DirtyRegionExpansionMode::Adaptive}) {
+        if (equalsIgnoreCase(name, dirtyRegionExpansionModeName(mode))) {
+            return mode;
+        }
+    }
+    return std::nullopt;
+}
 
 enum class DocumentTopologyRole : uint8_t {
     Core,
