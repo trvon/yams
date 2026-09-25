@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.20.1](https://github.com/trvon/yams/compare/v0.20.0...v0.20.1) (2026-09-25)
+
+
+### Fixed
+
+* **ci:** build aarch64 Arch packages on an Arch Linux ARM base image ([e167498](https://github.com/trvon/yams/commit/e167498be43deb3a499cfbb42505b58458a40de9))
+* **ci:** repair Arch x86_64 and aarch64 release lanes ([9bbcacf](https://github.com/trvon/yams/commit/9bbcacf6bc6301bd7ecb3240819af88ce1333652))
+* **ci:** stop package-validate from exiting silently on a missing build dir ([89bf716](https://github.com/trvon/yams/commit/89bf7165b793220abd372b4ea55500435264e2c9))
+
 ## [0.20.0](https://github.com/trvon/yams/compare/v0.19.0...v0.20.0) (2026-09-24)
 
 
