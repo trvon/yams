@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.20.2](https://github.com/trvon/yams/compare/v0.20.1...v0.20.2) (2026-09-25)
+
+
+### Added
+
+* **search:** apply lines: qualifiers to result snippets ([8eae143](https://github.com/trvon/yams/commit/8eae143259f7c23b1a7326f2f062ff6c0a885030))
+* **topology:** select the dirty-region expansion mode from config ([39af8df](https://github.com/trvon/yams/commit/39af8dfc3589727352c0d3bc9425fc5f3a86cb57))
+
+
+### Fixed
+
+* **build:** map aarch64/arm64 to Conan's armv8 arch setting ([2ef70a6](https://github.com/trvon/yams/commit/2ef70a69073007836368d970645bae599883a129))
+* cancel reporting, download progress stages, topology expansion config, lines: search qualifier ([9d88fbd](https://github.com/trvon/yams/commit/9d88fbde3b171d08574303f5a3dfa96df55c9dda))
+* **downloader:** emit the Resolving and Verifying progress stages ([9ca69d4](https://github.com/trvon/yams/commit/9ca69d42a1633d108cb651080c0248411b9d9df0))
+* **downloader:** report a user cancel as OperationCancelled ([322c908](https://github.com/trvon/yams/commit/322c908d3adc460d677f13dccdf58dccac0579bb))
+* **release:** build the Arch aarch64 lane end to end ([4d262dd](https://github.com/trvon/yams/commit/4d262dd8db18eabf1d3a367a239aeff5e0a6fe41))
+* **release:** let clang find Arch ARM's GCC for Boost's arm64 target ([721965b](https://github.com/trvon/yams/commit/721965bd6efb9e27774c7bf9042104d637aa9e99))
+
+
+### Maintenance
+
+* release 0.20.2 ([698c3cb](https://github.com/trvon/yams/commit/698c3cb5fa2cef93daa61c0d9196b88384d0f789))
+
 ## [0.20.1](https://github.com/trvon/yams/compare/v0.20.0...v0.20.1) (2026-09-25)
 
 
