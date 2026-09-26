@@ -3296,6 +3296,7 @@ bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath,
         } else {
             spdlog::info("[ServiceManager] Running full metadata integrity check: {}",
                          stampDecision.reason);
+            setDatabasePhase(dbphase::kCheckingIntegrity);
             if (!ensureDatabaseIntegrityOrRecover(dbPath, database)) {
                 return false;
             }
@@ -3345,7 +3346,7 @@ ServiceManager::co_openDatabase(const std::filesystem::path& dbPath, int /*timeo
     // volumes doesn't look like a hang. Terminates as soon as `completed` flips.
     boost::asio::co_spawn(
         ex,
-        [completed, dbPath, startedAt, ex]() -> boost::asio::awaitable<void> {
+        [this, completed, dbPath, startedAt, ex]() -> boost::asio::awaitable<void> {
             using namespace std::chrono_literals;
             boost::asio::steady_timer timer(ex);
             while (!completed->load(std::memory_order_acquire)) {
@@ -3358,8 +3359,19 @@ ServiceManager::co_openDatabase(const std::filesystem::path& dbPath, int /*timeo
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                                    std::chrono::steady_clock::now() - startedAt)
                                    .count();
-                spdlog::info("[ServiceManager] still opening database '{}' ({}s elapsed)",
-                             dbPath.string(), elapsed);
+                std::string phase;
+                {
+                    std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                    phase = state_.readiness.databasePhase;
+                }
+                if (phase == dbphase::kCheckingIntegrity) {
+                    spdlog::info("[ServiceManager] still checking metadata integrity of '{}' "
+                                 "({}s elapsed; full scan because no clean-shutdown stamp)",
+                                 dbPath.string(), elapsed);
+                } else {
+                    spdlog::info("[ServiceManager] still opening database '{}' ({}s elapsed)",
+                                 dbPath.string(), elapsed);
+                }
             }
             co_return;
         },
