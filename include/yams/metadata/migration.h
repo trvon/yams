@@ -284,6 +284,7 @@ private:
     // Version 41: Optimize metadata_value_counts triggers to bypass topology keys and prune
     // legacy topology metadata.
     static Migration bypassTopologyMetadataValueCountsTriggers();
+    static Migration createDocumentSnapshotMembership();
 };
 
 /**

@@ -469,6 +469,15 @@ public:
         return std::unordered_map<std::string, metadata::MetadataValue>{};
     }
 
+    Result<std::vector<metadata::DocumentSnapshotEntry>>
+    getDocumentSnapshots(int64_t documentId) override {
+        auto all = getAllMetadata(documentId);
+        if (!all) {
+            return all.error();
+        }
+        return metadata::legacySnapshotEntries(all.value());
+    }
+
     Result<std::optional<metadata::DocumentInfo>>
     findDocumentByExactPath(const std::string&) override {
         std::lock_guard<std::mutex> lk(mu_);

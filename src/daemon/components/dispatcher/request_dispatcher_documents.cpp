@@ -1991,58 +1991,23 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
                 spdlog::debug("[FileHistory] Processing doc {}/{}: id={}, path={}", idx + 1,
                               docsToProcess, doc.id, doc.filePath);
 
-                auto metadataRes = appContext.metadataRepo->getAllMetadata(doc.id);
-                if (!metadataRes) {
-                    spdlog::debug("[FileHistory] Failed to get metadata for doc {}: {}", doc.id,
-                                  metadataRes.error().message);
+                // Membership rows plus any legacy snapshot_id:<id> keys not yet backfilled.
+                auto snapshotsRes = appContext.metadataRepo->getDocumentSnapshots(doc.id);
+                if (!snapshotsRes) {
+                    spdlog::debug("[FileHistory] Failed to get snapshots for doc {}: {}", doc.id,
+                                  snapshotsRes.error().message);
                     continue;
                 }
-
-                spdlog::debug("[FileHistory] Got {} metadata entries for doc {}",
-                              metadataRes.value().size(), doc.id);
+                if (snapshotsRes.value().empty()) {
+                    spdlog::debug("[FileHistory] Doc {} has no snapshot membership", doc.id);
+                    continue;
+                }
 
                 std::unordered_map<std::string, int64_t> snapshotTimes;
-                std::unordered_set<std::string> snapshotIds;
-
-                for (const auto& [key, value] : metadataRes.value()) {
-                    if (key == "snapshot_id" && value.type == metadata::MetadataValueType::String) {
-                        snapshotIds.insert(value.asString());
-                        continue;
-                    }
-                    if (key.rfind("snapshot_id:", 0) == 0 &&
-                        value.type == metadata::MetadataValueType::String) {
-                        if (!value.asString().empty()) {
-                            snapshotIds.insert(value.asString());
-                        } else {
-                            snapshotIds.insert(key.substr(12));
-                        }
-                        continue;
-                    }
-                    if (key == "snapshot_time" &&
-                        value.type == metadata::MetadataValueType::String) {
-                        try {
-                            snapshotTimes[""] = std::stoll(value.asString());
-                        } catch (const std::exception& error) {
-                            spdlog::debug("[FileHistory] invalid snapshot_time for doc {}: {}",
-                                          doc.id, error.what());
-                        }
-                        continue;
-                    }
-                    if (key.rfind("snapshot_time:", 0) == 0 &&
-                        value.type == metadata::MetadataValueType::String) {
-                        try {
-                            snapshotTimes[key.substr(14)] = std::stoll(value.asString());
-                        } catch (const std::exception& error) {
-                            spdlog::debug("[FileHistory] invalid {} for doc {}: {}", key, doc.id,
-                                          error.what());
-                        }
-                        continue;
-                    }
-                }
-
-                if (snapshotIds.empty()) {
-                    spdlog::debug("[FileHistory] Doc {} has no snapshot_id metadata", doc.id);
-                    continue;
+                std::vector<std::string> snapshotIds;
+                for (const auto& entry : snapshotsRes.value()) {
+                    snapshotTimes[entry.snapshotId] = entry.snapshotTimeMicros;
+                    snapshotIds.push_back(entry.snapshotId);
                 }
 
                 for (const auto& snapshotId : snapshotIds) {

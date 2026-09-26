@@ -437,6 +437,8 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 
     bool initialScanEnqueued = false;
     bool vectorCleanupDone = false;
+    bool snapshotBackfillDone = false;
+    auto nextSnapshotBackfill = std::chrono::steady_clock::now();
     std::uint32_t deferTicks = 0;
     const std::uint32_t minDeferTicks = shutdownState->config.initialScanDeferTicks;
 
@@ -496,6 +498,15 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         if (!vectorCleanupDone && maintenanceAllowed()) {
             performVectorCleanup();
             vectorCleanupDone = true;
+        }
+
+        // Legacy snapshot history backfill (migration 42): small batches, paused between,
+        // and only while the daemon is not under resource pressure.
+        if (!snapshotBackfillDone && std::chrono::steady_clock::now() >= nextSnapshotBackfill &&
+            maintenanceAllowed() &&
+            ResourceGovernor::instance().getPressureLevel() < ResourcePressureLevel::Warning) {
+            snapshotBackfillDone = backfillLegacySnapshotKeysBatch();
+            nextSnapshotBackfill = std::chrono::steady_clock::now() + 200ms;
         }
 
         // Deferred initial scan
@@ -813,6 +824,37 @@ boost::asio::awaitable<void> RepairService::processPathTreeRepair() {
     } catch (const std::exception& e) {
         spdlog::debug("RepairService: PathTreeRepair exception: {}", e.what());
     }
+}
+
+bool RepairService::backfillLegacySnapshotKeysBatch() {
+    constexpr std::size_t kSnapshotsPerBatch = 1000;
+    auto repo = getMetadataRepoForRepair();
+    if (!repo) {
+        return false; // not ready yet; try again later
+    }
+    auto moved = repo->migrateLegacySnapshotKeys(kSnapshotsPerBatch);
+    if (!moved) {
+        if (moved.error().code == ErrorCode::NotImplemented) {
+            return true;
+        }
+        spdlog::debug("RepairService: legacy snapshot backfill batch failed: {}",
+                      moved.error().message);
+        return false; // transient (busy); retry on a later tick
+    }
+    legacySnapshotKeysMoved_ += moved.value();
+    if (moved.value() == 0) {
+        if (legacySnapshotKeysMoved_ > 0) {
+            spdlog::info("RepairService: legacy snapshot history backfill complete ({} snapshot "
+                         "entries moved to document_snapshots)",
+                         legacySnapshotKeysMoved_);
+        }
+        return true;
+    }
+    if ((legacySnapshotKeysMoved_ / kSnapshotsPerBatch) % 100 == 0) {
+        spdlog::info("RepairService: legacy snapshot history backfill: {} entries moved so far",
+                     legacySnapshotKeysMoved_);
+    }
+    return false;
 }
 
 void RepairService::performVectorCleanup() {

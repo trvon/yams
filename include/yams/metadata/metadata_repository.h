@@ -106,6 +106,18 @@ struct TreeSnapshotRecord {
     std::unordered_map<std::string, std::string> metadata;
 };
 
+/// One snapshot a document was stored in (document_snapshots, migration 42).
+struct DocumentSnapshotEntry {
+    std::string snapshotId;
+    std::int64_t snapshotTimeMicros = 0; // unix epoch microseconds; 0 when unknown
+};
+
+/// Snapshot entries encoded in legacy metadata: the latest snapshot_id/snapshot_time pair and
+/// per-snapshot snapshot_id:<id>/snapshot_time:<id> keys. A snapshot's time is its own
+/// snapshot_time:<id>, else the latest snapshot_time, else 0. Sorted by snapshot id.
+std::vector<DocumentSnapshotEntry>
+legacySnapshotEntries(const std::unordered_map<std::string, MetadataValue>& metadata);
+
 struct BatchDocumentInsert {
     DocumentInfo info;
     std::vector<std::pair<std::string, MetadataValue>> tags;
@@ -453,6 +465,20 @@ public:
     findDocumentsBySnapshot(const std::string& snapshotId) = 0;
     virtual Result<std::vector<DocumentInfo>>
     findDocumentsBySnapshotLabel(const std::string& snapshotLabel) = 0;
+
+    /// Every snapshot the document was stored in, including legacy per-snapshot metadata
+    /// keys that the background backfill has not moved yet.
+    virtual Result<std::vector<DocumentSnapshotEntry>> getDocumentSnapshots(int64_t documentId) {
+        (void)documentId;
+        return Error{ErrorCode::NotImplemented, "getDocumentSnapshots"};
+    }
+
+    /// Move up to maxSnapshots legacy snapshot_id:<id>/snapshot_time:<id> metadata pairs into
+    /// document_snapshots and delete them. Returns how many were moved; 0 means none remain.
+    virtual Result<std::size_t> migrateLegacySnapshotKeys(std::size_t maxSnapshots) {
+        (void)maxSnapshots;
+        return Error{ErrorCode::NotImplemented, "migrateLegacySnapshotKeys"};
+    }
     virtual Result<std::vector<std::string>> getSnapshots() = 0;
     virtual Result<std::vector<std::string>> getSnapshotLabels() = 0;
 
@@ -796,6 +822,8 @@ public:
     findDocumentsBySnapshot(const std::string& snapshotId) override;
     Result<std::vector<DocumentInfo>>
     findDocumentsBySnapshotLabel(const std::string& snapshotLabel) override;
+    Result<std::vector<DocumentSnapshotEntry>> getDocumentSnapshots(int64_t documentId) override;
+    Result<std::size_t> migrateLegacySnapshotKeys(std::size_t maxSnapshots) override;
 
     Result<std::optional<DocumentInfo>> findDocumentByExactPath(const std::string& path) override;
     Result<std::vector<DocumentInfo>> queryDocuments(const DocumentQueryOptions& options) override;

@@ -651,10 +651,10 @@ api::ContentMetadata buildStoreContentMetadata(const StoreDocumentRequest& req,
         std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(
                            std::chrono::system_clock::now().time_since_epoch())
                            .count());
+    // Latest snapshot only. Membership in every snapshot is recorded in document_snapshots by
+    // the insert transaction; per-snapshot keys here grew without bound.
     metadata.tags["snapshot_id"] = snapshotId;
     metadata.tags["snapshot_time"] = snapshotTime;
-    metadata.tags["snapshot_id:" + snapshotId] = snapshotId;
-    metadata.tags["snapshot_time:" + snapshotId] = snapshotTime;
     if (!req.snapshotLabel.empty()) {
         metadata.tags["snapshot_label"] = req.snapshotLabel;
     }

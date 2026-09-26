@@ -255,12 +255,22 @@ MetadataRepository::getMetadataForDocuments(std::span<const int64_t> documentIds
                 }
                 inList += ')';
 
+                // Legacy per-snapshot history keys (snapshot_id:<id>, snapshot_time:<id>) are
+                // not document metadata and can number tens of thousands per document; they
+                // move to document_snapshots in the background. Filtering them through
+                // idx_metadata_doc_key skips them without reading their rows.
                 QuerySpec spec{};
-                spec.table = "metadata";
+                spec.table = "metadata INDEXED BY idx_metadata_doc_key";
                 spec.columns = {"document_id", "key", "value", "value_type"};
-                spec.conditions = {"document_id IN " + inList};
+                spec.conditions = {"document_id IN " + inList, "key NOT GLOB 'snapshot_id:*'",
+                                   "key NOT GLOB 'snapshot_time:*'"};
 
-                YAMS_TRY_UNWRAP(stmt, db.prepare(yams::metadata::sql::buildSelect(spec)));
+                auto prepared = db.prepare(yams::metadata::sql::buildSelect(spec));
+                if (!prepared) {
+                    spec.table = "metadata"; // index missing on an unmigrated database
+                    prepared = db.prepare(yams::metadata::sql::buildSelect(spec));
+                }
+                YAMS_TRY_UNWRAP(stmt, std::move(prepared));
                 int index = 1;
                 for (auto id : chunkIds) {
                     YAMS_TRY(stmt.bind(index++, id));

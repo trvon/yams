@@ -258,7 +258,11 @@ private:
     boost::asio::awaitable<void> spawnInitialScan();
     boost::asio::awaitable<void> processPathTreeRepair();
     void performVectorCleanup();
+    /// Move one batch of legacy per-snapshot metadata keys into document_snapshots.
+    /// Returns true once none remain (or the repository cannot do it).
+    bool backfillLegacySnapshotKeysBatch();
     bool maintenanceAllowed() const;
+    std::uint64_t legacySnapshotKeysMoved_{0};
 
     // ── Detect missing work ──
     struct MissingWorkResult {

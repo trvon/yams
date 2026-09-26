@@ -379,7 +379,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createEmbeddingDerivations(),
             invalidateEmbeddingReadinessOnContentChanges(),
             dropSymbolExtractionSubsystem(),
-            bypassTopologyMetadataValueCountsTriggers()};
+            bypassTopologyMetadataValueCountsTriggers(),
+            createDocumentSnapshotMembership()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -3265,6 +3266,33 @@ Migration YamsMetadataMigrations::bypassTopologyMetadataValueCountsTriggers() {
         WHERE key GLOB 'topology.*' AND value IS NOT NULL AND value != ''
         GROUP BY key, value
         ON CONFLICT(key, value) DO UPDATE SET count = excluded.count;
+    )";
+    return m;
+}
+
+Migration YamsMetadataMigrations::createDocumentSnapshotMembership() {
+    Migration m;
+    m.version = 42;
+    m.name = "Record document snapshot membership in its own table";
+    m.created = std::chrono::system_clock::now();
+    // Membership was two metadata rows per (document, snapshot), snapshot_id:<id> and
+    // snapshot_time:<id>, never pruned. This only creates the table so startup stays fast;
+    // the repair service moves the legacy keys over in the background
+    // (MetadataRepository::migrateLegacySnapshotKeys).
+    m.upSQL = R"(
+        CREATE TABLE IF NOT EXISTS document_snapshots (
+            document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            snapshot_id TEXT NOT NULL,
+            snapshot_time INTEGER NOT NULL DEFAULT 0, -- unix epoch microseconds
+            PRIMARY KEY (document_id, snapshot_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_document_snapshots_snapshot
+            ON document_snapshots(snapshot_id);
+    )";
+    // Rows already moved out of metadata are not restored; downgrade loses that history.
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_document_snapshots_snapshot;
+        DROP TABLE IF EXISTS document_snapshots;
     )";
     return m;
 }
