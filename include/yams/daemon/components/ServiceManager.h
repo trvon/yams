@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "IComponent.h"
 #include <boost/asio/any_io_executor.hpp>
@@ -560,6 +561,8 @@ public:
             dirFiles; // dir -> (file -> (mtime,size))
         std::unordered_map<std::string, std::vector<std::string>> gitignorePatterns;
         std::unordered_map<std::string, std::uint64_t> gitignoreMtime;
+        // Paths whose indexing or removal failed; warned once, retried quietly.
+        std::unordered_set<std::string> failingPaths;
     };
     SessionWatchState sessionWatch_;
     yams::compat::stop_source sessionWatchStopSource_;
