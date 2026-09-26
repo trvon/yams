@@ -376,6 +376,9 @@ namespace yams::daemon::dbphase {
 // and the StatusResponse.databasePhase IPC field. Pin the strings here so
 // daemon writers and CLI/MCP readers cannot drift.
 constexpr std::string_view kOpening = "opening";
+// Full metadata quick_check, run when no trusted clean-shutdown stamp exists.
+// It reads every page, so on a large database it can take many minutes.
+constexpr std::string_view kCheckingIntegrity = "checking_integrity";
 constexpr std::string_view kRecovering = "recovering";
 constexpr std::string_view kSalvaging = "salvaging";
 constexpr std::string_view kMigrating = "migrating";

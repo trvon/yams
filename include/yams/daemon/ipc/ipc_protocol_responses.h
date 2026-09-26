@@ -848,7 +848,8 @@ struct StatusResponse {
     uint32_t vectorDbDim{0};
     std::string vectorIndexEngine;
     // Database init phase visibility for `yams daemon status` rendering.
-    // Empty when not set; otherwise "opening" | "recovering" | "migrating" | "ready".
+    // Empty when not set; otherwise "opening" | "checking_integrity" | "recovering" |
+    // "migrating" | "ready".
     std::string databasePhase;
     uint64_t databasePhaseElapsedMs{0};
     // Post-startup maintenance phase, separate from database readiness.

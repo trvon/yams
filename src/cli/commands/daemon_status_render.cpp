@@ -413,6 +413,13 @@ void renderDaemonStatusBrief(const yams::daemon::StatusResponse& s,
                     extra += " · ";
                 extra += s.metadataDbPath;
             }
+        } else if (phase == dbphase::kCheckingIntegrity) {
+            // Full quick_check after a start without a trusted clean-shutdown stamp. It
+            // reads every page, so say so; "Opening" made a long scan look like a hang.
+            label = "Checking integrity";
+            extra = elapsedSec.empty() ? std::string("full scan after unclean stop")
+                                       : elapsedSec + " · full scan after unclean stop";
+            dbSev = Severity::Warn;
         } else if (phase == dbphase::kRecovering) {
             label = "Repairing";
             extra = elapsedSec.empty() ? std::string("quarantining corrupt DB")

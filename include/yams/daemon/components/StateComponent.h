@@ -47,8 +47,9 @@ struct DaemonReadiness {
 
     // Database init phase visibility. Lets `yams daemon status` show what the
     // daemon is doing during a slow open/migrate/recover instead of a generic
-    // "Initializing". Values: "" (unset), "opening", "recovering", "migrating",
-    // "ready". Updated under recoveryMutex along with phase start time.
+    // "Initializing". Values: "" (unset), "opening", "checking_integrity",
+    // "recovering", "migrating", "ready". Updated under recoveryMutex along with
+    // phase start time.
     std::string databasePhase;
     std::chrono::steady_clock::time_point databasePhaseSince;
 

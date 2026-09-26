@@ -105,6 +105,26 @@ TEST_CASE("daemon status brief renders the overview from a synthetic response",
     CHECK(out.find("yams daemon status -d") != std::string::npos);
 }
 
+TEST_CASE("daemon status names a running integrity check instead of 'Opening'",
+          "[cli][daemon][status][catch2]") {
+    PlainColors plain;
+    StatusResponse s = readyDaemon();
+    s.ready = false;
+    s.lifecycleState = "initializing";
+    s.readinessStates[std::string(yams::daemon::readiness::kDatabase)] = false;
+    s.databasePhase = std::string(yams::daemon::dbphase::kCheckingIntegrity);
+    s.databasePhaseElapsedMs = 671000;
+    s.metadataDbPath = "/srv/yams/yams.db";
+
+    const std::string out = renderBrief(s, {});
+    INFO(out);
+
+    CHECK(out.find("Checking integrity") != std::string::npos);
+    CHECK(out.find("11m") != std::string::npos);
+    CHECK(out.find("full scan after unclean stop") != std::string::npos);
+    CHECK(out.find("Opening") == std::string::npos);
+}
+
 TEST_CASE("lexical containment rejects incomparable roots", "[cli][daemon][status][catch2]") {
     using yams::common::isLexicallyContained;
     CHECK(isLexicallyContained("/tmp", "/tmp"));
