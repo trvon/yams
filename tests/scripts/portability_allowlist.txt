@@ -143,7 +143,7 @@ src/daemon/components/dispatcher/request_dispatcher_models.cpp:38:portability/en
 src/detection/file_type_detector.cpp:612:portability/env-read # reviewed raw environment read
 src/detection/file_type_detector.cpp:655:portability/env-read # reviewed raw environment read
 src/mcp/stdio_transport.cpp:46:portability/env-read # reviewed raw environment read
-src/metadata/connection_pool.cpp:974:portability/jthread # feature-test guarded std::jthread
+src/metadata/connection_pool.cpp:975:portability/jthread # feature-test guarded std::jthread
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path
 src/metadata/metadata_repository.cpp:1546:portability/env-read # reviewed raw environment read
@@ -343,7 +343,7 @@ tests/unit/extraction/plugin_process_minimal_test.cpp:10:portability/env-read # 
 tests/unit/extraction/plugin_process_minimal_test.cpp:34:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_minimal_test.cpp:58:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_test.cpp:82:portability/env-read # reviewed raw environment read
-tests/unit/metadata/connection_pool_catch2_test.cpp:29:portability/env-read # reviewed raw environment read
+tests/unit/metadata/connection_pool_catch2_test.cpp:32:portability/env-read # reviewed raw environment read
 tests/unit/metadata/corpus_stats_catch2_test.cpp:43:portability/env-read # reviewed raw environment read
 tests/unit/metadata/database_catch2_test.cpp:21:portability/env-read # reviewed raw environment read
 tests/unit/metadata/fts5_performance_stress_catch2_test.cpp:31:portability/env-read # reviewed raw environment read

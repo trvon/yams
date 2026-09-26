@@ -7,6 +7,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <sqlite3.h>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -15,6 +17,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <yams/metadata/connection_pool.h>
@@ -265,6 +268,44 @@ TEST_CASE("Connection pool histograms holder durations and warns on slow holds",
     CHECK((stats.maxHolderMicros >= 50'000u));
 
     pool.shutdown();
+}
+
+TEST_CASE("Connection pool names the pool in slow-hold warnings", "[metadata][connection_pool]") {
+    const auto dbPath = make_db_path("pool_holder_label_").string();
+    const auto slowHoldLog = [&](bool readOnly) {
+        ConnectionPoolConfig cfg;
+        cfg.minConnections = 1;
+        cfg.maxConnections = 1;
+        cfg.enableWAL = false;
+        cfg.readOnly = readOnly;
+        ConnectionPool pool(dbPath, cfg);
+        REQUIRE(pool.initialize().has_value());
+        pool.setSlowHolderThreshold(std::chrono::milliseconds(20));
+
+        std::ostringstream captured;
+        auto previous = spdlog::default_logger();
+        auto logger = std::make_shared<spdlog::logger>(
+            "pool_label_capture", std::make_shared<spdlog::sinks::ostream_sink_mt>(captured));
+        spdlog::set_default_logger(logger);
+        {
+            auto conn = pool.acquire(std::chrono::milliseconds(1000), ConnectionPriority::Normal,
+                                     "client_list");
+            REQUIRE(conn.has_value());
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+        spdlog::set_default_logger(previous);
+        pool.shutdown();
+        return captured.str();
+    };
+
+    const auto writeLog = slowHoldLog(false);
+    CHECK(writeLog.find("slow write-connection hold: tag='client_list'") != std::string::npos);
+
+    // Read pools share the threshold; calling their holds "write" sent a slow read-only
+    // listing down the wrong path.
+    const auto readLog = slowHoldLog(true);
+    CHECK(readLog.find("slow read-connection hold: tag='client_list'") != std::string::npos);
+    CHECK(readLog.find("write-connection") == std::string::npos);
 }
 
 TEST_CASE("Connection pool records source location for untagged acquire",
