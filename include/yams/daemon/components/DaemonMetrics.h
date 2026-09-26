@@ -170,7 +170,8 @@ struct MetricsSnapshot {
     uint32_t vectorDbDim{0};
 
     // Database init phase visibility (surfaced in `yams daemon status`).
-    // databasePhase is "" | "opening" | "recovering" | "migrating" | "ready".
+    // databasePhase is "" | "opening" | "checking_integrity" | "recovering" | "migrating"
+    // | "ready".
     std::string databasePhase;
     std::uint64_t databasePhaseElapsedMs{0};
     // Post-startup maintenance visibility, separate from database readiness.
