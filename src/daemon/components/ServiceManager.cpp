@@ -734,6 +734,17 @@ void ServiceManager::refreshRuntimeTuningStatus() {
             "tuning.resource.memory_hysteresis_ms");
         put("resource.cpu_hysteresis_ms", TuneAdvisor::cpuLevelHysteresisMs(),
             "tuning.resource.cpu_hysteresis_ms");
+        const auto hostThresholds = TuneAdvisor::hostPressureThresholds();
+        put("resource.host_pressure", TuneAdvisor::hostPressureEnabled(),
+            "tuning.resource.host_pressure");
+        put("resource.host_cpu_pressure_pct", hostThresholds.cpuSomePct,
+            "tuning.resource.host_cpu_pressure_pct");
+        put("resource.host_io_pressure_pct", hostThresholds.ioSomePct,
+            "tuning.resource.host_io_pressure_pct");
+        put("resource.host_memory_pressure_pct", hostThresholds.memorySomePct,
+            "tuning.resource.host_memory_pressure_pct");
+        put("resource.host_load_per_cpu", hostThresholds.loadPerCpu,
+            "tuning.resource.host_load_per_cpu");
         return true;
     });
 

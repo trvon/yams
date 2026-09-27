@@ -1681,6 +1681,27 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
             spdlog::warn("Config: tuning.resource.memory_hysteresis_ms outside range 10..10000");
         }
     }
+    if (auto value = parseBoolean(resource, "tuning.resource", "host_pressure")) {
+        TuneAdvisor::setHostPressureEnabled(*value);
+        noteSource("tuning.resource", "host_pressure");
+    }
+    const auto applyHostThreshold = [&](std::string_view key, double minimum, double maximum,
+                                        auto setter) {
+        if (auto value = parseFloating(resource, "tuning.resource", key)) {
+            if (*value >= minimum && *value <= maximum) {
+                setter(*value);
+                noteSource("tuning.resource", key);
+            } else {
+                spdlog::warn("Config: tuning.resource.{} outside range {}..{}; ignoring {}", key,
+                             minimum, maximum, *value);
+            }
+        }
+    };
+    applyHostThreshold("host_cpu_pressure_pct", 1.0, 100.0, &TuneAdvisor::setHostCpuPressurePct);
+    applyHostThreshold("host_io_pressure_pct", 1.0, 100.0, &TuneAdvisor::setHostIoPressurePct);
+    applyHostThreshold("host_memory_pressure_pct", 1.0, 100.0,
+                       &TuneAdvisor::setHostMemoryPressurePct);
+    applyHostThreshold("host_load_per_cpu", 0.1, 64.0, &TuneAdvisor::setHostLoadPerCpu);
     if (auto value = parseUint32(resource, "tuning.resource", "cpu_hysteresis_ms")) {
         if (*value >= 10 && *value <= 10000) {
             TuneAdvisor::setCpuLevelHysteresisMs(*value);

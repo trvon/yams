@@ -206,6 +206,11 @@ void TuneAdvisor::resetConfiguredOverrides() noexcept {
     memoryEmergencyPctOverride_.store(0.0, std::memory_order_relaxed);
     memoryHysteresisMsOverride_.store(0, std::memory_order_relaxed);
     cpuLevelHysteresisMsOverride_.store(0, std::memory_order_relaxed);
+    hostPressureEnabled_.store(true, std::memory_order_relaxed);
+    hostCpuPressurePctOverride_.store(0.0, std::memory_order_relaxed);
+    hostIoPressurePctOverride_.store(0.0, std::memory_order_relaxed);
+    hostMemoryPressurePctOverride_.store(0.0, std::memory_order_relaxed);
+    hostLoadPerCpuOverride_.store(0.0, std::memory_order_relaxed);
     postIngestRpcQueueMaxOverride_.store(0, std::memory_order_relaxed);
     postIngestRpcMaxPerBatchOverride_.store(0, std::memory_order_relaxed);
     postIngestTotalConcurrentOverride_.store(0, std::memory_order_relaxed);
@@ -2517,6 +2522,49 @@ uint32_t TuneAdvisor::cpuLevelHysteresisMs() {
 
 void TuneAdvisor::setCpuLevelHysteresisMs(uint32_t ms) {
     cpuLevelHysteresisMsOverride_.store(ms, std::memory_order_relaxed);
+}
+
+bool TuneAdvisor::hostPressureEnabled() {
+    return hostPressureEnabled_.load(std::memory_order_relaxed);
+}
+
+void TuneAdvisor::setHostPressureEnabled(bool enabled) {
+    hostPressureEnabled_.store(enabled, std::memory_order_relaxed);
+}
+
+HostPressureThresholds TuneAdvisor::hostPressureThresholds() {
+    HostPressureThresholds thresholds;
+    const auto apply = [](const std::atomic<double>& overrideValue, double& field) {
+        const double value = overrideValue.load(std::memory_order_relaxed);
+        if (value > 0.0) {
+            field = value;
+        }
+    };
+    apply(hostCpuPressurePctOverride_, thresholds.cpuSomePct);
+    apply(hostIoPressurePctOverride_, thresholds.ioSomePct);
+    apply(hostMemoryPressurePctOverride_, thresholds.memorySomePct);
+    apply(hostLoadPerCpuOverride_, thresholds.loadPerCpu);
+    return thresholds;
+}
+
+void TuneAdvisor::setHostCpuPressurePct(double pct) {
+    hostCpuPressurePctOverride_.store(std::isfinite(pct) ? std::max(0.0, pct) : 0.0,
+                                      std::memory_order_relaxed);
+}
+
+void TuneAdvisor::setHostIoPressurePct(double pct) {
+    hostIoPressurePctOverride_.store(std::isfinite(pct) ? std::max(0.0, pct) : 0.0,
+                                     std::memory_order_relaxed);
+}
+
+void TuneAdvisor::setHostMemoryPressurePct(double pct) {
+    hostMemoryPressurePctOverride_.store(std::isfinite(pct) ? std::max(0.0, pct) : 0.0,
+                                         std::memory_order_relaxed);
+}
+
+void TuneAdvisor::setHostLoadPerCpu(double load) {
+    hostLoadPerCpuOverride_.store(std::isfinite(load) ? std::max(0.0, load) : 0.0,
+                                  std::memory_order_relaxed);
 }
 
 uint32_t TuneAdvisor::modelEvictionCooldownMs() {

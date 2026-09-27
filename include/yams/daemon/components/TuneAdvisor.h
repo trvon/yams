@@ -31,6 +31,7 @@
 #include <string_view>
 #include <thread>
 #include <yams/config/config_helpers.h>
+#include <yams/daemon/components/HostPressure.h>
 #include <yams/daemon/components/RepairTuning.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/metadata/db_lock_telemetry.h>
@@ -999,6 +1000,22 @@ public:
     static uint32_t cpuLevelHysteresisMs();
     static void setCpuLevelHysteresisMs(uint32_t ms);
 
+    /// Sample host-wide pressure (Linux PSI, else load average) on the governor tick so
+    /// deferrable background work can wait for a quieter host. Default: true.
+    /// Config: tuning.resource.host_pressure
+    static bool hostPressureEnabled();
+    static void setHostPressureEnabled(bool enabled);
+
+    /// Host-busy thresholds. PSI values are "some avg10" percentages; the load threshold is the
+    /// one-minute load average per online CPU and only applies when PSI is unavailable.
+    /// A value <= 0 passed to a setter restores the default.
+    /// Config: tuning.resource.host_{cpu,io,memory}_pressure_pct, host_load_per_cpu
+    static HostPressureThresholds hostPressureThresholds();
+    static void setHostCpuPressurePct(double pct);
+    static void setHostIoPressurePct(double pct);
+    static void setHostMemoryPressurePct(double pct);
+    static void setHostLoadPerCpu(double load);
+
     /// Cooldown period between model evictions to prevent thrashing (ms). Default: 500.
     /// Environment: YAMS_MODEL_EVICTION_COOLDOWN_MS
     static uint32_t modelEvictionCooldownMs();
@@ -1159,6 +1176,11 @@ private:
     static inline std::atomic<uint32_t> cpuLevelHysteresisMsOverride_{0};
     static inline std::atomic<uint32_t> modelEvictionCooldownMsOverride_{0};
     static inline std::atomic<uint32_t> governorWarningScalePctOverride_{0};
+    static inline std::atomic<bool> hostPressureEnabled_{true};
+    static inline std::atomic<double> hostCpuPressurePctOverride_{0.0};
+    static inline std::atomic<double> hostIoPressurePctOverride_{0.0};
+    static inline std::atomic<double> hostMemoryPressurePctOverride_{0.0};
+    static inline std::atomic<double> hostLoadPerCpuOverride_{0.0};
 
     // Gradient limiter overrides
     static inline std::atomic<int> enableGradientLimitersOverride_{-1};

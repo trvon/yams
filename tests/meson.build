@@ -1287,6 +1287,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_host_pressure_exe = executable('catch2_host_pressure',
+    files('unit/daemon/host_pressure_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_timing_audit_exe = executable('catch2_timing_audit',
     files('unit/daemon/timing_audit_catch2_test.cpp'),
     include_directories: incs,
@@ -3929,6 +3938,12 @@ if catch2_dep.found()
   )
 
   test('resource_governance', catch2_resource_governance_exe,
+    suite: ['catch2', 'unit', 'daemon', 'governance'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('host_pressure', catch2_host_pressure_exe,
     suite: ['catch2', 'unit', 'daemon', 'governance'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60

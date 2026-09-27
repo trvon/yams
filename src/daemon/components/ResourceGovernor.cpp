@@ -259,6 +259,7 @@ ResourceSnapshot ResourceGovernor::tick(ServiceManager* sm) {
 
     if (!TuneAdvisor::enableResourceGovernor()) {
         // Governor disabled - return empty snapshot with Normal level
+        hostPressureElevated_.store(false, std::memory_order_release);
         ResourceSnapshot snap{};
         snap.level = ResourcePressureLevel::Normal;
         snap.timestamp = std::chrono::steady_clock::now();
@@ -270,6 +271,7 @@ ResourceSnapshot ResourceGovernor::tick(ServiceManager* sm) {
 
     // Collect metrics from all sources
     collectMetrics(sm, snap);
+    collectHostPressure(snap);
 
     // Update admission control decisions based on CPU with hysteresis
     updateCpuAdmissionControl(snap);
@@ -441,6 +443,45 @@ void ResourceGovernor::collectMetrics(ServiceManager* sm, ResourceSnapshot& snap
     // Connection pool stats
     auto ipcStats = poolStats("ipc");
     snap.dbConnections = ipcStats.current_size;
+}
+
+void ResourceGovernor::collectHostPressure(ResourceSnapshot& snap) {
+    YAMS_ZONE_SCOPED_N("ResourceGovernor::collectHostPressure");
+
+    if (!TuneAdvisor::hostPressureEnabled()) {
+        hostPressureElevated_.store(false, std::memory_order_release);
+        snap.host = HostPressureSample{};
+        snap.hostPressureElevated = false;
+        return;
+    }
+
+    bool resampled = false;
+    {
+        std::unique_lock lock(mutex_);
+        if (lastHostSampleTime_ == std::chrono::steady_clock::time_point{} ||
+            snap.timestamp - lastHostSampleTime_ >= kMinHostSampleInterval) {
+            cachedHostSample_ = hostSampler_ ? hostSampler_() : sampleHostPressure();
+            lastHostSampleTime_ = snap.timestamp;
+            resampled = true;
+        }
+        snap.host = cachedHostSample_;
+    }
+
+    const bool wasElevated = hostPressureElevated_.load(std::memory_order_acquire);
+    bool elevated = wasElevated;
+    if (resampled) {
+        elevated = ::yams::daemon::hostPressureElevated(
+            snap.host, TuneAdvisor::hostPressureThresholds(), wasElevated);
+        if (elevated != wasElevated) {
+            hostPressureElevated_.store(elevated, std::memory_order_release);
+            spdlog::info("[ResourceGovernor] Host pressure {} (source={}, cpu={:.1f}%, io={:.1f}%, "
+                         "memory={:.1f}%, load/cpu={:.2f})",
+                         elevated ? "elevated" : "cleared",
+                         hostPressureSourceName(snap.host.source), snap.host.cpuSomeAvg10,
+                         snap.host.ioSomeAvg10, snap.host.memorySomeAvg10, snap.host.loadPerCpu);
+        }
+    }
+    snap.hostPressureElevated = elevated;
 }
 
 // ============================================================================

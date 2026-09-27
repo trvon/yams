@@ -20,12 +20,14 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <yams/daemon/components/HostPressure.h>
 
 namespace yams::daemon {
 
@@ -99,6 +101,11 @@ struct ResourceSnapshot {
     std::uint32_t consecutiveWarningTicks{0};
     std::uint32_t consecutiveCriticalTicks{0};
     std::uint32_t consecutiveEmergencyTicks{0};
+
+    // Host-wide pressure (other processes on the machine). Kept separate from `level`: a busy
+    // host defers background work but does not throttle foreground requests or model loads.
+    HostPressureSample host{};
+    bool hostPressureElevated{false};
 
     // Scaling budget remaining (governor can veto scale-up if exhausted)
     // 0.0 = no headroom (at/over budget), 1.0 = full headroom (well under budget)
@@ -268,6 +275,11 @@ public:
     /// Get current pressure level (fast, atomic read)
     [[nodiscard]] ResourcePressureLevel getPressureLevel() const noexcept;
 
+    /// Whether the host (not just this daemon) is currently busy (fast, atomic read).
+    [[nodiscard]] bool hostPressureElevated() const noexcept {
+        return hostPressureElevated_.load(std::memory_order_acquire);
+    }
+
     /// Get current scaling caps (thread-safe copy)
     [[nodiscard]] ScalingCaps getScalingCaps() const;
 
@@ -280,6 +292,13 @@ public:
     /// Test-only: expose computeLevel for unit tests.
     ResourcePressureLevel testing_computeLevel(const ResourceSnapshot& snap) {
         return computeLevel(snap);
+    }
+    /// Test-only: replace the host pressure sampler (nullptr restores the platform sampler)
+    /// and force the next tick to resample.
+    void testing_setHostPressureSampler(std::function<HostPressureSample()> sampler) {
+        std::unique_lock lock(mutex_);
+        hostSampler_ = std::move(sampler);
+        lastHostSampleTime_ = {};
     }
     /// Test-only: set pressure state for hysteresis tests.
     void testing_setPressureState(ResourcePressureLevel level,
@@ -332,6 +351,9 @@ private:
     /// Compute pressure level from snapshot with hysteresis
     ResourcePressureLevel computeLevel(const ResourceSnapshot& snap);
 
+    /// Sample host pressure (rate limited) and update the elevated flag.
+    void collectHostPressure(ResourceSnapshot& snap);
+
     /// Update CPU-based admission control with hysteresis
     void updateCpuAdmissionControl(const ResourceSnapshot& snap);
 
@@ -377,6 +399,14 @@ private:
     std::chrono::steady_clock::time_point lastProcReadTime_{};
     std::uint64_t cachedRssBytes_{0};
     double cachedCpuPercent_{0.0};
+
+    // Host pressure sampling state. PSI avg10 only moves every 2s, so sample at most once a
+    // second and reuse the cached reading on the ticks in between.
+    std::function<HostPressureSample()> hostSampler_;
+    std::chrono::steady_clock::time_point lastHostSampleTime_{};
+    HostPressureSample cachedHostSample_{};
+    std::atomic<bool> hostPressureElevated_{false};
+    static constexpr auto kMinHostSampleInterval = std::chrono::seconds(1);
 
     // CPU admission control state (time-based hysteresis)
     std::atomic<bool> cpuAdmissionBlocked_{false};
