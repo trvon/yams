@@ -5,11 +5,14 @@
 #include <yams/daemon/components/db_recovery.h>
 #include <yams/metadata/database.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iterator>
 #include <string>
+#include <vector>
 
 #include "../../common/sqlite_corruption.h"
 
@@ -359,6 +362,91 @@ TEST_CASE("Recovery sentinel survives across calls and is idempotent to read",
     REQUIRE(sentinel1.has_value());
     REQUIRE(sentinel2.has_value());
     REQUIRE((sentinel1->quarantinedPath == sentinel2->quarantinedPath));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+namespace {
+
+std::string readFile(const fs::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+std::vector<fs::path> filesWithPrefix(const fs::path& dir, const std::string& prefix) {
+    std::vector<fs::path> out;
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        if (entry.path().filename().string().rfind(prefix, 0) == 0) {
+            out.push_back(entry.path());
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("quarantineSqliteSidecars preserves an unreadable WAL instead of deleting it",
+          "[unit][daemon][db_recovery][wal_quarantine]") {
+    auto dir = makeScratchDir("yams_db_recovery_wal_quarantine");
+    auto dbPath = dir / "yams.db";
+    writeFile(dbPath, "db");
+    writeFile(fs::path(dbPath.string() + "-wal"), "uncheckpointed-transactions");
+    writeFile(fs::path(dbPath.string() + "-shm"), "shm-index");
+
+    auto res = yams::daemon::quarantineSqliteSidecars(dbPath);
+    REQUIRE(res);
+
+    // SQLite must no longer see the sidecars...
+    CHECK_FALSE(fs::exists(dbPath.string() + "-wal"));
+    CHECK_FALSE(fs::exists(dbPath.string() + "-shm"));
+    // ...but their bytes survive next to the database.
+    const auto wal = filesWithPrefix(dir, "yams.db-wal.quarantine-");
+    const auto shm = filesWithPrefix(dir, "yams.db-shm.quarantine-");
+    REQUIRE((wal.size() == 1));
+    REQUIRE((shm.size() == 1));
+    CHECK((readFile(wal.front()) == "uncheckpointed-transactions"));
+    CHECK((readFile(shm.front()) == "shm-index"));
+    REQUIRE((res.value().size() == 2));
+    CHECK((res.value().front() == wal.front()));
+    CHECK(fs::exists(dbPath));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("quarantineSqliteSidecars never overwrites an earlier quarantine",
+          "[unit][daemon][db_recovery][wal_quarantine]") {
+    auto dir = makeScratchDir("yams_db_recovery_wal_quarantine_twice");
+    auto dbPath = dir / "yams.db";
+    writeFile(dbPath, "db");
+
+    writeFile(fs::path(dbPath.string() + "-wal"), "first");
+    REQUIRE(yams::daemon::quarantineSqliteSidecars(dbPath));
+    writeFile(fs::path(dbPath.string() + "-wal"), "second");
+    REQUIRE(yams::daemon::quarantineSqliteSidecars(dbPath));
+
+    const auto wal = filesWithPrefix(dir, "yams.db-wal.quarantine-");
+    REQUIRE((wal.size() == 2));
+    std::vector<std::string> payloads{readFile(wal[0]), readFile(wal[1])};
+    std::sort(payloads.begin(), payloads.end());
+    CHECK((payloads == std::vector<std::string>{"first", "second"}));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("quarantineSqliteSidecars is a no-op without sidecars",
+          "[unit][daemon][db_recovery][wal_quarantine]") {
+    auto dir = makeScratchDir("yams_db_recovery_wal_quarantine_none");
+    auto dbPath = dir / "yams.db";
+    writeFile(dbPath, "db");
+
+    auto res = yams::daemon::quarantineSqliteSidecars(dbPath);
+    REQUIRE(res);
+    CHECK(res.value().empty());
+    CHECK(filesWithPrefix(dir, "yams.db-").empty());
 
     std::error_code ec;
     fs::remove_all(dir, ec);

@@ -3019,17 +3019,18 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
         tempDb->close();
         if (message.find("malformed") != std::string::npos ||
             message.find("corrupt") != std::string::npos) {
-            spdlog::warn("[ServiceManager] Removing malformed stale WAL/SHM sidecars; "
-                         "metadata DB will continue from its last checkpoint");
-            for (const auto& suffix : {"-wal", "-shm"}) {
-                std::error_code sidecarEc;
-                const auto sidecarPath = std::filesystem::path(dbPath.string() + suffix);
-                if (std::filesystem::exists(sidecarPath, sidecarEc)) {
-                    std::filesystem::remove(sidecarPath, sidecarEc);
-                    if (sidecarEc) {
-                        spdlog::debug("[ServiceManager] stale SQLite sidecar cleanup failed: {}",
-                                      sidecarEc.message());
-                    }
+            // The WAL may still hold committed transactions that were never checkpointed.
+            // Move it aside rather than deleting it so the data stays recoverable.
+            auto quarantined = quarantineSqliteSidecars(dbPath);
+            if (!quarantined) {
+                spdlog::error("[ServiceManager] Could not quarantine malformed stale WAL/SHM "
+                              "sidecars: {}",
+                              quarantined.error().message);
+            } else {
+                for (const auto& path : quarantined.value()) {
+                    spdlog::warn("[ServiceManager] Quarantined malformed stale SQLite sidecar to "
+                                 "{}; metadata DB will continue from its last checkpoint",
+                                 path.string());
                 }
             }
         } else {

@@ -127,6 +127,25 @@ TEST_CASE("DbIntegrityCheck - detects corrupt artifacts", "[doctor][db_integrity
     CHECK(result.ok == false);
 }
 
+TEST_CASE("DbIntegrityCheck - reports quarantined WAL sidecars", "[doctor][db_integrity]") {
+    DoctorTestEnv env;
+
+    fs::path quarantinedWal = env.dataDir / "yams.db-wal.quarantine-20260501T120000Z";
+    {
+        std::ofstream w(quarantinedWal, std::ios::binary);
+        w << "uncheckpointed frames";
+    }
+
+    auto cli = env.makeCli();
+    DoctorContext ctx(cli.get());
+    DbIntegrityCheck check;
+    auto result = check.execute(ctx);
+
+    REQUIRE(result.corruptArtifacts.size() == 1);
+    CHECK(result.corruptArtifacts.front().find("yams.db-wal.quarantine-") != std::string::npos);
+    CHECK(result.ok == false);
+}
+
 TEST_CASE("DbIntegrityCheck - render produces output", "[doctor][db_integrity]") {
     DoctorTestEnv env;
 
