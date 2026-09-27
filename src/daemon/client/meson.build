@@ -102,6 +102,7 @@ yams_daemon_client_lib = static_library('yams_daemon_client',
   dependencies: [
     dependency('yams_core'),
     dependency('yams_config'),
+    dependency('yams_compression'),
     dependency('yams_tune_advisor'),
     dependency('spdlog'),
     protobuf_dep,

@@ -7,6 +7,7 @@
 #include "../../../include/yams/common/fs_utils.h"
 #endif
 #include <yams/common/string_utils.h>
+#include <yams/compression/framed_payload.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/await_result_sync.h>
@@ -757,6 +758,20 @@ boost::asio::awaitable<Result<GetResponse>> DaemonClient::get(const GetRequest& 
         Result<GetResponse> getResults() {
             if (error_) {
                 return *error_;
+            }
+            // acceptCompressed transfers arrive framed (header + zstd body). Decode here so
+            // every client receives the document; the compression fields stay for display.
+            if (response_.compressed) {
+                auto decoded = compression::decodeFramedPayload(std::span<const std::byte>(
+                    reinterpret_cast<const std::byte*>(response_.content.data()),
+                    response_.content.size()));
+                if (!decoded) {
+                    return Error{decoded.error().code,
+                                 "Could not decode document content: " + decoded.error().message};
+                }
+                response_.content.assign(reinterpret_cast<const char*>(decoded.value().data()),
+                                         decoded.value().size());
+                response_.compressed = false;
             }
             return response_;
         }

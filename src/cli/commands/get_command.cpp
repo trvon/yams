@@ -19,7 +19,6 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compressor_interface.h>
-#include <yams/compression/framed_payload.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -292,25 +291,9 @@ public:
                     }
 
                 } else if (resp.hasContent) {
-                    // Content retrieval. This request sets acceptCompressed, so the daemon may
-                    // send a framed payload (header + zstd body); write the document, not the
-                    // frame.
-                    std::string decodedContent;
+                    // Content retrieval. DaemonClient decodes compressed transfers, so this is
+                    // always the document itself.
                     const std::string* content = &resp.content;
-                    if (resp.compressed) {
-                        auto decoded =
-                            yams::compression::decodeFramedPayload(std::span<const std::byte>(
-                                reinterpret_cast<const std::byte*>(resp.content.data()),
-                                resp.content.size()));
-                        if (!decoded) {
-                            return Error{decoded.error().code,
-                                         "Could not decode document content: " +
-                                             decoded.error().message};
-                        }
-                        decodedContent.assign(reinterpret_cast<const char*>(decoded.value().data()),
-                                              decoded.value().size());
-                        content = &decodedContent;
-                    }
                     if (outputPath_.empty() || outputPath_ == "-") {
                         // Output to stdout
                         std::cout << *content;

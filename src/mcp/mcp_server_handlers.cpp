@@ -14,7 +14,6 @@
 #include <yams/cli/graph_helpers.h>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compressor_interface.h>
-#include <yams/compression/framed_payload.h>
 #include <yams/config/config_helpers.h>
 #include <yams/core/task.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -1622,20 +1621,8 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         mcp_response.compressionHeader = oss.str();
     }
     if (resp.hasContent) {
-        if (resp.compressed) {
-            // The daemon framed the content (header + zstd body); send the document, not the
-            // frame. A payload that does not decode is an error, never content.
-            auto decoded = compression::decodeFramedPayload(std::span<const std::byte>(
-                reinterpret_cast<const std::byte*>(resp.content.data()), resp.content.size()));
-            if (!decoded) {
-                co_return Error{decoded.error().code,
-                                "Could not decode document content: " + decoded.error().message};
-            }
-            mcp_response.content = std::string(
-                reinterpret_cast<const char*>(decoded.value().data()), decoded.value().size());
-        } else {
-            mcp_response.content = resp.content;
-        }
+        // DaemonClient decodes compressed transfers, so this is the document itself.
+        mcp_response.content = resp.content;
 
         size_t maxContentBytes = size_t{32} * 1024;
         if (const auto env = yams::config::getenv_copy("YAMS_MCP_GET_MAX_CONTENT_BYTES");
