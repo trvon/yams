@@ -70,6 +70,15 @@ struct P2pSyncResult {
     std::size_t quarantined{0};
 };
 
+/// Outcome of inbound sessions this manager accepted, for status and diagnostics.
+struct P2pInboundStats {
+    std::uint64_t sessions{0};
+    std::uint64_t failures{0};
+    std::string lastFailureStage; ///< transport, handshake, peer_history, delta_exchange, ...
+    std::string lastFailure;
+    std::uint64_t lastFailureUnixMs{0};
+};
+
 class P2pManager {
 public:
     static Result<std::unique_ptr<P2pManager>> create(P2pManagerOptions options,
@@ -90,6 +99,7 @@ public:
     Result<void> forget(std::string_view nodeId);
     Result<P2pLocalIdentity> localIdentity() const;
     Result<std::vector<PeerRegistryRecord>> peers() const;
+    [[nodiscard]] P2pInboundStats inboundStats() const;
 
 #if YAMS_DAEMON_TEST_HOOKS_ENABLED
     /// Inject a reconnect-loop action for deterministic thread-boundary tests.

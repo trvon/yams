@@ -1011,6 +1011,13 @@ public:
                 }
             } else {
                 spdlog::debug("[p2p] session rejected: {}", handshake.error().message);
+                if (options.onRejected) {
+                    try {
+                        options.onRejected(handshake.error());
+                    } catch (...) {
+                        spdlog::debug("[p2p] session rejection observer threw");
+                    }
+                }
             }
         } catch (const std::exception& error) {
             spdlog::warn("[p2p] session thread contained exception: {}", error.what());

@@ -199,6 +199,11 @@ public:
         std::string mode;
         std::string trustMode;
         std::uint64_t peerCount{0};
+        std::uint64_t inboundSessions{0};
+        std::uint64_t inboundFailures{0};
+        std::string lastInboundFailureStage;
+        std::string lastInboundFailure;
+        std::uint64_t lastInboundFailureAgeMs{0};
     };
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);

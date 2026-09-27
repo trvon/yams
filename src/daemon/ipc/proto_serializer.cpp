@@ -203,6 +203,12 @@ template <> struct ProtoBinding<MemorySyncResponse> {
         out->set_mode(yams::common::sanitizeUtf8(response.mode));
         out->set_trust_mode(yams::common::sanitizeUtf8(response.trustMode));
         out->set_peer_count(response.peerCount);
+        out->set_inbound_sessions(response.inboundSessions);
+        out->set_inbound_failures(response.inboundFailures);
+        out->set_last_inbound_failure_stage(
+            yams::common::sanitizeUtf8(response.lastInboundFailureStage));
+        out->set_last_inbound_failure(yams::common::sanitizeUtf8(response.lastInboundFailure));
+        out->set_last_inbound_failure_age_ms(response.lastInboundFailureAgeMs);
     }
     static MemorySyncResponse get(const Envelope& env) {
         const auto& in = env.memory_sync_response();
@@ -221,7 +227,12 @@ template <> struct ProtoBinding<MemorySyncResponse> {
                                   in.corpus_epoch(),
                                   in.mode(),
                                   in.trust_mode(),
-                                  in.peer_count()};
+                                  in.peer_count(),
+                                  in.inbound_sessions(),
+                                  in.inbound_failures(),
+                                  in.last_inbound_failure_stage(),
+                                  in.last_inbound_failure(),
+                                  in.last_inbound_failure_age_ms()};
     }
 };
 
