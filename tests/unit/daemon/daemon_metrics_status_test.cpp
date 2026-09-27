@@ -25,6 +25,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <yams/app/services/graph_context_service.hpp>
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/crypto/hasher.h>
@@ -4983,6 +4984,29 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InternalError);
         CHECK(err.message == "Metadata repository unavailable");
+    }
+
+    SECTION("legacy impact and affected-tests requests explain the removed symbol graph") {
+        // No metadata repository: the answer does not depend on daemon state.
+        GraphImpactRequest impactReq;
+        impactReq.symbol = "callee";
+        auto impactResp = dispatchRequest(*fixture.dispatcher, Request{impactReq});
+        REQUIRE(std::holds_alternative<GraphImpactResponse>(impactResp));
+        const auto& impact = std::get<GraphImpactResponse>(impactResp);
+        CHECK(impact.symbol == "callee");
+        CHECK(impact.affectedSymbols.empty());
+        REQUIRE(impact.warnings.size() == 1);
+        CHECK(impact.warnings.front() == app::services::kImpactNeedsSymbolGraphWarning);
+
+        GraphAffectedTestsRequest testsReq;
+        testsReq.changedFiles = {"src/callee.cpp"};
+        auto testsResp = dispatchRequest(*fixture.dispatcher, Request{testsReq});
+        REQUIRE(std::holds_alternative<GraphAffectedTestsResponse>(testsResp));
+        const auto& tests = std::get<GraphAffectedTestsResponse>(testsResp);
+        CHECK(tests.changedFiles == testsReq.changedFiles);
+        CHECK(tests.affectedTests.empty());
+        REQUIRE(tests.warnings.size() == 1);
+        CHECK(tests.warnings.front() == app::services::kAffectedTestsNeedSymbolGraphWarning);
     }
 
     SECTION("graph explore reports unavailable metadata repository") {

@@ -803,16 +803,13 @@ void MCPServer::initializeToolRegistry() {
                    {{"type", "string"},
                     {"description",
                      "Operation: 'query' (default) to traverse/explore the graph, 'ingest' to "
-                     "insert nodes/edges/aliases, 'lookup' to resolve a symbol definition, "
-                     "'impact' for reverse dependents (blast radius), 'trace' for a path between "
-                     "two symbols, 'affected_tests' to map changed files to affected tests"},
-                    {"enum", json::array({"query", "ingest", "lookup", "impact", "trace",
-                                          "affected_tests"})},
+                     "insert nodes/edges/aliases, 'lookup' to resolve a graph node by label or "
+                     "alias, 'trace' for a path between two nodes"},
+                    {"enum", json::array({"query", "ingest", "lookup", "trace"})},
                     {"default", "query"}}},
-                  // ── Navigation parameters (lookup/impact/trace/affected_tests) ──
+                  // ── Navigation parameters (lookup/trace) ──
                   {"symbol",
-                   {{"type", "string"},
-                    {"description", "Target symbol for action=lookup or action=impact"}}},
+                   {{"type", "string"}, {"description", "Target symbol for action=lookup"}}},
                   {"file",
                    {{"type", "string"},
                     {"description", "File path substring to disambiguate action=lookup"}}},
@@ -821,14 +818,6 @@ void MCPServer::initializeToolRegistry() {
                     {"description", "Line number to disambiguate action=lookup"}}},
                   {"from", {{"type", "string"}, {"description", "Source symbol for action=trace"}}},
                   {"to", {{"type", "string"}, {"description", "Target symbol for action=trace"}}},
-                  {"changed_files",
-                   {{"type", "array"},
-                    {"items", {{"type", "string"}}},
-                    {"description", "Changed file paths for action=affected_tests"}}},
-                  {"test_pattern",
-                   {{"type", "string"},
-                    {"description", "Path substring identifying test files for "
-                                    "action=affected_tests"}}},
                   // ── Query parameters ──
                   {"hash", {{"type", "string"}, {"description", "Document hash to query from"}}},
                   {"name", {{"type", "string"}, {"description", "Document name to query from"}}},

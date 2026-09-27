@@ -145,15 +145,8 @@ public:
         cmd->add_option("--lookup", lookupSymbol_,
                         "Resolve a symbol definition (go-to-definition)");
         cmd->add_option("--at-file", lookupAtFile_, "Disambiguate --lookup by file path substring");
-        cmd->add_option("--impact", impactSymbol_,
-                        "Show reverse dependents (blast radius) of a symbol");
         cmd->add_option("--trace", traceFrom_, "Trace a path from this symbol (use with --to)");
         cmd->add_option("--to", traceTo_, "Target symbol for --trace");
-        cmd->add_option("--affected-tests", affectedTestsFiles_,
-                        "Find tests affected by the given changed file(s)")
-            ->expected(-1);
-        cmd->add_option("--test-pattern", testPathPattern_,
-                        "Path substring identifying test files for --affected-tests");
 
         // Relation filtering for traversal
         cmd->add_option("--relation,-r", relationFilter_,
@@ -176,7 +169,7 @@ public:
                           "Scope list/topology results under CWD; --explore is scoped by default");
         auto* globalExplore =
             cmd->add_flag("--global", globalExplore_,
-                          "Allow --explore/--impact results outside the current working directory");
+                          "Allow --explore results outside the current working directory");
         scopeCwd->excludes(globalExplore);
         globalExplore->excludes(scopeCwd);
 
@@ -215,14 +208,8 @@ public:
             if (!lookupSymbol_.empty()) {
                 co_return co_await executeGraphLookup();
             }
-            if (!impactSymbol_.empty()) {
-                co_return co_await executeGraphImpact();
-            }
             if (!traceFrom_.empty()) {
                 co_return co_await executeGraphTrace();
-            }
-            if (!affectedTestsFiles_.empty()) {
-                co_return co_await executeGraphAffectedTests();
             }
 
             // yams-66h: Handle --list-types mode (show available node types)
@@ -1011,28 +998,6 @@ private:
             std::cout << "warning: " << w << "\n";
     }
 
-    template <typename Resp> void renderImpact(const Resp& resp) const {
-        if (wantsJsonOutput()) {
-            nlohmann::json j;
-            j["symbol"] = resp.symbol;
-            j["truncated"] = resp.truncated;
-            j["affectedSymbols"] = nlohmann::json::array();
-            for (const auto& s : resp.affectedSymbols)
-                appendSymbolJson(j["affectedSymbols"], s);
-            j["warnings"] = resp.warnings;
-            std::cout << j.dump(2) << "\n";
-            return;
-        }
-        std::cout << "Impact of '" << resp.symbol << "': " << resp.affectedSymbols.size()
-                  << " dependent symbol(s)\n";
-        for (const auto& s : resp.affectedSymbols)
-            printSymbolLine(s);
-        if (resp.truncated)
-            std::cout << "  (truncated)\n";
-        for (const auto& w : resp.warnings)
-            std::cout << "warning: " << w << "\n";
-    }
-
     template <typename Resp> void renderTrace(const Resp& resp) const {
         if (wantsJsonOutput()) {
             nlohmann::json j;
@@ -1063,22 +1028,6 @@ private:
             std::cout << "warning: " << w << "\n";
     }
 
-    template <typename Resp> void renderAffectedTests(const Resp& resp) const {
-        if (wantsJsonOutput()) {
-            nlohmann::json j;
-            j["changedFiles"] = resp.changedFiles;
-            j["affectedTests"] = resp.affectedTests;
-            j["warnings"] = resp.warnings;
-            std::cout << j.dump(2) << "\n";
-            return;
-        }
-        std::cout << resp.affectedTests.size() << " affected test file(s):\n";
-        for (const auto& t : resp.affectedTests)
-            std::cout << "  " << t << "\n";
-        for (const auto& w : resp.warnings)
-            std::cout << "warning: " << w << "\n";
-    }
-
     boost::asio::awaitable<Result<void>> executeGraphLookup() {
         auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
@@ -1100,29 +1049,6 @@ private:
             co_return result.error();
         }
         renderLookup(result.value());
-        co_return Result<void>();
-    }
-
-    boost::asio::awaitable<Result<void>> executeGraphImpact() {
-        auto leaseRes = acquireGraphClientLease();
-        if (!leaseRes) {
-            co_return leaseRes.error();
-        }
-        auto leaseHandle = std::move(leaseRes.value());
-        printFallbackNoticeIfNeeded(leaseHandle.plan);
-        auto& client = **leaseHandle.lease;
-
-        daemon::GraphImpactRequest req;
-        req.symbol = impactSymbol_;
-        if (!globalExplore_) {
-            req.scopePathPrefix = invocationCwd_.lexically_normal().generic_string();
-        }
-        req.depth = static_cast<uint64_t>(depth_);
-        auto result = co_await client.call(req);
-        if (!result) {
-            co_return result.error();
-        }
-        renderImpact(result.value());
         co_return Result<void>();
     }
 
@@ -1148,28 +1074,6 @@ private:
             co_return result.error();
         }
         renderTrace(result.value());
-        co_return Result<void>();
-    }
-
-    boost::asio::awaitable<Result<void>> executeGraphAffectedTests() {
-        const auto depth = static_cast<uint64_t>(depth_);
-        auto leaseRes = acquireGraphClientLease();
-        if (!leaseRes) {
-            co_return leaseRes.error();
-        }
-        auto leaseHandle = std::move(leaseRes.value());
-        printFallbackNoticeIfNeeded(leaseHandle.plan);
-        auto& client = **leaseHandle.lease;
-
-        daemon::GraphAffectedTestsRequest req;
-        req.changedFiles = affectedTestsFiles_;
-        req.depth = depth;
-        req.testPathPattern = testPathPattern_;
-        auto result = co_await client.call(req);
-        if (!result) {
-            co_return result.error();
-        }
-        renderAffectedTests(result.value());
         co_return Result<void>();
     }
 
@@ -1201,11 +1105,8 @@ private:
     bool globalExplore_{false};
     std::string lookupSymbol_;
     std::string lookupAtFile_;
-    std::string impactSymbol_;
     std::string traceFrom_;
     std::string traceTo_;
-    std::vector<std::string> affectedTestsFiles_;
-    std::string testPathPattern_;
 };
 
 std::unique_ptr<ICommand> createGraphCommand() {

@@ -751,32 +751,3 @@ TEST_CASE("GraphContextService trace finds a path across a call chain",
     REQUIRE((missing.has_value()));
     CHECK_FALSE(missing.value().found);
 }
-
-TEST_CASE("GraphContextService impact and affectedTests report the removed symbol graph",
-          "[services][graph][context]") {
-    GraphContextServiceFixture fixture;
-    auto sourcePath = fixture.writeSource("src/callee.cpp", {"int callee() { return 1; }"});
-    fixture.upsertPathNode(sourcePath);
-
-    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
-    REQUIRE((service != nullptr));
-
-    GraphImpactRequest impactReq;
-    impactReq.symbol = "callee";
-    auto impact = service->impact(impactReq);
-    REQUIRE((impact.has_value()));
-    CHECK(impact.value().affectedSymbols.empty());
-    REQUIRE_FALSE(impact.value().warnings.empty());
-    CHECK(
-        (std::find(impact.value().warnings.begin(), impact.value().warnings.end(),
-                   std::string(kImpactNeedsSymbolGraphWarning)) != impact.value().warnings.end()));
-
-    GraphAffectedTestsRequest testsReq;
-    testsReq.changedFiles = {sourcePath.string()};
-    auto affected = service->affectedTests(testsReq);
-    REQUIRE((affected.has_value()));
-    REQUIRE_FALSE(affected.value().warnings.empty());
-    CHECK((std::find(affected.value().warnings.begin(), affected.value().warnings.end(),
-                     std::string(kAffectedTestsNeedSymbolGraphWarning)) !=
-           affected.value().warnings.end()));
-}
