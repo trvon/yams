@@ -195,3 +195,47 @@ TEST_CASE("Legacy per-snapshot keys move to membership in bounded batches",
     REQUIRE(inL2.has_value());
     CHECK(SnapshotFixture::contains(inL2.value(), id));
 }
+
+TEST_CASE("Snapshot summaries count every member, not only latest snapshot_id holders",
+          "[metadata][snapshots]") {
+    SnapshotFixture f;
+    const auto shared =
+        f.store(f.document("/repo/shared.txt", std::string(64, 'd')), "S1", 1'000'000);
+    f.store(f.document("/repo/only-s1.txt", std::string(64, 'e')), "S1", 1'000'000);
+    f.store(f.document("/repo/shared.txt", std::string(64, 'd')), "S2", 2'000'000); // re-store
+
+    auto snapshots = f.repo->getSnapshots();
+    REQUIRE(snapshots.has_value());
+    CHECK(std::find(snapshots.value().begin(), snapshots.value().end(), "S1") !=
+          snapshots.value().end());
+    CHECK(std::find(snapshots.value().begin(), snapshots.value().end(), "S2") !=
+          snapshots.value().end());
+
+    // Before membership, S1 lost the re-stored document and reported 1 file.
+    auto s1 = f.repo->getSnapshotInfo("S1");
+    REQUIRE(s1.has_value());
+    CHECK((s1.value().fileCount == 2));
+    auto s2 = f.repo->getSnapshotInfo("S2");
+    REQUIRE(s2.has_value());
+    CHECK((s2.value().fileCount == 1));
+
+    auto batch = f.repo->batchGetSnapshotInfo({"S1", "S2", "missing"});
+    REQUIRE(batch.has_value());
+    CHECK((batch.value().at("S1").fileCount == 2));
+    CHECK((batch.value().at("S2").fileCount == 1));
+    CHECK_FALSE(batch.value().contains("missing"));
+    (void)shared;
+}
+
+TEST_CASE("Snapshot summaries include legacy per-snapshot keys until they are moved",
+          "[metadata][snapshots]") {
+    SnapshotFixture f;
+    auto inserted = f.repo->insertDocument(f.document("/repo/legacy2.txt", std::string(64, 'f')));
+    REQUIRE(inserted.has_value());
+    REQUIRE(
+        f.repo->setMetadata(inserted.value(), "snapshot_id:L9", MetadataValue(std::string("L9")))
+            .has_value());
+    auto info = f.repo->getSnapshotInfo("L9");
+    REQUIRE(info.has_value());
+    CHECK((info.value().fileCount == 1));
+}
