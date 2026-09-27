@@ -18,6 +18,17 @@ inline bool declaresRemovedSymbolExtractor(const std::vector<std::string>& inter
     return std::ranges::find(interfaces, kRemovedSymbolExtractorInterface) != interfaces.end();
 }
 
+// Error message prefix (followed by the plugin path) of the refusal above.
+inline constexpr std::string_view kRemovedSymbolExtractorRefusal =
+    "Plugin declares the removed symbol_extractor_v1 interface: ";
+
+// True for the refusal of a plugin built against the removed interface. The host already told
+// the user once which file to delete, so callers treat it as a quiet skip, not a load failure.
+inline bool isRemovedInterfaceRefusal(const Error& error) {
+    return error.code == ErrorCode::NotSupported &&
+           std::string_view(error.message).starts_with(kRemovedSymbolExtractorRefusal);
+}
+
 struct PluginDescriptor {
     std::string name;
     std::string version;

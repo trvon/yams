@@ -865,6 +865,12 @@ Result<size_t> PluginManager::autoloadPlugins() {
 
             try {
                 auto loadResult = loadDiscoveredPlugin(discovered);
+                if (!loadResult && isRemovedInterfaceRefusal(loadResult.error())) {
+                    // The host already reported the stale file once; not a load failure.
+                    spdlog::debug("[PluginManager] skipped '{}': {}", descriptor.name,
+                                  loadResult.error().message);
+                    continue;
+                }
                 if (!loadResult) {
                     spdlog::warn("[PluginManager] load failed for '{}': {}", descriptor.name,
                                  loadResult.error().message);
