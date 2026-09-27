@@ -4971,6 +4971,12 @@ struct MemorySyncResponse {
     std::string mode;
     std::string trustMode;
     std::uint64_t peerCount{0};
+    // Inbound p2p sessions: protobuf-only additive fields, like the counters above.
+    std::uint64_t inboundSessions{0};
+    std::uint64_t inboundFailures{0};
+    std::string lastInboundFailureStage;
+    std::string lastInboundFailure;
+    std::uint64_t lastInboundFailureAgeMs{0};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>

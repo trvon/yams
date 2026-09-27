@@ -440,6 +440,11 @@ public:
 
     Result<void> forget(std::string_view nodeId) { return registry_->removePeer(nodeId); }
 
+    P2pInboundStats inboundStats() const {
+        std::lock_guard<std::mutex> lock(inboundMutex_);
+        return inbound_;
+    }
+
     Result<P2pLocalIdentity> localIdentity() const {
         auto identity = TlsIdentity::fromPrivateKeyPem(options_.nodeId, options_.privateKeyPem);
         if (!identity) {
@@ -532,13 +537,25 @@ private:
 
     void handleInbound(P2pConnection connection) {
         detail::ConnectionFrameSource frames(connection);
-        (void)detail::runInboundSession(
+        auto outcome = detail::runInboundSession(
             frames, detail::channelIdentity(connection), service_, *registry_,
             detail::InboundSessionOptions{.nodeId = options_.nodeId,
                                           .corpusId = options_.corpusId,
                                           .corpusEpoch = options_.corpusEpoch,
                                           .allowFirstContact = options_.allowFirstContact,
                                           .timeout = options_.timeout});
+        // The outcome used to be discarded, so a rejected or failed inbound peer left no trace.
+        std::lock_guard<std::mutex> lock(inboundMutex_);
+        ++inbound_.sessions;
+        if (!outcome.result) {
+            ++inbound_.failures;
+            inbound_.lastFailureStage = std::string(detail::inboundStageName(outcome.stage));
+            inbound_.lastFailure = outcome.result.error().message;
+            inbound_.lastFailureUnixMs =
+                static_cast<std::uint64_t>(std::max<std::int64_t>(0, unixTimeMs()));
+            spdlog::warn("[p2p] inbound session failed at {}: {}", inbound_.lastFailureStage,
+                         inbound_.lastFailure);
+        }
     }
 
     void reconnectLoop() {
@@ -607,6 +624,8 @@ private:
     memory_sync::MemorySyncService& service_;
     std::unique_ptr<PeerRegistry> registry_;
     mutable std::mutex lifecycleMutex_;
+    mutable std::mutex inboundMutex_;
+    P2pInboundStats inbound_;
     std::mutex reconnectMutex_;
     std::condition_variable reconnectCv_;
     std::unique_ptr<P2pListener> listener_;
@@ -672,6 +691,9 @@ Result<void> P2pManager::forget(std::string_view nodeId) {
 }
 Result<P2pLocalIdentity> P2pManager::localIdentity() const {
     return impl_->localIdentity();
+}
+P2pInboundStats P2pManager::inboundStats() const {
+    return impl_->inboundStats();
 }
 Result<std::vector<PeerRegistryRecord>> P2pManager::peers() const {
     return impl_->peers();

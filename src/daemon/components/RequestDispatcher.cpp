@@ -318,6 +318,11 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
     response.trustMode = std::move(status.value().trustMode);
     // pi-lens-ignore: clang:no_member -- fields are additive and generated headers lag clangd.
     response.peerCount = status.value().peerCount;
+    response.inboundSessions = status.value().inboundSessions;
+    response.inboundFailures = status.value().inboundFailures;
+    response.lastInboundFailureStage = std::move(status.value().lastInboundFailureStage);
+    response.lastInboundFailure = std::move(status.value().lastInboundFailure);
+    response.lastInboundFailureAgeMs = status.value().lastInboundFailureAgeMs;
     co_return response;
 }
 

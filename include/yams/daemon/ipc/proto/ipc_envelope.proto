@@ -1231,6 +1231,11 @@ message MemorySyncResponse {
   string mode = 14;
   string trust_mode = 15;
   uint64 peer_count = 16;
+  uint64 inbound_sessions = 17;
+  uint64 inbound_failures = 18;
+  string last_inbound_failure_stage = 19;
+  string last_inbound_failure = 20;
+  uint64 last_inbound_failure_age_ms = 21;
 }
 
 // ENVELOPE

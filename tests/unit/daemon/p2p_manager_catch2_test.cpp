@@ -343,7 +343,16 @@ TEST_CASE("P2P manager rejects unknown inbound peers before delta exchange",
     CHECK(serverPeers.value().empty());
 
     client.value()->stop();
-    server.value()->stop();
+    server.value()->stop(); // joins the inbound worker, so its outcome is recorded
+
+    // The rejection used to be discarded; it is now counted with the stage it failed at.
+    const auto inbound = server.value()->inboundStats();
+    CHECK(inbound.sessions >= 1u);
+    CHECK(inbound.failures >= 1u);
+    CHECK((inbound.lastFailureStage == "handshake"));
+    CHECK_FALSE(inbound.lastFailure.empty());
+    CHECK(inbound.lastFailureUnixMs > 0u);
+    CHECK((client.value()->inboundStats().failures == 0u));
 }
 
 TEST_CASE("P2P manager converges after mutual operator enrollment",
