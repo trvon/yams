@@ -125,6 +125,10 @@ TEST_CASE("DbIntegrityCheck - detects corrupt artifacts", "[doctor][db_integrity
 
     CHECK_FALSE(result.corruptArtifacts.empty());
     CHECK(result.ok == false);
+
+    std::ostringstream os;
+    DbIntegrityCheck::render(os, result);
+    CHECK(os.str().find("retention window") != std::string::npos);
 }
 
 TEST_CASE("DbIntegrityCheck - reports quarantined WAL sidecars", "[doctor][db_integrity]") {

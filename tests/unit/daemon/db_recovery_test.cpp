@@ -437,6 +437,27 @@ TEST_CASE("quarantineSqliteSidecars never overwrites an earlier quarantine",
     fs::remove_all(dir, ec);
 }
 
+TEST_CASE("quarantineAndRecreate never overwrites an earlier corrupt DB copy",
+          "[unit][daemon][db_recovery]") {
+    auto dir = makeScratchDir("yams_db_recovery_quarantine_twice");
+    auto dbPath = dir / "yams.db";
+
+    writeFile(dbPath, "first");
+    auto first = yams::daemon::quarantineAndRecreate(dbPath);
+    REQUIRE(first);
+    writeFile(dbPath, "second");
+    auto second = yams::daemon::quarantineAndRecreate(dbPath);
+    REQUIRE(second);
+
+    CHECK((first.value().quarantinedPath != second.value().quarantinedPath));
+    CHECK((readFile(first.value().quarantinedPath) == "first"));
+    CHECK((readFile(second.value().quarantinedPath) == "second"));
+    CHECK((yams::daemon::listCorruptDbs(dir).size() == 2));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
 TEST_CASE("quarantineSqliteSidecars is a no-op without sidecars",
           "[unit][daemon][db_recovery][wal_quarantine]") {
     auto dir = makeScratchDir("yams_db_recovery_wal_quarantine_none");

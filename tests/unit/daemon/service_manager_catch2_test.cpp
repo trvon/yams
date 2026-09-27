@@ -38,6 +38,7 @@
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/repair/repair_health_probe.h>
 #include <yams/daemon/components/RepairService.h>
@@ -197,7 +198,7 @@ std::optional<fs::path> findQuarantinedFile(const fs::path& dataDir) {
     if (!fs::exists(dataDir, ec)) {
         return std::nullopt;
     }
-    const std::string prefix = "yams.db.corrupt-";
+    const std::string prefix = yams::daemon::corruptDbPrefix();
     for (fs::directory_iterator it(dataDir, ec), end; it != end; it.increment(ec)) {
         if (ec) {
             ec.clear();
@@ -1540,6 +1541,54 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     sm->shutdown();
     CHECK(walSidecarCleared(dbPath));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager startup salvage keeps the corrupt DB for retention",
+                 "[daemon][service_manager][startup][recovery][salvage]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    // A readable earlier metadata DB with more documents than the (not yet created) live DB.
+    const auto corruptPath = config_.dataDir / "yams.db.corrupt-20200101T000000Z";
+    {
+        metadata::Database db;
+        REQUIRE(db.open(corruptPath.string(), metadata::ConnectionMode::Create));
+        REQUIRE(db.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                           "file_path TEXT NOT NULL, file_name TEXT NOT NULL, file_extension "
+                           "TEXT, file_size INTEGER NOT NULL, sha256_hash TEXT UNIQUE NOT NULL, "
+                           "mime_type TEXT, created_time INTEGER, modified_time INTEGER, "
+                           "indexed_time INTEGER, content_extracted BOOLEAN DEFAULT 0, "
+                           "extraction_status TEXT DEFAULT 'pending', extraction_error TEXT, "
+                           "path_prefix TEXT, reverse_path TEXT, path_hash TEXT, parent_hash "
+                           "TEXT, path_depth INTEGER DEFAULT 0, repair_status TEXT DEFAULT "
+                           "'pending', repair_attempted_at INTEGER, repair_attempts INTEGER "
+                           "DEFAULT 0)"));
+        for (int i = 0; i < 2; ++i) {
+            const auto n = std::to_string(i);
+            REQUIRE(db.execute("INSERT INTO documents (file_path, file_name, file_size, "
+                               "sha256_hash) VALUES ('/salvage/" +
+                               n + ".txt', '" + n + ".txt', 1, '" + std::string(63, 'a') + n +
+                               "')"));
+        }
+        REQUIRE(db.execute("PRAGMA wal_checkpoint(TRUNCATE)"));
+        db.close();
+    }
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+    const auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    requireReadyDatabaseState(state_);
+
+    CHECK(state_.readiness.databaseSalvaged.load(std::memory_order_acquire));
+    // Startup salvages but never deletes: removal is the repair service's job, after the
+    // retention window and only with evidence that every document reached the live DB.
+    CHECK(fs::exists(corruptPath));
+
+    sm->shutdown();
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager clears stale metadata WAL during startup",

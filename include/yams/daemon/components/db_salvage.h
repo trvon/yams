@@ -2,6 +2,7 @@
 
 #include <yams/core/types.h>
 
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <functional>
@@ -46,8 +47,14 @@ struct SalvageQuickCheck {
 SalvageQuickCheck quickCheckSalvageNeeded(const std::filesystem::path& dataDir,
                                           const std::filesystem::path& dbPath);
 
+struct RetainedCorruptDb {
+    std::filesystem::path path;
+    std::string reason;
+};
+
 struct CorruptDbCleanup {
     std::vector<std::filesystem::path> removed;
+    std::vector<RetainedCorruptDb> retained;
     std::vector<std::string> errors;
 };
 
@@ -58,6 +65,22 @@ struct RecoverySentinelCleanup {
 
 RecoverySentinelCleanup removeRecoverySentinels(const std::filesystem::path& dbPath);
 
-CorruptDbCleanup removeCorruptDbFiles(const std::filesystem::path& dataDir);
+/**
+ * Evidence that salvage from `corruptPath` into `liveDbPath` is complete: true when every document
+ * hash in the corrupt DB is present in the live DB. An error means the evidence could not be read
+ * (unreadable corrupt DB, missing live DB, ...) and the corrupt DB must be kept.
+ */
+Result<bool> corruptDbSalvageConfirmed(const std::filesystem::path& corruptPath,
+                                       const std::filesystem::path& liveDbPath);
+
+/**
+ * Remove corrupt-DB artifacts of `liveDbPath` (and their -wal/-shm) only when both
+ *  - they were quarantined at least `minAge` ago (name timestamp, else mtime), and
+ *  - corruptDbSalvageConfirmed() proves every document reached the live DB.
+ * Everything else is kept and reported in `retained` with the reason.
+ */
+CorruptDbCleanup removeSalvagedCorruptDbs(
+    const std::filesystem::path& liveDbPath, std::chrono::seconds minAge,
+    std::chrono::system_clock::time_point now = std::chrono::system_clock::now());
 
 } // namespace yams::daemon

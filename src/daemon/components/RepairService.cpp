@@ -1,3 +1,4 @@
+#include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/db_salvage.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
 #include <yams/daemon/components/RepairService.h>
@@ -439,6 +440,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
     bool vectorCleanupDone = false;
     bool snapshotBackfillDone = false;
     auto nextSnapshotBackfill = std::chrono::steady_clock::now();
+    auto nextRecoveryArtifactSweep = std::chrono::steady_clock::now();
     std::uint32_t deferTicks = 0;
     const std::uint32_t minDeferTicks = shutdownState->config.initialScanDeferTicks;
 
@@ -507,6 +509,15 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             ResourceGovernor::instance().getPressureLevel() < ResourcePressureLevel::Warning) {
             snapshotBackfillDone = backfillLegacySnapshotKeysBatch();
             nextSnapshotBackfill = std::chrono::steady_clock::now() + 200ms;
+        }
+
+        // Retention cleanup of crash-recovery leftovers (corrupt DB copies, ...): owned here
+        // rather than by startup so it runs only when the daemon is idle and never races
+        // recovery itself.
+        if (std::chrono::steady_clock::now() >= nextRecoveryArtifactSweep && maintenanceAllowed()) {
+            (void)runRecoveryArtifactMaintenance();
+            nextRecoveryArtifactSweep = std::chrono::steady_clock::now() +
+                                        shutdownState->config.recoveryArtifactSweepInterval;
         }
 
         // Deferred initial scan
@@ -855,6 +866,33 @@ bool RepairService::backfillLegacySnapshotKeysBatch() {
                      legacySnapshotKeysMoved_);
     }
     return false;
+}
+
+RepairService::RecoveryArtifactMaintenanceStats RepairService::runRecoveryArtifactMaintenance() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::runRecoveryArtifactMaintenance");
+    RecoveryArtifactMaintenanceStats stats;
+    if (cfg_.dataDir.empty()) {
+        return stats;
+    }
+    const auto dbPath = cfg_.dataDir / kMetadataDbFileName;
+
+    auto corrupt = removeSalvagedCorruptDbs(
+        dbPath, std::chrono::duration_cast<std::chrono::seconds>(cfg_.corruptDbRetention));
+    stats.corruptDbsRemoved = corrupt.removed.size();
+    stats.corruptDbsRetained = corrupt.retained.size();
+    for (const auto& path : corrupt.removed) {
+        spdlog::info("RepairService: removed salvaged corrupt DB {} (all documents confirmed in "
+                     "the live DB, retention {}h elapsed)",
+                     path.string(), cfg_.corruptDbRetention.count());
+    }
+    for (const auto& kept : corrupt.retained) {
+        spdlog::debug("RepairService: keeping corrupt DB {}: {}", kept.path.string(), kept.reason);
+    }
+    for (auto& err : corrupt.errors) {
+        spdlog::warn("RepairService: corrupt DB cleanup error: {}", err);
+        stats.errors.push_back(std::move(err));
+    }
+    return stats;
 }
 
 void RepairService::performVectorCleanup() {
@@ -1632,10 +1670,9 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
     // from corrupt metadata DBs before scanning for orphans.  Skip salvage entirely
     // when all corrupt-DB documents are already present in the current DB.
     size_t salvagedCount = 0;
-    bool salvageDidRun = false;
     if (!dryRun) {
         namespace fs = std::filesystem;
-        fs::path dbPath = cfg_.dataDir / "yams.db";
+        fs::path dbPath = cfg_.dataDir / kMetadataDbFileName;
         if (fs::exists(dbPath)) {
             auto qc = quickCheckSalvageNeeded(cfg_.dataDir, dbPath);
             if (qc.needsSalvage) {
@@ -1658,7 +1695,6 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
                 }
                 auto salvaged = salvageFromAllCorruptDbs(cfg_.dataDir, dbPath, salvageProgress);
                 salvagedCount = salvaged.combined.documentsSalvaged;
-                salvageDidRun = true;
                 if (salvagedCount > 0) {
                     spdlog::info("[RepairService] Salvage recovered {} document(s) "
                                  "from {} corrupt DB(s)",
@@ -1715,13 +1751,20 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
             ", salvaged " + std::to_string(salvagedCount) + " documents from corrupt DBs";
     }
 
-    // Phase 3: If requested, remove the corrupt DB files now that salvage is complete
-    if (!dryRun && removeCorrupt && salvageDidRun) {
-        auto cleanup = removeCorruptDbFiles(cfg_.dataDir);
+    // Phase 3: If requested, remove corrupt DB files whose salvage is confirmed. The explicit
+    // request waives the retention window but never the evidence that every document is in the
+    // live DB; anything else is kept and reported.
+    if (!dryRun && removeCorrupt) {
+        auto cleanup =
+            removeSalvagedCorruptDbs(cfg_.dataDir / kMetadataDbFileName, std::chrono::seconds{0});
         if (!cleanup.removed.empty()) {
             spdlog::info("[RepairService] Removed {} corrupt DB file(s)", cleanup.removed.size());
             result.message +=
                 ", removed " + std::to_string(cleanup.removed.size()) + " corrupt DB file(s)";
+        }
+        if (!cleanup.retained.empty()) {
+            result.message += ", kept " + std::to_string(cleanup.retained.size()) +
+                              " corrupt DB file(s) whose salvage is not confirmed";
         }
         for (const auto& err : cleanup.errors) {
             spdlog::warn("[RepairService] Corrupt DB removal error: {}", err);

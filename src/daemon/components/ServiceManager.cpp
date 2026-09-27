@@ -1871,13 +1871,11 @@ void ServiceManager::runStartupSalvageIfNeeded(const std::filesystem::path& dbPa
         spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
     }
 
-    auto cleanup = removeCorruptDbFiles(salvageDir);
-    if (!cleanup.removed.empty()) {
-        spdlog::info("[ServiceManager] Cleaned up {} corrupt DB file(s)", cleanup.removed.size());
-    }
-    for (const auto& err : cleanup.errors) {
-        spdlog::warn("[ServiceManager] Corrupt DB cleanup error: {}", err);
-    }
+    // Startup never deletes corrupt DBs, even after a successful salvage: they are the only copy
+    // of anything salvage missed. RepairService removes them later, once every document is
+    // confirmed in the live DB and the retention window has passed.
+    spdlog::info("[ServiceManager] Corrupt DB artifact(s) retained; the repair service removes "
+                 "them after salvage is confirmed and the retention window has passed");
 
     setMaintenancePhase(maintenance_phase::kIdle);
     setDatabasePhase(dbphase::kReady);

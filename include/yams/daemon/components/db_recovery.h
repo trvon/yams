@@ -10,6 +10,32 @@
 
 namespace yams::daemon {
 
+/// File name of the metadata database inside the data directory.
+inline constexpr std::string_view kMetadataDbFileName = "yams.db";
+
+/// Infix of a quarantined database: `<db file name>.corrupt-<UTC timestamp>[.N]`.
+inline constexpr std::string_view kCorruptDbMarker = ".corrupt-";
+
+/// File-name prefix of corrupt-DB artifacts for `dbFileName` (e.g. "yams.db.corrupt-").
+inline std::string corruptDbPrefix(std::string_view dbFileName = kMetadataDbFileName) {
+    std::string prefix(dbFileName);
+    prefix += kCorruptDbMarker;
+    return prefix;
+}
+
+/// True for the main file of a corrupt-DB artifact of `dbFileName`, not its -wal/-shm companions.
+inline bool isCorruptDbFileName(std::string_view name,
+                                std::string_view dbFileName = kMetadataDbFileName) {
+    const auto prefix = corruptDbPrefix(dbFileName);
+    return name.size() > prefix.size() && name.starts_with(prefix) && !name.ends_with("-wal") &&
+           !name.ends_with("-shm");
+}
+
+/// Main files of the corrupt-DB artifacts of `dbFileName` in `dataDir` (unordered).
+std::vector<std::filesystem::path>
+listCorruptDbs(const std::filesystem::path& dataDir,
+               std::string_view dbFileName = kMetadataDbFileName);
+
 struct DbRecoveryResult {
     std::filesystem::path quarantinedPath;
     std::filesystem::path sentinelPath;

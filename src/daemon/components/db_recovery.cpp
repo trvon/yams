@@ -63,13 +63,18 @@ Result<DbRecoveryResult> quarantineAndRecreate(const fs::path& dbPath) {
     }
 
     const auto timestamp = formatUtcTimestamp(std::chrono::system_clock::now());
-    const std::string suffix = ".corrupt-" + timestamp;
-    const fs::path quarantined = dbPath.string() + suffix;
 
     std::error_code ec;
     if (!fs::exists(dbPath, ec)) {
         return Error{ErrorCode::FileNotFound,
                      "db file does not exist for quarantine: " + dbPath.string()};
+    }
+
+    // Never rename over an earlier quarantine from the same second.
+    const fs::path quarantined =
+        uniqueSiblingPath(dbPath.string() + std::string(kCorruptDbMarker) + timestamp);
+    if (quarantined.empty()) {
+        return Error{ErrorCode::IOError, "no free quarantine name for " + dbPath.string()};
     }
 
     fs::rename(dbPath, quarantined, ec);
@@ -98,6 +103,17 @@ Result<DbRecoveryResult> quarantineAndRecreate(const fs::path& dbPath) {
 
     DbRecoveryResult res{quarantined, sentinel, timestamp};
     return res;
+}
+
+std::vector<fs::path> listCorruptDbs(const fs::path& dataDir, std::string_view dbFileName) {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    for (fs::directory_iterator it(dataDir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (isCorruptDbFileName(it->path().filename().string(), dbFileName)) {
+            out.push_back(it->path());
+        }
+    }
+    return out;
 }
 
 Result<std::vector<fs::path>> quarantineSqliteSidecars(const fs::path& dbPath) {

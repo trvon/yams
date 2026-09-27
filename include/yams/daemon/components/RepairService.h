@@ -119,6 +119,17 @@ public:
         std::chrono::seconds stalledThreshold{3600}; // 1 hour
         std::size_t maxPendingRepairs{1000};
         std::uint32_t initialScanDeferTicks{50};
+        // Corrupt metadata DB copies (yams.db.corrupt-*) are kept at least this long after
+        // quarantine, and removed only once every document is confirmed in the live DB.
+        std::chrono::hours corruptDbRetention{24 * 7};
+        // How often the background loop re-runs recovery-artifact maintenance.
+        std::chrono::minutes recoveryArtifactSweepInterval{6 * 60};
+    };
+
+    struct RecoveryArtifactMaintenanceStats {
+        std::size_t corruptDbsRemoved{0};
+        std::size_t corruptDbsRetained{0};
+        std::vector<std::string> errors;
     };
 
     // Event types for document operations (same as old RepairCoordinator)
@@ -186,6 +197,10 @@ public:
         cfg_.maintenanceTokens = tokens;
     }
     void setMaxBatch(std::uint32_t maxBatch) { cfg_.maxBatch = maxBatch; }
+
+    /// Retention cleanup of crash-recovery leftovers in the data directory. Run periodically by
+    /// the background loop when maintenance is allowed; never deletes unconfirmed data.
+    RecoveryArtifactMaintenanceStats runRecoveryArtifactMaintenance();
 
 private:
     enum class OnDemandRepairOperation : std::uint8_t {
