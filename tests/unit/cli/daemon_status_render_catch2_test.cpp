@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -56,6 +57,16 @@ std::string renderDetailed(const StatusResponse& s, const DaemonStatusRenderCont
     std::ostringstream os;
     yams::cli::renderDaemonStatusDetailed(s, ctx, os);
     return os.str();
+}
+
+std::string lineContaining(const std::string& text, std::string_view needle) {
+    std::istringstream lines(text);
+    for (std::string line; std::getline(lines, line);) {
+        if (line.find(needle) != std::string::npos) {
+            return line;
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -123,6 +134,49 @@ TEST_CASE("daemon status names a running integrity check instead of 'Opening'",
     CHECK(out.find("11m") != std::string::npos);
     CHECK(out.find("full scan after unclean stop") != std::string::npos);
     CHECK(out.find("Opening") == std::string::npos);
+}
+
+TEST_CASE("daemon status shows the vector index as pending while vectors initialize",
+          "[cli][daemon][status][catch2]") {
+    PlainColors plain;
+    StatusResponse s = readyDaemon();
+    s.ready = false;
+    s.lifecycleState = "initializing";
+    s.vectorDbInitAttempted = false;
+    s.vectorDbReady = false;
+    s.readinessStates[std::string(yams::daemon::readiness::kDatabase)] = false;
+    s.databasePhase = std::string(yams::daemon::dbphase::kCheckingIntegrity);
+    s.databasePhaseElapsedMs = 90000;
+
+    const std::string brief = renderBrief(s, {});
+    INFO(brief);
+    CHECK(lineContaining(brief, "Vector Index").find("pending") != std::string::npos);
+    CHECK(brief.find("by configuration") == std::string::npos);
+
+    const std::string detailed = renderDetailed(s, {});
+    INFO(detailed);
+    CHECK(lineContaining(detailed, "Vector DB").find("Pending") != std::string::npos);
+    CHECK(detailed.find("by configuration") == std::string::npos);
+}
+
+TEST_CASE("daemon status says 'disabled by configuration' only when the daemon reports it",
+          "[cli][daemon][status][catch2]") {
+    PlainColors plain;
+    StatusResponse s = readyDaemon();
+    s.vectorDbInitAttempted = false;
+    s.vectorDbReady = false;
+    s.readinessStates[std::string(yams::daemon::readiness::kVectorDbDisabled)] = true;
+
+    const std::string brief = renderBrief(s, {});
+    INFO(brief);
+    const auto line = lineContaining(brief, "Vector Index");
+    CHECK(line.find("disabled") != std::string::npos);
+    CHECK(line.find("by configuration") != std::string::npos);
+    CHECK(line.find("pending") == std::string::npos);
+
+    const std::string detailed = renderDetailed(s, {});
+    INFO(detailed);
+    CHECK(lineContaining(detailed, "Vector DB").find("by configuration") != std::string::npos);
 }
 
 TEST_CASE("lexical containment rejects incomparable roots", "[cli][daemon][status][catch2]") {

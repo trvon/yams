@@ -339,6 +339,9 @@ constexpr std::string_view kRepairService = "repair_service";
 constexpr std::string_view kVectorDbInitAttempted = "vector_db_init_attempted";
 constexpr std::string_view kVectorDbReady = "vector_db_ready";
 constexpr std::string_view kVectorDbDim = "vector_db_dim";
+// Present (and true) only when vectors are disabled by configuration, so clients can tell that
+// apart from a vector database that has not finished initializing.
+constexpr std::string_view kVectorDbDisabled = "vector_db_disabled";
 constexpr std::string_view kSearchEngineDegraded = "search_engine_degraded";
 constexpr std::string_view kEmbeddingReady = "embedding_ready";
 constexpr std::string_view kEmbeddingDegraded = "embedding_degraded";
