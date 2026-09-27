@@ -5,16 +5,20 @@
 // pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 
+#include <sqlite3.h>
 #include <nlohmann/json.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/use_future.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -34,13 +38,16 @@
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/repair/repair_health_probe.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/shutdown_budget.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/writer_auth.h>
 #include <yams/metadata/database.h>
@@ -191,7 +198,7 @@ std::optional<fs::path> findQuarantinedFile(const fs::path& dataDir) {
     if (!fs::exists(dataDir, ec)) {
         return std::nullopt;
     }
-    const std::string prefix = "yams.db.corrupt-";
+    const std::string prefix = yams::daemon::corruptDbPrefix();
     for (fs::directory_iterator it(dataDir, ec), end; it != end; it.increment(ec)) {
         if (ec) {
             ec.clear();
@@ -1400,6 +1407,85 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK(nextStartup.invalidationPersisted);
 }
 
+namespace {
+std::atomic<std::int64_t> gInFlightQueryDeadlineNs{0};
+
+void keepRunningUntilDeadline(sqlite3_context* context, int, sqlite3_value**) {
+    const auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch())
+                           .count();
+    sqlite3_result_int(context, nowNs < gInFlightQueryDeadlineNs.load() ? 1 : 0);
+}
+} // namespace
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager shutdown interrupts an in-flight metadata query and keeps the "
+                 "clean-shutdown stamp",
+                 "[daemon][service_manager][shutdown][integrity_stamp][cancellation]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+    config_.enableAutoRepair = false;
+
+    const auto dbPath = metadataDbPath(config_);
+    seedMetadataDb(dbPath, "inflight_handler");
+    REQUIRE(publishDbCleanShutdownStamp(dbPath));
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+    const auto ready = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE((ready.state == ServiceManagerState::Ready));
+
+    auto readPool = sm->getReadConnectionPool();
+    REQUIRE((readPool != nullptr));
+
+    // A request handler pinned on a WorkCoordinator worker inside one long SQLite statement, the
+    // shape seen when a `yams list` over a large corpus was in flight during `daemon restart`.
+    // The statement would run well past both Phase 5 join windows unless shutdown interrupts it.
+    constexpr auto kStatementBudget = std::chrono::seconds(20);
+    gInFlightQueryDeadlineNs.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            (std::chrono::steady_clock::now() + kStatementBudget).time_since_epoch())
+            .count());
+    std::promise<void> started;
+    auto startedFuture = started.get_future();
+    std::promise<bool> finished;
+    auto finishedFuture = finished.get_future();
+    boost::asio::post(sm->getWorkerExecutor(), [readPool, &started, &finished]() {
+        WorkCoordinator::JobScope job("test.inflight_metadata_query");
+        auto conn = readPool->acquire(std::chrono::seconds(5));
+        if (!conn) {
+            started.set_value();
+            finished.set_value(false);
+            return;
+        }
+        auto& db = **conn.value();
+        sqlite3_create_function(db.rawHandle(), "yams_test_keep_running", 0, SQLITE_UTF8, nullptr,
+                                keepRunningUntilDeadline, nullptr, nullptr);
+        started.set_value();
+        const auto result = db.execute("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 "
+                                       "FROM c WHERE yams_test_keep_running()) SELECT count(*) "
+                                       "FROM c");
+        finished.set_value(!result.has_value());
+    });
+    REQUIRE((startedFuture.wait_for(std::chrono::seconds(5)) == std::future_status::ready));
+    // Let the statement enter sqlite3_step() so shutdown interrupts a running query.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    const auto shutdownStart = std::chrono::steady_clock::now();
+    sm->shutdown();
+    const auto shutdownElapsed = std::chrono::steady_clock::now() - shutdownStart;
+
+    REQUIRE((finishedFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready));
+    CHECK(finishedFuture.get());
+    CHECK((shutdownElapsed < shutdown_budget::kWorkCoordinatorJoinTimeout));
+    CHECK((sm->getServiceManagerFsmSnapshot().state == ServiceManagerState::Stopped));
+
+    const auto nextStartup = consumeDbCleanShutdownStamp(dbPath);
+    CHECK(nextStartup.trustedCleanShutdown);
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager preserves metadata when integrity validation cannot finish",
                  "[daemon][service_manager][startup][integrity][cancellation]") {
@@ -1455,6 +1541,54 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     sm->shutdown();
     CHECK(walSidecarCleared(dbPath));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager startup salvage keeps the corrupt DB for retention",
+                 "[daemon][service_manager][startup][recovery][salvage]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    // A readable earlier metadata DB with more documents than the (not yet created) live DB.
+    const auto corruptPath = config_.dataDir / "yams.db.corrupt-20200101T000000Z";
+    {
+        metadata::Database db;
+        REQUIRE(db.open(corruptPath.string(), metadata::ConnectionMode::Create));
+        REQUIRE(db.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                           "file_path TEXT NOT NULL, file_name TEXT NOT NULL, file_extension "
+                           "TEXT, file_size INTEGER NOT NULL, sha256_hash TEXT UNIQUE NOT NULL, "
+                           "mime_type TEXT, created_time INTEGER, modified_time INTEGER, "
+                           "indexed_time INTEGER, content_extracted BOOLEAN DEFAULT 0, "
+                           "extraction_status TEXT DEFAULT 'pending', extraction_error TEXT, "
+                           "path_prefix TEXT, reverse_path TEXT, path_hash TEXT, parent_hash "
+                           "TEXT, path_depth INTEGER DEFAULT 0, repair_status TEXT DEFAULT "
+                           "'pending', repair_attempted_at INTEGER, repair_attempts INTEGER "
+                           "DEFAULT 0)"));
+        for (int i = 0; i < 2; ++i) {
+            const auto n = std::to_string(i);
+            REQUIRE(db.execute("INSERT INTO documents (file_path, file_name, file_size, "
+                               "sha256_hash) VALUES ('/salvage/" +
+                               n + ".txt', '" + n + ".txt', 1, '" + std::string(63, 'a') + n +
+                               "')"));
+        }
+        REQUIRE(db.execute("PRAGMA wal_checkpoint(TRUNCATE)"));
+        db.close();
+    }
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+    const auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    requireReadyDatabaseState(state_);
+
+    CHECK(state_.readiness.databaseSalvaged.load(std::memory_order_acquire));
+    // Startup salvages but never deletes: removal is the repair service's job, after the
+    // retention window and only with evidence that every document reached the live DB.
+    CHECK(fs::exists(corruptPath));
+
+    sm->shutdown();
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager clears stale metadata WAL during startup",

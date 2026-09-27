@@ -23,12 +23,17 @@
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/common/gitignore.h>
+#include <yams/common/log_rate_limiter.h>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 
 namespace yams::daemon {
+
+namespace {
+constexpr auto kSessionWatcherWarnInterval = std::chrono::minutes(10);
+} // namespace
 
 bool ServiceManager::shouldStartSessionWatcher(std::string_view disableValue) {
     const std::string value(disableValue);
@@ -140,8 +145,13 @@ bool ServiceManager::scanSessionWatchDirectory(app::services::IIndexingService& 
         }
     }
     if (error) {
-        spdlog::warn("[ServiceManager] session watcher scan failed for '{}': {}",
-                     directory.string(), error.message());
+        // Retried every pass (seconds apart) until the directory is readable again.
+        static yams::common::LogRateLimiter scanFailureLog{kSessionWatcherWarnInterval};
+        if (auto held = scanFailureLog.admit()) {
+            spdlog::warn("[ServiceManager] session watcher scan failed for '{}': {}{}",
+                         directory.string(), error.message(),
+                         yams::common::LogRateLimiter::suppressedSuffix(*held));
+        }
         return false;
     }
 
@@ -152,10 +162,18 @@ bool ServiceManager::scanSessionWatchDirectory(app::services::IIndexingService& 
     const auto noteFailure = [&](const std::string& path, std::string_view what,
                                  std::string_view detail) {
         allSucceeded = false;
+        // A directory full of failing files reports each once, but not thousands of lines.
+        static yams::common::LogRateLimiter firstFailureLog{kSessionWatcherWarnInterval};
         if (sessionWatch_.failingPaths.insert(path).second) {
-            spdlog::warn("[ServiceManager] session watcher {} failed for '{}': {} (retrying "
-                         "quietly)",
-                         what, path, detail);
+            if (auto held = firstFailureLog.admit()) {
+                spdlog::warn("[ServiceManager] session watcher {} failed for '{}': {} (retrying "
+                             "quietly){}",
+                             what, path, detail,
+                             yams::common::LogRateLimiter::suppressedSuffix(*held));
+            } else {
+                spdlog::debug("[ServiceManager] session watcher {} failed for '{}': {}", what, path,
+                              detail);
+            }
         } else {
             spdlog::debug("[ServiceManager] session watcher {} still failing for '{}': {}", what,
                           path, detail);
@@ -182,8 +200,12 @@ bool ServiceManager::scanSessionWatchDirectory(app::services::IIndexingService& 
                 holdBackChanged(filePath);
             }
             allSucceeded = false;
-            spdlog::warn("[ServiceManager] session watcher indexing failed for '{}': {}",
-                         directory.string(), indexed.error().message);
+            static yams::common::LogRateLimiter indexFailureLog{kSessionWatcherWarnInterval};
+            if (auto held = indexFailureLog.admit()) {
+                spdlog::warn("[ServiceManager] session watcher indexing failed for '{}': {}{}",
+                             directory.string(), indexed.error().message,
+                             yams::common::LogRateLimiter::suppressedSuffix(*held));
+            }
         } else if (indexed.value().filesFailed != 0) {
             std::unordered_set<std::string> failed;
             for (const auto& result : indexed.value().results) {

@@ -1,6 +1,7 @@
 #include <yams/cli/doctor/checks/db_integrity.h>
 #include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/ui_helpers.hpp>
+#include <yams/daemon/components/db_recovery.h>
 
 #include <sqlite3.h>
 #include <filesystem>
@@ -74,7 +75,10 @@ DbIntegrityCheck::Result DbIntegrityCheck::execute(const DoctorContext& ctx) {
             if (ec)
                 break;
             auto name = entry.path().filename().string();
-            if (name.find(".corrupt-") != std::string::npos) {
+            // Quarantined SQLite sidecars may hold uncheckpointed transactions; surface them
+            // alongside corrupt DBs so they are not forgotten.
+            if (name.find(yams::daemon::kCorruptDbMarker) != std::string::npos ||
+                name.find(yams::daemon::kSqliteSidecarQuarantineMarker) != std::string::npos) {
                 std::ostringstream oss;
                 oss << name;
                 if (entry.is_regular_file() && entry.file_size() > 0)
@@ -149,6 +153,11 @@ void DbIntegrityCheck::render(std::ostream& os, const Result& r) {
 
     for (const auto& artifact : r.corruptArtifacts)
         os << "\n  " << status_warning(artifact) << "\n";
+    if (!r.corruptArtifacts.empty()) {
+        os << "    → Corrupt DB copies are kept until every document is confirmed in yams.db and\n"
+              "      the retention window (default 7 days) has passed; the repair service then\n"
+              "      removes them. Quarantined WAL/SHM files are never removed automatically.\n";
+    }
 
     // ── Integrity check results ──
     if (r.integrityCheckRan) {

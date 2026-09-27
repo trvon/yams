@@ -13,6 +13,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -861,5 +862,73 @@ TEST_CASE("Connection pool respects busy timeout on contention",
     // Should have waited at least the busyTimeout before failing
     CHECK((elapsed >= cfg.busyTimeout));
 
+    pool.shutdown();
+}
+
+namespace {
+// Deadline for the bounded long-running query used by the interrupt tests. The SQL function lets
+// the statement run for a fixed wall-clock budget independent of machine or build speed.
+std::atomic<std::int64_t> gLongQueryDeadlineNs{0};
+
+void keepRunningUntilDeadline(sqlite3_context* context, int, sqlite3_value**) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    const auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+    sqlite3_result_int(context, nowNs < gLongQueryDeadlineNs.load() ? 1 : 0);
+}
+
+constexpr const char* kLongQuery =
+    "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE "
+    "yams_test_keep_running()) SELECT count(*) FROM c";
+} // namespace
+
+TEST_CASE("Connection pool interrupts statements running on leased connections",
+          "[metadata][connection_pool][interrupt][shutdown]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 2;
+    cfg.enableWAL = false;
+
+    ConnectionPool pool(make_db_path("pool_interrupt_").string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    auto conn = pool.acquire();
+    REQUIRE(conn.has_value());
+    auto& db = **conn.value();
+    REQUIRE(
+        (sqlite3_create_function(db.rawHandle(), "yams_test_keep_running", 0, SQLITE_UTF8, nullptr,
+                                 keepRunningUntilDeadline, nullptr, nullptr) == SQLITE_OK));
+
+    // An interrupt that lands while the leased connection is idle must not fail its next
+    // statement: shutdown interrupts every lease, including ones between statements.
+    CHECK((pool.interruptActiveConnections() == 1U));
+    CHECK(db.execute("SELECT 1").has_value());
+
+    constexpr auto kQueryBudget = 30s;
+    gLongQueryDeadlineNs.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            (std::chrono::steady_clock::now() + kQueryBudget).time_since_epoch())
+            .count());
+    std::promise<void> started;
+    auto startedFuture = started.get_future();
+    auto query = std::async(std::launch::async, [&db, &started]() {
+        started.set_value();
+        return db.execute(kLongQuery);
+    });
+    REQUIRE((startedFuture.wait_for(5s) == std::future_status::ready));
+
+    // The statement may not have entered sqlite3_step() yet, and SQLite clears an interrupt that
+    // arrives before any statement is active, so re-issue until the query returns.
+    const auto interruptStart = std::chrono::steady_clock::now();
+    while (query.wait_for(10ms) != std::future_status::ready &&
+           std::chrono::steady_clock::now() - interruptStart < kQueryBudget) {
+        pool.interruptActiveConnections();
+    }
+    REQUIRE((query.wait_for(0s) == std::future_status::ready));
+    const auto elapsed = std::chrono::steady_clock::now() - interruptStart;
+    CHECK_FALSE(query.get().has_value());
+    CHECK((elapsed < 5s));
+
+    conn = {};
+    CHECK((pool.interruptActiveConnections() == 0U));
     pool.shutdown();
 }

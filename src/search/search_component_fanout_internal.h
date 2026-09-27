@@ -75,9 +75,11 @@ public:
 
     ComponentFanoutCollector(const SearchEngineConfig& config, SearchTraceCollector& trace,
                              ComponentFanoutSinks sinks,
-                             std::shared_ptr<const std::atomic<bool>> cancellationSignal = {})
+                             std::shared_ptr<const std::atomic<bool>> cancellationSignal = {},
+                             std::shared_ptr<const std::atomic<bool>> hostCancellationSignal = {})
         : config_(config), trace_(trace), sinks_(sinks),
-          cancellationSignal_(std::move(cancellationSignal)) {}
+          cancellationSignal_(std::move(cancellationSignal)),
+          hostCancellationSignal_(std::move(hostCancellationSignal)) {}
 
     ComponentStatus collect(Future& future, const char* name, std::atomic<uint64_t>& queryCount,
                             std::atomic<uint64_t>& avgTime);
@@ -86,10 +88,20 @@ public:
                           std::atomic<uint64_t>& avgTime);
 
 private:
+    [[nodiscard]] bool cancellable() const noexcept {
+        return cancellationSignal_ || hostCancellationSignal_;
+    }
+    [[nodiscard]] bool canceled() const noexcept {
+        return (cancellationSignal_ && cancellationSignal_->load(std::memory_order_acquire)) ||
+               (hostCancellationSignal_ &&
+                hostCancellationSignal_->load(std::memory_order_acquire));
+    }
+
     const SearchEngineConfig& config_;
     SearchTraceCollector& trace_;
     ComponentFanoutSinks sinks_;
     std::shared_ptr<const std::atomic<bool>> cancellationSignal_;
+    std::shared_ptr<const std::atomic<bool>> hostCancellationSignal_;
 };
 
 } // namespace yams::search::detail

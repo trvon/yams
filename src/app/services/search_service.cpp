@@ -158,6 +158,7 @@ search::SearchExecutionContext buildSearchExecutionContext(const AppContext& ctx
         context.workerExecutor = ctx.workerExecutor;
     }
     context.cancellationSignal = req.cancellationSignal;
+    context.hostCancellationSignal = ctx.cancellationSignal;
 
     const search::QueryRouter router;
     const auto intent = router.classifyIntent(normalizedQuery).label;
@@ -589,7 +590,8 @@ public:
         const auto t0 = steady_clock::now();
         MetadataTelemetry metadataTelemetry;
 
-        if (req.cancellationSignal && req.cancellationSignal->load(std::memory_order_acquire)) {
+        if ((req.cancellationSignal && req.cancellationSignal->load(std::memory_order_acquire)) ||
+            hostCancellationRequested(ctx_)) {
             co_return Error{ErrorCode::OperationCancelled, "Search request canceled"};
         }
 

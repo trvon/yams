@@ -1,3 +1,4 @@
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/retrieval_path_policy.hpp>
@@ -646,6 +647,32 @@ TEST_CASE("GrepService - Error Handling", "[grep][service][reliability]") {
         REQUIRE(res);
         CHECK(res.value().totalMatches > 0);
     }
+}
+
+TEST_CASE("GrepService - Stops scanning when the host cancels",
+          "[grep][service][reliability][cancellation]") {
+    SKIP_GREP_ON_WINDOWS();
+
+    GrepFixture fixture;
+    fixture.addDocument("a.txt", "alpha beta gamma\n");
+    fixture.addDocument("b.txt", "alpha delta\n");
+
+    auto cancelled = std::make_shared<std::atomic<bool>>(true);
+    fixture.ctx_.cancellationSignal = cancelled;
+    fixture.grepService_ = makeGrepService(fixture.ctx_);
+
+    GrepRequest req;
+    req.pattern = "alpha";
+    req.literalText = true;
+
+    auto res = fixture.grep(req);
+    REQUIRE_FALSE(res);
+    CHECK((res.error().code == ErrorCode::OperationCancelled));
+
+    cancelled->store(false);
+    auto resumed = fixture.grep(req);
+    REQUIRE(resumed);
+    CHECK((resumed.value().totalMatches > 0));
 }
 
 TEST_CASE("GrepService - Falls back to extracted content when blob unavailable",

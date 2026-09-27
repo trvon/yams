@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/db_salvage.h>
+#include <yams/daemon/components/RepairService.h>
 #include <yams/metadata/database.h>
 
 #include <sqlite3.h>
@@ -378,15 +380,17 @@ TEST_CASE("quick salvage check tracks unreadable corrupt DBs without requesting 
     fs::remove_all(dir, ec);
 }
 
-TEST_CASE("corrupt DB cleanup removes readable artifacts but keeps unreadable evidence",
-          "[unit][daemon][db_salvage][startup_refactor]") {
+TEST_CASE("corrupt DB cleanup removes confirmed artifacts but keeps unreadable evidence",
+          "[unit][daemon][db_salvage][startup_refactor][retention]") {
     auto dir = makeScratchDir("yams_corrupt_cleanup_safe");
+    auto livePath = dir / "yams.db";
     auto readableCorrupt = dir / "yams.db.corrupt-readable";
     auto unreadableCorrupt = dir / "yams.db.corrupt-unreadable";
     auto readableWal = fs::path(readableCorrupt.string() + "-wal");
     auto readableShm = fs::path(readableCorrupt.string() + "-shm");
     auto hashes = makeTestHashes(1);
 
+    createAndPopulateDb(livePath, 1, hashes);
     createAndPopulateDb(readableCorrupt, 1, hashes);
     {
         std::ofstream(readableWal) << "wal";
@@ -394,14 +398,172 @@ TEST_CASE("corrupt DB cleanup removes readable artifacts but keeps unreadable ev
         std::ofstream(unreadableCorrupt, std::ios::binary) << "not sqlite";
     }
 
-    const auto cleanup = yams::daemon::removeCorruptDbFiles(dir);
+    const auto cleanup = yams::daemon::removeSalvagedCorruptDbs(livePath, std::chrono::seconds{0});
     REQUIRE(cleanup.errors.empty());
     REQUIRE((cleanup.removed.size() == 1));
+    REQUIRE((cleanup.retained.size() == 1));
+    CHECK((cleanup.retained.front().path.filename() == unreadableCorrupt.filename()));
     REQUIRE((cleanup.removed.front().filename() == readableCorrupt.filename()));
     REQUIRE_FALSE(fs::exists(readableCorrupt));
     REQUIRE_FALSE(fs::exists(readableWal));
     REQUIRE_FALSE(fs::exists(readableShm));
     REQUIRE(fs::exists(unreadableCorrupt));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("corrupt DB cleanup keeps readable artifacts whose documents never reached the live DB",
+          "[unit][daemon][db_salvage][retention]") {
+    auto dir = makeScratchDir("yams_corrupt_cleanup_unsalvaged");
+    auto livePath = dir / "yams.db";
+    auto corruptPath = dir / "yams.db.corrupt-20200101T000000Z";
+    auto hashes = makeTestHashes(3);
+
+    // The live DB only has the first document: salvage of the other two never happened
+    // (or failed), so the corrupt DB is still the only copy of them.
+    createAndPopulateDb(livePath, 1, hashes);
+    createAndPopulateDb(corruptPath, 3, hashes);
+
+    const auto cleanup = yams::daemon::removeSalvagedCorruptDbs(livePath, std::chrono::seconds{0});
+    CHECK(cleanup.removed.empty());
+    REQUIRE((cleanup.retained.size() == 1));
+    CHECK((cleanup.retained.front().reason == "documents missing from live DB"));
+    REQUIRE(fs::exists(corruptPath));
+    CHECK((countDocuments(corruptPath) == 3));
+
+    auto confirmed = yams::daemon::corruptDbSalvageConfirmed(corruptPath, livePath);
+    REQUIRE(confirmed);
+    CHECK_FALSE(confirmed.value());
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("corrupt DB cleanup honours the retention window even when salvage is confirmed",
+          "[unit][daemon][db_salvage][retention]") {
+    using namespace std::chrono;
+    auto dir = makeScratchDir("yams_corrupt_cleanup_retention");
+    auto livePath = dir / "yams.db";
+    auto corruptPath = dir / "yams.db.corrupt-20260301T120000Z";
+    auto hashes = makeTestHashes(2);
+    createAndPopulateDb(livePath, 2, hashes);
+    createAndPopulateDb(corruptPath, 2, hashes);
+
+    const auto quarantinedAt = sys_days{2026y / March / 1} + 12h;
+    const auto retention = duration_cast<seconds>(hours{24 * 7});
+
+    SECTION("young artifact is kept") {
+        const auto cleanup =
+            yams::daemon::removeSalvagedCorruptDbs(livePath, retention, quarantinedAt + 6 * 24h);
+        CHECK(cleanup.removed.empty());
+        REQUIRE((cleanup.retained.size() == 1));
+        CHECK((cleanup.retained.front().reason == "within retention window"));
+        CHECK(fs::exists(corruptPath));
+    }
+    SECTION("aged, confirmed artifact is removed") {
+        const auto cleanup =
+            yams::daemon::removeSalvagedCorruptDbs(livePath, retention, quarantinedAt + 8 * 24h);
+        REQUIRE((cleanup.removed.size() == 1));
+        CHECK(cleanup.retained.empty());
+        CHECK_FALSE(fs::exists(corruptPath));
+    }
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("corrupt DB cleanup falls back to mtime when the name has no timestamp",
+          "[unit][daemon][db_salvage][retention]") {
+    using namespace std::chrono;
+    auto dir = makeScratchDir("yams_corrupt_cleanup_mtime");
+    auto livePath = dir / "yams.db";
+    auto corruptPath = dir / "yams.db.corrupt-manual-copy";
+    auto hashes = makeTestHashes(1);
+    createAndPopulateDb(livePath, 1, hashes);
+    createAndPopulateDb(corruptPath, 1, hashes);
+    const auto retention = duration_cast<seconds>(hours{24 * 7});
+
+    auto cleanup = yams::daemon::removeSalvagedCorruptDbs(livePath, retention);
+    CHECK(cleanup.removed.empty());
+    CHECK(fs::exists(corruptPath));
+
+    fs::last_write_time(corruptPath, fs::file_time_type::clock::now() - hours{24 * 10});
+    cleanup = yams::daemon::removeSalvagedCorruptDbs(livePath, retention);
+    CHECK((cleanup.removed.size() == 1));
+    CHECK_FALSE(fs::exists(corruptPath));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("corrupt DB cleanup keeps everything when the live DB is missing",
+          "[unit][daemon][db_salvage][retention]") {
+    auto dir = makeScratchDir("yams_corrupt_cleanup_no_live");
+    auto corruptPath = dir / "yams.db.corrupt-20200101T000000Z";
+    createAndPopulateDb(corruptPath, 1, makeTestHashes(1));
+
+    const auto cleanup =
+        yams::daemon::removeSalvagedCorruptDbs(dir / "yams.db", std::chrono::seconds{0});
+    CHECK(cleanup.removed.empty());
+    CHECK((cleanup.retained.size() == 1));
+    CHECK(fs::exists(corruptPath));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("corrupt DB artifact names are recognised in one place",
+          "[unit][daemon][db_salvage][retention]") {
+    using yams::daemon::isCorruptDbFileName;
+    CHECK((yams::daemon::corruptDbPrefix() == "yams.db.corrupt-"));
+    CHECK(isCorruptDbFileName("yams.db.corrupt-20260101T000000Z"));
+    CHECK(isCorruptDbFileName("yams.db.corrupt-20260101T000000Z.1"));
+    CHECK_FALSE(isCorruptDbFileName("yams.db.corrupt-20260101T000000Z-wal"));
+    CHECK_FALSE(isCorruptDbFileName("yams.db.corrupt-20260101T000000Z-shm"));
+    CHECK_FALSE(isCorruptDbFileName("yams.db.corrupt-"));
+    CHECK_FALSE(isCorruptDbFileName("vectors.db.corrupt-20260101T000000Z"));
+    CHECK(isCorruptDbFileName("vectors.db.corrupt-20260101T000000Z", "vectors.db"));
+
+    auto dir = makeScratchDir("yams_corrupt_list");
+    for (const auto* name : {"yams.db", "yams.db.corrupt-a", "yams.db.corrupt-a-wal",
+                             "yams.db-wal.quarantine-20260101T000000Z", "vectors.db.corrupt-b"}) {
+        std::ofstream(dir / name) << "x";
+    }
+    const auto listed = yams::daemon::listCorruptDbs(dir);
+    REQUIRE((listed.size() == 1));
+    CHECK((listed.front().filename() == "yams.db.corrupt-a"));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("RepairService maintenance removes only aged, confirmed corrupt DBs",
+          "[unit][daemon][db_salvage][retention][repair]") {
+    auto dir = makeScratchDir("yams_repair_recovery_artifacts");
+    auto livePath = dir / "yams.db";
+    auto hashes = makeTestHashes(3);
+    createAndPopulateDb(livePath, 2, hashes);
+
+    const auto oldConfirmed = dir / "yams.db.corrupt-20200101T000000Z";
+    const auto oldUnconfirmed = dir / "yams.db.corrupt-20200102T000000Z";
+    createAndPopulateDb(oldConfirmed, 2, hashes);
+    createAndPopulateDb(oldUnconfirmed, 3, hashes);
+    // Quarantine time in the future: always inside the retention window.
+    auto youngCorrupt = dir / "yams.db.corrupt-21000101T000000Z";
+    createAndPopulateDb(youngCorrupt, 2, hashes);
+
+    yams::daemon::RepairService::Config cfg;
+    cfg.dataDir = dir;
+    yams::daemon::RepairService service(
+        yams::daemon::RepairServiceContext{}, nullptr, [] { return std::size_t{0}; }, cfg);
+    const auto stats = service.runRecoveryArtifactMaintenance();
+
+    CHECK((stats.corruptDbsRemoved == 1));
+    CHECK((stats.corruptDbsRetained == 2));
+    CHECK_FALSE(fs::exists(oldConfirmed));
+    CHECK(fs::exists(oldUnconfirmed));
+    CHECK(fs::exists(youngCorrupt));
 
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -544,6 +706,28 @@ TEST_CASE("salvaged fresh DB passes integrity check", "[unit][daemon][db_salvage
     REQUIRE(fresh.open(freshPath.string(), yams::metadata::ConnectionMode::ReadWrite));
     REQUIRE(fresh.checkIntegrity());
     fresh.close();
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("RepairService maintenance sweeps stale clean-shutdown stamp leftovers",
+          "[unit][daemon][db_salvage][repair][stamp_sweep]") {
+    auto dir = makeScratchDir("yams_repair_stamp_sweep");
+    auto livePath = dir / "yams.db";
+    createAndPopulateDb(livePath, 1, makeTestHashes(1));
+    const fs::path staleTmp(livePath.string() + ".integrity.tmp");
+    std::ofstream(staleTmp) << "version=1\n";
+    fs::last_write_time(staleTmp, fs::file_time_type::clock::now() - std::chrono::hours{2});
+
+    yams::daemon::RepairService::Config cfg;
+    cfg.dataDir = dir;
+    yams::daemon::RepairService service(
+        yams::daemon::RepairServiceContext{}, nullptr, [] { return std::size_t{0}; }, cfg);
+    const auto stats = service.runRecoveryArtifactMaintenance();
+
+    CHECK((stats.stampArtifactsRemoved == 1));
+    CHECK_FALSE(fs::exists(staleTmp));
 
     std::error_code ec;
     fs::remove_all(dir, ec);

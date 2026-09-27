@@ -120,6 +120,14 @@ public:
     void clearEngine();
 
     /**
+     * @brief Ask the current engine's background work to stop ahead of clearEngine().
+     *
+     * Called when shutdown begins so the simeon-lexical build thread winds down while the rest
+     * of shutdown runs, instead of blocking the engine destructor in Phase 6.7.
+     */
+    void requestShutdown();
+
+    /**
      * Check if engine is currently building.
      */
     bool isBuilding() const { return fsm_.isBuilding(); }

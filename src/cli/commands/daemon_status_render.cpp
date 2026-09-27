@@ -184,6 +184,20 @@ std::string repairOperationLabel(uint64_t code) {
     return label;
 }
 
+// The daemon publishes vector_db_disabled only when vectors are off by configuration. Anything
+// else with no vector init attempt yet is still starting (e.g. the metadata integrity check).
+bool vectorsDisabledByConfiguration(const yams::daemon::StatusResponse& s) {
+    const auto it = s.readinessStates.find(std::string(yams::daemon::readiness::kVectorDbDisabled));
+    return it != s.readinessStates.end() && it->second;
+}
+
+std::string vectorInitPendingDetail(const yams::daemon::StatusResponse& s) {
+    if (!s.databasePhase.empty() && s.databasePhase != yams::daemon::dbphase::kReady) {
+        return "waiting for database (" + humanizeToken(s.databasePhase) + ")";
+    }
+    return "initializing";
+}
+
 } // namespace
 
 void renderDaemonStatusWithOptionalSection(
@@ -534,11 +548,14 @@ void renderDaemonStatusBrief(const yams::daemon::StatusResponse& s,
         return it == s.initProgress.end() ? 0 : it->second;
     }();
 
-    if (vectorDisabled) {
+    if (vectorsDisabledByConfiguration(s)) {
         // Vectors are disabled by configuration (e.g. YAMS_DISABLE_VECTORS=1 or an
         // empty vector config); this is intentional, not a rebuild failure.
         overview.push_back(
             {"Vector Index", paintStatus(Severity::Good, "disabled"), "by configuration"});
+    } else if (vectorDisabled) {
+        overview.push_back(
+            {"Vector Index", paintStatus(Severity::Warn, "pending"), vectorInitPendingDetail(s)});
     }
 
     if (topologyRebuildRunning || (!vectorDisabled && !vectorIndexReady)) {
@@ -1166,7 +1183,8 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
             indexLabel = "HNSW Index";
         }
         if (vectorDisabled) {
-            indexState << "disabled (by configuration)";
+            indexState << (vectorsDisabledByConfiguration(status) ? "disabled (by configuration)"
+                                                                  : "pending");
         } else if (vectorIndexReady) {
             indexState << "ready";
         } else {
@@ -1314,12 +1332,17 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
     {
         const bool ready = getReadiness("vector_db");
         const bool initialized = status.vectorDbInitAttempted;
-        Severity sev = ready ? Severity::Good : Severity::Warn;
-        std::string text =
-            ready ? "Ready" : (initialized ? "Initialized (empty)" : "Not initialized");
+        const bool disabled = !initialized && vectorsDisabledByConfiguration(status);
+        Severity sev = (ready || disabled) ? Severity::Good : Severity::Warn;
+        std::string text = ready         ? "Ready"
+                           : initialized ? "Initialized (empty)"
+                           : disabled    ? "Disabled (by configuration)"
+                                         : "Pending";
         std::string extra;
         if (status.vectorDbDim > 0) {
             extra = "dim=" + std::to_string(status.vectorDbDim);
+        } else if (!initialized && !disabled) {
+            extra = vectorInitPendingDetail(status);
         }
         storageRows.push_back({"Vector DB", paintStatus(sev, text), extra});
     }

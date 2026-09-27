@@ -34,9 +34,10 @@ dispatchBatchToCoordinator(ServiceManager* sm, WorkCoordinator* coordinator,
         co_return processTaskBatch(sm, std::move(tasks));
     }
 
-    co_return co_await dispatch::offload_to_worker(sm, [sm, tasks = std::move(tasks)]() mutable {
-        return processTaskBatch(sm, std::move(tasks));
-    });
+    co_return co_await dispatch::offload_to_worker(
+        sm, "ingest.store_batch", [sm, tasks = std::move(tasks)]() mutable {
+            return processTaskBatch(sm, std::move(tasks));
+        });
 }
 
 static void mergePendingPostIngest(PendingPostIngestByMime& target,

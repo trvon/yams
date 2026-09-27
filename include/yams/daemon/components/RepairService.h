@@ -1,6 +1,8 @@
 #pragma once
 
+#include <yams/app/services/session_service.hpp>
 #include <yams/core/types.h>
+#include <yams/daemon/components/sqlite_vacuum.h>
 #include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
@@ -12,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <string_view>
@@ -44,6 +47,7 @@ class RepairManager;
 namespace yams::daemon {
 
 class WriteCoordinator;
+enum class ResourcePressureLevel : std::uint8_t;
 
 class ServiceManager;
 struct StateComponent;
@@ -119,7 +123,47 @@ public:
         std::chrono::seconds stalledThreshold{3600}; // 1 hour
         std::size_t maxPendingRepairs{1000};
         std::uint32_t initialScanDeferTicks{50};
+        // Corrupt metadata DB copies (yams.db.corrupt-*) are kept at least this long after
+        // quarantine, and removed only once every document is confirmed in the live DB.
+        std::chrono::hours corruptDbRetention{24 * 7};
+        // How often the background loop re-runs recovery-artifact maintenance.
+        std::chrono::minutes recoveryArtifactSweepInterval{6 * 60};
+        // Clean-shutdown stamp leftovers (yams.db.integrity.tmp / .claim.<pid>.<n>) of a
+        // crashed process are removed only when at least this old.
+        std::chrono::minutes stampArtifactMinAge{60};
+        // Idle maintenance waits this long after startup (and after a VACUUM that had to
+        // yield to new work) before its next check.
+        std::chrono::minutes maintenanceDelay{15};
+        // How often idle maintenance checks whether vectors.db is worth a VACUUM (0 disables).
+        std::chrono::hours vectorVacuumInterval{24};
+        // Session files nobody has touched for this long are deleted (0 disables).
+        std::chrono::days sessionExpiry{30};
+        // Session store to expire; empty means the user's session directory.
+        std::filesystem::path sessionsDir{};
     };
+
+    struct RecoveryArtifactMaintenanceStats {
+        std::size_t corruptDbsRemoved{0};
+        std::size_t corruptDbsRetained{0};
+        std::size_t stampArtifactsRemoved{0};
+        std::vector<std::string> errors;
+    };
+
+    /// Everything that decides whether a vectors.db VACUUM may start or must yield.
+    struct VectorVacuumSignals {
+        bool shuttingDown{false};
+        bool maintenanceAllowed{false};
+        ResourcePressureLevel pressure{};
+        std::size_t embeddingQueued{0};
+        std::size_t embeddingInFlight{0};
+        bool indexMutating{false};
+        bool repairInProgress{false};
+    };
+
+    /// VACUUM holds the vectors.db write lock for the whole rewrite, so it only runs while the
+    /// daemon is idle: no client connections, no resource pressure, no queued or in-flight
+    /// embedding writes, no index rebuild or bulk load, and no on-demand repair.
+    [[nodiscard]] static bool vectorVacuumAdmitted(const VectorVacuumSignals& signals) noexcept;
 
     // Event types for document operations (same as old RepairCoordinator)
     struct DocumentAddedEvent {
@@ -186,6 +230,22 @@ public:
         cfg_.maintenanceTokens = tokens;
     }
     void setMaxBatch(std::uint32_t maxBatch) { cfg_.maxBatch = maxBatch; }
+
+    /// Retention cleanup of crash-recovery leftovers in the data directory. Run periodically by
+    /// the background loop when maintenance is allowed; never deletes unconfirmed data.
+    RecoveryArtifactMaintenanceStats runRecoveryArtifactMaintenance();
+
+#ifdef YAMS_TESTING
+    void testing_setVectorVacuumPolicy(const SqliteVacuumPolicy& policy) {
+        vectorVacuumPolicy_ = policy;
+    }
+    std::optional<SqliteVacuumOutcome> testing_runVectorVacuumMaintenance() {
+        return runVectorVacuumMaintenance();
+    }
+    std::optional<app::services::SessionExpiryResult> testing_runSessionExpiryMaintenance() {
+        return runSessionExpiryMaintenance();
+    }
+#endif
 
 private:
     enum class OnDemandRepairOperation : std::uint8_t {
@@ -263,6 +323,18 @@ private:
     bool backfillLegacySnapshotKeysBatch();
     bool maintenanceAllowed() const;
     std::uint64_t legacySnapshotKeysMoved_{0};
+
+    // ── vectors.db VACUUM (idle maintenance) ──
+    VectorVacuumSignals collectVectorVacuumSignals() const;
+    /// Runs one VACUUM check of vectors.db when admitted. Returns nullopt when the check did
+    /// not run (not admitted, vectors disabled, or the vector database is not open on disk).
+    std::optional<SqliteVacuumOutcome> runVectorVacuumMaintenance();
+    SqliteVacuumPolicy vectorVacuumPolicy_{};
+
+    // ── Session store expiry (idle maintenance) ──
+    /// Deletes idle session files when maintenance is allowed. Returns nullopt when the check
+    /// did not run (disabled, or clients are connected).
+    std::optional<app::services::SessionExpiryResult> runSessionExpiryMaintenance();
 
     // ── Detect missing work ──
     struct MissingWorkResult {

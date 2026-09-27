@@ -951,6 +951,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_repair_maintenance_exe = executable('catch2_repair_maintenance',
+    files('unit/daemon/repair_maintenance_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_write_coordinator_exe = executable('catch2_write_coordinator',
     files('unit/daemon/write_coordinator_catch2_test.cpp'),
     include_directories: incs,
@@ -1769,6 +1778,7 @@ if catch2_dep.found()
       'unit/common/format_catch2_test.cpp',
       'unit/common/crc32_catch2_test.cpp',
       'unit/common/hash_predicates_catch2_test.cpp',
+      'unit/common/log_rate_limiter_catch2_test.cpp',
       'unit/common/path_alias_catch2_test.cpp',
       'unit/common/pattern_utils_catch2_test.cpp',
       'unit/common/string_utils_catch2_test.cpp',
@@ -3675,6 +3685,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
+  )
+
+  test('repair_maintenance', catch2_repair_maintenance_exe,
+    suite: ['catch2', 'unit', 'daemon', 'repair'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('service_manager', catch2_service_manager_exe,

@@ -7,11 +7,16 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <set>
+#include <sstream>
+#include <string>
 #include <thread>
 #include <vector>
 
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/post.hpp>
@@ -37,6 +42,39 @@ inline bool wait_for_condition(std::chrono::milliseconds timeout,
     }
     return predicate();
 }
+
+class SpdlogCaptureGuard {
+public:
+    SpdlogCaptureGuard()
+        : previousLogger_(spdlog::default_logger()), previousLevel_(spdlog::get_level()) {
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(stream_);
+        logger_ = std::make_shared<spdlog::logger>("work_coordinator_capture", sink);
+        logger_->set_level(spdlog::level::warn);
+        spdlog::set_default_logger(logger_);
+        spdlog::set_level(spdlog::level::warn);
+    }
+
+    ~SpdlogCaptureGuard() {
+        if (previousLogger_) {
+            spdlog::set_default_logger(previousLogger_);
+        }
+        spdlog::set_level(previousLevel_);
+    }
+
+    SpdlogCaptureGuard(const SpdlogCaptureGuard&) = delete;
+    SpdlogCaptureGuard& operator=(const SpdlogCaptureGuard&) = delete;
+
+    std::string str() {
+        logger_->flush();
+        return stream_.str();
+    }
+
+private:
+    std::ostringstream stream_;
+    std::shared_ptr<spdlog::logger> previousLogger_;
+    std::shared_ptr<spdlog::logger> logger_;
+    spdlog::level::level_enum previousLevel_;
+};
 } // namespace
 
 TEST_CASE("WorkCoordinator lifecycle", "[daemon][work_coordinator][lifecycle]") {
@@ -405,11 +443,11 @@ TEST_CASE("WorkCoordinator priority executors", "[daemon][work_coordinator][prio
         coordinator.start(2);
 
         std::atomic<int> ran{0};
-        coordinator.post(WorkCoordinator::Priority::High,
+        coordinator.post(WorkCoordinator::Priority::High, "test.high",
                          [&]() { ran.fetch_add(1, std::memory_order_relaxed); });
-        coordinator.post(WorkCoordinator::Priority::Normal,
+        coordinator.post(WorkCoordinator::Priority::Normal, "test.normal",
                          [&]() { ran.fetch_add(1, std::memory_order_relaxed); });
-        coordinator.post(WorkCoordinator::Priority::Background,
+        coordinator.post(WorkCoordinator::Priority::Background, "test.background",
                          [&]() { ran.fetch_add(1, std::memory_order_relaxed); });
 
         bool completed = wait_for_condition(
@@ -774,4 +812,88 @@ TEST_CASE("WorkCoordinator spawnDetached cancels timer poller on stop",
     CHECK(joined);
     CHECK((coordinator.getWorkerCount() == 0));
     CHECK_FALSE(coordinator.isRunning());
+}
+
+TEST_CASE("WorkCoordinator names in-flight jobs in shutdown diagnostics",
+          "[daemon][work_coordinator][shutdown][diagnostics]") {
+    WorkCoordinator coordinator;
+    coordinator.start(2);
+
+    std::promise<void> entered;
+    auto enteredFuture = entered.get_future();
+    std::promise<void> release;
+    auto releaseFuture = release.get_future().share();
+    std::promise<void> finished;
+    auto finishedFuture = finished.get_future();
+
+    coordinator.post(WorkCoordinator::Priority::Normal, "test.blocking_list",
+                     [&entered, &finished, releaseFuture]() {
+                         entered.set_value();
+                         releaseFuture.wait();
+                         finished.set_value();
+                     });
+    REQUIRE((enteredFuture.wait_for(5s) == std::future_status::ready));
+    std::this_thread::sleep_for(20ms);
+
+    const auto jobs = coordinator.activeJobs();
+    REQUIRE((jobs.size() == 1));
+    CHECK((jobs.front().name == "test.blocking_list"));
+    CHECK((jobs.front().age >= 20ms));
+    CHECK((jobs.front().workerIndex < 2));
+
+    {
+        SpdlogCaptureGuard capture;
+        coordinator.stop();
+        CHECK_FALSE(coordinator.joinWithTimeout(50ms));
+        const auto logs = capture.str();
+        INFO(logs);
+        CHECK((logs.find("job=test.blocking_list") != std::string::npos));
+    }
+
+    release.set_value();
+    REQUIRE((finishedFuture.wait_for(5s) == std::future_status::ready));
+    REQUIRE(coordinator.joinWithTimeout(5000ms));
+    CHECK(coordinator.activeJobs().empty());
+}
+
+TEST_CASE("WorkCoordinator job scopes restore the enclosing job name",
+          "[daemon][work_coordinator][diagnostics]") {
+    WorkCoordinator coordinator;
+    coordinator.start(1);
+
+    std::promise<std::vector<std::string>> observed;
+    auto observedFuture = observed.get_future();
+    boost::asio::post(coordinator.getExecutor(), [&coordinator, &observed]() {
+        std::vector<std::string> names;
+        auto snapshotName = [&coordinator]() {
+            const auto jobs = coordinator.activeJobs();
+            return jobs.empty() ? std::string{"<none>"} : jobs.front().name;
+        };
+        names.push_back(snapshotName());
+        {
+            WorkCoordinator::JobScope outer("test.outer");
+            names.push_back(snapshotName());
+            {
+                WorkCoordinator::JobScope inner("test.inner");
+                names.push_back(snapshotName());
+            }
+            names.push_back(snapshotName());
+        }
+        names.push_back(snapshotName());
+        observed.set_value(std::move(names));
+    });
+
+    REQUIRE((observedFuture.wait_for(5s) == std::future_status::ready));
+    const auto names = observedFuture.get();
+    CHECK((names ==
+           std::vector<std::string>{"<none>", "test.outer", "test.inner", "test.outer", "<none>"}));
+
+    // A scope opened off the worker pool is a no-op rather than a misattributed slot.
+    {
+        WorkCoordinator::JobScope offWorker("test.caller_thread");
+        CHECK(coordinator.activeJobs().empty());
+    }
+
+    coordinator.stop();
+    REQUIRE(coordinator.joinWithTimeout(5000ms));
 }

@@ -292,6 +292,15 @@ public:
         if (req.pattern.empty()) {
             return Error{ErrorCode::InvalidArgument, "Pattern is required"};
         }
+        // Shutdown cancellation: checked before the scan and between document batches so a grep
+        // over a large corpus releases its worker instead of holding the shutdown join.
+        const auto grepCanceled = [this]() { return hostCancellationRequested(ctx_); };
+        const auto canceledError = []() {
+            return Error{ErrorCode::OperationCancelled, "Grep request canceled: shutting down"};
+        };
+        if (grepCanceled()) {
+            return canceledError();
+        }
 
         std::map<std::string, std::int64_t> phaseTimings;
         const search::QueryRouter queryRouter;
@@ -659,6 +668,9 @@ public:
         }
         recordPhaseMetric(phaseTimings, "phase_candidate_classification_ms",
                           "grep::phase::candidate_classification_ms", candidateClassificationStart);
+        if (grepCanceled()) {
+            return canceledError();
+        }
 
         GrepResponse response;
         response.searchStats["generated_candidates_rejected"] =
@@ -756,6 +768,10 @@ public:
             while (true) {
                 if (stop.load(std::memory_order_relaxed))
                     break;
+                if (grepCanceled()) {
+                    stop.store(true, std::memory_order_relaxed);
+                    break;
+                }
                 if (budget_ms > 0) {
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                         GrepClock::now() - start_time);
@@ -1128,6 +1144,9 @@ public:
                 ths.emplace_back(workerFunc);
             for (auto& th : ths)
                 th.join();
+        }
+        if (grepCanceled()) {
+            return canceledError();
         }
 
         auto workers_duration = std::chrono::duration_cast<std::chrono::milliseconds>(

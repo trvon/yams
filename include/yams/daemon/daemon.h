@@ -7,8 +7,8 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
-#include <yams/memory_sync/memory_sync.h>
 #include <yams/memory_sync/corpus_scope.h>
+#include <yams/memory_sync/memory_sync.h>
 #include <yams/storage/disk_pressure.h>
 
 #include <atomic>
@@ -111,6 +111,14 @@ struct DaemonConfig {
         std::chrono::minutes interval{60};
         std::chrono::minutes initialDelay{10};
     } graphPrune;
+
+    /// Idle maintenance run by the repair service. Resolved from [daemon.maintenance].
+    struct MaintenancePolicy {
+        /// How often vectors.db is checked for a reclaiming VACUUM; 0 disables.
+        std::chrono::hours vectorVacuumInterval{24};
+        /// Session files nobody has touched for this long are deleted; 0 disables.
+        std::chrono::days sessionExpiry{30};
+    } maintenance;
 
     /// Opt-in document-history retention. Newest versions are always retained;
     /// older versions are removed through DocumentService and then reclaimed by

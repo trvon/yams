@@ -33,7 +33,64 @@ uint64_t steadyNowNs() noexcept {
                                      .count());
 }
 
+struct WorkerJobSlot {
+    std::atomic<const char*> name{nullptr};
+    std::atomic<std::int64_t> startNs{0};
+};
+
+// The job slot of the WorkCoordinator worker running on this thread, if any.
+thread_local WorkerJobSlot* tlsWorkerJobSlot = nullptr;
+
 } // namespace
+
+struct WorkCoordinator::JobSlots {
+    explicit JobSlots(std::size_t count) : slots(count) {}
+    std::vector<WorkerJobSlot> slots;
+};
+
+WorkCoordinator::JobScope::JobScope(const char* name) noexcept {
+    auto* slot = tlsWorkerJobSlot;
+    if (slot == nullptr) {
+        return;
+    }
+    slot_ = slot;
+    previousName_ = slot->name.load(std::memory_order_relaxed);
+    previousStartNs_ = slot->startNs.load(std::memory_order_relaxed);
+    slot->startNs.store(static_cast<std::int64_t>(steadyNowNs()), std::memory_order_relaxed);
+    slot->name.store(name, std::memory_order_release);
+}
+
+WorkCoordinator::JobScope::~JobScope() {
+    auto* slot = static_cast<WorkerJobSlot*>(slot_);
+    if (slot == nullptr) {
+        return;
+    }
+    slot->name.store(previousName_, std::memory_order_release);
+    slot->startNs.store(previousStartNs_, std::memory_order_relaxed);
+}
+
+std::vector<WorkCoordinator::ActiveJob> WorkCoordinator::activeJobs() const {
+    std::vector<ActiveJob> jobs;
+    const auto slots = jobSlots_;
+    if (!slots) {
+        return jobs;
+    }
+    const auto nowNs = static_cast<std::int64_t>(steadyNowNs());
+    for (std::size_t i = 0; i < slots->slots.size(); ++i) {
+        const auto& slot = slots->slots[i];
+        const char* name = slot.name.load(std::memory_order_acquire);
+        if (name == nullptr) {
+            continue;
+        }
+        const auto startNs = slot.startNs.load(std::memory_order_relaxed);
+        const auto ageNs = nowNs > startNs ? nowNs - startNs : 0;
+        jobs.push_back(ActiveJob{.workerIndex = i,
+                                 .name = name,
+                                 .age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::nanoseconds(ageNs))});
+    }
+    return jobs;
+}
 
 struct WorkCoordinator::DetachedCancellationState {
     mutable std::mutex mutex;
@@ -102,6 +159,8 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
         numThreads.value_or(std::max<std::size_t>(1, std::thread::hardware_concurrency()));
 
     workers_.reserve(workerCount);
+    auto jobSlots = std::make_shared<JobSlots>(workerCount);
+    jobSlots_ = jobSlots;
     {
         std::lock_guard<std::mutex> stateLock(workerStateMutex_);
         workerThreadIds_.assign(workerCount, std::thread::id{});
@@ -113,7 +172,8 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
 
     try {
         for (std::size_t i = 0; i < workerCount; ++i) {
-            workers_.emplace_back([this, i]() {
+            workers_.emplace_back([this, i, jobSlots]() {
+                tlsWorkerJobSlot = &jobSlots->slots[i];
                 {
                     std::lock_guard<std::mutex> stateLock(workerStateMutex_);
                     if (i < workerThreadIds_.size()) {
@@ -174,6 +234,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                         workerExited_[i] = true;
                     }
                 }
+                tlsWorkerJobSlot = nullptr;
                 activeWorkers_.fetch_sub(1, std::memory_order_release);
                 joinCV_.notify_all();
             });
@@ -298,7 +359,8 @@ void WorkCoordinator::join() {
     }
 }
 
-bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
+bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout,
+                                      const std::function<void()>& whileWaiting) {
     if (workers_.empty()) {
         try {
             spdlog::debug("[WorkCoordinator] joinWithTimeout() called with no workers (no-op)");
@@ -335,6 +397,15 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
         const auto slice =
             std::min<std::chrono::milliseconds>(remaining, std::chrono::milliseconds(50));
         joinCV_.wait_for(lock, slice);
+        if (whileWaiting && activeWorkers_.load(std::memory_order_acquire) != 0) {
+            lock.unlock();
+            try {
+                whileWaiting();
+            } catch (...) {
+                // Intentional best-effort path; a failing hook must not break the join.
+            }
+            lock.lock();
+        }
     }
 
     auto joinEnd = std::chrono::steady_clock::now();
@@ -412,10 +483,21 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
             spdlog::error("[WorkCoordinator] Timeout expired with {} workers still active; "
                           "workers remain joinable for a later retry",
                           activeWorkers_.load());
+            const auto jobs = activeJobs();
             for (const auto& snap : workersStillRunning) {
-                spdlog::error("[WorkCoordinator] timeout worker detail: worker={} tid_hash={} "
-                              "exited={} run={}ms",
-                              snap.index, snap.tidHash, snap.exited, snap.runMs);
+                const auto job = std::find_if(jobs.begin(), jobs.end(), [&snap](const auto& j) {
+                    return j.workerIndex == snap.index;
+                });
+                if (job != jobs.end()) {
+                    spdlog::error("[WorkCoordinator] timeout worker detail: worker={} tid_hash={} "
+                                  "exited={} run={}ms job={} job_age={}ms",
+                                  snap.index, snap.tidHash, snap.exited, snap.runMs, job->name,
+                                  job->age.count());
+                } else {
+                    spdlog::error("[WorkCoordinator] timeout worker detail: worker={} tid_hash={} "
+                                  "exited={} run={}ms job=<unnamed handler or idle>",
+                                  snap.index, snap.tidHash, snap.exited, snap.runMs);
+                }
             }
         } catch (...) {
             // Intentional best-effort path; keep the primary operation unaffected.

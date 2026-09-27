@@ -1,3 +1,5 @@
+#include <yams/daemon/components/db_integrity_stamp.h>
+#include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/db_salvage.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
 #include <yams/daemon/components/RepairService.h>
@@ -9,6 +11,7 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/sqlite_vacuum.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
@@ -439,6 +442,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
     bool vectorCleanupDone = false;
     bool snapshotBackfillDone = false;
     auto nextSnapshotBackfill = std::chrono::steady_clock::now();
+    auto nextRecoveryArtifactSweep = std::chrono::steady_clock::now();
     std::uint32_t deferTicks = 0;
     const std::uint32_t minDeferTicks = shutdownState->config.initialScanDeferTicks;
 
@@ -450,6 +454,8 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             "path_tree_repair_jobs", 32);
 
     bool pathTreeRepairDone = false;
+    auto nextVectorVacuum = std::chrono::steady_clock::now() + cfg_.maintenanceDelay;
+    auto nextSessionExpiry = std::chrono::steady_clock::now() + cfg_.maintenanceDelay;
 
     while (running_.load(std::memory_order_relaxed) &&
            shutdownState_->running.load(std::memory_order_acquire)) {
@@ -507,6 +513,35 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             ResourceGovernor::instance().getPressureLevel() < ResourcePressureLevel::Warning) {
             snapshotBackfillDone = backfillLegacySnapshotKeysBatch();
             nextSnapshotBackfill = std::chrono::steady_clock::now() + 200ms;
+        }
+
+        // Retention cleanup of crash-recovery leftovers (corrupt DB copies, ...): owned here
+        // rather than by startup so it runs only when the daemon is idle and never races
+        // recovery itself.
+        if (std::chrono::steady_clock::now() >= nextRecoveryArtifactSweep && maintenanceAllowed()) {
+            (void)runRecoveryArtifactMaintenance();
+            nextRecoveryArtifactSweep = std::chrono::steady_clock::now() +
+                                        shutdownState->config.recoveryArtifactSweepInterval;
+        }
+
+        // vectors.db VACUUM: rare, idle-only, and yields to any writer that shows up.
+        if (cfg_.vectorVacuumInterval.count() > 0 &&
+            std::chrono::steady_clock::now() >= nextVectorVacuum &&
+            vectorVacuumAdmitted(collectVectorVacuumSignals())) {
+            const auto outcome = runVectorVacuumMaintenance();
+            const bool yielded = outcome && (outcome->status == SqliteVacuumStatus::Busy ||
+                                             outcome->status == SqliteVacuumStatus::Interrupted);
+            using Wait = std::chrono::steady_clock::duration;
+            nextVectorVacuum =
+                std::chrono::steady_clock::now() +
+                (yielded ? Wait(cfg_.maintenanceDelay) : Wait(cfg_.vectorVacuumInterval));
+        }
+
+        // Session store expiry: a directory scan once a day, only while no client is connected.
+        if (cfg_.sessionExpiry.count() > 0 &&
+            std::chrono::steady_clock::now() >= nextSessionExpiry && maintenanceAllowed()) {
+            (void)runSessionExpiryMaintenance();
+            nextSessionExpiry = std::chrono::steady_clock::now() + std::chrono::hours(24);
         }
 
         // Deferred initial scan
@@ -855,6 +890,160 @@ bool RepairService::backfillLegacySnapshotKeysBatch() {
                      legacySnapshotKeysMoved_);
     }
     return false;
+}
+
+RepairService::RecoveryArtifactMaintenanceStats RepairService::runRecoveryArtifactMaintenance() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::runRecoveryArtifactMaintenance");
+    RecoveryArtifactMaintenanceStats stats;
+    if (cfg_.dataDir.empty()) {
+        return stats;
+    }
+    const auto dbPath = cfg_.dataDir / kMetadataDbFileName;
+
+    auto corrupt = removeSalvagedCorruptDbs(
+        dbPath, std::chrono::duration_cast<std::chrono::seconds>(cfg_.corruptDbRetention));
+    stats.corruptDbsRemoved = corrupt.removed.size();
+    stats.corruptDbsRetained = corrupt.retained.size();
+    for (const auto& path : corrupt.removed) {
+        spdlog::info("RepairService: removed salvaged corrupt DB {} (all documents confirmed in "
+                     "the live DB, retention {}h elapsed)",
+                     path.string(), cfg_.corruptDbRetention.count());
+    }
+    for (const auto& kept : corrupt.retained) {
+        spdlog::debug("RepairService: keeping corrupt DB {}: {}", kept.path.string(), kept.reason);
+    }
+    for (auto& err : corrupt.errors) {
+        spdlog::warn("RepairService: corrupt DB cleanup error: {}", err);
+        stats.errors.push_back(std::move(err));
+    }
+
+    // Leftovers of a clean-shutdown stamp publish/consume interrupted by a crash. They never
+    // affect trust decisions but would otherwise accumulate forever.
+    auto stamps = sweepStaleDbIntegrityStampArtifacts(
+        dbPath, std::chrono::duration_cast<std::chrono::seconds>(cfg_.stampArtifactMinAge));
+    stats.stampArtifactsRemoved = stamps.removed.size();
+    for (const auto& path : stamps.removed) {
+        spdlog::info("RepairService: removed stale integrity-stamp artifact {}", path);
+    }
+    for (auto& err : stamps.errors) {
+        spdlog::warn("RepairService: integrity-stamp artifact sweep error: {}", err);
+        stats.errors.push_back(std::move(err));
+    }
+    return stats;
+}
+
+bool RepairService::vectorVacuumAdmitted(const VectorVacuumSignals& signals) noexcept {
+    return !signals.shuttingDown && signals.maintenanceAllowed &&
+           signals.pressure < ResourcePressureLevel::Warning && signals.embeddingQueued == 0 &&
+           signals.embeddingInFlight == 0 && !signals.indexMutating && !signals.repairInProgress;
+}
+
+RepairService::VectorVacuumSignals RepairService::collectVectorVacuumSignals() const {
+    VectorVacuumSignals signals;
+    signals.shuttingDown =
+        shutdownState_ && !shutdownState_->running.load(std::memory_order_acquire);
+    signals.maintenanceAllowed = maintenanceAllowed();
+    signals.pressure = ResourceGovernor::instance().getPressureLevel();
+    signals.embeddingQueued = ctx_.getEmbeddingQueuedJobs ? ctx_.getEmbeddingQueuedJobs() : 0;
+    signals.embeddingInFlight = ctx_.getEmbeddingInFlightJobs ? ctx_.getEmbeddingInFlightJobs() : 0;
+    if (coordinator_ != nullptr) {
+        const auto telemetry = coordinator_->snapshot();
+        signals.indexMutating = telemetry.rebuilding || telemetry.activeBulkScopes > 0;
+    }
+    signals.repairInProgress = repairInProgress_.load(std::memory_order_acquire);
+    return signals;
+}
+
+std::optional<SqliteVacuumOutcome> RepairService::runVectorVacuumMaintenance() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::runVectorVacuumMaintenance");
+    if (vectorsDisabledByEnv()) {
+        return std::nullopt;
+    }
+    auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
+    if (!vectorDb || !vectorDb->isInitialized()) {
+        return std::nullopt;
+    }
+    const auto& vectorConfig = vectorDb->getConfig();
+    if (vectorConfig.use_in_memory || vectorConfig.database_path.empty() ||
+        vectorConfig.database_path == ":memory:") {
+        return std::nullopt;
+    }
+    if (!vectorVacuumAdmitted(collectVectorVacuumSignals())) {
+        return std::nullopt;
+    }
+
+    // Poll the admission signals while VACUUM runs (throttled; the progress handler fires
+    // far more often than the signals change) and roll back as soon as work arrives.
+    auto lastPoll = std::chrono::steady_clock::now();
+    const auto shouldAbort = [this, &lastPoll]() {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastPoll < std::chrono::milliseconds(200)) {
+            return false;
+        }
+        lastPoll = now;
+        return !vectorVacuumAdmitted(collectVectorVacuumSignals());
+    };
+
+    const std::filesystem::path dbPath(vectorConfig.database_path);
+    auto outcome = vacuumSqliteFileIfUseful(dbPath, vectorVacuumPolicy_, shouldAbort);
+    constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
+    switch (outcome.status) {
+        case SqliteVacuumStatus::Vacuumed:
+            spdlog::info("RepairService: vectors.db VACUUM complete: {} MB -> {} MB",
+                         outcome.bytesBefore / kMiB, outcome.bytesAfter / kMiB);
+            break;
+        case SqliteVacuumStatus::InsufficientSpace:
+            spdlog::info("RepairService: vectors.db has {} MB reclaimable but not enough free "
+                         "disk to VACUUM ({})",
+                         outcome.reclaimableBytes / kMiB, outcome.detail);
+            break;
+        case SqliteVacuumStatus::Interrupted:
+            spdlog::info("RepairService: vectors.db VACUUM yielded to new work; will retry");
+            break;
+        case SqliteVacuumStatus::Busy:
+        case SqliteVacuumStatus::OpenFailed:
+            spdlog::debug("RepairService: vectors.db VACUUM skipped ({}): {}",
+                          sqliteVacuumStatusName(outcome.status), outcome.detail);
+            break;
+        case SqliteVacuumStatus::NotNeeded:
+            spdlog::debug("RepairService: vectors.db VACUUM not useful: {} MB, {} MB reclaimable",
+                          outcome.bytesBefore / kMiB, outcome.reclaimableBytes / kMiB);
+            break;
+    }
+    return outcome;
+}
+
+std::optional<app::services::SessionExpiryResult> RepairService::runSessionExpiryMaintenance() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::runSessionExpiryMaintenance");
+    if (cfg_.sessionExpiry.count() <= 0 || !maintenanceAllowed()) {
+        return std::nullopt;
+    }
+    const auto sessionsDir =
+        cfg_.sessionsDir.empty() ? app::services::sessionsDirectory() : cfg_.sessionsDir;
+    app::services::SessionExpiryOptions options;
+    options.maxIdle = cfg_.sessionExpiry;
+    // A session that still tags documents keeps them reachable through `session merge` or
+    // `discard`; without the repository, ownership is unknown and nothing expires.
+    options.hasSessionDocuments = [repo = getMetadataRepoForRepair()](const std::string& name) {
+        if (!repo) {
+            return true;
+        }
+        auto count = repo->countDocumentsBySessionId(name);
+        return !count || count.value() > 0;
+    };
+    try {
+        auto result = app::services::expireIdleSessions(sessionsDir, options);
+        if (!result.expired.empty()) {
+            spdlog::info("RepairService: removed {} session(s) unused for {} days from {} ({} "
+                         "kept)",
+                         result.expired.size(), cfg_.sessionExpiry.count(), sessionsDir.string(),
+                         result.kept);
+        }
+        return result;
+    } catch (const std::exception& e) {
+        spdlog::debug("RepairService: session expiry skipped: {}", e.what());
+        return app::services::SessionExpiryResult{};
+    }
 }
 
 void RepairService::performVectorCleanup() {
@@ -1632,10 +1821,9 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
     // from corrupt metadata DBs before scanning for orphans.  Skip salvage entirely
     // when all corrupt-DB documents are already present in the current DB.
     size_t salvagedCount = 0;
-    bool salvageDidRun = false;
     if (!dryRun) {
         namespace fs = std::filesystem;
-        fs::path dbPath = cfg_.dataDir / "yams.db";
+        fs::path dbPath = cfg_.dataDir / kMetadataDbFileName;
         if (fs::exists(dbPath)) {
             auto qc = quickCheckSalvageNeeded(cfg_.dataDir, dbPath);
             if (qc.needsSalvage) {
@@ -1658,7 +1846,6 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
                 }
                 auto salvaged = salvageFromAllCorruptDbs(cfg_.dataDir, dbPath, salvageProgress);
                 salvagedCount = salvaged.combined.documentsSalvaged;
-                salvageDidRun = true;
                 if (salvagedCount > 0) {
                     spdlog::info("[RepairService] Salvage recovered {} document(s) "
                                  "from {} corrupt DB(s)",
@@ -1715,13 +1902,20 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
             ", salvaged " + std::to_string(salvagedCount) + " documents from corrupt DBs";
     }
 
-    // Phase 3: If requested, remove the corrupt DB files now that salvage is complete
-    if (!dryRun && removeCorrupt && salvageDidRun) {
-        auto cleanup = removeCorruptDbFiles(cfg_.dataDir);
+    // Phase 3: If requested, remove corrupt DB files whose salvage is confirmed. The explicit
+    // request waives the retention window but never the evidence that every document is in the
+    // live DB; anything else is kept and reported.
+    if (!dryRun && removeCorrupt) {
+        auto cleanup =
+            removeSalvagedCorruptDbs(cfg_.dataDir / kMetadataDbFileName, std::chrono::seconds{0});
         if (!cleanup.removed.empty()) {
             spdlog::info("[RepairService] Removed {} corrupt DB file(s)", cleanup.removed.size());
             result.message +=
                 ", removed " + std::to_string(cleanup.removed.size()) + " corrupt DB file(s)";
+        }
+        if (!cleanup.retained.empty()) {
+            result.message += ", kept " + std::to_string(cleanup.retained.size()) +
+                              " corrupt DB file(s) whose salvage is not confirmed";
         }
         for (const auto& err : cleanup.errors) {
             spdlog::warn("[RepairService] Corrupt DB removal error: {}", err);

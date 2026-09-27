@@ -77,6 +77,7 @@
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/components/sqlite_vacuum.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
@@ -767,6 +768,7 @@ yams::Result<void>
 ServiceManager::initializeImpl(const std::function<void()>& beforePoolConfigure) {
     // Clear any stale shutdown marker from prior daemon lifecycles in this process.
     setOnnxShutdownMarker(false);
+    shutdownCancellation_->store(false, std::memory_order_release);
 
     // Validate data directory synchronously to fail fast if unwritable
     namespace fs = std::filesystem;
@@ -1176,25 +1178,43 @@ void ServiceManager::quiesceServicesBeforeWorkerShutdown(
 void ServiceManager::stopWorkCoordinatorForShutdown(
     std::unique_ptr<CheckpointManager>& checkpointManagerHold) {
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
+    // Cancel before interrupting SQL: a handler whose statement fails with SQLITE_INTERRUPT must
+    // already observe the cancellation flag rather than retry or move on to the next query.
+    shutdownCancellation_->store(true, std::memory_order_release);
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
     if (databaseManager_) {
         databaseManager_->interruptPendingConnectionAcquiresForShutdown();
-        spdlog::info("[ServiceManager] Phase 4: Pending DB acquires interrupted");
+        const auto interrupted = databaseManager_->interruptActiveConnectionsForShutdown();
+        spdlog::info("[ServiceManager] Phase 4: Pending DB acquires interrupted; {} in-flight "
+                     "metadata statement(s) interrupted",
+                     interrupted);
     }
+    // Let the simeon-lexical build stop now; Phase 6.7 clearEngine() joins it.
+    searchEngineManager_.requestShutdown();
     if (workCoordinator_) {
         workCoordinator_->stop();
         spdlog::info("[ServiceManager] Phase 4: WorkCoordinator stop() called");
     }
 
     spdlog::info("[ServiceManager] Phase 5: Joining WorkCoordinator threads");
+    // SQLite drops an interrupt that lands between statements, so keep interrupting leased
+    // connections while the join waits: a handler that starts another statement after the first
+    // interrupt is aborted within one wait slice instead of running to completion.
+    const auto interruptInFlightStatements = [this]() {
+        if (databaseManager_) {
+            (void)databaseManager_->interruptActiveConnectionsForShutdown();
+        }
+    };
     bool workersQuiesced = true;
     if (workCoordinator_) {
         try {
-            if (!workCoordinator_->joinWithTimeout(shutdown_budget::kWorkCoordinatorJoinTimeout)) {
+            if (!workCoordinator_->joinWithTimeout(shutdown_budget::kWorkCoordinatorJoinTimeout,
+                                                   interruptInFlightStatements)) {
                 spdlog::info("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s; "
                              "retrying with extended timeout to avoid unsafe teardown races");
                 if (!workCoordinator_->joinWithTimeout(
-                        shutdown_budget::kWorkCoordinatorExtendedJoinTimeout)) {
+                        shutdown_budget::kWorkCoordinatorExtendedJoinTimeout,
+                        interruptInFlightStatements)) {
                     workersQuiesced = false;
                     spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired with workers "
                                  "still active; abandoning remaining workers to avoid "
@@ -1852,13 +1872,11 @@ void ServiceManager::runStartupSalvageIfNeeded(const std::filesystem::path& dbPa
         spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
     }
 
-    auto cleanup = removeCorruptDbFiles(salvageDir);
-    if (!cleanup.removed.empty()) {
-        spdlog::info("[ServiceManager] Cleaned up {} corrupt DB file(s)", cleanup.removed.size());
-    }
-    for (const auto& err : cleanup.errors) {
-        spdlog::warn("[ServiceManager] Corrupt DB cleanup error: {}", err);
-    }
+    // Startup never deletes corrupt DBs, even after a successful salvage: they are the only copy
+    // of anything salvage missed. RepairService removes them later, once every document is
+    // confirmed in the live DB and the retention window has passed.
+    spdlog::info("[ServiceManager] Corrupt DB artifact(s) retained; the repair service removes "
+                 "them after salvage is confirmed and the retention window has passed");
 
     setMaintenancePhase(maintenance_phase::kIdle);
     setDatabasePhase(dbphase::kReady);
@@ -3000,17 +3018,18 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
         tempDb->close();
         if (message.find("malformed") != std::string::npos ||
             message.find("corrupt") != std::string::npos) {
-            spdlog::warn("[ServiceManager] Removing malformed stale WAL/SHM sidecars; "
-                         "metadata DB will continue from its last checkpoint");
-            for (const auto& suffix : {"-wal", "-shm"}) {
-                std::error_code sidecarEc;
-                const auto sidecarPath = std::filesystem::path(dbPath.string() + suffix);
-                if (std::filesystem::exists(sidecarPath, sidecarEc)) {
-                    std::filesystem::remove(sidecarPath, sidecarEc);
-                    if (sidecarEc) {
-                        spdlog::debug("[ServiceManager] stale SQLite sidecar cleanup failed: {}",
-                                      sidecarEc.message());
-                    }
+            // The WAL may still hold committed transactions that were never checkpointed.
+            // Move it aside rather than deleting it so the data stays recoverable.
+            auto quarantined = quarantineSqliteSidecars(dbPath);
+            if (!quarantined) {
+                spdlog::error("[ServiceManager] Could not quarantine malformed stale WAL/SHM "
+                              "sidecars: {}",
+                              quarantined.error().message);
+            } else {
+                for (const auto& path : quarantined.value()) {
+                    spdlog::warn("[ServiceManager] Quarantined malformed stale SQLite sidecar to "
+                                 "{}; metadata DB will continue from its last checkpoint",
+                                 path.string());
                 }
             }
         } else {
@@ -3115,28 +3134,7 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(
 
 bool ServiceManager::shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
                                       std::uint64_t freePageCount, std::uint64_t pageSize) {
-    constexpr std::uintmax_t kAutoVacuumThreshold = 512ULL * 1024 * 1024;
-    constexpr std::uint64_t kMinReclaimableBytes = 128ULL * 1024 * 1024;
-    constexpr double kMinReclaimableRatio = 0.10;
-    if (databaseBytes <= kAutoVacuumThreshold || pageCount == 0 || pageSize == 0 ||
-        freePageCount > pageCount) {
-        return false;
-    }
-    if (freePageCount > std::numeric_limits<std::uint64_t>::max() / pageSize ||
-        pageCount > std::numeric_limits<std::uint64_t>::max() / pageSize) {
-        return false;
-    }
-    const auto reclaimablePageBytes = freePageCount * pageSize;
-    const auto logicalBytes = pageCount * pageSize;
-    const auto reclaimableTailBytes =
-        databaseBytes > logicalBytes ? databaseBytes - logicalBytes : 0;
-    const auto reclaimablePageRatio = static_cast<double>(freePageCount) / pageCount;
-    const auto reclaimableTailRatio =
-        static_cast<double>(reclaimableTailBytes) / static_cast<double>(databaseBytes);
-    return (reclaimablePageBytes >= kMinReclaimableBytes &&
-            reclaimablePageRatio >= kMinReclaimableRatio) ||
-           (reclaimableTailBytes >= kMinReclaimableBytes &&
-            reclaimableTailRatio >= kMinReclaimableRatio);
+    return shouldVacuumSqlite(databaseBytes, pageCount, freePageCount, pageSize);
 }
 
 void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath) {
@@ -3148,7 +3146,7 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
 
     constexpr std::uintmax_t kMiB = 1024ULL * 1024ULL;
     const auto spaceInfo = std::filesystem::space(dbPath.parent_path(), ec);
-    if (ec || spaceInfo.available <= dbSize) {
+    if (ec || !hasSpaceForSqliteVacuum(dbSize, spaceInfo.available)) {
         spdlog::info("[ServiceManager] DB file is {} MB but only {} MB free; skipping "
                      "auto-VACUUM",
                      dbSize / kMiB, ec ? 0 : spaceInfo.available / kMiB);
@@ -3912,6 +3910,7 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
                                 ? graphQueryServiceOverride_
                                 : (graphComponent ? graphComponent->getQueryService() : nullptr);
     ctx.contentExtractors = getContentExtractors();
+    ctx.cancellationSignal = shutdownCancellation_;
 
     // Log vector capability status
     auto modelProvider = loadModelProvider();
@@ -4005,8 +4004,9 @@ ServiceManager::co_ensureEmbeddingModelReady(const std::string& requestedModel,
                                              std::function<void(const ModelLoadEvent&)> progress,
                                              int timeoutMs, bool keepHot, bool warmup) {
     co_return co_await yams::daemon::dispatch::offload_to_worker(
-        this, [this, requestedModel, progress = std::move(progress), timeoutMs, keepHot,
-               warmup]() mutable {
+        this, "embedding.ensure_model_ready",
+        [this, requestedModel, progress = std::move(progress), timeoutMs, keepHot,
+         warmup]() mutable {
             return ensureEmbeddingModelReadySync(requestedModel, std::move(progress), timeoutMs,
                                                  keepHot, warmup);
         });
@@ -4372,6 +4372,8 @@ void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
     rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
     rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
     rcfg.maxPendingRepairs = config_.maxPendingRepairs;
+    rcfg.vectorVacuumInterval = config_.maintenance.vectorVacuumInterval;
+    rcfg.sessionExpiry = config_.maintenance.sessionExpiry;
     repairServiceHost_.start(std::move(rcfg), &state_, std::move(activeConnFn),
                              makeRepairServiceContext(this));
 }

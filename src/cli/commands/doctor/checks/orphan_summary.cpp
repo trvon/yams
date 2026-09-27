@@ -2,6 +2,7 @@
 #include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 #include <filesystem>
@@ -42,7 +43,7 @@ OrphanSummaryCheck::Result OrphanSummaryCheck::execute(const DoctorContext& ctx)
             if (ec)
                 break;
             auto name = entry.path().filename().string();
-            if (name.find(".corrupt-") != std::string::npos)
+            if (name.find(yams::daemon::kCorruptDbMarker) != std::string::npos)
                 r.corruptArtifacts++;
         }
     }

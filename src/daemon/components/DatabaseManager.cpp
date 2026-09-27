@@ -4,6 +4,7 @@
 #include "../../../include/yams/daemon/components/DatabaseManager.h"
 #include "../../../include/yams/daemon/components/db_integrity_stamp.h"
 #include <yams/config/config_helpers.h>
+#include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -167,7 +168,7 @@ void DatabaseManager::shutdown() {
 
     std::string dbPath;
     bool checkpointCompleted = false;
-    bool cleanupMalformedSidecars = false;
+    bool quarantineMalformedSidecars = false;
     auto database = std::atomic_exchange_explicit(&database_, std::shared_ptr<metadata::Database>{},
                                                   std::memory_order_acq_rel);
     if (database && database->isOpen()) {
@@ -175,8 +176,8 @@ void DatabaseManager::shutdown() {
         auto checkpointResult = database->execute("PRAGMA wal_checkpoint(TRUNCATE)");
         if (!checkpointResult) {
             const auto message = checkpointResult.error().message;
-            cleanupMalformedSidecars = message.find("malformed") != std::string::npos ||
-                                       message.find("corrupt") != std::string::npos;
+            quarantineMalformedSidecars = message.find("malformed") != std::string::npos ||
+                                          message.find("corrupt") != std::string::npos;
             spdlog::warn("[DatabaseManager] Shutdown WAL checkpoint (TRUNCATE) failed: {}",
                          message);
         } else {
@@ -206,18 +207,18 @@ void DatabaseManager::shutdown() {
         }
     }
 
-    if (cleanupMalformedSidecars && !dbPath.empty()) {
-        spdlog::warn("[DatabaseManager] Removing malformed SQLite WAL/SHM sidecars after all "
-                     "database connections closed");
-        for (const auto& suffix : {"-wal", "-shm"}) {
-            std::error_code sidecarEc;
-            const auto sidecarPath = std::filesystem::path(dbPath + suffix);
-            if (std::filesystem::exists(sidecarPath, sidecarEc)) {
-                std::filesystem::remove(sidecarPath, sidecarEc);
-                if (sidecarEc) {
-                    spdlog::debug("[DatabaseManager] stale SQLite sidecar cleanup failed: {}",
-                                  sidecarEc.message());
-                }
+    if (quarantineMalformedSidecars && !dbPath.empty()) {
+        // Every connection is closed, so the sidecars can be moved safely. Keep them rather
+        // than deleting: the WAL may hold committed transactions that never reached the DB.
+        auto quarantined = quarantineSqliteSidecars(std::filesystem::path(dbPath));
+        if (!quarantined) {
+            spdlog::error("[DatabaseManager] Could not quarantine malformed SQLite WAL/SHM "
+                          "sidecars: {}",
+                          quarantined.error().message);
+        } else {
+            for (const auto& path : quarantined.value()) {
+                spdlog::warn("[DatabaseManager] Quarantined malformed SQLite sidecar to {}",
+                             path.string());
             }
         }
     }
@@ -280,6 +281,24 @@ void DatabaseManager::interruptPendingConnectionAcquiresForShutdown() {
     if (writePool) {
         writePool->interruptPendingAcquires();
     }
+}
+
+std::size_t DatabaseManager::interruptActiveConnectionsForShutdown() {
+    std::shared_ptr<metadata::ConnectionPool> readPool;
+    std::shared_ptr<metadata::ConnectionPool> writePool;
+    {
+        std::lock_guard<std::mutex> lk(poolMutex_);
+        readPool = readConnectionPool_;
+        writePool = connectionPool_;
+    }
+    std::size_t interrupted = 0;
+    if (readPool) {
+        interrupted += readPool->interruptActiveConnections();
+    }
+    if (writePool && writePool != readPool) {
+        interrupted += writePool->interruptActiveConnections();
+    }
+    return interrupted;
 }
 
 void DatabaseManager::shutdownWal() {

@@ -1,3 +1,4 @@
+#include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/db_salvage.h>
 
 #include <sqlite3.h>
@@ -5,8 +6,10 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 
 namespace yams::daemon {
 
@@ -391,26 +394,7 @@ AggregateSalvageResult salvageFromAllCorruptDbs(const fs::path& dataDir, const f
                                                 SalvageProgressFn progress) {
     AggregateSalvageResult result;
 
-    const std::string dbStem = "yams.db";
-    const std::string corruptPrefix = dbStem + ".corrupt-";
-
-    std::vector<fs::path> corruptDbs;
-    std::error_code ec;
-    for (const auto& entry : fs::directory_iterator(dataDir, ec)) {
-        if (ec) {
-            ec.clear();
-            continue;
-        }
-        const auto name = entry.path().filename().string();
-        if (name.rfind(corruptPrefix, 0) == 0) {
-            // Skip WAL and SHM sibling files
-            if (name.size() >= 4 && (name.substr(name.size() - 4) == "-wal" ||
-                                     name.substr(name.size() - 4) == "-shm")) {
-                continue;
-            }
-            corruptDbs.push_back(entry.path());
-        }
-    }
+    auto corruptDbs = listCorruptDbs(dataDir, kMetadataDbFileName);
 
     // Sort by modification time, newest first
     std::sort(corruptDbs.begin(), corruptDbs.end(), [](const fs::path& a, const fs::path& b) {
@@ -471,31 +455,18 @@ SalvageQuickCheck quickCheckSalvageNeeded(const fs::path& dataDir, const fs::pat
     SalvageQuickCheck qc;
     qc.currentDocCount = countDocumentsInDb(dbPath);
 
-    const std::string corruptPrefix = dbPath.filename().string() + ".corrupt-";
-
-    std::error_code ec;
-    for (const auto& entry : fs::directory_iterator(dataDir, ec)) {
-        if (ec) {
-            ec.clear();
-            continue;
-        }
-        const auto name = entry.path().filename().string();
-        if (name.rfind(corruptPrefix, 0) != 0)
-            continue;
-        if (name.size() >= 4 &&
-            (name.substr(name.size() - 4) == "-wal" || name.substr(name.size() - 4) == "-shm"))
-            continue;
+    for (const auto& corruptPath : listCorruptDbs(dataDir, dbPath.filename().string())) {
         ++qc.corruptDbCount;
-        int64_t count = countDocumentsInDb(entry.path());
+        int64_t count = countDocumentsInDb(corruptPath);
         if (count < 0) {
             ++qc.unreadableCorruptDbCount;
             spdlog::warn("[db_salvage] Corrupt DB '{}' could not be counted; leaving it for "
                          "manual repair",
-                         entry.path().filename().string());
+                         corruptPath.filename().string());
             continue;
         }
         spdlog::info("[db_salvage] Corrupt DB '{}' has {} docs (current DB has {})",
-                     entry.path().filename().string(), count, qc.currentDocCount);
+                     corruptPath.filename().string(), count, qc.currentDocCount);
         if (count > qc.currentDocCount) {
             qc.needsSalvage = true;
             qc.maxCorruptCount = std::max(qc.maxCorruptCount, count);
@@ -533,51 +504,166 @@ RecoverySentinelCleanup removeRecoverySentinels(const fs::path& dbPath) {
     return cleanup;
 }
 
-CorruptDbCleanup removeCorruptDbFiles(const fs::path& dataDir) {
-    CorruptDbCleanup cleanup;
+namespace {
 
-    const std::string corruptPrefix = "yams.db.corrupt-";
+// `YYYYmmddTHHMMSSZ[.N]` -> UTC time the artifact was quarantined.
+std::optional<std::chrono::system_clock::time_point> parseQuarantineTimestamp(std::string_view s) {
+    if (s.size() < 16 || s[8] != 'T' || s[15] != 'Z') {
+        return std::nullopt;
+    }
+    const auto field = [&](std::size_t pos, std::size_t len, int& out) {
+        const auto* first = s.data() + pos;
+        const auto* last = first + len;
+        const auto [ptr, ec] = std::from_chars(first, last, out);
+        return ec == std::errc{} && ptr == last;
+    };
+    int y = 0;
+    int mo = 0;
+    int d = 0;
+    int h = 0;
+    int mi = 0;
+    int sec = 0;
+    if (!field(0, 4, y) || !field(4, 2, mo) || !field(6, 2, d) || !field(9, 2, h) ||
+        !field(11, 2, mi) || !field(13, 2, sec) || y < 1970 || y > 2200 || h > 23 || mi > 59 ||
+        sec > 60) {
+        return std::nullopt;
+    }
+    const std::chrono::year_month_day ymd{std::chrono::year{y},
+                                          std::chrono::month{static_cast<unsigned>(mo)},
+                                          std::chrono::day{static_cast<unsigned>(d)}};
+    if (!ymd.ok()) {
+        return std::nullopt;
+    }
+    return std::chrono::sys_days{ymd} + std::chrono::hours{h} + std::chrono::minutes{mi} +
+           std::chrono::seconds{sec};
+}
 
-    std::error_code ec;
-    std::vector<fs::path> candidates;
-    for (const auto& entry : fs::directory_iterator(dataDir, ec)) {
-        if (ec) {
-            ec.clear();
-            continue;
+// When the artifact was quarantined: the timestamp in its name, else its modification time.
+std::optional<std::chrono::system_clock::time_point> quarantineTime(const fs::path& corruptPath,
+                                                                    std::string_view dbFileName) {
+    const auto name = corruptPath.filename().string();
+    const auto prefix = corruptDbPrefix(dbFileName);
+    if (name.size() > prefix.size()) {
+        if (auto parsed = parseQuarantineTimestamp(std::string_view(name).substr(prefix.size()))) {
+            return parsed;
         }
-        const auto name = entry.path().filename().string();
-        if (name.rfind(corruptPrefix, 0) != 0)
-            continue;
-        if (name.size() >= 4 &&
-            (name.substr(name.size() - 4) == "-wal" || name.substr(name.size() - 4) == "-shm"))
-            continue;
-        candidates.push_back(entry.path());
+    }
+    std::error_code ec;
+    const auto written = fs::last_write_time(corruptPath, ec);
+    if (ec) {
+        return std::nullopt;
+    }
+    return std::chrono::system_clock::now() +
+           std::chrono::duration_cast<std::chrono::system_clock::duration>(
+               written - fs::file_time_type::clock::now());
+}
+
+} // namespace
+
+Result<bool> corruptDbSalvageConfirmed(const fs::path& corruptPath, const fs::path& liveDbPath) {
+    std::error_code existsEc;
+    if (!fs::exists(liveDbPath, existsEc)) {
+        return Error{ErrorCode::FileNotFound, "live DB missing: " + liveDbPath.string()};
     }
 
-    for (const auto& corruptPath : candidates) {
-        const int64_t docCount = countDocumentsInDb(corruptPath);
-        if (docCount < 0) {
-            spdlog::warn("[db_salvage] Keeping unreadable corrupt DB '{}' for manual repair",
-                         corruptPath.filename().string());
+    sqlite3* db = nullptr;
+    int rc = sqlite3_open_v2(corruptPath.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr);
+    if (rc != SQLITE_OK) {
+        std::string err = db ? sqlite3_errmsg(db) : sqlite3_errstr(rc);
+        if (db)
+            sqlite3_close(db);
+        return Error{ErrorCode::DatabaseError, "cannot open corrupt DB: " + err};
+    }
+    sqlite3_busy_timeout(db, 5000);
+
+    const auto fail = [&](const std::string& what) -> Result<bool> {
+        std::string err = what + ": " + sqlite3_errmsg(db);
+        sqlite3_close(db);
+        return Error{ErrorCode::DatabaseError, err};
+    };
+
+    // The connection is read-only, so the attached live DB is opened read-only too.
+    sqlite3_stmt* attach = nullptr;
+    if (sqlite3_prepare_v2(db, "ATTACH DATABASE ?1 AS live", -1, &attach, nullptr) != SQLITE_OK) {
+        return fail("cannot prepare ATTACH");
+    }
+    const auto live = liveDbPath.string();
+    sqlite3_bind_text(attach, 1, live.c_str(), static_cast<int>(live.size()), SQLITE_TRANSIENT);
+    rc = sqlite3_step(attach);
+    sqlite3_finalize(attach);
+    if (rc != SQLITE_DONE) {
+        return fail("cannot attach live DB");
+    }
+
+    // Salvage copies documents keyed by content hash; it is complete when none is missing.
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT COUNT(*) FROM main.documents AS c WHERE NOT EXISTS "
+                           "(SELECT 1 FROM live.documents AS l WHERE l.sha256_hash = "
+                           "c.sha256_hash)",
+                           -1, &stmt, nullptr) != SQLITE_OK) {
+        return fail("cannot prepare salvage confirmation query");
+    }
+    rc = sqlite3_step(stmt);
+    const int64_t missing = rc == SQLITE_ROW ? sqlite3_column_int64(stmt, 0) : -1;
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_ROW) {
+        return fail("salvage confirmation query failed");
+    }
+    sqlite3_close(db);
+    return missing == 0;
+}
+
+CorruptDbCleanup removeSalvagedCorruptDbs(const fs::path& liveDbPath, std::chrono::seconds minAge,
+                                          std::chrono::system_clock::time_point now) {
+    CorruptDbCleanup cleanup;
+    const fs::path dataDir = liveDbPath.has_parent_path() ? liveDbPath.parent_path() : ".";
+    const auto dbFileName = liveDbPath.filename().string();
+
+    for (const auto& corruptPath : listCorruptDbs(dataDir, dbFileName)) {
+        const auto name = corruptPath.filename().string();
+        const auto quarantinedAt = quarantineTime(corruptPath, dbFileName);
+        if (!quarantinedAt) {
+            cleanup.retained.push_back({corruptPath, "quarantine time unknown"});
+            continue;
+        }
+        if (now - *quarantinedAt < minAge) {
+            cleanup.retained.push_back({corruptPath, "within retention window"});
             continue;
         }
 
-        // Remove the corrupt DB file
+        auto confirmed = corruptDbSalvageConfirmed(corruptPath, liveDbPath);
+        if (!confirmed) {
+            spdlog::warn("[db_salvage] Keeping corrupt DB '{}': salvage cannot be confirmed ({})",
+                         name, confirmed.error().message);
+            cleanup.retained.push_back({corruptPath, "unreadable: " + confirmed.error().message});
+            continue;
+        }
+        if (!confirmed.value()) {
+            spdlog::warn("[db_salvage] Keeping corrupt DB '{}': it holds documents missing from "
+                         "the live DB",
+                         name);
+            cleanup.retained.push_back({corruptPath, "documents missing from live DB"});
+            continue;
+        }
+
         std::error_code removeEc;
         if (!fs::remove(corruptPath, removeEc)) {
             cleanup.errors.push_back("cannot remove " + corruptPath.string() + ": " +
-                                     removeEc.message());
+                                     (removeEc ? removeEc.message() : std::string("not found")));
             continue;
         }
         cleanup.removed.push_back(corruptPath);
-
-        // Remove companion WAL and SHM files
-        fs::path walPath = corruptPath.string() + "-wal";
-        fs::path shmPath = corruptPath.string() + "-shm";
-        fs::remove(walPath, ec);
-        fs::remove(shmPath, ec);
-
-        spdlog::info("[db_salvage] Removed corrupt DB: {}", corruptPath.filename().string());
+        for (const auto* suffix : {"-wal", "-shm"}) {
+            std::error_code sidecarEc;
+            fs::remove(fs::path(corruptPath.string() + suffix), sidecarEc);
+            if (sidecarEc) {
+                cleanup.errors.push_back("cannot remove " + corruptPath.string() + suffix + ": " +
+                                         sidecarEc.message());
+            }
+        }
+        spdlog::info("[db_salvage] Removed corrupt DB '{}': every document is in the live DB",
+                     name);
     }
 
     return cleanup;

@@ -36,7 +36,10 @@ static const char* dlerror() {
 #include <dlfcn.h>
 #endif
 #include <fstream>
+#include <mutex>
 #include <regex>
+#include <set>
+#include <string>
 #include <string_view>
 #include <yams/app/services/services.hpp>
 #include <yams/config/config_helpers.h>
@@ -400,13 +403,23 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
     } catch (...) {
     }
     if (declaresRemovedSymbolExtractor(hi->info.interfaces)) {
-        spdlog::warn("Skipping plugin '{}' ({}): the {} interface was removed in v0.20",
-                     hi->info.name, canon.string(), kRemovedSymbolExtractorInterface);
+        // A stale install artifact, not an error: say once per process which file to delete.
+        static std::mutex reportedMutex;
+        static std::set<std::string> reported;
+        bool firstReport = false;
+        {
+            std::lock_guard<std::mutex> reportedLock(reportedMutex);
+            firstReport = reported.insert(canon.string()).second;
+        }
+        if (firstReport) {
+            spdlog::info("Skipping plugin '{}': it implements {}, which was removed in v0.20. "
+                         "The file is unused and can be deleted: {}",
+                         hi->info.name, kRemovedSymbolExtractorInterface, canon.string());
+        }
         recordSkip("symbol_extractor_v1 interface removed in v0.20");
         // hi owns the handle and host context; releasing it shuts the plugin down.
         return Error{ErrorCode::NotSupported,
-                     "Plugin declares the removed symbol_extractor_v1 interface: " +
-                         canon.string()};
+                     std::string(kRemovedSymbolExtractorRefusal) + canon.string()};
     }
     // Normalize provider name to avoid duplicate variants on UNIX (e.g., libyams_foo_plugin vs
     // yams_foo_plugin). Prefer non-'lib' prefix for user-facing identity.

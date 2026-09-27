@@ -37,13 +37,14 @@ struct FanoutFixture {
     std::atomic<uint64_t> queryCount{0};
     std::atomic<uint64_t> avgTime{0};
     std::shared_ptr<std::atomic<bool>> cancellationSignal;
+    std::shared_ptr<std::atomic<bool>> hostCancellationSignal;
 
     ComponentFanoutCollector makeCollector() {
         return ComponentFanoutCollector(config, trace,
                                         ComponentFanoutSinks{allComponentResults, componentTiming,
                                                              contributing, failed, timedOut,
                                                              timedOutQueries},
-                                        cancellationSignal);
+                                        cancellationSignal, hostCancellationSignal);
     }
 };
 
@@ -173,6 +174,44 @@ TEST_CASE("fanout collector stops waiting when its request is canceled",
     CHECK(fixture.failed.empty());
     CHECK(fixture.timedOut.empty());
     CHECK(fixture.timedOutQueries.load() == 0);
+
+    canceler.join();
+    future.wait();
+    guard.reset();
+    io.stop();
+    runner.join();
+}
+
+TEST_CASE("fanout collector stops an unbounded wait when the host cancels",
+          "[search][fanout][cancel][catch2]") {
+    FanoutFixture fixture;
+    // componentTimeout == 0 waits without a deadline; host cancellation (daemon shutdown) must
+    // still end the wait so the request handler releases its worker thread.
+    fixture.config.componentTimeout = std::chrono::milliseconds(0);
+    fixture.hostCancellationSignal = std::make_shared<std::atomic<bool>>(false);
+    auto collector = fixture.makeCollector();
+
+    boost::asio::io_context io;
+    auto guard = boost::asio::make_work_guard(io);
+    std::thread runner([&io]() { io.run(); });
+    std::optional<boost::asio::any_io_executor> executor{io.get_executor()};
+
+    auto future = scheduleComponent(1.0f, executor, []() -> Result<std::vector<ComponentResult>> {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        return std::vector<ComponentResult>{};
+    });
+    std::thread canceler([signal = fixture.hostCancellationSignal]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        signal->store(true, std::memory_order_release);
+    });
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto status = collector.collect(future, "text", fixture.queryCount, fixture.avgTime);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    CHECK(status == ComponentStatus::Canceled);
+    CHECK(elapsed < std::chrono::milliseconds(200));
+    CHECK(fixture.timedOut.empty());
 
     canceler.join();
     future.wait();

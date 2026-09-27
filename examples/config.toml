@@ -320,6 +320,15 @@ interval_minutes = 60
 # Initial delay after startup
 initial_delay_minutes = 10
 
+[daemon.maintenance]
+# Idle-only maintenance run by the repair service (no clients connected, no resource pressure).
+# How often vectors.db is checked for a VACUUM that reclaims its free pages (0 disables).
+vector_vacuum_interval_hours = 24
+# Session files (under $XDG_STATE_HOME/yams/sessions) nobody has opened or changed for this
+# many days are deleted, except the current session, sessions watching a directory that still
+# exists, and sessions that still own documents (0 disables).
+session_expiry_days = 30
+
 # Centralized tuning knobs (advanced): defaults are safe; uncomment to override
 [tuning]
 # Default tuning preset applied by the daemon. Options: "efficient", "balanced", "aggressive".

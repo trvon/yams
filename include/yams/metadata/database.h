@@ -409,6 +409,15 @@ public:
      */
     [[nodiscard]] sqlite3* rawHandle() const { return db_; }
 
+    /**
+     * @brief Abort the statement currently running on this connection (sqlite3_interrupt).
+     *
+     * Safe to call from another thread while the connection stays open; the running statement
+     * fails with SQLITE_INTERRUPT. An interrupt that arrives while no statement is active is
+     * cleared by SQLite when the next statement starts.
+     */
+    void interrupt() noexcept;
+
 private:
     sqlite3* db_ = nullptr;
     std::string path_;
