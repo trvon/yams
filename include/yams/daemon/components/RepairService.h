@@ -124,11 +124,15 @@ public:
         std::chrono::hours corruptDbRetention{24 * 7};
         // How often the background loop re-runs recovery-artifact maintenance.
         std::chrono::minutes recoveryArtifactSweepInterval{6 * 60};
+        // Clean-shutdown stamp leftovers (yams.db.integrity.tmp / .claim.<pid>.<n>) of a
+        // crashed process are removed only when at least this old.
+        std::chrono::minutes stampArtifactMinAge{60};
     };
 
     struct RecoveryArtifactMaintenanceStats {
         std::size_t corruptDbsRemoved{0};
         std::size_t corruptDbsRetained{0};
+        std::size_t stampArtifactsRemoved{0};
         std::vector<std::string> errors;
     };
 

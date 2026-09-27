@@ -7,12 +7,19 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iterator>
 #include <string>
 #include <vector>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "../../common/sqlite_corruption.h"
 
@@ -468,6 +475,82 @@ TEST_CASE("quarantineSqliteSidecars is a no-op without sidecars",
     REQUIRE(res);
     CHECK(res.value().empty());
     CHECK(filesWithPrefix(dir, "yams.db-").empty());
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+namespace {
+
+std::uint64_t currentPid() {
+#if defined(_WIN32)
+    return static_cast<std::uint64_t>(_getpid());
+#else
+    return static_cast<std::uint64_t>(::getpid());
+#endif
+}
+
+// Far above any real pid_max; kill()/OpenProcess() report it as not running.
+constexpr std::uint64_t kDeadPid = 2147483646;
+
+void ageFile(const fs::path& p, std::chrono::hours age) {
+    fs::last_write_time(p, fs::file_time_type::clock::now() - age);
+}
+
+} // namespace
+
+TEST_CASE("stamp artifact sweep removes only stale leftovers of dead owners",
+          "[unit][daemon][db_recovery][integrity_stamp][stamp_sweep]") {
+    using namespace std::chrono_literals;
+    auto dir = makeScratchDir("yams_db_stamp_sweep");
+    auto dbPath = dir / "yams.db";
+    seedTable(dbPath, 1);
+    REQUIRE(yams::daemon::publishDbCleanShutdownStamp(dbPath));
+    const fs::path stamp = yams::daemon::dbIntegrityStampPath(dbPath);
+    const std::string stampText = readFile(stamp);
+
+    const fs::path staleTmp(stamp.string() + ".tmp");
+    const fs::path deadClaim(stamp.string() + ".claim." + std::to_string(kDeadPid) + ".0");
+    const fs::path liveClaim(stamp.string() + ".claim." + std::to_string(currentPid()) + ".0");
+    const fs::path youngDeadClaim(stamp.string() + ".claim." + std::to_string(kDeadPid) + ".1");
+    const fs::path opaqueClaim(stamp.string() + ".claim.not-a-pid.0");
+    const fs::path unrelated(dir / "yams.db.integrity-notes");
+    for (const auto& p : {staleTmp, deadClaim, liveClaim, youngDeadClaim, opaqueClaim, unrelated}) {
+        writeFile(p, "version=1\nstate=in_progress\n");
+    }
+    for (const auto& p : {staleTmp, deadClaim, liveClaim, opaqueClaim, unrelated}) {
+        ageFile(p, 3h);
+    }
+    ageFile(stamp, 3h);
+
+    const auto sweep = yams::daemon::sweepStaleDbIntegrityStampArtifacts(dbPath, 1h);
+    CHECK(sweep.errors.empty());
+    CHECK((sweep.removed.size() == 2));
+    CHECK_FALSE(fs::exists(staleTmp));
+    CHECK_FALSE(fs::exists(deadClaim));
+    CHECK(fs::exists(liveClaim));      // owner still running
+    CHECK(fs::exists(youngDeadClaim)); // too recent to be sure it is abandoned
+    CHECK(fs::exists(opaqueClaim));    // owner unknown
+    CHECK(fs::exists(unrelated));
+    REQUIRE(fs::exists(stamp)); // the live stamp is never touched
+    CHECK((readFile(stamp) == stampText));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("stamp artifact sweep keeps a fresh temp file of an in-flight publish",
+          "[unit][daemon][db_recovery][integrity_stamp][stamp_sweep]") {
+    using namespace std::chrono_literals;
+    auto dir = makeScratchDir("yams_db_stamp_sweep_fresh");
+    auto dbPath = dir / "yams.db";
+    writeFile(dbPath, "db");
+    const fs::path tmp(yams::daemon::dbIntegrityStampPath(dbPath) + ".tmp");
+    writeFile(tmp, "partial");
+
+    const auto sweep = yams::daemon::sweepStaleDbIntegrityStampArtifacts(dbPath, 1h);
+    CHECK(sweep.removed.empty());
+    CHECK(fs::exists(tmp));
 
     std::error_code ec;
     fs::remove_all(dir, ec);

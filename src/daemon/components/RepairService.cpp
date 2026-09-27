@@ -1,3 +1,4 @@
+#include <yams/daemon/components/db_integrity_stamp.h>
 #include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/db_salvage.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
@@ -890,6 +891,19 @@ RepairService::RecoveryArtifactMaintenanceStats RepairService::runRecoveryArtifa
     }
     for (auto& err : corrupt.errors) {
         spdlog::warn("RepairService: corrupt DB cleanup error: {}", err);
+        stats.errors.push_back(std::move(err));
+    }
+
+    // Leftovers of a clean-shutdown stamp publish/consume interrupted by a crash. They never
+    // affect trust decisions but would otherwise accumulate forever.
+    auto stamps = sweepStaleDbIntegrityStampArtifacts(
+        dbPath, std::chrono::duration_cast<std::chrono::seconds>(cfg_.stampArtifactMinAge));
+    stats.stampArtifactsRemoved = stamps.removed.size();
+    for (const auto& path : stamps.removed) {
+        spdlog::info("RepairService: removed stale integrity-stamp artifact {}", path);
+    }
+    for (auto& err : stamps.errors) {
+        spdlog::warn("RepairService: integrity-stamp artifact sweep error: {}", err);
         stats.errors.push_back(std::move(err));
     }
     return stats;

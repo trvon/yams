@@ -710,3 +710,25 @@ TEST_CASE("salvaged fresh DB passes integrity check", "[unit][daemon][db_salvage
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+TEST_CASE("RepairService maintenance sweeps stale clean-shutdown stamp leftovers",
+          "[unit][daemon][db_salvage][repair][stamp_sweep]") {
+    auto dir = makeScratchDir("yams_repair_stamp_sweep");
+    auto livePath = dir / "yams.db";
+    createAndPopulateDb(livePath, 1, makeTestHashes(1));
+    const fs::path staleTmp(livePath.string() + ".integrity.tmp");
+    std::ofstream(staleTmp) << "version=1\n";
+    fs::last_write_time(staleTmp, fs::file_time_type::clock::now() - std::chrono::hours{2});
+
+    yams::daemon::RepairService::Config cfg;
+    cfg.dataDir = dir;
+    yams::daemon::RepairService service(
+        yams::daemon::RepairServiceContext{}, nullptr, [] { return std::size_t{0}; }, cfg);
+    const auto stats = service.runRecoveryArtifactMaintenance();
+
+    CHECK((stats.stampArtifactsRemoved == 1));
+    CHECK_FALSE(fs::exists(staleTmp));
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}

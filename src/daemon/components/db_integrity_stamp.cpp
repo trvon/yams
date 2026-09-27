@@ -5,6 +5,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <string>
@@ -12,11 +13,13 @@
 #include <system_error>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #endif
@@ -451,6 +454,41 @@ bool fingerprintsMatch(const DbFingerprint& expected, const DbFingerprint& actua
            (expected.device == actual.device && expected.inode == actual.inode);
 }
 
+// Stamp paths are UTF-8 strings (see windowsPath); keep that encoding across std::filesystem.
+std::filesystem::path toFsPath(const std::string& utf8) {
+    return std::filesystem::path(std::u8string(utf8.begin(), utf8.end()));
+}
+
+std::string fromFsPath(const std::filesystem::path& path) {
+    const auto utf8 = path.u8string();
+    return std::string(utf8.begin(), utf8.end());
+}
+
+// Conservative: anything other than "no such process" counts as alive.
+bool processIsAlive(std::uint64_t pid) {
+#if defined(_WIN32)
+    if (pid > std::numeric_limits<DWORD>::max()) {
+        return false;
+    }
+    HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (handle == nullptr) {
+        return GetLastError() != ERROR_INVALID_PARAMETER;
+    }
+    DWORD exitCode = 0;
+    const bool queried = GetExitCodeProcess(handle, &exitCode) != 0;
+    CloseHandle(handle);
+    return !queried || exitCode == STILL_ACTIVE;
+#else
+    if (pid > static_cast<std::uint64_t>(std::numeric_limits<pid_t>::max())) {
+        return false;
+    }
+    if (::kill(static_cast<pid_t>(pid), 0) == 0) {
+        return true;
+    }
+    return errno != ESRCH;
+#endif
+}
+
 struct StampClaim {
     bool succeeded{false};
     std::string path;
@@ -596,6 +634,62 @@ DbIntegrityStampDecision consumeDbCleanShutdownStamp(const std::string& dbPathSt
     std::error_code removeEc;
     removePath(claimedStamp.path, removeEc);
     return decision;
+}
+
+DbIntegrityStampSweep sweepStaleDbIntegrityStampArtifacts(const std::string& dbPath,
+                                                          std::chrono::seconds minAge) {
+    namespace fs = std::filesystem;
+    DbIntegrityStampSweep sweep;
+
+    const auto stampPath = toFsPath(dbIntegrityStampPath(dbPath));
+    const auto stampName = fromFsPath(stampPath.filename());
+    const std::string tmpName = stampName + ".tmp";
+    const std::string claimPrefix = stampName + ".claim.";
+    const fs::path dir = stampPath.has_parent_path() ? stampPath.parent_path() : fs::path(".");
+
+    std::vector<std::string> stale;
+    std::error_code ec;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const auto name = fromFsPath(it->path().filename());
+        const bool isTmp = name == tmpName;
+        const bool isClaim = name.size() > claimPrefix.size() && name.starts_with(claimPrefix);
+        if (!isTmp && !isClaim) {
+            continue; // includes the live stamp itself
+        }
+
+        std::error_code timeEc;
+        const auto written = fs::last_write_time(it->path(), timeEc);
+        if (timeEc || fs::file_time_type::clock::now() - written < minAge) {
+            continue;
+        }
+        if (isClaim) {
+            // `<stamp>.claim.<pid>.<sequence>`: keep it unless its owner is provably gone.
+            const std::string_view rest = std::string_view(name).substr(claimPrefix.size());
+            const auto dot = rest.find('.');
+            std::uint64_t pid = 0;
+            std::uint64_t sequence = 0;
+            if (dot == std::string_view::npos || !parseInteger(rest.substr(0, dot), pid) ||
+                !parseInteger(rest.substr(dot + 1), sequence) || pid == 0 || processIsAlive(pid)) {
+                continue;
+            }
+        }
+
+        stale.push_back(fromFsPath(it->path()));
+    }
+    if (ec) {
+        sweep.errors.push_back("cannot scan " + fromFsPath(dir) + ": " + ec.message());
+    }
+
+    for (const auto& path : stale) {
+        std::error_code removeEc;
+        removePath(path, removeEc);
+        if (removeEc) {
+            sweep.errors.push_back("cannot remove " + path + ": " + removeEc.message());
+        } else {
+            sweep.removed.push_back(path);
+        }
+    }
+    return sweep;
 }
 
 Result<void> invalidateDbCleanShutdownStamp(const std::string& dbPath) {

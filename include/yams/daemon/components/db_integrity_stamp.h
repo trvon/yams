@@ -2,7 +2,9 @@
 
 #include "../../core/types.h"
 
+#include <chrono>
 #include <string>
+#include <vector>
 
 namespace yams::daemon {
 
@@ -55,6 +57,28 @@ DbIntegrityStampDecision consumeDbCleanShutdownStamp(const std::string& dbPath);
 template <typename PathLike>
 DbIntegrityStampDecision consumeDbCleanShutdownStamp(const PathLike& dbPath) {
     return consumeDbCleanShutdownStamp(dbPath.string());
+}
+
+struct DbIntegrityStampSweep {
+    std::vector<std::string> removed;
+    std::vector<std::string> errors;
+};
+
+/**
+ * Remove leftovers of a stamp publish/consume that was interrupted by a crash:
+ * `<stamp>.tmp` and `<stamp>.claim.<pid>.<n>`.
+ *
+ * A claim file is removed only when its owning pid is not a live process; both kinds are removed
+ * only when older than `minAge`. The live stamp itself is never touched, and a claim whose owner
+ * cannot be parsed is kept.
+ */
+DbIntegrityStampSweep sweepStaleDbIntegrityStampArtifacts(const std::string& dbPath,
+                                                          std::chrono::seconds minAge);
+
+template <typename PathLike>
+DbIntegrityStampSweep sweepStaleDbIntegrityStampArtifacts(const PathLike& dbPath,
+                                                          std::chrono::seconds minAge) {
+    return sweepStaleDbIntegrityStampArtifacts(dbPath.string(), minAge);
 }
 
 /** Remove any stamp so the next startup must perform the full integrity check. */
