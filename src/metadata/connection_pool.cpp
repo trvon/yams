@@ -844,7 +844,8 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
         if (threshold > 0 && holdMicros > threshold) {
             slowHolderCount_.fetch_add(1, std::memory_order_relaxed);
             const auto& tag = conn->holderTag();
-            spdlog::warn("[ConnectionPool] slow write-connection hold: tag='{}' duration_ms={}",
+            spdlog::warn("[ConnectionPool] slow {}-connection hold: tag='{}' duration_ms={}",
+                         config_.readOnly ? "read" : "write",
                          tag.empty() ? "<untagged>" : tag.c_str(), holdMicros / 1000ULL);
         }
     }
