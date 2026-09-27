@@ -921,7 +921,7 @@ YAMS_MOBILE_API yams_mobile_version_info yams_mobile_get_version(void) {
 
 YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
     const yams_mobile_context_config* config, yams_mobile_context_t** out_context) {
-    YAMS_PROFILE_ZONE("mobile::context_create");
+    YAMS_ZONE_SCOPED_N("mobile::context_create");
     if (out_context == nullptr) {
         set_last_error("out_context pointer is null");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
@@ -996,6 +996,10 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
             yams::daemon::ClientConfig clientConfig;
             clientConfig.autoStart = false;
             clientConfig.executor = ctx->state.worker_pool->get_executor();
+            // The default pool is process-wide and keyed by socket path, so it would keep
+            // sockets bound to this context's worker_pool after the context is destroyed,
+            // and a later context would reuse them. Keep every connection context-owned.
+            clientConfig.singleUseConnections = true;
             if (!ctx->state.config.daemon_socket_path.empty()) {
                 clientConfig.socketPath = ctx->state.config.daemon_socket_path;
             }
@@ -1057,7 +1061,8 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
             ctx->state.app_context.metadataRepo = ctx->state.metadata_repo;
             if (ctx->state.metadata_repo) {
                 ctx->state.app_context.metadataInsertWriter =
-                    std::make_shared<yams::metadata::MetadataInsertWriter>(ctx->state.metadata_repo);
+                    std::make_shared<yams::metadata::MetadataInsertWriter>(
+                        ctx->state.metadata_repo);
             }
             ctx->state.app_context.kgStore = std::move(kgStore);
             ctx->state.app_context.graphQueryService =
@@ -1102,6 +1107,11 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
 YAMS_MOBILE_API void yams_mobile_context_destroy(yams_mobile_context_t* ctx) {
     if (!ctx)
         return;
+    // Close daemon connections while the worker pool that runs their handlers is alive.
+    if (ctx->state.daemon_client) {
+        ctx->state.daemon_client->disconnect();
+        ctx->state.daemon_client.reset();
+    }
     if (ctx->state.worker_pool) {
         ctx->state.worker_pool->join();
     }
@@ -1394,7 +1404,7 @@ YAMS_MOBILE_API void yams_mobile_search_result_destroy(yams_mobile_search_result
 YAMS_MOBILE_API yams_mobile_status yams_mobile_store_document(
     yams_mobile_context_t* ctx, const yams_mobile_document_store_request* request,
     yams_mobile_string_view* out_hash) {
-    YAMS_PROFILE_ZONE("mobile::store_document");
+    YAMS_ZONE_SCOPED_N("mobile::store_document");
     if (out_hash) {
         out_hash->data = nullptr;
         out_hash->length = 0;
@@ -1468,7 +1478,7 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_store_document(
 
 YAMS_MOBILE_API yams_mobile_status yams_mobile_remove_document(yams_mobile_context_t* ctx,
                                                                const char* document_hash) {
-    YAMS_PROFILE_ZONE("mobile::remove_document");
+    YAMS_ZONE_SCOPED_N("mobile::remove_document");
     if (!ctx || !document_hash || *document_hash == '\0') {
         set_last_error("invalid arguments");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
@@ -1540,7 +1550,7 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_remove_document(yams_mobile_conte
 YAMS_MOBILE_API yams_mobile_status yams_mobile_download(yams_mobile_context_t* ctx,
                                                         const yams_mobile_download_request* request,
                                                         yams_mobile_string_view* out_hash) {
-    YAMS_PROFILE_ZONE("mobile::download");
+    YAMS_ZONE_SCOPED_N("mobile::download");
     if (out_hash) {
         out_hash->data = nullptr;
         out_hash->length = 0;
@@ -2301,7 +2311,7 @@ YAMS_MOBILE_API void yams_mobile_metadata_result_destroy(yams_mobile_metadata_re
 YAMS_MOBILE_API yams_mobile_status yams_mobile_get_vector_status(
     yams_mobile_context_t* ctx, const yams_mobile_vector_status_request* request,
     yams_mobile_vector_status_result_t** out_result) {
-    YAMS_PROFILE_ZONE("mobile::get_vector_status");
+    YAMS_ZONE_SCOPED_N("mobile::get_vector_status");
     if (out_result)
         *out_result = nullptr;
     if (!ctx) {
@@ -2526,7 +2536,7 @@ YAMS_MOBILE_API void yams_mobile_list_result_destroy(yams_mobile_list_result_t* 
 YAMS_MOBILE_API yams_mobile_status yams_mobile_get_document(
     yams_mobile_context_t* ctx, const yams_mobile_document_get_request* request,
     yams_mobile_document_get_result_t** out_result) {
-    YAMS_PROFILE_ZONE("mobile::get_document");
+    YAMS_ZONE_SCOPED_N("mobile::get_document");
     if (out_result)
         *out_result = nullptr;
     if (!ctx) {
@@ -2926,10 +2936,32 @@ YAMS_MOBILE_API const char* yams_mobile_last_error_message(void) {
 
 // --- Mobile extensions: repair, diff, cat, restore, model, doctor ---
 
+namespace {
+
+// Fetch a document's stored bytes through the document service. Content comes
+// back uncompressed because the request leaves acceptCompressed unset.
+Result<std::string> retrieve_document_bytes(yams::app::services::IDocumentService& service,
+                                            const char* hash) {
+    RetrieveDocumentRequest req;
+    req.hash = hash;
+    req.includeContent = true;
+    req.raw = true;
+    req.extract = false;
+    auto result = service.retrieve(req);
+    if (!result)
+        return result.error();
+    auto& response = result.value();
+    if (!response.document || !response.document->content)
+        return yams::Error{ErrorCode::NotFound, "document content not found"};
+    return std::move(*response.document->content);
+}
+
+} // namespace
+
 YAMS_MOBILE_API yams_mobile_status yams_mobile_repair(yams_mobile_context_t* ctx,
                                                       const yams_mobile_repair_request* request,
                                                       yams_mobile_repair_result** out_result) {
-    YAMS_PROFILE_ZONE("mobile::repair");
+    YAMS_ZONE_SCOPED_N("mobile::repair");
     if (!ctx || !request || !out_result)
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     if (auto status = validate_request_header(&request->header, "repair");
@@ -2948,24 +2980,28 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_repair(yams_mobile_context_t* ctx
             dreq.repairOrphans = request->repair_orphans;
             dreq.repairAll = request->repair_all;
             dreq.dryRun = request->dry_run;
-            dreq.maxRetries = request->max_retries;
+            if (request->max_retries > 0)
+                dreq.maxRetries = request->max_retries;
             if (request->embedding_model)
                 dreq.embeddingModel = request->embedding_model;
-            auto client = ctx->state.daemon_client;
-            if (!client)
-                return YAMS_MOBILE_STATUS_UNAVAILABLE;
-            auto future = client->call(dreq);
-            auto dres = future.get();
+            auto dres = daemon_call(ctx->state, std::move(dreq));
             if (!dres) {
                 set_last_error(dres.error().message);
-                return YAMS_MOBILE_STATUS_INTERNAL_ERROR;
+                return map_error_code(dres.error().code);
             }
-            res->embeddings_generated = dres->embeddingsGenerated;
-            res->embeddings_skipped = dres->embeddingsSkipped;
-            res->fts5_cleaned = dres->fts5Cleaned;
-            res->graph_repaired = dres->graphRepaired;
-            res->orphans_removed = dres->orphansRemoved;
-            res->operation_count = dres->operationsPerformed;
+            for (const auto& op : dres.value().operationResults) {
+                if (op.operation == "embeddings") {
+                    res->embeddings_generated += op.succeeded;
+                    res->embeddings_skipped += op.skipped;
+                } else if (op.operation == "fts5") {
+                    res->fts5_cleaned += op.succeeded;
+                } else if (op.operation == "graph") {
+                    res->graph_repaired += op.succeeded;
+                } else if (op.operation == "orphans") {
+                    res->orphans_removed += op.succeeded;
+                }
+            }
+            res->operation_count = static_cast<std::uint32_t>(dres.value().operationResults.size());
         } else {
             set_last_error("repair requires daemon backend");
             return YAMS_MOBILE_STATUS_UNAVAILABLE;
@@ -2986,7 +3022,7 @@ void yams_mobile_repair_result_destroy(yams_mobile_repair_result* result) {
 YAMS_MOBILE_API yams_mobile_status yams_mobile_diff(yams_mobile_context_t* ctx,
                                                     const yams_mobile_diff_request* request,
                                                     yams_mobile_string_view* out_diff) {
-    YAMS_PROFILE_ZONE("mobile::diff");
+    YAMS_ZONE_SCOPED_N("mobile::diff");
     if (!ctx || !request || !out_diff || !request->hash_a)
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     if (auto status = validate_request_header(&request->header, "diff");
@@ -2994,36 +3030,28 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_diff(yams_mobile_context_t* ctx,
         return status;
 
     try {
-        RetrieveDocumentRequest getReq;
-        getReq.hash = request->hash_a;
-        getReq.includeContent = true;
-        RetrieveDocumentResponse doc_a;
-        if (ctx->state.document_service) {
-            auto result = ctx->state.document_service->retrieveDocument(getReq);
-            if (!result.has_value()) {
-                set_last_error("hash_a not found");
-                return YAMS_MOBILE_STATUS_NOT_FOUND;
-            }
-            doc_a = std::move(result.value());
-        } else {
+        if (!ctx->state.document_service) {
             set_last_error("document service not available");
             return YAMS_MOBILE_STATUS_UNAVAILABLE;
         }
+        auto content_a = retrieve_document_bytes(*ctx->state.document_service, request->hash_a);
+        if (!content_a) {
+            set_last_error("hash_a: " + content_a.error().message);
+            return map_error_code(content_a.error().code);
+        }
         std::string content_b;
         if (request->hash_b) {
-            getReq.hash = request->hash_b;
-            auto result_b = ctx->state.document_service->retrieveDocument(getReq);
-            if (!result_b.has_value()) {
-                set_last_error("hash_b not found");
-                return YAMS_MOBILE_STATUS_NOT_FOUND;
+            auto result_b = retrieve_document_bytes(*ctx->state.document_service, request->hash_b);
+            if (!result_b) {
+                set_last_error("hash_b: " + result_b.error().message);
+                return map_error_code(result_b.error().code);
             }
-            content_b = std::move(result_b->content);
+            content_b = std::move(result_b.value());
         }
 
         // Simple line diff
         std::ostringstream diff;
-        auto& lines_a = doc_a->content;
-        std::istringstream stream_a(lines_a), stream_b(content_b);
+        std::istringstream stream_a(content_a.value()), stream_b(content_b);
         std::string line_a, line_b;
         int lineno = 1;
         while (std::getline(stream_a, line_a)) {
@@ -3056,7 +3084,7 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_diff(yams_mobile_context_t* ctx,
 YAMS_MOBILE_API yams_mobile_status yams_mobile_cat(yams_mobile_context_t* ctx,
                                                    const yams_mobile_cat_request* request,
                                                    yams_mobile_string_view* out_content) {
-    YAMS_PROFILE_ZONE("mobile::cat");
+    YAMS_ZONE_SCOPED_N("mobile::cat");
     if (!ctx || !request || !out_content || !request->hash)
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     if (auto status = validate_request_header(&request->header, "cat");
@@ -3064,19 +3092,16 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_cat(yams_mobile_context_t* ctx,
         return status;
 
     try {
-        RetrieveDocumentRequest getReq;
-        getReq.hash = request->hash;
-        getReq.includeContent = true;
         if (!ctx->state.document_service) {
             set_last_error("document service not available");
             return YAMS_MOBILE_STATUS_UNAVAILABLE;
         }
-        auto result = ctx->state.document_service->retrieveDocument(getReq);
-        if (!result.has_value()) {
-            set_last_error("document not found");
-            return YAMS_MOBILE_STATUS_NOT_FOUND;
+        auto result = retrieve_document_bytes(*ctx->state.document_service, request->hash);
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
         }
-        auto& stored = ctx->state.string_pool.emplace_back(std::move(result->content));
+        auto& stored = ctx->state.string_pool.emplace_back(std::move(result.value()));
         out_content->data = stored.c_str();
         out_content->length = stored.size();
     } catch (const std::exception& e) {
@@ -3089,7 +3114,7 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_cat(yams_mobile_context_t* ctx,
 YAMS_MOBILE_API yams_mobile_status yams_mobile_restore(yams_mobile_context_t* ctx,
                                                        const yams_mobile_restore_request* request,
                                                        yams_mobile_string_view* out_summary) {
-    YAMS_PROFILE_ZONE("mobile::restore");
+    YAMS_ZONE_SCOPED_N("mobile::restore");
     if (!ctx || !request || !out_summary || !request->output_directory)
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     if (auto status = validate_request_header(&request->header, "restore");
@@ -3111,7 +3136,7 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_restore(yams_mobile_context_t* ct
 
 YAMS_MOBILE_API yams_mobile_status
 yams_mobile_list_models(yams_mobile_context_t* ctx, yams_mobile_model_list_result** out_result) {
-    YAMS_PROFILE_ZONE("mobile::list_models");
+    YAMS_ZONE_SCOPED_N("mobile::list_models");
     if (!ctx || !out_result)
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     auto res = std::make_unique<yams_mobile_model_list_result>();
@@ -3134,7 +3159,7 @@ void yams_mobile_model_list_result_destroy(yams_mobile_model_list_result* result
 
 YAMS_MOBILE_API yams_mobile_status yams_mobile_set_model(yams_mobile_context_t* ctx,
                                                          const char* model_name) {
-    YAMS_PROFILE_ZONE("mobile::set_model");
+    YAMS_ZONE_SCOPED_N("mobile::set_model");
     if (!ctx || !model_name)
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     // Stub: model switching requires daemon-level model provider
@@ -3146,7 +3171,7 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_set_model(yams_mobile_context_t* 
 
 YAMS_MOBILE_API yams_mobile_status
 yams_mobile_get_embedding_info(yams_mobile_context_t* ctx, yams_mobile_embedding_info* out_info) {
-    YAMS_PROFILE_ZONE("mobile::get_embedding_info");
+    YAMS_ZONE_SCOPED_N("mobile::get_embedding_info");
     if (!ctx || !out_info)
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     out_info->available = 0;
@@ -3157,19 +3182,40 @@ yams_mobile_get_embedding_info(yams_mobile_context_t* ctx, yams_mobile_embedding
 
 YAMS_MOBILE_API yams_mobile_status yams_mobile_doctor(yams_mobile_context_t* ctx,
                                                       yams_mobile_string_view* out_report) {
-    YAMS_PROFILE_ZONE("mobile::doctor");
+    YAMS_ZONE_SCOPED_N("mobile::doctor");
     if (!ctx || !out_report)
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
-    std::string report = "{\"version\":\"" + std::string(kVersion.major + '0') + "." +
-                         std::to_string(kVersion.minor) + "." + std::to_string(kVersion.patch) +
-                         "\",\"backend\":\"embedded\",\"status\":\"ok\"}";
+    nlohmann::json doctor;
+    doctor["version"] = std::to_string(kVersion.major) + "." + std::to_string(kVersion.minor) +
+                        "." + std::to_string(kVersion.patch);
+    doctor["backend"] =
+        ctx->state.config.backend_mode == YAMS_MOBILE_BACKEND_DAEMON ? "daemon" : "embedded";
+    doctor["status"] = "ok";
+    const std::string report = doctor.dump();
     auto& stored = ctx->state.string_pool.emplace_back(report);
     out_report->data = stored.c_str();
     out_report->length = stored.size();
     return YAMS_MOBILE_STATUS_OK;
 }
 
-void yams_mobile_doctor_result_destroy(yams_mobile_string_view* report) {
-    // String pool owned by context; no-op
-    (void)report;
+// Views returned by diff/cat/restore/doctor point into the context's string pool,
+// which the context owns and frees on yams_mobile_context_destroy. Destroying a
+// view only clears it so a host cannot read it again by mistake.
+YAMS_MOBILE_API void yams_mobile_string_view_destroy(yams_mobile_string_view* sv) {
+    if (sv) {
+        sv->data = nullptr;
+        sv->length = 0;
+    }
+}
+
+YAMS_MOBILE_API void yams_mobile_cat_result_destroy(yams_mobile_string_view* content) {
+    yams_mobile_string_view_destroy(content);
+}
+
+YAMS_MOBILE_API void yams_mobile_restore_result_destroy(yams_mobile_string_view* summary) {
+    yams_mobile_string_view_destroy(summary);
+}
+
+YAMS_MOBILE_API void yams_mobile_doctor_result_destroy(yams_mobile_string_view* report) {
+    yams_mobile_string_view_destroy(report);
 }
