@@ -1701,6 +1701,7 @@ if catch2_dep.found()
       'unit/compression/compression_monitor_catch2_test.cpp',
       'unit/compression/compression_policy_catch2_test.cpp',
       'unit/compression/error_handler_catch2_test.cpp',
+      'unit/compression/framed_payload_catch2_test.cpp',
 #TODO(yams - 3s4) : Fix API mismatch - uses non - existent IntegrityValidator methods
 #'unit/compression/integrity_validator_catch2_test.cpp',
       'unit/compression/recovery_manager_catch2_test.cpp',

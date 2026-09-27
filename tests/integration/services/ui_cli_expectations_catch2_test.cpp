@@ -27,6 +27,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/compat/unistd.h>
 #include <yams/compression/compression_header.h>
+#include <yams/compression/framed_payload.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -467,6 +468,18 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: get honors acceptCompressed f
     CHECK(*compressed->uncompressedSize == expectedUncompressedSize);
     REQUIRE_FALSE(compressed->compressionHeader.empty());
     CHECK(compressed->compressionHeader.size() == yams::compression::CompressionHeader::SIZE);
+
+    // The framed content decodes to exactly the stored document (yams get printed the frame).
+    auto decoded = yams::compression::decodeFramedPayload(
+        std::span<const std::byte>(reinterpret_cast<const std::byte*>(compressed->content.data()),
+                                   compressed->content.size()));
+    REQUIRE(decoded.has_value());
+    std::string expectedContent;
+    for (int i = 0; i < 4096; ++i) {
+        expectedContent += payload;
+    }
+    CHECK((std::string(reinterpret_cast<const char*>(decoded.value().data()),
+                       decoded.value().size()) == expectedContent));
 
     REQUIRE(compressed->content.size() >= yams::compression::CompressionHeader::SIZE);
     uint32_t magic = 0;

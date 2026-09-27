@@ -20,6 +20,7 @@
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
+#include <yams/compression/framed_payload.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/format_handlers/format_handler.hpp>
@@ -468,47 +469,22 @@ struct CompressedPayload {
     compression::CompressionHeader header;
 };
 
+// The transfer format lives in compression/framed_payload so clients decode exactly what is
+// encoded here.
 Result<CompressedPayload> makeCompressedPayload(std::span<const std::byte> data) {
-    auto& registry = compression::CompressionRegistry::instance();
-    auto compressor = registry.createCompressor(compression::CompressionAlgorithm::Zstandard);
-    if (!compressor) {
-        return Error{ErrorCode::InvalidState, "Zstandard compressor unavailable"};
+    auto framed = compression::encodeFramedPayload(data);
+    if (!framed) {
+        return framed.error();
     }
-
-    constexpr uint8_t kDefaultLevel = 3;
-    auto compressedResult = compressor->compress(data, kDefaultLevel);
-    if (!compressedResult) {
-        return compressedResult.error();
+    auto header = compression::CompressionHeader::parse(
+        std::span<const std::byte>(framed.value()).first(compression::CompressionHeader::SIZE));
+    if (!header) {
+        return header.error();
     }
-
-    const auto& compressedVal = compressedResult.value();
-
-    compression::CompressionHeader header{};
-    header.magic = compression::CompressionHeader::MAGIC;
-    header.version = compression::CompressionHeader::VERSION;
-    // Use the actual algorithm from compression result - may be None if compression was ineffective
-    header.algorithm = static_cast<uint8_t>(compressedVal.algorithm);
-    header.level = compressedVal.level;
-    header.uncompressedSize = static_cast<uint64_t>(compressedVal.originalSize);
-    header.compressedSize = static_cast<uint64_t>(compressedVal.compressedSize);
-    header.uncompressedCRC32 = compression::calculateCRC32(data);
-    auto compressedSpan =
-        std::span<const std::byte>(compressedVal.data.data(), compressedVal.data.size());
-    header.compressedCRC32 = compression::calculateCRC32(compressedSpan);
-    const auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           std::chrono::system_clock::now().time_since_epoch())
-                           .count();
-    header.timestamp = nowNs < 0 ? 0ULL : static_cast<uint64_t>(nowNs);
-    header.flags = 0;
-    header.reserved1 = 0;
-    std::memset(header.reserved2, 0, sizeof(header.reserved2));
-
     CompressedPayload payload;
-    payload.blob.resize(sizeof(header) + compressedVal.data.size());
-    std::memcpy(payload.blob.data(), &header, sizeof(header));
-    std::memcpy(payload.blob.data() + sizeof(header), compressedVal.data.data(),
-                compressedVal.data.size());
-    payload.header = header;
+    payload.blob.assign(reinterpret_cast<const char*>(framed.value().data()),
+                        framed.value().size());
+    payload.header = header.value();
     return payload;
 }
 

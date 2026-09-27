@@ -14,6 +14,7 @@
 #include <yams/cli/graph_helpers.h>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compressor_interface.h>
+#include <yams/compression/framed_payload.h>
 #include <yams/config/config_helpers.h>
 #include <yams/core/task.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -1621,52 +1622,17 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         mcp_response.compressionHeader = oss.str();
     }
     if (resp.hasContent) {
-        // Handle compressed content - need to decompress or strip header for JSON response
-        constexpr size_t headerSize = compression::CompressionHeader::SIZE;
-        if (resp.compressed && resp.content.size() > headerSize) {
-            // Parse the compression header
-            std::span<const std::byte> headerSpan(
-                reinterpret_cast<const std::byte*>(resp.content.data()), headerSize);
-            auto headerRes = compression::CompressionHeader::parse(headerSpan);
-            if (headerRes && headerRes.value().validate()) {
-                const auto& header = headerRes.value();
-                auto algo = static_cast<compression::CompressionAlgorithm>(header.algorithm);
-
-                if (algo == compression::CompressionAlgorithm::None) {
-                    // Content stored uncompressed with header - strip header and return raw data
-                    mcp_response.content = std::string(resp.content.data() + headerSize,
-                                                       resp.content.size() - headerSize);
-                } else {
-                    // Content is compressed - decompress it
-                    auto compressor =
-                        compression::CompressionRegistry::instance().createCompressor(algo);
-                    if (compressor && header.compressedSize > 0 &&
-                        headerSize + header.compressedSize <= resp.content.size()) {
-                        std::span<const std::byte> compressedSpan(
-                            reinterpret_cast<const std::byte*>(resp.content.data() + headerSize),
-                            header.compressedSize);
-                        auto decompRes =
-                            compressor->decompress(compressedSpan, header.uncompressedSize);
-                        if (decompRes) {
-                            const auto& decompData = decompRes.value();
-                            mcp_response.content =
-                                std::string(reinterpret_cast<const char*>(decompData.data()),
-                                            decompData.size());
-                        } else {
-                            spdlog::warn("[MCP] Decompression failed: {}",
-                                         decompRes.error().message);
-                            mcp_response.content = resp.content;
-                        }
-                    } else {
-                        spdlog::warn("[MCP] Invalid header sizes or no compressor for algo={}",
-                                     static_cast<int>(algo));
-                        mcp_response.content = resp.content;
-                    }
-                }
-            } else {
-                // Header invalid - return content as-is
-                mcp_response.content = resp.content;
+        if (resp.compressed) {
+            // The daemon framed the content (header + zstd body); send the document, not the
+            // frame. A payload that does not decode is an error, never content.
+            auto decoded = compression::decodeFramedPayload(std::span<const std::byte>(
+                reinterpret_cast<const std::byte*>(resp.content.data()), resp.content.size()));
+            if (!decoded) {
+                co_return Error{decoded.error().code,
+                                "Could not decode document content: " + decoded.error().message};
             }
+            mcp_response.content = std::string(
+                reinterpret_cast<const char*>(decoded.value().data()), decoded.value().size());
         } else {
             mcp_response.content = resp.content;
         }
