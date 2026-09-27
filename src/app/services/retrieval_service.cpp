@@ -34,7 +34,6 @@ static yams::daemon::ClientConfig makeClientConfig(const RetrievalOptions& opts)
     cfg.headerTimeout = std::chrono::milliseconds(opts.headerTimeoutMs);
     cfg.bodyTimeout = std::chrono::milliseconds(opts.bodyTimeoutMs);
     cfg.requestTimeout = std::chrono::milliseconds(opts.requestTimeoutMs);
-    cfg.acceptCompressed = opts.acceptCompressed;
     if (opts.transportMode.has_value()) {
         cfg.transportMode = *opts.transportMode;
     }

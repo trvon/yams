@@ -690,8 +690,8 @@ inline bool operator==(const yams::daemon::ClientConfig& lhs,
            lhs.progressiveOutput == rhs.progressiveOutput &&
            lhs.singleUseConnections == rhs.singleUseConnections &&
            lhs.disableStreamingForLargeQueries == rhs.disableStreamingForLargeQueries &&
-           lhs.acceptCompressed == rhs.acceptCompressed && lhs.transportMode == rhs.transportMode &&
-           lhs.transport == rhs.transport && executorsEqual;
+           lhs.transportMode == rhs.transportMode && lhs.transport == rhs.transport &&
+           executorsEqual;
 }
 
 inline bool operator!=(const yams::daemon::ClientConfig& lhs,

@@ -17,7 +17,6 @@ TEST_CASE("RetrievalService testing helpers map client config", "[retrieval][ser
     opts.headerTimeoutMs = 1234;
     opts.bodyTimeoutMs = 5678;
     opts.requestTimeoutMs = 9012;
-    opts.acceptCompressed = true;
     opts.transportMode = yams::daemon::ClientTransportMode::Socket;
     opts.autoStart = false;
 
@@ -32,7 +31,6 @@ TEST_CASE("RetrievalService testing helpers map client config", "[retrieval][ser
     CHECK(cfg.headerTimeout == std::chrono::milliseconds(opts.headerTimeoutMs));
     CHECK(cfg.bodyTimeout == std::chrono::milliseconds(opts.bodyTimeoutMs));
     CHECK(cfg.requestTimeout == std::chrono::milliseconds(opts.requestTimeoutMs));
-    CHECK(cfg.acceptCompressed);
     CHECK(cfg.transportMode == yams::daemon::ClientTransportMode::Socket);
     CHECK_FALSE(cfg.autoStart);
 }
