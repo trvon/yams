@@ -789,6 +789,9 @@ public:
     // NOLINTEND(bugprone-reserved-identifier)
 
 private:
+    /// Re-request a topology rebuild after `delay`. At most one retry is armed at a time.
+    void scheduleTopologyRebuildRetry(const std::string& reason, std::chrono::milliseconds delay);
+
     std::shared_ptr<GraphComponent> loadGraphComponent() const {
         return std::atomic_load_explicit(&graphComponent_, std::memory_order_acquire);
     }

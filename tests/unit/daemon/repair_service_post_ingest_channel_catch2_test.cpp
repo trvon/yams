@@ -33,8 +33,10 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/connection_pool.h>
@@ -1411,6 +1413,131 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     CHECK((provider->batchCalls() >= 2));
     CHECK((provider->singleCalls() >= 1));
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager: topology rebuild waits for a calm host, then retries",
+                 "[daemon][topology][service-manager][host_pressure]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>("0"));
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>("0"));
+    yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT",
+                                                 std::optional<std::string>("0"));
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar forceImmediateTopology("YAMS_TEST_FORCE_TOPOLOGY_REBUILD",
+                                                    std::optional<std::string>{"1"});
+
+    // Drive the governor's host signal from the test: busy until told otherwise.
+    auto hostBusy = std::make_shared<std::atomic<bool>>(true);
+    auto& governor = ResourceGovernor::instance();
+    struct HostGuard {
+        ~HostGuard() {
+            ResourceGovernor::instance().testing_setHostPressureSampler(nullptr);
+            TuneAdvisor::resetBackgroundMaxDeferralMs();
+            ResourceGovernor::instance().testing_resetDeferralGates();
+        }
+    } hostGuard;
+    const auto installSampler = [&governor, hostBusy] {
+        governor.testing_setHostPressureSampler([hostBusy] {
+            HostPressureSample sample;
+            sample.source = HostPressureSource::Psi;
+            sample.cpuSomeAvg10 = hostBusy->load() ? 95.0 : 1.0;
+            sample.ioSomeAvg10 = 0.0;
+            sample.memorySomeAvg10 = 0.0;
+            return sample;
+        });
+        (void)governor.tick(nullptr);
+    };
+    TuneAdvisor::setBackgroundMaxDeferralMs(10U * 60U * 1000U);
+    installSampler();
+    REQUIRE(governor.hostPressureElevated());
+
+    config_.enableAutoRepair = false;
+    config_.autoLoadPlugins = false;
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE((sm->initialize()));
+    sm->startAsyncInit();
+    REQUIRE(waitForCoreServices(*sm));
+    REQUIRE(
+        waitForCondition(std::chrono::seconds(30), [&] { return sm->getKgStore() != nullptr; }));
+
+    auto meta = sm->getMetadataRepo();
+    auto kgStore = sm->getKgStore();
+    auto vectorDb = sm->getVectorDatabase();
+    REQUIRE((meta != nullptr));
+    REQUIRE((kgStore != nullptr));
+    // The deferral itself needs no vectors; only the final rebuild does.
+
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    const std::vector<std::string> hashes{std::string(64, 'd'), std::string(64, 'e')};
+    for (std::size_t i = 0; i < hashes.size(); ++i) {
+        metadata::DocumentInfo doc{};
+        doc.fileName = "host-pressure-" + std::to_string(i) + ".txt";
+        doc.filePath = (config_.dataDir / doc.fileName).string();
+        doc.fileExtension = "txt";
+        doc.fileSize = 64;
+        doc.sha256Hash = hashes[i];
+        doc.mimeType = "text/plain";
+        doc.modifiedTime = now;
+        doc.indexedTime = now;
+        REQUIRE(meta->insertDocument(doc).has_value());
+
+        metadata::KGNode node;
+        node.nodeKey = "doc:" + hashes[i];
+        node.label = doc.filePath;
+        node.type = "document";
+        REQUIRE((kgStore->upsertNode(node).has_value()));
+
+        if (vectorDb == nullptr) {
+            continue;
+        }
+        yams::vector::VectorRecord vec;
+        vec.document_hash = hashes[i];
+        vec.chunk_id = "host-pressure-doc-" + std::to_string(i);
+        vec.embedding.assign(vectorDb->getConfig().embedding_dim, 0.0f);
+        vec.embedding[i % vec.embedding.size()] = 1.0f;
+        vec.content = "host pressure seed";
+        vec.level = yams::vector::EmbeddingLevel::DOCUMENT;
+        REQUIRE((vectorDb->insertVector(vec)));
+    }
+
+    yams::topology::MetadataKgTopologyArtifactStore store(
+        std::static_pointer_cast<metadata::IMetadataRepository>(meta), kgStore);
+    const auto built = [&store] {
+        auto latest = store.loadLatest();
+        return latest.has_value() && latest.value().has_value();
+    };
+
+    const auto topologyDeferred = [&governor] {
+        const auto deferred = governor.deferredWork();
+        return std::find(deferred.begin(), deferred.end(), DeferrableWork::TopologyRebuild) !=
+               deferred.end();
+    };
+
+    // The service manager's own tuning ticks keep using the test sampler.
+    installSampler();
+    sm->requestTopologyRebuild("unit_test_host_pressure", hashes);
+    REQUIRE(waitForCondition(std::chrono::seconds(10), topologyDeferred));
+    CHECK_FALSE(built());
+
+    // Once the host calms down nothing is held back, and the armed retry picks the rebuild up
+    // without a new request.
+    hostBusy->store(false);
+    installSampler();
+    CHECK_FALSE(governor.hostPressureElevated());
+    CHECK_FALSE(topologyDeferred());
+    if (vectorDb != nullptr) {
+        CHECK(waitForCondition(std::chrono::seconds(15), built));
+    } else {
+        WARN("Vector DB unavailable in this configuration; rebuild completion not checked");
+    }
 
     sm->shutdown();
 }

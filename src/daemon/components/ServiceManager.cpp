@@ -183,7 +183,9 @@ namespace yams::daemon {
 namespace {
 constexpr auto kTopologyOverlayRebuildMinAge = std::chrono::minutes(5);
 constexpr std::size_t kTopologyOverlayDirtyThreshold = 64;
-// How often a topology rebuild deferred for host pressure re-checks the host.
+// How often a topology rebuild request re-checks while ingest work is still draining, and
+// while it is deferred for host pressure.
+constexpr auto kTopologyBusyRetryInterval = std::chrono::milliseconds(500);
 constexpr auto kTopologyDeferredRetryInterval = std::chrono::seconds(5);
 
 } // namespace
@@ -4262,35 +4264,25 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
             const auto kgQueued = writeCoordinator ? writeCoordinator->queuedBatches() : 0U;
             const auto kgInFlight = writeCoordinator ? writeCoordinator->inFlight() : 0U;
 
+            // While ingest, post-ingest, embedding or KG work is still running, check again
+            // shortly. Re-posting immediately here kept one worker spinning at 100% for the
+            // whole ingest, and longer still on a loaded host where that work drains slowly.
             if (ingestMetrics.queued > 0 || ingestMetrics.active > 0 || postQueued > 0 ||
                 postInFlight > 0 || embedQueued > 0 || embedInFlight > 0 || kgQueued > 0 ||
                 kgInFlight > 0) {
                 self->topologyRebuildPending_.store(true, std::memory_order_release);
                 self->topologyRebuildInProgress_.store(false, std::memory_order_release);
-                self->requestTopologyRebuild(reason);
+                self->scheduleTopologyRebuildRetry(reason, kTopologyBusyRetryInterval);
                 return;
             }
 
             // Topology rebuilds are deferrable: while other processes keep the host busy the
             // dirty set keeps accumulating and one rebuild covers it once the host calms down
-            // (or once the starvation guard lets a pass through). Retry on a timer rather than
-            // re-posting, so a deferred rebuild does not spin a worker.
+            // (or once the starvation guard lets a pass through).
             if (!ResourceGovernor::instance().admitDeferrable(DeferrableWork::TopologyRebuild)) {
                 self->topologyRebuildPending_.store(true, std::memory_order_release);
                 self->topologyRebuildInProgress_.store(false, std::memory_order_release);
-                bool notArmed = false;
-                if (self->topologyRebuildRetryArmed_.compare_exchange_strong(
-                        notArmed, true, std::memory_order_acq_rel)) {
-                    auto retry = std::make_shared<boost::asio::steady_timer>(
-                        self->getWorkerExecutor(), kTopologyDeferredRetryInterval);
-                    retry->async_wait([weakSelf, reason, retry](const boost::system::error_code&) {
-                        if (auto again = weakSelf.lock()) {
-                            again->topologyRebuildRetryArmed_.store(false,
-                                                                    std::memory_order_release);
-                            again->requestTopologyRebuild(reason);
-                        }
-                    });
-                }
+                self->scheduleTopologyRebuildRetry(reason, kTopologyDeferredRetryInterval);
                 return;
             }
 
@@ -4341,6 +4333,27 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
         }
 
         self->topologyRebuildInProgress_.store(false, std::memory_order_release);
+    });
+}
+
+void ServiceManager::scheduleTopologyRebuildRetry(const std::string& reason,
+                                                  std::chrono::milliseconds delay) {
+    bool notArmed = false;
+    if (!topologyRebuildRetryArmed_.compare_exchange_strong(notArmed, true,
+                                                            std::memory_order_acq_rel)) {
+        return; // a retry is already pending and will pick up the dirty set
+    }
+    auto weakSelf = weak_from_this();
+    auto retry = std::make_shared<boost::asio::steady_timer>(getWorkerExecutor(), delay);
+    retry->async_wait([weakSelf, reason, retry](const boost::system::error_code& ec) {
+        auto self = weakSelf.lock();
+        if (!self) {
+            return;
+        }
+        self->topologyRebuildRetryArmed_.store(false, std::memory_order_release);
+        if (!ec) {
+            self->requestTopologyRebuild(reason);
+        }
     });
 }
 
