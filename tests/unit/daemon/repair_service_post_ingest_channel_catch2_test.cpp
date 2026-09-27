@@ -558,10 +558,6 @@ TEST_CASE_METHOD(ServiceManagerFixture, "RepairService: stop waits for in-flight
 TEST_CASE_METHOD(ServiceManagerFixture,
                  "RepairService: post-ingest success should persist extracted content",
                  "[daemon][repair][regression][post-ingest]") {
-    SKIP("PostIngestQueue completion is asynchronous and not yet exposed with a deterministic "
-         "test signal in this harness");
-    return;
-
     yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
                                             std::optional<std::string>{"1"});
     yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
