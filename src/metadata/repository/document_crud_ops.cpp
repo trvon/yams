@@ -447,6 +447,38 @@ Result<void> upsertPathTreeForDocumentInTransaction(Database& db, const Document
     return Result<void>();
 }
 
+// Record that docId was stored in snapshot, in the same transaction as the document row.
+// The time comes from the snapshot_time tag (unix microseconds) when present.
+Result<void> recordDocumentSnapshotRow(Database& db, int64_t docId,
+                                       const TreeSnapshotRecord& snapshot,
+                                       const std::vector<repository::MetadataWriteEntry>& writes) {
+    if (snapshot.snapshotId.empty()) {
+        return Result<void>();
+    }
+    std::int64_t timeMicros = snapshot.createdTime * 1'000'000;
+    for (const auto& [id, key, value] : writes) {
+        (void)id;
+        if (key == "snapshot_time") {
+            try {
+                timeMicros = std::stoll(value.asString());
+            } catch (const std::exception&) {
+            }
+        }
+    }
+    YAMS_TRY_UNWRAP(stmtHandle, db.prepareCached(R"(
+        INSERT INTO document_snapshots (document_id, snapshot_id, snapshot_time)
+        VALUES (?, ?, ?)
+        ON CONFLICT(document_id, snapshot_id) DO UPDATE SET snapshot_time = excluded.snapshot_time
+    )"));
+    auto& stmt = *stmtHandle;
+    YAMS_TRY(stmt.reset());
+    YAMS_TRY(stmt.clearBindings());
+    YAMS_TRY(stmt.bind(1, docId));
+    YAMS_TRY(stmt.bind(2, snapshot.snapshotId));
+    YAMS_TRY(stmt.bind(3, timeMicros));
+    return stmt.execute();
+}
+
 Result<void> upsertTreeSnapshotRow(Database& db, const TreeSnapshotRecord& snapshot) {
     auto metaOrEmpty = [&](const char* key) -> std::string {
         auto it = snapshot.metadata.find(key);
@@ -679,6 +711,7 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
                 const auto snapshotStart = std::chrono::steady_clock::now();
                 snapshot->ingestDocumentId = docId;
                 YAMS_TRY(upsertTreeSnapshotRow(db, *snapshot));
+                YAMS_TRY(recordDocumentSnapshotRow(db, docId, *snapshot, dedupedMetadataWrites));
                 recordMetadataInsertPhase("upsert_snapshot", snapshotStart);
             }
 
@@ -819,6 +852,8 @@ MetadataRepository::batchInsertDocumentsWithMetadata(std::vector<BatchDocumentIn
                 if (item.snapshot.has_value()) {
                     item.snapshot->ingestDocumentId = docId;
                     YAMS_TRY(upsertTreeSnapshotRow(db, *item.snapshot));
+                    YAMS_TRY(recordDocumentSnapshotRow(db, docId, *item.snapshot,
+                                                       dedupedMetadataWrites));
                 }
 
                 if (item.updatePathTreeInTransaction) {

@@ -2081,6 +2081,16 @@ if catch2_dep.found()
     install: false,
   )
 
+# Document snapshot membership and the legacy per-snapshot key backfill
+  catch2_document_snapshots_exe = executable('catch2_document_snapshots',
+    files('unit/metadata/document_snapshots_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #KG Store Tests(Catch2) - knowledge graph store operations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
@@ -2898,6 +2908,12 @@ if catch2_dep.found()
 
   test('connection_pool', catch2_connection_pool_exe,
     suite: ['catch2', 'unit', 'metadata', 'connection_pool'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('document_snapshots', catch2_document_snapshots_exe,
+    suite: ['catch2', 'unit', 'metadata', 'snapshots'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )

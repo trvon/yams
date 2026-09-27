@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <optional>
 #include <random>
 #include <span>
@@ -3893,36 +3894,178 @@ Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsBySnapshot(const std::string& snapshotId) {
     return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            // Use the full 21-column list so mapDocumentRow() can populate all fields
-            std::string sql = "SELECT DISTINCT ";
+            // Membership, not the latest snapshot_id: a document stays in every snapshot it was
+            // stored in. Legacy snapshot_id keys cover rows the backfill has not moved yet.
+            std::string sql = "SELECT ";
             sql += kDocumentColumnListAliasD;
-            sql += " FROM documents d"
-                   " JOIN metadata m ON d.id = m.document_id"
-                   " WHERE m.key = 'snapshot_id' AND m.value = ?"
+            sql += " FROM documents d WHERE d.id IN ("
+                   " SELECT document_id FROM document_snapshots WHERE snapshot_id = ?1"
+                   " UNION SELECT document_id FROM metadata"
+                   "   WHERE key = 'snapshot_id:' || ?1"
+                   " UNION SELECT document_id FROM metadata"
+                   "   WHERE key = 'snapshot_id' AND value = ?1)"
                    " ORDER BY d.indexed_time DESC, d.id DESC";
-            auto stmtResult = db.prepare(sql);
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, snapshotId);
-            if (!bindResult)
-                return bindResult.error();
+            YAMS_TRY_UNWRAP(stmt, db.prepare(sql));
+            YAMS_TRY(stmt.bind(1, snapshotId));
 
             std::vector<DocumentInfo> documents;
             while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
+                YAMS_TRY_UNWRAP(hasRow, stmt.step());
+                if (!hasRow)
                     break;
-
                 documents.push_back(mapDocumentRow(stmt));
             }
-
             return documents;
         });
+}
+
+std::vector<DocumentSnapshotEntry>
+legacySnapshotEntries(const std::unordered_map<std::string, MetadataValue>& metadata) {
+    const auto parseTime = [](const MetadataValue& value) -> std::optional<std::int64_t> {
+        try {
+            const auto text = value.asString();
+            std::size_t used = 0;
+            const auto parsed = std::stoll(text, &used);
+            return used == text.size() ? std::optional<std::int64_t>(parsed) : std::nullopt;
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    };
+    static constexpr std::string_view kIdPrefix = "snapshot_id:";
+    static constexpr std::string_view kTimePrefix = "snapshot_time:";
+
+    std::optional<std::int64_t> latestTime;
+    if (auto it = metadata.find("snapshot_time"); it != metadata.end()) {
+        latestTime = parseTime(it->second);
+    }
+    std::map<std::string, std::int64_t> entries;
+    const auto add = [&](const std::string& id) {
+        if (id.empty() || entries.contains(id)) {
+            return;
+        }
+        std::optional<std::int64_t> time;
+        if (auto it = metadata.find(std::string(kTimePrefix) + id); it != metadata.end()) {
+            time = parseTime(it->second);
+        }
+        entries[id] = time.value_or(latestTime.value_or(0));
+    };
+    if (auto it = metadata.find("snapshot_id"); it != metadata.end()) {
+        add(it->second.asString());
+    }
+    for (const auto& [key, value] : metadata) {
+        if (key.starts_with(kIdPrefix)) {
+            const auto id = value.asString();
+            add(id.empty() ? key.substr(kIdPrefix.size()) : id);
+        }
+    }
+
+    std::vector<DocumentSnapshotEntry> out;
+    out.reserve(entries.size());
+    for (const auto& [id, micros] : entries) {
+        out.push_back({.snapshotId = id, .snapshotTimeMicros = micros});
+    }
+    return out;
+}
+
+Result<std::vector<DocumentSnapshotEntry>>
+MetadataRepository::getDocumentSnapshots(int64_t documentId) {
+    return executeReadQuery<std::vector<DocumentSnapshotEntry>>(
+        [&](Database& db) -> Result<std::vector<DocumentSnapshotEntry>> {
+            std::map<std::string, std::int64_t> times; // ordered by snapshot id
+
+            YAMS_TRY_UNWRAP(members,
+                            db.prepare("SELECT snapshot_id, snapshot_time FROM document_snapshots"
+                                       " WHERE document_id = ?"));
+            YAMS_TRY(members.bind(1, documentId));
+            while (true) {
+                YAMS_TRY_UNWRAP(hasRow, members.step());
+                if (!hasRow)
+                    break;
+                times[members.getString(0)] = members.getInt64(1);
+            }
+
+            // Legacy keys the background backfill has not moved yet (idx_metadata_doc_key).
+            YAMS_TRY_UNWRAP(legacy, db.prepare(R"(
+                SELECT key, value FROM metadata
+                WHERE document_id = ?1 AND (key IN ('snapshot_id', 'snapshot_time')
+                    OR key GLOB 'snapshot_id:*' OR key GLOB 'snapshot_time:*')
+            )"));
+            YAMS_TRY(legacy.bind(1, documentId));
+            std::unordered_map<std::string, MetadataValue> legacyKeys;
+            while (true) {
+                YAMS_TRY_UNWRAP(hasRow, legacy.step());
+                if (!hasRow)
+                    break;
+                legacyKeys.emplace(legacy.getString(0), MetadataValue(legacy.getString(1)));
+            }
+            for (auto& entry : legacySnapshotEntries(legacyKeys)) {
+                times.try_emplace(std::move(entry.snapshotId), entry.snapshotTimeMicros);
+            }
+
+            std::vector<DocumentSnapshotEntry> out;
+            out.reserve(times.size());
+            for (auto& [id, micros] : times) {
+                out.push_back({.snapshotId = id, .snapshotTimeMicros = micros});
+            }
+            return out;
+        });
+}
+
+Result<std::size_t> MetadataRepository::migrateLegacySnapshotKeys(std::size_t maxSnapshots) {
+    if (maxSnapshots == 0) {
+        return std::size_t{0};
+    }
+    return executeQuery<std::size_t>([&](Database& db) -> Result<std::size_t> {
+        YAMS_TRY(beginTransactionWithRetry(db));
+        auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
+
+        // snapshot_id:<id> rows, via idx_metadata_key. Each moves with its snapshot_time:<id>.
+        YAMS_TRY_UNWRAP(pick, db.prepare("SELECT document_id, substr(key, 13) FROM metadata"
+                                         " WHERE key GLOB 'snapshot_id:*' LIMIT ?"));
+        YAMS_TRY(pick.bind(1, static_cast<int64_t>(maxSnapshots)));
+        std::vector<std::pair<int64_t, std::string>> batch;
+        while (true) {
+            YAMS_TRY_UNWRAP(hasRow, pick.step());
+            if (!hasRow)
+                break;
+            batch.emplace_back(pick.getInt64(0), pick.getString(1));
+        }
+
+        YAMS_TRY_UNWRAP(move, db.prepare(R"(
+            INSERT INTO document_snapshots (document_id, snapshot_id, snapshot_time)
+            VALUES (?1, ?2, COALESCE((SELECT CAST(value AS INTEGER) FROM metadata
+                                      WHERE document_id = ?1 AND key = 'snapshot_time:' || ?2),
+                                     0))
+            ON CONFLICT(document_id, snapshot_id) DO NOTHING
+        )"));
+        YAMS_TRY_UNWRAP(drop, db.prepare("DELETE FROM metadata WHERE document_id = ?1 AND key IN"
+                                         " ('snapshot_id:' || ?2, 'snapshot_time:' || ?2)"));
+        for (const auto& [documentId, snapshotId] : batch) {
+            YAMS_TRY(move.reset());
+            YAMS_TRY(move.bind(1, documentId));
+            YAMS_TRY(move.bind(2, snapshotId));
+            YAMS_TRY(move.execute());
+            YAMS_TRY(drop.reset());
+            YAMS_TRY(drop.bind(1, documentId));
+            YAMS_TRY(drop.bind(2, snapshotId));
+            YAMS_TRY(drop.execute());
+        }
+
+        std::size_t moved = batch.size();
+        if (moved < maxSnapshots) {
+            // snapshot_time:<id> rows whose snapshot_id:<id> is gone carry no membership.
+            YAMS_TRY_UNWRAP(orphans,
+                            db.prepare("DELETE FROM metadata WHERE rowid IN (SELECT rowid FROM"
+                                       " metadata WHERE key GLOB 'snapshot_time:*' LIMIT ?)"));
+            YAMS_TRY(orphans.bind(1, static_cast<int64_t>(maxSnapshots - moved)));
+            YAMS_TRY(orphans.execute());
+            moved += static_cast<std::size_t>(db.changes());
+        }
+
+        YAMS_TRY(commitOrRollback(db));
+        rollback.dismiss();
+        return moved;
+    });
 }
 
 Result<std::vector<DocumentInfo>>
