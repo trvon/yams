@@ -27,7 +27,6 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/compat/unistd.h>
 #include <yams/compression/compression_header.h>
-#include <yams/compression/framed_payload.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -450,63 +449,50 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: get honors acceptCompressed f
     getReq.hash = addRes.value().hash;
     getReq.acceptCompressed = true;
 
+    // The transfer is compressed on the wire, and DaemonClient decodes it: the response
+    // carries the stored document plus the compression metadata of the transfer.
     std::optional<yams::daemon::GetResponse> compressed;
     for (int attempt = 0; attempt < 60 && !compressed; ++attempt) {
         auto attemptRes = retrieval.get(getReq, retrievalOpts);
-        if (attemptRes && attemptRes.value().compressed) {
+        if (attemptRes && attemptRes.value().compressionAlgorithm.has_value()) {
             compressed = std::move(attemptRes.value());
         } else {
             std::this_thread::sleep_for(50ms);
         }
     }
     REQUIRE(compressed.has_value());
-    CHECK(compressed->compressed);
+    CHECK_FALSE(compressed->compressed); // decoded by the client
     CHECK(compressed->hasContent);
-    CHECK(compressed->compressionAlgorithm.has_value());
     CHECK(compressed->compressionLevel.has_value());
-    CHECK(compressed->uncompressedSize.has_value());
+    REQUIRE(compressed->uncompressedSize.has_value());
     CHECK(*compressed->uncompressedSize == expectedUncompressedSize);
-    REQUIRE_FALSE(compressed->compressionHeader.empty());
-    CHECK(compressed->compressionHeader.size() == yams::compression::CompressionHeader::SIZE);
 
-    // The framed content decodes to exactly the stored document (yams get printed the frame).
-    auto decoded = yams::compression::decodeFramedPayload(
-        std::span<const std::byte>(reinterpret_cast<const std::byte*>(compressed->content.data()),
-                                   compressed->content.size()));
-    REQUIRE(decoded.has_value());
     std::string expectedContent;
     for (int i = 0; i < 4096; ++i) {
         expectedContent += payload;
     }
-    CHECK((std::string(reinterpret_cast<const char*>(decoded.value().data()),
-                       decoded.value().size()) == expectedContent));
+    CHECK(compressed->content.size() == expectedUncompressedSize);
+    CHECK((compressed->content == expectedContent)); // yams get used to print the frame
 
-    REQUIRE(compressed->content.size() >= yams::compression::CompressionHeader::SIZE);
+    REQUIRE(compressed->compressionHeader.size() == yams::compression::CompressionHeader::SIZE);
     uint32_t magic = 0;
     uint64_t uncompressedSize = 0;
     uint8_t algorithm = 0;
     uint8_t level = 0;
-    std::memcpy(&magic,
-                compressed->content.data() + offsetof(yams::compression::CompressionHeader, magic),
+    const auto* header = compressed->compressionHeader.data();
+    std::memcpy(&magic, header + offsetof(yams::compression::CompressionHeader, magic),
                 sizeof(magic));
     std::memcpy(&uncompressedSize,
-                compressed->content.data() +
-                    offsetof(yams::compression::CompressionHeader, uncompressedSize),
+                header + offsetof(yams::compression::CompressionHeader, uncompressedSize),
                 sizeof(uncompressedSize));
-    std::memcpy(&algorithm,
-                compressed->content.data() +
-                    offsetof(yams::compression::CompressionHeader, algorithm),
+    std::memcpy(&algorithm, header + offsetof(yams::compression::CompressionHeader, algorithm),
                 sizeof(algorithm));
-    std::memcpy(&level,
-                compressed->content.data() + offsetof(yams::compression::CompressionHeader, level),
+    std::memcpy(&level, header + offsetof(yams::compression::CompressionHeader, level),
                 sizeof(level));
-
     CHECK(magic == yams::compression::CompressionHeader::MAGIC);
     CHECK(uncompressedSize == expectedUncompressedSize);
     CHECK(algorithm == compressed->compressionAlgorithm.value());
     CHECK(level == compressed->compressionLevel.value());
-    CHECK(0 == std::memcmp(compressed->compressionHeader.data(), compressed->content.data(),
-                           yams::compression::CompressionHeader::SIZE));
 
     yams::app::services::RetrievalOptions plainOpts = retrievalOpts;
     plainOpts.acceptCompressed = false;
@@ -526,9 +512,8 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: get honors acceptCompressed f
     CHECK_FALSE(plain->compressed);
     CHECK(plain->hasContent);
     CHECK(plain->compressionHeader.empty());
-    CHECK(plain->content.size() >= payload.size());
-    CHECK(0 != std::memcmp(compressed->content.data(), plain->content.data(),
-                           std::min(compressed->content.size(), plain->content.size())));
+    // Compressed and plain transfers deliver the same document.
+    CHECK((plain->content == compressed->content));
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: list limit and namePattern",

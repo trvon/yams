@@ -525,10 +525,10 @@ struct RetrieveDocumentRequest {
     uint32_t chunkSize{262144}; // streaming chunk size
 
     // Content options
-    bool includeContent{true};   // include document content
-    bool raw{false};             // raw content without text extraction
-    bool extract{false};         // force text extraction
-    bool acceptCompressed{true}; // request compressed payload when supported
+    bool includeContent{true};    // include document content
+    bool raw{false};              // raw content without text extraction
+    bool extract{false};          // force text extraction
+    bool acceptCompressed{false}; // opt in only where the receiver decodes (DaemonClient)
 
     // Knowledge graph options
     bool graph{false}; // show related documents
