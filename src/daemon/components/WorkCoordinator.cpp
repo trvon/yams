@@ -359,7 +359,8 @@ void WorkCoordinator::join() {
     }
 }
 
-bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
+bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout,
+                                      const std::function<void()>& whileWaiting) {
     if (workers_.empty()) {
         try {
             spdlog::debug("[WorkCoordinator] joinWithTimeout() called with no workers (no-op)");
@@ -396,6 +397,15 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
         const auto slice =
             std::min<std::chrono::milliseconds>(remaining, std::chrono::milliseconds(50));
         joinCV_.wait_for(lock, slice);
+        if (whileWaiting && activeWorkers_.load(std::memory_order_acquire) != 0) {
+            lock.unlock();
+            try {
+                whileWaiting();
+            } catch (...) {
+                // Intentional best-effort path; a failing hook must not break the join.
+            }
+            lock.lock();
+        }
     }
 
     auto joinEnd = std::chrono::steady_clock::now();

@@ -21,6 +21,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -160,9 +161,12 @@ public:
      * up when the process terminates.
      *
      * @param timeout Maximum time to wait for workers to exit
+     * @param whileWaiting Optional hook run on the joining thread between wait slices (~50 ms),
+     *        e.g. to keep interrupting work that pins a worker. Runs without internal locks held.
      * @return true if all workers joined within timeout, false if timeout expired
      */
-    bool joinWithTimeout(std::chrono::milliseconds timeout);
+    bool joinWithTimeout(std::chrono::milliseconds timeout,
+                         const std::function<void()>& whileWaiting = {});
 
     /**
      * @brief Detach any remaining worker threads and abandon coordinated shutdown.

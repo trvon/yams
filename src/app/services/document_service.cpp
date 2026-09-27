@@ -2466,6 +2466,16 @@ public:
 
         metadata::MetadataOpScope metadataScope("client_list");
 
+        // Shutdown cancellation: checked between the query and every hydration step so a list
+        // over a large corpus releases its worker instead of holding the shutdown join.
+        const auto listCanceled = [this]() { return hostCancellationRequested(ctx_); };
+        const auto canceledError = []() {
+            return Error{ErrorCode::OperationCancelled, "List request canceled: shutting down"};
+        };
+        if (listCanceled()) {
+            return canceledError();
+        }
+
         std::vector<metadata::DocumentInfo> docs;
         bool usedQuery = false;
         std::size_t totalFoundApprox = 0;
@@ -2535,6 +2545,9 @@ public:
         if (!useFallback && !useTree) {
             auto docsRes = ctx_.metadataRepo->queryDocumentsForListProjection(queryOpts);
             if (!docsRes) {
+                if (listCanceled()) {
+                    return canceledError();
+                }
                 return Error{ErrorCode::InternalError,
                              "Failed to query documents: " + docsRes.error().message};
             }
@@ -2548,6 +2561,9 @@ public:
                 canonicalPattern.empty() ? "%" : globToSqlLike(canonicalPattern);
             auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, sqlPattern);
             if (!docsRes) {
+                if (listCanceled()) {
+                    return canceledError();
+                }
                 return Error{ErrorCode::InternalError,
                              "Failed to query documents: " + docsRes.error().message};
             }
@@ -2619,10 +2635,16 @@ public:
             return out;
         }
 
+        if (listCanceled()) {
+            return canceledError();
+        }
         const std::vector<int64_t> docIds = collectDocumentIds(page);
         MetadataCache metadataCache;
         if (wantsMetadata) {
             metadataCache = hydrateListMetadata(docIds);
+            if (listCanceled()) {
+                return canceledError();
+            }
         }
 
         SnippetPreviewCache snippetPreviewCache;
@@ -2631,6 +2653,9 @@ public:
             auto hydrated = hydrateListSnippets(docIds, req.snippetLength);
             snippetPreviewCache = std::move(hydrated.first);
             snippetFetchFailed = hydrated.second;
+            if (listCanceled()) {
+                return canceledError();
+            }
         }
 
         auto buildEntryForDoc = [&](const metadata::DocumentInfo& doc) -> DocumentEntry {
@@ -2652,7 +2677,7 @@ public:
             ths.reserve(workers);
             for (size_t t = 0; t < workers; ++t) {
                 ths.emplace_back([&]() {
-                    while (true) {
+                    while (!listCanceled()) {
                         size_t i = nextIdx.fetch_add(1);
                         if (i >= page.size())
                             break;
@@ -2662,11 +2687,17 @@ public:
             }
             for (auto& th : ths)
                 th.join();
+            if (listCanceled()) {
+                return canceledError();
+            }
             for (size_t i = 0; i < page.size(); ++i) {
                 out.documents.push_back(std::move(tmp[i]));
             }
         } else {
             for (const auto& d : page) {
+                if (listCanceled()) {
+                    return canceledError();
+                }
                 out.documents.push_back(buildEntryForDoc(d));
             }
         }

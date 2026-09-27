@@ -234,6 +234,18 @@ public:
     void interruptPendingAcquires();
 
     /**
+     * @brief Interrupt the statements running on every leased connection.
+     *
+     * Shutdown-only: calls sqlite3_interrupt on each connection currently handed out so request
+     * handlers blocked inside a long query return with an error instead of pinning their worker
+     * thread. Leases between statements are unaffected. Leases are not revoked; holders still
+     * return their connections normally.
+     *
+     * @return number of leased connections interrupted
+     */
+    std::size_t interruptActiveConnections();
+
+    /**
      * @brief Prune idle connections
      */
     void pruneIdleConnections();

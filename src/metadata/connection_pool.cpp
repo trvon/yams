@@ -561,6 +561,20 @@ void ConnectionPool::interruptPendingAcquires() {
     cv_.notify_all();
 }
 
+std::size_t ConnectionPool::interruptActiveConnections() {
+    // mutex_ keeps every leased connection open while it is interrupted: a lease leaves leased_
+    // under mutex_ before its Database can be closed or handed back to available_.
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::size_t interrupted = 0;
+    for (auto* conn : leased_) {
+        if (conn != nullptr && conn->db_ && conn->db_->isOpen()) {
+            conn->db_->interrupt();
+            ++interrupted;
+        }
+    }
+    return interrupted;
+}
+
 Result<void> ConnectionPool::healthCheck() {
     std::unique_lock<std::mutex> lock(mutex_);
 
@@ -857,6 +871,7 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
     } catch (...) {
         // If rollback fails, connection is likely stale
         std::lock_guard<std::mutex> lock(mutex_);
+        leased_.erase(conn);
         if (!shutdown_) {
             activeConnections_--;
             totalConnections_--;

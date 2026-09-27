@@ -767,6 +767,7 @@ yams::Result<void>
 ServiceManager::initializeImpl(const std::function<void()>& beforePoolConfigure) {
     // Clear any stale shutdown marker from prior daemon lifecycles in this process.
     setOnnxShutdownMarker(false);
+    shutdownCancellation_->store(false, std::memory_order_release);
 
     // Validate data directory synchronously to fail fast if unwritable
     namespace fs = std::filesystem;
@@ -1176,10 +1177,16 @@ void ServiceManager::quiesceServicesBeforeWorkerShutdown(
 void ServiceManager::stopWorkCoordinatorForShutdown(
     std::unique_ptr<CheckpointManager>& checkpointManagerHold) {
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
+    // Cancel before interrupting SQL: a handler whose statement fails with SQLITE_INTERRUPT must
+    // already observe the cancellation flag rather than retry or move on to the next query.
+    shutdownCancellation_->store(true, std::memory_order_release);
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
     if (databaseManager_) {
         databaseManager_->interruptPendingConnectionAcquiresForShutdown();
-        spdlog::info("[ServiceManager] Phase 4: Pending DB acquires interrupted");
+        const auto interrupted = databaseManager_->interruptActiveConnectionsForShutdown();
+        spdlog::info("[ServiceManager] Phase 4: Pending DB acquires interrupted; {} in-flight "
+                     "metadata statement(s) interrupted",
+                     interrupted);
     }
     if (workCoordinator_) {
         workCoordinator_->stop();
@@ -1187,14 +1194,24 @@ void ServiceManager::stopWorkCoordinatorForShutdown(
     }
 
     spdlog::info("[ServiceManager] Phase 5: Joining WorkCoordinator threads");
+    // SQLite drops an interrupt that lands between statements, so keep interrupting leased
+    // connections while the join waits: a handler that starts another statement after the first
+    // interrupt is aborted within one wait slice instead of running to completion.
+    const auto interruptInFlightStatements = [this]() {
+        if (databaseManager_) {
+            (void)databaseManager_->interruptActiveConnectionsForShutdown();
+        }
+    };
     bool workersQuiesced = true;
     if (workCoordinator_) {
         try {
-            if (!workCoordinator_->joinWithTimeout(shutdown_budget::kWorkCoordinatorJoinTimeout)) {
+            if (!workCoordinator_->joinWithTimeout(shutdown_budget::kWorkCoordinatorJoinTimeout,
+                                                   interruptInFlightStatements)) {
                 spdlog::info("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s; "
                              "retrying with extended timeout to avoid unsafe teardown races");
                 if (!workCoordinator_->joinWithTimeout(
-                        shutdown_budget::kWorkCoordinatorExtendedJoinTimeout)) {
+                        shutdown_budget::kWorkCoordinatorExtendedJoinTimeout,
+                        interruptInFlightStatements)) {
                     workersQuiesced = false;
                     spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired with workers "
                                  "still active; abandoning remaining workers to avoid "
@@ -3912,6 +3929,7 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
                                 ? graphQueryServiceOverride_
                                 : (graphComponent ? graphComponent->getQueryService() : nullptr);
     ctx.contentExtractors = getContentExtractors();
+    ctx.cancellationSignal = shutdownCancellation_;
 
     // Log vector capability status
     auto modelProvider = loadModelProvider();

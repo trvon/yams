@@ -65,10 +65,14 @@ struct SearchExecutionContext {
     IndexFreshnessSnapshot freshness{};
     std::vector<std::string> topologyOverlayHashes;
     std::optional<boost::asio::any_io_executor> workerExecutor;
+    /// Per-request cancellation (client went away).
     std::shared_ptr<const std::atomic<bool>> cancellationSignal;
+    /// Host-wide cancellation (daemon shutdown); honored the same way as a request cancel.
+    std::shared_ptr<const std::atomic<bool>> hostCancellationSignal;
 
     [[nodiscard]] bool cancellationRequested() const noexcept {
-        return cancellationSignal && cancellationSignal->load(std::memory_order_acquire);
+        return (cancellationSignal && cancellationSignal->load(std::memory_order_acquire)) ||
+               (hostCancellationSignal && hostCancellationSignal->load(std::memory_order_acquire));
     }
 };
 

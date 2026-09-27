@@ -1630,10 +1630,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (!embeddingStarted && needsEmbedding && embeddingGen_) {
             traceCollector.markStageAttempted("embedding");
             embStart = std::chrono::steady_clock::now();
+            // The task owns its inputs so a canceled search can stop waiting for it.
             embeddingFuture = postWork(
-                [this, &query]() {
+                [generator = embeddingGen_, queryText = query]() {
                     YAMS_ZONE_SCOPED_N("embedding::generate_async");
-                    return embeddingGen_->generateEmbedding(query);
+                    return generator->generateEmbedding(queryText);
                 },
                 executor_);
             embeddingStarted = true;
@@ -1659,20 +1660,36 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         workingConfig.conceptExtractionBackend ==
             SearchEngineConfig::ConceptExtractionBackend::GlinerWithFallback) {
         conceptStart = std::chrono::steady_clock::now();
+        // The task owns its inputs so a canceled search can stop waiting for it.
         conceptFuture = postWork(
-            [this, &query]() {
+            [extractor = conceptExtractor_, queryText = query]() {
                 YAMS_ZONE_SCOPED_N("concepts::extract_async");
-                return conceptExtractor_(query, {});
+                return extractor(queryText, {});
             },
             executor_);
     }
 
+    // Wait for a background future, giving up once the request or host is canceled. Returns true
+    // when the future is ready. Only futures whose tasks own their inputs may be abandoned.
+    const auto waitUnlessCanceled = [&cancellationRequested](auto& future,
+                                                             std::chrono::milliseconds budget) {
+        constexpr auto kCancellationPollInterval = std::chrono::milliseconds(5);
+        const auto deadline = budget.count() > 0 ? std::chrono::steady_clock::now() + budget
+                                                 : std::chrono::steady_clock::time_point::max();
+        while (future.wait_for(kCancellationPollInterval) != std::future_status::ready) {
+            if (cancellationRequested() || std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     auto waitForBackgroundPreparation = [&]() {
         if (embeddingFuture.valid()) {
-            embeddingFuture.wait();
+            (void)waitUnlessCanceled(embeddingFuture, std::chrono::milliseconds(0));
         }
         if (conceptFuture.valid()) {
-            conceptFuture.wait();
+            (void)waitUnlessCanceled(conceptFuture, std::chrono::milliseconds(0));
         }
     };
 
@@ -1806,12 +1823,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (conceptFuture.valid()) {
             std::future_status conceptStatus = std::future_status::deferred;
             if (waitIfConfigured) {
-                if (workingConfig.componentTimeout.count() > 0) {
-                    conceptStatus = conceptFuture.wait_for(workingConfig.componentTimeout);
-                } else {
-                    conceptFuture.wait();
-                    conceptStatus = std::future_status::ready;
-                }
+                // componentTimeout == 0 means "no deadline", but the wait still ends when the
+                // request or the host (daemon shutdown) is canceled.
+                conceptStatus = waitUnlessCanceled(conceptFuture, workingConfig.componentTimeout)
+                                    ? std::future_status::ready
+                                    : std::future_status::timeout;
             } else {
                 conceptStatus = conceptFuture.wait_for(std::chrono::seconds(0));
             }
@@ -1981,7 +1997,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         workingConfig, traceCollector,
         detail::ComponentFanoutSinks{allComponentResults, componentTiming, contributing, failed,
                                      timedOut, stats_.timedOutQueries},
-        searchExecutionContext.cancellationSignal);
+        searchExecutionContext.cancellationSignal, searchExecutionContext.hostCancellationSignal);
 
     if (workingConfig.enableParallelExecution) [[likely]] {
         YAMS_ZONE_SCOPED_N("search_engine::fanout_parallel");

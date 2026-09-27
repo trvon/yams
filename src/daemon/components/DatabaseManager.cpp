@@ -282,6 +282,24 @@ void DatabaseManager::interruptPendingConnectionAcquiresForShutdown() {
     }
 }
 
+std::size_t DatabaseManager::interruptActiveConnectionsForShutdown() {
+    std::shared_ptr<metadata::ConnectionPool> readPool;
+    std::shared_ptr<metadata::ConnectionPool> writePool;
+    {
+        std::lock_guard<std::mutex> lk(poolMutex_);
+        readPool = readConnectionPool_;
+        writePool = connectionPool_;
+    }
+    std::size_t interrupted = 0;
+    if (readPool) {
+        interrupted += readPool->interruptActiveConnections();
+    }
+    if (writePool && writePool != readPool) {
+        interrupted += writePool->interruptActiveConnections();
+    }
+    return interrupted;
+}
+
 void DatabaseManager::shutdownWal() {
     auto walManager = std::atomic_exchange_explicit(
         &walManager_, std::shared_ptr<yams::wal::WALManager>{}, std::memory_order_acq_rel);

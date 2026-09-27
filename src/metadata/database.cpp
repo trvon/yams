@@ -525,6 +525,12 @@ void Database::close() {
     trace_db_lifetime("close.end", this, path_, db_, statementCache_.size());
 }
 
+void Database::interrupt() noexcept {
+    if (db_) {
+        sqlite3_interrupt(db_);
+    }
+}
+
 Result<Statement> Database::prepare(const std::string& sql) {
     if (!db_) {
         return Error{ErrorCode::InvalidState, "Database not open"};

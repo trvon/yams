@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -723,6 +724,30 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         REQUIRE(result);
         CHECK((result.value().documents.size() >= 2));
     }
+}
+
+TEST_CASE("DocumentService - Listing stops when the host cancels",
+          "[document][service][listing][cancellation]") {
+    DocumentFixture fixture;
+    auto cancelled = std::make_shared<std::atomic<bool>>(true);
+    auto ctx = fixture.appContext_;
+    ctx.cancellationSignal = cancelled;
+    auto service = makeDocumentService(ctx);
+
+    ListDocumentsRequest request;
+    request.limit = 100;
+    request.showSnippets = true;
+    request.snippetLength = 40;
+
+    auto result = service->list(request);
+    REQUIRE_FALSE(result);
+    CHECK((result.error().code == ErrorCode::OperationCancelled));
+
+    // The signal is read live, so clearing it lets the same service list again.
+    cancelled->store(false);
+    auto resumed = service->list(request);
+    REQUIRE(resumed);
+    CHECK_FALSE(resumed.value().documents.empty());
 }
 
 TEST_CASE("DocumentService - Retrieval", "[document][service][retrieval]") {

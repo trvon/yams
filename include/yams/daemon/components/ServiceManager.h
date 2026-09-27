@@ -913,6 +913,10 @@ private:
     EmbeddingLifecycleManager embeddingLifecycle_;
 
     boost::asio::cancellation_signal shutdownSignal_;
+    /// Set when shutdown begins; published to request handlers as AppContext::cancellationSignal
+    /// so long request loops return OperationCancelled instead of pinning WorkCoordinator workers.
+    std::shared_ptr<std::atomic<bool>> shutdownCancellation_ =
+        std::make_shared<std::atomic<bool>>(false);
 
     std::unique_ptr<WorkCoordinator> workCoordinator_;
     /// Dedicated thread pool for blocking I/O (database open, migrations).
