@@ -79,6 +79,10 @@ public:
     void setCrossReranker(CrossRerankScorer scorer, std::string scoringMode = {});
     std::shared_ptr<SearchTuner> getSearchTuner() const;
     SimeonLexicalStatus getSimeonLexicalStatus() const;
+    /// Ask background work owned by the engine (the simeon-lexical index build) to stop at its
+    /// next checkpoint. Queries keep working; used when the daemon begins shutting down so engine
+    /// destruction does not wait on a corpus scan.
+    void requestShutdown() noexcept;
 
 private:
     class Impl;

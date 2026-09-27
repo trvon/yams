@@ -1209,6 +1209,12 @@ public:
     }
     std::shared_ptr<SearchTuner> getSearchTuner() const { return tuner_; }
 
+    void requestShutdown() noexcept {
+        if (simeonLexical_) {
+            simeonLexical_->requestStop();
+        }
+    }
+
     SearchEngine::SimeonLexicalStatus getSimeonLexicalStatus() const {
         SearchEngine::SimeonLexicalStatus status;
         if (!simeonLexical_) {
@@ -5564,6 +5570,10 @@ std::shared_ptr<SearchTuner> SearchEngine::getSearchTuner() const {
 
 SearchEngine::SimeonLexicalStatus SearchEngine::getSimeonLexicalStatus() const {
     return pImpl_->getSimeonLexicalStatus();
+}
+
+void SearchEngine::requestShutdown() noexcept {
+    pImpl_->requestShutdown();
 }
 
 // Factory function

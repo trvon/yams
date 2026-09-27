@@ -1188,6 +1188,8 @@ void ServiceManager::stopWorkCoordinatorForShutdown(
                      "metadata statement(s) interrupted",
                      interrupted);
     }
+    // Let the simeon-lexical build stop now; Phase 6.7 clearEngine() joins it.
+    searchEngineManager_.requestShutdown();
     if (workCoordinator_) {
         workCoordinator_->stop();
         spdlog::info("[ServiceManager] Phase 4: WorkCoordinator stop() called");

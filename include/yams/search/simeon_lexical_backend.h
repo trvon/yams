@@ -178,6 +178,13 @@ public:
     // first is in flight is a no-op.
     Result<void> buildAsync(std::shared_ptr<metadata::MetadataRepository> repo);
 
+    // Ask an in-flight build to stop at its next document boundary without joining it, and make
+    // later buildAsync() calls no-ops. Called when the daemon begins shutting down so the build
+    // thread has exited by the time the owning engine is destroyed. Thread-safe; idempotent.
+    // Steps inside simeon itself (BM25 finalize, concept mining, PMI learning) are not
+    // interruptible and finish before the stop is observed.
+    void requestStop() noexcept { stopRequested_.store(true, std::memory_order_release); }
+
     bool ready() const noexcept { return ready_.load(std::memory_order_acquire); }
     bool building() const noexcept { return building_.load(std::memory_order_acquire); }
     bool hasStrategyRouter() const noexcept { return strategy_router_ != nullptr; }
@@ -306,6 +313,7 @@ private:
     Config cfg_;
     std::atomic<bool> ready_{false};
     std::atomic<bool> building_{false};
+    std::atomic<bool> stopRequested_{false};
 
     // Owning handle for the background build. compat::jthread uses native
     // std::jthread where available and falls back to an auto-joining

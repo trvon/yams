@@ -157,7 +157,7 @@ src/metadata/versioning_util.cpp:101:portability/env-read # reviewed raw environ
 src/plugins/plugin_repo_client.cpp:62:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:379:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:392:portability/env-read # reviewed raw environment read
-src/search/search_engine.cpp:3122:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:3128:portability/env-read # reviewed raw environment read
 src/search/search_lexical_pipeline.cpp:601:portability/env-read # reviewed raw environment read
 src/storage/compressed_storage_engine.cpp:632:portability/env-read # reviewed raw environment read
 src/storage/object_storage_plugin_loader.cpp:126:portability/env-read # reviewed raw environment read
@@ -367,7 +367,7 @@ tests/unit/search/kg_scorer_simple_catch2_test.cpp:35:portability/env-read # rev
 tests/unit/search/search_engine_simeon_lexical_catch2_test.cpp:25:portability/env-read # reviewed raw environment read
 tests/unit/search/search_engine_topology_catch2_test.cpp:44:portability/env-read # reviewed raw environment read
 tests/unit/search/simeon_bandit_backend_catch2_test.cpp:30:portability/env-read # reviewed raw environment read
-tests/unit/search/simeon_lexical_backend_catch2_test.cpp:27:portability/env-read # reviewed raw environment read
+tests/unit/search/simeon_lexical_backend_catch2_test.cpp:29:portability/env-read # reviewed raw environment read
 tests/unit/topology/topology_baseline_catch2_test.cpp:65:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:42:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:48:portability/env-read # reviewed raw environment read

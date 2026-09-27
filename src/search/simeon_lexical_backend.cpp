@@ -323,6 +323,9 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
     if (!repo) {
         return Error{ErrorCode::InvalidArgument, "SimeonLexicalBackend: null metadata repo"};
     }
+    if (stopRequested_.load(std::memory_order_acquire)) {
+        return Result<void>{};
+    }
     bool expected = false;
     if (!building_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         return Result<void>{};
@@ -379,8 +382,13 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         YAMS_SET_THREAD_NAME("simeon-build");
         YAMS_ZONE_SCOPED_N("simeon::buildAsync");
         const auto t0 = std::chrono::steady_clock::now();
+        // Destruction stops the jthread; daemon shutdown calls requestStop() earlier so the build
+        // winds down while the rest of shutdown proceeds instead of blocking engine teardown.
+        const auto stopRequested = [this, &stop]() {
+            return stop.stop_requested() || stopRequested_.load(std::memory_order_acquire);
+        };
 
-        if (stop.stop_requested()) {
+        if (stopRequested()) {
             building_.store(false, std::memory_order_release);
             return;
         }
@@ -439,8 +447,8 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         std::size_t pmiSampleBytes = 0;
         std::size_t chunkedDocs = 0;
         for (auto docId : ids) {
-            // Check stop every ~1k docs so shutdown doesn't wait the full build.
-            if ((dense & 0x3ffu) == 0u && stop.stop_requested()) {
+            // Check stop before every document fetch so shutdown never waits on the corpus scan.
+            if (stopRequested()) {
                 building_.store(false, std::memory_order_release);
                 return;
             }
@@ -492,7 +500,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 docLeadTexts.push_back(std::move(leadText));
             }
         }
-        if (stop.stop_requested()) {
+        if (stopRequested()) {
             // Owner is going away — drop locally owned indexes; do not publish
             // into member state (would be UAF on a destructed `this`).
             building_.store(false, std::memory_order_release);
@@ -519,7 +527,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 std::size_t conceptCorpusBytes = 0;
                 bool conceptBudgetExceeded = false;
                 for (auto docId : ids) {
-                    if (stop.stop_requested())
+                    if (stopRequested())
                         break;
                     auto contentResult = repo->getContent(docId);
                     if (contentResult && contentResult.value()) {
@@ -541,7 +549,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                     conceptTexts.clear();
                     conceptTexts.shrink_to_fit();
                 }
-                if (!conceptBudgetExceeded && !stop.stop_requested() &&
+                if (!conceptBudgetExceeded && !stopRequested() &&
                     conceptTexts.size() == ids.size()) {
                     YAMS_ZONE_SCOPED_N("simeon::mine_concepts");
                     std::vector<std::string_view> docViews;
@@ -583,7 +591,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         if (cfg_.strategy_router_enabled && !ids.empty()) {
             textAdapter = std::make_unique<simeon::TextAdapter>();
             // docLeadTexts was filled in pass 1 (no second extraction pass).
-            if (!stop.stop_requested() && primary) {
+            if (!stopRequested() && primary) {
                 strategies.push_back(std::make_unique<simeon::Bm25Strategy>(*primary));
 
                 strategies.push_back(
@@ -605,7 +613,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         const std::size_t uniqueWordCount = useCorpusPmi && considerFragmentGeometry
                                                 ? estimateUniqueWordCount(pmi_sample_texts)
                                                 : 0;
-        if (considerFragmentGeometry) {
+        if (considerFragmentGeometry && !stopRequested()) {
             try {
                 if (useCorpusPmi) {
                     if (uniqueWordCount < 64 || pmi_sample_texts.empty()) {
@@ -663,7 +671,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 std::size_t fragmentChunkedDocs = 0;
                 for (std::size_t i = 0;
                      fragmentEncoder && i < dense_doc_ids.size() && i < fragmentDocCap; ++i) {
-                    if ((i & 0x3ffu) == 0u && stop.stop_requested()) {
+                    if (stopRequested()) {
                         building_.store(false, std::memory_order_release);
                         return;
                     }
@@ -712,7 +720,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         }
         releaseTransientPages("post-fragment-build");
 
-        if (stop.stop_requested()) {
+        if (stopRequested()) {
             building_.store(false, std::memory_order_release);
             return;
         }
