@@ -795,13 +795,6 @@ Result<yams::daemon::StatusResponse> RetrievalService::status(const RetrievalOpt
         opts, "status", [client]() { return client->status(); });
 }
 
-Result<yams::daemon::CatResponse> RetrievalService::cat(const yams::daemon::CatRequest& req,
-                                                        const RetrievalOptions& opts) const {
-    auto client = getOrCreateClient(opts);
-    return runClientCallWithTimeout<yams::daemon::CatResponse>(
-        opts, "cat", [client, req]() { return client->cat(req); });
-}
-
 Result<yams::daemon::GraphQueryResponse>
 RetrievalService::graphQuery(const yams::daemon::GraphQueryRequest& req,
                              const RetrievalOptions& opts) const {
