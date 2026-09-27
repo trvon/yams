@@ -279,6 +279,10 @@ public:
     /// explicitly supplied policy is invalid; config remains unchanged on failure.
     static bool applyStorageDiskPressure(const ConfigSections& sections, DaemonConfig& config);
 
+    /// Apply [daemon.maintenance] (idle repair-service maintenance). Invalid values are
+    /// logged and leave the default in place; maintenance is never a reason to refuse startup.
+    static void applyDaemonMaintenance(const ConfigSections& sections, DaemonConfig& config);
+
     /// Resolve the opt-in [memory_sync] policy once from typed TOML sections.
     /// Returns false when an explicitly enabled policy is invalid.
     static bool applyMemorySync(const ConfigSections& sections, DaemonConfig& config);

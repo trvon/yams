@@ -11,6 +11,7 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/sqlite_vacuum.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
@@ -453,6 +454,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             "path_tree_repair_jobs", 32);
 
     bool pathTreeRepairDone = false;
+    auto nextVectorVacuum = std::chrono::steady_clock::now() + cfg_.maintenanceDelay;
 
     while (running_.load(std::memory_order_relaxed) &&
            shutdownState_->running.load(std::memory_order_acquire)) {
@@ -519,6 +521,19 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             (void)runRecoveryArtifactMaintenance();
             nextRecoveryArtifactSweep = std::chrono::steady_clock::now() +
                                         shutdownState->config.recoveryArtifactSweepInterval;
+        }
+
+        // vectors.db VACUUM: rare, idle-only, and yields to any writer that shows up.
+        if (cfg_.vectorVacuumInterval.count() > 0 &&
+            std::chrono::steady_clock::now() >= nextVectorVacuum &&
+            vectorVacuumAdmitted(collectVectorVacuumSignals())) {
+            const auto outcome = runVectorVacuumMaintenance();
+            const bool yielded = outcome && (outcome->status == SqliteVacuumStatus::Busy ||
+                                             outcome->status == SqliteVacuumStatus::Interrupted);
+            using Wait = std::chrono::steady_clock::duration;
+            nextVectorVacuum =
+                std::chrono::steady_clock::now() +
+                (yielded ? Wait(cfg_.maintenanceDelay) : Wait(cfg_.vectorVacuumInterval));
         }
 
         // Deferred initial scan
@@ -907,6 +922,87 @@ RepairService::RecoveryArtifactMaintenanceStats RepairService::runRecoveryArtifa
         stats.errors.push_back(std::move(err));
     }
     return stats;
+}
+
+bool RepairService::vectorVacuumAdmitted(const VectorVacuumSignals& signals) noexcept {
+    return !signals.shuttingDown && signals.maintenanceAllowed &&
+           signals.pressure < ResourcePressureLevel::Warning && signals.embeddingQueued == 0 &&
+           signals.embeddingInFlight == 0 && !signals.indexMutating && !signals.repairInProgress;
+}
+
+RepairService::VectorVacuumSignals RepairService::collectVectorVacuumSignals() const {
+    VectorVacuumSignals signals;
+    signals.shuttingDown =
+        shutdownState_ && !shutdownState_->running.load(std::memory_order_acquire);
+    signals.maintenanceAllowed = maintenanceAllowed();
+    signals.pressure = ResourceGovernor::instance().getPressureLevel();
+    signals.embeddingQueued = ctx_.getEmbeddingQueuedJobs ? ctx_.getEmbeddingQueuedJobs() : 0;
+    signals.embeddingInFlight = ctx_.getEmbeddingInFlightJobs ? ctx_.getEmbeddingInFlightJobs() : 0;
+    if (coordinator_ != nullptr) {
+        const auto telemetry = coordinator_->snapshot();
+        signals.indexMutating = telemetry.rebuilding || telemetry.activeBulkScopes > 0;
+    }
+    signals.repairInProgress = repairInProgress_.load(std::memory_order_acquire);
+    return signals;
+}
+
+std::optional<SqliteVacuumOutcome> RepairService::runVectorVacuumMaintenance() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::runVectorVacuumMaintenance");
+    if (vectorsDisabledByEnv()) {
+        return std::nullopt;
+    }
+    auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
+    if (!vectorDb || !vectorDb->isInitialized()) {
+        return std::nullopt;
+    }
+    const auto& vectorConfig = vectorDb->getConfig();
+    if (vectorConfig.use_in_memory || vectorConfig.database_path.empty() ||
+        vectorConfig.database_path == ":memory:") {
+        return std::nullopt;
+    }
+    if (!vectorVacuumAdmitted(collectVectorVacuumSignals())) {
+        return std::nullopt;
+    }
+
+    // Poll the admission signals while VACUUM runs (throttled; the progress handler fires
+    // far more often than the signals change) and roll back as soon as work arrives.
+    auto lastPoll = std::chrono::steady_clock::now();
+    const auto shouldAbort = [this, &lastPoll]() {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastPoll < std::chrono::milliseconds(200)) {
+            return false;
+        }
+        lastPoll = now;
+        return !vectorVacuumAdmitted(collectVectorVacuumSignals());
+    };
+
+    const std::filesystem::path dbPath(vectorConfig.database_path);
+    auto outcome = vacuumSqliteFileIfUseful(dbPath, vectorVacuumPolicy_, shouldAbort);
+    constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
+    switch (outcome.status) {
+        case SqliteVacuumStatus::Vacuumed:
+            spdlog::info("RepairService: vectors.db VACUUM complete: {} MB -> {} MB",
+                         outcome.bytesBefore / kMiB, outcome.bytesAfter / kMiB);
+            break;
+        case SqliteVacuumStatus::InsufficientSpace:
+            spdlog::info("RepairService: vectors.db has {} MB reclaimable but not enough free "
+                         "disk to VACUUM ({})",
+                         outcome.reclaimableBytes / kMiB, outcome.detail);
+            break;
+        case SqliteVacuumStatus::Interrupted:
+            spdlog::info("RepairService: vectors.db VACUUM yielded to new work; will retry");
+            break;
+        case SqliteVacuumStatus::Busy:
+        case SqliteVacuumStatus::OpenFailed:
+            spdlog::debug("RepairService: vectors.db VACUUM skipped ({}): {}",
+                          sqliteVacuumStatusName(outcome.status), outcome.detail);
+            break;
+        case SqliteVacuumStatus::NotNeeded:
+            spdlog::debug("RepairService: vectors.db VACUUM not useful: {} MB, {} MB reclaimable",
+                          outcome.bytesBefore / kMiB, outcome.reclaimableBytes / kMiB);
+            break;
+    }
+    return outcome;
 }
 
 void RepairService::performVectorCleanup() {

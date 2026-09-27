@@ -77,6 +77,7 @@
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/components/sqlite_vacuum.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
@@ -3133,28 +3134,7 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(
 
 bool ServiceManager::shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
                                       std::uint64_t freePageCount, std::uint64_t pageSize) {
-    constexpr std::uintmax_t kAutoVacuumThreshold = 512ULL * 1024 * 1024;
-    constexpr std::uint64_t kMinReclaimableBytes = 128ULL * 1024 * 1024;
-    constexpr double kMinReclaimableRatio = 0.10;
-    if (databaseBytes <= kAutoVacuumThreshold || pageCount == 0 || pageSize == 0 ||
-        freePageCount > pageCount) {
-        return false;
-    }
-    if (freePageCount > std::numeric_limits<std::uint64_t>::max() / pageSize ||
-        pageCount > std::numeric_limits<std::uint64_t>::max() / pageSize) {
-        return false;
-    }
-    const auto reclaimablePageBytes = freePageCount * pageSize;
-    const auto logicalBytes = pageCount * pageSize;
-    const auto reclaimableTailBytes =
-        databaseBytes > logicalBytes ? databaseBytes - logicalBytes : 0;
-    const auto reclaimablePageRatio = static_cast<double>(freePageCount) / pageCount;
-    const auto reclaimableTailRatio =
-        static_cast<double>(reclaimableTailBytes) / static_cast<double>(databaseBytes);
-    return (reclaimablePageBytes >= kMinReclaimableBytes &&
-            reclaimablePageRatio >= kMinReclaimableRatio) ||
-           (reclaimableTailBytes >= kMinReclaimableBytes &&
-            reclaimableTailRatio >= kMinReclaimableRatio);
+    return shouldVacuumSqlite(databaseBytes, pageCount, freePageCount, pageSize);
 }
 
 void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath) {
@@ -3166,7 +3146,7 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
 
     constexpr std::uintmax_t kMiB = 1024ULL * 1024ULL;
     const auto spaceInfo = std::filesystem::space(dbPath.parent_path(), ec);
-    if (ec || spaceInfo.available <= dbSize) {
+    if (ec || !hasSpaceForSqliteVacuum(dbSize, spaceInfo.available)) {
         spdlog::info("[ServiceManager] DB file is {} MB but only {} MB free; skipping "
                      "auto-VACUUM",
                      dbSize / kMiB, ec ? 0 : spaceInfo.available / kMiB);
@@ -4392,6 +4372,7 @@ void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
     rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
     rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
     rcfg.maxPendingRepairs = config_.maxPendingRepairs;
+    rcfg.vectorVacuumInterval = config_.maintenance.vectorVacuumInterval;
     repairServiceHost_.start(std::move(rcfg), &state_, std::move(activeConnFn),
                              makeRepairServiceContext(this));
 }

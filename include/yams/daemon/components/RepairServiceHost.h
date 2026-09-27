@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -36,6 +37,7 @@ public:
         std::uint32_t maxBatch{0};
         bool autoRebuildOnDimMismatch{false};
         std::size_t maxPendingRepairs{1000};
+        std::chrono::hours vectorVacuumInterval{24};
     };
 
     RepairServiceHost();

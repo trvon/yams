@@ -320,6 +320,11 @@ interval_minutes = 60
 # Initial delay after startup
 initial_delay_minutes = 10
 
+[daemon.maintenance]
+# Idle-only maintenance run by the repair service (no clients connected, no resource pressure).
+# How often vectors.db is checked for a VACUUM that reclaims its free pages (0 disables).
+vector_vacuum_interval_hours = 24
+
 # Centralized tuning knobs (advanced): defaults are safe; uncomment to override
 [tuning]
 # Default tuning preset applied by the daemon. Options: "efficient", "balanced", "aggressive".

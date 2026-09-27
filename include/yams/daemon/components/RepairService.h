@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/core/types.h>
+#include <yams/daemon/components/sqlite_vacuum.h>
 #include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
@@ -12,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <string_view>
@@ -44,6 +46,7 @@ class RepairManager;
 namespace yams::daemon {
 
 class WriteCoordinator;
+enum class ResourcePressureLevel : std::uint8_t;
 
 class ServiceManager;
 struct StateComponent;
@@ -127,6 +130,11 @@ public:
         // Clean-shutdown stamp leftovers (yams.db.integrity.tmp / .claim.<pid>.<n>) of a
         // crashed process are removed only when at least this old.
         std::chrono::minutes stampArtifactMinAge{60};
+        // Idle maintenance waits this long after startup (and after a VACUUM that had to
+        // yield to new work) before its next check.
+        std::chrono::minutes maintenanceDelay{15};
+        // How often idle maintenance checks whether vectors.db is worth a VACUUM (0 disables).
+        std::chrono::hours vectorVacuumInterval{24};
     };
 
     struct RecoveryArtifactMaintenanceStats {
@@ -135,6 +143,22 @@ public:
         std::size_t stampArtifactsRemoved{0};
         std::vector<std::string> errors;
     };
+
+    /// Everything that decides whether a vectors.db VACUUM may start or must yield.
+    struct VectorVacuumSignals {
+        bool shuttingDown{false};
+        bool maintenanceAllowed{false};
+        ResourcePressureLevel pressure{};
+        std::size_t embeddingQueued{0};
+        std::size_t embeddingInFlight{0};
+        bool indexMutating{false};
+        bool repairInProgress{false};
+    };
+
+    /// VACUUM holds the vectors.db write lock for the whole rewrite, so it only runs while the
+    /// daemon is idle: no client connections, no resource pressure, no queued or in-flight
+    /// embedding writes, no index rebuild or bulk load, and no on-demand repair.
+    [[nodiscard]] static bool vectorVacuumAdmitted(const VectorVacuumSignals& signals) noexcept;
 
     // Event types for document operations (same as old RepairCoordinator)
     struct DocumentAddedEvent {
@@ -205,6 +229,15 @@ public:
     /// Retention cleanup of crash-recovery leftovers in the data directory. Run periodically by
     /// the background loop when maintenance is allowed; never deletes unconfirmed data.
     RecoveryArtifactMaintenanceStats runRecoveryArtifactMaintenance();
+
+#ifdef YAMS_TESTING
+    void testing_setVectorVacuumPolicy(const SqliteVacuumPolicy& policy) {
+        vectorVacuumPolicy_ = policy;
+    }
+    std::optional<SqliteVacuumOutcome> testing_runVectorVacuumMaintenance() {
+        return runVectorVacuumMaintenance();
+    }
+#endif
 
 private:
     enum class OnDemandRepairOperation : std::uint8_t {
@@ -282,6 +315,13 @@ private:
     bool backfillLegacySnapshotKeysBatch();
     bool maintenanceAllowed() const;
     std::uint64_t legacySnapshotKeysMoved_{0};
+
+    // ── vectors.db VACUUM (idle maintenance) ──
+    VectorVacuumSignals collectVectorVacuumSignals() const;
+    /// Runs one VACUUM check of vectors.db when admitted. Returns nullopt when the check did
+    /// not run (not admitted, vectors disabled, or the vector database is not open on disk).
+    std::optional<SqliteVacuumOutcome> runVectorVacuumMaintenance();
+    SqliteVacuumPolicy vectorVacuumPolicy_{};
 
     // ── Detect missing work ──
     struct MissingWorkResult {

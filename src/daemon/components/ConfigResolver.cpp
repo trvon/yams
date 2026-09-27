@@ -1849,6 +1849,23 @@ bool ConfigResolver::applyStorageDiskPressure(const ConfigSections& sections,
     return true;
 }
 
+void ConfigResolver::applyDaemonMaintenance(const ConfigSections& sections, DaemonConfig& config) {
+    const auto section = sections.find("daemon.maintenance");
+    if (section == sections.end()) {
+        return;
+    }
+    if (const auto it = section->second.find("vector_vacuum_interval_hours");
+        it != section->second.end()) {
+        if (const auto parsed = parseUnsignedIntegral<std::uint32_t>(it->second)) {
+            config.maintenance.vectorVacuumInterval = std::chrono::hours{*parsed};
+        } else {
+            spdlog::warn("Config: daemon.maintenance.vector_vacuum_interval_hours must be an "
+                         "unsigned integer; keeping {}h",
+                         config.maintenance.vectorVacuumInterval.count());
+        }
+    }
+}
+
 bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfig& config) {
     const auto section = sections.find("memory_sync");
     if (section == sections.end()) {

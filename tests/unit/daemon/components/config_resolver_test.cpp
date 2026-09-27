@@ -480,6 +480,27 @@ TEST_CASE("ConfigResolver applies typed disk pressure policy transactionally",
     CHECK(config.diskPressure.emergencyReserveBytes == accepted.emergencyReserveBytes);
 }
 
+TEST_CASE("ConfigResolver applies typed daemon maintenance policy",
+          "[daemon][components][config][maintenance][catch2]") {
+    DaemonConfig defaults;
+    CHECK(defaults.maintenance.vectorVacuumInterval == std::chrono::hours{24});
+
+    ConfigResolver::ConfigSections sections;
+    sections["daemon.maintenance"] = {{"vector_vacuum_interval_hours", "6"}};
+    DaemonConfig config;
+    ConfigResolver::applyDaemonMaintenance(sections, config);
+    CHECK(config.maintenance.vectorVacuumInterval == std::chrono::hours{6});
+
+    sections["daemon.maintenance"] = {{"vector_vacuum_interval_hours", "0"}};
+    ConfigResolver::applyDaemonMaintenance(sections, config);
+    CHECK(config.maintenance.vectorVacuumInterval.count() == 0);
+
+    DaemonConfig invalid;
+    sections["daemon.maintenance"] = {{"vector_vacuum_interval_hours", "-3"}};
+    ConfigResolver::applyDaemonMaintenance(sections, invalid);
+    CHECK(invalid.maintenance.vectorVacuumInterval == std::chrono::hours{24});
+}
+
 TEST_CASE("ConfigResolver disk pressure policy rejects unsafe values",
           "[daemon][components][config][disk-pressure][catch2]") {
     const std::vector<std::pair<std::string, std::string>> invalidValues = {
