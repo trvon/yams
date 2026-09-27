@@ -1778,6 +1778,7 @@ if catch2_dep.found()
       'unit/common/format_catch2_test.cpp',
       'unit/common/crc32_catch2_test.cpp',
       'unit/common/hash_predicates_catch2_test.cpp',
+      'unit/common/log_rate_limiter_catch2_test.cpp',
       'unit/common/path_alias_catch2_test.cpp',
       'unit/common/pattern_utils_catch2_test.cpp',
       'unit/common/string_utils_catch2_test.cpp',

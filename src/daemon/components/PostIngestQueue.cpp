@@ -18,6 +18,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
+#include <yams/common/log_rate_limiter.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
@@ -1535,7 +1536,11 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
     double ms = std::chrono::duration<double, std::milli>(duration).count();
 
     if (!result) {
-        spdlog::error("[PostIngestQueue] KG batch failed: {}", result.error().message);
+        static yams::common::LogRateLimiter kgBatchFailureLog{std::chrono::seconds(60)};
+        if (auto held = kgBatchFailureLog.admit()) {
+            spdlog::error("[PostIngestQueue] KG batch failed: {}{}", result.error().message,
+                          yams::common::LogRateLimiter::suppressedSuffix(*held));
+        }
     } else {
         spdlog::debug("[PostIngestQueue] KG batch submitted {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
                       jobs.size(), ms, ms / jobs.size());
@@ -1793,7 +1798,11 @@ void PostIngestQueue::dispatchToEntityChannel(
     job.contentBytes = std::move(contentBytes);
 
     if (!channel->try_push(std::move(job))) {
-        spdlog::warn("[PostIngestQueue] Entity channel full, dropping job for {}", hash);
+        static yams::common::LogRateLimiter entityDropLog{std::chrono::seconds(60)};
+        if (auto held = entityDropLog.admit()) {
+            spdlog::warn("[PostIngestQueue] Entity channel full, dropping job for {}{}", hash,
+                         yams::common::LogRateLimiter::suppressedSuffix(*held));
+        }
         InternalEventBus::instance().incEntityDropped();
     } else {
         InternalEventBus::instance().incEntityQueued();
@@ -2441,8 +2450,8 @@ void PostIngestQueue::processTitleExtractionStage(
 
         auto duration = std::chrono::steady_clock::now() - startTime;
         double ms = std::chrono::duration<double, std::milli>(duration).count();
-        spdlog::info("[PostIngestQueue] Title+NL extraction for {} in {:.2f}ms (title={}, nl={})",
-                     hash.substr(0, 12), ms, bestTitle ? "yes" : "no", nlEntityCount);
+        spdlog::debug("[PostIngestQueue] Title+NL extraction for {} in {:.2f}ms (title={}, nl={})",
+                      hash.substr(0, 12), ms, bestTitle ? "yes" : "no", nlEntityCount);
 
         InternalEventBus::instance().incTitleConsumed();
     } catch (const std::exception& e) {
