@@ -19,6 +19,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compressor_interface.h>
+#include <yams/compression/framed_payload.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -291,10 +292,28 @@ public:
                     }
 
                 } else if (resp.hasContent) {
-                    // Content retrieval
+                    // Content retrieval. This request sets acceptCompressed, so the daemon may
+                    // send a framed payload (header + zstd body); write the document, not the
+                    // frame.
+                    std::string decodedContent;
+                    const std::string* content = &resp.content;
+                    if (resp.compressed) {
+                        auto decoded =
+                            yams::compression::decodeFramedPayload(std::span<const std::byte>(
+                                reinterpret_cast<const std::byte*>(resp.content.data()),
+                                resp.content.size()));
+                        if (!decoded) {
+                            return Error{decoded.error().code,
+                                         "Could not decode document content: " +
+                                             decoded.error().message};
+                        }
+                        decodedContent.assign(reinterpret_cast<const char*>(decoded.value().data()),
+                                              decoded.value().size());
+                        content = &decodedContent;
+                    }
                     if (outputPath_.empty() || outputPath_ == "-") {
                         // Output to stdout
-                        std::cout << resp.content;
+                        std::cout << *content;
                     } else {
                         // Write to file
                         std::ofstream outFile(outputPath_, std::ios::binary);
@@ -302,7 +321,8 @@ public:
                             return Error{ErrorCode::WriteError,
                                          "Cannot open output file: " + outputPath_.string()};
                         }
-                        outFile.write(resp.content.data(), resp.content.size());
+                        outFile.write(content->data(),
+                                      static_cast<std::streamsize>(content->size()));
                         outFile.close();
 
                         if (verbose_) {

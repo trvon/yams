@@ -8,6 +8,7 @@ compression_src = files(
   'zstandard_compressor.cpp',
   'compression_registry.cpp',
   'compression_utils.cpp',
+  'framed_payload.cpp',
   'compression_header.cpp',
   'compression_policy.cpp',
   'compression_monitor.cpp',
