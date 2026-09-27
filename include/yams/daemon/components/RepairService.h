@@ -1,5 +1,6 @@
 #pragma once
 
+#include <yams/app/services/session_service.hpp>
 #include <yams/core/types.h>
 #include <yams/daemon/components/sqlite_vacuum.h>
 #include <yams/daemon/components/TopologyManager.h>
@@ -135,6 +136,10 @@ public:
         std::chrono::minutes maintenanceDelay{15};
         // How often idle maintenance checks whether vectors.db is worth a VACUUM (0 disables).
         std::chrono::hours vectorVacuumInterval{24};
+        // Session files nobody has touched for this long are deleted (0 disables).
+        std::chrono::days sessionExpiry{30};
+        // Session store to expire; empty means the user's session directory.
+        std::filesystem::path sessionsDir{};
     };
 
     struct RecoveryArtifactMaintenanceStats {
@@ -237,6 +242,9 @@ public:
     std::optional<SqliteVacuumOutcome> testing_runVectorVacuumMaintenance() {
         return runVectorVacuumMaintenance();
     }
+    std::optional<app::services::SessionExpiryResult> testing_runSessionExpiryMaintenance() {
+        return runSessionExpiryMaintenance();
+    }
 #endif
 
 private:
@@ -322,6 +330,11 @@ private:
     /// not run (not admitted, vectors disabled, or the vector database is not open on disk).
     std::optional<SqliteVacuumOutcome> runVectorVacuumMaintenance();
     SqliteVacuumPolicy vectorVacuumPolicy_{};
+
+    // ── Session store expiry (idle maintenance) ──
+    /// Deletes idle session files when maintenance is allowed. Returns nullopt when the check
+    /// did not run (disabled, or clients are connected).
+    std::optional<app::services::SessionExpiryResult> runSessionExpiryMaintenance();
 
     // ── Detect missing work ──
     struct MissingWorkResult {

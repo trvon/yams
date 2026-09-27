@@ -455,6 +455,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 
     bool pathTreeRepairDone = false;
     auto nextVectorVacuum = std::chrono::steady_clock::now() + cfg_.maintenanceDelay;
+    auto nextSessionExpiry = std::chrono::steady_clock::now() + cfg_.maintenanceDelay;
 
     while (running_.load(std::memory_order_relaxed) &&
            shutdownState_->running.load(std::memory_order_acquire)) {
@@ -534,6 +535,13 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             nextVectorVacuum =
                 std::chrono::steady_clock::now() +
                 (yielded ? Wait(cfg_.maintenanceDelay) : Wait(cfg_.vectorVacuumInterval));
+        }
+
+        // Session store expiry: a directory scan once a day, only while no client is connected.
+        if (cfg_.sessionExpiry.count() > 0 &&
+            std::chrono::steady_clock::now() >= nextSessionExpiry && maintenanceAllowed()) {
+            (void)runSessionExpiryMaintenance();
+            nextSessionExpiry = std::chrono::steady_clock::now() + std::chrono::hours(24);
         }
 
         // Deferred initial scan
@@ -1003,6 +1011,39 @@ std::optional<SqliteVacuumOutcome> RepairService::runVectorVacuumMaintenance() {
             break;
     }
     return outcome;
+}
+
+std::optional<app::services::SessionExpiryResult> RepairService::runSessionExpiryMaintenance() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::runSessionExpiryMaintenance");
+    if (cfg_.sessionExpiry.count() <= 0 || !maintenanceAllowed()) {
+        return std::nullopt;
+    }
+    const auto sessionsDir =
+        cfg_.sessionsDir.empty() ? app::services::sessionsDirectory() : cfg_.sessionsDir;
+    app::services::SessionExpiryOptions options;
+    options.maxIdle = cfg_.sessionExpiry;
+    // A session that still tags documents keeps them reachable through `session merge` or
+    // `discard`; without the repository, ownership is unknown and nothing expires.
+    options.hasSessionDocuments = [repo = getMetadataRepoForRepair()](const std::string& name) {
+        if (!repo) {
+            return true;
+        }
+        auto count = repo->countDocumentsBySessionId(name);
+        return !count || count.value() > 0;
+    };
+    try {
+        auto result = app::services::expireIdleSessions(sessionsDir, options);
+        if (!result.expired.empty()) {
+            spdlog::info("RepairService: removed {} session(s) unused for {} days from {} ({} "
+                         "kept)",
+                         result.expired.size(), cfg_.sessionExpiry.count(), sessionsDir.string(),
+                         result.kept);
+        }
+        return result;
+    } catch (const std::exception& e) {
+        spdlog::debug("RepairService: session expiry skipped: {}", e.what());
+        return app::services::SessionExpiryResult{};
+    }
 }
 
 void RepairService::performVectorCleanup() {

@@ -1,5 +1,6 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -630,6 +631,113 @@ private:
 
 std::shared_ptr<ISessionService> makeSessionService(const AppContext* ctx) {
     return std::make_shared<SessionService>(ctx);
+}
+
+std::filesystem::path sessionsDirectory() {
+    return state_root() / "sessions";
+}
+
+namespace {
+
+std::int64_t jsonSeconds(const json& j, const char* key) {
+    const auto it = j.find(key);
+    return it != j.end() && it->is_number_integer() ? it->get<std::int64_t>() : 0;
+}
+
+bool watchesExistingDirectory(const json& session) {
+    const auto watch = session.find("watch");
+    if (watch == session.end() || !watch->is_object() || !watch->value("enabled", false)) {
+        return false;
+    }
+    const auto selectors = session.find("selectors");
+    if (selectors == session.end() || !selectors->is_array()) {
+        return false;
+    }
+    for (const auto& selector : *selectors) {
+        if (!selector.is_object() || !selector.contains("path") || !selector["path"].is_string()) {
+            continue;
+        }
+        std::error_code ec;
+        if (std::filesystem::is_directory(selector["path"].get<std::string>(), ec)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+SessionExpiryResult expireIdleSessions(const std::filesystem::path& sessionsDir,
+                                       const SessionExpiryOptions& options) {
+    namespace fs = std::filesystem;
+    SessionExpiryResult result;
+    std::error_code ec;
+    if (options.maxIdle <= std::chrono::system_clock::duration::zero() ||
+        !fs::is_directory(sessionsDir, ec)) {
+        return result;
+    }
+
+    std::string current;
+    if (auto index = load_json(sessionsDir / "index.json");
+        index.contains("current") && index["current"].is_string()) {
+        current = index["current"].get<std::string>();
+    }
+
+    const auto nowSeconds =
+        std::chrono::duration_cast<std::chrono::seconds>(options.now.time_since_epoch()).count();
+    const auto maxIdleSeconds =
+        std::chrono::duration_cast<std::chrono::seconds>(options.maxIdle).count();
+    const auto fileNow = fs::file_time_type::clock::now();
+
+    for (fs::directory_iterator it(sessionsDir, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code entryEc;
+        const auto& path = it->path();
+        if (!it->is_regular_file(entryEc) || path.extension() != ".json" ||
+            path.filename() == "index.json") {
+            continue;
+        }
+        const auto name = path.stem().string();
+        const auto keep = [&] { ++result.kept; };
+        if (name == current) {
+            keep();
+            continue;
+        }
+
+        // Any recent write (a pin, a watch toggle, a materialize) counts as a touch.
+        const auto modified = it->last_write_time(entryEc);
+        if (entryEc || fileNow - modified < options.maxIdle) {
+            keep();
+            continue;
+        }
+
+        json session;
+        try {
+            std::ifstream in(path);
+            in >> session;
+        } catch (...) {
+            keep(); // not ours to judge
+            continue;
+        }
+        if (!session.is_object()) {
+            keep();
+            continue;
+        }
+        const auto lastTouched =
+            std::max({jsonSeconds(session, "createdTime"), jsonSeconds(session, "lastOpenedTime"),
+                      jsonSeconds(session, "lastClosedTime")});
+        if (nowSeconds - lastTouched < maxIdleSeconds || watchesExistingDirectory(session) ||
+            !options.hasSessionDocuments || options.hasSessionDocuments(name)) {
+            keep();
+            continue;
+        }
+
+        if (fs::remove(path, entryEc)) {
+            result.expired.push_back(name);
+        } else {
+            keep();
+        }
+    }
+    return result;
 }
 
 } // namespace yams::app::services

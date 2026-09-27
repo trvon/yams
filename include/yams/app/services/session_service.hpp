@@ -1,7 +1,9 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -133,5 +135,30 @@ public:
 };
 
 std::shared_ptr<ISessionService> makeSessionService(const AppContext* ctx = nullptr);
+
+/// Directory that holds the session files (<state_dir>/sessions). Not created.
+std::filesystem::path sessionsDirectory();
+
+struct SessionExpiryOptions {
+    /// A session untouched (not created, opened, closed or modified) for this long expires.
+    std::chrono::system_clock::duration maxIdle{std::chrono::days{30}};
+    std::chrono::system_clock::time_point now{std::chrono::system_clock::now()};
+    /// True when documents are still tagged with the session. Such a session is kept so its
+    /// documents stay reachable through `session merge` / `discard`. Unset means "unknown",
+    /// which also keeps every session.
+    std::function<bool(const std::string&)> hasSessionDocuments;
+};
+
+struct SessionExpiryResult {
+    std::vector<std::string> expired;
+    std::size_t kept{0};
+};
+
+/// Delete idle session files from @p sessionsDir. Tool integrations (editor plugins, MCP
+/// clients) create a session per run and never remove it, so the directory otherwise grows
+/// without bound. Never expires the current session, a session watching a directory that
+/// still exists, a session that still owns documents, or a file that does not parse.
+SessionExpiryResult expireIdleSessions(const std::filesystem::path& sessionsDir,
+                                       const SessionExpiryOptions& options);
 
 } // namespace yams::app::services

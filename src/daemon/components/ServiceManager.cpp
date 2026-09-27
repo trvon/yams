@@ -4373,6 +4373,7 @@ void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
     rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
     rcfg.maxPendingRepairs = config_.maxPendingRepairs;
     rcfg.vectorVacuumInterval = config_.maintenance.vectorVacuumInterval;
+    rcfg.sessionExpiry = config_.maintenance.sessionExpiry;
     repairServiceHost_.start(std::move(rcfg), &state_, std::move(activeConnFn),
                              makeRepairServiceContext(this));
 }

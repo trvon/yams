@@ -76,10 +76,10 @@ plugins/onnx/ort_runtime_loader.cpp:174:portability/env-read # reviewed raw envi
 plugins/onnx/ort_runtime_loader.cpp:197:portability/env-read # reviewed raw environment read
 src/app/services/document_service.cpp:1174:portability/env-read # reviewed raw environment read
 src/app/services/search_service.cpp:511:portability/env-read # reviewed raw environment read
-src/app/services/session_service.cpp:18:portability/env-read # reviewed raw environment read
-src/app/services/session_service.cpp:20:portability/env-read # reviewed raw environment read
-src/app/services/session_service.cpp:71:portability/env-read # reviewed raw environment read
-src/app/services/session_service.cpp:480:portability/env-read # reviewed raw environment read
+src/app/services/session_service.cpp:19:portability/env-read # reviewed raw environment read
+src/app/services/session_service.cpp:21:portability/env-read # reviewed raw environment read
+src/app/services/session_service.cpp:72:portability/env-read # reviewed raw environment read
+src/app/services/session_service.cpp:481:portability/env-read # reviewed raw environment read
 src/benchmarks/internal_event_bus_benchmark.cpp:13:portability/env-read # reviewed raw environment read
 src/cli/commands/add_command.cpp:266:portability/env-read # reviewed raw environment read
 src/cli/commands/doctor/checks/model_check.cpp:16:portability/env-read # reviewed raw environment read

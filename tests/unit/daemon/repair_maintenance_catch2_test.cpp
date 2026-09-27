@@ -1,22 +1,30 @@
-// Idle maintenance run by RepairService: vectors.db VACUUM.
+// Idle maintenance run by RepairService: vectors.db VACUUM and session expiry.
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "../../common/test_helpers_catch2.h"
 
+#include <yams/app/services/session_service.hpp>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/sqlite_vacuum.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_database.h>
+
+#include <nlohmann/json.hpp>
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 using namespace yams::daemon;
 namespace fs = std::filesystem;
@@ -65,6 +73,62 @@ void addReclaimableFreePages(const fs::path& path) {
 std::uint64_t fileBytes(const fs::path& path) {
     return static_cast<std::uint64_t>(fs::file_size(path));
 }
+
+using namespace std::chrono_literals;
+
+std::int64_t epochSeconds(std::chrono::system_clock::time_point when) {
+    return std::chrono::duration_cast<std::chrono::seconds>(when.time_since_epoch()).count();
+}
+
+// Write a session file the way SessionService does, last touched `idle` ago.
+void writeSession(const fs::path& dir, const std::string& name, std::chrono::hours idle,
+                  nlohmann::json extra = nlohmann::json::object()) {
+    const auto touched = std::chrono::system_clock::now() - idle;
+    nlohmann::json j = {{"name", name},
+                        {"state", "closed"},
+                        {"createdTime", epochSeconds(touched)},
+                        {"lastOpenedTime", epochSeconds(touched)},
+                        {"lastClosedTime", 0},
+                        {"selectors", nlohmann::json::array()},
+                        {"materialized", nlohmann::json::array()}};
+    j.update(extra);
+    const auto path = dir / (name + ".json");
+    std::ofstream(path) << j.dump(2);
+    fs::last_write_time(path, fs::file_time_type::clock::now() - idle);
+}
+
+bool contains(const std::vector<std::string>& names, const std::string& name) {
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+// A session store shaped like the audited machine: per-run tool sessions plus a few that must
+// survive expiry.
+struct SessionStore {
+    yams::test::TempDirGuard tmp{"yams_session_expiry_"};
+    fs::path dir{tmp.path() / "sessions"};
+    fs::path watchedDir{tmp.path() / "project"};
+
+    SessionStore() {
+        fs::create_directories(dir);
+        fs::create_directories(watchedDir);
+        std::ofstream(dir / "index.json") << R"({"current": "active-now"})";
+        fs::last_write_time(dir / "index.json", fs::file_time_type::clock::now() - 24h * 90);
+
+        writeSession(dir, "opencode-1a2b", 24h * 40);
+        writeSession(dir, "mcp-grep-hot-7f", 24h * 45);
+        writeSession(dir, "active-now", 24h * 60); // current, however old
+        writeSession(dir, "used-yesterday", 24h);
+        writeSession(dir, "watching-project", 24h * 60,
+                     {{"watch", {{"enabled", true}, {"interval_ms", 2000}}},
+                      {"selectors", {{{"path", watchedDir.string()}}}}});
+        writeSession(dir, "watching-deleted-dir", 24h * 60,
+                     {{"watch", {{"enabled", true}, {"interval_ms", 2000}}},
+                      {"selectors", {{{"path", (tmp.path() / "gone").string()}}}}});
+        writeSession(dir, "owns-documents", 24h * 60);
+        std::ofstream(dir / "corrupt.json") << "{ not json";
+        fs::last_write_time(dir / "corrupt.json", fs::file_time_type::clock::now() - 24h * 90);
+    }
+};
 
 } // namespace
 
@@ -244,4 +308,96 @@ TEST_CASE("RepairService maintenance vacuums the live vectors.db when idle",
         CHECK(fileBytes(dbPath) == before);
     }
     vectorDb->close();
+}
+
+TEST_CASE("expireIdleSessions deletes only idle, unowned, unwatched sessions",
+          "[daemon][repair][maintenance][sessions][catch2]") {
+    SessionStore store;
+    yams::app::services::SessionExpiryOptions options;
+    options.maxIdle = 24h * 30;
+    options.hasSessionDocuments = [](const std::string& name) { return name == "owns-documents"; };
+
+    const auto result = yams::app::services::expireIdleSessions(store.dir, options);
+
+    CHECK(contains(result.expired, "opencode-1a2b"));
+    CHECK(contains(result.expired, "mcp-grep-hot-7f"));
+    CHECK(contains(result.expired, "watching-deleted-dir"));
+    CHECK(result.expired.size() == 3);
+    CHECK_FALSE(fs::exists(store.dir / "opencode-1a2b.json"));
+    CHECK_FALSE(fs::exists(store.dir / "mcp-grep-hot-7f.json"));
+
+    for (const char* kept : {"active-now", "used-yesterday", "watching-project", "owns-documents",
+                             "corrupt", "index"}) {
+        INFO(kept);
+        CHECK(fs::exists(store.dir / (std::string(kept) + ".json")));
+    }
+    CHECK(result.kept == 5);
+}
+
+TEST_CASE("expireIdleSessions keeps everything when ownership cannot be checked",
+          "[daemon][repair][maintenance][sessions][catch2]") {
+    SessionStore store;
+    yams::app::services::SessionExpiryOptions options;
+    options.maxIdle = 24h * 30;
+    CHECK(yams::app::services::expireIdleSessions(store.dir, options).expired.empty());
+
+    options.hasSessionDocuments = [](const std::string&) { return false; };
+    options.maxIdle = std::chrono::system_clock::duration::zero(); // expiry disabled
+    CHECK(yams::app::services::expireIdleSessions(store.dir, options).expired.empty());
+    CHECK(fs::exists(store.dir / "opencode-1a2b.json"));
+
+    CHECK(yams::app::services::expireIdleSessions(store.tmp.path() / "missing", options)
+              .expired.empty());
+}
+
+TEST_CASE("RepairService maintenance expires idle sessions using document ownership",
+          "[daemon][repair][maintenance][sessions][catch2]") {
+    SessionStore store;
+    const auto dbPath = store.tmp.path() / "yams.db";
+    yams::metadata::ConnectionPoolConfig poolConfig;
+    poolConfig.minConnections = 1;
+    poolConfig.maxConnections = 2;
+    auto pool = std::make_unique<yams::metadata::ConnectionPool>(dbPath.string(), poolConfig);
+    REQUIRE(pool->initialize().has_value());
+    auto repo = std::make_shared<yams::metadata::MetadataRepository>(*pool);
+
+    yams::metadata::DocumentInfo doc;
+    doc.filePath = (store.tmp.path() / "note.md").string();
+    doc.fileName = "note.md";
+    doc.fileExtension = ".md";
+    doc.fileSize = 4;
+    doc.sha256Hash = std::string(64, 'b');
+    doc.mimeType = "text/markdown";
+    auto docId = repo->insertDocument(doc);
+    REQUIRE(docId.has_value());
+    REQUIRE(repo->setMetadata(docId.value(), "session_id",
+                              yams::metadata::MetadataValue(std::string("owns-documents")))
+                .has_value());
+
+    std::size_t activeConnections = 0;
+    RepairServiceContext ctx;
+    ctx.getMetadataRepo = [repo] { return repo; };
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = store.tmp.path();
+    cfg.sessionsDir = store.dir;
+    RepairService service(ctx, nullptr, [&activeConnections] { return activeConnections; }, cfg);
+
+    SECTION("a connected client defers it") {
+        activeConnections = 1;
+        CHECK_FALSE(service.testing_runSessionExpiryMaintenance().has_value());
+        CHECK(fs::exists(store.dir / "opencode-1a2b.json"));
+    }
+    SECTION("an idle daemon expires the tool sessions but not the one owning documents") {
+        const auto result = service.testing_runSessionExpiryMaintenance();
+        REQUIRE(result.has_value());
+        CHECK(contains(result->expired, "opencode-1a2b"));
+        CHECK(contains(result->expired, "mcp-grep-hot-7f"));
+        CHECK_FALSE(contains(result->expired, "owns-documents"));
+        CHECK(fs::exists(store.dir / "owns-documents.json"));
+        CHECK(fs::exists(store.dir / "active-now.json"));
+    }
+
+    repo.reset();
+    pool->shutdown();
 }

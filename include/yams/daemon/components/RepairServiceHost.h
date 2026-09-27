@@ -38,6 +38,7 @@ public:
         bool autoRebuildOnDimMismatch{false};
         std::size_t maxPendingRepairs{1000};
         std::chrono::hours vectorVacuumInterval{24};
+        std::chrono::days sessionExpiry{30};
     };
 
     RepairServiceHost();

@@ -499,6 +499,14 @@ TEST_CASE("ConfigResolver applies typed daemon maintenance policy",
     sections["daemon.maintenance"] = {{"vector_vacuum_interval_hours", "-3"}};
     ConfigResolver::applyDaemonMaintenance(sections, invalid);
     CHECK(invalid.maintenance.vectorVacuumInterval == std::chrono::hours{24});
+
+    CHECK(defaults.maintenance.sessionExpiry == std::chrono::days{30});
+    sections["daemon.maintenance"] = {{"session_expiry_days", "7"}};
+    ConfigResolver::applyDaemonMaintenance(sections, config);
+    CHECK(config.maintenance.sessionExpiry == std::chrono::days{7});
+    sections["daemon.maintenance"] = {{"session_expiry_days", "soon"}};
+    ConfigResolver::applyDaemonMaintenance(sections, config);
+    CHECK(config.maintenance.sessionExpiry == std::chrono::days{7});
 }
 
 TEST_CASE("ConfigResolver disk pressure policy rejects unsafe values",

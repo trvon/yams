@@ -116,6 +116,8 @@ struct DaemonConfig {
     struct MaintenancePolicy {
         /// How often vectors.db is checked for a reclaiming VACUUM; 0 disables.
         std::chrono::hours vectorVacuumInterval{24};
+        /// Session files nobody has touched for this long are deleted; 0 disables.
+        std::chrono::days sessionExpiry{30};
     } maintenance;
 
     /// Opt-in document-history retention. Newest versions are always retained;

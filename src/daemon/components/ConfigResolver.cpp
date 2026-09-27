@@ -1864,6 +1864,15 @@ void ConfigResolver::applyDaemonMaintenance(const ConfigSections& sections, Daem
                          config.maintenance.vectorVacuumInterval.count());
         }
     }
+    if (const auto it = section->second.find("session_expiry_days"); it != section->second.end()) {
+        if (const auto parsed = parseUnsignedIntegral<std::uint32_t>(it->second)) {
+            config.maintenance.sessionExpiry = std::chrono::days{*parsed};
+        } else {
+            spdlog::warn("Config: daemon.maintenance.session_expiry_days must be an unsigned "
+                         "integer; keeping {}",
+                         config.maintenance.sessionExpiry.count());
+        }
+    }
 }
 
 bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfig& config) {
