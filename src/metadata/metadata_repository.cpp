@@ -4122,14 +4122,15 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshots() {
     // Cache miss - query database
     auto result = executeReadQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
-            using yams::metadata::sql::QuerySpec;
-            QuerySpec spec{};
-            spec.table = "metadata";
-            spec.columns = {"DISTINCT value"};
-            spec.conditions = {"key = 'snapshot_id'"};
-            spec.orderBy = std::optional<std::string>{"value"};
-
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+            // Every snapshot, not only those still named by a document's latest snapshot_id.
+            // Legacy snapshot_id:<id> keys are left out: scanning them is a full-table read on
+            // large corpora, and their snapshots are also recorded in tree_snapshots.
+            auto stmtResult = db.prepare(R"(
+                SELECT snapshot_id FROM tree_snapshots
+                UNION SELECT snapshot_id FROM document_snapshots
+                UNION SELECT value FROM metadata WHERE key = 'snapshot_id'
+                ORDER BY 1
+            )");
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -4227,90 +4228,12 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshotLabels() {
 }
 
 Result<SnapshotInfo> MetadataRepository::getSnapshotInfo(const std::string& snapshotId) {
-    return executeReadQuery<SnapshotInfo>([&snapshotId](Database& db) -> Result<SnapshotInfo> {
-        // Query documents with this snapshot_id and aggregate info
-        const char* sql = R"(
-            SELECT
-                COUNT(*) as file_count,
-                MIN(d.indexed_time) as created_time,
-                GROUP_CONCAT(DISTINCT SUBSTR(d.file_path, 1, INSTR(d.file_path || '/', '/') - 1)) as root_dirs
-            FROM documents d
-            JOIN metadata m ON d.id = m.document_id
-            WHERE m.key = 'snapshot_id' AND m.value = ?
-        )";
-
-        auto stmtResult = db.prepare(sql);
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bind(1, snapshotId);
-        if (!bindResult)
-            return bindResult.error();
-
-        SnapshotInfo info;
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        if (stepResult.value()) {
-            info.fileCount = stmt.getInt64(0);
-            info.createdTime = stmt.isNull(1) ? 0 : stmt.getInt64(1);
-            // Derive directory path from common root (simplified - just take first path component)
-            if (!stmt.isNull(2)) {
-                std::string roots = stmt.getString(2);
-                // If there are multiple roots, just use the first one
-                auto commaPos = roots.find(',');
-                info.directoryPath =
-                    commaPos != std::string::npos ? roots.substr(0, commaPos) : roots;
-            }
-        }
-
-        // Get label from metadata if present
-        const char* labelSql = R"(
-            SELECT DISTINCT m2.value
-            FROM metadata m1
-            JOIN metadata m2 ON m1.document_id = m2.document_id
-            WHERE m1.key = 'snapshot_id' AND m1.value = ?
-              AND m2.key = 'snapshot_label'
-            LIMIT 1
-        )";
-
-        auto labelStmtResult = db.prepare(labelSql);
-        if (labelStmtResult) {
-            Statement labelStmt = std::move(labelStmtResult).value();
-            auto labelBindResult = labelStmt.bind(1, snapshotId);
-            if (labelBindResult) {
-                auto labelStepResult = labelStmt.step();
-                if (labelStepResult && labelStepResult.value() && !labelStmt.isNull(0)) {
-                    info.label = labelStmt.getString(0);
-                }
-            }
-        }
-
-        // Get git commit from metadata if present
-        const char* commitSql = R"(
-            SELECT DISTINCT m2.value
-            FROM metadata m1
-            JOIN metadata m2 ON m1.document_id = m2.document_id
-            WHERE m1.key = 'snapshot_id' AND m1.value = ?
-              AND m2.key = 'git_commit'
-            LIMIT 1
-        )";
-
-        auto commitStmtResult = db.prepare(commitSql);
-        if (commitStmtResult) {
-            Statement commitStmt = std::move(commitStmtResult).value();
-            auto commitBindResult = commitStmt.bind(1, snapshotId);
-            if (commitBindResult) {
-                auto commitStepResult = commitStmt.step();
-                if (commitStepResult && commitStepResult.value() && !commitStmt.isNull(0)) {
-                    info.gitCommit = commitStmt.getString(0);
-                }
-            }
-        }
-
-        return info;
-    });
+    auto batch = batchGetSnapshotInfo({snapshotId});
+    if (!batch) {
+        return batch.error();
+    }
+    auto it = batch.value().find(snapshotId);
+    return it != batch.value().end() ? it->second : SnapshotInfo{};
 }
 
 Result<std::unordered_map<std::string, SnapshotInfo>>
@@ -4321,31 +4244,47 @@ MetadataRepository::batchGetSnapshotInfo(const std::vector<std::string>& snapsho
 
     return executeReadQuery<std::unordered_map<std::string, SnapshotInfo>>(
         [&snapshotIds](Database& db) -> Result<std::unordered_map<std::string, SnapshotInfo>> {
-            // Build placeholders for IN clause
-            std::string placeholders;
-            placeholders.reserve(snapshotIds.size() * 2);
+            // Members of each requested snapshot: document_snapshots rows, legacy
+            // snapshot_id:<id> keys not yet moved, and the latest snapshot_id key. Each source
+            // is looked up by id through an index. Label and git commit come from
+            // tree_snapshots, falling back to the members' metadata.
+            std::string values;
+            values.reserve(snapshotIds.size() * 4);
             for (size_t i = 0; i < snapshotIds.size(); ++i) {
-                if (i > 0)
-                    placeholders += ',';
-                placeholders += '?';
+                values += i > 0 ? ",(?)" : "(?)";
             }
-
-            // Single query with GROUP BY to get all snapshot info in one round-trip
-            // Uses conditional aggregation to extract label and git_commit in same query
             std::string sql = R"(
+                WITH ids(snapshot_id) AS (VALUES )" +
+                              values + R"(),
+                member(document_id, snapshot_id) AS (
+                    SELECT ds.document_id, ds.snapshot_id
+                    FROM document_snapshots ds JOIN ids ON ds.snapshot_id = ids.snapshot_id
+                    UNION
+                    SELECT m.document_id, ids.snapshot_id
+                    FROM ids JOIN metadata m ON m.key = 'snapshot_id:' || ids.snapshot_id
+                    UNION
+                    SELECT m.document_id, ids.snapshot_id
+                    FROM ids JOIN metadata m ON m.key = 'snapshot_id' AND m.value = ids.snapshot_id
+                )
                 SELECT
-                    m_snap.value as snapshot_id,
-                    COUNT(DISTINCT d.id) as file_count,
-                    MIN(d.indexed_time) as created_time,
-                    MAX(CASE WHEN m2.key = 'snapshot_label' THEN m2.value END) as label,
-                    MAX(CASE WHEN m2.key = 'git_commit' THEN m2.value END) as git_commit,
-                    GROUP_CONCAT(DISTINCT SUBSTR(d.file_path, 1, INSTR(d.file_path || '/', '/') - 1)) as root_dirs
-                FROM documents d
-                JOIN metadata m_snap ON d.id = m_snap.document_id AND m_snap.key = 'snapshot_id'
-                LEFT JOIN metadata m2 ON d.id = m2.document_id AND m2.key IN ('snapshot_label', 'git_commit')
-                WHERE m_snap.value IN ()" +
-                              placeholders + R"()
-                GROUP BY m_snap.value
+                    member.snapshot_id,
+                    COUNT(DISTINCT d.id) AS file_count,
+                    MIN(d.indexed_time) AS created_time,
+                    COALESCE(
+                        (SELECT ts.snapshot_label FROM tree_snapshots ts
+                         WHERE ts.snapshot_id = member.snapshot_id),
+                        MAX(CASE WHEN m2.key = 'snapshot_label' THEN m2.value END)) AS label,
+                    COALESCE(
+                        (SELECT ts.git_commit FROM tree_snapshots ts
+                         WHERE ts.snapshot_id = member.snapshot_id),
+                        MAX(CASE WHEN m2.key = 'git_commit' THEN m2.value END)) AS git_commit,
+                    GROUP_CONCAT(DISTINCT SUBSTR(d.file_path, 1,
+                                 INSTR(d.file_path || '/', '/') - 1)) AS root_dirs
+                FROM member
+                JOIN documents d ON d.id = member.document_id
+                LEFT JOIN metadata m2
+                    ON d.id = m2.document_id AND m2.key IN ('snapshot_label', 'git_commit')
+                GROUP BY member.snapshot_id
             )";
 
             auto stmtResult = db.prepare(sql);
