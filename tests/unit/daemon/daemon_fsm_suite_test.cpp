@@ -111,11 +111,91 @@ TEST_CASE("ConnectionFSM: Basic state transitions", "[daemon][fsm][connection]")
         fsm.on_connect(3);
         ConnectionFsm::FrameInfo info{};
         info.payload_size = 128;
+        // Without on_readable the header event is ignored: Connected only moves to
+        // ReadingHeader, so there is no Connected -> ReadingPayload shortcut.
         fsm.on_header_parsed(info);
+        REQUIRE(fsm.state() == ConnectionFsm::State::Connected);
 
         fsm.on_body_parsed();
-        // After body parsed, FSM should be in a state where write is possible
-        // Actual state depends on FSM implementation
+        REQUIRE(fsm.state() == ConnectionFsm::State::Connected);
+        REQUIRE(fsm.can_write());
+    }
+}
+
+TEST_CASE("ConnectionFSM: transition table", "[daemon][fsm][connection][transitions]") {
+    using S = ConnectionFsm::State;
+    ConnectionFsm fsm;
+    ConnectionFsm::FrameInfo headerOnly{};
+    ConnectionFsm::FrameInfo withPayload{};
+    withPayload.payload_size = 64;
+
+    SECTION("on_readable only moves Connected to ReadingHeader") {
+        fsm.on_readable(8);
+        CHECK(fsm.state() == S::Disconnected);
+
+        fsm.on_connect(3);
+        fsm.on_readable(8);
+        CHECK(fsm.state() == S::ReadingHeader);
+
+        fsm.on_readable(8);
+        CHECK(fsm.state() == S::ReadingHeader);
+
+        fsm.on_header_parsed(withPayload);
+        REQUIRE(fsm.state() == S::ReadingPayload);
+        fsm.on_readable(8);
+        CHECK(fsm.state() == S::ReadingPayload);
+    }
+
+    SECTION("ReadingHeader with empty payload goes straight to WritingHeader") {
+        fsm.on_connect(3);
+        fsm.on_readable(8);
+        fsm.on_header_parsed(headerOnly);
+        CHECK(fsm.state() == S::WritingHeader);
+    }
+
+    SECTION("Streaming response returns to Connected for keep-alive") {
+        fsm.on_connect(3);
+        fsm.on_readable(8);
+        fsm.on_header_parsed(headerOnly);
+        fsm.on_stream_next(false);
+        CHECK(fsm.state() == S::StreamingChunks);
+        fsm.on_stream_next(false);
+        CHECK(fsm.state() == S::StreamingChunks);
+        fsm.on_response_complete(false);
+        CHECK(fsm.state() == S::Connected);
+        fsm.on_readable(8);
+        CHECK(fsm.state() == S::ReadingHeader);
+    }
+
+    SECTION("Final stream chunk closes, then close request finishes") {
+        fsm.on_connect(3);
+        fsm.on_readable(8);
+        fsm.on_header_parsed(headerOnly);
+        fsm.on_stream_next(true);
+        CHECK(fsm.state() == S::Closing);
+        fsm.on_close_request();
+        CHECK(fsm.state() == S::Closed);
+        CHECK_FALSE(fsm.alive());
+    }
+
+    SECTION("Errors while reading go to Error, and Error can only close") {
+        fsm.on_connect(3);
+        fsm.on_readable(8);
+        fsm.on_error(ECONNRESET);
+        CHECK(fsm.state() == S::Error);
+        fsm.on_readable(8);
+        CHECK(fsm.state() == S::Error);
+        fsm.on_close_request();
+        CHECK(fsm.state() == S::Closing);
+    }
+
+    SECTION("Accepting only advances on connect") {
+        fsm.on_accept(3);
+        CHECK(fsm.state() == S::Accepting);
+        fsm.on_readable(8);
+        CHECK(fsm.state() == S::Accepting);
+        fsm.on_connect(3);
+        CHECK(fsm.state() == S::Connected);
     }
 }
 
