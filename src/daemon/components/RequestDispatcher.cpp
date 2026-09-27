@@ -173,7 +173,8 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
     switch (req.operation) {
         case MemorySyncOperation::Publish: {
             auto published = co_await dispatch::offload_to_worker(
-                serviceManager_, [manager = serviceManager_, key = req.key, value = req.value] {
+                serviceManager_, "memory_sync.publish",
+                [manager = serviceManager_, key = req.key, value = req.value] {
                     return manager->publishMemorySync(key, value);
                 });
             if (!published) {
@@ -193,7 +194,7 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
         }
         case MemorySyncOperation::Delete: {
             auto deleted = co_await dispatch::offload_to_worker(
-                serviceManager_, [manager = serviceManager_, key = req.key] {
+                serviceManager_, "memory_sync.delete", [manager = serviceManager_, key = req.key] {
                     return manager->deleteMemorySync(key);
                 });
             if (!deleted) {
@@ -205,7 +206,8 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
         }
         case MemorySyncOperation::Connect: {
             auto connected = co_await dispatch::offload_to_worker(
-                serviceManager_, [manager = serviceManager_, connection = req.key] {
+                serviceManager_, "memory_sync.connect",
+                [manager = serviceManager_, connection = req.key] {
                     return manager->connectP2p(connection);
                 });
             if (!connected) {
@@ -222,10 +224,11 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
             break;
         }
         case MemorySyncOperation::Disconnect: {
-            auto disconnected = co_await dispatch::offload_to_worker(
-                serviceManager_, [manager = serviceManager_, nodeId = req.key] {
-                    return manager->disconnectP2p(nodeId);
-                });
+            auto disconnected =
+                co_await dispatch::offload_to_worker(serviceManager_, "memory_sync.disconnect",
+                                                     [manager = serviceManager_, nodeId = req.key] {
+                                                         return manager->disconnectP2p(nodeId);
+                                                     });
             if (!disconnected) {
                 co_return dispatch::makeErrorResponse(disconnected.error().code,
                                                       disconnected.error().message);
@@ -234,10 +237,11 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
             break;
         }
         case MemorySyncOperation::Forget: {
-            auto forgotten = co_await dispatch::offload_to_worker(
-                serviceManager_, [manager = serviceManager_, nodeId = req.key] {
-                    return manager->forgetP2pPeer(nodeId);
-                });
+            auto forgotten =
+                co_await dispatch::offload_to_worker(serviceManager_, "memory_sync.forget",
+                                                     [manager = serviceManager_, nodeId = req.key] {
+                                                         return manager->forgetP2pPeer(nodeId);
+                                                     });
             if (!forgotten) {
                 co_return dispatch::makeErrorResponse(forgotten.error().code,
                                                       forgotten.error().message);
@@ -278,7 +282,8 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
         }
         case MemorySyncOperation::Enroll: {
             auto enrolled = co_await dispatch::offload_to_worker(
-                serviceManager_, [manager = serviceManager_, nodeId = req.key, pin = req.value] {
+                serviceManager_, "memory_sync.enroll",
+                [manager = serviceManager_, nodeId = req.key, pin = req.value] {
                     return manager->enrollP2pPeer(nodeId, pin);
                 });
             if (!enrolled) {

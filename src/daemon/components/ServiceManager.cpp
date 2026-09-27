@@ -4005,8 +4005,9 @@ ServiceManager::co_ensureEmbeddingModelReady(const std::string& requestedModel,
                                              std::function<void(const ModelLoadEvent&)> progress,
                                              int timeoutMs, bool keepHot, bool warmup) {
     co_return co_await yams::daemon::dispatch::offload_to_worker(
-        this, [this, requestedModel, progress = std::move(progress), timeoutMs, keepHot,
-               warmup]() mutable {
+        this, "embedding.ensure_model_ready",
+        [this, requestedModel, progress = std::move(progress), timeoutMs, keepHot,
+         warmup]() mutable {
             return ensureEmbeddingModelReadySync(requestedModel, std::move(progress), timeoutMs,
                                                  keepHot, warmup);
         });
