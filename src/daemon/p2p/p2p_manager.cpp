@@ -358,7 +358,10 @@ public:
                                  .handshakeTimeout = options_.timeout,
                                  .sessionTimeout = options_.sessionTimeout,
                                  .maxConcurrentHandshakes = 32,
-                                 .maxConcurrentSessions = 16});
+                                 .maxConcurrentSessions = 16,
+                                 .onRejected = [this](const Error& error) {
+                                     recordInboundFailure("transport", error.message);
+                                 }});
         listener_->setHandler(
             [this](P2pConnection connection) { handleInbound(std::move(connection)); });
         auto listening = listener_->start();
@@ -545,17 +548,27 @@ private:
                                           .allowFirstContact = options_.allowFirstContact,
                                           .timeout = options_.timeout});
         // The outcome used to be discarded, so a rejected or failed inbound peer left no trace.
+        if (outcome.result) {
+            std::lock_guard<std::mutex> lock(inboundMutex_);
+            ++inbound_.sessions;
+            return;
+        }
+        recordInboundFailure(detail::inboundStageName(outcome.stage),
+                             outcome.result.error().message);
+    }
+
+    // Inbound sessions refused by the transport (TLS, pin, capacity) and those that fail after
+    // it both count; the stage says where.
+    void recordInboundFailure(std::string_view stage, const std::string& message) {
         std::lock_guard<std::mutex> lock(inboundMutex_);
         ++inbound_.sessions;
-        if (!outcome.result) {
-            ++inbound_.failures;
-            inbound_.lastFailureStage = std::string(detail::inboundStageName(outcome.stage));
-            inbound_.lastFailure = outcome.result.error().message;
-            inbound_.lastFailureUnixMs =
-                static_cast<std::uint64_t>(std::max<std::int64_t>(0, unixTimeMs()));
-            spdlog::warn("[p2p] inbound session failed at {}: {}", inbound_.lastFailureStage,
-                         inbound_.lastFailure);
-        }
+        ++inbound_.failures;
+        inbound_.lastFailureStage = std::string(stage);
+        inbound_.lastFailure = message;
+        inbound_.lastFailureUnixMs =
+            static_cast<std::uint64_t>(std::max<std::int64_t>(0, unixTimeMs()));
+        spdlog::warn("[p2p] inbound session failed at {}: {}", inbound_.lastFailureStage,
+                     inbound_.lastFailure);
     }
 
     void reconnectLoop() {

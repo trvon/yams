@@ -74,7 +74,7 @@ struct P2pSyncResult {
 struct P2pInboundStats {
     std::uint64_t sessions{0};
     std::uint64_t failures{0};
-    std::string lastFailureStage; ///< handshake, peer_history, delta_exchange, ...
+    std::string lastFailureStage; ///< transport, handshake, peer_history, delta_exchange, ...
     std::string lastFailure;
     std::uint64_t lastFailureUnixMs{0};
 };

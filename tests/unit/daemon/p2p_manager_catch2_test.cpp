@@ -349,7 +349,8 @@ TEST_CASE("P2P manager rejects unknown inbound peers before delta exchange",
     const auto inbound = server.value()->inboundStats();
     CHECK(inbound.sessions >= 1u);
     CHECK(inbound.failures >= 1u);
-    CHECK((inbound.lastFailureStage == "handshake"));
+    // The unknown client's pin is refused by the TLS listener, before the application handshake.
+    CHECK((inbound.lastFailureStage == "transport"));
     CHECK_FALSE(inbound.lastFailure.empty());
     CHECK(inbound.lastFailureUnixMs > 0u);
     CHECK((client.value()->inboundStats().failures == 0u));
