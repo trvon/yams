@@ -17,6 +17,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
@@ -256,11 +257,23 @@ public:
         }
         app::services::AddDirectoryResponse response;
         response.filesProcessed = request.includePatterns.size();
-        response.filesIndexed = request.includePatterns.size();
+        for (const auto& relative : request.includePatterns) {
+            app::services::IndexedFileResult result;
+            result.path = (fs::path(request.directoryPath) / relative).string();
+            result.success = !failingFiles.contains(relative);
+            if (result.success) {
+                ++response.filesIndexed;
+            } else {
+                ++response.filesFailed;
+                result.error = "simulated per-file failure";
+            }
+            response.results.push_back(std::move(result));
+        }
         return response;
     }
 
     std::size_t failuresRemaining{0};
+    std::set<std::string> failingFiles;
     std::vector<app::services::AddDirectoryRequest> requests;
 };
 
@@ -1109,6 +1122,73 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                           "coding", watchedDirectory));
     CHECK((documentService.deleteRequests.size() == 2));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager session watcher keeps progressing past a failing path",
+                 "[daemon][service_manager][session_watch]") {
+    ServiceManager serviceManager(config_, state_, lifecycleFsm_);
+    SessionWatchIndexingService indexingService;
+    SessionWatchDocumentService documentService;
+    const auto watchedDirectory = testDir_ / "watched_progress";
+    fs::create_directories(watchedDirectory);
+    const auto writeFile = [&](const fs::path& path, std::string_view text) {
+        std::ofstream output(path);
+        REQUIRE(output.good());
+        output << text;
+    };
+    writeFile(watchedDirectory / "kept.cpp", "int kept = 1;\n");
+    writeFile(watchedDirectory / "gone.cpp", "int gone = 1;\n");
+    REQUIRE(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                            "coding", watchedDirectory));
+    REQUIRE((indexingService.requests.size() == 1));
+
+    SECTION("a removal that keeps failing does not re-index unrelated files") {
+        REQUIRE(fs::remove(watchedDirectory / "gone.cpp"));
+        documentService.failuresRemaining = 1000;
+        CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(
+            indexingService, &documentService, "coding", watchedDirectory));
+        REQUIRE_FALSE(documentService.deleteRequests.empty());
+        // The path no longer exists, so every document stored at it is stale.
+        CHECK(documentService.deleteRequests.back().force);
+
+        writeFile(watchedDirectory / "added.cpp", "int added = 1;\n");
+        CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(
+            indexingService, &documentService, "coding", watchedDirectory));
+        REQUIRE((indexingService.requests.size() == 2));
+        CHECK((indexingService.requests.back().includePatterns ==
+               std::vector<std::string>{"added.cpp"}));
+
+        // Before the fix the stale snapshot made added.cpp "changed" on every pass.
+        CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(
+            indexingService, &documentService, "coding", watchedDirectory));
+        CHECK((indexingService.requests.size() == 2));
+
+        documentService.failuresRemaining = 0;
+        const auto deletesBefore = documentService.deleteRequests.size();
+        CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                              "coding", watchedDirectory));
+        CHECK((documentService.deleteRequests.size() == deletesBefore + 1));
+        CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                              "coding", watchedDirectory));
+        CHECK((documentService.deleteRequests.size() == deletesBefore + 1));
+    }
+
+    SECTION("only the file that failed to index is retried") {
+        writeFile(watchedDirectory / "good.cpp", "int good = 1;\n");
+        writeFile(watchedDirectory / "bad.cpp", "int bad = 1;\n");
+        indexingService.failingFiles = {"bad.cpp"};
+        CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(
+            indexingService, &documentService, "coding", watchedDirectory));
+        REQUIRE((indexingService.requests.size() == 2));
+
+        indexingService.failingFiles.clear();
+        CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                              "coding", watchedDirectory));
+        REQUIRE((indexingService.requests.size() == 3));
+        CHECK((indexingService.requests.back().includePatterns ==
+               std::vector<std::string>{"bad.cpp"}));
+    }
 }
 
 TEST_CASE("ServiceManager topology readiness follows artifact freshness",
