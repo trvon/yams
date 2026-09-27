@@ -211,6 +211,7 @@ void TuneAdvisor::resetConfiguredOverrides() noexcept {
     hostIoPressurePctOverride_.store(0.0, std::memory_order_relaxed);
     hostMemoryPressurePctOverride_.store(0.0, std::memory_order_relaxed);
     hostLoadPerCpuOverride_.store(0.0, std::memory_order_relaxed);
+    backgroundMaxDeferralMsOverride_.store(UINT32_MAX, std::memory_order_relaxed);
     postIngestRpcQueueMaxOverride_.store(0, std::memory_order_relaxed);
     postIngestRpcMaxPerBatchOverride_.store(0, std::memory_order_relaxed);
     postIngestTotalConcurrentOverride_.store(0, std::memory_order_relaxed);
@@ -2560,6 +2561,19 @@ void TuneAdvisor::setHostIoPressurePct(double pct) {
 void TuneAdvisor::setHostMemoryPressurePct(double pct) {
     hostMemoryPressurePctOverride_.store(std::isfinite(pct) ? std::max(0.0, pct) : 0.0,
                                          std::memory_order_relaxed);
+}
+
+uint32_t TuneAdvisor::backgroundMaxDeferralMs() {
+    const uint32_t ov = backgroundMaxDeferralMsOverride_.load(std::memory_order_relaxed);
+    return ov == UINT32_MAX ? 300'000u : ov;
+}
+
+void TuneAdvisor::setBackgroundMaxDeferralMs(uint32_t ms) {
+    backgroundMaxDeferralMsOverride_.store(ms, std::memory_order_relaxed);
+}
+
+void TuneAdvisor::resetBackgroundMaxDeferralMs() {
+    backgroundMaxDeferralMsOverride_.store(UINT32_MAX, std::memory_order_relaxed);
 }
 
 void TuneAdvisor::setHostLoadPerCpu(double load) {

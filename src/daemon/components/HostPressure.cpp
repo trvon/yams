@@ -159,4 +159,25 @@ HostPressureSample sampleHostPressure() noexcept {
     return sample;
 }
 
+bool DeferralGate::admit(bool hostBusy, Clock::time_point now,
+                         std::chrono::milliseconds maxDeferral) noexcept {
+    if (!hostBusy || maxDeferral.count() <= 0) {
+        deferredSince_.reset();
+        return true;
+    }
+    if (!deferredSince_) {
+        deferredSince_ = now;
+        ++deferrals_;
+        return false;
+    }
+    if (now - *deferredSince_ >= maxDeferral) {
+        // Starvation guard: let one pass through and start a new wait window.
+        ++forcedRuns_;
+        deferredSince_ = now;
+        return true;
+    }
+    ++deferrals_;
+    return false;
+}
+
 } // namespace yams::daemon

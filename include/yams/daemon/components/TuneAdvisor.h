@@ -1016,6 +1016,13 @@ public:
     static void setHostMemoryPressurePct(double pct);
     static void setHostLoadPerCpu(double load);
 
+    /// Longest a deferrable background task waits for a busy host before the starvation guard
+    /// lets one pass run (milliseconds). 0 disables deferral. Default: 300000 (5 minutes).
+    /// Config: tuning.resource.background_max_deferral_s
+    static uint32_t backgroundMaxDeferralMs();
+    static void setBackgroundMaxDeferralMs(uint32_t ms);
+    static void resetBackgroundMaxDeferralMs();
+
     /// Cooldown period between model evictions to prevent thrashing (ms). Default: 500.
     /// Environment: YAMS_MODEL_EVICTION_COOLDOWN_MS
     static uint32_t modelEvictionCooldownMs();
@@ -1181,6 +1188,8 @@ private:
     static inline std::atomic<double> hostIoPressurePctOverride_{0.0};
     static inline std::atomic<double> hostMemoryPressurePctOverride_{0.0};
     static inline std::atomic<double> hostLoadPerCpuOverride_{0.0};
+    // UINT32_MAX = unset (0 is a meaningful value: deferral off).
+    static inline std::atomic<uint32_t> backgroundMaxDeferralMsOverride_{UINT32_MAX};
 
     // Gradient limiter overrides
     static inline std::atomic<int> enableGradientLimitersOverride_{-1};

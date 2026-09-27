@@ -17,6 +17,7 @@
 // - Gates scaling decisions via canScaleUp(), canLoadModel(), canAdmitWork()
 // - Triggers pressure responses via onWarningLevel(), onCriticalLevel(), etc.
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -106,6 +107,8 @@ struct ResourceSnapshot {
     // host defers background work but does not throttle foreground requests or model loads.
     HostPressureSample host{};
     bool hostPressureElevated{false};
+    // Bit i set = DeferrableWork(i) is currently held back for host pressure.
+    std::uint8_t deferredWorkMask{0};
 
     // Scaling budget remaining (governor can veto scale-up if exhausted)
     // 0.0 = no headroom (at/over budget), 1.0 = full headroom (well under budget)
@@ -280,6 +283,15 @@ public:
         return hostPressureElevated_.load(std::memory_order_acquire);
     }
 
+    /// Admission for deferrable background work. Returns false while the host is busy, until
+    /// the work has waited tuning.resource.background_max_deferral_s; then one pass is let
+    /// through and the wait starts over. Must-run work (recovery, integrity checks, WAL
+    /// checkpoints) never calls this.
+    [[nodiscard]] bool admitDeferrable(DeferrableWork kind);
+
+    /// Deferrable work currently held back for host pressure, in enum order.
+    [[nodiscard]] std::vector<DeferrableWork> deferredWork() const;
+
     /// Get current scaling caps (thread-safe copy)
     [[nodiscard]] ScalingCaps getScalingCaps() const;
 
@@ -299,6 +311,12 @@ public:
         std::unique_lock lock(mutex_);
         hostSampler_ = std::move(sampler);
         lastHostSampleTime_ = {};
+    }
+    /// Test-only: forget all deferral state.
+    void testing_resetDeferralGates() {
+        std::lock_guard lock(deferralMutex_);
+        deferralGates_ = {};
+        deferredWorkMask_.store(0, std::memory_order_release);
     }
     /// Test-only: set pressure state for hysteresis tests.
     void testing_setPressureState(ResourcePressureLevel level,
@@ -407,6 +425,11 @@ private:
     HostPressureSample cachedHostSample_{};
     std::atomic<bool> hostPressureElevated_{false};
     static constexpr auto kMinHostSampleInterval = std::chrono::seconds(1);
+
+    // Deferral state per DeferrableWork kind.
+    mutable std::mutex deferralMutex_;
+    std::array<DeferralGate, kDeferrableWorkKinds> deferralGates_{};
+    std::atomic<std::uint8_t> deferredWorkMask_{0};
 
     // CPU admission control state (time-based hysteresis)
     std::atomic<bool> cpuAdmissionBlocked_{false};

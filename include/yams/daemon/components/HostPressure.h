@@ -14,6 +14,7 @@
 // Parsing and classification are pure functions so they can be tested without a busy host.
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -75,5 +76,66 @@ bool hostPressureElevated(const HostPressureSample& sample,
 /// Read the host signal for this platform. Cheap (a few small file reads or sysctls); callers
 /// still rate-limit it because PSI avg10 only changes every two seconds.
 HostPressureSample sampleHostPressure() noexcept;
+
+// ============================================================================
+// Deferrable background work
+// ============================================================================
+
+/// Background work the daemon may postpone while the host is busy. Must-run work is not
+/// listed on purpose and is never gated: crash recovery, database integrity checks and WAL
+/// checkpoints keep the corpus consistent, so they run regardless of host load. Embedding of
+/// newly ingested documents is not deferrable either: throttling it under host load made the
+/// drain 1.5-4x longer and triggered extra vector index builds without saving daemon CPU.
+enum class DeferrableWork : std::uint8_t {
+    TopologyRebuild = 0,  // topology artifact rebuild after ingest
+    RepairScan = 1,       // repair initial scan, legacy backfills, vectors.db VACUUM
+    SemanticBackfill = 2, // semantic_neighbor graph backfill for older documents
+};
+
+inline constexpr std::size_t kDeferrableWorkKinds = 3;
+
+constexpr std::string_view deferrableWorkName(DeferrableWork kind) noexcept {
+    switch (kind) {
+        case DeferrableWork::TopologyRebuild:
+            return "topology";
+        case DeferrableWork::RepairScan:
+            return "repair";
+        case DeferrableWork::SemanticBackfill:
+            return "semantic_backfill";
+    }
+    return "unknown";
+}
+
+/// Starvation guard for one kind of deferrable work. While the host is busy, work waits; once
+/// it has waited `maxDeferral`, one run is admitted and the wait starts over. Under sustained
+/// pressure the work therefore still runs, at one pass per `maxDeferral`. A zero `maxDeferral`
+/// turns deferral off. Not thread-safe; the governor serializes access.
+class DeferralGate {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    /// Returns true when the caller may run its work now.
+    bool admit(bool hostBusy, Clock::time_point now,
+               std::chrono::milliseconds maxDeferral) noexcept;
+
+    /// True while work is being held back (a deferral started and has not been released).
+    [[nodiscard]] bool deferring() const noexcept { return deferredSince_.has_value(); }
+
+    /// How many admission checks were refused since construction.
+    [[nodiscard]] std::uint64_t deferrals() const noexcept { return deferrals_; }
+
+    /// How many runs the starvation guard forced through while the host was still busy.
+    [[nodiscard]] std::uint64_t forcedRuns() const noexcept { return forcedRuns_; }
+
+    /// When the current deferral started, if any.
+    [[nodiscard]] std::optional<Clock::time_point> deferredSince() const noexcept {
+        return deferredSince_;
+    }
+
+private:
+    std::optional<Clock::time_point> deferredSince_;
+    std::uint64_t deferrals_{0};
+    std::uint64_t forcedRuns_{0};
+};
 
 } // namespace yams::daemon

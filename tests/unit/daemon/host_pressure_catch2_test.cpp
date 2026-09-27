@@ -8,6 +8,7 @@
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
+#include <chrono>
 #include <functional>
 
 using namespace yams::daemon;
@@ -37,7 +38,9 @@ struct HostSamplerGuard {
         TuneAdvisor::setHostIoPressurePct(0.0);
         TuneAdvisor::setHostMemoryPressurePct(0.0);
         TuneAdvisor::setHostLoadPerCpu(0.0);
+        TuneAdvisor::resetBackgroundMaxDeferralMs();
         ResourceGovernor::instance().tick(nullptr);
+        ResourceGovernor::instance().testing_resetDeferralGates();
     }
     HostSamplerGuard(const HostSamplerGuard&) = delete;
     HostSamplerGuard& operator=(const HostSamplerGuard&) = delete;
@@ -186,4 +189,107 @@ TEST_CASE("ResourceGovernor host sampling can be disabled",
     CHECK(snap.host.source == HostPressureSource::Unavailable);
     CHECK_FALSE(snap.hostPressureElevated);
     CHECK_FALSE(governor.hostPressureElevated());
+}
+
+// =============================================================================
+// Deferrable background work
+// =============================================================================
+
+TEST_CASE("DeferralGate admits immediately on a calm host",
+          "[daemon][governance][host_pressure][deferral][catch2]") {
+    DeferralGate gate;
+    const auto t0 = DeferralGate::Clock::now();
+    CHECK(gate.admit(false, t0, std::chrono::minutes(5)));
+    CHECK_FALSE(gate.deferring());
+    CHECK(gate.deferrals() == 0);
+}
+
+TEST_CASE("DeferralGate holds work while the host is busy and releases when it calms",
+          "[daemon][governance][host_pressure][deferral][catch2]") {
+    DeferralGate gate;
+    const auto t0 = DeferralGate::Clock::now();
+    const auto maxDeferral = std::chrono::minutes(5);
+
+    CHECK_FALSE(gate.admit(true, t0, maxDeferral));
+    CHECK(gate.deferring());
+    REQUIRE(gate.deferredSince().has_value());
+    CHECK(*gate.deferredSince() == t0);
+    CHECK_FALSE(gate.admit(true, t0 + std::chrono::seconds(30), maxDeferral));
+    CHECK(gate.deferrals() == 2);
+
+    CHECK(gate.admit(false, t0 + std::chrono::seconds(31), maxDeferral));
+    CHECK_FALSE(gate.deferring());
+    CHECK(gate.forcedRuns() == 0);
+}
+
+TEST_CASE("DeferralGate starvation guard forces one run per max deferral",
+          "[daemon][governance][host_pressure][deferral][catch2]") {
+    DeferralGate gate;
+    const auto t0 = DeferralGate::Clock::now();
+    const auto maxDeferral = std::chrono::seconds(60);
+
+    CHECK_FALSE(gate.admit(true, t0, maxDeferral));
+    CHECK_FALSE(gate.admit(true, t0 + std::chrono::seconds(59), maxDeferral));
+
+    // Waited the full budget: one run goes through even though the host is still busy.
+    CHECK(gate.admit(true, t0 + std::chrono::seconds(60), maxDeferral));
+    CHECK(gate.forcedRuns() == 1);
+    // The wait starts over, so sustained pressure yields a low, bounded rate.
+    CHECK(gate.deferring());
+    CHECK_FALSE(gate.admit(true, t0 + std::chrono::seconds(61), maxDeferral));
+    CHECK_FALSE(gate.admit(true, t0 + std::chrono::seconds(119), maxDeferral));
+    CHECK(gate.admit(true, t0 + std::chrono::seconds(120), maxDeferral));
+    CHECK(gate.forcedRuns() == 2);
+}
+
+TEST_CASE("DeferralGate with a zero max deferral never defers",
+          "[daemon][governance][host_pressure][deferral][catch2]") {
+    DeferralGate gate;
+    const auto t0 = DeferralGate::Clock::now();
+    CHECK(gate.admit(true, t0, std::chrono::milliseconds(0)));
+    CHECK_FALSE(gate.deferring());
+    CHECK(gate.deferrals() == 0);
+}
+
+TEST_CASE("ResourceGovernor defers background work only while the host is busy",
+          "[daemon][governance][host_pressure][deferral][catch2]") {
+    HostSamplerGuard guard;
+    auto& governor = ResourceGovernor::instance();
+    TuneAdvisor::setBackgroundMaxDeferralMs(60'000);
+
+    governor.testing_setHostPressureSampler([] { return psiSample(1.0, 0.0, 0.0); });
+    governor.tick(nullptr);
+    CHECK(governor.admitDeferrable(DeferrableWork::TopologyRebuild));
+    CHECK(governor.deferredWork().empty());
+
+    governor.testing_setHostPressureSampler([] { return psiSample(95.0, 0.0, 0.0); });
+    governor.tick(nullptr);
+    CHECK_FALSE(governor.admitDeferrable(DeferrableWork::TopologyRebuild));
+    CHECK_FALSE(governor.admitDeferrable(DeferrableWork::RepairScan));
+    // Each kind is tracked on its own, and status lists what is currently held back.
+    const auto deferred = governor.deferredWork();
+    REQUIRE(deferred.size() == 2);
+    CHECK(deferred[0] == DeferrableWork::TopologyRebuild);
+    CHECK(deferred[1] == DeferrableWork::RepairScan);
+    // The next tick publishes the same set in the snapshot that status reads.
+    CHECK(governor.tick(nullptr).deferredWorkMask == 0b11);
+
+    governor.testing_setHostPressureSampler([] { return psiSample(1.0, 0.0, 0.0); });
+    governor.tick(nullptr);
+    CHECK(governor.admitDeferrable(DeferrableWork::TopologyRebuild));
+    CHECK(governor.admitDeferrable(DeferrableWork::RepairScan));
+    CHECK(governor.deferredWork().empty());
+}
+
+TEST_CASE("ResourceGovernor background deferral can be turned off with a zero max deferral",
+          "[daemon][governance][host_pressure][deferral][catch2]") {
+    HostSamplerGuard guard;
+    auto& governor = ResourceGovernor::instance();
+    TuneAdvisor::setBackgroundMaxDeferralMs(0);
+
+    governor.testing_setHostPressureSampler([] { return psiSample(95.0, 0.0, 0.0); });
+    governor.tick(nullptr);
+    CHECK(governor.hostPressureElevated());
+    CHECK(governor.admitDeferrable(DeferrableWork::SemanticBackfill));
+    CHECK(governor.deferredWork().empty());
 }

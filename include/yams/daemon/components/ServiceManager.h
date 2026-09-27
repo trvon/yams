@@ -956,6 +956,8 @@ private:
     std::atomic<bool> semanticTopologyMaintenanceScheduled_{false};
     std::atomic<bool> topologyRebuildPending_{false};
     std::atomic<bool> topologyRebuildInProgress_{false};
+    // A retry is armed for a topology rebuild deferred by host pressure.
+    std::atomic<bool> topologyRebuildRetryArmed_{false};
 
     DaemonLifecycleFsm& lifecycleFsm_;
 

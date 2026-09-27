@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <limits>
+#include <yams/core/assert.hpp>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PostIngestQueue.h>
@@ -474,6 +475,15 @@ void ResourceGovernor::collectHostPressure(ResourceSnapshot& snap) {
             snap.host, TuneAdvisor::hostPressureThresholds(), wasElevated);
         if (elevated != wasElevated) {
             hostPressureElevated_.store(elevated, std::memory_order_release);
+            if (!elevated) {
+                // Calm again: nothing is held back any more, whether or not its owner has
+                // polled since.
+                std::lock_guard deferralLock(deferralMutex_);
+                for (auto& gate : deferralGates_) {
+                    (void)gate.admit(false, snap.timestamp, std::chrono::milliseconds(1));
+                }
+                deferredWorkMask_.store(0, std::memory_order_release);
+            }
             spdlog::info("[ResourceGovernor] Host pressure {} (source={}, cpu={:.1f}%, io={:.1f}%, "
                          "memory={:.1f}%, load/cpu={:.2f})",
                          elevated ? "elevated" : "cleared",
@@ -482,6 +492,50 @@ void ResourceGovernor::collectHostPressure(ResourceSnapshot& snap) {
         }
     }
     snap.hostPressureElevated = elevated;
+    snap.deferredWorkMask = deferredWorkMask_.load(std::memory_order_acquire);
+}
+
+bool ResourceGovernor::admitDeferrable(DeferrableWork kind) {
+    const auto index = static_cast<std::size_t>(kind);
+    YAMS_PRECONDITION(index < kDeferrableWorkKinds, "unknown DeferrableWork kind");
+    const bool busy = hostPressureElevated_.load(std::memory_order_acquire);
+    const auto maxDeferral = std::chrono::milliseconds(TuneAdvisor::backgroundMaxDeferralMs());
+    const auto now = std::chrono::steady_clock::now();
+
+    std::lock_guard lock(deferralMutex_);
+    auto& gate = deferralGates_[index];
+    const bool wasDeferring = gate.deferring();
+    const auto forcedBefore = gate.forcedRuns();
+    const bool admitted = gate.admit(busy, now, maxDeferral);
+
+    const auto bit = static_cast<std::uint8_t>(1u << index);
+    const auto mask = deferredWorkMask_.load(std::memory_order_relaxed);
+    deferredWorkMask_.store(gate.deferring() ? (mask | bit) : (mask & ~bit),
+                            std::memory_order_release);
+
+    if (!wasDeferring && gate.deferring()) {
+        spdlog::info("[ResourceGovernor] deferring {} while host pressure is elevated "
+                     "(max deferral {}s)",
+                     deferrableWorkName(kind), maxDeferral.count() / 1000);
+    } else if (gate.forcedRuns() != forcedBefore) {
+        spdlog::info("[ResourceGovernor] {} waited {}s for host pressure; running one pass",
+                     deferrableWorkName(kind), maxDeferral.count() / 1000);
+    } else if (wasDeferring && !gate.deferring()) {
+        spdlog::info("[ResourceGovernor] resuming {}: host pressure cleared",
+                     deferrableWorkName(kind));
+    }
+    return admitted;
+}
+
+std::vector<DeferrableWork> ResourceGovernor::deferredWork() const {
+    std::vector<DeferrableWork> out;
+    const auto mask = deferredWorkMask_.load(std::memory_order_acquire);
+    for (std::size_t i = 0; i < kDeferrableWorkKinds; ++i) {
+        if ((mask & (1u << i)) != 0) {
+            out.push_back(static_cast<DeferrableWork>(i));
+        }
+    }
+    return out;
 }
 
 // ============================================================================

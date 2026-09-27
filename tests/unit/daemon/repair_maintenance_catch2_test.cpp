@@ -243,6 +243,10 @@ TEST_CASE("vectors.db VACUUM is admitted only while the daemon is idle",
     busy = idle;
     busy.repairInProgress = true;
     CHECK_FALSE(RepairService::vectorVacuumAdmitted(busy));
+
+    busy = idle;
+    busy.hostDeferred = true; // another process is keeping the host busy
+    CHECK_FALSE(RepairService::vectorVacuumAdmitted(busy));
 }
 
 TEST_CASE("RepairService maintenance vacuums the live vectors.db when idle",

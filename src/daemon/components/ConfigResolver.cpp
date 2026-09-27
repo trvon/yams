@@ -1702,6 +1702,17 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     applyHostThreshold("host_memory_pressure_pct", 1.0, 100.0,
                        &TuneAdvisor::setHostMemoryPressurePct);
     applyHostThreshold("host_load_per_cpu", 0.1, 64.0, &TuneAdvisor::setHostLoadPerCpu);
+    // 0 is valid here: it turns background deferral off.
+    if (auto value = parseUint32(resource, "tuning.resource", "background_max_deferral_s")) {
+        if (*value <= 86400) {
+            TuneAdvisor::setBackgroundMaxDeferralMs(*value * 1000u);
+            noteSource("tuning.resource", "background_max_deferral_s");
+        } else {
+            spdlog::warn("Config: tuning.resource.background_max_deferral_s must be at most "
+                         "86400; ignoring {}",
+                         *value);
+        }
+    }
     if (auto value = parseUint32(resource, "tuning.resource", "cpu_hysteresis_ms")) {
         if (*value >= 10 && *value <= 10000) {
             TuneAdvisor::setCpuLevelHysteresisMs(*value);

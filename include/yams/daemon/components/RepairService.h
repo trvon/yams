@@ -158,11 +158,13 @@ public:
         std::size_t embeddingInFlight{0};
         bool indexMutating{false};
         bool repairInProgress{false};
+        bool hostDeferred{false}; // the host is busy and the governor is holding repair work
     };
 
     /// VACUUM holds the vectors.db write lock for the whole rewrite, so it only runs while the
     /// daemon is idle: no client connections, no resource pressure, no queued or in-flight
-    /// embedding writes, no index rebuild or bulk load, and no on-demand repair.
+    /// embedding writes, no index rebuild or bulk load, no on-demand repair, and no host
+    /// pressure from other processes.
     [[nodiscard]] static bool vectorVacuumAdmitted(const VectorVacuumSignals& signals) noexcept;
 
     // Event types for document operations (same as old RepairCoordinator)
