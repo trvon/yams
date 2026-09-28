@@ -407,7 +407,7 @@ Result<void> SocketServer::start() {
                          initialSlots);
         }
 
-        connectionSlots_ = std::make_unique<std::counting_semaphore<>>(initialSlots);
+        connectionSlots_ = std::make_shared<std::counting_semaphore<>>(initialSlots);
         slotLimit_.store(initialSlots, std::memory_order_relaxed);
         spdlog::info("SocketServer: bounded concurrency enabled (max {} slots)", initialSlots);
 
@@ -417,7 +417,7 @@ Result<void> SocketServer::start() {
             if (proxySlots == 0) {
                 proxySlots = 1;
             }
-            proxyConnectionSlots_ = std::make_unique<std::counting_semaphore<>>(proxySlots);
+            proxyConnectionSlots_ = std::make_shared<std::counting_semaphore<>>(proxySlots);
             spdlog::info("SocketServer: proxy bounded concurrency enabled (max {} slots)",
                          proxySlots);
         }
@@ -716,8 +716,9 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
 
         // IMPORTANT: Accept first, then try to acquire a slot.
         // If we acquire slots before accept(), we can starve the acceptor/backlog under load.
-        std::counting_semaphore<>* slots =
-            isProxy ? proxyConnectionSlots_.get() : connectionSlots_.get();
+        // Shared so a connection handler that outlives stop() can still release its slot.
+        std::shared_ptr<std::counting_semaphore<>> slots =
+            isProxy ? proxyConnectionSlots_ : connectionSlots_;
         try {
             // Use as_tuple to avoid exception overhead during shutdown
             auto [ec, socket] =
@@ -895,31 +896,33 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 spdlog::info("stream-trace: [conn={}] handler_spawned", conn_token);
             }
 
-            // Create a capturing lambda that releases the semaphore on completion
-            auto wrapped_handler = [this, conn_token, tracked, isProxy,
-                                    slots]() mutable -> awaitable<void> {
-                // RAII guard for semaphore - handles shrink debt for graceful downsizing
+            // Captureless coroutine lambda: its arguments are copied into the coroutine frame, so
+            // the frame never refers back to this accept-loop iteration. The frame co-owns the
+            // slot semaphore because SocketServer::stop() may release it while the handler is
+            // still draining.
+            auto wrapped_handler =
+                [](SocketServer* server, uint64_t token,
+                   std::shared_ptr<TrackedSocket> trackedSocket, bool proxyConn,
+                   std::shared_ptr<std::counting_semaphore<>> sem) -> awaitable<void> {
+                // Proxy connections hold a slot for their lifetime; return it on completion.
                 struct SemaphoreGuard {
-                    SocketServer* server;
-                    std::counting_semaphore<>* sem;
+                    std::shared_ptr<std::counting_semaphore<>> sem;
                     bool proxyConn;
                     ~SemaphoreGuard() {
-                        if (!sem || !server)
-                            return;
-                        if (proxyConn) {
+                        if (sem && proxyConn) {
                             sem->release();
-                            return;
                         }
                     }
-                } guard{this, slots, isProxy};
+                } guard{std::move(sem), proxyConn};
 
                 // Handle the connection with tracing token
-                co_await handle_connection(tracked, conn_token, isProxy);
+                co_await server->handle_connection(std::move(trackedSocket), token, proxyConn);
             };
 
             // Spawn detached; shutdown closes sockets/acceptors and waits for accept loops before
             // executor teardown.
-            co_spawn(connectionExecutor, wrapped_handler(), boost::asio::detached);
+            co_spawn(connectionExecutor, wrapped_handler(this, conn_token, tracked, isProxy, slots),
+                     boost::asio::detached);
 
         } catch (const std::exception& e) {
             if (!running_ || stopping_)
