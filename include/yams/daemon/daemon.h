@@ -300,6 +300,9 @@ public:
     void spawnShutdownThread(std::function<void()> shutdownFn);
 
     void reapCompletedShutdownThread();
+
+    // Tear down the IPC layer (SocketServer + IOCoordinator); see teardownSocketServer().
+    void shutdownIpcLayer() noexcept;
 };
 
 } // namespace yams::daemon

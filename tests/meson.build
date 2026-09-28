@@ -1323,6 +1323,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_socket_server_teardown_exe = executable('catch2_socket_server_teardown',
+    files('unit/daemon/socket_server_teardown_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_vector_index_coordinator_bulk_scope_exe = executable(
     'catch2_vector_index_coordinator_bulk_scope',
     files('unit/daemon/vector_index_coordinator_bulk_scope_catch2_test.cpp'),
@@ -3948,6 +3957,14 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
+
+  if host_machine.system() != 'windows'
+    test('socket_server_teardown', catch2_socket_server_teardown_exe,
+      suite: ['catch2', 'unit', 'daemon', 'socket', 'shutdown'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 60
+    )
+  endif
 
   test('vector_index_coordinator_bulk_scope', catch2_vector_index_coordinator_bulk_scope_exe,
     suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],

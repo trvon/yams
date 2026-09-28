@@ -1418,6 +1418,45 @@ bool SocketServer::resizeConnectionSlots(size_t newSize) {
     return true;
 }
 
+void teardownSocketServer(std::unique_ptr<SocketServer>& server,
+                          std::unique_ptr<IOCoordinator>& ioCoordinator) noexcept {
+    // Connection handlers are coroutines on the IOCoordinator io_context that hold raw pointers
+    // into the SocketServer (cleanup guards, admission callbacks). stop() only waits a bounded
+    // time for them to drain, so the server must outlive every handler frame:
+    //   1. stop(): stop accepting, signal connections, drain; this also releases the acceptors
+    //      and the accept strand while the io_context is still running.
+    //   2. Stop and join the I/O threads, so no handler can resume.
+    //   3. Destroy the IOCoordinator; its io_context destroys the handler frames still queued on
+    //      it (and the sockets they own) while the server is still valid.
+    //   4. Destroy the server, which by now owns no io_context-bound object.
+    if (server) {
+        try {
+            auto stopResult = server->stop();
+            if (!stopResult) {
+                spdlog::warn("Socket server stop returned error: {}", stopResult.error().message);
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Socket server stop exception: {}", e.what());
+        } catch (...) {
+            spdlog::warn("Socket server stop: unknown exception");
+        }
+    }
+
+    if (ioCoordinator) {
+        try {
+            ioCoordinator->stop();
+            ioCoordinator->join();
+        } catch (const std::exception& e) {
+            spdlog::warn("IOCoordinator stop exception: {}", e.what());
+        } catch (...) {
+            spdlog::warn("IOCoordinator stop: unknown exception");
+        }
+        ioCoordinator.reset();
+    }
+
+    server.reset();
+}
+
 double SocketServer::getSlotUtilization() const {
     size_t active = mainActiveConnectionCount();
     size_t limit = slotLimit_.load(std::memory_order_relaxed);

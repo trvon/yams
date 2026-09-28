@@ -244,4 +244,13 @@ private:
                           std::chrono::milliseconds timeout, std::string_view label);
 };
 
+/**
+ * Tear down a SocketServer together with the IOCoordinator whose io_context runs its connection
+ * handlers: stop the server, stop and join the I/O threads, destroy the IOCoordinator (and the
+ * handler frames still queued on it), then destroy the server those frames reference. Both
+ * pointers are null on return; either may already be null.
+ */
+void teardownSocketServer(std::unique_ptr<SocketServer>& server,
+                          std::unique_ptr<IOCoordinator>& ioCoordinator) noexcept;
+
 } // namespace yams::daemon
