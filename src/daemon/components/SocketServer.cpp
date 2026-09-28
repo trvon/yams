@@ -1047,11 +1047,17 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                     auto completion_exec =
                         boost::asio::get_associated_executor(*handlerPtr, executor);
 
+                    // The callback re-arms itself through a weak reference: a strong self-capture
+                    // is a cycle that leaked the callback and everything it holds (socket, timer,
+                    // tracked socket and this connection's completion handler, i.e. the frame).
+                    // The connection coroutine below owns the callback for its lifetime.
                     auto on_timer_fire =
                         std::make_shared<std::function<void(const boost::system::error_code&)>>();
+                    std::weak_ptr<std::function<void(const boost::system::error_code&)>> weak_self =
+                        on_timer_fire;
                     *on_timer_fire = [this, completed, handlerPtr, completion_exec, conn_token,
                                       created_at, lifetime, sock, tracked_for_timer, timer,
-                                      on_timer_fire](const boost::system::error_code& ec) mutable {
+                                      weak_self](const boost::system::error_code& ec) mutable {
                         if (ec == boost::asio::error::operation_aborted)
                             return;
                         if (completed->load(std::memory_order_acquire))
@@ -1060,8 +1066,10 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                             const auto now = std::chrono::steady_clock::now();
                             const auto last = tracked_for_timer->last_activity_at();
                             if (now - last < lifetime / 2) {
-                                timer->expires_after(lifetime / 2);
-                                timer->async_wait(*on_timer_fire);
+                                if (auto rearm = weak_self.lock()) {
+                                    timer->expires_after(lifetime / 2);
+                                    timer->async_wait(*rearm);
+                                }
                                 return;
                             }
                         }
@@ -1106,7 +1114,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                     boost::asio::co_spawn(
                         connection_strand,
                         [handler, sock, token, conn_token, timer, completed, handlerPtr,
-                         completion_exec,
+                         completion_exec, on_timer_fire,
                          on_activity =
                              std::move(on_activity)]() mutable -> boost::asio::awaitable<void> {
                             co_await handler->handle_connection(sock, token, conn_token,
