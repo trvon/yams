@@ -62,6 +62,12 @@ Named decisions from the tuning migration:
   budgets, and hysteresis), and `[tuning.post_ingest]` (stage concurrency, batch, RPC queue, and RPC
   drain controls). Their effective values and per-key source are exposed as `runtime_tuning` in
   detailed/JSON status.
+- Host-load scheduling lives in `[tuning.resource]` with no environment counterpart:
+  `host_pressure` (sample host PSI or load average, default on), `host_cpu_pressure_pct` (40),
+  `host_io_pressure_pct` (30), `host_memory_pressure_pct` (10), `host_load_per_cpu` (1.5, used
+  when PSI is unavailable), and `background_max_deferral_s` (300; 0 turns deferral off). While
+  the host is busy, deferrable background work (topology rebuilds, repair scans and VACUUM,
+  semantic backfill) waits; `yams daemon status` shows the host load and what is deferred.
 - CLI search header/body timeouts are passed in `ClientConfig`; the dead process-wide
   `YAMS_HEADER_TIMEOUT` / `YAMS_BODY_TIMEOUT` writes were removed.
 - Daemon compatibility aliases (`YAMS_IN_DAEMON`, data/config aliases, and socket path) remain for

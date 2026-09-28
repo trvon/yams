@@ -177,6 +177,43 @@ std::string neutralText(const std::string& text) {
     return colorize(text, Ansi::WHITE);
 }
 
+/// "Host Load" row: Calm/Busy plus the host signal and any deferred background work.
+std::optional<yams::cli::ui::Row> hostLoadRow(const yams::daemon::StatusResponse& s) {
+    if (s.hostPressureSource.empty() || s.hostPressureSource == "unavailable") {
+        return std::nullopt;
+    }
+    std::ostringstream detail;
+    const auto pct = [&detail](const char* label, double value, bool& first) {
+        if (value < 0.0) {
+            return;
+        }
+        detail << (first ? "" : " · ") << label << " " << static_cast<int>(value) << "%";
+        first = false;
+    };
+    bool first = true;
+    if (s.hostPressureSource == "psi") {
+        pct("cpu", s.hostCpuPressurePct, first);
+        pct("io", s.hostIoPressurePct, first);
+        pct("mem", s.hostMemoryPressurePct, first);
+    } else if (s.hostLoadPerCpu >= 0.0) {
+        detail << "load " << std::fixed << std::setprecision(2) << s.hostLoadPerCpu << "/cpu";
+        first = false;
+    }
+    if (!s.deferredBackgroundWork.empty()) {
+        std::string deferred = s.deferredBackgroundWork;
+        for (std::size_t pos = deferred.find(','); pos != std::string::npos;
+             pos = deferred.find(',', pos + 2)) {
+            deferred.replace(pos, 1, ", ");
+        }
+        std::replace(deferred.begin(), deferred.end(), '_', ' ');
+        detail << (first ? "" : " · ") << "deferring " << deferred;
+    }
+    return yams::cli::ui::Row{"Host Load",
+                              paintStatus(s.hostPressureElevated ? Severity::Warn : Severity::Good,
+                                          s.hostPressureElevated ? "Busy" : "Calm"),
+                              detail.str()};
+}
+
 // Human label for the wire code published under kRepairCurrentOperationCode.
 std::string repairOperationLabel(uint64_t code) {
     std::string label(yams::daemon::metrics::repairOperationNameForCode(code));
@@ -405,6 +442,9 @@ void renderDaemonStatusBrief(const yams::daemon::StatusResponse& s,
         overview.push_back(
             {"Memory",
              paintStatus(memSev, std::to_string(static_cast<int>(s.memoryUsageMb)) + " MB"), ""});
+    }
+    if (auto hostRow = hostLoadRow(s)) {
+        overview.push_back(std::move(*hostRow));
     }
 
     // Database phase visibility: lets the user tell a slow open / repair from a hang.
@@ -838,6 +878,9 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
     Severity workerSeverity =
         util >= 95 ? Severity::Bad : (util >= 85 ? Severity::Warn : Severity::Good);
     resourceRows.push_back({"Workers", paintStatus(workerSeverity, workerVal.str()), ""});
+    if (auto hostRow = hostLoadRow(status)) {
+        resourceRows.push_back(std::move(*hostRow));
+    }
     render_rows(os, resourceRows);
 
     // Resource Governor section (memory pressure management)

@@ -292,6 +292,48 @@ TEST_CASE("daemon status detailed renders every section from a synthetic respons
     CHECK(out.find("Data Directory Warnings") == std::string::npos);
 }
 
+TEST_CASE("daemon status shows host pressure and deferred background work",
+          "[cli][daemon][status][host_pressure][catch2]") {
+    PlainColors plain;
+
+    SECTION("busy host names what is being deferred") {
+        StatusResponse s = readyDaemon();
+        s.hostPressureSource = "psi";
+        s.hostPressureElevated = true;
+        s.hostCpuPressurePct = 72.5;
+        s.hostIoPressurePct = 3.0;
+        s.hostMemoryPressurePct = 0.0;
+        s.hostLoadPerCpu = 1.9;
+        s.deferredBackgroundWork = "topology,repair";
+
+        for (const auto& out : {renderBrief(s, {}), renderDetailed(s, {})}) {
+            INFO(out);
+            CHECK(out.find("Host Load") != std::string::npos);
+            CHECK(out.find("Busy") != std::string::npos);
+            CHECK(out.find("cpu 72%") != std::string::npos);
+            CHECK(out.find("io 3%") != std::string::npos);
+            CHECK(out.find("deferring topology, repair") != std::string::npos);
+        }
+    }
+
+    SECTION("calm load-average host shows the per-CPU load") {
+        StatusResponse s = readyDaemon();
+        s.hostPressureSource = "loadavg";
+        s.hostLoadPerCpu = 0.42;
+        const std::string out = renderBrief(s, {});
+        INFO(out);
+        CHECK(out.find("Host Load") != std::string::npos);
+        CHECK(out.find("Calm") != std::string::npos);
+        CHECK(out.find("load 0.42/cpu") != std::string::npos);
+        CHECK(out.find("deferring") == std::string::npos);
+    }
+
+    SECTION("no host signal hides the row") {
+        const std::string out = renderBrief(readyDaemon(), {});
+        CHECK(out.find("Host Load") == std::string::npos);
+    }
+}
+
 TEST_CASE("memory sync section renders only when the loop has started",
           "[cli][daemon][status][catch2]") {
     PlainColors plain;
