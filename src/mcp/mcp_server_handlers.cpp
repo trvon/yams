@@ -2764,33 +2764,6 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
         co_return out;
     }
 
-    if (req.action == "impact") {
-        auto clientRes = requireDaemonClient();
-        if (!clientRes)
-            co_return clientRes.error();
-        yams::daemon::GraphImpactRequest dreq;
-        dreq.symbol = req.symbol.empty() ? req.name : req.symbol;
-        dreq.depth = static_cast<uint64_t>(req.depth);
-        auto res = co_await clientRes.value()->call<yams::daemon::GraphImpactRequest>(dreq);
-        if (!res)
-            co_return res.error();
-        const auto& resp = res.value();
-        MCPGraphResponse out;
-        out.action = "impact";
-        json nav;
-        nav["symbol"] = resp.symbol;
-        nav["truncated"] = resp.truncated;
-        nav["affected_symbols"] = json::array();
-        for (const auto& s : resp.affectedSymbols)
-            nav["affected_symbols"].push_back(symbolToJson(s));
-        nav["relationships"] = json::array();
-        for (const auto& r : resp.relationships)
-            nav["relationships"].push_back(relationToJson(r));
-        nav["warnings"] = resp.warnings;
-        out.navResult = std::move(nav);
-        co_return out;
-    }
-
     if (req.action == "trace") {
         auto clientRes = requireDaemonClient();
         if (!clientRes)
@@ -2820,32 +2793,8 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
         co_return out;
     }
 
-    if (req.action == "affected_tests") {
-        auto clientRes = requireDaemonClient();
-        if (!clientRes)
-            co_return clientRes.error();
-        yams::daemon::GraphAffectedTestsRequest dreq;
-        dreq.changedFiles = req.changedFiles;
-        if (req.depth > 1) {
-            dreq.depth = static_cast<uint64_t>(req.depth);
-        }
-        dreq.testPathPattern = req.testPattern;
-        auto res = co_await clientRes.value()->call<yams::daemon::GraphAffectedTestsRequest>(dreq);
-        if (!res)
-            co_return res.error();
-        const auto& resp = res.value();
-        MCPGraphResponse out;
-        out.action = "affected_tests";
-        json nav;
-        nav["changed_files"] = resp.changedFiles;
-        nav["affected_tests"] = resp.affectedTests;
-        nav["truncated"] = resp.truncated;
-        nav["relationships"] = json::array();
-        for (const auto& r : resp.relationships)
-            nav["relationships"].push_back(relationToJson(r));
-        nav["warnings"] = resp.warnings;
-        out.navResult = std::move(nav);
-        co_return out;
+    if (!req.action.empty() && req.action != "query") {
+        co_return Error{ErrorCode::InvalidArgument, "Unknown graph action: " + req.action};
     }
 
     auto clientRes = requireDaemonClient();

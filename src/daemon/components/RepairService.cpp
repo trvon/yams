@@ -510,7 +510,8 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         // and only while the daemon is not under resource pressure.
         if (!snapshotBackfillDone && std::chrono::steady_clock::now() >= nextSnapshotBackfill &&
             maintenanceAllowed() &&
-            ResourceGovernor::instance().getPressureLevel() < ResourcePressureLevel::Warning) {
+            ResourceGovernor::instance().getPressureLevel() < ResourcePressureLevel::Warning &&
+            ResourceGovernor::instance().admitDeferrable(DeferrableWork::RepairScan)) {
             snapshotBackfillDone = backfillLegacySnapshotKeysBatch();
             nextSnapshotBackfill = std::chrono::steady_clock::now() + 200ms;
         }
@@ -553,7 +554,8 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         if (queueEmpty && !initialScanEnqueued) {
             if (deferTicks < minDeferTicks) {
                 ++deferTicks;
-            } else if (maintenanceAllowed()) {
+            } else if (maintenanceAllowed() &&
+                       ResourceGovernor::instance().admitDeferrable(DeferrableWork::RepairScan)) {
                 auto scanExec = RepairThreadPool::instance().get_executor();
                 boost::asio::co_spawn(
                     scanExec,
@@ -935,7 +937,8 @@ RepairService::RecoveryArtifactMaintenanceStats RepairService::runRecoveryArtifa
 bool RepairService::vectorVacuumAdmitted(const VectorVacuumSignals& signals) noexcept {
     return !signals.shuttingDown && signals.maintenanceAllowed &&
            signals.pressure < ResourcePressureLevel::Warning && signals.embeddingQueued == 0 &&
-           signals.embeddingInFlight == 0 && !signals.indexMutating && !signals.repairInProgress;
+           signals.embeddingInFlight == 0 && !signals.indexMutating && !signals.repairInProgress &&
+           !signals.hostDeferred;
 }
 
 RepairService::VectorVacuumSignals RepairService::collectVectorVacuumSignals() const {
@@ -951,6 +954,12 @@ RepairService::VectorVacuumSignals RepairService::collectVectorVacuumSignals() c
         signals.indexMutating = telemetry.rebuilding || telemetry.activeBulkScopes > 0;
     }
     signals.repairInProgress = repairInProgress_.load(std::memory_order_acquire);
+    // Ask the host-pressure gate last, and only when nothing else blocks the VACUUM, so the
+    // deferral clock measures time the VACUUM actually spent waiting on other processes.
+    if (vectorVacuumAdmitted(signals)) {
+        signals.hostDeferred =
+            !ResourceGovernor::instance().admitDeferrable(DeferrableWork::RepairScan);
+    }
     return signals;
 }
 

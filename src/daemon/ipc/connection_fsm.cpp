@@ -76,6 +76,7 @@ struct StateBase {
     virtual void exit() {}
     virtual Next on_accept(uint64_t) { return {}; }
     virtual Next on_connect(uint64_t) { return {}; }
+    virtual Next on_readable() { return {}; }
     virtual Next on_header_parsed(uint64_t /*payload_size*/) { return {}; }
     virtual Next on_body_parsed() { return {}; }
     virtual Next on_stream_next(bool /*done*/) { return {}; }
@@ -109,11 +110,8 @@ struct AcceptingState final : StateBase {
 };
 
 struct ConnectedState final : StateBase {
-    Next on_header_parsed(uint64_t payload_size) override {
-        if (payload_size > 0)
-            return {true, ImplState::ReadingPayload};
-        return {true, ImplState::WritingHeader};
-    }
+    // A readable socket starts a new request; header parsing happens in ReadingHeader.
+    Next on_readable() override { return {true, ImplState::ReadingHeader}; }
     Next on_close_request() override { return {true, ImplState::Closing}; }
     const char* name() const noexcept override { return "ConnectedState"; }
 };
@@ -419,19 +417,11 @@ void ConnectionFsm::on_readable(std::size_t) {
                       static_cast<int64_t>(impl->metrics.header_reads_started));
         }
     }
-    // Drive reads based on current state
-    switch (state_) {
-        case State::Connected:
-            transition(State::ReadingHeader, "on_readable:connected->reading_header");
-            break;
-        case State::ReadingHeader:
-            // Header bytes available, remain until parsed
-            break;
-        case State::ReadingPayload:
-            // Payload bytes available, remain until parsed
-            break;
-        default:
-            break;
+    // Connected -> ReadingHeader; every other state stays put until its bytes are parsed.
+    if (auto* impl = impl_.get(); impl && impl->current) {
+        auto next = impl->current->on_readable();
+        if (next.has)
+            transition(to_public(next.state), "on_readable:state_impl");
     }
 }
 

@@ -410,6 +410,13 @@ constexpr std::string_view kMaintenancePhaseElapsedMs = "maintenance_phase_elaps
 constexpr std::string_view kDatabaseRecoveredAt = "database_recovered_at";
 constexpr std::string_view kDatabaseRecoveredFrom = "database_recovered_from";
 constexpr std::string_view kStorageWarning = "storage_warning";
+constexpr std::string_view kHostPressureSource = "host_pressure_source";
+constexpr std::string_view kHostPressureElevated = "host_pressure_elevated";
+constexpr std::string_view kHostCpuPressurePct = "host_cpu_pressure_pct";
+constexpr std::string_view kHostIoPressurePct = "host_io_pressure_pct";
+constexpr std::string_view kHostMemoryPressurePct = "host_memory_pressure_pct";
+constexpr std::string_view kHostLoadPerCpu = "host_load_per_cpu";
+constexpr std::string_view kDeferredBackgroundWork = "deferred_background_work";
 
 } // namespace yams::daemon::status_keys
 

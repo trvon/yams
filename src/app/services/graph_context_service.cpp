@@ -808,41 +808,6 @@ public:
         return response;
     }
 
-    Result<GraphImpactResponse> impact(const GraphImpactRequest& req) override {
-        YAMS_ZONE_SCOPED_N("graph_context::impact");
-        GraphImpactResponse response;
-        response.symbol = req.symbol;
-        if (!kgStore_) {
-            response.warnings.push_back("Knowledge graph store not available");
-            return response;
-        }
-        if (req.symbol.empty()) {
-            return Error{ErrorCode::InvalidArgument, "graph impact requires a symbol"};
-        }
-
-        // The calls/references/inherits/implements edges this walked were code-symbol edges.
-        response.warnings.emplace_back(kImpactNeedsSymbolGraphWarning);
-        return response;
-    }
-
-    Result<GraphAffectedTestsResponse>
-    affectedTests(const GraphAffectedTestsRequest& req) override {
-        YAMS_ZONE_SCOPED_N("graph_context::affectedTests");
-        GraphAffectedTestsResponse response;
-        response.changedFiles = req.changedFiles;
-        if (!kgStore_) {
-            response.warnings.push_back("Knowledge graph store not available");
-            return response;
-        }
-        if (req.changedFiles.empty()) {
-            return Error{ErrorCode::InvalidArgument, "affected tests requires changed files"};
-        }
-
-        // Affected tests were found by walking reverse code-symbol edges from indexed symbols.
-        response.warnings.emplace_back(kAffectedTestsNeedSymbolGraphWarning);
-        return response;
-    }
-
 private:
     void addRelationships(const std::vector<GraphContextSymbol>& symbols,
                           GraphExploreResponse& response, const GraphContextBudget& budget) {

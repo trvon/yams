@@ -3,6 +3,7 @@
 // Covers: DaemonMetrics, StatusResponse serialization, plugin degradation, WAL metrics
 
 // pi-lens-ignore: fatal error
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
@@ -25,6 +26,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <yams/app/services/graph_context_service.hpp>
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/crypto/hasher.h>
@@ -4985,6 +4987,29 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK(err.message == "Metadata repository unavailable");
     }
 
+    SECTION("legacy impact and affected-tests requests explain the removed symbol graph") {
+        // No metadata repository: the answer does not depend on daemon state.
+        GraphImpactRequest impactReq;
+        impactReq.symbol = "callee";
+        auto impactResp = dispatchRequest(*fixture.dispatcher, Request{impactReq});
+        REQUIRE(std::holds_alternative<GraphImpactResponse>(impactResp));
+        const auto& impact = std::get<GraphImpactResponse>(impactResp);
+        CHECK(impact.symbol == "callee");
+        CHECK(impact.affectedSymbols.empty());
+        REQUIRE(impact.warnings.size() == 1);
+        CHECK(impact.warnings.front() == app::services::kImpactNeedsSymbolGraphWarning);
+
+        GraphAffectedTestsRequest testsReq;
+        testsReq.changedFiles = {"src/callee.cpp"};
+        auto testsResp = dispatchRequest(*fixture.dispatcher, Request{testsReq});
+        REQUIRE(std::holds_alternative<GraphAffectedTestsResponse>(testsResp));
+        const auto& tests = std::get<GraphAffectedTestsResponse>(testsResp);
+        CHECK(tests.changedFiles == testsReq.changedFiles);
+        CHECK(tests.affectedTests.empty());
+        REQUIRE(tests.warnings.size() == 1);
+        CHECK(tests.warnings.front() == app::services::kAffectedTestsNeedSymbolGraphWarning);
+    }
+
     SECTION("graph explore reports unavailable metadata repository") {
         auto resp =
             dispatchRequest(*fixture.dispatcher, Request{GraphExploreRequest{.query = "entry"}});
@@ -6958,6 +6983,54 @@ TEST_CASE("StatusResponse: maintenance phase fields round-trip",
     CHECK(decoded.databasePhaseElapsedMs == 11);
     CHECK(decoded.maintenancePhase == "salvaging");
     CHECK(decoded.maintenancePhaseElapsedMs == 222);
+}
+
+TEST_CASE("StatusResponse: host pressure fields round-trip",
+          "[daemon][status][protocol][host_pressure]") {
+    StatusResponse s{};
+    s.hostPressureSource = "psi";
+    s.hostPressureElevated = true;
+    s.hostCpuPressurePct = 72.5;
+    s.hostIoPressurePct = 3.25;
+    s.hostMemoryPressurePct = 0.0;
+    s.hostLoadPerCpu = 1.75;
+    s.deferredBackgroundWork = "topology,repair";
+
+    Message m{};
+    m.payload = Response{std::in_place_type<StatusResponse>, s};
+
+    auto enc = ProtoSerializer::encode_payload(m);
+    REQUIRE(enc.has_value());
+    auto dec = ProtoSerializer::decode_payload(enc.value());
+    REQUIRE(dec.has_value());
+
+    const auto& resp = std::get<Response>(dec.value().payload);
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& decoded = std::get<StatusResponse>(resp);
+    CHECK(decoded.hostPressureSource == "psi");
+    CHECK(decoded.hostPressureElevated);
+    CHECK(decoded.hostCpuPressurePct == Catch::Approx(72.5));
+    CHECK(decoded.hostIoPressurePct == Catch::Approx(3.25));
+    CHECK(decoded.hostMemoryPressurePct == Catch::Approx(0.0));
+    CHECK(decoded.hostLoadPerCpu == Catch::Approx(1.75));
+    CHECK(decoded.deferredBackgroundWork == "topology,repair");
+    // The piggyback keys must not leak into the numeric request counters.
+    CHECK_FALSE(decoded.requestCounts.contains("host_pressure_source"));
+
+    SECTION("an unmeasured host stays unmeasured") {
+        StatusResponse none{};
+        Message m2{};
+        m2.payload = Response{std::in_place_type<StatusResponse>, none};
+        auto enc2 = ProtoSerializer::encode_payload(m2);
+        REQUIRE(enc2.has_value());
+        auto dec2 = ProtoSerializer::decode_payload(enc2.value());
+        REQUIRE(dec2.has_value());
+        const auto& out = std::get<StatusResponse>(std::get<Response>(dec2.value().payload));
+        CHECK(out.hostPressureSource.empty());
+        CHECK_FALSE(out.hostPressureElevated);
+        CHECK(out.hostCpuPressurePct < 0.0);
+        CHECK(out.deferredBackgroundWork.empty());
+    }
 }
 
 TEST_CASE("StatusResponse: search maintenance provenance round-trips",

@@ -329,6 +329,16 @@ else
       args: ['Daemon shutdown with in-flight operations', '--allow-running-no-tests'],
     )
 
+    test('daemon_shutdown_draining_connections',
+      daemon_shutdown_exe,
+      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon stop outlives connections still draining on the IO threads',
+        '--allow-running-no-tests'],
+    )
+
     # Removed flaky shutdown tests (idempotency, after_ops, under_load, graceful)
     # Core shutdown behavior is covered by timing and inflight_ops tests above
     

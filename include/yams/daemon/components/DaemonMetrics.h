@@ -277,6 +277,15 @@ struct MetricsSnapshot {
     uint8_t governorPressureLevel{0}; // 0=Normal, 1=Warning, 2=Critical, 3=Emergency
     uint8_t governorHeadroomPct{100}; // Scaling headroom (0-100%)
 
+    // Host pressure (other processes on the machine). Negative values mean "not measured".
+    std::string hostPressureSource;
+    bool hostPressureElevated{false};
+    double hostCpuPressurePct{-1.0};
+    double hostIoPressurePct{-1.0};
+    double hostMemoryPressurePct{-1.0};
+    double hostLoadPerCpu{-1.0};
+    std::string deferredBackgroundWork; // comma-separated
+
     // ONNX concurrency metrics
     uint32_t onnxTotalSlots{0};
     uint32_t onnxUsedSlots{0};

@@ -1287,6 +1287,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_host_pressure_exe = executable('catch2_host_pressure',
+    files('unit/daemon/host_pressure_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_timing_audit_exe = executable('catch2_timing_audit',
     files('unit/daemon/timing_audit_catch2_test.cpp'),
     include_directories: incs,
@@ -1316,6 +1325,15 @@ if catch2_dep.found()
 
   catch2_health_check_isolation_exe = executable('catch2_health_check_isolation',
     files('unit/daemon/health_check_isolation_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_socket_server_teardown_exe = executable('catch2_socket_server_teardown',
+    files('unit/daemon/socket_server_teardown_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -3925,6 +3943,12 @@ if catch2_dep.found()
     timeout: 60
   )
 
+  test('host_pressure', catch2_host_pressure_exe,
+    suite: ['catch2', 'unit', 'daemon', 'governance'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('timing_audit', catch2_timing_audit_exe,
     suite: ['catch2', 'unit', 'daemon', 'timing-audit'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -3948,6 +3972,14 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
+
+  if host_machine.system() != 'windows'
+    test('socket_server_teardown', catch2_socket_server_teardown_exe,
+      suite: ['catch2', 'unit', 'daemon', 'socket', 'shutdown'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 60
+    )
+  endif
 
   test('vector_index_coordinator_bulk_scope', catch2_vector_index_coordinator_bulk_scope_exe,
     suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],

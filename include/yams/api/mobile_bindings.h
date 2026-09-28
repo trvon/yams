@@ -364,36 +364,11 @@ yams_mobile_document_get_result_content(const yams_mobile_document_get_result_t*
  */
 YAMS_MOBILE_API const char* yams_mobile_last_error_message(void);
 
-#ifdef __cplusplus
-} // extern "C"
-#endif
-
-#ifdef __cplusplus
-static inline yams_mobile_context_config yams_mobile_context_config_default() {
-    yams_mobile_context_config config{};
-    config.struct_size = sizeof(yams_mobile_context_config);
-    config.version = YAMS_MOBILE_API_VERSION;
-    config.reserved = 0U;
-    config.backend_mode = YAMS_MOBILE_BACKEND_EMBEDDED;
-    config.daemon_socket_path = nullptr;
-    return config;
-}
-
-static inline yams_mobile_request_header yams_mobile_request_header_default() {
-    yams_mobile_request_header header{};
-    header.struct_size = sizeof(yams_mobile_request_header);
-    header.version = YAMS_MOBILE_API_VERSION;
-    header.flags = 0U;
-    header.correlation_id = nullptr;
-    header.timeout_ms = 0U;
-    return header;
-}
-
 // --- Repair / Doctor / Diff / Cat / Restore / Model (mobile extensions) ---
 
 typedef struct yams_mobile_repair_request {
     yams_mobile_request_header header;
-    const char* embedding_model;    // optional: model name for embedding repair
+    const char* embedding_model; // optional: model name for embedding repair
     uint32_t repair_embeddings : 1;
     uint32_t repair_fts5 : 1;
     uint32_t repair_graph : 1;
@@ -401,7 +376,7 @@ typedef struct yams_mobile_repair_request {
     uint32_t repair_all : 1;
     uint32_t dry_run : 1;
     uint32_t reserved : 26;
-    int32_t max_retries;            // default 3
+    int32_t max_retries; // default 3
 } yams_mobile_repair_request;
 
 typedef struct yams_mobile_repair_result {
@@ -416,13 +391,13 @@ typedef struct yams_mobile_repair_result {
 
 typedef struct yams_mobile_diff_request {
     yams_mobile_request_header header;
-    const char* hash_a;    // first document hash
-    const char* hash_b;    // second document hash (or nullptr for latest)
+    const char* hash_a; // first document hash
+    const char* hash_b; // second document hash (or nullptr for latest)
 } yams_mobile_diff_request;
 
 typedef struct yams_mobile_cat_request {
     yams_mobile_request_header header;
-    const char* hash;       // document hash to retrieve raw content
+    const char* hash; // document hash to retrieve raw content
 } yams_mobile_cat_request;
 
 typedef struct yams_mobile_restore_request {
@@ -453,46 +428,63 @@ typedef struct yams_mobile_embedding_info {
     uint32_t reserved;
 } yams_mobile_embedding_info;
 
-YAMS_MOBILE_API yams_mobile_status yams_mobile_repair(
-    yams_mobile_context_t* ctx,
-    const yams_mobile_repair_request* request,
-    yams_mobile_repair_result** out_result);
+YAMS_MOBILE_API yams_mobile_status yams_mobile_repair(yams_mobile_context_t* ctx,
+                                                      const yams_mobile_repair_request* request,
+                                                      yams_mobile_repair_result** out_result);
 YAMS_MOBILE_API void yams_mobile_repair_result_destroy(yams_mobile_repair_result* result);
 
-YAMS_MOBILE_API yams_mobile_status yams_mobile_diff(
-    yams_mobile_context_t* ctx,
-    const yams_mobile_diff_request* request,
-    yams_mobile_string_view* out_diff);
+YAMS_MOBILE_API yams_mobile_status yams_mobile_diff(yams_mobile_context_t* ctx,
+                                                    const yams_mobile_diff_request* request,
+                                                    yams_mobile_string_view* out_diff);
 YAMS_MOBILE_API void yams_mobile_string_view_destroy(yams_mobile_string_view* sv);
 
-YAMS_MOBILE_API yams_mobile_status yams_mobile_cat(
-    yams_mobile_context_t* ctx,
-    const yams_mobile_cat_request* request,
-    yams_mobile_string_view* out_content);
+YAMS_MOBILE_API yams_mobile_status yams_mobile_cat(yams_mobile_context_t* ctx,
+                                                   const yams_mobile_cat_request* request,
+                                                   yams_mobile_string_view* out_content);
 YAMS_MOBILE_API void yams_mobile_cat_result_destroy(yams_mobile_string_view* content);
 
-YAMS_MOBILE_API yams_mobile_status yams_mobile_restore(
-    yams_mobile_context_t* ctx,
-    const yams_mobile_restore_request* request,
-    yams_mobile_string_view* out_summary);
+YAMS_MOBILE_API yams_mobile_status yams_mobile_restore(yams_mobile_context_t* ctx,
+                                                       const yams_mobile_restore_request* request,
+                                                       yams_mobile_string_view* out_summary);
 YAMS_MOBILE_API void yams_mobile_restore_result_destroy(yams_mobile_string_view* summary);
 
-YAMS_MOBILE_API yams_mobile_status yams_mobile_list_models(
-    yams_mobile_context_t* ctx,
-    yams_mobile_model_list_result** out_result);
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_list_models(yams_mobile_context_t* ctx, yams_mobile_model_list_result** out_result);
 YAMS_MOBILE_API void yams_mobile_model_list_result_destroy(yams_mobile_model_list_result* result);
 
-YAMS_MOBILE_API yams_mobile_status yams_mobile_set_model(
-    yams_mobile_context_t* ctx,
-    const char* model_name);
-YAMS_MOBILE_API yams_mobile_status yams_mobile_get_embedding_info(
-    yams_mobile_context_t* ctx,
-    yams_mobile_embedding_info* out_info);
+YAMS_MOBILE_API yams_mobile_status yams_mobile_set_model(yams_mobile_context_t* ctx,
+                                                         const char* model_name);
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_get_embedding_info(yams_mobile_context_t* ctx, yams_mobile_embedding_info* out_info);
 
-YAMS_MOBILE_API yams_mobile_status yams_mobile_doctor(
-    yams_mobile_context_t* ctx,
-    yams_mobile_string_view* out_report);
+YAMS_MOBILE_API yams_mobile_status yams_mobile_doctor(yams_mobile_context_t* ctx,
+                                                      yams_mobile_string_view* out_report);
 YAMS_MOBILE_API void yams_mobile_doctor_result_destroy(yams_mobile_string_view* report);
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
+#ifdef __cplusplus
+static inline yams_mobile_context_config yams_mobile_context_config_default() {
+    yams_mobile_context_config config{};
+    config.struct_size = sizeof(yams_mobile_context_config);
+    config.version = YAMS_MOBILE_API_VERSION;
+    config.reserved = 0U;
+    config.backend_mode = YAMS_MOBILE_BACKEND_EMBEDDED;
+    config.daemon_socket_path = nullptr;
+    return config;
+}
+
+static inline yams_mobile_request_header yams_mobile_request_header_default() {
+    yams_mobile_request_header header{};
+    header.struct_size = sizeof(yams_mobile_request_header);
+    header.version = YAMS_MOBILE_API_VERSION;
+    header.flags = 0U;
+    header.correlation_id = nullptr;
+    header.timeout_ms = 0U;
+    return header;
+}
 
 #else
 static inline yams_mobile_context_config yams_mobile_context_config_default(void) {

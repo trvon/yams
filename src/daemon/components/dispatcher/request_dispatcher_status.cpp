@@ -140,6 +140,13 @@ void populateStatusCoreFromSnapshot(StatusResponse& res, const MetricsSnapshot& 
     res.governorBudgetBytes = snap.governorBudgetBytes;
     res.governorPressureLevel = snap.governorPressureLevel;
     res.governorHeadroomPct = snap.governorHeadroomPct;
+    res.hostPressureSource = snap.hostPressureSource;
+    res.hostPressureElevated = snap.hostPressureElevated;
+    res.hostCpuPressurePct = snap.hostCpuPressurePct;
+    res.hostIoPressurePct = snap.hostIoPressurePct;
+    res.hostMemoryPressurePct = snap.hostMemoryPressurePct;
+    res.hostLoadPerCpu = snap.hostLoadPerCpu;
+    res.deferredBackgroundWork = snap.deferredBackgroundWork;
     res.onnxTotalSlots = snap.onnxTotalSlots;
     res.onnxUsedSlots = snap.onnxUsedSlots;
     res.onnxGlinerUsed = snap.onnxGlinerUsed;

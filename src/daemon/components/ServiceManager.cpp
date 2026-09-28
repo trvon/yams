@@ -183,6 +183,10 @@ namespace yams::daemon {
 namespace {
 constexpr auto kTopologyOverlayRebuildMinAge = std::chrono::minutes(5);
 constexpr std::size_t kTopologyOverlayDirtyThreshold = 64;
+// How often a topology rebuild request re-checks while ingest work is still draining, and
+// while it is deferred for host pressure.
+constexpr auto kTopologyBusyRetryInterval = std::chrono::milliseconds(500);
+constexpr auto kTopologyDeferredRetryInterval = std::chrono::seconds(5);
 
 } // namespace
 
@@ -734,6 +738,19 @@ void ServiceManager::refreshRuntimeTuningStatus() {
             "tuning.resource.memory_hysteresis_ms");
         put("resource.cpu_hysteresis_ms", TuneAdvisor::cpuLevelHysteresisMs(),
             "tuning.resource.cpu_hysteresis_ms");
+        const auto hostThresholds = TuneAdvisor::hostPressureThresholds();
+        put("resource.host_pressure", TuneAdvisor::hostPressureEnabled(),
+            "tuning.resource.host_pressure");
+        put("resource.host_cpu_pressure_pct", hostThresholds.cpuSomePct,
+            "tuning.resource.host_cpu_pressure_pct");
+        put("resource.host_io_pressure_pct", hostThresholds.ioSomePct,
+            "tuning.resource.host_io_pressure_pct");
+        put("resource.host_memory_pressure_pct", hostThresholds.memorySomePct,
+            "tuning.resource.host_memory_pressure_pct");
+        put("resource.host_load_per_cpu", hostThresholds.loadPerCpu,
+            "tuning.resource.host_load_per_cpu");
+        put("resource.background_max_deferral_s", TuneAdvisor::backgroundMaxDeferralMs() / 1000u,
+            "tuning.resource.background_max_deferral_s");
         return true;
     });
 
@@ -4247,12 +4264,25 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
             const auto kgQueued = writeCoordinator ? writeCoordinator->queuedBatches() : 0U;
             const auto kgInFlight = writeCoordinator ? writeCoordinator->inFlight() : 0U;
 
+            // While ingest, post-ingest, embedding or KG work is still running, check again
+            // shortly. Re-posting immediately here kept one worker spinning at 100% for the
+            // whole ingest, and longer still on a loaded host where that work drains slowly.
             if (ingestMetrics.queued > 0 || ingestMetrics.active > 0 || postQueued > 0 ||
                 postInFlight > 0 || embedQueued > 0 || embedInFlight > 0 || kgQueued > 0 ||
                 kgInFlight > 0) {
                 self->topologyRebuildPending_.store(true, std::memory_order_release);
                 self->topologyRebuildInProgress_.store(false, std::memory_order_release);
-                self->requestTopologyRebuild(reason);
+                self->scheduleTopologyRebuildRetry(reason, kTopologyBusyRetryInterval);
+                return;
+            }
+
+            // Topology rebuilds are deferrable: while other processes keep the host busy the
+            // dirty set keeps accumulating and one rebuild covers it once the host calms down
+            // (or once the starvation guard lets a pass through).
+            if (!ResourceGovernor::instance().admitDeferrable(DeferrableWork::TopologyRebuild)) {
+                self->topologyRebuildPending_.store(true, std::memory_order_release);
+                self->topologyRebuildInProgress_.store(false, std::memory_order_release);
+                self->scheduleTopologyRebuildRetry(reason, kTopologyDeferredRetryInterval);
                 return;
             }
 
@@ -4306,6 +4336,27 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
     });
 }
 
+void ServiceManager::scheduleTopologyRebuildRetry(const std::string& reason,
+                                                  std::chrono::milliseconds delay) {
+    bool notArmed = false;
+    if (!topologyRebuildRetryArmed_.compare_exchange_strong(notArmed, true,
+                                                            std::memory_order_acq_rel)) {
+        return; // a retry is already pending and will pick up the dirty set
+    }
+    auto weakSelf = weak_from_this();
+    auto retry = std::make_shared<boost::asio::steady_timer>(getWorkerExecutor(), delay);
+    retry->async_wait([weakSelf, reason, retry](const boost::system::error_code& ec) {
+        auto self = weakSelf.lock();
+        if (!self) {
+            return;
+        }
+        self->topologyRebuildRetryArmed_.store(false, std::memory_order_release);
+        if (!ec) {
+            self->requestTopologyRebuild(reason);
+        }
+    });
+}
+
 void ServiceManager::requestSemanticTopologyMaintenance(const std::string& reason) {
     if (shutdownInvoked_.load(std::memory_order_acquire))
         return;
@@ -4341,6 +4392,12 @@ void ServiceManager::requestSemanticTopologyMaintenance(const std::string& reaso
 
             auto dirtyForMaintenance = self->topologyManager_.getOverlayHashes(4096);
             if (dirtyForMaintenance.empty()) {
+                clearScheduled();
+                return;
+            }
+            // Deferrable like the rebuild itself; the overlay stays dirty and the next drain
+            // schedules maintenance again.
+            if (!ResourceGovernor::instance().admitDeferrable(DeferrableWork::TopologyRebuild)) {
                 clearScheduled();
                 return;
             }

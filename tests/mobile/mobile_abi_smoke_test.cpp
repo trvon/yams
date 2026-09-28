@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/api/mobile_bindings.h>
+#include <yams/daemon/components/SocketServer.h>
 
 #include "tests/common/fixture_manager.h"
 #include "tests/common/search_corpus_presets.h"
@@ -311,6 +312,95 @@ TEST_CASE("Mobile corpus document round trip works in embedded mode", "[mobile][
     yams_mobile_document_get_result_t* getAfterDeleteResult = nullptr;
     CHECK(yams_mobile_get_document(ctx, &getAfterDelete, &getAfterDeleteResult) ==
           YAMS_MOBILE_STATUS_NOT_FOUND);
+
+    yams_mobile_context_destroy(ctx);
+}
+
+TEST_CASE("Embedded mobile cat and diff return stored document content", "[mobile][abi]") {
+    const auto workingDir = make_unique_temp_dir();
+    TempDirGuard guard(workingDir);
+
+    yams_mobile_context_config config = yams_mobile_context_config_default();
+    config.working_directory = workingDir.c_str();
+    const auto cacheDir = workingDir + "/cache";
+    config.cache_directory = cacheDir.c_str();
+
+    yams_mobile_context_t* ctx = nullptr;
+    REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
+    REQUIRE(ctx != nullptr);
+
+    const auto docsDir = std::filesystem::path(workingDir) / "docs";
+    std::filesystem::create_directories(docsDir);
+    const std::string contentA = "alpha\nbravo\ncharlie\n";
+    const std::string contentB = "alpha\nbravo-changed\ncharlie\ndelta\n";
+    const auto pathA = (docsDir / "diff_a.txt").string();
+    const auto pathB = (docsDir / "diff_b.txt").string();
+    std::ofstream(pathA, std::ios::binary) << contentA;
+    std::ofstream(pathB, std::ios::binary) << contentB;
+
+    auto storeFile = [&](const std::string& path) {
+        yams_mobile_document_store_request store{};
+        store.header = yams_mobile_request_header_default();
+        store.path = path.c_str();
+        store.sync_now = 1;
+        yams_mobile_string_view hash{};
+        REQUIRE(store_document_with_retry(ctx, store, &hash, std::chrono::seconds(5)));
+        INFO(yams_mobile_last_error_message());
+        REQUIRE(hash.length > 0U);
+        return std::string(hash.data, hash.length);
+    };
+    const auto hashA = storeFile(pathA);
+    const auto hashB = storeFile(pathB);
+
+    SECTION("cat returns the exact stored bytes") {
+        yams_mobile_cat_request catReq{};
+        catReq.header = yams_mobile_request_header_default();
+        catReq.hash = hashA.c_str();
+        yams_mobile_string_view content{};
+        REQUIRE(yams_mobile_cat(ctx, &catReq, &content) == YAMS_MOBILE_STATUS_OK);
+        REQUIRE(content.data != nullptr);
+        CHECK(std::string(content.data, content.length) == contentA);
+        yams_mobile_cat_result_destroy(&content);
+    }
+
+    SECTION("diff reports changed and appended lines") {
+        yams_mobile_diff_request diffReq{};
+        diffReq.header = yams_mobile_request_header_default();
+        diffReq.hash_a = hashA.c_str();
+        diffReq.hash_b = hashB.c_str();
+        yams_mobile_string_view diff{};
+        REQUIRE(yams_mobile_diff(ctx, &diffReq, &diff) == YAMS_MOBILE_STATUS_OK);
+        REQUIRE(diff.data != nullptr);
+        CHECK(std::string(diff.data, diff.length) ==
+              "2c2\n< bravo\n> bravo-changed\n4a4\n> delta\n");
+        yams_mobile_string_view_destroy(&diff);
+    }
+
+    SECTION("identical documents produce an empty diff") {
+        yams_mobile_diff_request diffReq{};
+        diffReq.header = yams_mobile_request_header_default();
+        diffReq.hash_a = hashA.c_str();
+        diffReq.hash_b = hashA.c_str();
+        yams_mobile_string_view diff{};
+        REQUIRE(yams_mobile_diff(ctx, &diffReq, &diff) == YAMS_MOBILE_STATUS_OK);
+        CHECK(diff.length == 0U);
+    }
+
+    SECTION("missing hashes map to not_found") {
+        const std::string missing(64, 'f');
+        yams_mobile_cat_request catReq{};
+        catReq.header = yams_mobile_request_header_default();
+        catReq.hash = missing.c_str();
+        yams_mobile_string_view content{};
+        CHECK(yams_mobile_cat(ctx, &catReq, &content) == YAMS_MOBILE_STATUS_NOT_FOUND);
+
+        yams_mobile_diff_request diffReq{};
+        diffReq.header = yams_mobile_request_header_default();
+        diffReq.hash_a = hashA.c_str();
+        diffReq.hash_b = missing.c_str();
+        yams_mobile_string_view diff{};
+        CHECK(yams_mobile_diff(ctx, &diffReq, &diff) == YAMS_MOBILE_STATUS_NOT_FOUND);
+    }
 
     yams_mobile_context_destroy(ctx);
 }
@@ -914,6 +1004,52 @@ TEST_CASE("Mobile delete_by_name returns an empty result across backends when no
     SECTION("daemon") {
         run_case(YAMS_MOBILE_BACKEND_DAEMON);
     }
+}
+
+TEST_CASE("Daemon mobile context destroy releases its daemon connections",
+          "[mobile][abi][daemon]") {
+    yams::test::DaemonHarness harness({.enableAutoRepair = false});
+    REQUIRE(harness.start(std::chrono::seconds(10)));
+    auto* server = harness.daemon()->getSocketServer();
+    REQUIRE(server != nullptr);
+    const auto baseline = server->activeConnections();
+
+    const auto workingDir = make_unique_temp_dir();
+    TempDirGuard guard(workingDir);
+    const auto documentPath = std::filesystem::path(workingDir) / "daemon-mobile-release.txt";
+    std::ofstream(documentPath) << "daemon connection release test\n";
+
+    const auto daemonSocketPath = harness.socketPath().string();
+    for (int round = 0; round < 2; ++round) {
+        yams_mobile_context_config config = yams_mobile_context_config_default();
+        config.working_directory = workingDir.c_str();
+        config.backend_mode = YAMS_MOBILE_BACKEND_DAEMON;
+        config.daemon_socket_path = daemonSocketPath.c_str();
+
+        yams_mobile_context_t* ctx = nullptr;
+        REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
+        INFO(yams_mobile_last_error_message());
+
+        const auto path = documentPath.string();
+        yams_mobile_document_store_request store{};
+        store.header = yams_mobile_request_header_default();
+        store.path = path.c_str();
+        yams_mobile_string_view hash{};
+        REQUIRE(store_document_with_retry(ctx, store, &hash, std::chrono::seconds(5)));
+        REQUIRE(
+            wait_for_document(ctx, std::string(hash.data, hash.length), std::chrono::seconds(5)));
+
+        yams_mobile_context_destroy(ctx);
+    }
+
+    // The server observes a client close asynchronously, so poll briefly. A context
+    // that leaves pooled sockets open keeps this count above baseline indefinitely.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (server->activeConnections() > baseline && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(server->activeConnections() <= baseline);
+
+    harness.stop();
 }
 
 TEST_CASE("Daemon mobile corpus status reports readiness without warmup control",

@@ -175,6 +175,17 @@ jobs:
             needs_rosetta: false
             build_type: Debug
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-ubsan=true -Db_sanitize=undefined -Db_lundef=false -Dtest-timeout-scale=2 -Denable-dcheck=true"
+          # Host-only mobile SDK lane: builds libyams_mobile plus its Catch2 ABI tests and
+          # checks the exported C surface. It proves the Linux host build, not that an
+          # Android .so or iOS XCFramework loads on a device.
+          - suffix: linux-x86_64-mobile
+            runs_on: ubuntu-24.04
+            conan_host_profile: ./conan/profiles/host-linux-clang
+            conan_arch: x86_64
+            needs_rosetta: false
+            build_type: Debug
+            mobile_bindings: true
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-mobile-tests=true -Dtest-timeout-scale=2 -Denable-bench-tests=false -Dbuild-benchmarks=false -Denable-dcheck=true"
           # TSAN intentionally excluded from CI: boost::asio strand destruction triggers
           # a heap-use-after-free that TSAN detects but cannot be suppressed via tsan.suppressions.
           # Run TSAN locally with: meson setup builddir-tsan -Denable-tsan=true -Db_sanitize=thread
@@ -571,7 +582,7 @@ jobs:
           export YAMS_CONAN_HOST_PROFILE="${{ matrix.conan_host_profile }}"
           export YAMS_CONAN_ARCH="${{ matrix.conan_arch }}"
           export YAMS_EXTRA_MESON_FLAGS="${{ matrix.extra_meson_flags }}"
-          export YAMS_ENABLE_MOBILE_BINDINGS=false
+          export YAMS_ENABLE_MOBILE_BINDINGS="${{ matrix.mobile_bindings || 'false' }}"
           # Cap ninja jobs at 4 by default so push-triggered builds do not saturate
           # every runner core; larger/self-hosted runners stay bounded.
           MESON_COMPILE_JOBS=4
@@ -603,6 +614,10 @@ jobs:
               catch2_post_ingest_queue_unit \
               catch2_storage_submodule \
               catch2_work_coordinator
+          elif [ "${{ matrix.suffix }}" = "linux-x86_64-mobile" ]; then
+            $ARCH_PREFIX meson compile -C builddir -j "$MESON_COMPILE_JOBS" \
+              yams_mobile \
+              catch2_mobile_abi
           else
             if [ -n "$MESON_COMPILE_JOBS" ]; then
               $ARCH_PREFIX meson compile -C builddir -j "$MESON_COMPILE_JOBS"
@@ -660,16 +675,18 @@ jobs:
             ~/.ccache
           key: ccache-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'meson.build', 'meson_options.txt') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      # - name: Check mobile ABI surface
-      #   shell: bash
-      #   run: |
-      #     set -euo pipefail
-      #     LIB_PATH=$(find "${{ env.BUILD_DIR }}" -type f \( -name 'libyams_mobile*.so' -o -name 'libyams_mobile*.dylib' -o -name 'yams_mobile.dll' \) | head -n1)
-      #     if [ -z "$LIB_PATH" ]; then
-      #       echo "libyams_mobile shared library not found under ${{ env.BUILD_DIR }}" >&2
-      #       exit 1
-      #     fi
-      #     scripts/ci/check_mobile_abi.sh "$LIB_PATH"
+      - name: Check mobile ABI surface
+        if: matrix.mobile_bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIB_PATH=$(find "${{ env.BUILD_DIR }}/src/mobile" -type f \( -name 'libyams_mobile*.so' -o -name 'libyams_mobile*.dylib' \) | head -n1)
+          if [ -z "$LIB_PATH" ]; then
+            echo "libyams_mobile shared library not found under ${{ env.BUILD_DIR }}/src/mobile" >&2
+            exit 1
+          fi
+          file "$LIB_PATH"
+          scripts/ci/check_mobile_abi.sh "$LIB_PATH"
 
       - name: Run Tests with Meson (Unix)
         id: meson_tests_unix
@@ -716,6 +733,9 @@ jobs:
               post_ingest_queue_unit \
               storage_submodule \
               work_coordinator
+          elif [ "${{ matrix.suffix }}" = "linux-x86_64-mobile" ]; then
+            meson test -C ${{ env.BUILD_DIR }} --no-rebuild --print-errorlogs --timeout-multiplier 2 \
+              --suite mobile
           else
             meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
           fi

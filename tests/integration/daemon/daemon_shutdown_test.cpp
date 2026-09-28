@@ -4,14 +4,26 @@
 #define CATCH_CONFIG_MAIN
 #include <spdlog/spdlog.h>
 #include <atomic>
+#include <cstring>
+#include <future>
+#include <latch>
 #include <thread>
+#include <vector>
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
+#include <boost/asio/post.hpp>
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/SocketServer.h>
+
+#ifndef _WIN32
+#include <sys/socket.h>
+#include <sys/un.h>
+#endif
 
 using namespace yams::daemon;
 using namespace yams::test;
@@ -488,3 +500,88 @@ TEST_CASE("Daemon graceful shutdown behavior", "[daemon][shutdown][graceful]") {
         REQUIRE_FALSE(connectResult.has_value());
     }
 }
+
+#ifndef _WIN32
+namespace {
+int connectRawUnixSocket(const std::filesystem::path& socketPath) {
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const auto pathString = socketPath.string();
+    if (pathString.size() >= sizeof(addr.sun_path)) {
+        ::close(fd);
+        return -1;
+    }
+    std::memcpy(addr.sun_path, pathString.data(), pathString.size());
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+} // namespace
+
+// Regression: YamsDaemon::stop() used to destroy the SocketServer while the IOCoordinator
+// threads were still running. When connection handlers outlived SocketServer::stop()'s drain
+// window, they resumed on an I/O thread and touched the freed server (ASAN heap-use-after-free
+// in the handle_connection cleanup guard).
+TEST_CASE("Daemon stop outlives connections still draining on the IO threads",
+          "[daemon][shutdown][socket]") {
+    DaemonHarness harness;
+    startHarnessWithRetry(harness);
+
+    auto* daemon = harness.daemon();
+    REQUIRE(daemon != nullptr);
+    auto* server = daemon->getSocketServer();
+    REQUIRE(server != nullptr);
+    REQUIRE(daemon->ioCoordinator_ != nullptr);
+
+    constexpr std::size_t kConnections = 24;
+    std::vector<int> clientFds;
+    clientFds.reserve(kConnections);
+    for (std::size_t i = 0; i < kConnections; ++i) {
+        // Mix main and proxy sessions: they take different handler paths (lifetime timer vs
+        // proxy connection-slot guard) and both must survive the teardown.
+        const int fd =
+            connectRawUnixSocket((i % 2 == 0) ? harness.socketPath() : harness.proxySocketPath());
+        REQUIRE(fd >= 0);
+        clientFds.push_back(fd);
+    }
+    const bool accepted =
+        wait_for_condition(5s, 10ms, [&] { return server->activeConnections() >= kConnections; });
+    REQUIRE(accepted);
+
+    // Park every IO thread so the server's drain window expires while every connection handler
+    // is still pending; the handlers only get to run once stop() is already past the drain.
+    // Hold no shared_ptr to the io_context: the daemon must stay its only owner.
+    auto& ioContext = *daemon->ioCoordinator_->getIOContext();
+    const auto ioThreads = static_cast<std::ptrdiff_t>(daemon->ioCoordinator_->getThreadCount());
+    REQUIRE(ioThreads > 0);
+    std::latch parked(ioThreads);
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    for (std::ptrdiff_t i = 0; i < ioThreads; ++i) {
+        boost::asio::post(ioContext, [&parked, released] {
+            parked.count_down();
+            released.wait();
+        });
+    }
+    parked.wait();
+
+    std::thread releaser([&release] {
+        std::this_thread::sleep_for(2500ms);
+        release.set_value();
+    });
+
+    harness.stop();
+    releaser.join();
+
+    CHECK_FALSE(harness.daemon());
+    for (const int fd : clientFds) {
+        ::close(fd);
+    }
+}
+#endif

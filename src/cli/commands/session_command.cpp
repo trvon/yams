@@ -493,6 +493,10 @@ Env:
 
     Result<void> execute() override {
         switch (mode_) {
+            case Mode::None:
+                // Only reachable if execute() runs without a parsed subcommand;
+                // require_subcommand() rejects that on the CLI path.
+                return Result<void>(Error{ErrorCode::InvalidArgument, "No session subcommand"});
             case Mode::Init:
                 return doInit();
             case Mode::Use:
@@ -535,9 +539,8 @@ Env:
                 return doMerge();
             case Mode::Discard:
                 return doDiscard();
-            default:
-                return Result<void>(Error{ErrorCode::InvalidArgument, "No session subcommand"});
         }
+        return Result<void>(Error{ErrorCode::InternalError, "Unknown session mode"});
     }
 
 private:
