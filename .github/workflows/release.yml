@@ -2276,7 +2276,7 @@ jobs:
           STABLE_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
           EXPERIMENTAL_GPG_PRIVATE_KEY: ${{ secrets.EXPERIMENTAL_GPG_PRIVATE_KEY || '' }}
           EXPERIMENTAL_GPG_PASSPHRASE: ${{ secrets.EXPERIMENTAL_GPG_PASSPHRASE || '' }}
-          REPOSITORY_PREFIX: ${{ steps.meta.outputs.channel == 'stable' && '' || 'experimental/' }}
+          REPOSITORY_PREFIX: ${{ steps.meta.outputs.channel != 'stable' && 'experimental/' || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2310,22 +2310,33 @@ jobs:
             echo "$GPG_PRIVATE_KEY" | base64 -d | gpg "${GPG_ARGS[@]}" --import
             gpg "${GPG_ARGS[@]}" --detach-sign --armor -o "$YUM_ROOT/repodata/repomd.xml.asc" "$YUM_ROOT/repodata/repomd.xml"
           fi
+          # Repository metadata is signed when a channel key is configured; the RPMs are not.
+          if [ -z "$REPOSITORY_PREFIX" ]; then
+            public_key_url="https://repo.yamsmemory.ai/gpg.key"
+          else
+            public_key_url="https://repo.yamsmemory.ai/experimental/aptrepo/gpg.key"
+          fi
+          if [ -f "$YUM_ROOT/repodata/repomd.xml.asc" ]; then
+            usage_title='Add YUM/DNF repo (signed repository metadata; RPMs unsigned):'
+            repo_gpg_lines=('  repo_gpgcheck=1' "  gpgkey=$public_key_url")
+          else
+            usage_title='Add YUM/DNF repo (unsigned):'
+            repo_gpg_lines=('  repo_gpgcheck=0')
+          fi
           printf '%s\n' \
-            'Add YUM/DNF repo (unsigned example):' \
+            "$usage_title" \
             '  sudo tee /etc/yum.repos.d/yams.repo <<REPO' \
             '  [yams]' \
             '  name=YAMS Repository' \
             "  baseurl=https://repo.yamsmemory.ai/${REPOSITORY_PREFIX}yumrepo/" \
             '  enabled=1' \
             '  gpgcheck=0' \
-            '  repo_gpgcheck=0' \
+            "${repo_gpg_lines[@]}" \
             '  REPO' \
             '' \
             'Then install:' \
             '  sudo dnf makecache || sudo yum makecache' \
             '  sudo dnf install yams || sudo yum install yams' \
-            '' \
-            '(Enable gpgcheck once you publish a key and sign RPMs/repodata.)' \
             > "$YUM_ROOT/USAGE.txt"
 
       - name: Upload YUM repo artifact
@@ -2338,7 +2349,7 @@ jobs:
 
       - name: Build Arch repository metadata (arch packages present)
         env:
-          REPOSITORY_PREFIX: ${{ steps.meta.outputs.channel == 'stable' && '' || 'experimental/' }}
+          REPOSITORY_PREFIX: ${{ steps.meta.outputs.channel != 'stable' && 'experimental/' || '' }}
         shell: bash
         run: |
           set -euo pipefail
