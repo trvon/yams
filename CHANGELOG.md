@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.20.3](https://github.com/trvon/yams/compare/v0.20.2...v0.20.3) (2026-09-30)
+
+
+### Added
+
+* **daemon:** expire idle session files from repair maintenance ([f87b64e](https://github.com/trvon/yams/commit/f87b64eb40739c97701d698966a3a17a79a2efc5))
+* **daemon:** vacuum vectors.db from idle repair maintenance ([6a71e79](https://github.com/trvon/yams/commit/6a71e79a47133a287aa4f79e0dd70cacb3f667d4))
+
+
+### Fixed
+
+* **cli:** decode compressed content in yams get ([7150be5](https://github.com/trvon/yams/commit/7150be549ef94e659993b381642127f63b5287d4))
+* **cli:** decode compressed content in yams get ([73e5d38](https://github.com/trvon/yams/commit/73e5d3831c03bb93b600c61e5fb61eea208ab13d))
+* **client:** decode compressed transfers for every client ([51e1ef2](https://github.com/trvon/yams/commit/51e1ef24d5b8f0986b54707e215dff7b27463127))
+* **client:** decode compressed transfers for every client ([fb38c7c](https://github.com/trvon/yams/commit/fb38c7c0910ff0c6ecf484cdccc8ce3f1d4ee306))
+* **cli:** show vector index as pending until vectors initialize ([86699d8](https://github.com/trvon/yams/commit/86699d80f5d730fef21d84820f89b58ef80b74f0))
+* **daemon:** break the connection lifetime timer reference cycle ([b421c12](https://github.com/trvon/yams/commit/b421c126ac8fe57c18a5914c968807ce8ad45359))
+* **daemon:** cancel in-flight request work when shutdown begins ([6aacda7](https://github.com/trvon/yams/commit/6aacda7913f186e080d80427be15135cdc030086))
+* **daemon:** delete corrupt DB copies only after confirmed salvage ([8da4df3](https://github.com/trvon/yams/commit/8da4df3568f6ecd22088bd5099b15687ef682ff9))
+* **daemon:** destroy the SocketServer only after its handlers are gone ([f8fce1d](https://github.com/trvon/yams/commit/f8fce1db18fb611c2ea03c80aafdca199610cbe5))
+* **daemon:** keep the session watcher progressing past a failing path ([c4a609d](https://github.com/trvon/yams/commit/c4a609dcacfaf260978616fc144e4a2caf07776b))
+* **daemon:** keep the session watcher progressing past a failing path ([4f5d77e](https://github.com/trvon/yams/commit/4f5d77e31be326976411518dcdc19386a577c8b1))
+* **daemon:** let connection handlers co-own the slot semaphore ([037a33b](https://github.com/trvon/yams/commit/037a33be807d5d3b57b521febfdbde4d3e1a39e5))
+* **daemon:** name in-flight worker jobs in shutdown join diagnostics ([df8097a](https://github.com/trvon/yams/commit/df8097abbbb8cfabbd52481cad5f55966774f7d1))
+* **daemon:** quarantine malformed WAL/SHM instead of deleting them ([fb3ed28](https://github.com/trvon/yams/commit/fb3ed2877da9c2d917e3962bb705ef1ecd45f43f))
+* **daemon:** rate-limit repeating warnings that flood the daemon log ([bbec409](https://github.com/trvon/yams/commit/bbec4093cd03d8d9e03c93d6a9cfd70cd2647a60))
+* **daemon:** report the startup integrity check as its own phase ([edc17df](https://github.com/trvon/yams/commit/edc17df83c9ac36daf7ffd92d96c20b62b38ca54))
+* **daemon:** report the startup integrity check as its own phase ([0b1b162](https://github.com/trvon/yams/commit/0b1b162e2a39fbe8dfaf541ee6b2dea6abb857b8))
+* **daemon:** show host pressure and deferred work in daemon status ([1fa2e92](https://github.com/trvon/yams/commit/1fa2e92510fad99ba58856a047da9d4f3963eec1))
+* **daemon:** stop topology rebuild requests from spinning workers ([8c24821](https://github.com/trvon/yams/commit/8c24821c96b002746698ee97c289857a38d69ecc))
+* **daemon:** sweep stale integrity-stamp temp and claim files ([344f3c5](https://github.com/trvon/yams/commit/344f3c588f0aa13eb6a8ef964f629cf83c05e4b1))
+* **lint:** update RequestDispatcher allowlist lines after the p2p and shutdown merges ([9c54cb0](https://github.com/trvon/yams/commit/9c54cb02fae202c43454f3744bb66c5c9227bd99))
+* **lint:** update RequestDispatcher allowlist lines after the p2p and shutdown merges ([d32c9b6](https://github.com/trvon/yams/commit/d32c9b669bfdfd484020350429b6806fdad9b340))
+* **metadata:** name the pool in slow connection-hold warnings ([6342531](https://github.com/trvon/yams/commit/6342531af7bc7643f5d82bb5ef4b68b841a6f8e3))
+* **metadata:** name the pool in slow connection-hold warnings ([2ecdaef](https://github.com/trvon/yams/commit/2ecdaefa90fdd094168fdaa247559ee23158c667))
+* **metadata:** record snapshot membership in its own table ([841aeb7](https://github.com/trvon/yams/commit/841aeb7b02d49b10f31ec4f3a04af9b074905e47))
+* **metadata:** record snapshot membership in its own table ([3637567](https://github.com/trvon/yams/commit/3637567512a46865ddc7eb1d10b558bd7c614618))
+* **metadata:** summarize snapshots from membership ([66fc421](https://github.com/trvon/yams/commit/66fc421702dbfc30ef35b1a46380d47fe77b95c5))
+* **metadata:** summarize snapshots from membership ([a57889e](https://github.com/trvon/yams/commit/a57889e783574b68a654e815d8f4caff64db98ca))
+* **mobile:** export only the yams_mobile_* C ABI from libyams_mobile ([015a01b](https://github.com/trvon/yams/commit/015a01b7f445fb3c5a55cdab8e1821eb6fdde2c2))
+* **mobile:** port bindings to current service APIs ([c597f99](https://github.com/trvon/yams/commit/c597f99d4435ec0f43a1590009a3cb9a954297d6))
+* **p2p:** count sessions the transport refuses as inbound failures ([f72abc7](https://github.com/trvon/yams/commit/f72abc7cc71329d0133ea91cd40387e94d067201))
+* **p2p:** record and report inbound session failures ([7f5db9d](https://github.com/trvon/yams/commit/7f5db9daf1453d0d9eb0de43b8eaa26a2b7044d6))
+* **p2p:** record and report inbound session failures ([bda974f](https://github.com/trvon/yams/commit/bda974f261ef87a88fbb68819e00f2581173b481))
+* **search:** stop the simeon-lexical build when shutdown begins ([8aae924](https://github.com/trvon/yams/commit/8aae9245ef5aec918d57c6ef20967402079eb0b9))
+
+
+### Performance
+
+* **daemon:** defer background work while the host is busy ([6b18462](https://github.com/trvon/yams/commit/6b1846225696dd4a610099c65d800e47707f30d1))
+* **daemon:** defer background work while the host is busy ([963d9bd](https://github.com/trvon/yams/commit/963d9bdbe4573b6b31c6b924b544422a4f6e16e0))
+* **daemon:** sample host pressure in the resource governor ([52545d3](https://github.com/trvon/yams/commit/52545d3f614477526c118122f1d5602546ae4414))
+
+
+### Maintenance
+
+* **release:** pin the next release to 0.20.3 ([f21f7b2](https://github.com/trvon/yams/commit/f21f7b24f8f1f1ffe6708867d1cbd55a4c385d08))
+
+
+### Changed
+
+* **cli:** handle SessionCommand Mode::None explicitly ([7f91141](https://github.com/trvon/yams/commit/7f9114101450a30ced701ce2699969b3460534e9))
+* **daemon:** remove unused ClientConfig::acceptCompressed ([17591fc](https://github.com/trvon/yams/commit/17591fc3fd406f3f8a3e351e631ca3412a6fb487))
+* **graph:** drop --impact and --affected-tests ([79232e5](https://github.com/trvon/yams/commit/79232e54717b05cd93494a07141d5daa806568be))
+* **ipc:** route Connected-&gt;ReadingHeader through state impl ([4be7145](https://github.com/trvon/yams/commit/4be71457d01e989f4a9a853d2a22c4011b0e890f))
+* **services:** drop unused RetrievalService::cat ([0d4e649](https://github.com/trvon/yams/commit/0d4e649c3d93a7a1842a3060f9995b6d6096c003))
+
 ## [0.20.2](https://github.com/trvon/yams/compare/v0.20.1...v0.20.2) (2026-09-25)
 
 
