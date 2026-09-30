@@ -1621,55 +1621,8 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         mcp_response.compressionHeader = oss.str();
     }
     if (resp.hasContent) {
-        // Handle compressed content - need to decompress or strip header for JSON response
-        constexpr size_t headerSize = compression::CompressionHeader::SIZE;
-        if (resp.compressed && resp.content.size() > headerSize) {
-            // Parse the compression header
-            std::span<const std::byte> headerSpan(
-                reinterpret_cast<const std::byte*>(resp.content.data()), headerSize);
-            auto headerRes = compression::CompressionHeader::parse(headerSpan);
-            if (headerRes && headerRes.value().validate()) {
-                const auto& header = headerRes.value();
-                auto algo = static_cast<compression::CompressionAlgorithm>(header.algorithm);
-
-                if (algo == compression::CompressionAlgorithm::None) {
-                    // Content stored uncompressed with header - strip header and return raw data
-                    mcp_response.content = std::string(resp.content.data() + headerSize,
-                                                       resp.content.size() - headerSize);
-                } else {
-                    // Content is compressed - decompress it
-                    auto compressor =
-                        compression::CompressionRegistry::instance().createCompressor(algo);
-                    if (compressor && header.compressedSize > 0 &&
-                        headerSize + header.compressedSize <= resp.content.size()) {
-                        std::span<const std::byte> compressedSpan(
-                            reinterpret_cast<const std::byte*>(resp.content.data() + headerSize),
-                            header.compressedSize);
-                        auto decompRes =
-                            compressor->decompress(compressedSpan, header.uncompressedSize);
-                        if (decompRes) {
-                            const auto& decompData = decompRes.value();
-                            mcp_response.content =
-                                std::string(reinterpret_cast<const char*>(decompData.data()),
-                                            decompData.size());
-                        } else {
-                            spdlog::warn("[MCP] Decompression failed: {}",
-                                         decompRes.error().message);
-                            mcp_response.content = resp.content;
-                        }
-                    } else {
-                        spdlog::warn("[MCP] Invalid header sizes or no compressor for algo={}",
-                                     static_cast<int>(algo));
-                        mcp_response.content = resp.content;
-                    }
-                }
-            } else {
-                // Header invalid - return content as-is
-                mcp_response.content = resp.content;
-            }
-        } else {
-            mcp_response.content = resp.content;
-        }
+        // DaemonClient decodes compressed transfers, so this is the document itself.
+        mcp_response.content = resp.content;
 
         size_t maxContentBytes = size_t{32} * 1024;
         if (const auto env = yams::config::getenv_copy("YAMS_MCP_GET_MAX_CONTENT_BYTES");
@@ -2811,33 +2764,6 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
         co_return out;
     }
 
-    if (req.action == "impact") {
-        auto clientRes = requireDaemonClient();
-        if (!clientRes)
-            co_return clientRes.error();
-        yams::daemon::GraphImpactRequest dreq;
-        dreq.symbol = req.symbol.empty() ? req.name : req.symbol;
-        dreq.depth = static_cast<uint64_t>(req.depth);
-        auto res = co_await clientRes.value()->call<yams::daemon::GraphImpactRequest>(dreq);
-        if (!res)
-            co_return res.error();
-        const auto& resp = res.value();
-        MCPGraphResponse out;
-        out.action = "impact";
-        json nav;
-        nav["symbol"] = resp.symbol;
-        nav["truncated"] = resp.truncated;
-        nav["affected_symbols"] = json::array();
-        for (const auto& s : resp.affectedSymbols)
-            nav["affected_symbols"].push_back(symbolToJson(s));
-        nav["relationships"] = json::array();
-        for (const auto& r : resp.relationships)
-            nav["relationships"].push_back(relationToJson(r));
-        nav["warnings"] = resp.warnings;
-        out.navResult = std::move(nav);
-        co_return out;
-    }
-
     if (req.action == "trace") {
         auto clientRes = requireDaemonClient();
         if (!clientRes)
@@ -2867,32 +2793,8 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
         co_return out;
     }
 
-    if (req.action == "affected_tests") {
-        auto clientRes = requireDaemonClient();
-        if (!clientRes)
-            co_return clientRes.error();
-        yams::daemon::GraphAffectedTestsRequest dreq;
-        dreq.changedFiles = req.changedFiles;
-        if (req.depth > 1) {
-            dreq.depth = static_cast<uint64_t>(req.depth);
-        }
-        dreq.testPathPattern = req.testPattern;
-        auto res = co_await clientRes.value()->call<yams::daemon::GraphAffectedTestsRequest>(dreq);
-        if (!res)
-            co_return res.error();
-        const auto& resp = res.value();
-        MCPGraphResponse out;
-        out.action = "affected_tests";
-        json nav;
-        nav["changed_files"] = resp.changedFiles;
-        nav["affected_tests"] = resp.affectedTests;
-        nav["truncated"] = resp.truncated;
-        nav["relationships"] = json::array();
-        for (const auto& r : resp.relationships)
-            nav["relationships"].push_back(relationToJson(r));
-        nav["warnings"] = resp.warnings;
-        out.navResult = std::move(nav);
-        co_return out;
+    if (!req.action.empty() && req.action != "query") {
+        co_return Error{ErrorCode::InvalidArgument, "Unknown graph action: " + req.action};
     }
 
     auto clientRes = requireDaemonClient();

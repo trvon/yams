@@ -25,8 +25,10 @@ namespace yams::app::services {
  * budgets into read-equivalent context blocks for CLI/MCP/agent surfaces.
  */
 
-// Reported by impact/affected-tests analysis, which walked the code-symbol edges (calls,
-// references, inherits, implements) that v0.20 stopped producing and migration 40 deleted.
+// Returned by the daemon for legacy GraphImpact/GraphAffectedTests requests. Both analyses walked
+// the code-symbol edges (calls, references, inherits, implements) that v0.20 stopped producing
+// and migration 40 deleted, so the service no longer implements them; the protocol messages
+// remain only for wire compatibility with older clients.
 inline constexpr std::string_view kImpactNeedsSymbolGraphWarning =
     "code-symbol graph was removed in v0.20; impact analysis needs symbol edges";
 inline constexpr std::string_view kAffectedTestsNeedSymbolGraphWarning =
@@ -146,36 +148,6 @@ struct GraphTraceResponse {
     bool truncated{false};
 };
 
-struct GraphImpactRequest {
-    std::string symbol;
-    std::string scopePathPrefix;
-    std::size_t depth{2};
-    GraphContextBudget budget{};
-};
-
-struct GraphImpactResponse {
-    std::string symbol;
-    std::vector<GraphContextSymbol> affectedSymbols;
-    std::vector<GraphContextRelation> relationships;
-    std::vector<std::string> warnings;
-    bool truncated{false};
-};
-
-struct GraphAffectedTestsRequest {
-    std::vector<std::string> changedFiles;
-    std::size_t depth{5};
-    std::string testPathPattern;
-    GraphContextBudget budget{};
-};
-
-struct GraphAffectedTestsResponse {
-    std::vector<std::string> changedFiles;
-    std::vector<std::string> affectedTests;
-    std::vector<GraphContextRelation> relationships;
-    std::vector<std::string> warnings;
-    bool truncated{false};
-};
-
 class IGraphContextService {
 public:
     virtual ~IGraphContextService() = default;
@@ -183,9 +155,6 @@ public:
     virtual Result<GraphExploreResponse> explore(const GraphExploreRequest& req) = 0;
     virtual Result<GraphSymbolLookupResponse> lookupSymbol(const GraphSymbolLookupRequest& req) = 0;
     virtual Result<GraphTraceResponse> trace(const GraphTraceRequest& req) = 0;
-    virtual Result<GraphImpactResponse> impact(const GraphImpactRequest& req) = 0;
-    virtual Result<GraphAffectedTestsResponse>
-    affectedTests(const GraphAffectedTestsRequest& req) = 0;
 };
 
 std::shared_ptr<IGraphContextService>

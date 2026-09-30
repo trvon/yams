@@ -30,6 +30,8 @@ void RepairServiceHost::start(Config cfg, StateComponent* state,
     rcfg.maxBatch = cfg.maxBatch;
     rcfg.autoRebuildOnDimMismatch = cfg.autoRebuildOnDimMismatch;
     rcfg.maxPendingRepairs = cfg.maxPendingRepairs;
+    rcfg.vectorVacuumInterval = cfg.vectorVacuumInterval;
+    rcfg.sessionExpiry = cfg.sessionExpiry;
     auto rs = std::make_shared<RepairService>(std::move(ctx), state, std::move(activeConn), rcfg);
     std::atomic_store_explicit(&service_, rs, std::memory_order_release);
     rs->start();

@@ -27,6 +27,10 @@
 #include <utility>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
+
+#include <sstream>
 
 using namespace yams::daemon;
 
@@ -134,6 +138,30 @@ public:
     std::string loadedConfigJson;
 };
 
+// A stale plugin built against the interface removed in v0.20: discovery finds it on every
+// start, and the host refuses to adopt it.
+class RemovedInterfaceAbiPluginHost final : public AbiPluginHost {
+public:
+    yams::Result<std::vector<PluginDescriptor>>
+    scanDirectory(const std::filesystem::path& path) override {
+        PluginDescriptor stale{.name = "yams_symbol_extractor",
+                               .path = path / "libyams_symbol_extractor.so",
+                               .interfaces = {std::string(kRemovedSymbolExtractorInterface)}};
+        return std::vector<PluginDescriptor>{stale};
+    }
+    yams::Result<PluginDescriptor> load(const std::filesystem::path& path,
+                                        const std::string&) override {
+        ++loads;
+        return yams::Error{yams::ErrorCode::NotSupported,
+                           std::string(kRemovedSymbolExtractorRefusal) + path.string()};
+    }
+    std::vector<PluginDescriptor> listLoaded() const override { return {}; }
+    std::vector<std::filesystem::path> trustList() const override { return trustedPaths; }
+
+    std::vector<std::filesystem::path> trustedPaths;
+    std::size_t loads{0};
+};
+
 struct PluginManagerFixture {
     std::filesystem::path tempDir;
     std::unique_ptr<DaemonLifecycleFsm> lifecycleFsm;
@@ -233,6 +261,54 @@ TEST_CASE_METHOD(PluginManagerFixture, "PluginManager autoload is synchronous",
 
     REQUIRE(result);
     CHECK((result.value() == 0));
+}
+
+TEST_CASE("Removed-interface refusals are recognised", "[daemon][components][plugin][catch2]") {
+    CHECK(isRemovedInterfaceRefusal(
+        yams::Error{yams::ErrorCode::NotSupported,
+                    std::string(kRemovedSymbolExtractorRefusal) + "/opt/yams/lib/x.so"}));
+    CHECK_FALSE(isRemovedInterfaceRefusal(
+        yams::Error{yams::ErrorCode::InvalidState,
+                    std::string(kRemovedSymbolExtractorRefusal) + "/opt/yams/lib/x.so"}));
+    CHECK_FALSE(isRemovedInterfaceRefusal(
+        yams::Error{yams::ErrorCode::NotSupported, "Plugin init failed"}));
+}
+
+TEST_CASE_METHOD(PluginManagerFixture,
+                 "PluginManager autoload skips a removed-interface plugin without a warning",
+                 "[daemon][components][plugin][autoload][catch2]") {
+    yams::test::ScopedEnvVar mockProvider("YAMS_USE_MOCK_PROVIDER", std::nullopt);
+    yams::test::ScopedEnvVar abiPlugins("YAMS_DISABLE_ABI_PLUGINS", std::nullopt);
+    config.pluginDirStrict = true;
+    std::filesystem::create_directories(tempDir / "plugins");
+    RemovedInterfaceAbiPluginHost abiHost;
+    abiHost.trustedPaths = {tempDir / "plugins"};
+
+    auto deps = makeDeps();
+    deps.sharedPluginHost = &abiHost;
+    PluginManager mgr(deps);
+    REQUIRE(mgr.initialize());
+
+    std::ostringstream captured;
+    auto previous = spdlog::default_logger();
+    auto logger = std::make_shared<spdlog::logger>(
+        "plugin_skip_capture", std::make_shared<spdlog::sinks::ostream_sink_mt>(captured));
+    logger->set_level(spdlog::level::info);
+    spdlog::set_default_logger(logger);
+    auto loaded = mgr.autoloadPlugins();
+    spdlog::set_default_logger(previous);
+
+    REQUIRE(loaded);
+    CHECK((loaded.value() == 0));
+    CHECK((abiHost.loads == 1));
+    INFO(captured.str());
+    std::istringstream lines(captured.str());
+    for (std::string line; std::getline(lines, line);) {
+        const bool aboutStalePlugin = line.find("symbol_extractor") != std::string::npos;
+        CHECK_FALSE((aboutStalePlugin && line.find("[warning]") != std::string::npos));
+    }
+    CHECK((captured.str().find("load failed") == std::string::npos));
+    CHECK((mgr.getPluginHostFsmSnapshot().state != PluginHostState::Failed));
 }
 
 TEST_CASE_METHOD(PluginManagerFixture, "PluginManager owns shared host shutdown",

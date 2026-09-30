@@ -1309,14 +1309,12 @@ struct MCPGraphRequest {
     // Snapshot scoping
     std::string scopeSnapshot;
 
-    // ── Navigation fields (lookup/impact/trace/affected_tests actions) ──
+    // ── Navigation fields (lookup/trace actions) ──
     std::string symbol;
     std::string file;
     int32_t line{-1};
     std::string fromSymbol;
     std::string toSymbol;
-    std::vector<std::string> changedFiles;
-    std::string testPattern;
 
     // ── Ingest fields (used when action == "ingest") ─────────
     std::vector<MCPKgIngestNodeInput> nodes;
@@ -1346,7 +1344,7 @@ struct MCPGraphResponse {
     bool kgAvailable{true};
     std::string warning;
 
-    // ── Navigation result (populated for lookup/impact/trace/affected_tests) ──
+    // ── Navigation result (populated for lookup/trace) ──
     json navResult;
 
     // ── Ingest result fields (populated when action == "ingest") ──

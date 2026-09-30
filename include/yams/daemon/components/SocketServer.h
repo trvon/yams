@@ -207,8 +207,9 @@ private:
     mutable std::mutex activeSocketsMutex_;
     std::vector<std::weak_ptr<TrackedSocket>> activeSockets_;
 
-    std::unique_ptr<std::counting_semaphore<>> connectionSlots_;
-    std::unique_ptr<std::counting_semaphore<>> proxyConnectionSlots_;
+    // Shared with in-flight connection handlers, which may outlive stop().
+    std::shared_ptr<std::counting_semaphore<>> connectionSlots_;
+    std::shared_ptr<std::counting_semaphore<>> proxyConnectionSlots_;
 
     // Dynamic sizing state (PBI-085)
     std::atomic<size_t> slotLimit_{0};   // Current slot limit (tracked for resize decisions)
@@ -242,5 +243,14 @@ private:
     bool wait_accept_loop(const std::shared_ptr<AcceptLoopState>& state,
                           std::chrono::milliseconds timeout, std::string_view label);
 };
+
+/**
+ * Tear down a SocketServer together with the IOCoordinator whose io_context runs its connection
+ * handlers: stop the server, stop and join the I/O threads, destroy the IOCoordinator (and the
+ * handler frames still queued on it), then destroy the server those frames reference. Both
+ * pointers are null on return; either may already be null.
+ */
+void teardownSocketServer(std::unique_ptr<SocketServer>& server,
+                          std::unique_ptr<IOCoordinator>& ioCoordinator) noexcept;
 
 } // namespace yams::daemon

@@ -30,6 +30,7 @@
 #include <unistd.h>
 #endif
 
+#include <yams/crypto/hasher.h>
 #include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
@@ -38,7 +39,6 @@
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/records.h>
 #include <yams/memory_sync/task_record.h>
-#include <yams/crypto/hasher.h>
 #include <yams/metadata/metadata_sync_adapter.h>
 #include <yams/metadata/topology_sync_adapter.h>
 #include <yams/storage/storage_runtime_resolver.h>
@@ -236,7 +236,9 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
     std::uint64_t peerCount = 0;
+    p2p::P2pInboundStats inbound;
     if (p2pManager_) {
+        inbound = p2pManager_->inboundStats();
         auto peers = p2pManager_->peers();
         if (peers) {
             peerCount = peers.value().size();
@@ -246,6 +248,15 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
             spdlog::warn("[ServiceManager] p2p peer registry read failed for status: {}",
                          peers.error().message);
         }
+    }
+    std::uint64_t lastFailureAgeMs = 0;
+    if (inbound.lastFailureUnixMs > 0) {
+        const auto nowMs =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::system_clock::now().time_since_epoch())
+                                           .count());
+        lastFailureAgeMs =
+            nowMs > inbound.lastFailureUnixMs ? nowMs - inbound.lastFailureUnixMs : 0;
     }
     return MemorySyncStatus{
         memorySync_->started(),
@@ -264,7 +275,12 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
             ? (config_.memorySync.allowFirstContact ? "mutual-tls-legacy-tofu"
                                                     : "mutual-tls-operator-pinned")
             : (config_.memorySync.writerAuthRequired ? "authenticated-writers" : "backend-acl"),
-        peerCount};
+        peerCount,
+        inbound.sessions,
+        inbound.failures,
+        inbound.lastFailureStage,
+        inbound.lastFailure,
+        lastFailureAgeMs};
 }
 
 Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view contentHash,

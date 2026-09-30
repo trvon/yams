@@ -848,7 +848,8 @@ struct StatusResponse {
     uint32_t vectorDbDim{0};
     std::string vectorIndexEngine;
     // Database init phase visibility for `yams daemon status` rendering.
-    // Empty when not set; otherwise "opening" | "recovering" | "migrating" | "ready".
+    // Empty when not set; otherwise "opening" | "checking_integrity" | "recovering" |
+    // "migrating" | "ready".
     std::string databasePhase;
     uint64_t databasePhaseElapsedMs{0};
     // Post-startup maintenance phase, separate from database readiness.
@@ -1123,6 +1124,15 @@ struct StatusResponse {
     uint8_t governorPressureLevel{0}; // 0=Normal, 1=Warning, 2=Critical, 3=Emergency
     uint8_t governorHeadroomPct{100}; // Scaling headroom (0-100%)
 
+    // Host pressure (other processes on the machine). Negative values mean "not measured".
+    std::string hostPressureSource; // "psi", "loadavg", "unavailable"; empty = not reported
+    bool hostPressureElevated{false};
+    double hostCpuPressurePct{-1.0};    // PSI cpu some avg10
+    double hostIoPressurePct{-1.0};     // PSI io some avg10
+    double hostMemoryPressurePct{-1.0}; // PSI memory some avg10
+    double hostLoadPerCpu{-1.0};        // 1-minute load average / online CPUs
+    std::string deferredBackgroundWork; // comma-separated deferrable work held back
+
     // ONNX concurrency metrics
     uint32_t onnxTotalSlots{0};
     uint32_t onnxUsedSlots{0};
@@ -1231,6 +1241,10 @@ struct StatusResponse {
         // Effective search-maintenance and runtime tuning policy (appended; older clients tolerate
         // missing tail fields).
         ser << searchAutomaticRebuildsEnabled << searchAutomaticRebuildsSource << runtimeTuning;
+
+        // Host pressure (appended; older clients tolerate missing tail fields).
+        ser << hostPressureSource << hostPressureElevated << hostCpuPressurePct << hostIoPressurePct
+            << hostMemoryPressurePct << hostLoadPerCpu << deferredBackgroundWork;
     }
 
     template <typename Deserializer>
@@ -1652,6 +1666,21 @@ struct StatusResponse {
         auto runtimeTuningRes = deser.readStringMap();
         if (runtimeTuningRes)
             res.runtimeTuning = std::move(runtimeTuningRes.value());
+
+        if (auto v = deser.template read<std::string>())
+            res.hostPressureSource = std::move(v.value());
+        if (auto v = deser.template read<bool>())
+            res.hostPressureElevated = v.value();
+        if (auto v = deser.template read<double>())
+            res.hostCpuPressurePct = v.value();
+        if (auto v = deser.template read<double>())
+            res.hostIoPressurePct = v.value();
+        if (auto v = deser.template read<double>())
+            res.hostMemoryPressurePct = v.value();
+        if (auto v = deser.template read<double>())
+            res.hostLoadPerCpu = v.value();
+        if (auto v = deser.template read<std::string>())
+            res.deferredBackgroundWork = std::move(v.value());
 
         return res;
     }
@@ -4970,6 +4999,12 @@ struct MemorySyncResponse {
     std::string mode;
     std::string trustMode;
     std::uint64_t peerCount{0};
+    // Inbound p2p sessions: protobuf-only additive fields, like the counters above.
+    std::uint64_t inboundSessions{0};
+    std::uint64_t inboundFailures{0};
+    std::string lastInboundFailureStage;
+    std::string lastInboundFailure;
+    std::uint64_t lastInboundFailureAgeMs{0};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>

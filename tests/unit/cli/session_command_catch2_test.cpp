@@ -114,3 +114,14 @@ TEST_CASE("SessionCommand - warm parses with budgets", "[cli][session][catch2][.
     CHECK((output.find("Warming (daemon) requested.") != std::string::npos ||
            output.find("Warmed (local)") != std::string::npos));
 }
+
+TEST_CASE("SessionCommand - bare session without subcommand is rejected",
+          "[cli][session][catch2]") {
+    CliTestHelper helper;
+    CaptureStdout capture;
+
+    // require_subcommand() rejects this at parse time, so execute() never runs with Mode::None.
+    const int rc = helper.runCommand({"yams", "session"});
+
+    CHECK(rc != 0);
+}

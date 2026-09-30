@@ -28,6 +28,22 @@ std::string formatUtcTimestamp(std::chrono::system_clock::time_point tp) {
     return out.str();
 }
 
+// Returns `base` when free, else `base.N` for the first free N. Recovery artifacts must never be
+// renamed over an earlier one: POSIX rename silently replaces the destination.
+fs::path uniqueSiblingPath(const fs::path& base) {
+    std::error_code ec;
+    if (!fs::exists(base, ec) && !ec) {
+        return base;
+    }
+    for (int i = 1; i < 1000; ++i) {
+        fs::path candidate(base.string() + "." + std::to_string(i));
+        if (!fs::exists(candidate, ec) && !ec) {
+            return candidate;
+        }
+    }
+    return {};
+}
+
 void renameIfExists(const fs::path& src, const fs::path& dst) {
     std::error_code ec;
     if (fs::exists(src, ec)) {
@@ -47,13 +63,18 @@ Result<DbRecoveryResult> quarantineAndRecreate(const fs::path& dbPath) {
     }
 
     const auto timestamp = formatUtcTimestamp(std::chrono::system_clock::now());
-    const std::string suffix = ".corrupt-" + timestamp;
-    const fs::path quarantined = dbPath.string() + suffix;
 
     std::error_code ec;
     if (!fs::exists(dbPath, ec)) {
         return Error{ErrorCode::FileNotFound,
                      "db file does not exist for quarantine: " + dbPath.string()};
+    }
+
+    // Never rename over an earlier quarantine from the same second.
+    const fs::path quarantined =
+        uniqueSiblingPath(dbPath.string() + std::string(kCorruptDbMarker) + timestamp);
+    if (quarantined.empty()) {
+        return Error{ErrorCode::IOError, "no free quarantine name for " + dbPath.string()};
     }
 
     fs::rename(dbPath, quarantined, ec);
@@ -82,6 +103,55 @@ Result<DbRecoveryResult> quarantineAndRecreate(const fs::path& dbPath) {
 
     DbRecoveryResult res{quarantined, sentinel, timestamp};
     return res;
+}
+
+std::vector<fs::path> listCorruptDbs(const fs::path& dataDir, std::string_view dbFileName) {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    for (fs::directory_iterator it(dataDir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (isCorruptDbFileName(it->path().filename().string(), dbFileName)) {
+            out.push_back(it->path());
+        }
+    }
+    return out;
+}
+
+Result<std::vector<fs::path>> quarantineSqliteSidecars(const fs::path& dbPath) {
+    if (dbPath.empty()) {
+        return Error{ErrorCode::InvalidArgument, "db path is empty"};
+    }
+
+    const auto timestamp = formatUtcTimestamp(std::chrono::system_clock::now());
+    std::vector<fs::path> moved;
+    // WAL first: it is the file that can carry uncheckpointed data. If it cannot be moved, leave
+    // the SHM alone too so SQLite still sees a consistent pair on the next open.
+    for (const auto* suffix : {"-wal", "-shm"}) {
+        const fs::path sidecar(dbPath.string() + suffix);
+        std::error_code ec;
+        if (!fs::exists(sidecar, ec)) {
+            if (ec) {
+                return Error{ErrorCode::IOError,
+                             "cannot inspect " + sidecar.string() + ": " + ec.message()};
+            }
+            continue;
+        }
+        const auto target = uniqueSiblingPath(
+            sidecar.string() + std::string(kSqliteSidecarQuarantineMarker) + timestamp);
+        if (target.empty()) {
+            return Error{ErrorCode::IOError, "no free quarantine name for " + sidecar.string() +
+                                                 " (moved so far: " + std::to_string(moved.size()) +
+                                                 ")"};
+        }
+        fs::rename(sidecar, target, ec);
+        if (ec) {
+            return Error{ErrorCode::IOError, "rename " + sidecar.string() + " -> " +
+                                                 target.string() + " failed: " + ec.message() +
+                                                 " (moved so far: " + std::to_string(moved.size()) +
+                                                 ")"};
+        }
+        moved.push_back(target);
+    }
+    return moved;
 }
 
 std::optional<DbRecoverySentinel> readLatestRecoverySentinel(const fs::path& dbPath) {

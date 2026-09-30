@@ -2,6 +2,7 @@
 
 #include <yams/api/content_store.h>
 #include <yams/app/services/graph_query_service.hpp>
+#include <yams/common/log_rate_limiter.h>
 #include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WriteCoordinator.h>
@@ -28,6 +29,10 @@
 namespace yams::daemon {
 
 namespace {
+
+// A full entity_graph_jobs channel rejects every job until the extractor drains it; one line a
+// minute (with a count of the rest) is enough to see it.
+constexpr auto kSubmitFailureLogInterval = std::chrono::seconds(60);
 
 Result<void>
 acknowledgeKnowledgeGraph(const std::shared_ptr<metadata::MetadataRepository>& repo,
@@ -230,8 +235,12 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
 
     auto submitResult = submitEntityExtraction(std::move(job));
     if (!submitResult) {
-        spdlog::warn("[GraphComponent] Failed to submit extraction for {}: {}",
-                     ctx.documentHash.substr(0, 12), submitResult.error().message);
+        static yams::common::LogRateLimiter submitFailureLog{kSubmitFailureLogInterval};
+        if (auto held = submitFailureLog.admit()) {
+            spdlog::warn("[GraphComponent] Failed to submit extraction for {}: {}{}",
+                         ctx.documentHash.substr(0, 12), submitResult.error().message,
+                         yams::common::LogRateLimiter::suppressedSuffix(*held));
+        }
     } else {
         spdlog::debug("[GraphComponent] Queued graph completion for {} ({})", ctx.filePath,
                       ctx.documentHash.substr(0, 12));
@@ -331,8 +340,13 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
         for (auto& job : extractionJobs) {
             auto submitResult = submitEntityExtraction(std::move(job));
             if (!submitResult) {
-                spdlog::warn("[GraphComponent] Failed to submit extraction for batch job: {}",
-                             submitResult.error().message);
+                // A full entity_graph_jobs channel fails every job in the batch the same way.
+                static yams::common::LogRateLimiter batchFailureLog{kSubmitFailureLogInterval};
+                if (auto held = batchFailureLog.admit()) {
+                    spdlog::warn("[GraphComponent] Failed to submit extraction for batch job: {}{}",
+                                 submitResult.error().message,
+                                 yams::common::LogRateLimiter::suppressedSuffix(*held));
+                }
                 if (!firstError)
                     firstError = submitResult.error();
             }

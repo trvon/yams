@@ -424,6 +424,8 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            yams::daemon::ConfigResolver::applyDaemonMaintenance(tomlConfig, config);
+
             if (!yams::daemon::ConfigResolver::applyStorageDiskPressure(tomlConfig, config)) {
                 spdlog::error(
                     "Config: refusing to start with invalid [storage.disk_pressure] settings");

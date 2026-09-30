@@ -8,6 +8,7 @@
 #include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/crypto/hasher.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/profiling.h>
 
 #include <algorithm>
@@ -1605,7 +1606,8 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
             pendingApprox_.load(std::memory_order_relaxed) == 0) {
             const auto snap = TuningSnapshotRegistry::instance().get();
             const bool daemonIdle = snap && snap->daemonIdle;
-            if (daemonIdle && getPreferredModel_) {
+            if (daemonIdle && getPreferredModel_ &&
+                ResourceGovernor::instance().admitDeferrable(DeferrableWork::SemanticBackfill)) {
                 std::string model = getPreferredModel_();
                 if (!model.empty()) {
                     auto drained =

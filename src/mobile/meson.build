@@ -24,6 +24,20 @@ mobile_deps = [
 
 mobile_cpp_args = []
 mobile_link_args = []
+mobile_link_depends = []
+
+# Export only the yams_mobile_* C ABI. The library links YAMS, SQLite and friends statically;
+# exporting them lets a host that also carries YAMS bind half its calls into this copy, so two
+# SQLite copies open one database and their POSIX locks clobber each other's WAL index.
+if host_machine.system() == 'darwin'
+  mobile_exports = files('yams_mobile.exp')
+  mobile_link_args += ['-Wl,-exported_symbols_list,' + mobile_exports[0].full_path()]
+  mobile_link_depends += mobile_exports
+elif host_machine.system() != 'windows'
+  mobile_version_script = files('yams_mobile.map')
+  mobile_link_args += ['-Wl,--version-script=' + mobile_version_script[0].full_path()]
+  mobile_link_depends += mobile_version_script
+endif
 
 if get_option('enable-tsan')
   # When TSAN is enabled, we must ensure libtsan is linked
@@ -53,6 +67,7 @@ if get_option('enable-mobile-bindings')
     include_directories: include_directories('../../include'),
     cpp_args: mobile_cpp_args,
     link_args: mobile_link_args,
+    link_depends: mobile_link_depends,
     install: true,
   )
 

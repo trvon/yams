@@ -232,6 +232,17 @@ public:
                                 gov["headroomPct"] = s.governorHeadroomPct;
                                 j["governor"] = std::move(gov);
                             }
+                            if (!s.hostPressureSource.empty()) {
+                                nlohmann::json host = nlohmann::json::object();
+                                host["source"] = s.hostPressureSource;
+                                host["elevated"] = s.hostPressureElevated;
+                                host["cpuSomeAvg10"] = s.hostCpuPressurePct;
+                                host["ioSomeAvg10"] = s.hostIoPressurePct;
+                                host["memorySomeAvg10"] = s.hostMemoryPressurePct;
+                                host["loadPerCpu"] = s.hostLoadPerCpu;
+                                host["deferred"] = s.deferredBackgroundWork;
+                                j["host_pressure"] = std::move(host);
+                            }
                             // ONNX concurrency metrics
                             if (s.onnxTotalSlots > 0) {
                                 nlohmann::json onnx = nlohmann::json::object();

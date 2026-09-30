@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <optional>
 #include <random>
 #include <span>
@@ -3893,36 +3894,178 @@ Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsBySnapshot(const std::string& snapshotId) {
     return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            // Use the full 21-column list so mapDocumentRow() can populate all fields
-            std::string sql = "SELECT DISTINCT ";
+            // Membership, not the latest snapshot_id: a document stays in every snapshot it was
+            // stored in. Legacy snapshot_id keys cover rows the backfill has not moved yet.
+            std::string sql = "SELECT ";
             sql += kDocumentColumnListAliasD;
-            sql += " FROM documents d"
-                   " JOIN metadata m ON d.id = m.document_id"
-                   " WHERE m.key = 'snapshot_id' AND m.value = ?"
+            sql += " FROM documents d WHERE d.id IN ("
+                   " SELECT document_id FROM document_snapshots WHERE snapshot_id = ?1"
+                   " UNION SELECT document_id FROM metadata"
+                   "   WHERE key = 'snapshot_id:' || ?1"
+                   " UNION SELECT document_id FROM metadata"
+                   "   WHERE key = 'snapshot_id' AND value = ?1)"
                    " ORDER BY d.indexed_time DESC, d.id DESC";
-            auto stmtResult = db.prepare(sql);
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, snapshotId);
-            if (!bindResult)
-                return bindResult.error();
+            YAMS_TRY_UNWRAP(stmt, db.prepare(sql));
+            YAMS_TRY(stmt.bind(1, snapshotId));
 
             std::vector<DocumentInfo> documents;
             while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
+                YAMS_TRY_UNWRAP(hasRow, stmt.step());
+                if (!hasRow)
                     break;
-
                 documents.push_back(mapDocumentRow(stmt));
             }
-
             return documents;
         });
+}
+
+std::vector<DocumentSnapshotEntry>
+legacySnapshotEntries(const std::unordered_map<std::string, MetadataValue>& metadata) {
+    const auto parseTime = [](const MetadataValue& value) -> std::optional<std::int64_t> {
+        try {
+            const auto text = value.asString();
+            std::size_t used = 0;
+            const auto parsed = std::stoll(text, &used);
+            return used == text.size() ? std::optional<std::int64_t>(parsed) : std::nullopt;
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    };
+    static constexpr std::string_view kIdPrefix = "snapshot_id:";
+    static constexpr std::string_view kTimePrefix = "snapshot_time:";
+
+    std::optional<std::int64_t> latestTime;
+    if (auto it = metadata.find("snapshot_time"); it != metadata.end()) {
+        latestTime = parseTime(it->second);
+    }
+    std::map<std::string, std::int64_t> entries;
+    const auto add = [&](const std::string& id) {
+        if (id.empty() || entries.contains(id)) {
+            return;
+        }
+        std::optional<std::int64_t> time;
+        if (auto it = metadata.find(std::string(kTimePrefix) + id); it != metadata.end()) {
+            time = parseTime(it->second);
+        }
+        entries[id] = time.value_or(latestTime.value_or(0));
+    };
+    if (auto it = metadata.find("snapshot_id"); it != metadata.end()) {
+        add(it->second.asString());
+    }
+    for (const auto& [key, value] : metadata) {
+        if (key.starts_with(kIdPrefix)) {
+            const auto id = value.asString();
+            add(id.empty() ? key.substr(kIdPrefix.size()) : id);
+        }
+    }
+
+    std::vector<DocumentSnapshotEntry> out;
+    out.reserve(entries.size());
+    for (const auto& [id, micros] : entries) {
+        out.push_back({.snapshotId = id, .snapshotTimeMicros = micros});
+    }
+    return out;
+}
+
+Result<std::vector<DocumentSnapshotEntry>>
+MetadataRepository::getDocumentSnapshots(int64_t documentId) {
+    return executeReadQuery<std::vector<DocumentSnapshotEntry>>(
+        [&](Database& db) -> Result<std::vector<DocumentSnapshotEntry>> {
+            std::map<std::string, std::int64_t> times; // ordered by snapshot id
+
+            YAMS_TRY_UNWRAP(members,
+                            db.prepare("SELECT snapshot_id, snapshot_time FROM document_snapshots"
+                                       " WHERE document_id = ?"));
+            YAMS_TRY(members.bind(1, documentId));
+            while (true) {
+                YAMS_TRY_UNWRAP(hasRow, members.step());
+                if (!hasRow)
+                    break;
+                times[members.getString(0)] = members.getInt64(1);
+            }
+
+            // Legacy keys the background backfill has not moved yet (idx_metadata_doc_key).
+            YAMS_TRY_UNWRAP(legacy, db.prepare(R"(
+                SELECT key, value FROM metadata
+                WHERE document_id = ?1 AND (key IN ('snapshot_id', 'snapshot_time')
+                    OR key GLOB 'snapshot_id:*' OR key GLOB 'snapshot_time:*')
+            )"));
+            YAMS_TRY(legacy.bind(1, documentId));
+            std::unordered_map<std::string, MetadataValue> legacyKeys;
+            while (true) {
+                YAMS_TRY_UNWRAP(hasRow, legacy.step());
+                if (!hasRow)
+                    break;
+                legacyKeys.emplace(legacy.getString(0), MetadataValue(legacy.getString(1)));
+            }
+            for (auto& entry : legacySnapshotEntries(legacyKeys)) {
+                times.try_emplace(std::move(entry.snapshotId), entry.snapshotTimeMicros);
+            }
+
+            std::vector<DocumentSnapshotEntry> out;
+            out.reserve(times.size());
+            for (auto& [id, micros] : times) {
+                out.push_back({.snapshotId = id, .snapshotTimeMicros = micros});
+            }
+            return out;
+        });
+}
+
+Result<std::size_t> MetadataRepository::migrateLegacySnapshotKeys(std::size_t maxSnapshots) {
+    if (maxSnapshots == 0) {
+        return std::size_t{0};
+    }
+    return executeQuery<std::size_t>([&](Database& db) -> Result<std::size_t> {
+        YAMS_TRY(beginTransactionWithRetry(db));
+        auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
+
+        // snapshot_id:<id> rows, via idx_metadata_key. Each moves with its snapshot_time:<id>.
+        YAMS_TRY_UNWRAP(pick, db.prepare("SELECT document_id, substr(key, 13) FROM metadata"
+                                         " WHERE key GLOB 'snapshot_id:*' LIMIT ?"));
+        YAMS_TRY(pick.bind(1, static_cast<int64_t>(maxSnapshots)));
+        std::vector<std::pair<int64_t, std::string>> batch;
+        while (true) {
+            YAMS_TRY_UNWRAP(hasRow, pick.step());
+            if (!hasRow)
+                break;
+            batch.emplace_back(pick.getInt64(0), pick.getString(1));
+        }
+
+        YAMS_TRY_UNWRAP(move, db.prepare(R"(
+            INSERT INTO document_snapshots (document_id, snapshot_id, snapshot_time)
+            VALUES (?1, ?2, COALESCE((SELECT CAST(value AS INTEGER) FROM metadata
+                                      WHERE document_id = ?1 AND key = 'snapshot_time:' || ?2),
+                                     0))
+            ON CONFLICT(document_id, snapshot_id) DO NOTHING
+        )"));
+        YAMS_TRY_UNWRAP(drop, db.prepare("DELETE FROM metadata WHERE document_id = ?1 AND key IN"
+                                         " ('snapshot_id:' || ?2, 'snapshot_time:' || ?2)"));
+        for (const auto& [documentId, snapshotId] : batch) {
+            YAMS_TRY(move.reset());
+            YAMS_TRY(move.bind(1, documentId));
+            YAMS_TRY(move.bind(2, snapshotId));
+            YAMS_TRY(move.execute());
+            YAMS_TRY(drop.reset());
+            YAMS_TRY(drop.bind(1, documentId));
+            YAMS_TRY(drop.bind(2, snapshotId));
+            YAMS_TRY(drop.execute());
+        }
+
+        std::size_t moved = batch.size();
+        if (moved < maxSnapshots) {
+            // snapshot_time:<id> rows whose snapshot_id:<id> is gone carry no membership.
+            YAMS_TRY_UNWRAP(orphans,
+                            db.prepare("DELETE FROM metadata WHERE rowid IN (SELECT rowid FROM"
+                                       " metadata WHERE key GLOB 'snapshot_time:*' LIMIT ?)"));
+            YAMS_TRY(orphans.bind(1, static_cast<int64_t>(maxSnapshots - moved)));
+            YAMS_TRY(orphans.execute());
+            moved += static_cast<std::size_t>(db.changes());
+        }
+
+        YAMS_TRY(commitOrRollback(db));
+        rollback.dismiss();
+        return moved;
+    });
 }
 
 Result<std::vector<DocumentInfo>>
@@ -3979,14 +4122,15 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshots() {
     // Cache miss - query database
     auto result = executeReadQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
-            using yams::metadata::sql::QuerySpec;
-            QuerySpec spec{};
-            spec.table = "metadata";
-            spec.columns = {"DISTINCT value"};
-            spec.conditions = {"key = 'snapshot_id'"};
-            spec.orderBy = std::optional<std::string>{"value"};
-
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+            // Every snapshot, not only those still named by a document's latest snapshot_id.
+            // Legacy snapshot_id:<id> keys are left out: scanning them is a full-table read on
+            // large corpora, and their snapshots are also recorded in tree_snapshots.
+            auto stmtResult = db.prepare(R"(
+                SELECT snapshot_id FROM tree_snapshots
+                UNION SELECT snapshot_id FROM document_snapshots
+                UNION SELECT value FROM metadata WHERE key = 'snapshot_id'
+                ORDER BY 1
+            )");
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -4084,90 +4228,12 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshotLabels() {
 }
 
 Result<SnapshotInfo> MetadataRepository::getSnapshotInfo(const std::string& snapshotId) {
-    return executeReadQuery<SnapshotInfo>([&snapshotId](Database& db) -> Result<SnapshotInfo> {
-        // Query documents with this snapshot_id and aggregate info
-        const char* sql = R"(
-            SELECT
-                COUNT(*) as file_count,
-                MIN(d.indexed_time) as created_time,
-                GROUP_CONCAT(DISTINCT SUBSTR(d.file_path, 1, INSTR(d.file_path || '/', '/') - 1)) as root_dirs
-            FROM documents d
-            JOIN metadata m ON d.id = m.document_id
-            WHERE m.key = 'snapshot_id' AND m.value = ?
-        )";
-
-        auto stmtResult = db.prepare(sql);
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bind(1, snapshotId);
-        if (!bindResult)
-            return bindResult.error();
-
-        SnapshotInfo info;
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        if (stepResult.value()) {
-            info.fileCount = stmt.getInt64(0);
-            info.createdTime = stmt.isNull(1) ? 0 : stmt.getInt64(1);
-            // Derive directory path from common root (simplified - just take first path component)
-            if (!stmt.isNull(2)) {
-                std::string roots = stmt.getString(2);
-                // If there are multiple roots, just use the first one
-                auto commaPos = roots.find(',');
-                info.directoryPath =
-                    commaPos != std::string::npos ? roots.substr(0, commaPos) : roots;
-            }
-        }
-
-        // Get label from metadata if present
-        const char* labelSql = R"(
-            SELECT DISTINCT m2.value
-            FROM metadata m1
-            JOIN metadata m2 ON m1.document_id = m2.document_id
-            WHERE m1.key = 'snapshot_id' AND m1.value = ?
-              AND m2.key = 'snapshot_label'
-            LIMIT 1
-        )";
-
-        auto labelStmtResult = db.prepare(labelSql);
-        if (labelStmtResult) {
-            Statement labelStmt = std::move(labelStmtResult).value();
-            auto labelBindResult = labelStmt.bind(1, snapshotId);
-            if (labelBindResult) {
-                auto labelStepResult = labelStmt.step();
-                if (labelStepResult && labelStepResult.value() && !labelStmt.isNull(0)) {
-                    info.label = labelStmt.getString(0);
-                }
-            }
-        }
-
-        // Get git commit from metadata if present
-        const char* commitSql = R"(
-            SELECT DISTINCT m2.value
-            FROM metadata m1
-            JOIN metadata m2 ON m1.document_id = m2.document_id
-            WHERE m1.key = 'snapshot_id' AND m1.value = ?
-              AND m2.key = 'git_commit'
-            LIMIT 1
-        )";
-
-        auto commitStmtResult = db.prepare(commitSql);
-        if (commitStmtResult) {
-            Statement commitStmt = std::move(commitStmtResult).value();
-            auto commitBindResult = commitStmt.bind(1, snapshotId);
-            if (commitBindResult) {
-                auto commitStepResult = commitStmt.step();
-                if (commitStepResult && commitStepResult.value() && !commitStmt.isNull(0)) {
-                    info.gitCommit = commitStmt.getString(0);
-                }
-            }
-        }
-
-        return info;
-    });
+    auto batch = batchGetSnapshotInfo({snapshotId});
+    if (!batch) {
+        return batch.error();
+    }
+    auto it = batch.value().find(snapshotId);
+    return it != batch.value().end() ? it->second : SnapshotInfo{};
 }
 
 Result<std::unordered_map<std::string, SnapshotInfo>>
@@ -4178,31 +4244,47 @@ MetadataRepository::batchGetSnapshotInfo(const std::vector<std::string>& snapsho
 
     return executeReadQuery<std::unordered_map<std::string, SnapshotInfo>>(
         [&snapshotIds](Database& db) -> Result<std::unordered_map<std::string, SnapshotInfo>> {
-            // Build placeholders for IN clause
-            std::string placeholders;
-            placeholders.reserve(snapshotIds.size() * 2);
+            // Members of each requested snapshot: document_snapshots rows, legacy
+            // snapshot_id:<id> keys not yet moved, and the latest snapshot_id key. Each source
+            // is looked up by id through an index. Label and git commit come from
+            // tree_snapshots, falling back to the members' metadata.
+            std::string values;
+            values.reserve(snapshotIds.size() * 4);
             for (size_t i = 0; i < snapshotIds.size(); ++i) {
-                if (i > 0)
-                    placeholders += ',';
-                placeholders += '?';
+                values += i > 0 ? ",(?)" : "(?)";
             }
-
-            // Single query with GROUP BY to get all snapshot info in one round-trip
-            // Uses conditional aggregation to extract label and git_commit in same query
             std::string sql = R"(
+                WITH ids(snapshot_id) AS (VALUES )" +
+                              values + R"(),
+                member(document_id, snapshot_id) AS (
+                    SELECT ds.document_id, ds.snapshot_id
+                    FROM document_snapshots ds JOIN ids ON ds.snapshot_id = ids.snapshot_id
+                    UNION
+                    SELECT m.document_id, ids.snapshot_id
+                    FROM ids JOIN metadata m ON m.key = 'snapshot_id:' || ids.snapshot_id
+                    UNION
+                    SELECT m.document_id, ids.snapshot_id
+                    FROM ids JOIN metadata m ON m.key = 'snapshot_id' AND m.value = ids.snapshot_id
+                )
                 SELECT
-                    m_snap.value as snapshot_id,
-                    COUNT(DISTINCT d.id) as file_count,
-                    MIN(d.indexed_time) as created_time,
-                    MAX(CASE WHEN m2.key = 'snapshot_label' THEN m2.value END) as label,
-                    MAX(CASE WHEN m2.key = 'git_commit' THEN m2.value END) as git_commit,
-                    GROUP_CONCAT(DISTINCT SUBSTR(d.file_path, 1, INSTR(d.file_path || '/', '/') - 1)) as root_dirs
-                FROM documents d
-                JOIN metadata m_snap ON d.id = m_snap.document_id AND m_snap.key = 'snapshot_id'
-                LEFT JOIN metadata m2 ON d.id = m2.document_id AND m2.key IN ('snapshot_label', 'git_commit')
-                WHERE m_snap.value IN ()" +
-                              placeholders + R"()
-                GROUP BY m_snap.value
+                    member.snapshot_id,
+                    COUNT(DISTINCT d.id) AS file_count,
+                    MIN(d.indexed_time) AS created_time,
+                    COALESCE(
+                        (SELECT ts.snapshot_label FROM tree_snapshots ts
+                         WHERE ts.snapshot_id = member.snapshot_id),
+                        MAX(CASE WHEN m2.key = 'snapshot_label' THEN m2.value END)) AS label,
+                    COALESCE(
+                        (SELECT ts.git_commit FROM tree_snapshots ts
+                         WHERE ts.snapshot_id = member.snapshot_id),
+                        MAX(CASE WHEN m2.key = 'git_commit' THEN m2.value END)) AS git_commit,
+                    GROUP_CONCAT(DISTINCT SUBSTR(d.file_path, 1,
+                                 INSTR(d.file_path || '/', '/') - 1)) AS root_dirs
+                FROM member
+                JOIN documents d ON d.id = member.document_id
+                LEFT JOIN metadata m2
+                    ON d.id = m2.document_id AND m2.key IN ('snapshot_label', 'git_commit')
+                GROUP BY member.snapshot_id
             )";
 
             auto stmtResult = db.prepare(sql);

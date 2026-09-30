@@ -1013,7 +1013,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
                           "name='{}', metadataOnly={})",
                           req.hash, req.name, req.metadataOnly);
             auto result = co_await yams::daemon::dispatch::offload_to_worker(
-                serviceManager_, [documentService, serviceReq = std::move(serviceReq)]() mutable {
+                serviceManager_, "documents.get",
+                [documentService, serviceReq = std::move(serviceReq)]() mutable {
                     return documentService->retrieve(serviceReq);
                 });
             if (!result) {
@@ -1074,7 +1075,8 @@ RequestDispatcher::handleGetInitRequest(const GetInitRequest& req) {
             std::string hash = req.hash;
             if (hash.empty() && req.byName && !req.name.empty()) {
                 auto rh = co_await yams::daemon::dispatch::offload_to_worker(
-                    serviceManager_, [documentService, name = req.name]() mutable {
+                    serviceManager_, "documents.get_init.resolve_name",
+                    [documentService, name = req.name]() mutable {
                         return documentService->resolveNameToHash(name);
                     });
                 if (!rh) {
@@ -1095,7 +1097,8 @@ RequestDispatcher::handleGetInitRequest(const GetInitRequest& req) {
             // Retrieve bytes (in-memory). For very large content, future improvement: stream from
             // CAS; for now, bounded by max memory and typical use in tests/CLI.
             auto rb = co_await yams::daemon::dispatch::offload_to_worker(
-                serviceManager_, [store, hash]() mutable { return store->retrieveBytes(hash); });
+                serviceManager_, "documents.get_init.retrieve_bytes",
+                [store, hash]() mutable { return store->retrieveBytes(hash); });
             if (!rb) {
                 co_return yams::daemon::dispatch::makeErrorResponse(
                     ErrorCode::InternalError,
@@ -1258,7 +1261,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
         // paralyzes the IPC event loop, preventing other clients from being served.
         const auto serviceStart = std::chrono::steady_clock::now();
         auto result = co_await yams::daemon::dispatch::offload_to_worker(
-            serviceManager_, [docService, serviceReq]() { return docService->list(serviceReq); });
+            serviceManager_, "documents.list",
+            [docService, serviceReq]() { return docService->list(serviceReq); });
         const auto serviceMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - serviceStart)
                                    .count();
@@ -1331,7 +1335,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleCatRequest(const CatRe
             sreq.depth = 1;
 
             auto result = co_await yams::daemon::dispatch::offload_to_worker(
-                serviceManager_, [documentService, sreq = std::move(sreq)]() mutable {
+                serviceManager_, "documents.cat",
+                [documentService, sreq = std::move(sreq)]() mutable {
                     return documentService->retrieve(sreq);
                 });
             if (!result) {
@@ -1408,7 +1413,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                 serviceReq.pattern += "*";
             }
             auto result = co_await yams::daemon::dispatch::offload_to_worker(
-                serviceManager_, [documentService, serviceReq = std::move(serviceReq)]() mutable {
+                serviceManager_, "documents.delete",
+                [documentService, serviceReq = std::move(serviceReq)]() mutable {
                     return documentService->deleteByName(serviceReq);
                 });
             if (!result) {
@@ -1457,7 +1463,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
             }
             if (!replicatedDeletes.empty()) {
                 auto published = co_await yams::daemon::dispatch::offload_to_worker(
-                    serviceManager_,
+                    serviceManager_, "documents.delete.publish_replication",
                     [manager = serviceManager_, hashes = std::move(replicatedDeletes),
                      retainContent = req.keepRefs] {
                         for (const auto& hash : hashes) {
@@ -1589,7 +1595,8 @@ RequestDispatcher::handleUpdateDocumentRequest(const UpdateDocumentRequest& req)
             serviceReq.createBackup = req.createBackup;
             serviceReq.verbose = req.verbose;
             auto result = co_await yams::daemon::dispatch::offload_to_worker(
-                serviceManager_, [documentService, serviceReq = std::move(serviceReq)]() mutable {
+                serviceManager_, "documents.update",
+                [documentService, serviceReq = std::move(serviceReq)]() mutable {
                     return documentService->updateMetadata(serviceReq);
                 });
             if (!result) {
@@ -1663,7 +1670,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
             serviceReq.useSession = req.useSession;
             serviceReq.sessionName = req.sessionName;
             auto result = co_await yams::daemon::dispatch::offload_to_worker(
-                serviceManager_, [grepService, serviceReq = std::move(serviceReq)]() mutable {
+                serviceManager_, "documents.grep",
+                [grepService, serviceReq = std::move(serviceReq)]() mutable {
                     return grepService->grep(serviceReq);
                 });
             if (!result) {
@@ -1991,58 +1999,23 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
                 spdlog::debug("[FileHistory] Processing doc {}/{}: id={}, path={}", idx + 1,
                               docsToProcess, doc.id, doc.filePath);
 
-                auto metadataRes = appContext.metadataRepo->getAllMetadata(doc.id);
-                if (!metadataRes) {
-                    spdlog::debug("[FileHistory] Failed to get metadata for doc {}: {}", doc.id,
-                                  metadataRes.error().message);
+                // Membership rows plus any legacy snapshot_id:<id> keys not yet backfilled.
+                auto snapshotsRes = appContext.metadataRepo->getDocumentSnapshots(doc.id);
+                if (!snapshotsRes) {
+                    spdlog::debug("[FileHistory] Failed to get snapshots for doc {}: {}", doc.id,
+                                  snapshotsRes.error().message);
                     continue;
                 }
-
-                spdlog::debug("[FileHistory] Got {} metadata entries for doc {}",
-                              metadataRes.value().size(), doc.id);
+                if (snapshotsRes.value().empty()) {
+                    spdlog::debug("[FileHistory] Doc {} has no snapshot membership", doc.id);
+                    continue;
+                }
 
                 std::unordered_map<std::string, int64_t> snapshotTimes;
-                std::unordered_set<std::string> snapshotIds;
-
-                for (const auto& [key, value] : metadataRes.value()) {
-                    if (key == "snapshot_id" && value.type == metadata::MetadataValueType::String) {
-                        snapshotIds.insert(value.asString());
-                        continue;
-                    }
-                    if (key.rfind("snapshot_id:", 0) == 0 &&
-                        value.type == metadata::MetadataValueType::String) {
-                        if (!value.asString().empty()) {
-                            snapshotIds.insert(value.asString());
-                        } else {
-                            snapshotIds.insert(key.substr(12));
-                        }
-                        continue;
-                    }
-                    if (key == "snapshot_time" &&
-                        value.type == metadata::MetadataValueType::String) {
-                        try {
-                            snapshotTimes[""] = std::stoll(value.asString());
-                        } catch (const std::exception& error) {
-                            spdlog::debug("[FileHistory] invalid snapshot_time for doc {}: {}",
-                                          doc.id, error.what());
-                        }
-                        continue;
-                    }
-                    if (key.rfind("snapshot_time:", 0) == 0 &&
-                        value.type == metadata::MetadataValueType::String) {
-                        try {
-                            snapshotTimes[key.substr(14)] = std::stoll(value.asString());
-                        } catch (const std::exception& error) {
-                            spdlog::debug("[FileHistory] invalid {} for doc {}: {}", key, doc.id,
-                                          error.what());
-                        }
-                        continue;
-                    }
-                }
-
-                if (snapshotIds.empty()) {
-                    spdlog::debug("[FileHistory] Doc {} has no snapshot_id metadata", doc.id);
-                    continue;
+                std::vector<std::string> snapshotIds;
+                for (const auto& entry : snapshotsRes.value()) {
+                    snapshotTimes[entry.snapshotId] = entry.snapshotTimeMicros;
+                    snapshotIds.push_back(entry.snapshotId);
                 }
 
                 for (const auto& snapshotId : snapshotIds) {

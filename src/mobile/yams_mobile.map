@@ -1,0 +1,8 @@
+/* Export only the mobile C ABI. Everything else (YAMS internals, SQLite, Boost, ...) stays
+   local so a host process that also links YAMS statically keeps a single copy of each. */
+{
+  global:
+    yams_mobile_*;
+  local:
+    *;
+};

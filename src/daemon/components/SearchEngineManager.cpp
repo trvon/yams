@@ -239,6 +239,17 @@ void SearchEngineManager::clearEngine() {
     refreshSnapshot();
 }
 
+void SearchEngineManager::requestShutdown() {
+    std::shared_ptr<yams::search::SearchEngine> eng;
+    {
+        std::shared_lock lock(engineMutex_);
+        eng = engine_;
+    }
+    if (eng) {
+        eng->requestShutdown();
+    }
+}
+
 void SearchEngineManager::refreshSnapshot() {
     std::shared_ptr<yams::search::SearchEngine> eng;
     {

@@ -284,6 +284,13 @@ private:
     // Version 41: Optimize metadata_value_counts triggers to bypass topology keys and prune
     // legacy topology metadata.
     static Migration bypassTopologyMetadataValueCountsTriggers();
+    static Migration createDocumentSnapshotMembership();
+
+    // Version 43: One-time data-directory cleanup. Deletes the tree-sitter grammar libraries
+    // that pre-v0.20 `yams init` / `yams config grammar` built into <data_dir>/grammars. Only
+    // acts on a data directory's yams.db, only deletes grammar libraries, and never follows a
+    // symlink out of the data directory.
+    static Migration removeLegacyGrammarArtifacts();
 };
 
 /**

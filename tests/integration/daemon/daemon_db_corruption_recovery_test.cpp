@@ -18,6 +18,7 @@
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/db_recovery.h>
 #include <yams/metadata/database.h>
 
 using namespace std::chrono_literals;
@@ -112,7 +113,7 @@ std::optional<fs::path> findQuarantinedFile(const fs::path& dataDir) {
     if (!fs::exists(dataDir, ec)) {
         return std::nullopt;
     }
-    const std::string prefix = "yams.db.corrupt-";
+    const std::string prefix = yams::daemon::corruptDbPrefix();
     for (fs::directory_iterator it(dataDir, ec), end; it != end; it.increment(ec)) {
         if (ec) {
             ec.clear();

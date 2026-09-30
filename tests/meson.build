@@ -951,6 +951,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_repair_maintenance_exe = executable('catch2_repair_maintenance',
+    files('unit/daemon/repair_maintenance_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_write_coordinator_exe = executable('catch2_write_coordinator',
     files('unit/daemon/write_coordinator_catch2_test.cpp'),
     include_directories: incs,
@@ -1278,6 +1287,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_host_pressure_exe = executable('catch2_host_pressure',
+    files('unit/daemon/host_pressure_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_timing_audit_exe = executable('catch2_timing_audit',
     files('unit/daemon/timing_audit_catch2_test.cpp'),
     include_directories: incs,
@@ -1307,6 +1325,15 @@ if catch2_dep.found()
 
   catch2_health_check_isolation_exe = executable('catch2_health_check_isolation',
     files('unit/daemon/health_check_isolation_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_socket_server_teardown_exe = executable('catch2_socket_server_teardown',
+    files('unit/daemon/socket_server_teardown_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -1701,6 +1728,7 @@ if catch2_dep.found()
       'unit/compression/compression_monitor_catch2_test.cpp',
       'unit/compression/compression_policy_catch2_test.cpp',
       'unit/compression/error_handler_catch2_test.cpp',
+      'unit/compression/framed_payload_catch2_test.cpp',
 #TODO(yams - 3s4) : Fix API mismatch - uses non - existent IntegrityValidator methods
 #'unit/compression/integrity_validator_catch2_test.cpp',
       'unit/compression/recovery_manager_catch2_test.cpp',
@@ -1768,6 +1796,7 @@ if catch2_dep.found()
       'unit/common/format_catch2_test.cpp',
       'unit/common/crc32_catch2_test.cpp',
       'unit/common/hash_predicates_catch2_test.cpp',
+      'unit/common/log_rate_limiter_catch2_test.cpp',
       'unit/common/path_alias_catch2_test.cpp',
       'unit/common/pattern_utils_catch2_test.cpp',
       'unit/common/string_utils_catch2_test.cpp',
@@ -2074,6 +2103,16 @@ if catch2_dep.found()
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
   catch2_connection_pool_exe = executable('catch2_connection_pool',
     files('unit/metadata/connection_pool_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+# Document snapshot membership and the legacy per-snapshot key backfill
+  catch2_document_snapshots_exe = executable('catch2_document_snapshots',
+    files('unit/metadata/document_snapshots_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -2902,6 +2941,12 @@ if catch2_dep.found()
     timeout: 120
   )
 
+  test('document_snapshots', catch2_document_snapshots_exe,
+    suite: ['catch2', 'unit', 'metadata', 'snapshots'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
   test('kg_store', catch2_kg_store_exe,
     suite: ['catch2', 'unit', 'metadata', 'kg'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -3660,6 +3705,12 @@ if catch2_dep.found()
     timeout: 120
   )
 
+  test('repair_maintenance', catch2_repair_maintenance_exe,
+    suite: ['catch2', 'unit', 'daemon', 'repair'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('service_manager', catch2_service_manager_exe,
     suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -3892,6 +3943,12 @@ if catch2_dep.found()
     timeout: 60
   )
 
+  test('host_pressure', catch2_host_pressure_exe,
+    suite: ['catch2', 'unit', 'daemon', 'governance'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('timing_audit', catch2_timing_audit_exe,
     suite: ['catch2', 'unit', 'daemon', 'timing-audit'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -3915,6 +3972,14 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
+
+  if host_machine.system() != 'windows'
+    test('socket_server_teardown', catch2_socket_server_teardown_exe,
+      suite: ['catch2', 'unit', 'daemon', 'socket', 'shutdown'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 60
+    )
+  endif
 
   test('vector_index_coordinator_bulk_scope', catch2_vector_index_coordinator_bulk_scope_exe,
     suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],

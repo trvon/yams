@@ -240,8 +240,6 @@ public:
     Result<yams::daemon::SearchResponse> search(const SearchOptions& req,
                                                 const RetrievalOptions& opts = {}) const;
     Result<yams::daemon::StatusResponse> status(const RetrievalOptions& opts = {}) const;
-    Result<yams::daemon::CatResponse> cat(const yams::daemon::CatRequest& req,
-                                          const RetrievalOptions& opts = {}) const;
     Result<yams::daemon::GraphQueryResponse> graphQuery(const yams::daemon::GraphQueryRequest& req,
                                                         const RetrievalOptions& opts = {}) const;
     Result<yams::daemon::DownloadResponse> download(const yams::daemon::DownloadRequest& req,

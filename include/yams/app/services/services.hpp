@@ -144,7 +144,17 @@ struct AppContext {
 
     // GLiNER query concept extraction for semantic query expansion
     search::EntityExtractionFunc queryConceptExtractor;
+
+    // Host-owned cancellation, set when the daemon begins shutting down. Long service loops
+    // (list, grep, search) check it between items and return OperationCancelled so request
+    // handlers release their worker threads within the shutdown join budget.
+    std::shared_ptr<const std::atomic<bool>> cancellationSignal;
 };
+
+/// True once the host asked in-flight service work to stop (daemon shutdown).
+[[nodiscard]] inline bool hostCancellationRequested(const AppContext& ctx) noexcept {
+    return ctx.cancellationSignal && ctx.cancellationSignal->load(std::memory_order_acquire);
+}
 
 // ===========================
 // Extraction (PBI-006 DTOs)
@@ -525,10 +535,10 @@ struct RetrieveDocumentRequest {
     uint32_t chunkSize{262144}; // streaming chunk size
 
     // Content options
-    bool includeContent{true};   // include document content
-    bool raw{false};             // raw content without text extraction
-    bool extract{false};         // force text extraction
-    bool acceptCompressed{true}; // request compressed payload when supported
+    bool includeContent{true};    // include document content
+    bool raw{false};              // raw content without text extraction
+    bool extract{false};          // force text extraction
+    bool acceptCompressed{false}; // opt in only where the receiver decodes (DaemonClient)
 
     // Knowledge graph options
     bool graph{false}; // show related documents

@@ -389,6 +389,23 @@ TEST_CASE("SearchService: basic text search", "[unit][services][search]") {
     }
 }
 
+TEST_CASE("SearchService: host cancellation stops the search", "[unit][services][search]") {
+    SearchServiceFixture f;
+    auto cancelled = std::make_shared<std::atomic<bool>>(true);
+    auto ctx = f.appContext;
+    ctx.cancellationSignal = cancelled;
+    auto service = makeSearchService(ctx);
+
+    auto request = f.createBasicSearchRequest("programming");
+    auto result = runAwait(service->search(request));
+    REQUIRE_FALSE(result);
+    CHECK((result.error().code == ErrorCode::OperationCancelled));
+
+    cancelled->store(false);
+    auto resumed = runAwait(service->search(request));
+    REQUIRE(resumed);
+}
+
 TEST_CASE("SearchService: a lines: qualifier shapes result snippets",
           "[unit][services][search][extract-scope]") {
     SearchServiceFixture f;

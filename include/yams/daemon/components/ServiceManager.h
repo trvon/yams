@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "IComponent.h"
 #include <boost/asio/any_io_executor.hpp>
@@ -198,6 +199,11 @@ public:
         std::string mode;
         std::string trustMode;
         std::uint64_t peerCount{0};
+        std::uint64_t inboundSessions{0};
+        std::uint64_t inboundFailures{0};
+        std::string lastInboundFailureStage;
+        std::string lastInboundFailure;
+        std::uint64_t lastInboundFailureAgeMs{0};
     };
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);
@@ -560,6 +566,8 @@ public:
             dirFiles; // dir -> (file -> (mtime,size))
         std::unordered_map<std::string, std::vector<std::string>> gitignorePatterns;
         std::unordered_map<std::string, std::uint64_t> gitignoreMtime;
+        // Paths whose indexing or removal failed; warned once, retried quietly.
+        std::unordered_set<std::string> failingPaths;
     };
     SessionWatchState sessionWatch_;
     yams::compat::stop_source sessionWatchStopSource_;
@@ -781,6 +789,9 @@ public:
     // NOLINTEND(bugprone-reserved-identifier)
 
 private:
+    /// Re-request a topology rebuild after `delay`. At most one retry is armed at a time.
+    void scheduleTopologyRebuildRetry(const std::string& reason, std::chrono::milliseconds delay);
+
     std::shared_ptr<GraphComponent> loadGraphComponent() const {
         return std::atomic_load_explicit(&graphComponent_, std::memory_order_acquire);
     }
@@ -910,6 +921,10 @@ private:
     EmbeddingLifecycleManager embeddingLifecycle_;
 
     boost::asio::cancellation_signal shutdownSignal_;
+    /// Set when shutdown begins; published to request handlers as AppContext::cancellationSignal
+    /// so long request loops return OperationCancelled instead of pinning WorkCoordinator workers.
+    std::shared_ptr<std::atomic<bool>> shutdownCancellation_ =
+        std::make_shared<std::atomic<bool>>(false);
 
     std::unique_ptr<WorkCoordinator> workCoordinator_;
     /// Dedicated thread pool for blocking I/O (database open, migrations).
@@ -944,6 +959,8 @@ private:
     std::atomic<bool> semanticTopologyMaintenanceScheduled_{false};
     std::atomic<bool> topologyRebuildPending_{false};
     std::atomic<bool> topologyRebuildInProgress_{false};
+    // A retry is armed for a topology rebuild deferred by host pressure.
+    std::atomic<bool> topologyRebuildRetryArmed_{false};
 
     DaemonLifecycleFsm& lifecycleFsm_;
 

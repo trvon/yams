@@ -1496,6 +1496,24 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
         out.governorBudgetBytes = govSnap.memoryBudgetBytes;
         out.governorPressureLevel = static_cast<uint8_t>(govSnap.level);
         out.governorHeadroomPct = static_cast<uint8_t>(govSnap.scalingHeadroom * 100.0);
+        if (govSnap.timestamp.time_since_epoch().count() != 0) {
+            out.hostPressureSource = std::string(hostPressureSourceName(govSnap.host.source));
+            out.hostPressureElevated = govSnap.hostPressureElevated;
+            out.hostCpuPressurePct = govSnap.host.cpuSomeAvg10;
+            out.hostIoPressurePct = govSnap.host.ioSomeAvg10;
+            out.hostMemoryPressurePct = govSnap.host.memorySomeAvg10;
+            out.hostLoadPerCpu = govSnap.host.loadPerCpu;
+            out.deferredBackgroundWork.clear();
+            for (std::size_t i = 0; i < kDeferrableWorkKinds; ++i) {
+                if ((govSnap.deferredWorkMask & (1u << i)) == 0) {
+                    continue;
+                }
+                if (!out.deferredBackgroundWork.empty()) {
+                    out.deferredBackgroundWork += ',';
+                }
+                out.deferredBackgroundWork += deferrableWorkName(static_cast<DeferrableWork>(i));
+            }
+        }
     } catch (...) {
         spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }

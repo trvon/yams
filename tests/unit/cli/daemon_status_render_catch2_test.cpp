@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -56,6 +57,16 @@ std::string renderDetailed(const StatusResponse& s, const DaemonStatusRenderCont
     std::ostringstream os;
     yams::cli::renderDaemonStatusDetailed(s, ctx, os);
     return os.str();
+}
+
+std::string lineContaining(const std::string& text, std::string_view needle) {
+    std::istringstream lines(text);
+    for (std::string line; std::getline(lines, line);) {
+        if (line.find(needle) != std::string::npos) {
+            return line;
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -103,6 +114,69 @@ TEST_CASE("daemon status brief renders the overview from a synthetic response",
     CHECK(out.find("Error:") == std::string::npos);
     CHECK(out.find("Memory Sync") == std::string::npos);
     CHECK(out.find("yams daemon status -d") != std::string::npos);
+}
+
+TEST_CASE("daemon status names a running integrity check instead of 'Opening'",
+          "[cli][daemon][status][catch2]") {
+    PlainColors plain;
+    StatusResponse s = readyDaemon();
+    s.ready = false;
+    s.lifecycleState = "initializing";
+    s.readinessStates[std::string(yams::daemon::readiness::kDatabase)] = false;
+    s.databasePhase = std::string(yams::daemon::dbphase::kCheckingIntegrity);
+    s.databasePhaseElapsedMs = 671000;
+    s.metadataDbPath = "/srv/yams/yams.db";
+
+    const std::string out = renderBrief(s, {});
+    INFO(out);
+
+    CHECK(out.find("Checking integrity") != std::string::npos);
+    CHECK(out.find("11m") != std::string::npos);
+    CHECK(out.find("full scan after unclean stop") != std::string::npos);
+    CHECK(out.find("Opening") == std::string::npos);
+}
+
+TEST_CASE("daemon status shows the vector index as pending while vectors initialize",
+          "[cli][daemon][status][catch2]") {
+    PlainColors plain;
+    StatusResponse s = readyDaemon();
+    s.ready = false;
+    s.lifecycleState = "initializing";
+    s.vectorDbInitAttempted = false;
+    s.vectorDbReady = false;
+    s.readinessStates[std::string(yams::daemon::readiness::kDatabase)] = false;
+    s.databasePhase = std::string(yams::daemon::dbphase::kCheckingIntegrity);
+    s.databasePhaseElapsedMs = 90000;
+
+    const std::string brief = renderBrief(s, {});
+    INFO(brief);
+    CHECK(lineContaining(brief, "Vector Index").find("pending") != std::string::npos);
+    CHECK(brief.find("by configuration") == std::string::npos);
+
+    const std::string detailed = renderDetailed(s, {});
+    INFO(detailed);
+    CHECK(lineContaining(detailed, "Vector DB").find("Pending") != std::string::npos);
+    CHECK(detailed.find("by configuration") == std::string::npos);
+}
+
+TEST_CASE("daemon status says 'disabled by configuration' only when the daemon reports it",
+          "[cli][daemon][status][catch2]") {
+    PlainColors plain;
+    StatusResponse s = readyDaemon();
+    s.vectorDbInitAttempted = false;
+    s.vectorDbReady = false;
+    s.readinessStates[std::string(yams::daemon::readiness::kVectorDbDisabled)] = true;
+
+    const std::string brief = renderBrief(s, {});
+    INFO(brief);
+    const auto line = lineContaining(brief, "Vector Index");
+    CHECK(line.find("disabled") != std::string::npos);
+    CHECK(line.find("by configuration") != std::string::npos);
+    CHECK(line.find("pending") == std::string::npos);
+
+    const std::string detailed = renderDetailed(s, {});
+    INFO(detailed);
+    CHECK(lineContaining(detailed, "Vector DB").find("by configuration") != std::string::npos);
 }
 
 TEST_CASE("lexical containment rejects incomparable roots", "[cli][daemon][status][catch2]") {
@@ -216,6 +290,48 @@ TEST_CASE("daemon status detailed renders every section from a synthetic respons
     CHECK(out.find("2 models · active") != std::string::npos);
     CHECK(out.find("Components Not Ready") == std::string::npos);
     CHECK(out.find("Data Directory Warnings") == std::string::npos);
+}
+
+TEST_CASE("daemon status shows host pressure and deferred background work",
+          "[cli][daemon][status][host_pressure][catch2]") {
+    PlainColors plain;
+
+    SECTION("busy host names what is being deferred") {
+        StatusResponse s = readyDaemon();
+        s.hostPressureSource = "psi";
+        s.hostPressureElevated = true;
+        s.hostCpuPressurePct = 72.5;
+        s.hostIoPressurePct = 3.0;
+        s.hostMemoryPressurePct = 0.0;
+        s.hostLoadPerCpu = 1.9;
+        s.deferredBackgroundWork = "topology,repair";
+
+        for (const auto& out : {renderBrief(s, {}), renderDetailed(s, {})}) {
+            INFO(out);
+            CHECK(out.find("Host Load") != std::string::npos);
+            CHECK(out.find("Busy") != std::string::npos);
+            CHECK(out.find("cpu 72%") != std::string::npos);
+            CHECK(out.find("io 3%") != std::string::npos);
+            CHECK(out.find("deferring topology, repair") != std::string::npos);
+        }
+    }
+
+    SECTION("calm load-average host shows the per-CPU load") {
+        StatusResponse s = readyDaemon();
+        s.hostPressureSource = "loadavg";
+        s.hostLoadPerCpu = 0.42;
+        const std::string out = renderBrief(s, {});
+        INFO(out);
+        CHECK(out.find("Host Load") != std::string::npos);
+        CHECK(out.find("Calm") != std::string::npos);
+        CHECK(out.find("load 0.42/cpu") != std::string::npos);
+        CHECK(out.find("deferring") == std::string::npos);
+    }
+
+    SECTION("no host signal hides the row") {
+        const std::string out = renderBrief(readyDaemon(), {});
+        CHECK(out.find("Host Load") == std::string::npos);
+    }
 }
 
 TEST_CASE("memory sync section renders only when the loop has started",

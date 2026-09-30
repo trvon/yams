@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <cstdint>
+#include <filesystem>
 #include <iomanip>
 #include <sstream>
 #include <unordered_set>
@@ -379,7 +380,9 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createEmbeddingDerivations(),
             invalidateEmbeddingReadinessOnContentChanges(),
             dropSymbolExtractionSubsystem(),
-            bypassTopologyMetadataValueCountsTriggers()};
+            bypassTopologyMetadataValueCountsTriggers(),
+            createDocumentSnapshotMembership(),
+            removeLegacyGrammarArtifacts()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -3266,6 +3269,108 @@ Migration YamsMetadataMigrations::bypassTopologyMetadataValueCountsTriggers() {
         GROUP BY key, value
         ON CONFLICT(key, value) DO UPDATE SET count = excluded.count;
     )";
+    return m;
+}
+
+Migration YamsMetadataMigrations::createDocumentSnapshotMembership() {
+    Migration m;
+    m.version = 42;
+    m.name = "Record document snapshot membership in its own table";
+    m.created = std::chrono::system_clock::now();
+    // Membership was two metadata rows per (document, snapshot), snapshot_id:<id> and
+    // snapshot_time:<id>, never pruned. This only creates the table so startup stays fast;
+    // the repair service moves the legacy keys over in the background
+    // (MetadataRepository::migrateLegacySnapshotKeys).
+    m.upSQL = R"(
+        CREATE TABLE IF NOT EXISTS document_snapshots (
+            document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            snapshot_id TEXT NOT NULL,
+            snapshot_time INTEGER NOT NULL DEFAULT 0, -- unix epoch microseconds
+            PRIMARY KEY (document_id, snapshot_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_document_snapshots_snapshot
+            ON document_snapshots(snapshot_id);
+    )";
+    // Rows already moved out of metadata are not restored; downgrade loses that history.
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_document_snapshots_snapshot;
+        DROP TABLE IF EXISTS document_snapshots;
+    )";
+    return m;
+}
+
+namespace {
+
+// File names the removed grammar tooling wrote: libtree-sitter-<lang>.<so|dylib|dll> (plus
+// MSVC import/export side files sharing the stem).
+bool isLegacyGrammarLibrary(const std::filesystem::path& file) {
+    const auto name = file.filename().string();
+    return name.starts_with("libtree-sitter-") || name.starts_with("tree-sitter-");
+}
+
+void removeLegacyGrammarDirectory(const std::filesystem::path& dbPath) {
+    namespace fs = std::filesystem;
+    // Only a data directory's metadata database identifies a data directory; scratch or test
+    // databases elsewhere must never delete their neighbours.
+    if (dbPath.filename() != "yams.db" || dbPath.parent_path().empty()) {
+        return;
+    }
+    const auto grammars = dbPath.parent_path() / "grammars";
+    std::error_code ec;
+    const auto status = fs::symlink_status(grammars, ec);
+    if (ec || !fs::is_directory(status)) {
+        // Missing, or a symlink (possibly pointing outside the data directory): leave it.
+        return;
+    }
+
+    std::size_t removed = 0;
+    std::uintmax_t freedBytes = 0;
+    std::size_t kept = 0;
+    for (fs::directory_iterator it(grammars, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code entryEc;
+        const bool isFile = !it->is_symlink(entryEc) && it->is_regular_file(entryEc);
+        if (!isFile || !isLegacyGrammarLibrary(it->path())) {
+            ++kept;
+            continue;
+        }
+        const auto bytes = it->file_size(entryEc);
+        const auto counted = entryEc ? std::uintmax_t{0} : bytes;
+        if (fs::remove(it->path(), entryEc)) {
+            ++removed;
+            freedBytes += counted;
+        } else {
+            ++kept;
+        }
+    }
+    if (kept == 0 && !ec) {
+        fs::remove(grammars, ec);
+    }
+    if (removed > 0) {
+        spdlog::info("Removed {} unused tree-sitter grammar file(s) ({} KiB) from {}{}", removed,
+                     freedBytes / 1024, grammars.string(),
+                     kept > 0 ? "; other files there were left in place" : "");
+    }
+}
+
+} // namespace
+
+Migration YamsMetadataMigrations::removeLegacyGrammarArtifacts() {
+    Migration m;
+    m.version = 43;
+    m.name = "Remove unused tree-sitter grammars from the data directory";
+    m.created = std::chrono::system_clock::now();
+    // Filesystem only; nothing to wrap in a transaction and nothing to restore on rollback
+    // (the grammars were build artifacts of a feature removed in v0.20).
+    m.wrapInTransaction = false;
+    m.upFunc = [](Database& db) -> Result<void> {
+        try {
+            removeLegacyGrammarDirectory(std::filesystem::path(db.path()));
+        } catch (const std::exception& e) {
+            spdlog::info("Skipping unused grammar cleanup: {}", e.what());
+        }
+        return Result<void>();
+    };
+    m.downFunc = [](Database&) -> Result<void> { return Result<void>(); };
     return m;
 }
 

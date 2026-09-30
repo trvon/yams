@@ -277,6 +277,56 @@ TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and relo
     TuneAdvisor::setMemoryWarningThreshold(0.0);
 }
 
+TEST_CASE("ConfigResolver applies typed host pressure thresholds",
+          "[daemon][components][config][tuning][host_pressure][catch2]") {
+    const HostPressureThresholds defaults{};
+    ConfigResolver::ConfigSections sections;
+    sections["tuning.resource"] = {
+        {"host_pressure", "false"},       {"host_cpu_pressure_pct", "25"},
+        {"host_io_pressure_pct", "15.5"}, {"host_memory_pressure_pct", "5"},
+        {"host_load_per_cpu", "2.5"},     {"background_max_deferral_s", "90"}};
+
+    const auto applied = ConfigResolver::applyRuntimeTuning(sections, TuningConfig{});
+    CHECK_FALSE(TuneAdvisor::hostPressureEnabled());
+    auto thresholds = TuneAdvisor::hostPressureThresholds();
+    CHECK((thresholds.cpuSomePct == Catch::Approx(25.0)));
+    CHECK((thresholds.ioSomePct == Catch::Approx(15.5)));
+    CHECK((thresholds.memorySomePct == Catch::Approx(5.0)));
+    CHECK((thresholds.loadPerCpu == Catch::Approx(2.5)));
+    CHECK((TuneAdvisor::backgroundMaxDeferralMs() == 90'000u));
+    CHECK((applied.provenance.at("tuning.resource.host_cpu_pressure_pct") ==
+           "config:tuning.resource.host_cpu_pressure_pct"));
+    CHECK((applied.provenance.at("tuning.resource.host_pressure") ==
+           "config:tuning.resource.host_pressure"));
+
+    // Out-of-range values are rejected and leave the defaults in place.
+    sections["tuning.resource"] = {{"host_cpu_pressure_pct", "0"},
+                                   {"host_io_pressure_pct", "101"},
+                                   {"host_memory_pressure_pct", "-3"},
+                                   {"host_load_per_cpu", "0.01"},
+                                   {"background_max_deferral_s", "86401"}};
+    const auto rejected = ConfigResolver::applyRuntimeTuning(sections, TuningConfig{});
+    CHECK(TuneAdvisor::hostPressureEnabled());
+    thresholds = TuneAdvisor::hostPressureThresholds();
+    CHECK((thresholds.cpuSomePct == Catch::Approx(defaults.cpuSomePct)));
+    CHECK((thresholds.ioSomePct == Catch::Approx(defaults.ioSomePct)));
+    CHECK((thresholds.memorySomePct == Catch::Approx(defaults.memorySomePct)));
+    CHECK((thresholds.loadPerCpu == Catch::Approx(defaults.loadPerCpu)));
+    CHECK_FALSE(rejected.provenance.contains("tuning.resource.host_cpu_pressure_pct"));
+    CHECK((TuneAdvisor::backgroundMaxDeferralMs() == 300'000u));
+
+    // Zero is a valid setting: it turns background deferral off.
+    sections["tuning.resource"] = {{"background_max_deferral_s", "0"}};
+    (void)ConfigResolver::applyRuntimeTuning(sections, TuningConfig{});
+    CHECK((TuneAdvisor::backgroundMaxDeferralMs() == 0u));
+
+    // Removing the keys on reload restores the defaults.
+    (void)ConfigResolver::applyRuntimeTuning({}, TuningConfig{});
+    CHECK(TuneAdvisor::hostPressureEnabled());
+    CHECK((TuneAdvisor::backgroundMaxDeferralMs() == 300'000u));
+    CHECK((TuneAdvisor::hostPressureThresholds().cpuSomePct == Catch::Approx(defaults.cpuSomePct)));
+}
+
 TEST_CASE_METHOD(ConfigResolverFixture,
                  "Compatibility embedding runtime policy parses as strictly as the typed resolver",
                  "[daemon][components][config][embeddings][catch2]") {
@@ -478,6 +528,35 @@ TEST_CASE("ConfigResolver applies typed disk pressure policy transactionally",
     CHECK(config.diskPressure.warningFreePercent == accepted.warningFreePercent);
     CHECK(config.diskPressure.minimumWriteAdmissionBytes == accepted.minimumWriteAdmissionBytes);
     CHECK(config.diskPressure.emergencyReserveBytes == accepted.emergencyReserveBytes);
+}
+
+TEST_CASE("ConfigResolver applies typed daemon maintenance policy",
+          "[daemon][components][config][maintenance][catch2]") {
+    DaemonConfig defaults;
+    CHECK(defaults.maintenance.vectorVacuumInterval == std::chrono::hours{24});
+
+    ConfigResolver::ConfigSections sections;
+    sections["daemon.maintenance"] = {{"vector_vacuum_interval_hours", "6"}};
+    DaemonConfig config;
+    ConfigResolver::applyDaemonMaintenance(sections, config);
+    CHECK(config.maintenance.vectorVacuumInterval == std::chrono::hours{6});
+
+    sections["daemon.maintenance"] = {{"vector_vacuum_interval_hours", "0"}};
+    ConfigResolver::applyDaemonMaintenance(sections, config);
+    CHECK(config.maintenance.vectorVacuumInterval.count() == 0);
+
+    DaemonConfig invalid;
+    sections["daemon.maintenance"] = {{"vector_vacuum_interval_hours", "-3"}};
+    ConfigResolver::applyDaemonMaintenance(sections, invalid);
+    CHECK(invalid.maintenance.vectorVacuumInterval == std::chrono::hours{24});
+
+    CHECK(defaults.maintenance.sessionExpiry == std::chrono::days{30});
+    sections["daemon.maintenance"] = {{"session_expiry_days", "7"}};
+    ConfigResolver::applyDaemonMaintenance(sections, config);
+    CHECK(config.maintenance.sessionExpiry == std::chrono::days{7});
+    sections["daemon.maintenance"] = {{"session_expiry_days", "soon"}};
+    ConfigResolver::applyDaemonMaintenance(sections, config);
+    CHECK(config.maintenance.sessionExpiry == std::chrono::days{7});
 }
 
 TEST_CASE("ConfigResolver disk pressure policy rejects unsafe values",

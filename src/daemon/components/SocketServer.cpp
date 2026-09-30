@@ -407,7 +407,7 @@ Result<void> SocketServer::start() {
                          initialSlots);
         }
 
-        connectionSlots_ = std::make_unique<std::counting_semaphore<>>(initialSlots);
+        connectionSlots_ = std::make_shared<std::counting_semaphore<>>(initialSlots);
         slotLimit_.store(initialSlots, std::memory_order_relaxed);
         spdlog::info("SocketServer: bounded concurrency enabled (max {} slots)", initialSlots);
 
@@ -417,7 +417,7 @@ Result<void> SocketServer::start() {
             if (proxySlots == 0) {
                 proxySlots = 1;
             }
-            proxyConnectionSlots_ = std::make_unique<std::counting_semaphore<>>(proxySlots);
+            proxyConnectionSlots_ = std::make_shared<std::counting_semaphore<>>(proxySlots);
             spdlog::info("SocketServer: proxy bounded concurrency enabled (max {} slots)",
                          proxySlots);
         }
@@ -716,8 +716,9 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
 
         // IMPORTANT: Accept first, then try to acquire a slot.
         // If we acquire slots before accept(), we can starve the acceptor/backlog under load.
-        std::counting_semaphore<>* slots =
-            isProxy ? proxyConnectionSlots_.get() : connectionSlots_.get();
+        // Shared so a connection handler that outlives stop() can still release its slot.
+        std::shared_ptr<std::counting_semaphore<>> slots =
+            isProxy ? proxyConnectionSlots_ : connectionSlots_;
         try {
             // Use as_tuple to avoid exception overhead during shutdown
             auto [ec, socket] =
@@ -895,31 +896,33 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 spdlog::info("stream-trace: [conn={}] handler_spawned", conn_token);
             }
 
-            // Create a capturing lambda that releases the semaphore on completion
-            auto wrapped_handler = [this, conn_token, tracked, isProxy,
-                                    slots]() mutable -> awaitable<void> {
-                // RAII guard for semaphore - handles shrink debt for graceful downsizing
+            // Captureless coroutine lambda: its arguments are copied into the coroutine frame, so
+            // the frame never refers back to this accept-loop iteration. The frame co-owns the
+            // slot semaphore because SocketServer::stop() may release it while the handler is
+            // still draining.
+            auto wrapped_handler =
+                [](SocketServer* server, uint64_t token,
+                   std::shared_ptr<TrackedSocket> trackedSocket, bool proxyConn,
+                   std::shared_ptr<std::counting_semaphore<>> sem) -> awaitable<void> {
+                // Proxy connections hold a slot for their lifetime; return it on completion.
                 struct SemaphoreGuard {
-                    SocketServer* server;
-                    std::counting_semaphore<>* sem;
+                    std::shared_ptr<std::counting_semaphore<>> sem;
                     bool proxyConn;
                     ~SemaphoreGuard() {
-                        if (!sem || !server)
-                            return;
-                        if (proxyConn) {
+                        if (sem && proxyConn) {
                             sem->release();
-                            return;
                         }
                     }
-                } guard{this, slots, isProxy};
+                } guard{std::move(sem), proxyConn};
 
                 // Handle the connection with tracing token
-                co_await handle_connection(tracked, conn_token, isProxy);
+                co_await server->handle_connection(std::move(trackedSocket), token, proxyConn);
             };
 
             // Spawn detached; shutdown closes sockets/acceptors and waits for accept loops before
             // executor teardown.
-            co_spawn(connectionExecutor, wrapped_handler(), boost::asio::detached);
+            co_spawn(connectionExecutor, wrapped_handler(this, conn_token, tracked, isProxy, slots),
+                     boost::asio::detached);
 
         } catch (const std::exception& e) {
             if (!running_ || stopping_)
@@ -1044,11 +1047,17 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                     auto completion_exec =
                         boost::asio::get_associated_executor(*handlerPtr, executor);
 
+                    // The callback re-arms itself through a weak reference: a strong self-capture
+                    // is a cycle that leaked the callback and everything it holds (socket, timer,
+                    // tracked socket and this connection's completion handler, i.e. the frame).
+                    // The connection coroutine below owns the callback for its lifetime.
                     auto on_timer_fire =
                         std::make_shared<std::function<void(const boost::system::error_code&)>>();
+                    std::weak_ptr<std::function<void(const boost::system::error_code&)>> weak_self =
+                        on_timer_fire;
                     *on_timer_fire = [this, completed, handlerPtr, completion_exec, conn_token,
                                       created_at, lifetime, sock, tracked_for_timer, timer,
-                                      on_timer_fire](const boost::system::error_code& ec) mutable {
+                                      weak_self](const boost::system::error_code& ec) mutable {
                         if (ec == boost::asio::error::operation_aborted)
                             return;
                         if (completed->load(std::memory_order_acquire))
@@ -1057,8 +1066,10 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                             const auto now = std::chrono::steady_clock::now();
                             const auto last = tracked_for_timer->last_activity_at();
                             if (now - last < lifetime / 2) {
-                                timer->expires_after(lifetime / 2);
-                                timer->async_wait(*on_timer_fire);
+                                if (auto rearm = weak_self.lock()) {
+                                    timer->expires_after(lifetime / 2);
+                                    timer->async_wait(*rearm);
+                                }
                                 return;
                             }
                         }
@@ -1103,7 +1114,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                     boost::asio::co_spawn(
                         connection_strand,
                         [handler, sock, token, conn_token, timer, completed, handlerPtr,
-                         completion_exec,
+                         completion_exec, on_timer_fire,
                          on_activity =
                              std::move(on_activity)]() mutable -> boost::asio::awaitable<void> {
                             co_await handler->handle_connection(sock, token, conn_token,
@@ -1405,6 +1416,45 @@ bool SocketServer::resizeConnectionSlots(size_t newSize) {
                   newSize);
 
     return true;
+}
+
+void teardownSocketServer(std::unique_ptr<SocketServer>& server,
+                          std::unique_ptr<IOCoordinator>& ioCoordinator) noexcept {
+    // Connection handlers are coroutines on the IOCoordinator io_context that hold raw pointers
+    // into the SocketServer (cleanup guards, admission callbacks). stop() only waits a bounded
+    // time for them to drain, so the server must outlive every handler frame:
+    //   1. stop(): stop accepting, signal connections, drain; this also releases the acceptors
+    //      and the accept strand while the io_context is still running.
+    //   2. Stop and join the I/O threads, so no handler can resume.
+    //   3. Destroy the IOCoordinator; its io_context destroys the handler frames still queued on
+    //      it (and the sockets they own) while the server is still valid.
+    //   4. Destroy the server, which by now owns no io_context-bound object.
+    if (server) {
+        try {
+            auto stopResult = server->stop();
+            if (!stopResult) {
+                spdlog::warn("Socket server stop returned error: {}", stopResult.error().message);
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("Socket server stop exception: {}", e.what());
+        } catch (...) {
+            spdlog::warn("Socket server stop: unknown exception");
+        }
+    }
+
+    if (ioCoordinator) {
+        try {
+            ioCoordinator->stop();
+            ioCoordinator->join();
+        } catch (const std::exception& e) {
+            spdlog::warn("IOCoordinator stop exception: {}", e.what());
+        } catch (...) {
+            spdlog::warn("IOCoordinator stop: unknown exception");
+        }
+        ioCoordinator.reset();
+    }
+
+    server.reset();
 }
 
 double SocketServer::getSlotUtilization() const {

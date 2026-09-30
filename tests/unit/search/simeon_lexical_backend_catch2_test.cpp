@@ -2,10 +2,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -180,6 +182,60 @@ TEST_CASE("SimeonLexicalBackend buildAsync flips ready on small corpus",
     REQUIRE(build.has_value());
     REQUIRE(waitReady(backend, std::chrono::seconds(5)));
     CHECK(backend.doc_count() == 3u);
+}
+
+namespace {
+// Holds the first getContent() call of a build until the test releases it, so a shutdown request
+// can be issued while the build is provably mid-corpus.
+class GatedContentRepository final : public MetadataRepository {
+public:
+    using MetadataRepository::MetadataRepository;
+
+    Result<std::optional<DocumentContent>> getContent(int64_t documentId) override {
+        if (calls_.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            entered_.set_value();
+            releaseFuture_.wait();
+        }
+        return MetadataRepository::getContent(documentId);
+    }
+
+    bool waitEntered(std::chrono::milliseconds timeout) {
+        return enteredFuture_.wait_for(timeout) == std::future_status::ready;
+    }
+    void release() { release_.set_value(); }
+    std::size_t calls() const { return calls_.load(std::memory_order_acquire); }
+
+private:
+    std::atomic<std::size_t> calls_{0};
+    std::promise<void> entered_;
+    std::future<void> enteredFuture_{entered_.get_future()};
+    std::promise<void> release_;
+    std::shared_future<void> releaseFuture_{release_.get_future().share()};
+};
+} // namespace
+
+TEST_CASE("SimeonLexicalBackend stops a running build when shutdown is requested",
+          "[search][simeon][shutdown][catch2]") {
+    std::vector<std::pair<std::string, std::string>> docs;
+    for (int i = 0; i < 64; ++i) {
+        docs.emplace_back("hash_stop_" + std::to_string(i),
+                          "alpha beta gamma document " + std::to_string(i));
+    }
+    auto corpus = makeCorpus(docs);
+    auto gated = std::make_shared<GatedContentRepository>(*corpus.pool);
+
+    SimeonLexicalBackend backend(SimeonLexicalBackend::Config{});
+    REQUIRE(backend.buildAsync(gated).has_value());
+    REQUIRE(gated->waitEntered(std::chrono::seconds(5)));
+
+    // Daemon shutdown asks the build to stop before the engine is destroyed, so the build thread
+    // is already gone when SearchEngineManager::clearEngine() drops the engine.
+    backend.requestStop();
+    gated->release();
+
+    REQUIRE(waitNotBuilding(backend, std::chrono::seconds(5)));
+    CHECK_FALSE(backend.ready());
+    CHECK((gated->calls() <= 2U));
 }
 
 TEST_CASE("SimeonLexicalBackend skips build when corpus text budget is exceeded",

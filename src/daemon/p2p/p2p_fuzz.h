@@ -125,6 +125,22 @@ enum class InboundSessionStage : std::uint8_t {
     RegistryUpdate,
 };
 
+constexpr std::string_view inboundStageName(InboundSessionStage stage) noexcept {
+    switch (stage) {
+        case InboundSessionStage::Handshake:
+            return "handshake";
+        case InboundSessionStage::PeerHistory:
+            return "peer_history";
+        case InboundSessionStage::DeltaExchange:
+            return "delta_exchange";
+        case InboundSessionStage::PostExchangeHistory:
+            return "post_exchange_history";
+        case InboundSessionStage::RegistryUpdate:
+            return "registry_update";
+    }
+    return "unknown";
+}
+
 struct InboundSessionOutcome {
     InboundSessionStage stage{InboundSessionStage::Handshake};
     Result<void> result;

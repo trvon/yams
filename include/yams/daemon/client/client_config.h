@@ -45,7 +45,6 @@ struct ClientConfig {
     bool progressiveOutput = true;
     bool singleUseConnections = false;
     bool disableStreamingForLargeQueries = false;
-    bool acceptCompressed = false;
     ClientTransportMode transportMode = ClientTransportMode::Auto;
     std::optional<boost::asio::any_io_executor> executor;
     std::shared_ptr<IClientTransport> transport;

@@ -42,14 +42,18 @@ namespace yams::daemon::dispatch {
  * Uses boost::asio::async_initiate (non-experimental) to properly integrate
  * with the async operation model, posting completion back to the caller's executor.
  *
+ * The job runs inside a WorkCoordinator::JobScope so a shutdown join that times out can name
+ * the handler still holding the worker and how long it has been running.
+ *
  * @tparam Fn Callable type that returns the result
  * @param sm ServiceManager providing access to WorkCoordinator
+ * @param jobName String literal naming the job for shutdown diagnostics
  * @param fn The synchronous function to execute on a worker thread
  * @return awaitable yielding the result of fn()
  */
 template <typename Fn>
 inline boost::asio::awaitable<std::remove_cvref_t<std::invoke_result_t<Fn&>>>
-offload_to_worker(ServiceManager* sm, Fn&& fn) {
+offload_to_worker(ServiceManager* sm, const char* jobName, Fn&& fn) {
     using RawResult = std::invoke_result_t<Fn&>;
     using ResultType = std::remove_cvref_t<RawResult>;
     static_assert(!std::is_void_v<ResultType>, "offload_to_worker requires non-void result type");
@@ -68,13 +72,14 @@ offload_to_worker(ServiceManager* sm, Fn&& fn) {
 
     co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
                                                    void(const std::exception_ptr&, ResultType)>(
-        [work_executor](auto handler, auto f) mutable {
+        [work_executor, jobName](auto handler, auto f) mutable {
             // Post work to the worker thread pool
             boost::asio::post(
-                work_executor, [handler = std::move(handler), f = std::move(f)]() mutable {
+                work_executor, [handler = std::move(handler), f = std::move(f), jobName]() mutable {
                     std::exception_ptr ep;
                     ResultType result{};
                     try {
+                        WorkCoordinator::JobScope jobScope(jobName);
                         result = f();
                     } catch (...) {
                         ep = std::current_exception();
@@ -175,7 +180,7 @@ ensure_model_loaded(ServiceManager* sm, std::shared_ptr<IModelProvider> provider
     };
     co_return co_await yams::daemon::init::await_with_timeout<void>(
         [sm, run_load]() mutable -> boost::asio::awaitable<yams::Result<void>> {
-            co_return co_await offload_to_worker(sm, run_load);
+            co_return co_await offload_to_worker(sm, "model.load", run_load);
         },
         timeout_ms);
 }

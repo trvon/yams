@@ -170,7 +170,8 @@ struct MetricsSnapshot {
     uint32_t vectorDbDim{0};
 
     // Database init phase visibility (surfaced in `yams daemon status`).
-    // databasePhase is "" | "opening" | "recovering" | "migrating" | "ready".
+    // databasePhase is "" | "opening" | "checking_integrity" | "recovering" | "migrating"
+    // | "ready".
     std::string databasePhase;
     std::uint64_t databasePhaseElapsedMs{0};
     // Post-startup maintenance visibility, separate from database readiness.
@@ -275,6 +276,15 @@ struct MetricsSnapshot {
     uint64_t governorBudgetBytes{0};  // Memory budget limit
     uint8_t governorPressureLevel{0}; // 0=Normal, 1=Warning, 2=Critical, 3=Emergency
     uint8_t governorHeadroomPct{100}; // Scaling headroom (0-100%)
+
+    // Host pressure (other processes on the machine). Negative values mean "not measured".
+    std::string hostPressureSource;
+    bool hostPressureElevated{false};
+    double hostCpuPressurePct{-1.0};
+    double hostIoPressurePct{-1.0};
+    double hostMemoryPressurePct{-1.0};
+    double hostLoadPerCpu{-1.0};
+    std::string deferredBackgroundWork; // comma-separated
 
     // ONNX concurrency metrics
     uint32_t onnxTotalSlots{0};

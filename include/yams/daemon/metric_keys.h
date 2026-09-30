@@ -339,6 +339,9 @@ constexpr std::string_view kRepairService = "repair_service";
 constexpr std::string_view kVectorDbInitAttempted = "vector_db_init_attempted";
 constexpr std::string_view kVectorDbReady = "vector_db_ready";
 constexpr std::string_view kVectorDbDim = "vector_db_dim";
+// Present (and true) only when vectors are disabled by configuration, so clients can tell that
+// apart from a vector database that has not finished initializing.
+constexpr std::string_view kVectorDbDisabled = "vector_db_disabled";
 constexpr std::string_view kSearchEngineDegraded = "search_engine_degraded";
 constexpr std::string_view kEmbeddingReady = "embedding_ready";
 constexpr std::string_view kEmbeddingDegraded = "embedding_degraded";
@@ -376,6 +379,9 @@ namespace yams::daemon::dbphase {
 // and the StatusResponse.databasePhase IPC field. Pin the strings here so
 // daemon writers and CLI/MCP readers cannot drift.
 constexpr std::string_view kOpening = "opening";
+// Full metadata quick_check, run when no trusted clean-shutdown stamp exists.
+// It reads every page, so on a large database it can take many minutes.
+constexpr std::string_view kCheckingIntegrity = "checking_integrity";
 constexpr std::string_view kRecovering = "recovering";
 constexpr std::string_view kSalvaging = "salvaging";
 constexpr std::string_view kMigrating = "migrating";
@@ -404,6 +410,13 @@ constexpr std::string_view kMaintenancePhaseElapsedMs = "maintenance_phase_elaps
 constexpr std::string_view kDatabaseRecoveredAt = "database_recovered_at";
 constexpr std::string_view kDatabaseRecoveredFrom = "database_recovered_from";
 constexpr std::string_view kStorageWarning = "storage_warning";
+constexpr std::string_view kHostPressureSource = "host_pressure_source";
+constexpr std::string_view kHostPressureElevated = "host_pressure_elevated";
+constexpr std::string_view kHostCpuPressurePct = "host_cpu_pressure_pct";
+constexpr std::string_view kHostIoPressurePct = "host_io_pressure_pct";
+constexpr std::string_view kHostMemoryPressurePct = "host_memory_pressure_pct";
+constexpr std::string_view kHostLoadPerCpu = "host_load_per_cpu";
+constexpr std::string_view kDeferredBackgroundWork = "deferred_background_work";
 
 } // namespace yams::daemon::status_keys
 

@@ -203,6 +203,12 @@ template <> struct ProtoBinding<MemorySyncResponse> {
         out->set_mode(yams::common::sanitizeUtf8(response.mode));
         out->set_trust_mode(yams::common::sanitizeUtf8(response.trustMode));
         out->set_peer_count(response.peerCount);
+        out->set_inbound_sessions(response.inboundSessions);
+        out->set_inbound_failures(response.inboundFailures);
+        out->set_last_inbound_failure_stage(
+            yams::common::sanitizeUtf8(response.lastInboundFailureStage));
+        out->set_last_inbound_failure(yams::common::sanitizeUtf8(response.lastInboundFailure));
+        out->set_last_inbound_failure_age_ms(response.lastInboundFailureAgeMs);
     }
     static MemorySyncResponse get(const Envelope& env) {
         const auto& in = env.memory_sync_response();
@@ -221,7 +227,12 @@ template <> struct ProtoBinding<MemorySyncResponse> {
                                   in.corpus_epoch(),
                                   in.mode(),
                                   in.trust_mode(),
-                                  in.peer_count()};
+                                  in.peer_count(),
+                                  in.inbound_sessions(),
+                                  in.inbound_failures(),
+                                  in.last_inbound_failure_stage(),
+                                  in.last_inbound_failure(),
+                                  in.last_inbound_failure_age_ms()};
     }
 };
 
@@ -1544,6 +1555,22 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key(std::string(status_keys::kStorageWarning));
             kv->set_value(r.storageWarning);
         }
+        if (!r.hostPressureSource.empty()) {
+            const auto put = [&](std::string_view key, std::string value) {
+                auto* kv = o->add_request_counts();
+                kv->set_key(std::string(key));
+                kv->set_value(std::move(value));
+            };
+            put(status_keys::kHostPressureSource, r.hostPressureSource);
+            put(status_keys::kHostPressureElevated, r.hostPressureElevated ? "1" : "0");
+            put(status_keys::kHostCpuPressurePct, std::to_string(r.hostCpuPressurePct));
+            put(status_keys::kHostIoPressurePct, std::to_string(r.hostIoPressurePct));
+            put(status_keys::kHostMemoryPressurePct, std::to_string(r.hostMemoryPressurePct));
+            put(status_keys::kHostLoadPerCpu, std::to_string(r.hostLoadPerCpu));
+            if (!r.deferredBackgroundWork.empty()) {
+                put(status_keys::kDeferredBackgroundWork, r.deferredBackgroundWork);
+            }
+        }
         // readiness: bool->string
         for (const auto& [k, v] : r.readinessStates) {
             auto* kv = o->add_readiness();
@@ -1669,6 +1696,37 @@ template <> struct ProtoBinding<StatusResponse> {
             }
             if (kv.key() == status_keys::kStorageWarning) {
                 r.storageWarning = kv.value();
+                continue;
+            }
+            if (kv.key() == status_keys::kHostPressureSource) {
+                r.hostPressureSource = kv.value();
+                continue;
+            }
+            if (kv.key() == status_keys::kHostPressureElevated) {
+                r.hostPressureElevated = kv.value() == "1";
+                continue;
+            }
+            if (kv.key() == status_keys::kDeferredBackgroundWork) {
+                r.deferredBackgroundWork = kv.value();
+                continue;
+            }
+            const auto hostNumber = [&r](const std::string& key) -> double* {
+                if (key == status_keys::kHostCpuPressurePct)
+                    return &r.hostCpuPressurePct;
+                if (key == status_keys::kHostIoPressurePct)
+                    return &r.hostIoPressurePct;
+                if (key == status_keys::kHostMemoryPressurePct)
+                    return &r.hostMemoryPressurePct;
+                if (key == status_keys::kHostLoadPerCpu)
+                    return &r.hostLoadPerCpu;
+                return nullptr;
+            };
+            if (double* field = hostNumber(kv.key())) {
+                try {
+                    *field = std::stod(kv.value());
+                } catch (...) {
+                    *field = -1.0;
+                }
                 continue;
             }
             if (kv.key() == "content_store_root") {

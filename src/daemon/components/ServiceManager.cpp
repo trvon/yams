@@ -77,6 +77,7 @@
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/components/sqlite_vacuum.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
@@ -182,6 +183,10 @@ namespace yams::daemon {
 namespace {
 constexpr auto kTopologyOverlayRebuildMinAge = std::chrono::minutes(5);
 constexpr std::size_t kTopologyOverlayDirtyThreshold = 64;
+// How often a topology rebuild request re-checks while ingest work is still draining, and
+// while it is deferred for host pressure.
+constexpr auto kTopologyBusyRetryInterval = std::chrono::milliseconds(500);
+constexpr auto kTopologyDeferredRetryInterval = std::chrono::seconds(5);
 
 } // namespace
 
@@ -733,6 +738,19 @@ void ServiceManager::refreshRuntimeTuningStatus() {
             "tuning.resource.memory_hysteresis_ms");
         put("resource.cpu_hysteresis_ms", TuneAdvisor::cpuLevelHysteresisMs(),
             "tuning.resource.cpu_hysteresis_ms");
+        const auto hostThresholds = TuneAdvisor::hostPressureThresholds();
+        put("resource.host_pressure", TuneAdvisor::hostPressureEnabled(),
+            "tuning.resource.host_pressure");
+        put("resource.host_cpu_pressure_pct", hostThresholds.cpuSomePct,
+            "tuning.resource.host_cpu_pressure_pct");
+        put("resource.host_io_pressure_pct", hostThresholds.ioSomePct,
+            "tuning.resource.host_io_pressure_pct");
+        put("resource.host_memory_pressure_pct", hostThresholds.memorySomePct,
+            "tuning.resource.host_memory_pressure_pct");
+        put("resource.host_load_per_cpu", hostThresholds.loadPerCpu,
+            "tuning.resource.host_load_per_cpu");
+        put("resource.background_max_deferral_s", TuneAdvisor::backgroundMaxDeferralMs() / 1000u,
+            "tuning.resource.background_max_deferral_s");
         return true;
     });
 
@@ -767,6 +785,7 @@ yams::Result<void>
 ServiceManager::initializeImpl(const std::function<void()>& beforePoolConfigure) {
     // Clear any stale shutdown marker from prior daemon lifecycles in this process.
     setOnnxShutdownMarker(false);
+    shutdownCancellation_->store(false, std::memory_order_release);
 
     // Validate data directory synchronously to fail fast if unwritable
     namespace fs = std::filesystem;
@@ -1176,25 +1195,43 @@ void ServiceManager::quiesceServicesBeforeWorkerShutdown(
 void ServiceManager::stopWorkCoordinatorForShutdown(
     std::unique_ptr<CheckpointManager>& checkpointManagerHold) {
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
+    // Cancel before interrupting SQL: a handler whose statement fails with SQLITE_INTERRUPT must
+    // already observe the cancellation flag rather than retry or move on to the next query.
+    shutdownCancellation_->store(true, std::memory_order_release);
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
     if (databaseManager_) {
         databaseManager_->interruptPendingConnectionAcquiresForShutdown();
-        spdlog::info("[ServiceManager] Phase 4: Pending DB acquires interrupted");
+        const auto interrupted = databaseManager_->interruptActiveConnectionsForShutdown();
+        spdlog::info("[ServiceManager] Phase 4: Pending DB acquires interrupted; {} in-flight "
+                     "metadata statement(s) interrupted",
+                     interrupted);
     }
+    // Let the simeon-lexical build stop now; Phase 6.7 clearEngine() joins it.
+    searchEngineManager_.requestShutdown();
     if (workCoordinator_) {
         workCoordinator_->stop();
         spdlog::info("[ServiceManager] Phase 4: WorkCoordinator stop() called");
     }
 
     spdlog::info("[ServiceManager] Phase 5: Joining WorkCoordinator threads");
+    // SQLite drops an interrupt that lands between statements, so keep interrupting leased
+    // connections while the join waits: a handler that starts another statement after the first
+    // interrupt is aborted within one wait slice instead of running to completion.
+    const auto interruptInFlightStatements = [this]() {
+        if (databaseManager_) {
+            (void)databaseManager_->interruptActiveConnectionsForShutdown();
+        }
+    };
     bool workersQuiesced = true;
     if (workCoordinator_) {
         try {
-            if (!workCoordinator_->joinWithTimeout(shutdown_budget::kWorkCoordinatorJoinTimeout)) {
+            if (!workCoordinator_->joinWithTimeout(shutdown_budget::kWorkCoordinatorJoinTimeout,
+                                                   interruptInFlightStatements)) {
                 spdlog::info("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s; "
                              "retrying with extended timeout to avoid unsafe teardown races");
                 if (!workCoordinator_->joinWithTimeout(
-                        shutdown_budget::kWorkCoordinatorExtendedJoinTimeout)) {
+                        shutdown_budget::kWorkCoordinatorExtendedJoinTimeout,
+                        interruptInFlightStatements)) {
                     workersQuiesced = false;
                     spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired with workers "
                                  "still active; abandoning remaining workers to avoid "
@@ -1852,13 +1889,11 @@ void ServiceManager::runStartupSalvageIfNeeded(const std::filesystem::path& dbPa
         spdlog::warn("[ServiceManager] No documents found in any corrupt DB for salvage");
     }
 
-    auto cleanup = removeCorruptDbFiles(salvageDir);
-    if (!cleanup.removed.empty()) {
-        spdlog::info("[ServiceManager] Cleaned up {} corrupt DB file(s)", cleanup.removed.size());
-    }
-    for (const auto& err : cleanup.errors) {
-        spdlog::warn("[ServiceManager] Corrupt DB cleanup error: {}", err);
-    }
+    // Startup never deletes corrupt DBs, even after a successful salvage: they are the only copy
+    // of anything salvage missed. RepairService removes them later, once every document is
+    // confirmed in the live DB and the retention window has passed.
+    spdlog::info("[ServiceManager] Corrupt DB artifact(s) retained; the repair service removes "
+                 "them after salvage is confirmed and the retention window has passed");
 
     setMaintenancePhase(maintenance_phase::kIdle);
     setDatabasePhase(dbphase::kReady);
@@ -3000,17 +3035,18 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
         tempDb->close();
         if (message.find("malformed") != std::string::npos ||
             message.find("corrupt") != std::string::npos) {
-            spdlog::warn("[ServiceManager] Removing malformed stale WAL/SHM sidecars; "
-                         "metadata DB will continue from its last checkpoint");
-            for (const auto& suffix : {"-wal", "-shm"}) {
-                std::error_code sidecarEc;
-                const auto sidecarPath = std::filesystem::path(dbPath.string() + suffix);
-                if (std::filesystem::exists(sidecarPath, sidecarEc)) {
-                    std::filesystem::remove(sidecarPath, sidecarEc);
-                    if (sidecarEc) {
-                        spdlog::debug("[ServiceManager] stale SQLite sidecar cleanup failed: {}",
-                                      sidecarEc.message());
-                    }
+            // The WAL may still hold committed transactions that were never checkpointed.
+            // Move it aside rather than deleting it so the data stays recoverable.
+            auto quarantined = quarantineSqliteSidecars(dbPath);
+            if (!quarantined) {
+                spdlog::error("[ServiceManager] Could not quarantine malformed stale WAL/SHM "
+                              "sidecars: {}",
+                              quarantined.error().message);
+            } else {
+                for (const auto& path : quarantined.value()) {
+                    spdlog::warn("[ServiceManager] Quarantined malformed stale SQLite sidecar to "
+                                 "{}; metadata DB will continue from its last checkpoint",
+                                 path.string());
                 }
             }
         } else {
@@ -3115,28 +3151,7 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(
 
 bool ServiceManager::shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
                                       std::uint64_t freePageCount, std::uint64_t pageSize) {
-    constexpr std::uintmax_t kAutoVacuumThreshold = 512ULL * 1024 * 1024;
-    constexpr std::uint64_t kMinReclaimableBytes = 128ULL * 1024 * 1024;
-    constexpr double kMinReclaimableRatio = 0.10;
-    if (databaseBytes <= kAutoVacuumThreshold || pageCount == 0 || pageSize == 0 ||
-        freePageCount > pageCount) {
-        return false;
-    }
-    if (freePageCount > std::numeric_limits<std::uint64_t>::max() / pageSize ||
-        pageCount > std::numeric_limits<std::uint64_t>::max() / pageSize) {
-        return false;
-    }
-    const auto reclaimablePageBytes = freePageCount * pageSize;
-    const auto logicalBytes = pageCount * pageSize;
-    const auto reclaimableTailBytes =
-        databaseBytes > logicalBytes ? databaseBytes - logicalBytes : 0;
-    const auto reclaimablePageRatio = static_cast<double>(freePageCount) / pageCount;
-    const auto reclaimableTailRatio =
-        static_cast<double>(reclaimableTailBytes) / static_cast<double>(databaseBytes);
-    return (reclaimablePageBytes >= kMinReclaimableBytes &&
-            reclaimablePageRatio >= kMinReclaimableRatio) ||
-           (reclaimableTailBytes >= kMinReclaimableBytes &&
-            reclaimableTailRatio >= kMinReclaimableRatio);
+    return shouldVacuumSqlite(databaseBytes, pageCount, freePageCount, pageSize);
 }
 
 void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath) {
@@ -3148,7 +3163,7 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
 
     constexpr std::uintmax_t kMiB = 1024ULL * 1024ULL;
     const auto spaceInfo = std::filesystem::space(dbPath.parent_path(), ec);
-    if (ec || spaceInfo.available <= dbSize) {
+    if (ec || !hasSpaceForSqliteVacuum(dbSize, spaceInfo.available)) {
         spdlog::info("[ServiceManager] DB file is {} MB but only {} MB free; skipping "
                      "auto-VACUUM",
                      dbSize / kMiB, ec ? 0 : spaceInfo.available / kMiB);
@@ -3296,6 +3311,7 @@ bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath,
         } else {
             spdlog::info("[ServiceManager] Running full metadata integrity check: {}",
                          stampDecision.reason);
+            setDatabasePhase(dbphase::kCheckingIntegrity);
             if (!ensureDatabaseIntegrityOrRecover(dbPath, database)) {
                 return false;
             }
@@ -3345,7 +3361,7 @@ ServiceManager::co_openDatabase(const std::filesystem::path& dbPath, int /*timeo
     // volumes doesn't look like a hang. Terminates as soon as `completed` flips.
     boost::asio::co_spawn(
         ex,
-        [completed, dbPath, startedAt, ex]() -> boost::asio::awaitable<void> {
+        [this, completed, dbPath, startedAt, ex]() -> boost::asio::awaitable<void> {
             using namespace std::chrono_literals;
             boost::asio::steady_timer timer(ex);
             while (!completed->load(std::memory_order_acquire)) {
@@ -3358,8 +3374,19 @@ ServiceManager::co_openDatabase(const std::filesystem::path& dbPath, int /*timeo
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                                    std::chrono::steady_clock::now() - startedAt)
                                    .count();
-                spdlog::info("[ServiceManager] still opening database '{}' ({}s elapsed)",
-                             dbPath.string(), elapsed);
+                std::string phase;
+                {
+                    std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
+                    phase = state_.readiness.databasePhase;
+                }
+                if (phase == dbphase::kCheckingIntegrity) {
+                    spdlog::info("[ServiceManager] still checking metadata integrity of '{}' "
+                                 "({}s elapsed; full scan because no clean-shutdown stamp)",
+                                 dbPath.string(), elapsed);
+                } else {
+                    spdlog::info("[ServiceManager] still opening database '{}' ({}s elapsed)",
+                                 dbPath.string(), elapsed);
+                }
             }
             co_return;
         },
@@ -3900,6 +3927,7 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
                                 ? graphQueryServiceOverride_
                                 : (graphComponent ? graphComponent->getQueryService() : nullptr);
     ctx.contentExtractors = getContentExtractors();
+    ctx.cancellationSignal = shutdownCancellation_;
 
     // Log vector capability status
     auto modelProvider = loadModelProvider();
@@ -3993,8 +4021,9 @@ ServiceManager::co_ensureEmbeddingModelReady(const std::string& requestedModel,
                                              std::function<void(const ModelLoadEvent&)> progress,
                                              int timeoutMs, bool keepHot, bool warmup) {
     co_return co_await yams::daemon::dispatch::offload_to_worker(
-        this, [this, requestedModel, progress = std::move(progress), timeoutMs, keepHot,
-               warmup]() mutable {
+        this, "embedding.ensure_model_ready",
+        [this, requestedModel, progress = std::move(progress), timeoutMs, keepHot,
+         warmup]() mutable {
             return ensureEmbeddingModelReadySync(requestedModel, std::move(progress), timeoutMs,
                                                  keepHot, warmup);
         });
@@ -4235,12 +4264,25 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
             const auto kgQueued = writeCoordinator ? writeCoordinator->queuedBatches() : 0U;
             const auto kgInFlight = writeCoordinator ? writeCoordinator->inFlight() : 0U;
 
+            // While ingest, post-ingest, embedding or KG work is still running, check again
+            // shortly. Re-posting immediately here kept one worker spinning at 100% for the
+            // whole ingest, and longer still on a loaded host where that work drains slowly.
             if (ingestMetrics.queued > 0 || ingestMetrics.active > 0 || postQueued > 0 ||
                 postInFlight > 0 || embedQueued > 0 || embedInFlight > 0 || kgQueued > 0 ||
                 kgInFlight > 0) {
                 self->topologyRebuildPending_.store(true, std::memory_order_release);
                 self->topologyRebuildInProgress_.store(false, std::memory_order_release);
-                self->requestTopologyRebuild(reason);
+                self->scheduleTopologyRebuildRetry(reason, kTopologyBusyRetryInterval);
+                return;
+            }
+
+            // Topology rebuilds are deferrable: while other processes keep the host busy the
+            // dirty set keeps accumulating and one rebuild covers it once the host calms down
+            // (or once the starvation guard lets a pass through).
+            if (!ResourceGovernor::instance().admitDeferrable(DeferrableWork::TopologyRebuild)) {
+                self->topologyRebuildPending_.store(true, std::memory_order_release);
+                self->topologyRebuildInProgress_.store(false, std::memory_order_release);
+                self->scheduleTopologyRebuildRetry(reason, kTopologyDeferredRetryInterval);
                 return;
             }
 
@@ -4294,6 +4336,27 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
     });
 }
 
+void ServiceManager::scheduleTopologyRebuildRetry(const std::string& reason,
+                                                  std::chrono::milliseconds delay) {
+    bool notArmed = false;
+    if (!topologyRebuildRetryArmed_.compare_exchange_strong(notArmed, true,
+                                                            std::memory_order_acq_rel)) {
+        return; // a retry is already pending and will pick up the dirty set
+    }
+    auto weakSelf = weak_from_this();
+    auto retry = std::make_shared<boost::asio::steady_timer>(getWorkerExecutor(), delay);
+    retry->async_wait([weakSelf, reason, retry](const boost::system::error_code& ec) {
+        auto self = weakSelf.lock();
+        if (!self) {
+            return;
+        }
+        self->topologyRebuildRetryArmed_.store(false, std::memory_order_release);
+        if (!ec) {
+            self->requestTopologyRebuild(reason);
+        }
+    });
+}
+
 void ServiceManager::requestSemanticTopologyMaintenance(const std::string& reason) {
     if (shutdownInvoked_.load(std::memory_order_acquire))
         return;
@@ -4332,6 +4395,12 @@ void ServiceManager::requestSemanticTopologyMaintenance(const std::string& reaso
                 clearScheduled();
                 return;
             }
+            // Deferrable like the rebuild itself; the overlay stays dirty and the next drain
+            // schedules maintenance again.
+            if (!ResourceGovernor::instance().admitDeferrable(DeferrableWork::TopologyRebuild)) {
+                clearScheduled();
+                return;
+            }
 
             auto maintenance =
                 graphComponent->maintainSemanticTopologyForDocuments(dirtyForMaintenance, false);
@@ -4360,6 +4429,8 @@ void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
     rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
     rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
     rcfg.maxPendingRepairs = config_.maxPendingRepairs;
+    rcfg.vectorVacuumInterval = config_.maintenance.vectorVacuumInterval;
+    rcfg.sessionExpiry = config_.maintenance.sessionExpiry;
     repairServiceHost_.start(std::move(rcfg), &state_, std::move(activeConnFn),
                              makeRepairServiceContext(this));
 }

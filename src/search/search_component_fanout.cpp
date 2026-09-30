@@ -19,7 +19,7 @@ ComponentStatus ComponentFanoutCollector::collect(Future& future, const char* na
     auto waitStart = std::chrono::steady_clock::now();
 
     std::future_status status = std::future_status::deferred;
-    if (!cancellationSignal_) {
+    if (!cancellable()) {
         if (config_.componentTimeout.count() == 0) {
             future.wait();
             status = std::future_status::ready;
@@ -32,7 +32,7 @@ ComponentStatus ComponentFanoutCollector::collect(Future& future, const char* na
                                   ? waitStart + config_.componentTimeout
                                   : std::chrono::steady_clock::time_point::max();
         while (status != std::future_status::ready) {
-            if (cancellationSignal_->load(std::memory_order_acquire)) {
+            if (canceled()) {
                 spdlog::debug("Parallel {} query abandoned after request cancellation", name);
                 return ComponentStatus::Canceled;
             }

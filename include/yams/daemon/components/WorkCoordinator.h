@@ -20,9 +20,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -84,6 +87,7 @@ class WorkCoordinator {
 private:
     struct DetachedCancellationState;
     struct ProgressProbeState;
+    struct JobSlots;
     struct DetachedCancellationRequest {
         std::shared_ptr<boost::asio::cancellation_signal> signal;
         boost::asio::any_io_executor executor;
@@ -157,9 +161,12 @@ public:
      * up when the process terminates.
      *
      * @param timeout Maximum time to wait for workers to exit
+     * @param whileWaiting Optional hook run on the joining thread between wait slices (~50 ms),
+     *        e.g. to keep interrupting work that pins a worker. Runs without internal locks held.
      * @return true if all workers joined within timeout, false if timeout expired
      */
-    bool joinWithTimeout(std::chrono::milliseconds timeout);
+    bool joinWithTimeout(std::chrono::milliseconds timeout,
+                         const std::function<void()>& whileWaiting = {});
 
     /**
      * @brief Detach any remaining worker threads and abandon coordinated shutdown.
@@ -194,8 +201,54 @@ public:
      */
     [[nodiscard]] boost::asio::any_io_executor getPriorityExecutor(Priority priority) const;
 
-    template <typename Fn> void post(Priority priority, Fn&& fn) const {
-        boost::asio::post(getPriorityExecutor(priority), std::forward<Fn>(fn));
+    /**
+     * @brief Records the job a worker thread is running for shutdown diagnostics.
+     *
+     * Opening a scope on a WorkCoordinator worker publishes `name` and the start time in that
+     * worker's slot until the scope closes; nested scopes restore the enclosing job. On any other
+     * thread the scope is a no-op. `name` must have static storage duration (a string literal):
+     * the slot stores the pointer so publishing a job costs two relaxed atomic stores.
+     */
+    class JobScope {
+    public:
+        explicit JobScope(const char* name) noexcept;
+        ~JobScope();
+
+        JobScope(const JobScope&) = delete;
+        JobScope& operator=(const JobScope&) = delete;
+        JobScope(JobScope&&) = delete;
+        JobScope& operator=(JobScope&&) = delete;
+
+    private:
+        void* slot_ = nullptr;
+        const char* previousName_ = nullptr;
+        std::int64_t previousStartNs_ = 0;
+    };
+
+    /// A worker that is currently inside a named job.
+    struct ActiveJob {
+        std::size_t workerIndex{0};
+        std::string name;
+        std::chrono::milliseconds age{0};
+    };
+
+    /**
+     * @brief Snapshot the named jobs currently running on worker threads.
+     *
+     * Workers that are idle, or running a handler posted without a JobScope, are not listed.
+     */
+    [[nodiscard]] std::vector<ActiveJob> activeJobs() const;
+
+    /**
+     * @brief Post `fn` to a priority executor, naming it for shutdown diagnostics.
+     * @param name String literal naming the job (see JobScope).
+     */
+    template <typename Fn> void post(Priority priority, const char* name, Fn&& fn) const {
+        boost::asio::post(getPriorityExecutor(priority),
+                          [name, fn = std::forward<Fn>(fn)]() mutable {
+                              JobScope scope(name);
+                              fn();
+                          });
     }
 
     /**
@@ -334,6 +387,10 @@ private:
 
     /// Registry of serialized per-coroutine cancellation requests used by spawnDetached().
     std::shared_ptr<DetachedCancellationState> detachedCancellationState_;
+
+    /// Per-worker "current job" slots. Shared with the worker threads so a worker abandoned at
+    /// shutdown never writes into a slot array freed with the coordinator.
+    std::shared_ptr<JobSlots> jobSlots_;
 };
 
 } // namespace yams::daemon

@@ -451,22 +451,12 @@ TEST_CASE("IntegrationSmoke.GraphExploreRendersAgentContext", "[smoke][integrati
     const auto global = nlohmann::json::parse(globalOut);
     CHECK((global["entrySymbols"].size() == 2));
 
+    // --impact walked code-symbol edges that v0.20 removed; the flag is gone, not a no-op.
     std::string impactOut;
     const int impactRc =
         run_cli({"yams", "graph", "--impact", "exploreTarget", "--json"}, &impactOut);
     INFO(impactOut);
-    REQUIRE((impactRc == 0));
-    const auto impact = nlohmann::json::parse(impactOut);
-    // Impact analysis walked code-symbol edges, which v0.20 no longer produces.
-    CHECK(impact["affectedSymbols"].empty());
-    REQUIRE(impact["warnings"].is_array());
-    bool reportsRemoval = false;
-    for (const auto& warning : impact["warnings"]) {
-        if (warning.get<std::string>().find("removed in v0.20") != std::string::npos) {
-            reportsRemoval = true;
-        }
-    }
-    CHECK(reportsRemoval);
+    CHECK((impactRc != 0));
 }
 
 TEST_CASE("IntegrationSmoke.GraphTopologyModesReadStoredSnapshot", "[smoke][integrationsmoke]") {

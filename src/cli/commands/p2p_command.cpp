@@ -190,7 +190,14 @@ Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, boo
             << " auth_failures=" << response.authFailures
             << " successful_cycles=" << response.successfulCycles
             << " failed_cycles=" << response.failedCycles
-            << " last_success_age_ms=" << response.lastSuccessAgeMs;
+            << " last_success_age_ms=" << response.lastSuccessAgeMs
+            << " inbound_sessions=" << response.inboundSessions
+            << " inbound_failures=" << response.inboundFailures;
+        if (response.inboundFailures > 0) {
+            out << "\nlast inbound failure (" << response.lastInboundFailureAgeMs / 1000
+                << "s ago) at " << response.lastInboundFailureStage << ": "
+                << response.lastInboundFailure;
+        }
         return out.str();
     }
     nlohmann::json output;
@@ -209,6 +216,13 @@ Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, boo
     // pi-lens-ignore: clang:no_member -- additive response field is compiled by Meson.
     output["peer_count"] = response.peerCount;
     output["started"] = response.started;
+    output["inbound_sessions"] = response.inboundSessions;
+    output["inbound_failures"] = response.inboundFailures;
+    if (response.inboundFailures > 0) {
+        output["last_inbound_failure"] = {{"stage", response.lastInboundFailureStage},
+                                          {"error", response.lastInboundFailure},
+                                          {"age_ms", response.lastInboundFailureAgeMs}};
+    }
     return output.dump(2);
 }
 

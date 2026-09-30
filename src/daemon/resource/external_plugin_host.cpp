@@ -214,13 +214,12 @@ struct ExternalPluginHost::Impl {
                 firstRefusal = removed_interface_refusals.insert(canonical_path).second;
             }
             if (firstRefusal) {
-                spdlog::warn("ExternalPluginHost: skipping plugin '{}' ({}): the {} interface "
-                             "was removed in v0.20",
-                             desc->name, file.string(), kRemovedSymbolExtractorInterface);
+                spdlog::info("ExternalPluginHost: skipping plugin '{}': it implements {}, which "
+                             "was removed in v0.20. The file is unused and can be deleted: {}",
+                             desc->name, kRemovedSymbolExtractorInterface, file.string());
             }
             return Error{ErrorCode::NotSupported,
-                         "Plugin declares the removed symbol_extractor_v1 interface: " +
-                             file.string()};
+                         std::string(kRemovedSymbolExtractorRefusal) + file.string()};
         }
 
         // Cache the result

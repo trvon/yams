@@ -291,10 +291,12 @@ public:
                     }
 
                 } else if (resp.hasContent) {
-                    // Content retrieval
+                    // Content retrieval. DaemonClient decodes compressed transfers, so this is
+                    // always the document itself.
+                    const std::string* content = &resp.content;
                     if (outputPath_.empty() || outputPath_ == "-") {
                         // Output to stdout
-                        std::cout << resp.content;
+                        std::cout << *content;
                     } else {
                         // Write to file
                         std::ofstream outFile(outputPath_, std::ios::binary);
@@ -302,7 +304,8 @@ public:
                             return Error{ErrorCode::WriteError,
                                          "Cannot open output file: " + outputPath_.string()};
                         }
-                        outFile.write(resp.content.data(), resp.content.size());
+                        outFile.write(content->data(),
+                                      static_cast<std::streamsize>(content->size()));
                         outFile.close();
 
                         if (verbose_) {

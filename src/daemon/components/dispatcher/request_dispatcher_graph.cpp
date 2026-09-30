@@ -185,36 +185,6 @@ GraphTraceResponse mapGraphTraceResponse(const app::services::GraphTraceResponse
     return out;
 }
 
-GraphImpactResponse mapGraphImpactResponse(const app::services::GraphImpactResponse& in) {
-    GraphImpactResponse out;
-    out.symbol = in.symbol;
-    out.truncated = in.truncated;
-    out.warnings = in.warnings;
-    out.affectedSymbols.reserve(in.affectedSymbols.size());
-    for (const auto& symbol : in.affectedSymbols) {
-        out.affectedSymbols.push_back(mapGraphExploreSymbol(symbol));
-    }
-    out.relationships.reserve(in.relationships.size());
-    for (const auto& relation : in.relationships) {
-        out.relationships.push_back(mapGraphRelation(relation));
-    }
-    return out;
-}
-
-GraphAffectedTestsResponse
-mapGraphAffectedTestsResponse(const app::services::GraphAffectedTestsResponse& in) {
-    GraphAffectedTestsResponse out;
-    out.changedFiles = in.changedFiles;
-    out.affectedTests = in.affectedTests;
-    out.truncated = in.truncated;
-    out.warnings = in.warnings;
-    out.relationships.reserve(in.relationships.size());
-    for (const auto& relation : in.relationships) {
-        out.relationships.push_back(mapGraphRelation(relation));
-    }
-    return out;
-}
-
 } // namespace
 
 using namespace yams::app::services;
@@ -458,67 +428,21 @@ RequestDispatcher::handleGraphTraceRequest(const GraphTraceRequest& req) {
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGraphImpactRequest(const GraphImpactRequest& req) {
-    YAMS_ZONE_SCOPED_N("dispatch::graphImpact");
-    auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
-    if (!metaRepo) {
-        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
-                                              "Metadata repository unavailable");
-    }
-    auto kgStore = metaRepo->getKnowledgeGraphStore();
-    if (!kgStore) {
-        GraphImpactResponse resp;
-        resp.symbol = req.symbol;
-        resp.warnings.push_back("Knowledge graph not available");
-        co_return resp;
-    }
-    auto graphService = app::services::makeGraphContextService(kgStore, metaRepo);
-    if (!graphService) {
-        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
-                                              "Failed to create graph context service");
-    }
-    app::services::GraphImpactRequest serviceReq;
-    serviceReq.symbol = req.symbol;
-    serviceReq.scopePathPrefix = req.scopePathPrefix;
-    serviceReq.depth = static_cast<std::size_t>(req.depth);
-    serviceReq.budget.maxSymbols = static_cast<std::size_t>(req.maxSymbols);
-
-    auto result = graphService->impact(serviceReq);
-    if (!result) {
-        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
-    }
-    co_return mapGraphImpactResponse(result.value());
+    // Impact analysis walked code-symbol edges removed in v0.20. Keep answering the message so
+    // older clients get an explanation instead of an unknown-request error.
+    GraphImpactResponse resp;
+    resp.symbol = req.symbol;
+    resp.warnings.emplace_back(app::services::kImpactNeedsSymbolGraphWarning);
+    co_return resp;
 }
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGraphAffectedTestsRequest(const GraphAffectedTestsRequest& req) {
-    YAMS_ZONE_SCOPED_N("dispatch::graphAffectedTests");
-    auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
-    if (!metaRepo) {
-        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
-                                              "Metadata repository unavailable");
-    }
-    auto kgStore = metaRepo->getKnowledgeGraphStore();
-    if (!kgStore) {
-        GraphAffectedTestsResponse resp;
-        resp.changedFiles = req.changedFiles;
-        resp.warnings.push_back("Knowledge graph not available");
-        co_return resp;
-    }
-    auto graphService = app::services::makeGraphContextService(kgStore, metaRepo);
-    if (!graphService) {
-        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
-                                              "Failed to create graph context service");
-    }
-    app::services::GraphAffectedTestsRequest serviceReq;
-    serviceReq.changedFiles = req.changedFiles;
-    serviceReq.depth = static_cast<std::size_t>(req.depth);
-    serviceReq.testPathPattern = req.testPathPattern;
-
-    auto result = graphService->affectedTests(serviceReq);
-    if (!result) {
-        co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
-    }
-    co_return mapGraphAffectedTestsResponse(result.value());
+    // Affected-test analysis walked code-symbol edges removed in v0.20; see handleGraphImpact.
+    GraphAffectedTestsResponse resp;
+    resp.changedFiles = req.changedFiles;
+    resp.warnings.emplace_back(app::services::kAffectedTestsNeedSymbolGraphWarning);
+    co_return resp;
 }
 
 // PBI-093: Helper for listByType mode - list KG nodes by type without traversal

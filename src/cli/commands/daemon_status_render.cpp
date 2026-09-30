@@ -177,11 +177,62 @@ std::string neutralText(const std::string& text) {
     return colorize(text, Ansi::WHITE);
 }
 
+/// "Host Load" row: Calm/Busy plus the host signal and any deferred background work.
+std::optional<yams::cli::ui::Row> hostLoadRow(const yams::daemon::StatusResponse& s) {
+    if (s.hostPressureSource.empty() || s.hostPressureSource == "unavailable") {
+        return std::nullopt;
+    }
+    std::ostringstream detail;
+    const auto pct = [&detail](const char* label, double value, bool& first) {
+        if (value < 0.0) {
+            return;
+        }
+        detail << (first ? "" : " · ") << label << " " << static_cast<int>(value) << "%";
+        first = false;
+    };
+    bool first = true;
+    if (s.hostPressureSource == "psi") {
+        pct("cpu", s.hostCpuPressurePct, first);
+        pct("io", s.hostIoPressurePct, first);
+        pct("mem", s.hostMemoryPressurePct, first);
+    } else if (s.hostLoadPerCpu >= 0.0) {
+        detail << "load " << std::fixed << std::setprecision(2) << s.hostLoadPerCpu << "/cpu";
+        first = false;
+    }
+    if (!s.deferredBackgroundWork.empty()) {
+        std::string deferred = s.deferredBackgroundWork;
+        for (std::size_t pos = deferred.find(','); pos != std::string::npos;
+             pos = deferred.find(',', pos + 2)) {
+            deferred.replace(pos, 1, ", ");
+        }
+        std::replace(deferred.begin(), deferred.end(), '_', ' ');
+        detail << (first ? "" : " · ") << "deferring " << deferred;
+    }
+    return yams::cli::ui::Row{"Host Load",
+                              paintStatus(s.hostPressureElevated ? Severity::Warn : Severity::Good,
+                                          s.hostPressureElevated ? "Busy" : "Calm"),
+                              detail.str()};
+}
+
 // Human label for the wire code published under kRepairCurrentOperationCode.
 std::string repairOperationLabel(uint64_t code) {
     std::string label(yams::daemon::metrics::repairOperationNameForCode(code));
     std::replace(label.begin(), label.end(), '_', ' ');
     return label;
+}
+
+// The daemon publishes vector_db_disabled only when vectors are off by configuration. Anything
+// else with no vector init attempt yet is still starting (e.g. the metadata integrity check).
+bool vectorsDisabledByConfiguration(const yams::daemon::StatusResponse& s) {
+    const auto it = s.readinessStates.find(std::string(yams::daemon::readiness::kVectorDbDisabled));
+    return it != s.readinessStates.end() && it->second;
+}
+
+std::string vectorInitPendingDetail(const yams::daemon::StatusResponse& s) {
+    if (!s.databasePhase.empty() && s.databasePhase != yams::daemon::dbphase::kReady) {
+        return "waiting for database (" + humanizeToken(s.databasePhase) + ")";
+    }
+    return "initializing";
 }
 
 } // namespace
@@ -392,6 +443,9 @@ void renderDaemonStatusBrief(const yams::daemon::StatusResponse& s,
             {"Memory",
              paintStatus(memSev, std::to_string(static_cast<int>(s.memoryUsageMb)) + " MB"), ""});
     }
+    if (auto hostRow = hostLoadRow(s)) {
+        overview.push_back(std::move(*hostRow));
+    }
 
     // Database phase visibility: lets the user tell a slow open / repair from a hang.
     {
@@ -413,6 +467,13 @@ void renderDaemonStatusBrief(const yams::daemon::StatusResponse& s,
                     extra += " · ";
                 extra += s.metadataDbPath;
             }
+        } else if (phase == dbphase::kCheckingIntegrity) {
+            // Full quick_check after a start without a trusted clean-shutdown stamp. It
+            // reads every page, so say so; "Opening" made a long scan look like a hang.
+            label = "Checking integrity";
+            extra = elapsedSec.empty() ? std::string("full scan after unclean stop")
+                                       : elapsedSec + " · full scan after unclean stop";
+            dbSev = Severity::Warn;
         } else if (phase == dbphase::kRecovering) {
             label = "Repairing";
             extra = elapsedSec.empty() ? std::string("quarantining corrupt DB")
@@ -527,11 +588,14 @@ void renderDaemonStatusBrief(const yams::daemon::StatusResponse& s,
         return it == s.initProgress.end() ? 0 : it->second;
     }();
 
-    if (vectorDisabled) {
+    if (vectorsDisabledByConfiguration(s)) {
         // Vectors are disabled by configuration (e.g. YAMS_DISABLE_VECTORS=1 or an
         // empty vector config); this is intentional, not a rebuild failure.
         overview.push_back(
             {"Vector Index", paintStatus(Severity::Good, "disabled"), "by configuration"});
+    } else if (vectorDisabled) {
+        overview.push_back(
+            {"Vector Index", paintStatus(Severity::Warn, "pending"), vectorInitPendingDetail(s)});
     }
 
     if (topologyRebuildRunning || (!vectorDisabled && !vectorIndexReady)) {
@@ -814,6 +878,9 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
     Severity workerSeverity =
         util >= 95 ? Severity::Bad : (util >= 85 ? Severity::Warn : Severity::Good);
     resourceRows.push_back({"Workers", paintStatus(workerSeverity, workerVal.str()), ""});
+    if (auto hostRow = hostLoadRow(status)) {
+        resourceRows.push_back(std::move(*hostRow));
+    }
     render_rows(os, resourceRows);
 
     // Resource Governor section (memory pressure management)
@@ -1159,7 +1226,8 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
             indexLabel = "HNSW Index";
         }
         if (vectorDisabled) {
-            indexState << "disabled (by configuration)";
+            indexState << (vectorsDisabledByConfiguration(status) ? "disabled (by configuration)"
+                                                                  : "pending");
         } else if (vectorIndexReady) {
             indexState << "ready";
         } else {
@@ -1307,12 +1375,17 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
     {
         const bool ready = getReadiness("vector_db");
         const bool initialized = status.vectorDbInitAttempted;
-        Severity sev = ready ? Severity::Good : Severity::Warn;
-        std::string text =
-            ready ? "Ready" : (initialized ? "Initialized (empty)" : "Not initialized");
+        const bool disabled = !initialized && vectorsDisabledByConfiguration(status);
+        Severity sev = (ready || disabled) ? Severity::Good : Severity::Warn;
+        std::string text = ready         ? "Ready"
+                           : initialized ? "Initialized (empty)"
+                           : disabled    ? "Disabled (by configuration)"
+                                         : "Pending";
         std::string extra;
         if (status.vectorDbDim > 0) {
             extra = "dim=" + std::to_string(status.vectorDbDim);
+        } else if (!initialized && !disabled) {
+            extra = vectorInitPendingDetail(status);
         }
         storageRows.push_back({"Vector DB", paintStatus(sev, text), extra});
     }

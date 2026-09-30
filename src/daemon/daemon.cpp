@@ -545,25 +545,7 @@ Result<void> YamsDaemon::start() {
 
     if (auto result = socketServer_->start(); !result) {
         running_ = false;
-        try {
-            (void)socketServer_->stop();
-        } catch (const std::exception& e) {
-            logIgnoredDaemonException("SocketServer stop during startup failure", e);
-        } catch (...) {
-            logIgnoredDaemonException("SocketServer stop during startup failure");
-        }
-        socketServer_.reset();
-        if (ioCoordinator_) {
-            try {
-                ioCoordinator_->stop();
-                ioCoordinator_->join();
-            } catch (const std::exception& e) {
-                logIgnoredDaemonException("IOCoordinator shutdown during startup failure", e);
-            } catch (...) {
-                logIgnoredDaemonException("IOCoordinator shutdown during startup failure");
-            }
-            ioCoordinator_.reset();
-        }
+        shutdownIpcLayer();
         if (tuningManager_) {
             try {
                 tuningManager_->stop();
@@ -593,25 +575,7 @@ Result<void> YamsDaemon::start() {
         ioCoordinator_->start();
     } catch (const std::exception& e) {
         running_ = false;
-        try {
-            (void)socketServer_->stop();
-        } catch (const std::exception& e2) {
-            logIgnoredDaemonException("SocketServer stop after IOCoordinator start failure", e2);
-        } catch (...) {
-            logIgnoredDaemonException("SocketServer stop after IOCoordinator start failure");
-        }
-        socketServer_.reset();
-        if (ioCoordinator_) {
-            try {
-                ioCoordinator_->stop();
-                ioCoordinator_->join();
-            } catch (const std::exception& e2) {
-                logIgnoredDaemonException("IOCoordinator stop after start failure", e2);
-            } catch (...) {
-                logIgnoredDaemonException("IOCoordinator stop after start failure");
-            }
-            ioCoordinator_.reset();
-        }
+        shutdownIpcLayer();
         if (tuningManager_) {
             try {
                 tuningManager_->stop();
@@ -696,12 +660,8 @@ Result<void> YamsDaemon::start() {
     if (auto result = serviceManager_->initialize(); !result) {
         running_ = false;
         lifecycleManager_->shutdown();
-        // Stop socket if we fail to initialize services
-        if (socketServer_) {
-            (void)socketServer_->stop();
-            socketServer_.reset();
-            state_.readiness.ipcServerReady = false;
-        }
+        // Stop the IPC layer if we fail to initialize services; its I/O threads are running.
+        shutdownIpcLayer();
         return result;
     }
     spdlog::info("[Startup] Phase: ServiceManager Init OK (async)");
@@ -1125,6 +1085,24 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
     lifecycleFsm_.tick();
 }
 
+void YamsDaemon::shutdownIpcLayer() noexcept {
+    if (socketServer_) {
+        std::shared_ptr<DaemonMetrics> metricsHandle;
+        {
+            std::lock_guard<std::mutex> lk(metricsMutex_);
+            metricsHandle = metrics_;
+        }
+        if (metricsHandle) {
+            // DaemonMetrics keeps a raw SocketServer pointer for status snapshots.
+            metricsHandle->setSocketServer(nullptr);
+        }
+    }
+    spdlog::debug("Stopping socket server and IOCoordinator...");
+    teardownSocketServer(socketServer_, ioCoordinator_);
+    state_.readiness.ipcServerReady = false;
+    spdlog::debug("Socket server and IOCoordinator stopped");
+}
+
 Result<void> YamsDaemon::stop() {
     if (!running_.exchange(false)) {
         const auto snapshot = lifecycleFsm_.snapshot();
@@ -1205,36 +1183,8 @@ Result<void> YamsDaemon::stop() {
         spdlog::debug("Metrics polling stopped");
     }
 
-    // Stop socket server before ServiceManager tears down the WorkCoordinator
-    if (socketServer_) {
-        if (metricsHandle) {
-            metricsHandle->setSocketServer(nullptr);
-        }
-        spdlog::debug("Stopping socket server...");
-        auto stopResult = socketServer_->stop();
-        if (!stopResult) {
-            spdlog::warn("Socket server stop returned error: {}", stopResult.error().message);
-        }
-        // Destroy acceptors/sockets while IOCoordinator is still alive to avoid
-        // boost::asio service teardown reading freed io_context memory.
-        socketServer_.reset();
-        state_.readiness.ipcServerReady = false;
-    }
-
-    // Stop dedicated IOCoordinator after SocketServer is down.
-    if (ioCoordinator_) {
-        try {
-            spdlog::debug("Stopping IOCoordinator...");
-            ioCoordinator_->stop();
-            ioCoordinator_->join();
-            spdlog::debug("IOCoordinator stopped");
-        } catch (const std::exception& e) {
-            spdlog::warn("IOCoordinator stop exception: {}", e.what());
-        } catch (...) {
-            spdlog::warn("IOCoordinator stop: unknown exception");
-        }
-        ioCoordinator_.reset();
-    }
+    // Stop the IPC layer before ServiceManager tears down the WorkCoordinator.
+    shutdownIpcLayer();
 
     // Release metrics before ServiceManager teardown.
     // DaemonMetrics owns asio strand/executor state bound to WorkCoordinator's io_context.

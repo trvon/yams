@@ -34,7 +34,6 @@ static yams::daemon::ClientConfig makeClientConfig(const RetrievalOptions& opts)
     cfg.headerTimeout = std::chrono::milliseconds(opts.headerTimeoutMs);
     cfg.bodyTimeout = std::chrono::milliseconds(opts.bodyTimeoutMs);
     cfg.requestTimeout = std::chrono::milliseconds(opts.requestTimeoutMs);
-    cfg.acceptCompressed = opts.acceptCompressed;
     if (opts.transportMode.has_value()) {
         cfg.transportMode = *opts.transportMode;
     }
@@ -793,13 +792,6 @@ Result<yams::daemon::StatusResponse> RetrievalService::status(const RetrievalOpt
     auto client = getOrCreateClient(opts);
     return runClientCallWithTimeout<yams::daemon::StatusResponse>(
         opts, "status", [client]() { return client->status(); });
-}
-
-Result<yams::daemon::CatResponse> RetrievalService::cat(const yams::daemon::CatRequest& req,
-                                                        const RetrievalOptions& opts) const {
-    auto client = getOrCreateClient(opts);
-    return runClientCallWithTimeout<yams::daemon::CatResponse>(
-        opts, "cat", [client, req]() { return client->cat(req); });
 }
 
 Result<yams::daemon::GraphQueryResponse>

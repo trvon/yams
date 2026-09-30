@@ -11,6 +11,7 @@
 #include <boost/asio/awaitable.hpp>
 
 #include <atomic>
+#include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -194,6 +195,17 @@ public:
      * only pending/future acquire() calls fail fast.
      */
     void interruptPendingConnectionAcquiresForShutdown();
+
+    /**
+     * @brief Interrupt statements running on leased metadata connections during shutdown.
+     *
+     * Calls sqlite3_interrupt on every connection currently leased from the read and write pools
+     * so in-flight request handlers return before the WorkCoordinator join budget expires. Safe to
+     * call repeatedly; SQLite clears an interrupt on a connection that is between statements.
+     *
+     * @return number of leased connections interrupted
+     */
+    std::size_t interruptActiveConnectionsForShutdown();
 
     /**
      * @brief Check if database is ready for queries.

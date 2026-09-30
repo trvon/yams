@@ -7,6 +7,7 @@
 #include <memory>
 #include <thread>
 // pi-lens-ignore: fatal error
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
@@ -139,6 +140,13 @@ void populateStatusCoreFromSnapshot(StatusResponse& res, const MetricsSnapshot& 
     res.governorBudgetBytes = snap.governorBudgetBytes;
     res.governorPressureLevel = snap.governorPressureLevel;
     res.governorHeadroomPct = snap.governorHeadroomPct;
+    res.hostPressureSource = snap.hostPressureSource;
+    res.hostPressureElevated = snap.hostPressureElevated;
+    res.hostCpuPressurePct = snap.hostCpuPressurePct;
+    res.hostIoPressurePct = snap.hostIoPressurePct;
+    res.hostMemoryPressurePct = snap.hostMemoryPressurePct;
+    res.hostLoadPerCpu = snap.hostLoadPerCpu;
+    res.deferredBackgroundWork = snap.deferredBackgroundWork;
     res.onnxTotalSlots = snap.onnxTotalSlots;
     res.onnxUsedSlots = snap.onnxUsedSlots;
     res.onnxGlinerUsed = snap.onnxGlinerUsed;
@@ -985,6 +993,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 }
             } catch (...) { // NOLINT(bugprone-empty-catch)
             }
+        }
+
+        // Only published when true: a false entry would read as "not ready" to clients that
+        // list every non-ready key.
+        if (!yams::config::resolve_vector_environment().enabled) {
+            res.readinessStates[std::string(readiness::kVectorDbDisabled)] = true;
         }
 
         // Keep canonical readiness keys stable for clients/tests even when

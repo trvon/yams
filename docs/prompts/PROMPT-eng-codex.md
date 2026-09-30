@@ -37,7 +37,7 @@ can answer is a defect. Pick by question type:
 | Exact symbol / string / pattern | `yams grep "<pat>" --cwd .` |
 | Definition and bounded source context for a known symbol/file | `yams graph --explore "<symbol-or-file>" --max-files 8` |
 | Callers / blast radius for a known symbol | `yams grep "<symbol>" --cwd .` (symbol graph removed in v0.20) |
-| Related tests for changed files | `yams graph --affected-tests <file> --depth 1` |
+| Related tests for changed files | `yams grep "<symbol-or-file-stem>" --cwd tests` (symbol graph removed in v0.20) |
 | Precise document edges | `yams graph --name <file> --depth 1 --limit 50`, `--node-key <key> -r <relation>` |
 | Concept / prior decision / task history | `yams search "<query>" --cwd --limit 10` |
 | Inspect a selected saved-memory artifact | run the emitted `yams cat --hash <hash>` hint |
@@ -55,11 +55,11 @@ Rules:
   emitted by search/grep to hydrate bounded source context, then locally read
   only the implementation detail that remains needed.
 - Do not send a prose concept query directly to graph traversal. Use scoped
-  search/grep to select a concrete symbol or file first, then choose
-  `--explore`, `--impact`, or `--affected-tests` by the relationship question.
+  search/grep to select a concrete symbol or file first, then use `--explore`
+  for bounded context or `--name`/`--node-key` for precise edges.
 - Start graph traversal at depth 1 and widen only when the first-hop evidence
-  is insufficient. `--explore` hydrates a known source target; it is not a
-  substitute for `--impact` or `--affected-tests`.
+  is insufficient. `--explore` hydrates a known source target; it does not
+  answer "who calls X" or "which tests cover X" (use `yams grep`).
 - Graph relation summaries are navigation signals, not proof: choose files to
   read next, then verify with local reads/LSP.
 - Allowed exceptions (state which one applies): user gave an exact path; file

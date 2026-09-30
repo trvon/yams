@@ -20,6 +20,7 @@
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
+#include <yams/compression/framed_payload.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/format_handlers/format_handler.hpp>
@@ -468,47 +469,22 @@ struct CompressedPayload {
     compression::CompressionHeader header;
 };
 
+// The transfer format lives in compression/framed_payload so clients decode exactly what is
+// encoded here.
 Result<CompressedPayload> makeCompressedPayload(std::span<const std::byte> data) {
-    auto& registry = compression::CompressionRegistry::instance();
-    auto compressor = registry.createCompressor(compression::CompressionAlgorithm::Zstandard);
-    if (!compressor) {
-        return Error{ErrorCode::InvalidState, "Zstandard compressor unavailable"};
+    auto framed = compression::encodeFramedPayload(data);
+    if (!framed) {
+        return framed.error();
     }
-
-    constexpr uint8_t kDefaultLevel = 3;
-    auto compressedResult = compressor->compress(data, kDefaultLevel);
-    if (!compressedResult) {
-        return compressedResult.error();
+    auto header = compression::CompressionHeader::parse(
+        std::span<const std::byte>(framed.value()).first(compression::CompressionHeader::SIZE));
+    if (!header) {
+        return header.error();
     }
-
-    const auto& compressedVal = compressedResult.value();
-
-    compression::CompressionHeader header{};
-    header.magic = compression::CompressionHeader::MAGIC;
-    header.version = compression::CompressionHeader::VERSION;
-    // Use the actual algorithm from compression result - may be None if compression was ineffective
-    header.algorithm = static_cast<uint8_t>(compressedVal.algorithm);
-    header.level = compressedVal.level;
-    header.uncompressedSize = static_cast<uint64_t>(compressedVal.originalSize);
-    header.compressedSize = static_cast<uint64_t>(compressedVal.compressedSize);
-    header.uncompressedCRC32 = compression::calculateCRC32(data);
-    auto compressedSpan =
-        std::span<const std::byte>(compressedVal.data.data(), compressedVal.data.size());
-    header.compressedCRC32 = compression::calculateCRC32(compressedSpan);
-    const auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           std::chrono::system_clock::now().time_since_epoch())
-                           .count();
-    header.timestamp = nowNs < 0 ? 0ULL : static_cast<uint64_t>(nowNs);
-    header.flags = 0;
-    header.reserved1 = 0;
-    std::memset(header.reserved2, 0, sizeof(header.reserved2));
-
     CompressedPayload payload;
-    payload.blob.resize(sizeof(header) + compressedVal.data.size());
-    std::memcpy(payload.blob.data(), &header, sizeof(header));
-    std::memcpy(payload.blob.data() + sizeof(header), compressedVal.data.data(),
-                compressedVal.data.size());
-    payload.header = header;
+    payload.blob.assign(reinterpret_cast<const char*>(framed.value().data()),
+                        framed.value().size());
+    payload.header = header.value();
     return payload;
 }
 
@@ -651,10 +627,10 @@ api::ContentMetadata buildStoreContentMetadata(const StoreDocumentRequest& req,
         std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(
                            std::chrono::system_clock::now().time_since_epoch())
                            .count());
+    // Latest snapshot only. Membership in every snapshot is recorded in document_snapshots by
+    // the insert transaction; per-snapshot keys here grew without bound.
     metadata.tags["snapshot_id"] = snapshotId;
     metadata.tags["snapshot_time"] = snapshotTime;
-    metadata.tags["snapshot_id:" + snapshotId] = snapshotId;
-    metadata.tags["snapshot_time:" + snapshotId] = snapshotTime;
     if (!req.snapshotLabel.empty()) {
         metadata.tags["snapshot_label"] = req.snapshotLabel;
     }
@@ -2490,6 +2466,16 @@ public:
 
         metadata::MetadataOpScope metadataScope("client_list");
 
+        // Shutdown cancellation: checked between the query and every hydration step so a list
+        // over a large corpus releases its worker instead of holding the shutdown join.
+        const auto listCanceled = [this]() { return hostCancellationRequested(ctx_); };
+        const auto canceledError = []() {
+            return Error{ErrorCode::OperationCancelled, "List request canceled: shutting down"};
+        };
+        if (listCanceled()) {
+            return canceledError();
+        }
+
         std::vector<metadata::DocumentInfo> docs;
         bool usedQuery = false;
         std::size_t totalFoundApprox = 0;
@@ -2559,6 +2545,9 @@ public:
         if (!useFallback && !useTree) {
             auto docsRes = ctx_.metadataRepo->queryDocumentsForListProjection(queryOpts);
             if (!docsRes) {
+                if (listCanceled()) {
+                    return canceledError();
+                }
                 return Error{ErrorCode::InternalError,
                              "Failed to query documents: " + docsRes.error().message};
             }
@@ -2572,6 +2561,9 @@ public:
                 canonicalPattern.empty() ? "%" : globToSqlLike(canonicalPattern);
             auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, sqlPattern);
             if (!docsRes) {
+                if (listCanceled()) {
+                    return canceledError();
+                }
                 return Error{ErrorCode::InternalError,
                              "Failed to query documents: " + docsRes.error().message};
             }
@@ -2643,10 +2635,16 @@ public:
             return out;
         }
 
+        if (listCanceled()) {
+            return canceledError();
+        }
         const std::vector<int64_t> docIds = collectDocumentIds(page);
         MetadataCache metadataCache;
         if (wantsMetadata) {
             metadataCache = hydrateListMetadata(docIds);
+            if (listCanceled()) {
+                return canceledError();
+            }
         }
 
         SnippetPreviewCache snippetPreviewCache;
@@ -2655,6 +2653,9 @@ public:
             auto hydrated = hydrateListSnippets(docIds, req.snippetLength);
             snippetPreviewCache = std::move(hydrated.first);
             snippetFetchFailed = hydrated.second;
+            if (listCanceled()) {
+                return canceledError();
+            }
         }
 
         auto buildEntryForDoc = [&](const metadata::DocumentInfo& doc) -> DocumentEntry {
@@ -2676,7 +2677,7 @@ public:
             ths.reserve(workers);
             for (size_t t = 0; t < workers; ++t) {
                 ths.emplace_back([&]() {
-                    while (true) {
+                    while (!listCanceled()) {
                         size_t i = nextIdx.fetch_add(1);
                         if (i >= page.size())
                             break;
@@ -2686,11 +2687,17 @@ public:
             }
             for (auto& th : ths)
                 th.join();
+            if (listCanceled()) {
+                return canceledError();
+            }
             for (size_t i = 0; i < page.size(); ++i) {
                 out.documents.push_back(std::move(tmp[i]));
             }
         } else {
             for (const auto& d : page) {
+                if (listCanceled()) {
+                    return canceledError();
+                }
                 out.documents.push_back(buildEntryForDoc(d));
             }
         }

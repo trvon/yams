@@ -19,6 +19,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 using namespace yams;
@@ -788,4 +789,116 @@ TEST_CASE("Migration v40 preserves user graph data that reuses symbol names",
     });
     INFO((run ? std::string{} : run.error().message));
     REQUIRE(run.has_value());
+}
+
+namespace {
+
+// Run every migration against a database at <dir>/<fileName>.
+Result<void> migrateDatabaseAt(const std::filesystem::path& dbFile) {
+    Database db;
+    if (auto r = db.open(dbFile.string(), ConnectionMode::Create); !r)
+        return r.error();
+    MigrationManager mm(db);
+    if (auto r = mm.initialize(); !r)
+        return r.error();
+    mm.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+    if (auto r = mm.migrate(); !r)
+        return r.error();
+    db.close();
+    return Result<void>();
+}
+
+void writeFile(const std::filesystem::path& path, std::string_view content = "x") {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream(path, std::ios::binary) << content;
+}
+
+struct TempRoot {
+    std::filesystem::path path;
+    TempRoot() {
+        path = std::filesystem::temp_directory_path() /
+               ("yams_grammar_cleanup_" +
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(path);
+    }
+    ~TempRoot() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
+
+} // namespace
+
+TEST_CASE("Migration v43 removes tree-sitter grammars left in the data directory",
+          "[catch2][unit][metadata][migration][v43]") {
+    namespace fs = std::filesystem;
+    TempRoot root;
+    const auto dataDir = root.path / "data";
+    const auto grammars = dataDir / "grammars";
+    writeFile(grammars / "libtree-sitter-cpp.so");
+    writeFile(grammars / "libtree-sitter-python.dylib");
+    writeFile(grammars / "tree-sitter-c-sharp.dll");
+    // Anything the old grammar tooling did not create is left alone.
+    writeFile(grammars / "notes.txt", "user note");
+    writeFile(grammars / "custom" / "libtree-sitter-mine.so");
+    // Sibling data is never touched.
+    writeFile(dataDir / "storage" / "keep.bin");
+    writeFile(dataDir / "libtree-sitter-sibling.so");
+
+    auto migrated = migrateDatabaseAt(dataDir / "yams.db");
+    INFO((migrated ? std::string{} : migrated.error().message));
+    REQUIRE(migrated.has_value());
+
+    CHECK_FALSE(fs::exists(grammars / "libtree-sitter-cpp.so"));
+    CHECK_FALSE(fs::exists(grammars / "libtree-sitter-python.dylib"));
+    CHECK_FALSE(fs::exists(grammars / "tree-sitter-c-sharp.dll"));
+    CHECK(fs::exists(grammars / "notes.txt"));
+    CHECK(fs::exists(grammars / "custom" / "libtree-sitter-mine.so"));
+    CHECK(fs::exists(dataDir / "storage" / "keep.bin"));
+    CHECK(fs::exists(dataDir / "libtree-sitter-sibling.so"));
+}
+
+TEST_CASE("Migration v43 deletes an all-grammar directory and is one-time",
+          "[catch2][unit][metadata][migration][v43]") {
+    namespace fs = std::filesystem;
+    TempRoot root;
+    const auto dataDir = root.path / "data";
+    const auto grammars = dataDir / "grammars";
+    writeFile(grammars / "libtree-sitter-rust.so");
+    writeFile(grammars / "libtree-sitter-go.so");
+
+    REQUIRE(migrateDatabaseAt(dataDir / "yams.db").has_value());
+    CHECK_FALSE(fs::exists(grammars));
+
+    // Recorded as applied: a grammars directory that appears later is not touched again.
+    writeFile(grammars / "libtree-sitter-zig.so");
+    REQUIRE(migrateDatabaseAt(dataDir / "yams.db").has_value());
+    CHECK(fs::exists(grammars / "libtree-sitter-zig.so"));
+}
+
+TEST_CASE("Migration v43 never follows a symlinked grammars directory or foreign databases",
+          "[catch2][unit][metadata][migration][v43]") {
+    namespace fs = std::filesystem;
+    TempRoot root;
+
+    SECTION("a symlinked grammars directory and its target are left alone") {
+        const auto outside = root.path / "outside";
+        writeFile(outside / "libtree-sitter-c.so");
+        const auto dataDir = root.path / "data";
+        fs::create_directories(dataDir);
+        std::error_code ec;
+        fs::create_directory_symlink(outside, dataDir / "grammars", ec);
+        if (ec) {
+            SKIP("symlinks unavailable: " << ec.message());
+        }
+        REQUIRE(migrateDatabaseAt(dataDir / "yams.db").has_value());
+        CHECK(fs::exists(outside / "libtree-sitter-c.so"));
+        CHECK(fs::is_symlink(dataDir / "grammars"));
+    }
+    SECTION("a database that is not a data directory's yams.db changes nothing") {
+        const auto dir = root.path / "elsewhere";
+        writeFile(dir / "grammars" / "libtree-sitter-c.so");
+        REQUIRE(migrateDatabaseAt(dir / "scratch.db").has_value());
+        CHECK(fs::exists(dir / "grammars" / "libtree-sitter-c.so"));
+    }
 }

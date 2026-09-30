@@ -139,6 +139,11 @@ TEST_CASE("ProtoSerializer MemorySync request and response preserve binary value
     response.mode = "persistent";
     response.trustMode = "authenticated-writers";
     response.peerCount = 6;
+    response.inboundSessions = 9;
+    response.inboundFailures = 2;
+    response.lastInboundFailureStage = "handshake";
+    response.lastInboundFailure = "peer is not enrolled";
+    response.lastInboundFailureAgeMs = 1500;
     Message responseMessage{};
     responseMessage.requestId = 91;
     responseMessage.payload = Response{response};
@@ -166,6 +171,11 @@ TEST_CASE("ProtoSerializer MemorySync request and response preserve binary value
     CHECK(roundTrippedResponse->mode == "persistent");
     CHECK(roundTrippedResponse->trustMode == "authenticated-writers");
     CHECK(roundTrippedResponse->peerCount == 6);
+    CHECK(roundTrippedResponse->inboundSessions == 9);
+    CHECK(roundTrippedResponse->inboundFailures == 2);
+    CHECK(roundTrippedResponse->lastInboundFailureStage == "handshake");
+    CHECK(roundTrippedResponse->lastInboundFailure == "peer is not enrolled");
+    CHECK(roundTrippedResponse->lastInboundFailureAgeMs == 1500);
 }
 
 TEST_CASE("ProtoSerializer StatusResponse preserves daemon log file path",
