@@ -255,6 +255,8 @@ TEST_CASE("RepairService maintenance vacuums the live vectors.db when idle",
     yams::test::ScopedEnvVar vectorsOnAlias("YAMS_DISABLE_VECTOR_DB", std::nullopt);
     yams::test::ScopedEnvVar vectorsOnSingular("YAMS_DISABLE_VECTOR", std::nullopt);
     yams::test::ScopedEnvVar onDisk("YAMS_VDB_IN_MEMORY", std::nullopt);
+    // CI runs the unit lanes with sqlite-vec init skipped; this case needs real vector tables.
+    yams::test::ScopedEnvVar vecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt);
     ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Normal,
                                                           std::chrono::steady_clock::now());
 
