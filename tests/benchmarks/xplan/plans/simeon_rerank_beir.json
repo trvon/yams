@@ -1,0 +1,65 @@
+{
+  "name": "simeon_rerank_beir",
+  "description": "Simeon cross-rerank mode A/B (off/replace/blend) on a BEIR dataset with repeats + variance. Reproduces the blend>replace finding with run-to-run noise bounds. Change `dataset` to sweep scifact/nfcorpus/fiqa.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 3600,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "rerank_off",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_EMBED_BACKEND": "simeon"
+    },
+    "params": {
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
+      "topk": 10,
+      "embed_backend": "simeon",
+      "rerank_topk": 10
+    }
+  },
+  "arms": [
+    {
+      "name": "rerank_off",
+      "factors": { "rerank_mode": "off" },
+      "env": { "YAMS_SEARCH_ENABLE_RERANKING": "0" }
+    },
+    {
+      "name": "rerank_replace",
+      "factors": { "rerank_mode": "replace" },
+      "env": {
+        "YAMS_SEARCH_ENABLE_RERANKING": "1",
+        "YAMS_SEARCH_RERANK_REPLACE_SCORES": "1"
+      }
+    },
+    {
+      "name": "rerank_blend",
+      "factors": { "rerank_mode": "blend" },
+      "env": {
+        "YAMS_SEARCH_ENABLE_RERANKING": "1",
+        "YAMS_SEARCH_RERANK_REPLACE_SCORES": "0",
+        "YAMS_SEARCH_RERANK_WEIGHT": "0.3"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": ["ndcg_at_k", "recall_at_k", "mrr"]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json"],
+    "require_metrics": ["ndcg_at_k"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": ["ndcg_at_k", "recall_at_k", "cross_rerank_apply_rate", "search_latency_ms_avg", "proc_cpu_sec", "proc_maxrss_mb"],
+    "group_by": ["rerank_mode"]
+  }
+}

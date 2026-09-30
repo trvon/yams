@@ -1,0 +1,93 @@
+{
+  "name": "topology_purity_validate",
+  "description": "Variance-aware validation of grok's topology construction-purity fix: trimmed key arms, repeats=3, baseline=topo_off. Confirms the single-run +10.7% MRR clears run-to-run noise (* flag). Swap dataset via YAMS_BENCH_DATASET for cross-dataset generalization.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 5400,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "topo_off",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS": "1",
+      "YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS": "2",
+      "YAMS_SEARCH_TOPOLOGY_MAX_DOCS": "8"
+    },
+    "params": {
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
+      "topk": 10,
+      "topology_source": "vector",
+      "max_component_docs": 64,
+      "seed_semantic_neighbors": "1"
+    }
+  },
+  "arms": [
+    {
+      "name": "topo_off",
+      "factors": { "topology_mode": "disabled" },
+      "env": { "YAMS_BENCH_TOPOLOGY_MODE": "disabled" }
+    },
+    {
+      "name": "cc_default",
+      "factors": { "topology_mode": "hybrid_assist", "topology_engine": "connected", "expansion_arm": "cap2" },
+      "env": { "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist", "YAMS_BENCH_TOPOLOGY_ENGINE": "connected" },
+      "params": { "expansion_arm": "cap2" }
+    },
+    {
+      "name": "cert_strict_64",
+      "factors": { "topology_mode": "hybrid_assist", "topology_engine": "connected", "max_component_docs": 64, "expansion_arm": "cap2" },
+      "env": { "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist", "YAMS_BENCH_TOPOLOGY_ENGINE": "connected", "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS": "64" },
+      "params": { "expansion_arm": "cap2", "max_component_docs": 64 }
+    },
+    {
+      "name": "louvain",
+      "factors": { "topology_mode": "hybrid_assist", "topology_engine": "louvain", "expansion_arm": "cap2" },
+      "env": { "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist", "YAMS_BENCH_TOPOLOGY_ENGINE": "louvain" },
+      "params": { "expansion_arm": "cap2" }
+    },
+    {
+      "name": "graph_neighbors",
+      "factors": { "topology_mode": "hybrid_assist", "expansion_source": "graph_neighbors" },
+      "env": { "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist", "YAMS_BENCH_TOPOLOGY_EXPANSION": "graph_neighbors", "YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE": "graph_neighbors", "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE": "0.25" },
+      "params": { "expansion_source": "graph_neighbors" }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "topology_narrow_rate",
+        "topology_snapshot_cache_hit_rate",
+        "topology_allowed_candidates_avg",
+        "vector_candidate_work_budget_avg"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json"],
+    "require_metrics": ["mrr"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "recall_at_k",
+      "search_latency_ms_p50",
+      "topology_applied",
+      "topology_narrow_rate",
+      "topology_snapshot_cache_hit_rate",
+      "topology_allowed_candidates_avg",
+      "vector_candidate_work_budget_avg"
+    ],
+    "group_by": ["topology_engine"]
+  }
+}

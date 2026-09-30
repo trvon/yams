@@ -1,0 +1,69 @@
+{
+  "name": "repair_ability",
+  "description": "Repair ability by fault kind with optional vectors ablation (mock vs richer provider path).",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 900,
+  "continue_on_arm_failure": true,
+  "mode": "synthetic",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SKIP_MODEL_LOADING": "1"
+    },
+    "params": {
+      "fault_docs": 20,
+      "doc_size": 512
+    }
+  },
+  "arms": [
+    {
+      "name": "embed",
+      "factors": { "fault_kind": "embed", "vectors": "off" },
+      "params": { "fault_kind": "embed" }
+    },
+    {
+      "name": "fts5",
+      "factors": { "fault_kind": "fts5", "vectors": "off" },
+      "params": { "fault_kind": "fts5" }
+    },
+    {
+      "name": "graph",
+      "factors": { "fault_kind": "graph", "vectors": "off" },
+      "params": { "fault_kind": "graph" }
+    },
+    {
+      "name": "embed_all_ops",
+      "factors": { "fault_kind": "all", "vectors": "off" },
+      "params": { "fault_kind": "all" }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "repair_ability",
+      "metrics": [
+        "faults_injected",
+        "faults_repaired",
+        "residual_faults",
+        "repair_docs_per_s",
+        "detect_latency_ms"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json"],
+    "require_metrics": ["faults_injected", "faults_repaired", "residual_faults"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "faults_injected",
+      "faults_repaired",
+      "residual_faults",
+      "repair_docs_per_s",
+      "detect_latency_ms",
+      "repair_wall_ms"
+    ],
+    "group_by": ["fault_kind"]
+  }
+}

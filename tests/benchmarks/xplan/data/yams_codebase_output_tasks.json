@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "corpus": "yams_codebase",
+  "tasks": [
+    {
+      "id": "search_graph_context_budget",
+      "surface": "search",
+      "query": "graph context output budgets symbols files",
+      "expected_any": [
+        "include/yams/app/services/graph_context_service.hpp"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "search_evidence_pipeline",
+      "surface": "search",
+      "query": "evidence search pipeline topology fusion rescue",
+      "expected_any": [
+        "src/search/search_engine.cpp"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "search_xplan_retrieval_quality",
+      "surface": "search",
+      "query": "retrieval quality benchmark BEIR qrels daemon",
+      "expected_any": [
+        "tests/benchmarks/xplan/README.md"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "grep_graph_context_budget",
+      "surface": "grep",
+      "query": "GraphContextBudget",
+      "expected_any": [
+        "src/app/services/graph_context_service.cpp"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "grep_post_ingest_queue",
+      "surface": "grep",
+      "query": "PostIngestQueue",
+      "expected_any": [
+        "src/daemon/components/ServiceManager.cpp"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "graph_graph_context_budget",
+      "surface": "graph",
+      "query": "GraphContextBudget",
+      "expected_any": [
+        "include/yams/app/services/graph_context_service.hpp"
+      ],
+      "limit": 4
+    },
+    {
+      "id": "graph_post_ingest_queue",
+      "surface": "graph",
+      "query": "PostIngestQueue",
+      "expected_any": [
+        "src/daemon/components/PostIngestQueue.cpp"
+      ],
+      "limit": 4
+    }
+  ]
+}

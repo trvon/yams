@@ -1,0 +1,140 @@
+{
+  "name": "search_rerank_blend_multicorp",
+  "description": "Product topology+ANN hybrid: cross-rerank blend weight sweep — off / 0.15 / 0.30(default) / 0.50 — on scifact + nfcorpus (repeats=3).",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 14400,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "scifact_b030",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow",
+      "YAMS_BENCH_SKIP_BUILD": "1",
+      "YAMS_SEARCH_RERANK_REPLACE_SCORES": "0"
+    },
+    "params": {
+      "topk": 10,
+      "num_queries": 50,
+      "skip_build": true
+    }
+  },
+  "arms": [
+    {
+      "name": "scifact_off",
+      "factors": { "dataset": "scifact", "rerank_mode": "off", "rerank_blend": 0.0 },
+      "params": { "dataset": "scifact", "corpus_size": 2000 },
+      "env": {
+        "YAMS_BENCH_DATASET": "scifact",
+        "YAMS_BENCH_CORPUS_SIZE": "2000",
+        "YAMS_SEARCH_ENABLE_RERANKING": "0"
+      }
+    },
+    {
+      "name": "scifact_b015",
+      "factors": { "dataset": "scifact", "rerank_mode": "blend", "rerank_blend": 0.15 },
+      "params": { "dataset": "scifact", "corpus_size": 2000 },
+      "env": {
+        "YAMS_BENCH_DATASET": "scifact",
+        "YAMS_BENCH_CORPUS_SIZE": "2000",
+        "YAMS_SEARCH_ENABLE_RERANKING": "1",
+        "YAMS_SEARCH_RERANK_WEIGHT": "0.15"
+      }
+    },
+    {
+      "name": "scifact_b030",
+      "factors": { "dataset": "scifact", "rerank_mode": "blend", "rerank_blend": 0.30 },
+      "params": { "dataset": "scifact", "corpus_size": 2000 },
+      "env": {
+        "YAMS_BENCH_DATASET": "scifact",
+        "YAMS_BENCH_CORPUS_SIZE": "2000",
+        "YAMS_SEARCH_ENABLE_RERANKING": "1",
+        "YAMS_SEARCH_RERANK_WEIGHT": "0.30"
+      }
+    },
+    {
+      "name": "scifact_b050",
+      "factors": { "dataset": "scifact", "rerank_mode": "blend", "rerank_blend": 0.50 },
+      "params": { "dataset": "scifact", "corpus_size": 2000 },
+      "env": {
+        "YAMS_BENCH_DATASET": "scifact",
+        "YAMS_BENCH_CORPUS_SIZE": "2000",
+        "YAMS_SEARCH_ENABLE_RERANKING": "1",
+        "YAMS_SEARCH_RERANK_WEIGHT": "0.50"
+      }
+    },
+    {
+      "name": "nfcorpus_off",
+      "factors": { "dataset": "nfcorpus", "rerank_mode": "off", "rerank_blend": 0.0 },
+      "params": { "dataset": "nfcorpus", "corpus_size": 0 },
+      "env": {
+        "YAMS_BENCH_DATASET": "nfcorpus",
+        "YAMS_SEARCH_ENABLE_RERANKING": "0"
+      }
+    },
+    {
+      "name": "nfcorpus_b015",
+      "factors": { "dataset": "nfcorpus", "rerank_mode": "blend", "rerank_blend": 0.15 },
+      "params": { "dataset": "nfcorpus", "corpus_size": 0 },
+      "env": {
+        "YAMS_BENCH_DATASET": "nfcorpus",
+        "YAMS_SEARCH_ENABLE_RERANKING": "1",
+        "YAMS_SEARCH_RERANK_WEIGHT": "0.15"
+      }
+    },
+    {
+      "name": "nfcorpus_b030",
+      "factors": { "dataset": "nfcorpus", "rerank_mode": "blend", "rerank_blend": 0.30 },
+      "params": { "dataset": "nfcorpus", "corpus_size": 0 },
+      "env": {
+        "YAMS_BENCH_DATASET": "nfcorpus",
+        "YAMS_SEARCH_ENABLE_RERANKING": "1",
+        "YAMS_SEARCH_RERANK_WEIGHT": "0.30"
+      }
+    },
+    {
+      "name": "nfcorpus_b050",
+      "factors": { "dataset": "nfcorpus", "rerank_mode": "blend", "rerank_blend": 0.50 },
+      "params": { "dataset": "nfcorpus", "corpus_size": 0 },
+      "env": {
+        "YAMS_BENCH_DATASET": "nfcorpus",
+        "YAMS_SEARCH_ENABLE_RERANKING": "1",
+        "YAMS_SEARCH_RERANK_WEIGHT": "0.50"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log"],
+    "require_metrics": ["mrr"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "cross_rerank_apply_rate",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95"
+    ],
+    "group_by": ["dataset"]
+  }
+}

@@ -1,0 +1,105 @@
+{
+  "name": "post_ingest_batch_size_moderate_load",
+  "description": "Transfer gate for post-ingest batch sizing under moderate concurrent daemon load.",
+  "build_dir": "build/vector-opt-release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 1200,
+  "continue_on_arm_failure": true,
+  "mode": "synthetic",
+  "repeats": 3,
+  "baseline": "batch16",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SKIP_MODEL_LOADING": "1"
+    },
+    "params": {
+      "vectors": "off",
+      "search_clients": 4,
+      "docs_per_client": 200,
+      "mixed_ops_per_client": 200,
+      "search_ratio": 0.2,
+      "doc_size": 4096,
+      "warmup_docs": 32,
+      "search_type": "keyword",
+      "search_query": "architecture",
+      "search_limit": 20,
+      "profile_hydration_surfaces": true,
+      "profile_output_liveness": true,
+      "resource_sample_ms": 50,
+      "idle_probe": "0"
+    }
+  },
+  "arms": [
+    {
+      "name": "batch16",
+      "factors": { "post_ingest_batch_size": 16 },
+      "env": { "YAMS_POST_INGEST_BATCH_SIZE": "16" }
+    },
+    {
+      "name": "batch32",
+      "factors": { "post_ingest_batch_size": 32 },
+      "env": { "YAMS_POST_INGEST_BATCH_SIZE": "32" }
+    },
+    {
+      "name": "batch64",
+      "factors": { "post_ingest_batch_size": 64 },
+      "env": { "YAMS_POST_INGEST_BATCH_SIZE": "64" }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_load",
+      "metrics": [
+        "workload_completion_ms",
+        "drain_elapsed_ms",
+        "drain_final_documents",
+        "drain_minimum_documents",
+        "drain_contract_pass",
+        "post_commit_content_index_calls",
+        "post_commit_content_index_total_ms",
+        "post_commit_content_index_max_ms",
+        "output_liveness_contract_pass",
+        "known_hit_empty_success_rate",
+        "known_hit_error_rate",
+        "search_p95_ms",
+        "total_ops_per_s",
+        "total_failures"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json"],
+    "require_metrics": [
+      "workload_completion_ms",
+      "drain_final_documents",
+      "drain_minimum_documents",
+      "drain_contract_pass",
+      "output_liveness_contract_pass",
+      "search_p95_ms",
+      "total_failures"
+    ],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "workload_completion_ms",
+      "drain_elapsed_ms",
+      "drain_final_documents",
+      "drain_minimum_documents",
+      "drain_contract_pass",
+      "post_commit_content_index_calls",
+      "post_commit_content_index_total_ms",
+      "post_commit_content_index_max_ms",
+      "output_liveness_contract_pass",
+      "known_hit_empty_success_rate",
+      "known_hit_error_rate",
+      "search_p50_ms",
+      "search_p95_ms",
+      "search_p99_ms",
+      "total_ops_per_s",
+      "total_failures"
+    ],
+    "group_by": ["post_ingest_batch_size"]
+  }
+}

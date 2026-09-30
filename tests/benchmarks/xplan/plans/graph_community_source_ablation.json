@@ -1,0 +1,132 @@
+{
+  "name": "graph_community_source_ablation",
+  "description": "Graph-rerank community signal source on BEIR scifact and nfcorpus with graph rerank forced on: reciprocal semantic_neighbor edge walk (default) vs resident topology snapshot co-membership. Promote topology_snapshot only if quality is within noise or better and p50 latency does not regress.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 10800,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "scifact_edges",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow",
+      "YAMS_BENCH_SKIP_BUILD": "1",
+      "YAMS_SEARCH_ENABLE_GRAPH_RERANK": "1"
+    },
+    "params": {
+      "topk": 10,
+      "num_queries": 50,
+      "skip_build": true,
+      "topology_mode": "hybrid_assist",
+      "topology_vector_policy": "shadow"
+    }
+  },
+  "arms": [
+    {
+      "name": "scifact_edges",
+      "factors": {
+        "dataset": "scifact",
+        "graph_community_source": "reciprocal_edges"
+      },
+      "params": {
+        "dataset": "scifact",
+        "graph_community_source": "reciprocal_edges",
+        "corpus_size": 2000
+      },
+      "env": {
+        "YAMS_BENCH_DATASET": "scifact",
+        "YAMS_BENCH_CORPUS_SIZE": "2000"
+      }
+    },
+    {
+      "name": "scifact_topology",
+      "factors": {
+        "dataset": "scifact",
+        "graph_community_source": "topology_snapshot"
+      },
+      "params": {
+        "dataset": "scifact",
+        "graph_community_source": "topology_snapshot",
+        "corpus_size": 2000
+      },
+      "env": {
+        "YAMS_BENCH_DATASET": "scifact",
+        "YAMS_BENCH_CORPUS_SIZE": "2000"
+      }
+    },
+    {
+      "name": "nfcorpus_edges",
+      "factors": {
+        "dataset": "nfcorpus",
+        "graph_community_source": "reciprocal_edges"
+      },
+      "params": {
+        "dataset": "nfcorpus",
+        "graph_community_source": "reciprocal_edges",
+        "corpus_size": 2000
+      },
+      "env": {
+        "YAMS_BENCH_DATASET": "nfcorpus",
+        "YAMS_BENCH_CORPUS_SIZE": "2000"
+      }
+    },
+    {
+      "name": "nfcorpus_topology",
+      "factors": {
+        "dataset": "nfcorpus",
+        "graph_community_source": "topology_snapshot"
+      },
+      "params": {
+        "dataset": "nfcorpus",
+        "graph_community_source": "topology_snapshot",
+        "corpus_size": 2000
+      },
+      "env": {
+        "YAMS_BENCH_DATASET": "nfcorpus",
+        "YAMS_BENCH_CORPUS_SIZE": "2000"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": [
+      "metrics.json",
+      "stdout.log"
+    ],
+    "require_metrics": [
+      "mrr"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95"
+    ],
+    "group_by": [
+      "dataset"
+    ]
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "search_shadow_cost",
+  "description": "Separate current product defaults, topology-off control, and traced shadow cost. Trace timings are diagnostic; compare ranking identity before attributing overhead.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 7200,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "product_untraced",
+  "fixed": {
+    "env": {"YAMS_TEST_SAFE_SINGLE_INSTANCE": "1", "YAMS_ENABLE_ENV_OVERRIDES": "1",
+            "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS": "1"},
+    "params": {"dataset": "scifact", "corpus_size": 2000, "num_queries": 50,
+               "topk": 10, "shared_warm_cache": "shadow-cost", "require_steady_state": true,
+               "seed_semantic_neighbors": "1", "max_component_docs": 64}
+  },
+  "arms": [
+    {"name": "product_untraced", "env": {"YAMS_SEARCH_STAGE_TRACE": "0", "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist", "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow"},
+     "params": {"latency_mode": "product", "require_shadow_evaluation": true}},
+    {"name": "topology_off_untraced", "env": {"YAMS_SEARCH_STAGE_TRACE": "0", "YAMS_BENCH_TOPOLOGY_MODE": "disabled"},
+     "params": {"latency_mode": "product", "topology_mode": "disabled"}},
+    {"name": "shadow_traced", "env": {"YAMS_SEARCH_STAGE_TRACE": "1", "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist", "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow"},
+     "params": {"latency_mode": "diagnostic", "topology_mode": "hybrid_assist", "topology_vector_policy": "shadow", "require_shadow_evaluation": true, "require_exact_shadow_control": true}}
+  ],
+  "steps": [{"worker": "retrieval_quality", "metrics": ["mrr", "ndcg_at_k", "recall_at_k", "search_latency_ms_p50", "search_latency_ms_p95"]}],
+  "validate": {"require_files": ["metrics.json"], "require_metric_status": ["ok"]},
+  "summarize": {"primary": ["mrr", "recall_at_k", "search_latency_ms_p50", "search_latency_ms_p95"]}
+}

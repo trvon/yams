@@ -1,0 +1,36 @@
+{
+  "name": "p2p_memory_sync_local",
+  "description": "Local-only shared-store memory-sync audit matrix (filesystem and MinIO).",
+  "build_dir": "build/debug",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 3600,
+  "continue_on_arm_failure": true,
+  "mode": "synthetic",
+  "arms": [
+    {
+      "name": "filesystem",
+      "factors": { "lane": "filesystem" }
+    },
+    {
+      "name": "s3-persistent",
+      "factors": { "lane": "s3-persistent" }
+    },
+    {
+      "name": "s3-temporary",
+      "factors": { "lane": "s3-temporary" }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "p2p_memory_sync",
+      "metrics": ["lane_pass", "convergence_samples", "convergence_lag_max_ms"]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json"],
+    "require_metric_status": ["ok", "skipped"]
+  },
+  "summarize": {
+    "primary": ["lane_pass", "convergence_samples", "convergence_lag_max_ms"]
+  }
+}

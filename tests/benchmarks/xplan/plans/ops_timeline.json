@@ -1,0 +1,65 @@
+{
+  "name": "ops_timeline",
+  "description": "Idle/drain ops mapping with ablation: vectors on/off and load size axes.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 900,
+  "continue_on_arm_failure": true,
+  "mode": "synthetic",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SKIP_MODEL_LOADING": "1"
+    },
+    "params": {
+      "doc_size": 1024,
+      "idle_probe": "1"
+    }
+  },
+  "arms": [
+    {
+      "name": "baseline_no_vectors",
+      "factors": { "vectors": "off", "profile": "burst_idle" },
+      "params": { "load_docs": 30 }
+    },
+    {
+      "name": "with_vectors",
+      "factors": { "vectors": "on", "profile": "burst_idle" },
+      "params": { "load_docs": 30 }
+    },
+    {
+      "name": "light_load",
+      "factors": { "vectors": "off", "profile": "light" },
+      "params": { "load_docs": 10 }
+    },
+    {
+      "name": "heavy_load",
+      "factors": { "vectors": "off", "profile": "heavy" },
+      "params": { "load_docs": 80 }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "ops_timeline",
+      "metrics": ["idle_fraction", "sample_count", "backlog_peak"]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json"],
+    "require_metrics": ["idle_fraction", "sample_count"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "idle_fraction",
+      "idle_mean_cpu_pct",
+      "idle_work_visible_us",
+      "work_share_post_ingest",
+      "backlog_peak",
+      "drain_elapsed_ms",
+      "sample_count",
+      "docs_per_s"
+    ],
+    "group_by": ["vectors", "profile"]
+  }
+}

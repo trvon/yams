@@ -1,0 +1,87 @@
+{
+  "name": "search_vector_weight_ablation",
+  "description": "Product topology+ANN hybrid: ablate SearchEngineConfig.vectorWeight. Product default 0.30 vs lower weights.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 7200,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "vector_w030",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow"
+    },
+    "params": {
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
+      "topk": 10
+    }
+  },
+  "arms": [
+    {
+      "name": "vector_w030",
+      "factors": { "vector_weight": 0.30 },
+      "env": {
+        "YAMS_SEARCH_VECTOR_WEIGHT": "0.30",
+        "YAMS_SEARCH_TEXT_WEIGHT": "0.70"
+      }
+    },
+    {
+      "name": "vector_w015",
+      "factors": { "vector_weight": 0.15 },
+      "env": {
+        "YAMS_SEARCH_VECTOR_WEIGHT": "0.15",
+        "YAMS_SEARCH_TEXT_WEIGHT": "0.85"
+      }
+    },
+    {
+      "name": "vector_w010",
+      "factors": { "vector_weight": 0.10 },
+      "env": {
+        "YAMS_SEARCH_VECTOR_WEIGHT": "0.10",
+        "YAMS_SEARCH_TEXT_WEIGHT": "0.90"
+      }
+    },
+    {
+      "name": "vector_w000",
+      "factors": { "vector_weight": 0.0 },
+      "env": {
+        "YAMS_SEARCH_VECTOR_WEIGHT": "0",
+        "YAMS_SEARCH_TEXT_WEIGHT": "1.0"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log"],
+    "require_metrics": ["mrr"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95"
+    ]
+  }
+}

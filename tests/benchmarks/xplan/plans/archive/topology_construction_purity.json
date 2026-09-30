@@ -1,0 +1,228 @@
+{
+  "name": "topology_construction_purity",
+  "description": "Construction/routing purity matrix on BEIR scifact. Primary metrics are retrieval quality (MRR/nDCG) plus topology apply/cert counters — not cluster-geometry reward. Isolates dual objective: cluster shape vs ranking quality.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 7200,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "baseline": "topo_off",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS": "1",
+      "YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS": "2",
+      "YAMS_SEARCH_TOPOLOGY_MAX_DOCS": "8"
+    },
+    "params": {
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
+      "topk": 10,
+      "topology_source": "vector",
+      "max_component_docs": 64,
+      "seed_semantic_neighbors": "1"
+    }
+  },
+  "arms": [
+    {
+      "name": "topo_off",
+      "factors": { "topology_mode": "disabled" },
+      "env": { "YAMS_BENCH_TOPOLOGY_MODE": "disabled" }
+    },
+    {
+      "name": "cc_default",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_engine": "connected",
+        "expansion_arm": "cap2"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+        "YAMS_BENCH_TOPOLOGY_FEATURE_SMOOTHING_HOPS": "0"
+      },
+      "params": { "expansion_arm": "cap2" }
+    },
+    {
+      "name": "cc_medoid",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_engine": "connected",
+        "expansion_arm": "medoid64"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "connected"
+      },
+      "params": { "expansion_arm": "medoid64" }
+    },
+    {
+      "name": "cc_min_route",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_engine": "connected",
+        "min_route_score": 0.25,
+        "expansion_arm": "cap2"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+        "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE": "0.25"
+      },
+      "params": { "expansion_arm": "cap2", "min_route_score": 0.25 }
+    },
+    {
+      "name": "cc_weak_only",
+      "factors": {
+        "topology_mode": "weak_query_only",
+        "topology_engine": "connected",
+        "expansion_arm": "cap2"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "weak_query_only",
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "connected"
+      },
+      "params": { "expansion_arm": "cap2" }
+    },
+    {
+      "name": "cc_size_weighted",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_engine": "connected",
+        "route_scoring": "size_weighted",
+        "expansion_arm": "cap2"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING": "size_weighted"
+      },
+      "params": { "expansion_arm": "cap2", "route_scoring": "size_weighted" }
+    },
+    {
+      "name": "cc_seed_coverage",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_engine": "connected",
+        "route_scoring": "seed_coverage",
+        "expansion_arm": "cap2"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING": "seed_coverage"
+      },
+      "params": { "expansion_arm": "cap2", "route_scoring": "seed_coverage" }
+    },
+    {
+      "name": "louvain",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_engine": "louvain",
+        "expansion_arm": "cap2"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "louvain"
+      },
+      "params": { "expansion_arm": "cap2" }
+    },
+    {
+      "name": "cert_strict_64",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_engine": "connected",
+        "max_component_docs": 64,
+        "expansion_arm": "cap2"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+        "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS": "64"
+      },
+      "params": { "expansion_arm": "cap2", "max_component_docs": 64 }
+    },
+    {
+      "name": "cert_strict_32",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_engine": "connected",
+        "max_component_docs": 32,
+        "expansion_arm": "cap2"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+        "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS": "32"
+      },
+      "params": { "expansion_arm": "cap2", "max_component_docs": 32 }
+    },
+    {
+      "name": "cc_min_edge_0_5",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_engine": "connected",
+        "min_edge_score": 0.5,
+        "expansion_arm": "cap2"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+        "YAMS_TOPOLOGY_MIN_EDGE_SCORE": "0.5",
+        "YAMS_TOPOLOGY_MAX_COMPONENT_DOCS": "64"
+      },
+      "params": { "expansion_arm": "cap2", "min_edge_score": 0.5, "max_component_docs": 64 }
+    },
+    {
+      "name": "graph_neighbors",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "expansion_source": "graph_neighbors"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_EXPANSION": "graph_neighbors",
+        "YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE": "graph_neighbors",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE": "0.25"
+      },
+      "params": { "expansion_source": "graph_neighbors" }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "topology_applied",
+        "topology_admitted",
+        "topology_cert_ok",
+        "topology_cert_seen",
+        "topology_added_avg",
+        "topology_routed_clusters_avg"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log"],
+    "require_metrics": ["mrr"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "topology_applied",
+      "topology_cert_ok",
+      "topology_cert_seen",
+      "topology_added_avg"
+    ],
+    "group_by": ["topology_engine", "topology_mode"]
+  }
+}

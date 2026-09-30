@@ -1,0 +1,60 @@
+{
+  "name": "search_tiered_ablation",
+  "description": "Tiered narrow-vector execution on/off on BEIR scifact. Measures whether the Tier-2 narrow-vector refinement after Tier-1 text carries quality without a latency regression versus the product default (tiered off).",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 7200,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "tiered_off",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1"
+    },
+    "params": {
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
+      "topk": 10
+    }
+  },
+  "arms": [
+    {
+      "name": "tiered_off",
+      "factors": { "tiered": "off" }
+    },
+    {
+      "name": "tiered_on",
+      "factors": { "tiered": "on" }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log"],
+    "require_metrics": ["mrr"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95"
+    ]
+  }
+}

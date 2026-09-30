@@ -1,0 +1,175 @@
+{
+  "name": "ingest_pipeline",
+  "description": "Ingest ablation (one-factor-off): KG, vectors, GLiNER, and full minimal path for optimization ranking.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 900,
+  "continue_on_arm_failure": true,
+  "mode": "synthetic",
+  "repeats": 3,
+  "baseline": "baseline",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1"
+    },
+    "params": {
+      "corpus_size": 100,
+      "doc_size": 8192,
+      "poll_interval_ms": 20,
+      "post_ingest_coalesce_ms": 2,
+      "ingest_mode": "directory",
+      "ingest_concurrency": 1,
+      "require_complete_pipeline": true,
+      "require_full_searchability": true,
+      "require_experiment_identity": true,
+      "require_full_oracle": true,
+      "require_spq_persistence": false,
+      "minimum_vector_count": 0
+    }
+  },
+  "arms": [
+    {
+      "name": "baseline",
+      "factors": { "kg": "on", "vectors": "on", "gliner": "on" },
+      "params": {
+        "corpus_size": 5,
+        "doc_size": 1000,
+        "require_spq_persistence": false,
+        "minimum_vector_count": 0
+      }
+    },
+    {
+      "name": "no_kg",
+      "factors": { "kg": "off", "vectors": "on", "gliner": "on" }
+    },
+    {
+      "name": "no_vectors",
+      "factors": { "kg": "on", "vectors": "off", "gliner": "on" }
+    },
+    {
+      "name": "no_gliner",
+      "factors": { "kg": "on", "vectors": "on", "gliner": "off" },
+      "params": {
+        "corpus_size": 100,
+        "doc_size": 8192,
+        "require_spq_persistence": true,
+        "minimum_vector_count": 256
+      }
+    },
+    {
+      "name": "no_vectors_no_kg",
+      "factors": { "kg": "off", "vectors": "off", "gliner": "on" }
+    },
+    {
+      "name": "minimal",
+      "factors": { "kg": "off", "vectors": "off", "gliner": "off" }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "ingestion_e2e",
+      "metrics": [
+        "total_duration_ms",
+        "docs_per_s",
+        "mib_per_s",
+        "pipeline_complete",
+        "dropped_batches",
+        "post_ingest_coalesce_ms",
+        "post_ingest_batch_size",
+        "admission_ms",
+        "add_dispatch_avg_us",
+        "add_dispatch_fingerprint_avg_us",
+        "add_dispatch_enqueue_avg_us",
+        "storage_ready_ms",
+        "pipeline_drain_ms",
+        "enrichment_ready_ms",
+        "vector_index_finalize_ms",
+        "searchability_ready_ms",
+        "storage_oracle_stored_documents",
+        "storage_oracle_stored_vectors",
+        "vector_index_reusable_persisted_index",
+        "resource_cpu_ms",
+        "resource_peak_rss_after_bytes",
+        "resource_wal_growth_bytes",
+        "resource_db_lock_errors",
+        "resource_shutdown_succeeded",
+        "write_coordinator_batches_committed",
+        "write_coordinator_commit_errors",
+        "write_coordinator_max_queue_depth",
+        "write_coordinator_capacity_rejections",
+        "write_coordinator_max_batch_apply_ms",
+        "write_coordinator_max_batch_queue_wait_ms"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "mode_manifest.json"],
+    "require_metrics": [
+      "total_duration_ms",
+      "docs_per_s",
+      "pipeline_complete",
+      "dropped_batches",
+      "post_ingest_coalesce_ms",
+      "post_ingest_batch_size",
+      "admission_ms",
+      "add_dispatch_avg_us",
+      "add_dispatch_fingerprint_avg_us",
+      "add_dispatch_enqueue_avg_us",
+      "storage_ready_ms",
+      "pipeline_drain_ms",
+      "searchability_ready_ms",
+      "write_coordinator_batches_committed"
+    ],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "docs_per_s",
+      "mib_per_s",
+      "total_duration_ms",
+      "pipeline_complete",
+      "dropped_batches",
+      "post_ingest_coalesce_ms",
+      "post_ingest_batch_size",
+      "admission_ms",
+      "add_dispatch_samples",
+      "add_dispatch_avg_us",
+      "add_dispatch_fingerprint_avg_us",
+      "add_dispatch_enqueue_avg_us",
+      "storage_ready_ms",
+      "pipeline_drain_ms",
+      "enrichment_ready_ms",
+      "vector_index_finalize_ms",
+      "searchability_ready_ms",
+      "storage_oracle_stored_documents",
+      "storage_oracle_stored_vectors",
+      "storage_oracle_chunk_vectors",
+      "storage_oracle_document_vectors",
+      "vector_index_authoritative_generation",
+      "vector_index_source_generation",
+      "vector_index_reusable_persisted_index",
+      "resource_cpu_ms",
+      "resource_peak_rss_after_bytes",
+      "resource_wal_growth_bytes",
+      "resource_db_lock_errors",
+      "resource_shutdown_succeeded",
+      "document_store_total_ms",
+      "extract_ms",
+      "kg_ms",
+      "embed_prepare_ms",
+      "queue_max_post_ingest",
+      "queue_max_embed_jobs",
+      "write_coordinator_batches_enqueued",
+      "write_coordinator_batches_committed",
+      "write_coordinator_ops_applied",
+      "write_coordinator_commit_errors",
+      "write_coordinator_max_queue_depth",
+      "write_coordinator_capacity_rejections",
+      "write_coordinator_forced_enqueues_over_capacity",
+      "write_coordinator_max_batch_apply_ms",
+      "write_coordinator_max_batch_queue_wait_ms",
+      "write_coordinator_max_batch_excess_queue_wait_ms"
+    ],
+    "group_by": ["kg", "vectors", "gliner"]
+  }
+}

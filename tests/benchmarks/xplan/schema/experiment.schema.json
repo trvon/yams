@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yams.dev/schemas/xplan-experiment.json",
+  "title": "YAMS xplan experiment",
+  "type": "object",
+  "required": ["name", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Stable experiment plan id (directory-safe)."
+    },
+    "description": { "type": "string" },
+    "build_dir": {
+      "type": "string",
+      "description": "Meson build dir relative to repo root or absolute.",
+      "default": "build/release"
+    },
+    "artifact_root": {
+      "type": "string",
+      "description": "Root for run artifacts relative to repo root.",
+      "default": "build/benchmarks"
+    },
+    "timeout_sec": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 600
+    },
+    "continue_on_arm_failure": {
+      "type": "boolean",
+      "default": true
+    },
+    "repeats": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Run each arm N times; metrics aggregate to mean + {metric}_stdev + {metric}_n."
+    },
+    "baseline": {
+      "type": "string",
+      "description": "Arm name used as the delta reference in the summary (Δ columns + within-noise flag)."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["synthetic", "live-ish", "daemon-faithful", "unknown"],
+      "default": "synthetic"
+    },
+    "fixed": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean"] }
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "factors": {
+      "type": "object",
+      "description": "Named axes. Cartesian product unless arms is set.",
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1
+      }
+    },
+    "arms": {
+      "type": "array",
+      "description": "Explicit arms. When present, factors are ignored for expansion.",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "env": {
+            "type": "object",
+            "additionalProperties": { "type": ["string", "number", "boolean"] }
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "factors": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["worker"],
+        "additionalProperties": false,
+        "properties": {
+          "worker": {
+            "type": "string",
+            "description": "Registered worker name (e.g. ingestion_e2e)."
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": { "type": ["string", "number", "boolean"] }
+          },
+          "timeout_sec": { "type": "integer", "minimum": 1 },
+          "metrics": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Required metric keys for validate."
+          },
+          "allow_stub": {
+            "type": "boolean",
+            "default": false,
+            "description": "If true, stub workers are valid (structure-only)."
+          }
+        }
+      }
+    },
+    "validate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "require_files": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "require_metrics": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "require_metric_status": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Allowed metrics.status values (default: ok)."
+        }
+      }
+    },
+    "summarize": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "primary": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "group_by": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

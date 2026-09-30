@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright 2026 YAMS Contributors
+#
+# Shared-store memory-sync matrix. The default services exercise the explicitly
+# named filesystem arm. COMPOSE_PROFILES=s3 adds an internal-only MinIO endpoint
+# for the persistent/temporary S3 arms; no MinIO port is published to the host.
+
+x-saged: &saged
+  image: yams-p2p-harness:local
+  build:
+    context: ../../../../..
+    dockerfile: tests/benchmarks/xplan/fixtures/p2p/saged.Dockerfile
+  environment:
+    YAMS_CONFIG: /cfg/config.toml
+    YAMS_DAEMON_SOCKET: /run/yams-daemon.sock
+    YAMS_DATA_DIR: /data
+    YAMS_CLI_DISABLE_DAEMON_AUTOSTART: "1"
+    YAMS_NON_INTERACTIVE: "1"
+    YAMS_PLUGIN_DIR: /usr/local/lib/yams/plugins
+  command:
+    - --foreground
+    - --data-dir
+    - /data
+    - --config
+    - /cfg/config.toml
+    - --socket
+    - /run/yams-daemon.sock
+    - --log-file
+    - /data/saged.log
+    - --log-level
+    - debug
+
+services:
+  saged-a:
+    <<: *saged
+    volumes:
+      - ${YAMS_P2P_MEM_A:-mem-store}:/mem
+      - data-a:/data
+      - ${YAMS_P2P_CONFIG_A:-./config-a.toml}:/cfg/config.toml:ro
+      - ./s3_fixture.py:/harness/s3_fixture.py:ro
+
+  saged-b:
+    <<: *saged
+    volumes:
+      - ${YAMS_P2P_MEM_B:-mem-store}:/mem
+      - data-b:/data
+      - ${YAMS_P2P_CONFIG_B:-./config-b.toml}:/cfg/config.toml:ro
+      - ./s3_fixture.py:/harness/s3_fixture.py:ro
+
+  minio-init:
+    profiles: [s3]
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mkdir -p /data/$$MINIO_BUCKET"]
+    environment:
+      MINIO_BUCKET: ${YAMS_P2P_BUCKET:-yams-p2p}
+    volumes:
+      - minio-store:/data
+
+  minio:
+    profiles: [s3]
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${YAMS_P2P_ACCESS_KEY:?set YAMS_P2P_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${YAMS_P2P_SECRET_KEY:?set YAMS_P2P_SECRET_KEY}
+    volumes:
+      - minio-store:/data
+
+volumes:
+  mem-store:
+  mem-a:
+  mem-b:
+  data-a:
+  data-b:
+  minio-store:

@@ -107,7 +107,12 @@ audit_artifacts/
 /docs/audits/
 /DIFFERENTIAL_REVIEW_REPORT.md
 tests/benchmarks/baseline/xplan_foundation_*.json
-/tests/benchmarks/xplan/
+# xplan core is tracked; ignore only its caches and local data/artifacts.
+/tests/benchmarks/xplan/**/__pycache__/
+/tests/benchmarks/xplan/**/*.pyc
+/tests/benchmarks/xplan/.cache/
+/tests/benchmarks/xplan/datasets/
+/tests/benchmarks/xplan/runs/
 # Local-only xplan compatibility wrappers.
 /tests/benchmarks/scripts/ingestion_pipeline_ablation.sh
 /tests/benchmarks/scripts/simeon_rerank_ab.sh

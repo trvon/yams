@@ -1,0 +1,229 @@
+{
+  "name": "search_bq_prefilter_nfcorpus_gate",
+  "description": "Multi-corpus transfer gate for the BQ centroid pre-filter: same arms as search_bq_prefilter_ablation on BEIR nfcorpus. Promote bq16 over the ann64 default only if quality stays within noise here and on scifact while route work drops. Full nfcorpus (corpus_size=0): a 2000-document slice dedups to 1988 and trips the bench readiness wait.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 7200,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "routed_exact",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS": "1",
+      "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+      "YAMS_TOPOLOGY_MIN_EDGE_SCORE": "0.25",
+      "YAMS_TOPOLOGY_MAX_COMPONENT_DOCS": "64",
+      "YAMS_VECTOR_MAX_RESULTS": "32",
+      "YAMS_VECTOR_SEARCH_ENGINE": "vec0",
+      "YAMS_VECTOR_VEC0_PHSS_ENABLED": "1",
+      "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "64"
+    },
+    "params": {
+      "dataset": "nfcorpus",
+      "corpus_size": 0,
+      "num_queries": 50,
+      "topk": 10,
+      "topology_source": "vector",
+      "topology_engine": "connected",
+      "seed_semantic_neighbors": "1",
+      "max_component_docs": 64,
+      "min_edge_score": 0.25
+    }
+  },
+  "arms": [
+    {
+      "name": "routed_exact",
+      "factors": {
+        "route_index": "exact",
+        "bq_candidate_limit": 0
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "narrow",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_FINGERPRINT": "ee056c1f266d034a",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_QUERIES": "50",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_PROTECTED_CANDIDATES": "50",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MISSED_PROTECTED_CANDIDATES": "0",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_MIN_CALIBRATION_QUERIES": "1",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_MAX_MISSES_PER_THOUSAND": "0",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_BOUNDARY_MARGIN": "0.02",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_SEED_HITS": "1",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ROWS_VISITED": "65536",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_EXACT_DISTANCE_EVALUATIONS": "65536",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ANN_CANDIDATES": "4096"
+      },
+      "params": {
+        "topology_vector_policy": "narrow",
+        "min_clusters": 1,
+        "max_clusters": 4,
+        "max_docs": 64,
+        "max_seed_documents": 16,
+        "topology_route_ann_candidate_limit": 0,
+        "adaptive_probe_score_gap": 0.05,
+        "narrow_min_boundary_margin": 0.02,
+        "min_route_score": 0.15
+      }
+    },
+    {
+      "name": "routed_ann64",
+      "factors": {
+        "route_index": "ann",
+        "bq_candidate_limit": 0
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "narrow",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_FINGERPRINT": "ee056c1f266d034a",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_QUERIES": "50",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_PROTECTED_CANDIDATES": "50",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MISSED_PROTECTED_CANDIDATES": "0",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_MIN_CALIBRATION_QUERIES": "1",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_MAX_MISSES_PER_THOUSAND": "0",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_BOUNDARY_MARGIN": "0.02",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_SEED_HITS": "1",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ROWS_VISITED": "65536",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_EXACT_DISTANCE_EVALUATIONS": "65536",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ANN_CANDIDATES": "4096"
+      },
+      "params": {
+        "topology_vector_policy": "narrow",
+        "min_clusters": 1,
+        "max_clusters": 4,
+        "max_docs": 64,
+        "max_seed_documents": 16,
+        "topology_route_ann_candidate_limit": 64,
+        "adaptive_probe_score_gap": 0.05,
+        "narrow_min_boundary_margin": 0.02,
+        "min_route_score": 0.15
+      }
+    },
+    {
+      "name": "routed_bq16",
+      "factors": {
+        "route_index": "bq",
+        "bq_candidate_limit": 16
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "narrow",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_FINGERPRINT": "ee056c1f266d034a",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_QUERIES": "50",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_PROTECTED_CANDIDATES": "50",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MISSED_PROTECTED_CANDIDATES": "0",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_MIN_CALIBRATION_QUERIES": "1",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_MAX_MISSES_PER_THOUSAND": "0",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_BOUNDARY_MARGIN": "0.02",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_SEED_HITS": "1",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ROWS_VISITED": "65536",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_EXACT_DISTANCE_EVALUATIONS": "65536",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ANN_CANDIDATES": "4096"
+      },
+      "params": {
+        "topology_vector_policy": "narrow",
+        "min_clusters": 1,
+        "max_clusters": 4,
+        "max_docs": 64,
+        "max_seed_documents": 16,
+        "topology_route_ann_candidate_limit": 0,
+        "adaptive_probe_score_gap": 0.05,
+        "narrow_min_boundary_margin": 0.02,
+        "min_route_score": 0.15,
+        "topology_route_bq_candidate_limit": 16
+      }
+    },
+    {
+      "name": "routed_bq64",
+      "factors": {
+        "route_index": "bq",
+        "bq_candidate_limit": 64
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "narrow",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_FINGERPRINT": "ee056c1f266d034a",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_QUERIES": "50",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_PROTECTED_CANDIDATES": "50",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MISSED_PROTECTED_CANDIDATES": "0",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_MIN_CALIBRATION_QUERIES": "1",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_MAX_MISSES_PER_THOUSAND": "0",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_BOUNDARY_MARGIN": "0.02",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_SEED_HITS": "1",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ROWS_VISITED": "65536",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_EXACT_DISTANCE_EVALUATIONS": "65536",
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ANN_CANDIDATES": "4096"
+      },
+      "params": {
+        "topology_vector_policy": "narrow",
+        "min_clusters": 1,
+        "max_clusters": 4,
+        "max_docs": 64,
+        "max_seed_documents": 16,
+        "topology_route_ann_candidate_limit": 0,
+        "adaptive_probe_score_gap": 0.05,
+        "narrow_min_boundary_margin": 0.02,
+        "min_route_score": 0.15,
+        "topology_route_bq_candidate_limit": 64
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95",
+        "proc_maxrss_mb",
+        "topology_narrow_rate",
+        "topology_confidence_abstain_rate",
+        "topology_route_available_avg",
+        "topology_route_ann_rate",
+        "topology_route_ann_candidates_avg",
+        "topology_route_bq_rate",
+        "topology_route_bq_candidates_avg",
+        "topology_route_exact_representative_distance_evaluations_avg",
+        "topology_allowed_candidates_avg"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": [
+      "metrics.json",
+      "stdout.log"
+    ],
+    "require_metrics": [
+      "mrr",
+      "search_latency_ms_p50"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "recall_at_k",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95",
+      "proc_maxrss_mb",
+      "topology_narrow_rate",
+      "topology_confidence_abstain_rate",
+      "topology_route_available_avg",
+      "topology_route_ann_rate",
+      "topology_route_ann_candidates_avg",
+      "topology_route_bq_rate",
+      "topology_route_bq_candidates_avg",
+      "topology_route_exact_representative_distance_evaluations_avg",
+      "topology_allowed_candidates_avg"
+    ]
+  }
+}

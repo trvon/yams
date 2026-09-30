@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright 2026 YAMS Contributors
+
+[version]
+config_version = 3
+
+[daemon]
+auto_load_plugins = false
+auto_repair = false
+
+[memory_sync]
+enabled = true
+node_id = "123e4567-e89b-42d3-a456-42661417400a"
+corpus_id = "p2p-harness"
+corpus_epoch = 1
+backend = "filesystem"
+path = "/mem"
+sync_interval_ms = 500

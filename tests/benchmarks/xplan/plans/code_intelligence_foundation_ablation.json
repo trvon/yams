@@ -1,0 +1,111 @@
+{
+  "name": "code_intelligence_foundation_ablation",
+  "description": "Empirical comparison of in-tree YAMS graph vs Brick foundation vs lexical grep baseline for code intelligence, symbol resolution, impact analysis, output efficiency, and architectural health.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 600,
+  "continue_on_arm_failure": false,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "yams_intree_kg",
+  "fixed": {
+    "params": {
+      "manifest": "tests/benchmarks/xplan/data/code_intelligence_tasks.json",
+      "byte_budgets": [
+        256,
+        512,
+        1024,
+        2048,
+        4096
+      ],
+      "brick_model": "/tmp/yams.brick.json",
+      "brick_binary": "/Users/trevon/work/tools/brick/target/release/brick",
+      "task_timeout_sec": 30
+    }
+  },
+  "arms": [
+    {
+      "name": "yams_intree_kg",
+      "factors": {
+        "backend": "yams_intree_kg"
+      },
+      "params": {
+        "backend": "yams_intree_kg"
+      }
+    },
+    {
+      "name": "brick_foundation",
+      "factors": {
+        "backend": "brick_foundation"
+      },
+      "params": {
+        "backend": "brick_foundation"
+      }
+    },
+    {
+      "name": "lexical_baseline",
+      "factors": {
+        "backend": "lexical_baseline"
+      },
+      "params": {
+        "backend": "lexical_baseline"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "code_intelligence",
+      "metrics": [
+        "task_count",
+        "command_success_rate",
+        "useful_hit_rate",
+        "useful_recall_at_256_bytes",
+        "useful_recall_at_512_bytes",
+        "useful_recall_at_1024_bytes",
+        "useful_recall_at_4096_bytes",
+        "output_bytes_p50",
+        "output_bytes_p95",
+        "first_useful_byte_p50",
+        "duplicate_line_fraction",
+        "scope_leak_count",
+        "scope_leak_fraction",
+        "command_latency_ms_p50",
+        "command_latency_ms_p95",
+        "cycle_detection_supported",
+        "cycle_count",
+        "storage_footprint_mb"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": [
+      "metrics.json"
+    ],
+    "require_metrics": [
+      "task_count",
+      "command_success_rate",
+      "useful_hit_rate",
+      "output_bytes_p50",
+      "command_latency_ms_p50"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
+  },
+  "summarize": {
+    "primary": [
+      "useful_hit_rate",
+      "useful_recall_at_256_bytes",
+      "useful_recall_at_512_bytes",
+      "useful_recall_at_1024_bytes",
+      "output_bytes_p50",
+      "output_bytes_p95",
+      "duplicate_line_fraction",
+      "scope_leak_count",
+      "command_latency_ms_p50",
+      "cycle_detection_supported",
+      "cycle_count",
+      "storage_footprint_mb"
+    ]
+  }
+}

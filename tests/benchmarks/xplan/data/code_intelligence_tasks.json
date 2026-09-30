@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "corpus": "yams_codebase",
+  "tasks": [
+    {
+      "id": "lookup_graph_context_budget",
+      "surface": "lookup",
+      "query": "GraphContextBudget",
+      "expected_any": [
+        "include/yams/app/services/graph_context_service.hpp"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "lookup_post_ingest_queue",
+      "surface": "lookup",
+      "query": "PostIngestQueue",
+      "expected_any": [
+        "include/yams/daemon/components/PostIngestQueue.h"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "lookup_search_engine",
+      "surface": "lookup",
+      "query": "SearchEngine",
+      "expected_any": [
+        "include/yams/search/search_engine.h"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "lookup_tune_advisor",
+      "surface": "lookup",
+      "query": "TuneAdvisor",
+      "expected_any": [
+        "include/yams/daemon/components/TuneAdvisor.h"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "lookup_internal_event_bus",
+      "surface": "lookup",
+      "query": "InternalEventBus",
+      "expected_any": [
+        "include/yams/daemon/components/InternalEventBus.h"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "lookup_resource_governor",
+      "surface": "lookup",
+      "query": "ResourceGovernor",
+      "expected_any": [
+        "include/yams/daemon/components/ResourceGovernor.h"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "impact_graph_context_budget",
+      "surface": "impact",
+      "query": "GraphContextBudget",
+      "expected_any": [
+        "graph_context_service",
+        "GraphContext"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "impact_post_ingest_queue",
+      "surface": "impact",
+      "query": "PostIngestQueue",
+      "expected_any": [
+        "PostIngestQueue",
+        "ServiceManager"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "explore_search_engine",
+      "surface": "explore",
+      "query": "SearchEngine",
+      "expected_any": [
+        "search_engine.h",
+        "search_engine.cpp"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "architecture_cycles",
+      "surface": "architecture",
+      "query": "cycles",
+      "expected_any": [
+        "cycle",
+        "scc",
+        "component"
+      ],
+      "limit": 5
+    },
+    {
+      "id": "architecture_bridges",
+      "surface": "architecture",
+      "query": "bridges",
+      "expected_any": [
+        "bridge"
+      ],
+      "limit": 5
+    }
+  ]
+}
