@@ -23,11 +23,15 @@
   "arms": [
     {
       "name": "tiered_off",
-      "factors": { "tiered": "off" }
+      "factors": {
+        "tiered": "off"
+      }
     },
     {
       "name": "tiered_on",
-      "factors": { "tiered": "on" }
+      "factors": {
+        "tiered": "on"
+      }
     }
   ],
   "steps": [
@@ -44,9 +48,16 @@
     }
   ],
   "validate": {
-    "require_files": ["metrics.json", "stdout.log"],
-    "require_metrics": ["mrr"],
-    "require_metric_status": ["ok"]
+    "require_files": [
+      "metrics.json",
+      "stdout.log"
+    ],
+    "require_metrics": [
+      "mrr"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
   },
   "summarize": {
     "primary": [
@@ -56,5 +67,6 @@
       "search_latency_ms_p50",
       "search_latency_ms_p95"
     ]
-  }
+  },
+  "parked": "YAMS_SEARCH_TIERED_NARROW_VECTOR_SEARCH has no reader in src/ or include/, so both arms ran the identical default engine. SearchEngineConfig::tieredNarrowVectorSearch has no TOML key or bench flag yet; re-enable after a typed route exists."
 }

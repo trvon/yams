@@ -13,7 +13,6 @@
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
       "YAMS_ENABLE_ENV_OVERRIDES": "1",
       "YAMS_EMBED_BACKEND": "simeon",
-      "YAMS_HNSW_RANDOM_SEED": "42",
       "YAMS_SEARCH_WAIT_FOR_CONCEPTS": "1"
     },
     "params": {

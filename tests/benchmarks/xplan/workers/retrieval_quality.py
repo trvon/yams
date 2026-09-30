@@ -2519,6 +2519,113 @@ def _merge_benchmark_env(
     return env
 
 
+# Plan/step params -> env keys exported to retrieval_quality_bench. Module level so the
+# plan preflight can verify every mapped key has a reader.
+PARAM_ENV_MAP: dict[str, str] = {
+    "corpus_size": "YAMS_BENCH_CORPUS_SIZE",
+    "num_queries": "YAMS_BENCH_NUM_QUERIES",
+    "topk": "YAMS_BENCH_TOPK",
+    "dataset": "YAMS_BENCH_DATASET",
+    "dataset_path": "YAMS_BENCH_DATASET_PATH",
+    "evaluate_grep_baseline": "YAMS_BENCH_EVALUATE_GREP_BASELINE",
+    "topology_mode": "YAMS_BENCH_TOPOLOGY_MODE",
+    "topology_vector_policy": "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY",
+    "topology_engine": "YAMS_BENCH_TOPOLOGY_ENGINE",
+    "topology_routing_representatives": (
+        "YAMS_BENCH_TOPOLOGY_ROUTING_REPRESENTATIVES"
+    ),
+    "topology_route_representative_limit": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT"
+    ),
+    "topology_route_ann_candidate_limit": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_ANN_CANDIDATE_LIMIT"
+    ),
+    "topology_route_bq_candidate_limit": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT"
+    ),
+    "topology_route_bq_prefix_dim": "YAMS_BENCH_TOPOLOGY_ROUTE_BQ_PREFIX_DIM",
+    "topology_sgc_hops": "YAMS_BENCH_TOPOLOGY_SGC_HOPS",
+    "simeon_outer_maxsim": "YAMS_BENCH_SIMEON_OUTER_MAXSIM",
+    "graph_community_source": "YAMS_BENCH_GRAPH_COMMUNITY_SOURCE",
+    "topology_source": "YAMS_BENCH_TOPOLOGY_SOURCE",
+    "route_scoring": "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING",
+    "sparse_dense_alpha": "YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA",
+    "min_route_score": "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE",
+    "min_clusters": "YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS",
+    "max_docs": "YAMS_BENCH_TOPOLOGY_MAX_DOCS",
+    "expansion_output_limit": "YAMS_BENCH_TOPOLOGY_EXPANSION_OUTPUT_LIMIT",
+    "max_clusters": "YAMS_BENCH_TOPOLOGY_MAX_CLUSTERS",
+    "max_seed_documents": "YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS",
+    "adaptive_probe_score_gap": "YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP",
+    "narrow_min_boundary_margin": "YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN",
+    "route_calibration_fingerprint": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_FINGERPRINT"
+    ),
+    "route_calibration_queries": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_QUERIES"
+    ),
+    "route_calibration_protected_candidates": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_PROTECTED_CANDIDATES"
+    ),
+    "route_calibration_missed_protected_candidates": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MISSED_PROTECTED_CANDIDATES"
+    ),
+    "route_min_calibration_queries": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_MIN_CALIBRATION_QUERIES"
+    ),
+    "route_max_misses_per_thousand": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_MAX_MISSES_PER_THOUSAND"
+    ),
+    "route_calibration_min_boundary_margin": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_BOUNDARY_MARGIN"
+    ),
+    "route_calibration_min_seed_hits": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_SEED_HITS"
+    ),
+    "route_work_max_rows_visited": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ROWS_VISITED"
+    ),
+    "route_work_max_exact_distance_evaluations": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_EXACT_DISTANCE_EVALUATIONS"
+    ),
+    "route_work_max_ann_candidates": (
+        "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ANN_CANDIDATES"
+    ),
+    "max_component_docs": "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS",
+    "topology_boundary_spill": "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL",
+    "topology_boundary_spill_limit": "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_LIMIT",
+    "topology_boundary_spill_distance_ratio": (
+        "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_DISTANCE_RATIO"
+    ),
+    "topology_boundary_spill_residual_penalty": (
+        "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_RESIDUAL_PENALTY"
+    ),
+    "min_edge_score": "YAMS_TOPOLOGY_MIN_EDGE_SCORE",
+    "expansion_source": "YAMS_BENCH_TOPOLOGY_EXPANSION",
+    "seed_semantic_neighbors": "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS",
+    "seed_semantic_topk": "YAMS_BENCH_SEED_SEMANTIC_TOPK",
+    "seed_semantic_threshold": "YAMS_BENCH_SEED_SEMANTIC_THRESHOLD",
+    "graph_neighbor_min_score": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE",
+    "graph_neighbor_reciprocal_only": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY",
+    "graph_weighted_seed_ranking": (
+        "YAMS_BENCH_TOPOLOGY_GRAPH_WEIGHTED_SEED_RANKING"
+    ),
+    "graph_vector_seed_probe": "YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE",
+    "topology_fusion_rescue_slots": "YAMS_SEARCH_TOPOLOGY_FUSION_RESCUE_SLOTS",
+    "topology_final_rescue_slots": "YAMS_SEARCH_TOPOLOGY_FINAL_RESCUE_SLOTS",
+    "topology_rescue_selector": "YAMS_BENCH_TOPOLOGY_RESCUE_SELECTOR",
+    "enable_reranking": "YAMS_SEARCH_ENABLE_RERANKING",
+    "rerank_topk": "YAMS_SEARCH_RERANK_TOPK",
+    "rerank_replace_scores": "YAMS_SEARCH_RERANK_REPLACE_SCORES",
+    "rerank_weight": "YAMS_SEARCH_RERANK_WEIGHT",
+    "embed_backend": "YAMS_EMBED_BACKEND",
+    "vector_search_engine": "YAMS_VECTOR_SEARCH_ENGINE",
+    "simeon_pq_rerank_factor": "YAMS_BENCH_SIMEON_PQ_RERANK_FACTOR",
+    "ingest_min_fraction": "YAMS_BENCH_INGEST_MIN_FRACTION",
+    "progress_timeout_sec": "YAMS_BENCH_PROGRESS_TIMEOUT",
+}
+
+
 def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     # The runner resolves, fingerprints, and binds one executable across all arms.
     # Do not consult ambient binary overrides here or the executed file can diverge
@@ -2801,109 +2908,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         ctx.params["corpus_size"] = 0
         ctx.params["num_queries"] = 0
 
-    param_env = {
-        "corpus_size": "YAMS_BENCH_CORPUS_SIZE",
-        "num_queries": "YAMS_BENCH_NUM_QUERIES",
-        "topk": "YAMS_BENCH_TOPK",
-        "dataset": "YAMS_BENCH_DATASET",
-        "dataset_path": "YAMS_BENCH_DATASET_PATH",
-        "evaluate_grep_baseline": "YAMS_BENCH_EVALUATE_GREP_BASELINE",
-        "topology_mode": "YAMS_BENCH_TOPOLOGY_MODE",
-        "topology_vector_policy": "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY",
-        "topology_engine": "YAMS_BENCH_TOPOLOGY_ENGINE",
-        "topology_routing_representatives": (
-            "YAMS_BENCH_TOPOLOGY_ROUTING_REPRESENTATIVES"
-        ),
-        "topology_route_representative_limit": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT"
-        ),
-        "topology_route_ann_candidate_limit": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_ANN_CANDIDATE_LIMIT"
-        ),
-        "topology_route_bq_candidate_limit": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT"
-        ),
-        "topology_route_bq_prefix_dim": "YAMS_BENCH_TOPOLOGY_ROUTE_BQ_PREFIX_DIM",
-        "topology_sgc_hops": "YAMS_BENCH_TOPOLOGY_SGC_HOPS",
-        "simeon_outer_maxsim": "YAMS_BENCH_SIMEON_OUTER_MAXSIM",
-        "graph_community_source": "YAMS_BENCH_GRAPH_COMMUNITY_SOURCE",
-        "topology_source": "YAMS_BENCH_TOPOLOGY_SOURCE",
-        "route_scoring": "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING",
-        "sparse_dense_alpha": "YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA",
-        "min_route_score": "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE",
-        "min_clusters": "YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS",
-        "max_docs": "YAMS_BENCH_TOPOLOGY_MAX_DOCS",
-        "expansion_output_limit": "YAMS_BENCH_TOPOLOGY_EXPANSION_OUTPUT_LIMIT",
-        "max_clusters": "YAMS_BENCH_TOPOLOGY_MAX_CLUSTERS",
-        "max_seed_documents": "YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS",
-        "adaptive_probe_score_gap": "YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP",
-        "narrow_min_boundary_margin": "YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN",
-        "route_calibration_fingerprint": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_FINGERPRINT"
-        ),
-        "route_calibration_queries": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_QUERIES"
-        ),
-        "route_calibration_protected_candidates": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_PROTECTED_CANDIDATES"
-        ),
-        "route_calibration_missed_protected_candidates": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MISSED_PROTECTED_CANDIDATES"
-        ),
-        "route_min_calibration_queries": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_MIN_CALIBRATION_QUERIES"
-        ),
-        "route_max_misses_per_thousand": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_MAX_MISSES_PER_THOUSAND"
-        ),
-        "route_calibration_min_boundary_margin": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_BOUNDARY_MARGIN"
-        ),
-        "route_calibration_min_seed_hits": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_SEED_HITS"
-        ),
-        "route_work_max_rows_visited": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ROWS_VISITED"
-        ),
-        "route_work_max_exact_distance_evaluations": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_EXACT_DISTANCE_EVALUATIONS"
-        ),
-        "route_work_max_ann_candidates": (
-            "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ANN_CANDIDATES"
-        ),
-        "max_component_docs": "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS",
-        "topology_boundary_spill": "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL",
-        "topology_boundary_spill_limit": "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_LIMIT",
-        "topology_boundary_spill_distance_ratio": (
-            "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_DISTANCE_RATIO"
-        ),
-        "topology_boundary_spill_residual_penalty": (
-            "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_RESIDUAL_PENALTY"
-        ),
-        "min_edge_score": "YAMS_TOPOLOGY_MIN_EDGE_SCORE",
-        "expansion_source": "YAMS_BENCH_TOPOLOGY_EXPANSION",
-        "seed_semantic_neighbors": "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS",
-        "seed_semantic_topk": "YAMS_BENCH_SEED_SEMANTIC_TOPK",
-        "seed_semantic_threshold": "YAMS_BENCH_SEED_SEMANTIC_THRESHOLD",
-        "graph_neighbor_min_score": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE",
-        "graph_neighbor_reciprocal_only": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY",
-        "graph_weighted_seed_ranking": (
-            "YAMS_BENCH_TOPOLOGY_GRAPH_WEIGHTED_SEED_RANKING"
-        ),
-        "graph_vector_seed_probe": "YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE",
-        "topology_fusion_rescue_slots": "YAMS_SEARCH_TOPOLOGY_FUSION_RESCUE_SLOTS",
-        "topology_final_rescue_slots": "YAMS_SEARCH_TOPOLOGY_FINAL_RESCUE_SLOTS",
-        "topology_rescue_selector": "YAMS_BENCH_TOPOLOGY_RESCUE_SELECTOR",
-        "enable_reranking": "YAMS_SEARCH_ENABLE_RERANKING",
-        "rerank_topk": "YAMS_SEARCH_RERANK_TOPK",
-        "rerank_replace_scores": "YAMS_SEARCH_RERANK_REPLACE_SCORES",
-        "rerank_weight": "YAMS_SEARCH_RERANK_WEIGHT",
-        "embed_backend": "YAMS_EMBED_BACKEND",
-        "vector_search_engine": "YAMS_VECTOR_SEARCH_ENGINE",
-        "simeon_pq_rerank_factor": "YAMS_BENCH_SIMEON_PQ_RERANK_FACTOR",
-        "ingest_min_fraction": "YAMS_BENCH_INGEST_MIN_FRACTION",
-        "progress_timeout_sec": "YAMS_BENCH_PROGRESS_TIMEOUT",
-    }
+    param_env = PARAM_ENV_MAP
     env = _merge_benchmark_env(
         ambient=os.environ,
         declared_env=ctx.env,

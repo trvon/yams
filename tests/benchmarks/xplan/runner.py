@@ -43,7 +43,7 @@ from artifacts import (  # noqa: E402
 )
 from model import ArmContext, BenchConfig, ExperimentPlan  # noqa: E402
 from summarize import write_summary  # noqa: E402
-from validate import validate_arm  # noqa: E402
+from validate import preflight_plan, validate_arm  # noqa: E402
 from workers import REGISTRY, get_worker  # noqa: E402
 from workers.base import WorkerContext  # noqa: E402
 
@@ -245,12 +245,35 @@ def cmd_list_plans(_: argparse.Namespace) -> int:
     for path in sorted(plans_dir.glob("*.json")):
         try:
             plan = ExperimentPlan.load(path)
+            parked = " PARKED" if plan.raw.get("parked") else ""
             print(
-                f"{plan.name:22} {path.name:28} arms={len(plan.arms):2} steps={len(plan.steps)}"
+                f"{plan.name:22} {path.name:28} arms={len(plan.arms):2} "
+                f"steps={len(plan.steps)}{parked}"
             )
         except Exception as exc:  # noqa: BLE001
             print(f"{path.stem:22} {path.name:28} ERROR {exc}")
     return 0
+
+
+def cmd_preflight(args: argparse.Namespace) -> int:
+    """Check plans for knobs nothing reads; exit 2 when any plan fails."""
+    repo_root = repo_root_from()
+    if args.plans:
+        paths = [resolve_plan_path(p, repo_root) for p in args.plans]
+    else:
+        paths = sorted((XPLAN_ROOT / "plans").glob("*.json"))
+    failed = 0
+    for path in paths:
+        plan = ExperimentPlan.load(path)
+        issues = preflight_plan(plan, repo_root)
+        if issues:
+            failed += 1
+            print(f"FAIL {plan.name}")
+            for issue in issues:
+                print(f"  - {issue}")
+        else:
+            print(f"ok   {plan.name}")
+    return 2 if failed else 0
 
 
 def cmd_download_beir(args: argparse.Namespace) -> int:
@@ -418,6 +441,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     plan_path = resolve_plan_path(args.plan, repo_root)
     plan = ExperimentPlan.load(plan_path)
     _filter_arms(plan, list(args.arm or []))
+
+    preflight_issues = preflight_plan(plan, repo_root)
+    if preflight_issues:
+        print(
+            f"plan preflight failed for {plan.name}: a knob it sets is not honored "
+            "(no reader / unsupported), so the run would report default-engine noise:",
+            file=sys.stderr,
+        )
+        for issue in preflight_issues:
+            print(f"  - {issue}", file=sys.stderr)
+        return 2
 
     for arm in plan.arms:
         for step in plan.steps:
@@ -847,6 +881,12 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("b", help="Candidate run dir (B)")
     cp.add_argument("--out", default="", help="Output compare.md path (default: B/compare.md)")
     cp.set_defaults(func=cmd_compare)
+
+    pf = sub.add_parser(
+        "preflight", help="Fail plans that set env/factors no product code reads"
+    )
+    pf.add_argument("plans", nargs="*", help="Plan names/paths (default: all top-level plans)")
+    pf.set_defaults(func=cmd_preflight)
 
     lw = sub.add_parser("list-workers", help="List registered workers")
     lw.set_defaults(func=cmd_list_workers)

@@ -28,23 +28,39 @@
   "arms": [
     {
       "name": "gv_w008",
-      "factors": { "graph_vector_weight": 0.08 },
-      "env": { "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.08" }
+      "factors": {
+        "graph_vector_weight": 0.08
+      },
+      "env": {
+        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.08"
+      }
     },
     {
       "name": "gv_w004",
-      "factors": { "graph_vector_weight": 0.04 },
-      "env": { "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.04" }
+      "factors": {
+        "graph_vector_weight": 0.04
+      },
+      "env": {
+        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.04"
+      }
     },
     {
       "name": "gv_w002",
-      "factors": { "graph_vector_weight": 0.02 },
-      "env": { "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.02" }
+      "factors": {
+        "graph_vector_weight": 0.02
+      },
+      "env": {
+        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.02"
+      }
     },
     {
       "name": "gv_w000",
-      "factors": { "graph_vector_weight": 0.0 },
-      "env": { "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0" }
+      "factors": {
+        "graph_vector_weight": 0.0
+      },
+      "env": {
+        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0"
+      }
     }
   ],
   "steps": [
@@ -61,9 +77,16 @@
     }
   ],
   "validate": {
-    "require_files": ["metrics.json", "stdout.log"],
-    "require_metrics": ["mrr"],
-    "require_metric_status": ["ok"]
+    "require_files": [
+      "metrics.json",
+      "stdout.log"
+    ],
+    "require_metrics": [
+      "mrr"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
   },
   "summarize": {
     "primary": [
@@ -73,5 +96,6 @@
       "search_latency_ms_p50",
       "search_latency_ms_p95"
     ]
-  }
+  },
+  "parked": "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT has no reader in src/ or include/, so every arm ran the identical default engine. SearchEngineConfig::graphVectorWeight has no TOML key or bench flag yet; re-enable after a typed route exists."
 }

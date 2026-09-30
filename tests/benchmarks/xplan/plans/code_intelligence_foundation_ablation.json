@@ -19,7 +19,6 @@
         4096
       ],
       "brick_model": "/tmp/yams.brick.json",
-      "brick_binary": "/Users/trevon/work/tools/brick/target/release/brick",
       "task_timeout_sec": 30
     }
   },

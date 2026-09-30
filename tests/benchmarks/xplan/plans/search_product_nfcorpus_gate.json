@@ -1,6 +1,6 @@
 {
   "name": "search_product_nfcorpus_gate",
-  "description": "Multi-corpus gate for the product topology+ANN hybrid on BEIR nfcorpus. Use after a scifact-only weight win to check transfer before flipping defaults.",
+  "description": "Multi-corpus gate for the product topology+ANN hybrid on BEIR nfcorpus. Use after a scifact-only weight win to check transfer before flipping defaults. graph_vector_weight arms removed: YAMS_SEARCH_GRAPH_VECTOR_WEIGHT has no reader.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 7200,
@@ -28,38 +28,22 @@
   "arms": [
     {
       "name": "nf_baseline",
-      "factors": { "graph_vector_weight": 0.08, "vector_weight": 0.30 },
+      "factors": {
+        "vector_weight": 0.3
+      },
       "env": {
-        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.08",
-        "YAMS_SEARCH_VECTOR_WEIGHT": "0.30",
-        "YAMS_SEARCH_TEXT_WEIGHT": "0.70"
-      }
-    },
-    {
-      "name": "nf_gv_w000",
-      "factors": { "graph_vector_weight": 0.0 },
-      "env": {
-        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0",
         "YAMS_SEARCH_VECTOR_WEIGHT": "0.30",
         "YAMS_SEARCH_TEXT_WEIGHT": "0.70"
       }
     },
     {
       "name": "nf_vector_w000",
-      "factors": { "vector_weight": 0.0 },
+      "factors": {
+        "vector_weight": 0.0
+      },
       "env": {
-        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.08",
         "YAMS_SEARCH_VECTOR_WEIGHT": "0",
         "YAMS_SEARCH_TEXT_WEIGHT": "1.0"
-      }
-    },
-    {
-      "name": "nf_gv_w004",
-      "factors": { "graph_vector_weight": 0.04 },
-      "env": {
-        "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0.04",
-        "YAMS_SEARCH_VECTOR_WEIGHT": "0.30",
-        "YAMS_SEARCH_TEXT_WEIGHT": "0.70"
       }
     }
   ],
@@ -77,9 +61,16 @@
     }
   ],
   "validate": {
-    "require_files": ["metrics.json", "stdout.log"],
-    "require_metrics": ["mrr"],
-    "require_metric_status": ["ok"]
+    "require_files": [
+      "metrics.json",
+      "stdout.log"
+    ],
+    "require_metrics": [
+      "mrr"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
   },
   "summarize": {
     "primary": [

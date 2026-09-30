@@ -1,6 +1,6 @@
 {
   "name": "search_product_component_ablation",
-  "description": "Product-default topology+ANN hybrid one-factor-off on BEIR scifact. Identifies which engine components carry quality versus noise for the path users actually hit.",
+  "description": "Product-default topology+ANN hybrid one-factor-off on BEIR scifact. Identifies which engine components carry quality versus noise for the path users actually hit. graph_text/graph_vector arms were removed: their env keys had no product reader (see workers/ablation.py UNSUPPORTED_FACTORS), so they measured the identical default engine.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 7200,
@@ -32,8 +32,6 @@
         "text": "on",
         "vector": "on",
         "kg_weight": "on",
-        "graph_text": "on",
-        "graph_vector": "on",
         "graph_rerank": "on",
         "rerank": "on",
         "topology": "shadow"
@@ -41,31 +39,33 @@
     },
     {
       "name": "no_vector",
-      "factors": { "vector": "off" }
+      "factors": {
+        "vector": "off"
+      }
     },
     {
       "name": "no_kg",
-      "factors": { "kg_weight": "off" }
-    },
-    {
-      "name": "no_graph_text",
-      "factors": { "graph_text": "off" }
-    },
-    {
-      "name": "no_graph_vector",
-      "factors": { "graph_vector": "off" }
+      "factors": {
+        "kg_weight": "off"
+      }
     },
     {
       "name": "no_graph_rerank",
-      "factors": { "graph_rerank": "off" }
+      "factors": {
+        "graph_rerank": "off"
+      }
     },
     {
       "name": "no_rerank",
-      "factors": { "rerank": "off" }
+      "factors": {
+        "rerank": "off"
+      }
     },
     {
       "name": "no_text",
-      "factors": { "text": "off" }
+      "factors": {
+        "text": "off"
+      }
     }
   ],
   "steps": [
@@ -83,9 +83,16 @@
     }
   ],
   "validate": {
-    "require_files": ["metrics.json", "stdout.log"],
-    "require_metrics": ["mrr"],
-    "require_metric_status": ["ok"]
+    "require_files": [
+      "metrics.json",
+      "stdout.log"
+    ],
+    "require_metrics": [
+      "mrr"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
   },
   "summarize": {
     "primary": [

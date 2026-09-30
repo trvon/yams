@@ -4081,5 +4081,201 @@ class ReportBaselineTests(unittest.TestCase):
         self.assertIsNone(_baseline_row(rows, "topo_off"))
 
 
+class AblationHonestyTests(unittest.TestCase):
+    """A factor must change the engine it claims to change, or fail loudly."""
+
+    def test_factors_without_a_product_reader_are_rejected(self) -> None:
+        from workers.ablation import UNSUPPORTED_FACTORS, AblationError, apply_ablation
+
+        self.assertEqual(
+            {"tiered", "graph_text", "graph_vector", "graph_vector_weight", "entity_vector"},
+            set(UNSUPPORTED_FACTORS),
+        )
+        for key in UNSUPPORTED_FACTORS:
+            for value in ("off", "on"):
+                with self.subTest(key=key, value=value):
+                    env: dict[str, str] = {}
+                    with self.assertRaises(AblationError):
+                        apply_ablation(env, factors={key: value})
+                    self.assertEqual({}, env, "rejected ablation must not leak env")
+
+    def test_unsupported_ablation_params_are_rejected(self) -> None:
+        from workers.ablation import AblationError, apply_ablation
+
+        with self.assertRaises(AblationError):
+            apply_ablation({}, factors={}, params={"graph_text": "off"})
+
+    def test_unknown_factor_key_raises_instead_of_running_the_default(self) -> None:
+        from workers.ablation import AblationError, apply_ablation
+
+        with self.assertRaisesRegex(AblationError, "graph_rerenk"):
+            apply_ablation({}, factors={"graph_rerenk": "off"})
+
+    def test_non_axis_params_are_not_ablation_params(self) -> None:
+        from workers.ablation import apply_ablation
+
+        env: dict[str, str] = {}
+        applied = apply_ablation(
+            env, factors={}, params={"dataset": "scifact", "corpus_size": 2000}
+        )
+        self.assertEqual({}, env)
+        self.assertEqual("baseline", applied["label"])
+
+    def test_unparseable_axis_values_raise(self) -> None:
+        from workers.ablation import AblationError, apply_ablation
+
+        for factors in (
+            {"rerank": "maybe"},
+            {"kg": "sometimes"},
+            {"search_type": "fuzzy"},
+            {"text": "half"},
+            {"vector_weight": -0.1},
+        ):
+            with self.subTest(factors=factors), self.assertRaises(AblationError):
+                apply_ablation({}, factors=factors)
+
+    def test_numeric_weight_factors_are_honored_not_ignored(self) -> None:
+        from workers.ablation import apply_ablation
+
+        env: dict[str, str] = {}
+        apply_ablation(env, factors={"vector_weight": 0.3})
+        self.assertEqual("0.3", env["YAMS_SEARCH_VECTOR_WEIGHT"])
+        self.assertEqual("1", env["YAMS_ENABLE_ENV_OVERRIDES"])
+
+        env = {}
+        applied = apply_ablation(env, factors={"vector_weight": 0.0})
+        self.assertEqual("0", env["YAMS_SEARCH_VECTOR_WEIGHT"])
+        self.assertIn("vector_weight", applied["weight_zeros"])
+
+    def test_numeric_weight_contradicting_explicit_env_raises(self) -> None:
+        from workers.ablation import AblationError, apply_ablation
+
+        with self.assertRaises(AblationError):
+            apply_ablation(
+                {"YAMS_SEARCH_VECTOR_WEIGHT": "0.30"}, factors={"vector_weight": 0.15}
+            )
+        env = {"YAMS_SEARCH_VECTOR_WEIGHT": "0.30"}
+        apply_ablation(env, factors={"vector_weight": 0.3})
+        self.assertEqual("0.30", env["YAMS_SEARCH_VECTOR_WEIGHT"])
+
+    def test_off_factors_still_map_to_their_env(self) -> None:
+        from workers.ablation import apply_ablation
+
+        env: dict[str, str] = {}
+        apply_ablation(env, factors={"text": "off", "rerank": "off", "kg": "off"})
+        self.assertEqual("0", env["YAMS_SEARCH_TEXT_WEIGHT"])
+        self.assertEqual("0", env["YAMS_SEARCH_ENABLE_RERANKING"])
+        self.assertEqual("1", env["YAMS_BENCH_DISABLE_KG"])
+
+
+class PlanPreflightTests(unittest.TestCase):
+    def _fake_repo(self, tmp: str) -> Path:
+        root = Path(tmp)
+        (root / "src").mkdir()
+        (root / "include").mkdir()
+        (root / "tests" / "benchmarks").mkdir(parents=True)
+        (root / "src" / "a.cpp").write_text(
+            'auto w = getEnvFloat("YAMS_SEARCH_TEXT_WEIGHT");\n', encoding="utf-8"
+        )
+        (root / "tests" / "benchmarks" / "b.cpp").write_text(
+            'std::getenv("YAMS_BENCH_DATASET"); // also YAMS_SEARCH_ONLY_IN_TESTS\n',
+            encoding="utf-8",
+        )
+        return root
+
+    def _plan(self, tmp: str, *, env: dict[str, str], factors: dict | None = None, extra=None):
+        body = {
+            "name": "pf",
+            "fixed": {"env": env},
+            "arms": [{"name": "a", "factors": factors or {}}],
+            "steps": [{"worker": "ops_timeline", "allow_stub": True}],
+        }
+        body.update(extra or {})
+        path = Path(tmp) / "pf.json"
+        path.write_text(json.dumps(body), encoding="utf-8")
+        return path
+
+    def test_reader_index_distinguishes_product_and_harness_keys(self) -> None:
+        from validate import env_key_has_reader
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_repo(tmp)
+            self.assertTrue(env_key_has_reader("YAMS_SEARCH_TEXT_WEIGHT", root))
+            # A product knob only mentioned by a test is not a product reader.
+            self.assertFalse(env_key_has_reader("YAMS_SEARCH_ONLY_IN_TESTS", root))
+            self.assertFalse(env_key_has_reader("YAMS_SEARCH_TIERED_NARROW_VECTOR_SEARCH", root))
+            # Harness-only keys are honored when a bench reads them.
+            self.assertTrue(env_key_has_reader("YAMS_BENCH_DATASET", root))
+            self.assertFalse(env_key_has_reader("YAMS_BENCH_NEVER_READ", root))
+
+    def test_preflight_fails_plan_that_sets_unread_env(self) -> None:
+        from validate import preflight_plan
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_repo(tmp)
+            plan = ExperimentPlan.load(
+                self._plan(tmp, env={"YAMS_SEARCH_GRAPH_TEXT_WEIGHT": "0"})
+            )
+            issues = preflight_plan(plan, root)
+            self.assertTrue(any("YAMS_SEARCH_GRAPH_TEXT_WEIGHT" in i for i in issues), issues)
+
+            ok = ExperimentPlan.load(self._plan(tmp, env={"YAMS_SEARCH_TEXT_WEIGHT": "0"}))
+            self.assertEqual([], preflight_plan(ok, root))
+
+    def test_preflight_checks_env_the_ablation_would_set(self) -> None:
+        from validate import preflight_plan
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_repo(tmp)  # does not read YAMS_SEARCH_VECTOR_WEIGHT
+            plan = ExperimentPlan.load(self._plan(tmp, env={}, factors={"vector": "off"}))
+            issues = preflight_plan(plan, root)
+            self.assertTrue(any("YAMS_SEARCH_VECTOR_WEIGHT" in i for i in issues), issues)
+
+    def test_preflight_fails_unsupported_factor_and_parked_plan(self) -> None:
+        from validate import preflight_plan
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_repo(tmp)
+            plan = ExperimentPlan.load(
+                self._plan(tmp, env={}, factors={"tiered": "on"}, extra={"parked": "why"})
+            )
+            issues = preflight_plan(plan, root)
+            self.assertTrue(any("unsupported" in i for i in issues), issues)
+            self.assertTrue(any("parked: why" in i for i in issues), issues)
+
+    def test_runner_refuses_to_run_a_plan_that_fails_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._plan(tmp, env={"YAMS_SEARCH_GRAPH_VECTOR_WEIGHT": "0"})
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = xplan_runner.main(["run", str(path), "--dry-run"])
+            self.assertEqual(2, rc)
+            self.assertIn("YAMS_SEARCH_GRAPH_VECTOR_WEIGHT", err.getvalue())
+
+    def test_every_shipped_plan_is_honest_or_parked(self) -> None:
+        from validate import preflight_plan
+
+        repo_root = XPLAN_ROOT.parents[2]
+        for path in sorted((XPLAN_ROOT / "plans").glob("*.json")):
+            plan = ExperimentPlan.load(path)
+            issues = preflight_plan(plan, repo_root)
+            with self.subTest(plan=plan.name):
+                if plan.raw.get("parked"):
+                    self.assertTrue(issues, "a parked plan must not pass preflight")
+                else:
+                    self.assertEqual([], issues)
+
+    def test_no_op_ablations_do_not_appear_in_shipped_plan_arms(self) -> None:
+        from workers.ablation import UNSUPPORTED_FACTORS
+
+        for path in sorted((XPLAN_ROOT / "plans").glob("*.json")):
+            plan = ExperimentPlan.load(path)
+            if plan.raw.get("parked"):
+                continue
+            for arm in plan.arms:
+                with self.subTest(plan=plan.name, arm=arm.name):
+                    self.assertFalse(set(arm.factors) & set(UNSUPPORTED_FACTORS))
+
+
 if __name__ == "__main__":
     unittest.main()

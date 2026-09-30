@@ -1,6 +1,6 @@
 {
   "name": "search_candidate_rescue_graph",
-  "description": "Daemon-native candidate-finding gate for theorem-aligned graph rescue: PostIngestQueue and EmbeddingService produce the graph, then unchanged global Simeon ANN is compared with true shadow rescue, active augmentation, and an equal maximum vector-result-budget control.",
+  "description": "Daemon-native candidate-finding gate for theorem-aligned graph rescue: PostIngestQueue and EmbeddingService produce the graph, then unchanged global Simeon ANN is compared with true shadow rescue, active augmentation, and an equal maximum vector-result-budget control. Window-rescue and fragment-selector arms removed: they relied on YAMS_SEARCH_TOPOLOGY_{FUSION,FINAL}_RESCUE_SLOTS, which no product code reads (SearchEngineConfig::topology{Fusion,Final}RescueSlots have no env/TOML route).",
   "build_dir": "build/vector-opt-release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 7200,
@@ -169,53 +169,6 @@
       }
     },
     {
-      "name": "graph_rescue_augment_full_relation_doc1024_windowrescue",
-      "factors": {
-        "topology_mode": "hybrid_assist",
-        "topology_vector_policy": "augment",
-        "vector_result_budget": 32,
-        "relation_materialization_budget": 2048,
-        "expansion_output_budget": 1024,
-        "candidate_selection": "simeon_document_top_k",
-        "fusion_window_rescue": true,
-        "final_window_rescue": true
-      },
-      "params": {
-        "topology_mode": "hybrid_assist",
-        "topology_vector_policy": "augment",
-        "max_docs": 2048,
-        "expansion_output_limit": 1024,
-        "topology_fusion_rescue_slots": 4,
-        "topology_final_rescue_slots": 2
-      }
-    },
-    {
-      "name": "graph_rescue_augment_full_relation_doc1024_simeon_fragment_selector",
-      "factors": {
-        "topology_mode": "hybrid_assist",
-        "topology_vector_policy": "augment",
-        "vector_result_budget": 32,
-        "relation_materialization_budget": 2048,
-        "expansion_output_budget": 1024,
-        "candidate_selection": "simeon_document_top_k",
-        "fusion_window_rescue": true,
-        "final_window_rescue": true,
-        "topology_rescue_selector": "simeon_fragment_geometry",
-        "simeon_fragment_encoder": "fixed_hash_384"
-      },
-      "params": {
-        "topology_mode": "hybrid_assist",
-        "topology_vector_policy": "augment",
-        "max_docs": 2048,
-        "expansion_output_limit": 1024,
-        "topology_fusion_rescue_slots": 4,
-        "topology_final_rescue_slots": 2,
-        "topology_rescue_selector": "simeon_fragment_geometry",
-        "simeon_fragment_geometry": true,
-        "simeon_fragment_encoder_profile": "fixed_hash_384"
-      }
-    },
-    {
       "name": "graph_rescue_augment_c32_plus16",
       "factors": {
         "topology_mode": "hybrid_assist",
@@ -317,7 +270,11 @@
     }
   ],
   "validate": {
-    "require_files": ["metrics.json", "stdout.log", "debug.jsonl"],
+    "require_files": [
+      "metrics.json",
+      "stdout.log",
+      "debug.jsonl"
+    ],
     "require_metrics": [
       "mrr",
       "recall_at_k",
@@ -351,7 +308,9 @@
       "daemon_graph_post_ingest_in_flight",
       "search_latency_ms_p50"
     ],
-    "require_metric_status": ["ok"]
+    "require_metric_status": [
+      "ok"
+    ]
   },
   "summarize": {
     "primary": [
@@ -424,6 +383,9 @@
       "daemon_graph_topology_isolated_documents",
       "search_latency_ms_p50"
     ],
-    "group_by": ["topology_mode", "topology_vector_policy"]
+    "group_by": [
+      "topology_mode",
+      "topology_vector_policy"
+    ]
   }
 }

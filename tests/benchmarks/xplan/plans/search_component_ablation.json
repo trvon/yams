@@ -1,6 +1,6 @@
 {
   "name": "search_component_ablation",
-  "description": "One-factor-off ablation of hybrid search components (weight=0 gates via YAMS_SEARCH_*_WEIGHT) on BEIR scifact. KPI-1 search lane for optimization ranking.",
+  "description": "One-factor-off ablation of hybrid search components (weight=0 gates via YAMS_SEARCH_*_WEIGHT) on BEIR scifact. KPI-1 search lane for optimization ranking. graph_text/graph_vector arms were removed: their env keys had no product reader (see workers/ablation.py UNSUPPORTED_FACTORS), so they measured the identical default engine.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 3600,
@@ -30,8 +30,6 @@
         "text": "on",
         "vector": "on",
         "kg_weight": "on",
-        "graph_text": "on",
-        "graph_vector": "on",
         "graph_rerank": "on",
         "rerank": "on",
         "topology": "on"
@@ -62,24 +60,6 @@
       },
       "params": {
         "kg_weight": "off"
-      }
-    },
-    {
-      "name": "no_graph_text",
-      "factors": {
-        "graph_text": "off"
-      },
-      "params": {
-        "graph_text": "off"
-      }
-    },
-    {
-      "name": "no_graph_vector",
-      "factors": {
-        "graph_vector": "off"
-      },
-      "params": {
-        "graph_vector": "off"
       }
     },
     {
@@ -142,5 +122,6 @@
       "hybrid_queries",
       "topology_applied"
     ]
-  }
+  },
+  "repeats": 3
 }

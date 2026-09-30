@@ -24,29 +24,91 @@
     }
   },
   "arms": [
-    { "name": "full", "factors": { "ablate": "none" } },
-    { "name": "text_off", "factors": { "ablate": "text", "text": "off" } },
-    { "name": "simeon_off", "factors": { "ablate": "simeon_text", "simeon_text": "off" } },
-    { "name": "graph_text_off", "factors": { "ablate": "graph_text", "graph_text": "off" } },
-    { "name": "vector_off", "factors": { "ablate": "vector", "vector": "off" } },
-    { "name": "kg_off", "factors": { "ablate": "kg_weight", "kg_weight": "off" } },
-    { "name": "rerank_off", "factors": { "ablate": "rerank", "rerank": "off" } },
-    { "name": "graph_rerank_off", "factors": { "ablate": "graph_rerank", "graph_rerank": "off" } },
-    { "name": "concept_boost_off", "factors": { "ablate": "concept_boost", "concept_boost": "off" } }
+    {
+      "name": "full",
+      "factors": {
+        "ablate": "none"
+      }
+    },
+    {
+      "name": "text_off",
+      "factors": {
+        "ablate": "text",
+        "text": "off"
+      }
+    },
+    {
+      "name": "simeon_off",
+      "factors": {
+        "ablate": "simeon_text",
+        "simeon_text": "off"
+      }
+    },
+    {
+      "name": "vector_off",
+      "factors": {
+        "ablate": "vector",
+        "vector": "off"
+      }
+    },
+    {
+      "name": "kg_off",
+      "factors": {
+        "ablate": "kg_weight",
+        "kg_weight": "off"
+      }
+    },
+    {
+      "name": "rerank_off",
+      "factors": {
+        "ablate": "rerank",
+        "rerank": "off"
+      }
+    },
+    {
+      "name": "graph_rerank_off",
+      "factors": {
+        "ablate": "graph_rerank",
+        "graph_rerank": "off"
+      }
+    },
+    {
+      "name": "concept_boost_off",
+      "factors": {
+        "ablate": "concept_boost",
+        "concept_boost": "off"
+      }
+    }
   ],
   "steps": [
     {
       "worker": "retrieval_quality",
-      "metrics": ["ndcg_at_k", "recall_at_k"]
+      "metrics": [
+        "ndcg_at_k",
+        "recall_at_k"
+      ]
     }
   ],
   "validate": {
-    "require_files": ["metrics.json"],
-    "require_metrics": ["ndcg_at_k"],
-    "require_metric_status": ["ok"]
+    "require_files": [
+      "metrics.json"
+    ],
+    "require_metrics": [
+      "ndcg_at_k"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
   },
   "summarize": {
-    "primary": ["ndcg_at_k", "recall_at_k", "mrr", "map"],
-    "group_by": ["ablate"]
+    "primary": [
+      "ndcg_at_k",
+      "recall_at_k",
+      "mrr",
+      "map"
+    ],
+    "group_by": [
+      "ablate"
+    ]
   }
 }

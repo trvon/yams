@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import functools
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -108,3 +111,102 @@ def validate_arm(
             result.issues.append(ValidationIssue("error", f"missing metric: {key}"))
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Plan preflight: no env key may be set that nothing reads.
+# ---------------------------------------------------------------------------
+
+_ENV_TOKEN = re.compile(r"\bYAMS_[A-Z0-9_]+\b")
+_PRODUCT_DIRS = ("src", "include")
+_PRODUCT_SUFFIXES = {".cpp", ".cc", ".h", ".hpp", ".mm", ".inl"}
+# YAMS_BENCH_* is harness vocabulary: readers live in the bench binaries/tests or in the
+# xplan workers themselves, not in product code.
+_HARNESS_DIRS = ("tests",)
+_HARNESS_PREFIX = "YAMS_BENCH_"
+# Keys the harness sets that are intentionally not read by src/ or include/. Keep tiny;
+# each entry needs a reason.
+ENV_READER_ALLOWLIST: dict[str, str] = {}
+
+
+def _scan_tokens(root: Path, dirs: tuple[str, ...], suffixes: set[str]) -> set[str]:
+    found: set[str] = set()
+    for rel in dirs:
+        base = root / rel
+        if not base.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            # plans only *declare* keys; they are not readers.
+            dirnames[:] = [d for d in dirnames if d not in {"plans", "__pycache__", "build"}]
+            for name in filenames:
+                if Path(name).suffix not in suffixes:
+                    continue
+                try:
+                    text = (Path(dirpath) / name).read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                found.update(_ENV_TOKEN.findall(text))
+    return found
+
+
+@functools.lru_cache(maxsize=8)
+def _reader_index(root_str: str) -> tuple[frozenset[str], frozenset[str]]:
+    root = Path(root_str)
+    product = _scan_tokens(root, _PRODUCT_DIRS, _PRODUCT_SUFFIXES)
+    harness = _scan_tokens(root, _HARNESS_DIRS, _PRODUCT_SUFFIXES | {".py"})
+    return frozenset(product), frozenset(harness)
+
+
+def env_key_has_reader(key: str, repo_root: Path) -> bool:
+    """True when `key` is read by product code (or, for YAMS_BENCH_*, by bench code)."""
+    if key in ENV_READER_ALLOWLIST:
+        return True
+    product, harness = _reader_index(str(repo_root.resolve()))
+    if key in product:
+        return True
+    if key.startswith(_HARNESS_PREFIX):
+        return key in harness
+    return False
+
+
+def preflight_plan(plan: ExperimentPlan, repo_root: Path) -> list[str]:
+    """Return blocking problems for a plan; empty means every knob it sets is honored."""
+    # Imported lazily: workers pull in heavy modules and need the runner's sys.path.
+    from workers.ablation import AblationError, apply_ablation
+    from workers.retrieval_quality import PARAM_ENV_MAP
+
+    issues: list[str] = []
+    parked = plan.raw.get("parked")
+    if parked:
+        issues.append(f"plan is parked: {parked}")
+
+    seen: set[tuple[str, str]] = set()
+
+    def check(where: str, key: str) -> None:
+        if not key.startswith("YAMS_") or (where, key) in seen:
+            return
+        seen.add((where, key))
+        if not env_key_has_reader(key, repo_root):
+            issues.append(f"{where}: env {key} has no reader (would be a silent no-op)")
+
+    for arm in plan.arms:
+        for step in plan.steps:
+            where = f"arm {arm.name!r}"
+            env = {**plan.fixed_env, **arm.env, **step.env}
+            params = {**arm.factors, **plan.fixed_params, **arm.params, **step.params}
+            for key in env:
+                check(where, key)
+            scratch = dict(env)
+            try:
+                apply_ablation(scratch, factors=arm.factors, params=params)
+            except AblationError as exc:
+                issues.append(f"{where}: {exc}")
+                continue
+            for key in scratch:
+                if key not in env:
+                    check(where, key)
+            if step.worker == "retrieval_quality":
+                for pkey, ekey in PARAM_ENV_MAP.items():
+                    if pkey in params:
+                        check(where, ekey)
+    return sorted(set(issues))

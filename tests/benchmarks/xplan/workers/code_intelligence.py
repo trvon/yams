@@ -421,7 +421,9 @@ def run_code_intelligence(ctx: WorkerContext) -> WorkerResult:
             yams_bin = Path(installed)
 
     brick_model_path = Path(str(ctx.params.get("brick_model") or "/tmp/yams.brick.json"))
-    brick_bin = Path(str(ctx.params.get("brick_binary") or "/Users/trevon/work/tools/brick/target/release/brick"))
+    brick_bin = Path(
+        str(ctx.params.get("brick_binary") or shutil.which("brick") or "brick")
+    )
 
     brick_index: BrickModelIndex | None = None
     if backend == "brick_foundation":
