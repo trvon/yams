@@ -273,7 +273,8 @@ class RepositoryPublicationTests(unittest.TestCase):
             command[command.index("--content-type") + 1],
             "application/octet-stream",
         )
-        self.assertIn("--force", command)
+        # wrangler 4.x `r2 object put` overwrites without prompting and rejects --force.
+        self.assertNotIn("--force", command)
 
 
 if __name__ == "__main__":
