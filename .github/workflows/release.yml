@@ -2393,7 +2393,8 @@ jobs:
           done
           printf '%s\n' \
             'Add Arch repo (unsigned):' \
-            '  sudo tee /etc/pacman.d/yams.conf <<REPO' \
+            '  sudo tee -a /etc/pacman.conf <<REPO' \
+            '' \
             '  [yams]' \
             '  SigLevel = Optional TrustAll' \
             "  Server = https://repo.yamsmemory.ai/${REPOSITORY_PREFIX}archrepo/os/\$arch" \
