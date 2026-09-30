@@ -104,10 +104,9 @@ Every [release](https://github.com/trvon/yams/releases) also carries
 
 ### Experimental channel
 
-Nightly builds of the `experimental` branch use the same commands with
-`/experimental/` in the path, for example
-`https://repo.yamsmemory.ai/experimental/aptrepo` with dist `experimental` and
-key `https://repo.yamsmemory.ai/experimental/aptrepo/gpg.key`. Expect breakage.
+Package repositories for the `experimental` channel are not published yet;
+only the stable repositories above are live. To try experimental builds, use
+the Homebrew `yams-nightly` formula or build from source.
 
 ## First run
 
