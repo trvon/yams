@@ -66,7 +66,7 @@ Run `./setup.sh --help`, `./setup.ps1 -?`, and inspect
 
 ```bash
 git config core.hooksPath .githooks
-scripts/quality-gate.sh
+YAMS_PREPUSH_GATE_SELF_TEST=1 git push   # prove the hook wiring without the full gate
 ```
 
 The default pre-push hook runs the blocking Linux and macOS CI gate. Coverage is

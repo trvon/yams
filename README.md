@@ -6,6 +6,18 @@ graph, and grep surfaces.
 
 > **Experimental:** YAMS is pre-1.0. Expect bugs and breaking changes.
 
+## Why YAMS
+
+YAMS is local memory for people who work with LLMs. It runs on your machine and
+is harness-agnostic: Claude Code, Codex, OpenCode, any MCP client, or a plain
+shell script all read and write the same corpus through the `yams` CLI or
+`yams serve`. Switching tools does not mean starting over.
+
+We believe LLM memory should be just that: memory, and yours. It lives in a data
+directory you choose, in formats you can inspect (content-addressed files and
+SQLite), and it can be exported or deleted whenever you decide. No account, no
+hosted service, and no model provider sits between you and what you have stored.
+
 ## What it provides
 
 - SHA-256 content-addressed storage with chunk-level deduplication and compression
@@ -21,12 +33,25 @@ graph, and grep surfaces.
 # macOS
 brew install trvon/yams/yams
 
+# Debian / Ubuntu
+curl -fsSL https://repo.yamsmemory.ai/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/yams-stable.gpg
+echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams-stable.gpg] https://repo.yamsmemory.ai/aptrepo stable main" \
+  | sudo tee /etc/apt/sources.list.d/yams-stable.list
+sudo apt-get update && sudo apt-get install yams
+
 # Container
 docker pull ghcr.io/trvon/yams:latest
 ```
 
-Linux packages and Windows artifacts are published with releases. To build from
-source, see [docs/BUILD.md](docs/BUILD.md).
+Fedora (DNF), Arch (pacman), Windows (MSI) and release archives are covered in
+the [install guide](docs/install.md), along with where YAMS keeps its config,
+data and logs, how to run the daemon as a service, and the settings most people
+change. To build from source, see [docs/BUILD.md](docs/BUILD.md).
+
+By default YAMS keeps its config in `~/.config/yams/config.toml`, your corpus in
+`~/.local/share/yams`, and daemon logs in `~/.local/state/yams`
+(`%APPDATA%` / `%LOCALAPPDATA%` on Windows).
 
 ## Start
 
@@ -63,6 +88,7 @@ yams serve
 
 ## Project pages
 
+- [Install and setup](docs/install.md)
 - [Build from source](docs/BUILD.md)
 - [Benchmarks](docs/benchmarks/)
 - [Roadmap](docs/roadmap.md)
