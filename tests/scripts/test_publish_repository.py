@@ -236,7 +236,7 @@ class RepositoryPublicationTests(unittest.TestCase):
         self.assertEqual(
             command[:5],
             [
-                "/wrangler",
+                str(Path("/wrangler")),
                 "r2",
                 "object",
                 "get",
@@ -260,7 +260,7 @@ class RepositoryPublicationTests(unittest.TestCase):
         self.assertEqual(
             command[:5],
             [
-                "/wrangler",
+                str(Path("/wrangler")),
                 "r2",
                 "object",
                 "put",
