@@ -166,6 +166,13 @@ if enable_ubsan
   endif
 endif
 
+# Profiling builds are optimized; keep frame pointers so Tracy call stacks and
+# perf/Instruments unwinding stay accurate.
+if get_option('enable-profiling') and cpp.get_id() not in ['msvc', 'clang-cl']
+  _profiling_frame_args = cpp.get_supported_arguments('-fno-omit-frame-pointer', '-mno-omit-leaf-frame-pointer')
+  add_project_arguments(_profiling_frame_args, language: ['cpp', 'c'])
+endif
+
 if enable_dcheck
   add_project_arguments('-DYAMS_ENABLE_DCHECK=1', language: 'cpp')
   message('YAMS_DCHECK enabled in this build (overrides NDEBUG for debug-only checks)')

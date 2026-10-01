@@ -179,7 +179,9 @@ release)
 	BUILD_TYPE="Release"
 	;;
 profiling)
-	BUILD_TYPE="Debug" # Use Debug as base for Conan/Meson
+	# Profile what ships: Release Conan dependencies and the Release Meson
+	# configuration (-O3 -g, NDEBUG), plus Tracy and frame pointers. No sanitizers.
+	BUILD_TYPE="Release"
 	ENABLE_PROFILING=true
 	;;
 fuzzing)
@@ -440,10 +442,10 @@ fi
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
 	BUILD_DIR="build/profiling"
 	CONAN_SUBDIR="build-profiling"
-	# Conan often writes profiling/debug toolchains under a nested build-debug directory
-	CONAN_ALT_SUBDIR="build-debug"
+	# Conan writes the Release-based profiling toolchain under a nested build-release directory
+	CONAN_ALT_SUBDIR="build-release"
 	# Profile optimized code: -O0 zone timings do not predict release hot spots.
-	BUILD_TYPE_MESON_LOWER="debugoptimized"
+	BUILD_TYPE_MESON_LOWER="release"
 elif [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 	BUILD_DIR="build/fuzzing"
 	CONAN_SUBDIR="build-fuzzing"
