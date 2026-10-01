@@ -565,11 +565,13 @@ package_rpm() {
   cat > "${spec}" <<'__RPM_SPEC__'
 %global debug_package %{nil}
 %global __strip /bin/true
+# zstd payload (level 19) instead of rpm's gzip-class default; rpm >= 4.14.
+%define _binary_payload w19.zstdio
 Name: yams
 Version: __VERSION__
 Release: __RELEASE__%{?dist}
 Summary: Yet Another Memory System
-License: Apache-2.0
+License: GPL-3.0-or-later
 URL: https://git.trevon.dev/trevon/yams
 Source0: %{name}-%{version}.tar.gz
 BuildArch: __RPM_ARCH__

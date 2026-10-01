@@ -167,16 +167,9 @@ builddate = ${builddate}
 packager = ${packager}
 size = ${install_size}
 arch = ${pkg_arch}
-license = Apache-2.0
+license = GPL-3.0-or-later
 depend = gcc-libs
 depend = glibc
-depend = liburing
-depend = libarchive
-depend = taglib
-depend = sqlite
-depend = openssl
-depend = curl
-depend = boost-libs
 optdepend = onnxruntime: ONNX-based embedding acceleration
 EOF
 

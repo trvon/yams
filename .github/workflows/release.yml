@@ -1419,7 +1419,9 @@ jobs:
           OUTDIR="$GITHUB_WORKSPACE"
           if [ "${{ matrix.packaging }}" = "zip" ]; then
             ASSET="yams-${VERSION}-${SUFFIX}.zip"
-            zip -r "$OUTDIR/$ASSET" .
+            # -y stores symlinks (bin/yams -> yams-cli, versioned dylib links) as links
+            # instead of a second full copy of the target.
+            zip -ry "$OUTDIR/$ASSET" .
           else
             ASSET="yams-${VERSION}-${SUFFIX}.tar.gz"
             tar czf "$OUTDIR/$ASSET" .
@@ -1566,7 +1568,6 @@ jobs:
             ${{ env.BUILD_DIR }}/bench_results/*.json
             yams-*.deb
             yams-*.rpm
-            yams-*.AppImage
             yams-*.pkg
             yams-*.pkg.tar.zst
             winget-manifests/**
@@ -1655,7 +1656,7 @@ jobs:
               [ -f "$file" ] && copy_unique_asset "$file"
             done
             # Packages
-            for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.AppImage "$dir"/*.pkg.tar.zst "$dir"/*.msi; do
+            for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.pkg.tar.zst "$dir"/*.msi; do
               [ -f "$file" ] && copy_unique_asset "$file"
             done
             # Arch repo metadata
@@ -1688,7 +1689,7 @@ jobs:
             distributables+=("$f")
           done < <(find . -maxdepth 1 -type f \( \
             -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o \
-            -name '*.AppImage' -o -name '*.pkg' -o -name '*.msi' -o -name '*.pkg.tar.zst' \
+            -name '*.pkg' -o -name '*.msi' -o -name '*.pkg.tar.zst' \
           \) -printf '%f\n' | sort)
           if [ ${#distributables[@]} -gt 0 ]; then
             : > SHA256SUMS
@@ -2684,7 +2685,7 @@ jobs:
                 mv "$file" assets/ 2>/dev/null || true
               done
               # Move Linux packages
-              for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.AppImage "$dir"/*.pkg; do
+              for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.pkg; do
                 mv "$file" assets/ 2>/dev/null || true
               done
               # Collect benchmark results

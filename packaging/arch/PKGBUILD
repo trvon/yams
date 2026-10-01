@@ -14,7 +14,7 @@ _yams_build_dir="build/pkg-makepkg-${CARCH}"
 pkgdesc="Yet Another Memory System — persistent content-addressed memory for LLMs"
 arch=(x86_64 aarch64)
 url="https://github.com/trvon/yams"
-license=(Apache-2.0)
+license=(GPL-3.0-or-later)
 makedepends=(
     base-devel
     clang
@@ -37,16 +37,11 @@ makedepends=(
     boost
     lld
 )
+# Third-party libraries are linked statically from the Conan build; the
+# installed binaries and plugins only need libstdc++/libgcc_s/libc/libm.
 depends=(
     gcc-libs
     glibc
-    liburing
-    libarchive
-    taglib
-    sqlite
-    openssl
-    curl
-    boost-libs
 )
 optdepends=(
     'onnxruntime: ONNX-based embedding acceleration'

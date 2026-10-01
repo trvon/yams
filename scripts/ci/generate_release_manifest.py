@@ -19,7 +19,6 @@ CHECKSUM_RE = re.compile(r"^([0-9a-fA-F]{64})[ \t]+[*]?([^\r\n]+)$")
 DISTRIBUTABLE_SUFFIXES = (
     ".pkg.tar.zst",
     ".tar.gz",
-    ".AppImage",
     ".zip",
     ".deb",
     ".rpm",
