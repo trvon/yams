@@ -117,7 +117,9 @@ Knowledge-graph topology is published by a repeating sweep over stable row ids: 
 every edge together with both of its endpoint nodes, then a check that tombstones this node's own
 published nodes and edges its graph no longer holds. Graph changes made after a sweep went by,
 including topology rebuilds that replace cluster nodes, reach peers on a later sweep; unchanged
-records publish nothing. A node never applies its own published topology back into its graph.
+records publish nothing. A node never applies its own published topology back into its graph. The
+periodic backfill publishes documents first, then embeddings, then topology, so peers can read the
+corpus before the records derived from it have replicated.
 
 ## Enroll and connect peers
 

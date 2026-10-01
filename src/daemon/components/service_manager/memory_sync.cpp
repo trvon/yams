@@ -959,54 +959,48 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         return false;
     };
 
-    const auto advanceDomain = [&] {
-        using Domain = MemorySyncBackfillState::Domain;
-        switch (state.nextDomain) {
-            case Domain::Documents:
-                state.nextDomain = Domain::Vectors;
-                break;
-            case Domain::Vectors:
-                state.nextDomain = Domain::Topology;
-                break;
-            case Domain::Topology:
-                state.nextDomain = Domain::Documents;
-                break;
-        }
-    };
-
+    // Domains are served in priority order: every item goes to the first domain that still has
+    // work this cycle. Documents (metadata and content) are what peers need to read the corpus;
+    // vectors and topology are derived from them and only defer on a peer until the document
+    // arrives. A publish costs a large share of the per-cycle time budget, so a fair rotation let
+    // derived records delay the documents every peer is waiting for.
+    using Domain = MemorySyncBackfillState::Domain;
+    constexpr std::array kDomainPriority{Domain::Documents, Domain::Vectors, Domain::Topology};
+    std::array<bool, kDomainPriority.size()> domainDone{};
     bool domainFailed = false;
-    std::size_t consecutiveEmptyDomains = 0;
-    while (!shouldStop() && consecutiveEmptyDomains < 3) {
-        const auto domain = state.nextDomain;
-        advanceDomain();
+    while (!shouldStop()) {
         bool published = false;
-        try {
-            using Domain = MemorySyncBackfillState::Domain;
-            switch (domain) {
-                case Domain::Documents:
-                    published = publishDocument();
-                    break;
-                case Domain::Vectors:
-                    published = publishVector();
-                    break;
-                case Domain::Topology:
-                    published = publishTopology();
-                    break;
+        for (std::size_t index = 0; index < kDomainPriority.size() && !published; ++index) {
+            if (domainDone[index]) {
+                continue;
             }
-        } catch (const std::exception& error) {
-            domainFailed = true;
-            spdlog::warn("[ServiceManager] memory_sync backfill domain failed: {}", error.what());
-        } catch (...) {
-            domainFailed = true;
-            spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
+            try {
+                switch (kDomainPriority[index]) {
+                    case Domain::Documents:
+                        published = publishDocument();
+                        break;
+                    case Domain::Vectors:
+                        published = publishVector();
+                        break;
+                    case Domain::Topology:
+                        published = publishTopology();
+                        break;
+                }
+            } catch (const std::exception& error) {
+                domainFailed = true;
+                spdlog::warn("[ServiceManager] memory_sync backfill domain failed: {}",
+                             error.what());
+            } catch (...) {
+                domainFailed = true;
+                spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
+            }
+            // A domain with nothing left, or one that failed, sits out the rest of this cycle.
+            domainDone[index] = !published;
         }
-
-        if (published) {
-            --remainingItems;
-            consecutiveEmptyDomains = 0;
-        } else {
-            ++consecutiveEmptyDomains;
+        if (!published) {
+            break;
         }
+        --remainingItems;
     }
 
     spdlog::debug(

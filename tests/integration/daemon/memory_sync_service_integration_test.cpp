@@ -1161,42 +1161,36 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
         makeFilesystemBackend(harness.dataDir() / "shared-memory"),
         yams::memory_sync::MemorySyncConfig{"backfill-peer", 60'000, "backfill-budget-corpus", 1}};
 
-    serviceManager->testingPublishMemorySyncBackfill();
-    REQUIRE(peer.syncOnce().has_value());
-    std::size_t firstCycle = 0;
-    for (const auto& hash : hashes) {
-        firstCycle += peer.readCached("document/" + hash).has_value() ? 1U : 0U;
-    }
-    CHECK(firstCycle == 1);
+    const auto publishedDocuments = [&] {
+        REQUIRE(peer.syncOnce().has_value());
+        std::size_t published = 0;
+        for (const auto& hash : hashes) {
+            published += peer.readCached("document/" + hash).has_value() ? 1U : 0U;
+        }
+        return published;
+    };
+    const auto observed = [&](std::string_view stage) {
+        return std::find(stages.begin(), stages.end(), stage) != stages.end();
+    };
 
+    // One item per cycle, and the cursor resumes where the previous cycle stopped. Documents come
+    // before the records derived from them, so the topology waits until every document is out.
+    for (std::size_t cycle = 1; cycle <= hashes.size(); ++cycle) {
+        stages.clear();
+        serviceManager->testingPublishMemorySyncBackfill();
+        INFO("cycle=" << cycle);
+        CHECK(publishedDocuments() == cycle);
+        CHECK_FALSE(observed("backfill.after_node"));
+    }
+
+    // The topology sweep then publishes every node before the edges, so the edge follows the
+    // second node within a bounded number of further cycles.
     stages.clear();
-    serviceManager->testingPublishMemorySyncBackfill();
-    REQUIRE(peer.syncOnce().has_value());
-    CHECK(std::find(stages.begin(), stages.end(), "backfill.after_node") != stages.end());
-    std::size_t secondCycle = 0;
-    for (const auto& hash : hashes) {
-        secondCycle += peer.readCached("document/" + hash).has_value() ? 1U : 0U;
-    }
-    CHECK(secondCycle == 1);
-
-    serviceManager->testingPublishMemorySyncBackfill();
-    REQUIRE(peer.syncOnce().has_value());
-    std::size_t thirdCycle = 0;
-    for (const auto& hash : hashes) {
-        thirdCycle += peer.readCached("document/" + hash).has_value() ? 1U : 0U;
-    }
-    CHECK(thirdCycle == 2);
-
-    // The topology sweep publishes every node before the edges, so the edge follows the second
-    // node within a bounded number of further cycles.
-    stages.clear();
-    for (int cycle = 0; cycle < 4 && std::find(stages.begin(), stages.end(),
-                                               "backfill.after_edge") == stages.end();
-         ++cycle) {
+    for (int cycle = 0; cycle < 4 && !observed("backfill.after_edge"); ++cycle) {
         serviceManager->testingPublishMemorySyncBackfill();
     }
-    REQUIRE(peer.syncOnce().has_value());
-    CHECK(std::find(stages.begin(), stages.end(), "backfill.after_edge") != stages.end());
+    CHECK(observed("backfill.after_node"));
+    CHECK(observed("backfill.after_edge"));
 
     serviceManager->testingSetMemorySyncStageObserver({});
     harness.stop();

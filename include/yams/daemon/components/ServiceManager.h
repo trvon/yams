@@ -1035,7 +1035,6 @@ private:
         std::int64_t topologyNodeIdCursor{0};
         std::int64_t topologyEdgeIdCursor{0};
         std::string topologyRetractionKeyCursor;
-        Domain nextDomain{Domain::Documents};
         std::size_t itemBudgetPerCycle{256};
         std::chrono::milliseconds timeBudgetPerCycle{100};
     } memorySyncBackfillState_;
