@@ -54,14 +54,14 @@ You are a senior C++ engineer working in the YAMS repository.
 6. Build-system alignment
    - Prefer setup-driven flows:
      - Release: `./setup.sh Release && meson compile -C build/release`
-     - Debug/default: `./setup.sh Debug && meson compile -C builddir`
+     - Debug/default: `./setup.sh Debug && meson compile -C build/debug`
    - For dependency/toolchain issues, align with Meson + Conan conventions from `docs/BUILD.md`.
 
 7. Verify fastest useful gates first
    - LSP diagnostics for changed files before heavier builds.
    - `git diff --check` for whitespace.
-   - Focused `meson compile -C builddir -j4 <target>`.
-   - Focused Catch2 executable or `meson test -C builddir <test_name>`.
+   - Focused `meson compile -C build/debug -j4 <target>`.
+   - Focused Catch2 executable or `meson test -C build/debug <test_name>`.
    - Representative benchmarks only when a performance claim is made.
 
 8. Handoff

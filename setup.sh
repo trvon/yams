@@ -452,7 +452,7 @@ elif [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 	CONAN_ALT_SUBDIR="build-debug"
 	BUILD_TYPE_MESON_LOWER="debug"
 elif [[ "${BUILD_TYPE}" == "Debug" ]]; then
-	BUILD_DIR="builddir"
+	BUILD_DIR="build/debug"
 	CONAN_SUBDIR="build-debug"
 	BUILD_TYPE_MESON_LOWER="debug"
 else

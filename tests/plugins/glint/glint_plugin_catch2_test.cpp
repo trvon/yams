@@ -55,11 +55,11 @@ std::optional<GlintPluginAPI> load_glint_plugin() {
     const char* plugin_path = GLINT_PLUGIN_PATH;
 #else
 #ifdef __APPLE__
-    const char* plugin_path = "builddir/plugins/glint/yams_glint.dylib";
+    const char* plugin_path = "build/debug/plugins/glint/yams_glint.dylib";
 #elif defined(_WIN32)
-    const char* plugin_path = "builddir/plugins/glint/yams_glint.dll";
+    const char* plugin_path = "build/debug/plugins/glint/yams_glint.dll";
 #else
-    const char* plugin_path = "builddir/plugins/glint/yams_glint.so";
+    const char* plugin_path = "build/debug/plugins/glint/yams_glint.so";
 #endif
 #endif
 

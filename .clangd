@@ -4,7 +4,7 @@
 # Default settings for all files
 CompileFlags:
   # Point to the meson build directory
-  CompilationDatabase: builddir
+  CompilationDatabase: build/debug
   # Remove flags that slow down clangd analysis
   Remove:
     # Sanitizers add overhead and aren't needed for IDE features
