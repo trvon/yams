@@ -290,6 +290,34 @@ void renderMemorySyncSection(const yams::daemon::MemorySyncResponse* sync, std::
                     severity_text(health(m.lastSuccessAgeMs > 60000),
                                   format_duration(m.lastSuccessAgeMs / 1000) + " ago"),
                     ""});
+    // A reconciled cycle can still fail to apply; report it apart from transport health.
+    const auto applyOk = m.applyCycles - std::min(m.applyCycles, m.applyFailedCycles);
+    rows.push_back({"Apply cycles",
+                    std::to_string(applyOk) + " ok · " + std::to_string(m.applyFailedCycles) +
+                        " with stage failures",
+                    severity_text(health(m.applyFailedCycles > 0), "")});
+    // Deferral is normal while prerequisites replicate; a long-lived one means one never came.
+    constexpr std::uint64_t kStaleDeferralMs = 10ULL * 60 * 1000;
+    const bool staleDeferral = m.oldestDeferralAgeMs > kStaleDeferralMs;
+    std::string deferred = std::to_string(m.deferredRecords()) + " records";
+    if (m.deferredRecords() > 0) {
+        deferred += " (oldest " + format_duration(m.oldestDeferralAgeMs / 1000) + ")";
+    }
+    rows.push_back({"Deferred", severity_text(health(staleDeferral), deferred),
+                    staleDeferral ? "prerequisite not replicated; yams p2p status" : ""});
+    if (m.applyFailures() > 0) {
+        rows.push_back(
+            {"Last apply error",
+             severity_text(Severity::Warn, m.lastApplyFailureStage + ": " + m.lastApplyFailure),
+             format_duration(m.lastApplyFailureAgeMs / 1000) + " ago"});
+    }
+    if (m.publishSkippedCycles > 0 || m.publishFailedCycles > 0) {
+        rows.push_back(
+            {"Publish",
+             severity_text(Severity::Warn, std::to_string(m.publishSkippedCycles) + " skipped · " +
+                                               std::to_string(m.publishFailedCycles) + " failed"),
+             ""});
+    }
     os << "\n" << section_header("Memory Sync") << "\n\n";
     render_rows(os, rows);
 }

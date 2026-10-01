@@ -62,6 +62,7 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
+#include <yams/memory_sync/apply_health.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine.h>
@@ -204,6 +205,10 @@ public:
         std::string lastInboundFailureStage;
         std::string lastInboundFailure;
         std::uint64_t lastInboundFailureAgeMs{0};
+        /// Apply-path health: deferred records, stage failures, and outbound-publish outcomes.
+        /// `failedCycles` counts reconciliation failures; apply.applyFailedCycles counts
+        /// reconciled cycles in which an inbound apply stage hard-failed.
+        memory_sync::ApplyHealthSnapshot apply;
     };
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);
@@ -1004,6 +1009,8 @@ private:
     std::atomic<std::uint64_t> memorySyncApplyAttempts_{0};
     std::atomic<std::uint64_t> memorySyncBackfillAttempts_{0};
     bool memorySyncVectorRebuildDirty_{false};
+    // Deferred-record ages, stage failures, and publish outcomes for status; internally locked.
+    memory_sync::ApplyHealth memorySyncApplyHealth_;
     struct MemorySyncBackfillState {
         enum class Domain { Documents, Vectors, Topology };
 

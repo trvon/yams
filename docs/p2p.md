@@ -87,6 +87,22 @@ local peer registry, `successful_cycles` counts completed local reconciliation c
 success does not prove that every enrolled peer is reachable or has the same frontier. Confirm
 convergence with explicit per-node corpus/frontier checks after the required full-mesh sessions.
 
+`yams p2p status` also reports the apply path, which runs after each reconciliation:
+
+- `apply_cycles` / `apply_failed_cycles`: cycles that ran the inbound apply stages, and those in
+  which a stage (content, metadata, vector, topology) hard-failed on I/O, corrupt data, or a
+  broken invariant. `failed_cycles` stays about reconciliation itself, so a node can show
+  `failed_cycles=0` while `apply_failed_cycles` climbs; the `apply` line breaks failures down per
+  stage and the last failure is printed with its stage.
+- `deferred` and `deferred_<stage>`: replicated records not applied yet because a prerequisite has
+  not arrived (an embedding or document whose content blob is missing, an edge whose endpoint node
+  is missing). They stay pending in the replicated index and are retried every cycle.
+  `oldest_deferral_age_ms` is how long the oldest one has waited; one deferred for more than ten
+  minutes is also logged, since its prerequisite probably never reached this node.
+- `publish_skipped_cycles` / `publish_failed_cycles`: cycles whose outbound publish was preempted
+  by the replicated-delete outbox, and outbound publishes with a failed domain. Inbound apply
+  failures never stop a node from publishing its own corpus.
+
 ## Enroll and connect peers
 
 Unknown inbound peers are rejected by default before application state or deltas are exchanged. On each node, obtain the local public identity:

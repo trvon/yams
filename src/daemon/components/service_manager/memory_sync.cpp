@@ -280,7 +280,8 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
         inbound.failures,
         inbound.lastFailureStage,
         inbound.lastFailure,
-        lastFailureAgeMs};
+        lastFailureAgeMs,
+        memorySyncApplyHealth_.snapshot(std::chrono::steady_clock::now())};
 }
 
 Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view contentHash,
@@ -618,6 +619,9 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     // A pre-delete intent can survive a crash between local deletion and tombstone publication.
     // Promote it only after local metadata is absent, then skip this stale callback snapshot.
     if (drainMemorySyncDocumentDeleteOutbox()) {
+        // Counted so a delete outbox that keeps preempting cycles cannot silently starve the
+        // outbound publish.
+        memorySyncApplyHealth_.recordPublishSkipped();
         return;
     }
     try {
@@ -641,25 +645,42 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     // success let a mesh deadlock, because when every node held an inbound record whose
     // prerequisite only a peer could publish, every node refused to publish and the
     // prerequisites never arrived. Only a stop request ends the cycle early.
-    const auto runStage = [this](std::string_view name, std::string_view completedStage,
-                                 auto&& applyStage) {
+    // A stage that defers records is healthy; only a hard failure marks the cycle failed.
+    bool stageFailed = false;
+    const auto runStage = [this, &stageFailed](memory_sync::ApplyStage stage,
+                                               std::string_view completedStage, auto&& applyStage) {
         if (memorySync_->stopRequested()) {
             return false;
         }
+        const auto name = memory_sync::applyStageName(stage);
+        const auto recordFailure = [&](std::string message) {
+            stageFailed = true;
+            spdlog::warn("[ServiceManager] memory_sync {} apply failed: {}", name, message);
+            memorySyncApplyHealth_.recordFailure(stage, std::move(message),
+                                                 std::chrono::steady_clock::now());
+        };
         try {
             auto deferred = applyStage();
             if (!deferred) {
-                spdlog::warn("[ServiceManager] memory_sync {} apply failed: {}", name,
-                             deferred.error().message);
-            } else if (!deferred.value().empty()) {
-                spdlog::debug("[ServiceManager] memory_sync {} apply deferred {} record(s) "
-                              "awaiting replicated prerequisites",
-                              name, deferred.value().size());
+                recordFailure(deferred.error().message);
+            } else {
+                if (!deferred.value().empty()) {
+                    spdlog::debug("[ServiceManager] memory_sync {} apply deferred {} record(s) "
+                                  "awaiting replicated prerequisites",
+                                  name, deferred.value().size());
+                }
+                const auto stale = memorySyncApplyHealth_.recordDeferred(
+                    stage, deferred.value(), std::chrono::steady_clock::now());
+                for (const auto& key : stale) {
+                    spdlog::warn("[ServiceManager] memory_sync {} record {} has been deferred for "
+                                 "over {} minutes; its replicated prerequisite has not arrived",
+                                 name, key, memory_sync::ApplyHealth::kStaleDeferralAge.count());
+                }
             }
         } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] memory_sync {} apply threw: {}", name, e.what());
+            recordFailure(std::string("threw: ") + e.what());
         } catch (...) {
-            spdlog::warn("[ServiceManager] memory_sync {} apply threw (unknown)", name);
+            recordFailure("threw an unknown exception");
         }
         notifyMemorySyncStage(completedStage);
         return true;
@@ -736,12 +757,14 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return adapter.deferredKeys();
     };
 
-    if (!runStage("content", "apply.after_content", applyContent) ||
-        !runStage("metadata", "apply.after_metadata", applyMetadata) ||
-        !runStage("vector", "apply.after_vector", applyVectors) ||
-        !runStage("topology", "apply.after_topology", applyTopology)) {
+    using memory_sync::ApplyStage;
+    if (!runStage(ApplyStage::Content, "apply.after_content", applyContent) ||
+        !runStage(ApplyStage::Metadata, "apply.after_metadata", applyMetadata) ||
+        !runStage(ApplyStage::Vector, "apply.after_vector", applyVectors) ||
+        !runStage(ApplyStage::Topology, "apply.after_topology", applyTopology)) {
         return;
     }
+    memorySyncApplyHealth_.recordCycle(stageFailed);
 
     if (memorySync_->stopRequested()) {
         return;
@@ -973,6 +996,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         }
     };
 
+    bool domainFailed = false;
     std::size_t consecutiveEmptyDomains = 0;
     while (!shouldStop() && consecutiveEmptyDomains < 3) {
         const auto domain = state.nextDomain;
@@ -992,8 +1016,10 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                     break;
             }
         } catch (const std::exception& error) {
+            domainFailed = true;
             spdlog::warn("[ServiceManager] memory_sync backfill domain failed: {}", error.what());
         } catch (...) {
+            domainFailed = true;
             spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
         }
 
@@ -1010,10 +1036,21 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         "edges={} skipped={}",
         documentsPublished, blobsPublished, vectorsPublished, nodesPublished, edgesPublished,
         skippedDocuments);
+    if (domainFailed) {
+        memorySyncApplyHealth_.recordPublishFailed();
+    }
 } catch (const std::exception& error) {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed: {}", error.what());
+    try {
+        memorySyncApplyHealth_.recordPublishFailed();
+    } catch (...) {
+    }
 } catch (...) {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed (unknown)");
+    try {
+        memorySyncApplyHealth_.recordPublishFailed();
+    } catch (...) {
+    }
 }
 
 Result<void> ServiceManager::configureMemorySyncApply() {

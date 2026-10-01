@@ -1442,6 +1442,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_memory_sync_apply_health_exe = executable('catch2_memory_sync_apply_health',
+    files('unit/memory_sync/apply_health_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_memory_sync_records_exe = executable('catch2_memory_sync_records',
     files('unit/memory_sync/records_catch2_test.cpp'),
     include_directories: incs,
@@ -1927,6 +1936,7 @@ if catch2_dep.found()
       'unit/cli/daemon_helpers_pool_catch2_test.cpp',
       'unit/cli/daemon_command_catch2_test.cpp',
       'unit/cli/daemon_status_render_catch2_test.cpp',
+      'unit/cli/p2p_status_format_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: cli_test_deps,
@@ -4042,6 +4052,12 @@ if catch2_dep.found()
   )
 
   test('version_vector', catch2_version_vector_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('memory_sync_apply_health', catch2_memory_sync_apply_health_exe,
     suite: ['catch2', 'unit', 'memory-sync'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60

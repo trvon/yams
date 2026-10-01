@@ -215,6 +215,14 @@ TEST_CASE("Memory sync nodes holding each other's missing prerequisites still co
     bool converged = false;
     while (!converged && rounds < kMaxRounds) {
         nodeA.runCycle();
+        if (rounds == 0) {
+            // A ran first, before B published its target: B's edge is deferred, not an error.
+            const auto status = nodeA.manager->getMemorySyncStatus();
+            REQUIRE(status.has_value());
+            CHECK(status.value().apply.deferredIn(memory_sync::ApplyStage::Topology) == 1);
+            CHECK(status.value().apply.oldestDeferralAgeMs < 60'000);
+            CHECK(status.value().apply.applyFailedCycles == 0);
+        }
         nodeB.runCycle();
         ++rounds;
         converged = nodeA.hasEdgeOf(nodeB) && nodeB.hasEdgeOf(nodeA);
@@ -224,6 +232,19 @@ TEST_CASE("Memory sync nodes holding each other's missing prerequisites still co
     CHECK(nodeA.hasEdgeOf(nodeB));
     CHECK(nodeB.hasEdgeOf(nodeA));
     CHECK(converged);
+
+    for (const auto* node : {&nodeA, &nodeB}) {
+        const auto status = node->manager->getMemorySyncStatus();
+        REQUIRE(status.has_value());
+        const auto& apply = status.value().apply;
+        INFO("node=" << node->name);
+        CHECK(apply.applyCycles == rounds);
+        CHECK(apply.applyFailedCycles == 0);
+        CHECK(apply.deferredTotal() == 0);
+        CHECK(apply.oldestDeferralAgeMs == 0);
+        CHECK(apply.publishSkippedCycles == 0);
+        CHECK(apply.publishFailedCycles == 0);
+    }
 }
 
 TEST_CASE("Memory sync content apply stores good blobs past a corrupt one",
@@ -257,4 +278,14 @@ TEST_CASE("Memory sync content apply stores good blobs past a corrupt one",
     const auto corrupt = contentStore->exists(corruptHash);
     REQUIRE(corrupt.has_value());
     CHECK_FALSE(corrupt.value());
+
+    // The corrupt blob is a genuine failure: it fails the stage and the cycle, visibly.
+    const auto status = reader.manager->getMemorySyncStatus();
+    REQUIRE(status.has_value());
+    const auto& apply = status.value().apply;
+    CHECK(apply.failuresIn(memory_sync::ApplyStage::Content) == 1);
+    CHECK(apply.applyCycles == 1);
+    CHECK(apply.applyFailedCycles == 1);
+    CHECK(apply.lastFailureStage == "content");
+    CHECK(apply.lastFailure.find("do not match the claimed hash") != std::string::npos);
 }
