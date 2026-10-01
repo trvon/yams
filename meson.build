@@ -240,6 +240,33 @@ add_project_arguments(hardening_cpp_args, language: 'cpp')
 add_project_arguments(hardening_c_args, language: 'c')
 add_project_link_arguments(hardening_link_args, language: ['cpp', 'c'])
 
+# --- Release size: dead-section GC and packed relative relocations ---
+# Optimized builds put every function/object in its own section so the linker
+# can drop what nothing references (each executable links the full static
+# core, so most of it is unreachable from any one of them). DT_RELR packs the
+# relative relocations of the PIE binaries (~0.9 MiB .rela.dyn each); it needs
+# glibc >= 2.36 at runtime, below the GLIBC_2.38 floor the binaries already
+# carry, and the link probe drops it on toolchains that cannot emit it.
+# Debug/-O0 and coverage builds are left alone.
+yams_size_cflags = []
+yams_size_ldflags = []
+if get_option('optimization') not in ['0', 'g'] and not get_option('b_coverage') and cpp.get_id() not in ['msvc', 'clang-cl']
+  if host_machine.system() == 'darwin'
+    yams_size_ldflags += cpp.get_supported_link_arguments('-Wl,-dead_strip')
+  elif host_machine.system() != 'windows'
+    yams_size_cflags += cpp.get_supported_arguments('-ffunction-sections', '-fdata-sections')
+    yams_size_ldflags += cpp.get_supported_link_arguments('-Wl,--gc-sections', '-Wl,--build-id')
+    if cpp.get_linker_id() == 'ld.lld'
+      yams_size_ldflags += cpp.get_supported_link_arguments('-Wl,--icf=safe')
+    endif
+    if host_machine.system() == 'linux'
+      yams_size_ldflags += cpp.get_supported_link_arguments('-Wl,-z,pack-relative-relocs')
+    endif
+  endif
+endif
+add_project_arguments(yams_size_cflags, language: ['cpp', 'c'])
+add_project_link_arguments(yams_size_ldflags, language: ['cpp', 'c'])
+
 # --- Fuzzing engine selection ---
 # AFL++ wrappers (afl-clang-fast++) instrument every object themselves, so an AFL build keeps
 # its historical flags. A plain clang build with -Dbuild-fuzzers=true selects libFuzzer: every
