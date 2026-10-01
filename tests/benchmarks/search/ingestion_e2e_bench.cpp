@@ -365,8 +365,13 @@ public:
         // installed daemon's config, cache, corpus, or embedding selection.
         saveAndUnsetEnvironment("YAMS_CONFIG_PATH");
         saveAndUnsetEnvironment("YAMS_CONFIG");
+        saveAndUnsetEnvironment("YAMS_STORAGE");
+        saveAndUnsetEnvironment("YAMS_DAEMON_SOCKET");
+        saveAndUnsetEnvironment("YAMS_DAEMON_SOCKET_PATH");
         saveAndUnsetEnvironment("YAMS_EMBED_BACKEND");
         saveAndUnsetEnvironment("YAMS_PREFERRED_MODEL");
+        saveAndSetEnvironment("HOME", root_ / "home");
+        saveAndSetEnvironment("XDG_DATA_HOME", root_ / "xdg_data");
         saveAndSetEnvironment("XDG_STATE_HOME", root_ / "state");
         saveAndSetEnvironment("XDG_CONFIG_HOME", root_ / "config");
         saveAndSetEnvironment("XDG_CACHE_HOME", root_ / "cache");
