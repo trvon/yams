@@ -434,9 +434,16 @@ set -e
 UNIT=yams-daemon.service
 
 if [ "$1" = "configure" ]; then
+    # The unit runs as the `yams` system account; its group gates the socket.
+    if command -v systemd-sysusers >/dev/null 2>&1; then
+        systemd-sysusers /usr/lib/sysusers.d/yams.conf
+    elif ! getent passwd yams >/dev/null 2>&1; then
+        adduser --system --group --home /var/lib/yams --no-create-home yams >/dev/null
+    fi
     if [ -d /run/systemd/system ]; then
         systemctl --system daemon-reload >/dev/null 2>&1 || true
         deb-systemd-helper unmask "$UNIT" >/dev/null 2>&1 || true
+        # was-enabled is true on first install, so new installs are enabled.
         if deb-systemd-helper --quiet was-enabled "$UNIT"; then
             deb-systemd-helper enable "$UNIT" >/dev/null 2>&1 || true
         else
@@ -489,6 +496,10 @@ if [ "$1" = "purge" ]; then
         deb-systemd-helper purge "$UNIT" >/dev/null 2>&1 || true
         deb-systemd-helper unmask "$UNIT" >/dev/null 2>&1 || true
     fi
+    # Purge removes the system corpus and logs. Earlier releases ran the unit
+    # with DynamicUser=, which keeps them under /var/{lib,log}/private.
+    rm -rf /var/lib/yams /var/log/yams /var/lib/private/yams /var/log/private/yams
+    # The `yams` account stays (Debian policy: never reuse a system UID).
 fi
 
 exit 0
@@ -599,6 +610,10 @@ cp -a %{_builddir}/%{name}-%{version}/. %{buildroot}/
 # the shipped preset (enable) and then start the unit; the explicit start is a
 # deliberate deviation from Fedora's "don't start on install" guidance.
 %post
+# The unit runs as the `yams` system account; its group gates the socket.
+# Created on install and upgrade (an upgrade from a DynamicUser= release needs it
+# before the old package's %postun restarts the unit).
+systemd-sysusers /usr/lib/sysusers.d/yams.conf >/dev/null 2>&1 || :
 if [ $1 -eq 1 ] ; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl preset yams-daemon.service >/dev/null 2>&1 || true

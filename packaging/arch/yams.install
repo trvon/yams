@@ -1,22 +1,30 @@
 # Arch Linux install script for YAMS
-# Handles systemd daemon registration, enable, start, stop, and teardown.
+# Creates the `yams` system account, then registers, enables (per the shipped
+# 80-yams.preset) and starts the system daemon; stops it on removal.
 
 UNIT=yams-daemon.service
 
+_yams_sysusers() {
+    # pacman's sysusers hook also runs this; calling it here makes the account
+    # exist before the unit (re)starts below, whatever the hook order.
+    systemd-sysusers /usr/lib/sysusers.d/yams.conf >/dev/null 2>&1 || true
+}
+
 post_install() {
+    _yams_sysusers
     if [ -d /run/systemd/system ]; then
         systemctl --system daemon-reload >/dev/null 2>&1 || true
-        # Enable per systemd preset (80-yams.preset ships with the package)
         systemctl preset "${UNIT}" >/dev/null 2>&1 || true
-        # Start now (first install — pacman -U)
         systemctl start "${UNIT}" >/dev/null 2>&1 || true
     fi
+    echo ">>> The system daemon socket is /run/yams/yams-daemon.sock (group yams)."
+    echo ">>> Let a user reach it with: usermod -aG yams <user>  (then log in again)."
 }
 
 post_upgrade() {
+    _yams_sysusers
     if [ -d /run/systemd/system ]; then
         systemctl --system daemon-reload >/dev/null 2>&1 || true
-        # Restart if it was running, otherwise just re-enable
         if systemctl is-active --quiet "${UNIT}" 2>/dev/null; then
             systemctl restart "${UNIT}" >/dev/null 2>&1 || true
         else
@@ -27,7 +35,7 @@ post_upgrade() {
 
 pre_remove() {
     if [ -d /run/systemd/system ]; then
-        systemctl stop "${UNIT}" >/dev/null 2>&1 || true
+        systemctl disable --now "${UNIT}" >/dev/null 2>&1 || true
     fi
 }
 
@@ -35,4 +43,5 @@ post_remove() {
     if [ -d /run/systemd/system ]; then
         systemctl --system daemon-reload >/dev/null 2>&1 || true
     fi
+    echo ">>> /var/lib/yams and /var/log/yams were kept; remove them to delete the system corpus."
 }

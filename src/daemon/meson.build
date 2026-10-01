@@ -276,6 +276,11 @@ if host_machine.system() == 'linux'
     install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'system-preset'),
     install_tag: 'runtime',
   )
+  # System account (`yams` user + group) the unit runs as and the socket group.
+  install_data('../../packaging/systemd/yams.sysusers',
+    install_dir: join_paths(get_option('prefix'), 'lib', 'sysusers.d'),
+    rename: 'yams.conf',
+  )
 endif
 
 #-- - Windows : Copy runtime DLLs next to the daemon executable -- -

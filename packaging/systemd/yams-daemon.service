@@ -1,30 +1,68 @@
+# System-wide YAMS daemon shipped by the deb, rpm and Arch packages.
+#
+# The daemon runs as the unprivileged `yams` system account (created from
+# /usr/lib/sysusers.d/yams.conf). Its socket /run/yams/yams-daemon.sock is
+# mode 0660, group `yams`: root and members of the `yams` group can use it, and
+# the yams CLI finds it without configuration. Group membership grants full
+# read/write access to the system corpus.
+#
+# Per-user daemons are separate: `yams daemon install --user` writes a user
+# unit and never uses this socket.
 [Unit]
-Description=YAMS background daemon
-Documentation=https://github.com/trvon/yams
+Description=YAMS daemon (system service)
+Documentation=https://github.com/trvon/yams/blob/main/docs/install.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-DynamicUser=yes
-PermissionsStartOnly=yes
+User=yams
+Group=yams
+# Owner rwx + group rw on the socket (set by the daemon); nothing for others.
+UMask=0007
 StateDirectory=yams
+StateDirectoryMode=0750
 RuntimeDirectory=yams
+RuntimeDirectoryMode=0750
 LogsDirectory=yams
+LogsDirectoryMode=0750
 WorkingDirectory=/var/lib/yams
 Environment=HOME=/var/lib/yams
 ExecStart=/usr/bin/yams-daemon --foreground --data-dir /var/lib/yams --socket /run/yams/yams-daemon.sock --pid-file /run/yams/yams-daemon.pid --log-file /var/log/yams/daemon.log
-ExecStartPost=/bin/sh -ec 'for attempt in $(seq 1 40); do if [ -S /run/yams/yams-daemon.sock ]; then chmod 0666 /run/yams/yams-daemon.sock; exit 0; fi; sleep 0.25; done; echo "yams-daemon socket was not created in time" >&2; exit 1'
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=16384
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
+
+# Sandbox. The daemon only reads what clients send it and writes the state,
+# runtime and log directories above, which ProtectSystem=strict leaves
+# writable. Files under /home and /tmp are invisible to it; the CLI uploads
+# file content when it talks to a daemon running as another user.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+# MemoryDenyWriteExecute stays off: ONNX Runtime execution providers may
+# generate code at run time.
 
 [Install]
 WantedBy=multi-user.target

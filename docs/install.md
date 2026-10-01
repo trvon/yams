@@ -151,7 +151,9 @@ Highest precedence first:
   `YAMS_DATA_DIR` (or the older `YAMS_STORAGE`), then the default. A data
   directory set in `config.toml` wins over the environment variables.
 - **Daemon socket:** `--socket`, then `YAMS_DAEMON_SOCKET`, then
-  `daemon.socket_path` in `config.toml`, then the default.
+  `daemon.socket_path` in `config.toml`, then the default. Clients (not the
+  daemon) may use the packaged system daemon's socket instead of the default;
+  see [Linux packages](#linux-packages).
 - **PID file:** `--pid-file`, then `daemon.pid_file`, then the default.
 
 If two aliases disagree (`YAMS_DATA_DIR` vs `YAMS_STORAGE`), YAMS refuses to
@@ -162,26 +164,65 @@ guess unless a higher-precedence source decides. The full policy is in
 
 ### Linux packages
 
-The deb, rpm and Arch packages install and enable a **system** service,
-`yams-daemon.service`. It runs as a dynamic system user with:
+The deb, rpm and Arch packages install, enable and start a **system** service,
+`yams-daemon.service`. It runs as the unprivileged `yams` system account
+(created from `/usr/lib/sysusers.d/yams.conf`) with:
 
 - data in `/var/lib/yams`
-- socket at `/run/yams/yams-daemon.sock`
+- socket at `/run/yams/yams-daemon.sock`, mode `0660`, group `yams`
 - log at `/var/log/yams/daemon.log`
 
-The CLI does not look for that socket by default. To use the system daemon,
-point clients at it:
+Root and members of the `yams` group can use it. Add your account and log in
+again so the new group applies:
 
 ```bash
-export YAMS_DAEMON_SOCKET=/run/yams/yams-daemon.sock
+sudo usermod -aG yams "$USER"
 ```
 
-If you prefer your own per-user daemon and data directory (the default for the
-CLI), turn the system service off:
+The CLI then finds the system daemon on its own, with no environment
+variables, whenever it has nothing more specific to use. The order is:
+
+1. a socket you chose: `--socket`, `YAMS_DAEMON_SOCKET`, or
+   `daemon.socket_path` in `config.toml`;
+2. your per-user daemon, if its socket exists;
+3. your per-user daemon, if you named a personal data directory
+   (`--data-dir`, `YAMS_DATA_DIR`, or `core.data_dir`, which `yams init`
+   writes);
+4. the system daemon, if `/run/yams/yams-daemon.sock` exists and you can open
+   it;
+5. otherwise the per-user default, started on demand.
+
+So after `yams init` you keep a personal corpus. To use the shared system
+corpus from such an account, set `socket_path = "/run/yams/yams-daemon.sock"`
+under `[daemon]` in your `config.toml`. Anyone in the `yams` group can read,
+add and delete documents in the system corpus, so add only users you trust
+with all of it.
+
+The service is sandboxed: it cannot see `/home`, `/root` or the real `/tmp`,
+and it runs as a different user from you. When the CLI talks to a daemon that
+runs as another user, `yams add <file>` sends the file's content (up to 15 MiB
+per file) instead of its path. Directories cannot be added that way, because
+the daemon walks them itself; add their files individually, place them where
+the `yams` account can read them (for example under `/srv`), or use a per-user
+daemon. `yams daemon stop` and `restart` do not touch the system daemon; use
+`sudo systemctl stop|restart yams-daemon.service`. The service has no device
+access (`PrivateDevices=yes`); to use a GPU embedding backend from it, relax
+that in a drop-in (`sudo systemctl edit yams-daemon.service`).
+
+If you prefer your own per-user daemon and data directory, turn the system
+service off:
 
 ```bash
 sudo systemctl disable --now yams-daemon.service
 ```
+
+Removing the package stops and disables the service. `apt purge yams` also
+deletes `/var/lib/yams` and `/var/log/yams`; `dnf remove` and `pacman -R`
+keep them. The `yams` account stays in every case.
+
+Upgrading from 0.20.x, which ran the service as a dynamic user, keeps the
+corpus: systemd moves `/var/lib/private/yams` back to `/var/lib/yams` and
+hands it to the `yams` account on the first start.
 
 ### Per-user systemd service
 
