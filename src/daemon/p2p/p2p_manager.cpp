@@ -114,6 +114,10 @@ Result<void> enforcePeerHistory(memory_sync::MemorySyncService& service, const s
     if (!quarantined) {
         return quarantined.error();
     }
+    spdlog::warn("[p2p] durably quarantined writer {}: history commitment mismatch "
+                 "(local={} frontier={} prefix_matches={})",
+                 peer.peerNodeId, localState.version.get(peer.peerNodeId),
+                 peer.peerVersion.get(peer.peerNodeId), peer.peerPrefixMatches);
     return Error{ErrorCode::InvalidData, "authenticated peer writer history commitment mismatch"};
 }
 
@@ -609,6 +613,8 @@ private:
                             retries.erase(peer.nodeId);
                             continue;
                         }
+                        spdlog::warn("[p2p] outbound session to {} failed: {}", peer.nodeId,
+                                     connected.error().message);
                         retry.failures = std::min(retry.failures + 1U, 6U);
                         const auto multiplier = std::int64_t{1} << retry.failures;
                         const std::chrono::milliseconds delay{options_.reconnectInterval.count() *

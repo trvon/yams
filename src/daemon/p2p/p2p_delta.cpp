@@ -10,6 +10,8 @@
 // pi-lens-ignore: fatal error
 #include <yams/memory_sync/key_policy.h>
 
+#include <spdlog/spdlog.h>
+
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -734,6 +736,10 @@ Result<DeltaExchangeStats> receiveAll(FrameSource& frames, const std::string& lo
                 if (!quarantined) {
                     return quarantined.error();
                 }
+                spdlog::warn("[p2p] durably quarantined writer {}: empty delta window does not "
+                             "match authenticated frontier (local={} frontier={})",
+                             handshake.peerNodeId, local.version.get(handshake.peerNodeId),
+                             expectedCounter);
                 return Error{ErrorCode::ValidationError,
                              "empty delta window does not match authenticated frontier"};
             }
@@ -757,6 +763,11 @@ Result<DeltaExchangeStats> receiveAll(FrameSource& frames, const std::string& lo
             if (!quarantined) {
                 return quarantined.error();
             }
+            spdlog::warn("[p2p] durably quarantined writer {}: {} (local={} frontier={} "
+                         "staged={})",
+                         handshake.peerNodeId, validated.error().message,
+                         service.currentVersion().get(handshake.peerNodeId), expectedCounter,
+                         staged.size());
             return validated.error();
         }
         auto applied = service.applyDeltas(staged);
