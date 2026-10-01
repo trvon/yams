@@ -35,10 +35,10 @@ Build Notes
 - Target name: yams_object_storage_s3
 
 Testing
-- Unit coverage: `meson test -C builddir storage_submodule --print-errorlogs` (includes signer and storage submodule tests).
-- Optional network smoke test: `meson test -C builddir s3_plugin_smoke --print-errorlogs`.
+- Unit coverage: `meson test -C build/debug storage_submodule --print-errorlogs` (includes signer and storage submodule tests).
+- Optional network smoke test: `meson test -C build/debug s3_plugin_smoke --print-errorlogs`.
 - The smoke test requires the environment variables above and performs a PUT/GET/HEAD/LIST/DELETE round-trip.
-- Helper script: `scripts/dev/run_s3_plugin_smoke.sh [builddir]`.
+- Helper script: `scripts/dev/run_s3_plugin_smoke.sh [build/debug]`.
 
 Example (R2)
 ```bash
@@ -48,7 +48,7 @@ export AWS_REGION="auto"
 export S3_TEST_BUCKET="<bucket>"
 export S3_TEST_ENDPOINT="<accountid>.r2.cloudflarestorage.com"
 export S3_TEST_USE_PATH_STYLE=0
-meson test -C builddir s3_plugin_smoke --print-errorlogs
+meson test -C build/debug s3_plugin_smoke --print-errorlogs
 ```
 
 Example (AWS S3, supported path)
@@ -59,7 +59,7 @@ export AWS_REGION="us-east-1"
 export S3_TEST_BUCKET="<bucket>"
 export S3_TEST_ENDPOINT="s3.us-east-1.amazonaws.com"
 export S3_TEST_USE_PATH_STYLE=0
-meson test -C builddir s3_plugin_smoke --print-errorlogs
+meson test -C build/debug s3_plugin_smoke --print-errorlogs
 ```
 
 Note: set `S3_TEST_ENDPOINT` to host only. Do not include `https://` or `/<bucket>`.

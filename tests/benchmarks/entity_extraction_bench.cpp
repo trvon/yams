@@ -37,19 +37,19 @@ std::optional<GlintPluginAPI> loadGlintPlugin() {
 #ifdef __APPLE__
     const char* candidates[] = {
         "build/debug/plugins/glint/yams_glint.dylib",
-        "builddir/plugins/glint/yams_glint.dylib",
+        "build/debug/plugins/glint/yams_glint.dylib",
         "plugins/glint/yams_glint.dylib",
     };
 #elif defined(_WIN32)
     const char* candidates[] = {
         "build/debug/plugins/glint/yams_glint.dll",
-        "builddir/plugins/glint/yams_glint.dll",
+        "build/debug/plugins/glint/yams_glint.dll",
         "plugins/glint/yams_glint.dll",
     };
 #else
     const char* candidates[] = {
         "build/debug/plugins/glint/yams_glint.so",
-        "builddir/plugins/glint/yams_glint.so",
+        "build/debug/plugins/glint/yams_glint.so",
         "plugins/glint/yams_glint.so",
     };
 #endif

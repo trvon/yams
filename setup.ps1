@@ -490,7 +490,7 @@ if ($env:PATH -notlike "*$UserBin*") {
 
 # Map BuildType to build directories similar to setup.sh
 switch ($BuildType) {
-    'Debug'     { $buildDir = 'builddir'; $conanSubdir = 'build-debug' }
+    'Debug'     { $buildDir = 'build/debug'; $conanSubdir = 'build-debug' }
     'Profiling' { $buildDir = 'build/profiling'; $conanSubdir = 'build-profiling' }
     'Fuzzing'   { $buildDir = 'build/fuzzing'; $conanSubdir = 'build-fuzzing' }
     Default     { $buildDir = "build/$($BuildType.ToLower())"; $conanSubdir = "build-$($BuildType.ToLower())" }
