@@ -661,7 +661,7 @@ package_all() {
   fi
 
   if [ -d "${stage_root}/usr" ]; then
-    bash "${REPO_ROOT}/scripts/prune-runtime-install.sh" "${stage_root}/usr"
+    bash "${REPO_ROOT}/scripts/split-debug-symbols.sh" "${stage_root}/usr"
   fi
 
   prepare_stage_docs "${stage_root}"

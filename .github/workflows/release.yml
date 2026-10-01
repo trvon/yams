@@ -1155,7 +1155,7 @@ jobs:
           fi
           echo "STAGE_DIR=$BD/stage" >> "$GITHUB_ENV"
 
-      - name: Prune staged runtime payload (Linux/macOS)
+      - name: Split debug symbols from staged payload (Linux/macOS)
         if: runner.os != 'Windows' && matrix.arch_container != true
         shell: bash
         run: |
@@ -1177,7 +1177,9 @@ jobs:
             exit 1
           fi
 
-          bash scripts/prune-runtime-install.sh "$INSTALL_ROOT"
+          # Release builds keep -g; ship stripped binaries and keep the symbols as
+          # a separate workflow artifact (ELF .debug + .build-id links, macOS dSYM).
+          bash scripts/split-debug-symbols.sh "$INSTALL_ROOT" "$BUILD_DIR/debug-symbols"
 
       - name: Verify staged runtime assets (Linux/macOS)
         if: runner.os != 'Windows' && matrix.arch_container != true
@@ -1238,6 +1240,15 @@ jobs:
           cat "$BUILD_DIR/install-surface.txt"
           { echo '```'; cat "$BUILD_DIR/install-surface.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+      - name: Upload debug symbols (Linux/macOS)
+        if: runner.os != 'Windows' && matrix.arch_container != true && github.actor != 'nektos/act'
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-symbols-${{ matrix.suffix }}${{ github.run_attempt > 1 && format('-a{0}', github.run_attempt) || '' }}
+          path: ${{ env.BUILD_DIR }}/debug-symbols
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Install and Package MSI (Windows)
         if: runner.os == 'Windows' && inputs.fast_mode != 'true'

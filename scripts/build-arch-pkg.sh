@@ -298,8 +298,8 @@ build_main() {
 	rm -rf "${stage_root}"
 	meson install -C "${YAMS_BUILD_DIR}" --destdir "${stage_root}" --no-rebuild
 
-	# Prune development payload
-	bash scripts/prune-runtime-install.sh "${stage_root}/usr" 2>/dev/null || true
+	# Strip the staged binaries (the install rules already stage only the runtime set)
+	bash scripts/split-debug-symbols.sh "${stage_root}/usr"
 
 	# Fail the package rather than silently shipping without the embedding provider.
 	if ! compgen -G "${stage_root}/usr/lib/yams/plugins/libyams_onnx_plugin.so*" >/dev/null; then

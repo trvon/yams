@@ -458,7 +458,7 @@ elif [[ "${BUILD_TYPE}" == "Debug" ]]; then
 else
 	BUILD_DIR="build/${BUILD_TYPE_INPUT_LOWER}"
 	CONAN_SUBDIR="build-${BUILD_TYPE_INPUT_LOWER}"
-	BUILD_TYPE_MESON_LOWER="debugoptimized"
+	BUILD_TYPE_MESON_LOWER="release"
 fi
 
 if [[ -n "${YAMS_BUILD_DIR:-}" ]]; then
@@ -971,8 +971,12 @@ if [[ "${YAMS_DISABLE_RE2:-}" == "true" ]]; then
 	MESON_OPTIONS+=("-Denable-re2=disabled")
 fi
 
-if [[ "${BUILD_TYPE_MESON_LOWER}" == "debugoptimized" ]]; then
-	MESON_OPTIONS+=("-Db_ndebug=true")
+# Release/Profiling: -O3 with NDEBUG, PIE, and -g kept so packaging can split the
+# debug info into separate symbol files (scripts/split-debug-symbols.sh) instead
+# of shipping it. Debug/Fuzzing keep -O0 -g with assertions.
+MESON_OPTIONS+=("-Db_pie=true")
+if [[ "${BUILD_TYPE_MESON_LOWER}" == "release" || "${BUILD_TYPE_MESON_LOWER}" == "debugoptimized" ]]; then
+	MESON_OPTIONS+=("-Db_ndebug=true" "-Ddebug=true")
 else
 	MESON_OPTIONS+=("-Db_ndebug=false")
 fi
