@@ -2314,6 +2314,14 @@ private:
                       << ec.message() << "\n";
             std::exit(1);
         }
+        // The unit's WorkingDirectory= is the data directory: systemd fails the start with
+        // 200/CHDIR (and restarts forever) if it does not exist yet, as on a fresh account.
+        fs::create_directories(dataDir, ec);
+        if (ec) {
+            std::cerr << "[FAIL] Cannot create data directory " << dataDir << ": " << ec.message()
+                      << "\n";
+            std::exit(1);
+        }
         {
             std::ofstream out(unitPath, std::ios::trunc);
             if (!out) {
