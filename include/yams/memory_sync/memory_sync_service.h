@@ -511,10 +511,17 @@ public:
         return loop_.localHistoryWindowAfter(peerCounter, maxRecords, maxWireBytes);
     }
 
-    Result<void> validateHistoryExtension(std::span<const MemoryDelta> deltas,
-                                          const WriterHistoryCommitment& expectedFrontier) {
+    Result<WriterHistoryCommitment> historyCommitmentAt(std::string_view writerId,
+                                                        std::uint64_t counter) {
         std::lock_guard<std::mutex> lock(loopMutex_);
-        return loop_.validateHistoryExtension(deltas, expectedFrontier);
+        return loop_.historyCommitmentAt(writerId, counter);
+    }
+
+    Result<std::optional<WriterHistoryViolation>>
+    validateHistoryExtension(std::string_view writerId, std::span<const MemoryDelta> deltas,
+                             const WriterHistoryCommitment& expectedFrontier) {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.validateHistoryExtension(writerId, deltas, expectedFrontier);
     }
 
     VersionVector currentVersion() const { return replicationState().version; }

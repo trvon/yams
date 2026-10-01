@@ -720,29 +720,37 @@ Result<DeltaExchangeStats> receiveAll(FrameSource& frames, const std::string& lo
         }
         const auto expected = handshake.peerCommitments.find(handshake.peerNodeId);
         const auto expectedCounter = handshake.peerVersion.get(handshake.peerNodeId);
-        if (staged.empty()) {
-            const auto local = service.replicationState();
-            const auto localCommitment = local.commitments.find(handshake.peerNodeId);
-            const bool matches =
-                local.version.get(handshake.peerNodeId) == expectedCounter &&
-                (expectedCounter == 0 ? expected == handshake.peerCommitments.end() &&
-                                            localCommitment == local.commitments.end()
-                                      : expected != handshake.peerCommitments.end() &&
-                                            expected->second.counter == expectedCounter &&
-                                            localCommitment != local.commitments.end() &&
-                                            localCommitment->second == expected->second);
-            if (!matches) {
-                auto quarantined = service.quarantineWriter(handshake.peerNodeId, localNodeId);
-                if (!quarantined) {
-                    return quarantined.error();
-                }
-                spdlog::warn("[p2p] durably quarantined writer {}: empty delta window does not "
-                             "match authenticated frontier (local={} frontier={})",
-                             handshake.peerNodeId, local.version.get(handshake.peerNodeId),
-                             expectedCounter);
+        memory_sync::WriterHistoryCommitment frontier;
+        if (expectedCounter != 0) {
+            if (expected == handshake.peerCommitments.end() ||
+                expected->second.counter != expectedCounter) {
                 return Error{ErrorCode::ValidationError,
-                             "empty delta window does not match authenticated frontier"};
+                             "authenticated peer frontier commitment is unavailable"};
             }
+            frontier = expected->second;
+        } else if (!staged.empty()) {
+            return Error{ErrorCode::ValidationError,
+                         "authenticated peer frontier commitment is unavailable"};
+        }
+        // Validate against durable history, not a snapshot: a concurrent session with this
+        // peer may have advanced its writer since the handshake froze this window.
+        auto verdict = service.validateHistoryExtension(handshake.peerNodeId, staged, frontier);
+        if (!verdict) {
+            return verdict.error(); // Local or racy: abort this session and retry next cycle.
+        }
+        if (verdict.value()) {
+            auto quarantined = service.quarantineWriter(handshake.peerNodeId, localNodeId);
+            if (!quarantined) {
+                return quarantined.error();
+            }
+            spdlog::warn("[p2p] durably quarantined writer {}: {} (local={} frontier={} "
+                         "staged={})",
+                         handshake.peerNodeId, verdict.value()->reason,
+                         service.currentVersion().get(handshake.peerNodeId), expectedCounter,
+                         staged.size());
+            return Error{verdict.value()->code, verdict.value()->reason};
+        }
+        if (staged.empty()) {
             memory_sync::DeltaApplyResult emptyAck;
             emptyAck.version = projectedVersion;
             if (auto acknowledged =
@@ -751,24 +759,6 @@ Result<DeltaExchangeStats> receiveAll(FrameSource& frames, const std::string& lo
                 return acknowledged.error();
             }
             return stats;
-        }
-        if (expected == handshake.peerCommitments.end() ||
-            expected->second.counter != expectedCounter) {
-            return Error{ErrorCode::ValidationError,
-                         "authenticated peer frontier commitment is unavailable"};
-        }
-        auto validated = service.validateHistoryExtension(staged, expected->second);
-        if (!validated) {
-            auto quarantined = service.quarantineWriter(handshake.peerNodeId, localNodeId);
-            if (!quarantined) {
-                return quarantined.error();
-            }
-            spdlog::warn("[p2p] durably quarantined writer {}: {} (local={} frontier={} "
-                         "staged={})",
-                         handshake.peerNodeId, validated.error().message,
-                         service.currentVersion().get(handshake.peerNodeId), expectedCounter,
-                         staged.size());
-            return validated.error();
         }
         auto applied = service.applyDeltas(staged);
         if (!applied) {
@@ -821,7 +811,10 @@ Result<DeltaExchangeStats> runDeltaExchange(FrameSource& frames, const std::stri
         return fail(Error{ErrorCode::InvalidData,
                           "p2p delta exchange rejected unverified or quarantined peer history"});
     }
-    auto quarantine = requiresPeerWriterQuarantine(localState, handshake);
+    auto quarantine =
+        requiresPeerWriterQuarantine(localState, handshake, [&](std::uint64_t counter) {
+            return service.historyCommitmentAt(handshake.peerNodeId, counter);
+        });
     if (!quarantine) {
         return fail(quarantine.error());
     }

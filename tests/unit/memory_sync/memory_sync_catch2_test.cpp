@@ -1862,10 +1862,105 @@ TEST_CASE("staged deltas cannot exceed the handshake-frozen writer frontier",
     REQUIRE(later.has_value());
     REQUIRE(later.value().deltas.size() == 1);
 
-    auto rejected = reader.validateHistoryExtension(later.value().deltas, frozen);
-    REQUIRE_FALSE(rejected.has_value());
-    CHECK(rejected.error().code == yams::ErrorCode::InvalidData);
+    auto rejected = reader.validateHistoryExtension("writer", later.value().deltas, frozen);
+    REQUIRE(rejected.has_value());
+    REQUIRE(rejected.value().has_value());
+    CHECK(rejected.value()->code == yams::ErrorCode::InvalidData);
     CHECK_FALSE(reader.readCached("user/two").has_value());
+}
+
+TEST_CASE("a staged window may overlap a durable prefix advanced after its handshake",
+          "[memory-sync][direct-delta][commitment][concurrency]") {
+    BackendFixture writerFixture{"direct-overlap-writer"};
+    BackendFixture readerFixture{"direct-overlap-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "overlap-corpus", 1};
+    MemorySyncLoop reader{readerFixture.backend, "reader", "overlap-corpus", 1};
+    for (const auto* key : {"user/one", "user/two", "user/three"}) {
+        REQUIRE(writer.publish(key, bytes(key)).has_value());
+    }
+    const auto frontier = writer.replicationState().commitments.at("writer");
+    auto window = writer.exportLocalDeltasAfter({}, 8);
+    REQUIRE(window.has_value());
+    REQUIRE(window.value().deltas.size() == 3);
+
+    // A concurrent session applied the first operation after this window was frozen.
+    REQUIRE(reader.applyDeltas(std::span(window.value().deltas).first(1)).has_value());
+    auto overlapping = reader.validateHistoryExtension("writer", window.value().deltas, frontier);
+    REQUIRE(overlapping.has_value());
+    CHECK_FALSE(overlapping.value().has_value());
+
+    // Replayed operations are not applied again, but they must still be valid records.
+    auto tamperedReplay = window.value().deltas;
+    tamperedReplay.front().payload = bytes("tampered");
+    auto invalidReplay = reader.validateHistoryExtension("writer", tamperedReplay, frontier);
+    REQUIRE(invalidReplay.has_value());
+    REQUIRE(invalidReplay.value().has_value());
+    CHECK(invalidReplay.value()->code == yams::ErrorCode::HashMismatch);
+
+    // ... and one that already reached the frontier leaves an empty window to verify.
+    REQUIRE(reader.applyDeltas(window.value().deltas).has_value());
+    auto empty = reader.validateHistoryExtension("writer", {}, frontier);
+    REQUIRE(empty.has_value());
+    CHECK_FALSE(empty.value().has_value());
+    auto replayedInvalid = reader.validateHistoryExtension("writer", tamperedReplay, frontier);
+    REQUIRE(replayedInvalid.has_value());
+    CHECK(replayedInvalid.value().has_value());
+
+    auto forged = frontier;
+    forged.digest = std::string(64, '0');
+    auto contradicted = reader.validateHistoryExtension("writer", {}, forged);
+    REQUIRE(contradicted.has_value());
+    REQUIRE(contradicted.value().has_value());
+    CHECK(contradicted.value()->code == yams::ErrorCode::HashMismatch);
+}
+
+TEST_CASE("a staged window that rewrites history above the durable prefix is a violation",
+          "[memory-sync][direct-delta][commitment][security]") {
+    BackendFixture writerFixture{"direct-rewrite-writer"};
+    BackendFixture forkFixture{"direct-rewrite-fork"};
+    BackendFixture readerFixture{"direct-rewrite-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "rewrite-corpus", 1};
+    MemorySyncLoop fork{forkFixture.backend, "writer", "rewrite-corpus", 1};
+    MemorySyncLoop reader{readerFixture.backend, "reader", "rewrite-corpus", 1};
+    REQUIRE(writer.publish("user/one", bytes("one")).has_value());
+    REQUIRE(writer.publish("user/two", bytes("two")).has_value());
+    REQUIRE(fork.publish("user/other", bytes("other")).has_value());
+    REQUIRE(fork.publish("user/forked", bytes("forked")).has_value());
+    auto prefix = writer.exportLocalDeltasAfter({}, 1);
+    REQUIRE(prefix.has_value());
+    REQUIRE(reader.applyDeltas(prefix.value().deltas).has_value());
+
+    // The fork's window overlaps the reader's prefix with a different first operation. That
+    // replayed counter is skipped, but the fork's second operation cannot link the reader's
+    // durable prefix to the fork's frontier.
+    auto forkWindow = fork.exportLocalDeltasAfter({}, 8);
+    REQUIRE(forkWindow.has_value());
+    const auto forkFrontier = fork.replicationState().commitments.at("writer");
+    auto forked =
+        reader.validateHistoryExtension("writer", forkWindow.value().deltas, forkFrontier);
+    REQUIRE(forked.has_value());
+    REQUIRE(forked.value().has_value());
+    CHECK(forked.value()->code == yams::ErrorCode::HashMismatch);
+
+    auto honestWindow = writer.exportLocalDeltasAfter({}, 8);
+    REQUIRE(honestWindow.has_value());
+    const auto frontier = writer.replicationState().commitments.at("writer");
+    auto tampered = honestWindow.value().deltas;
+    tampered.back().payload = bytes("tampered");
+    auto rejected = reader.validateHistoryExtension("writer", tampered, frontier);
+    REQUIRE(rejected.has_value());
+    REQUIRE(rejected.value().has_value());
+    CHECK(rejected.value()->code == yams::ErrorCode::HashMismatch);
+
+    auto foreign =
+        reader.validateHistoryExtension("someone-else", honestWindow.value().deltas, frontier);
+    REQUIRE(foreign.has_value());
+    REQUIRE(foreign.value().has_value());
+    CHECK(foreign.value()->code == yams::ErrorCode::Unauthorized);
+
+    auto honest = reader.validateHistoryExtension("writer", honestWindow.value().deltas, frontier);
+    REQUIRE(honest.has_value());
+    CHECK_FALSE(honest.value().has_value());
 }
 
 TEST_CASE("durable quarantine is not blocked by malformed adapter payload",

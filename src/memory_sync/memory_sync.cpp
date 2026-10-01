@@ -1044,69 +1044,103 @@ Result<WriterHistoryCommitment> MemorySyncLoop::localHistoryWindowAfter(std::uin
     return computeHistoryCommitmentAt(nodeId_, endpoint);
 }
 
-Result<void>
-MemorySyncLoop::validateHistoryExtension(std::span<const MemoryDelta> deltas,
-                                         const WriterHistoryCommitment& expectedFrontier) {
-    if (deltas.empty()) {
-        return Error{ErrorCode::InvalidArgument, "history extension is empty"};
+Result<WriterHistoryCommitment> MemorySyncLoop::historyCommitmentAt(std::string_view writerId,
+                                                                    std::uint64_t counter) {
+    if (writerId.empty() || counter == 0) {
+        return Error{ErrorCode::InvalidArgument, "writer history prefix identity is empty"};
     }
     if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
         return loaded.error();
     }
-    const auto& writer = deltas.front().record.origin;
-    if (writer.empty() || writerQuarantined(writer) || !isSha256Digest(expectedFrontier.digest)) {
-        return Error{ErrorCode::InvalidState, "history extension writer or frontier is invalid"};
+    return computeHistoryCommitmentAt(writerId, counter);
+}
+
+Result<std::optional<WriterHistoryViolation>>
+MemorySyncLoop::validateHistoryExtension(std::string_view writerId,
+                                         std::span<const MemoryDelta> deltas,
+                                         const WriterHistoryCommitment& expectedFrontier) {
+    using Verdict = Result<std::optional<WriterHistoryViolation>>;
+    const auto violation = [](ErrorCode code, std::string reason) -> Verdict {
+        return std::optional<WriterHistoryViolation>{
+            WriterHistoryViolation{.code = code, .reason = std::move(reason)}};
+    };
+    const bool frontierWellFormed = expectedFrontier.counter == 0
+                                        ? expectedFrontier.digest.empty()
+                                        : isSha256Digest(expectedFrontier.digest);
+    if (writerId.empty() || !frontierWellFormed) {
+        // The frontier was validated during the handshake; a malformed one is a caller bug.
+        return Error{ErrorCode::InvalidArgument, "history extension writer or frontier is invalid"};
     }
-    auto commitment = historyCommitments_.contains(writer) ? historyCommitments_.at(writer)
-                                                           : WriterHistoryCommitment{};
-    if (commitment.counter >= expectedFrontier.counter) {
-        const bool exceedsFrozenFrontier =
-            std::ranges::any_of(deltas, [&](const MemoryDelta& delta) {
-                return delta.record.vv.get(writer) > expectedFrontier.counter;
-            });
-        if (exceedsFrozenFrontier) {
-            return Error{ErrorCode::InvalidData,
-                         "staged delta exceeds handshake-frozen writer frontier"};
+    if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+        return loaded.error();
+    }
+    const std::string writer(writerId);
+    if (writerQuarantined(writer)) {
+        return Error{ErrorCode::InvalidState, "history extension writer is already quarantined"};
+    }
+    // Every staged record must be a valid record of this writer, replay or not.
+    std::vector<std::pair<std::uint64_t, std::string>> ordered; // counter, record hash
+    ordered.reserve(deltas.size());
+    for (const auto& delta : deltas) {
+        if (delta.record.origin != writer) {
+            return violation(ErrorCode::Unauthorized,
+                             "history extension mixes authenticated writers");
+        }
+        const auto counter = delta.record.vv.get(writer);
+        if (counter == 0 || counter > expectedFrontier.counter) {
+            return violation(ErrorCode::InvalidData,
+                             "staged delta exceeds handshake-frozen writer frontier");
+        }
+        auto validated = validateDirectDelta(delta);
+        if (!validated) {
+            return violation(validated.error().code, validated.error().message);
+        }
+        ordered.emplace_back(counter, std::move(validated.value().recordHash));
+    }
+    std::ranges::sort(ordered);
+    if (std::ranges::adjacent_find(ordered, {}, &std::pair<std::uint64_t, std::string>::first) !=
+        ordered.end()) {
+        return violation(ErrorCode::InvalidData, "history extension repeats a writer counter");
+    }
+
+    // The durable prefix is the starting point. Another session with this writer may have
+    // advanced it since this window was frozen; that history was itself verified against the
+    // writer's authenticated frontier, so it is the only safe place to resume the chain.
+    const auto durable = historyCommitments_.contains(writer) ? historyCommitments_.at(writer)
+                                                              : WriterHistoryCommitment{};
+    if (durable.counter >= expectedFrontier.counter) {
+        if (expectedFrontier.counter == 0) {
+            return std::optional<WriterHistoryViolation>{}; // An empty prefix extends any history.
         }
         auto existing = computeHistoryCommitmentAt(writer, expectedFrontier.counter);
         if (!existing) {
             return existing.error();
         }
         return existing.value() == expectedFrontier
-                   ? Result<void>{}
-                   : Result<void>{
-                         Error{ErrorCode::HashMismatch,
-                               "existing writer history does not match advertised frontier"}};
+                   ? Verdict{std::optional<WriterHistoryViolation>{}}
+                   : violation(ErrorCode::HashMismatch,
+                               "existing writer history does not match advertised frontier");
     }
-    std::vector<const MemoryDelta*> ordered;
-    ordered.reserve(deltas.size());
-    for (const auto& delta : deltas) {
-        if (delta.record.origin != writer) {
-            return Error{ErrorCode::Unauthorized, "history extension mixes authenticated writers"};
+    // Staged operations at or below the durable prefix are replays: applyDeltas leaves them
+    // untouched and treats a different record under a known operation id as a fork. Only the
+    // operations above the prefix can change state, and they must link it to the frontier
+    // exactly.
+    auto commitment = durable;
+    for (const auto& [counter, recordHash] : ordered) {
+        if (counter <= durable.counter) {
+            continue;
         }
-        ordered.push_back(&delta);
-    }
-    std::ranges::sort(ordered, [&](const MemoryDelta* lhs, const MemoryDelta* rhs) {
-        return lhs->record.vv.get(writer) < rhs->record.vv.get(writer);
-    });
-    for (const auto* delta : ordered) {
-        auto validated = validateDirectDelta(*delta);
-        if (!validated) {
-            return validated.error();
-        }
-        const auto counter = delta->record.vv.get(writer);
         if (counter != commitment.counter + 1) {
-            return Error{ErrorCode::InvalidData, "history extension is not contiguous"};
+            return violation(ErrorCode::InvalidData, "history extension is not contiguous");
         }
         commitment = WriterHistoryCommitment{
-            .counter = counter,
-            .digest = advanceHistory(writer, commitment, validated.value().recordHash, counter)};
+            .counter = counter, .digest = advanceHistory(writer, commitment, recordHash, counter)};
     }
     if (commitment != expectedFrontier) {
-        return Error{ErrorCode::HashMismatch,
-                     "history extension does not match advertised frontier"};
+        return violation(ErrorCode::HashMismatch,
+                         "history extension does not match advertised frontier");
     }
-    return {};
+    return std::optional<WriterHistoryViolation>{};
 }
 
 bool MemorySyncLoop::writerQuarantined(std::string_view writerId) const noexcept {

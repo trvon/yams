@@ -103,7 +103,9 @@ Result<void> enforcePeerHistory(memory_sync::MemorySyncService& service, const s
     if (localState.quarantinedWriters.contains(peer.peerNodeId)) {
         return Error{ErrorCode::InvalidData, "peer writer is durably quarantined"};
     }
-    auto mismatch = requiresPeerWriterQuarantine(localState, peer);
+    auto mismatch = requiresPeerWriterQuarantine(localState, peer, [&](std::uint64_t counter) {
+        return service.historyCommitmentAt(peer.peerNodeId, counter);
+    });
     if (!mismatch) {
         return mismatch.error();
     }
