@@ -205,6 +205,36 @@ struct ResolvedRuntimePaths {
 Result<ResolvedRuntimePaths>
 resolve_runtime_paths(const RuntimePathOverrides& overrides = RuntimePathOverrides{});
 
+/// Socket of the packaged system service (yams-daemon.service): /run/yams/yams-daemon.sock.
+/// Empty on Windows, which has no packaged system service.
+std::filesystem::path system_daemon_socket_path();
+
+/// Filesystem checks used by select_client_socket_path(); injectable so tests need no daemon.
+struct DaemonSocketProbe {
+    /// A socket file exists at the path (a per-user daemon is, or was, listening there).
+    bool (*socketPresent)(const std::filesystem::path&) = nullptr;
+    /// A socket file exists at the path and the caller may connect to it (write access to the
+    /// socket and search access to every parent directory).
+    bool (*socketConnectable)(const std::filesystem::path&) = nullptr;
+};
+
+/// Probe backed by lstat()/access() on the real filesystem.
+DaemonSocketProbe default_daemon_socket_probe();
+
+/// Client-side daemon socket selection.
+///
+/// Order: a socket chosen explicitly (flag, YAMS_DAEMON_SOCKET, daemon.socket_path, explicit
+/// runtime dir) is used as is. Otherwise the per-user default is kept when its socket exists, or
+/// when the caller named a personal data directory (flag, environment, or config data_dir, as
+/// written by `yams init`). Only then, when the system service socket exists and is connectable
+/// (root, or a member of the `yams` group), the client uses the system daemon. In every other case
+/// it keeps the per-user default, which a CLI may auto-start.
+///
+/// Daemons never call this: a daemon binds the socket resolve_runtime_paths() names.
+std::filesystem::path select_client_socket_path(const ResolvedRuntimePaths& paths,
+                                                const DaemonSocketProbe& probe,
+                                                const std::filesystem::path& systemSocket);
+
 // Platform-specific directory resolution (follows OS best practices)
 // Windows: APPDATA (roaming) for config, LOCALAPPDATA for data/cache/runtime
 // Unix/macOS: XDG Base Directory Specification

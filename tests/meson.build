@@ -2538,6 +2538,7 @@ if catch2_dep.found()
 
   config_parse_utils_exe = executable('config_parse_utils',
     files(
+      'unit/config/client_socket_selection_catch2_test.cpp',
       'unit/config/config_parse_utils_catch2_test.cpp',
       'unit/config/environment_catch2_test.cpp',
       'unit/config/flat_toml_reader_catch2_test.cpp',

@@ -30,7 +30,8 @@
 #include <shlobj.h>
 #include <windows.h>
 #else
-#include <unistd.h> // For geteuid(), getpid(), getuid()
+#include <unistd.h>   // For access(), geteuid(), getpid(), getuid()
+#include <sys/stat.h> // For lstat(), S_ISSOCK
 #if defined(__APPLE__)
 #include <crt_externs.h>
 #else
@@ -1073,6 +1074,67 @@ Result<ResolvedRuntimePaths> resolve_runtime_paths(const RuntimePathOverrides& o
     }
 
     return resolved;
+}
+
+std::filesystem::path system_daemon_socket_path() {
+#ifdef _WIN32
+    return {};
+#else
+    return std::filesystem::path("/run/yams/yams-daemon.sock");
+#endif
+}
+
+namespace {
+
+#ifndef _WIN32
+bool isSocketFile(const std::filesystem::path& path) {
+    struct stat st{};
+    return ::lstat(path.c_str(), &st) == 0 && S_ISSOCK(st.st_mode);
+}
+
+bool isConnectableSocketFile(const std::filesystem::path& path) {
+    // connect(2) on a Unix socket needs write permission on the socket file and search permission
+    // on each directory of the path; access(2) checks both without opening a connection.
+    return isSocketFile(path) && ::access(path.c_str(), W_OK) == 0;
+}
+#else
+bool isSocketFile(const std::filesystem::path&) {
+    return false;
+}
+
+bool isConnectableSocketFile(const std::filesystem::path&) {
+    return false;
+}
+#endif
+
+} // namespace
+
+DaemonSocketProbe default_daemon_socket_probe() {
+    return DaemonSocketProbe{&isSocketFile, &isConnectableSocketFile};
+}
+
+std::filesystem::path select_client_socket_path(const ResolvedRuntimePaths& paths,
+                                                const DaemonSocketProbe& probe,
+                                                const std::filesystem::path& systemSocket) {
+    const auto& own = paths.socketPath.value;
+    if (paths.socketPath.source != RuntimePathSource::PlatformDefault ||
+        paths.runtimeDir.source == RuntimePathSource::Explicit) {
+        return own;
+    }
+    if (systemSocket.empty() || own == systemSocket || !probe.socketPresent ||
+        !probe.socketConnectable) {
+        return own;
+    }
+    if (probe.socketPresent(own)) {
+        return own;
+    }
+    if (paths.dataDir.source != RuntimePathSource::PlatformDefault) {
+        return own;
+    }
+    if (probe.socketConnectable(systemSocket)) {
+        return systemSocket;
+    }
+    return own;
 }
 
 std::filesystem::path resolve_socket_path_from_config() {

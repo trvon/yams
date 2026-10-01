@@ -2120,6 +2120,12 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     }
     const auto& paths = runtimePaths.value();
     const auto socketPath = paths.socketPath.value;
+    if (socket_utils::is_system_daemon_socket(socketPath)) {
+        // systemd owns the packaged service; a user-spawned daemon cannot bind its socket.
+        return Error{ErrorCode::NetworkError,
+                     "The system YAMS daemon (" + socketPath.string() +
+                         ") is not responding; check 'systemctl status yams-daemon.service'"};
+    }
     const auto dataDir = paths.dataDir.value;
     const auto pidFile = paths.pidFile.value;
     const auto configPath = paths.configFile.value;
