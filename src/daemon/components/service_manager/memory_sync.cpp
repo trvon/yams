@@ -718,6 +718,11 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         if (!applied) {
             return applied.error();
         }
+        if (applied.value().edgesDropped > 0) {
+            spdlog::debug("[ServiceManager] memory_sync topology apply dropped {} edge(s) whose "
+                          "endpoint node was deleted",
+                          applied.value().edgesDropped);
+        }
         return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
     };
 
@@ -764,6 +769,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     std::size_t vectorsPublished = 0;
     std::size_t nodesPublished = 0;
     std::size_t edgesPublished = 0;
+    std::size_t recordsRetracted = 0;
     std::size_t skippedDocuments = 0;
 
     const auto publishDocument = [&]() -> bool {
@@ -863,143 +869,145 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         if (!kgStore) {
             return false;
         }
+        using Phase = MemorySyncBackfillState::TopologyPhase;
         metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
-        if (!state.topologySnapshotInitialized) {
-            auto nodeTypes = kgStore->getNodeTypeCounts();
-            if (!nodeTypes) {
-                throw std::runtime_error(nodeTypes.error().message);
-            }
-            state.topologyNodeTypes.reserve(nodeTypes.value().size());
-            for (const auto& [nodeType, count] : nodeTypes.value()) {
-                (void)count;
-                state.topologyNodeTypes.push_back(nodeType);
-            }
-            std::sort(state.topologyNodeTypes.begin(), state.topologyNodeTypes.end());
-            state.topologySnapshotInitialized = true;
-        }
-
         while (!shouldStop()) {
-            if (state.topologyNodeActive) {
-                auto edges = kgStore->getEdgesFrom(state.topologyNodeId, std::nullopt, 1,
-                                                   state.topologyEdgeOffset);
-                if (!edges) {
-                    throw std::runtime_error(edges.error().message);
+            switch (state.topologyPhase) {
+                case Phase::Nodes: {
+                    auto nodes = kgStore->getNodesAfterId(state.topologyNodeIdCursor, 1);
+                    if (!nodes) {
+                        throw std::runtime_error(nodes.error().message);
+                    }
+                    if (nodes.value().empty()) {
+                        state.topologyPhase = Phase::Edges;
+                        continue;
+                    }
+                    const auto& node = nodes.value().front();
+                    if (auto published = adapter.publishNode(node); !published) {
+                        throw std::runtime_error(published.error().message);
+                    }
+                    state.topologyNodeIdCursor = node.id;
+                    ++nodesPublished;
+                    notifyMemorySyncStage("backfill.after_node");
+                    return true;
                 }
-                if (!edges.value().empty()) {
+                case Phase::Edges: {
+                    auto edges = kgStore->getEdgesAfterId(state.topologyEdgeIdCursor, 1);
+                    if (!edges) {
+                        throw std::runtime_error(edges.error().message);
+                    }
+                    if (edges.value().empty()) {
+                        state.topologyPhase = Phase::Retractions;
+                        continue;
+                    }
                     const auto& edge = edges.value().front();
+                    auto source = kgStore->getNodeById(edge.srcNodeId);
+                    if (!source) {
+                        throw std::runtime_error(source.error().message);
+                    }
                     auto target = kgStore->getNodeById(edge.dstNodeId);
                     if (!target) {
                         throw std::runtime_error(target.error().message);
                     }
-                    ++state.topologyEdgeOffset;
-                    if (!target.value()) {
+                    if (!source.value() || !target.value()) {
+                        // An endpoint was deleted after the edge was read; its cascade removes
+                        // the edge too, so there is nothing to publish.
+                        state.topologyEdgeIdCursor = edge.id;
                         continue;
                     }
-                    auto published =
-                        adapter.publishEdge(state.topologyNodeKey, edge, target.value()->nodeKey);
-                    if (!published) {
-                        --state.topologyEdgeOffset;
+                    // Endpoints go out with the edge, so no peer ever holds this writer's edge
+                    // without its endpoint nodes, whichever pass would otherwise reach them.
+                    if (auto published = adapter.publishEdgeWithEndpoints(*source.value(), edge,
+                                                                          *target.value());
+                        !published) {
                         throw std::runtime_error(published.error().message);
                     }
+                    state.topologyEdgeIdCursor = edge.id;
                     ++edgesPublished;
                     notifyMemorySyncStage("backfill.after_edge");
                     return true;
                 }
-                state.topologyNodeActive = false;
-                state.topologyNodeId = 0;
-                state.topologyNodeKey.clear();
-                state.topologyEdgeOffset = 0;
-                ++state.topologyNodeOffsets[state.topologyNodeTypes[state.topologyTypeIndex]];
+                case Phase::Retractions: {
+                    auto winners = memorySync_->committedWinnersAfter(
+                        "topology-", state.topologyRetractionKeyCursor, 1);
+                    if (winners.empty()) {
+                        // Pass complete. The next one starts from the beginning, so records
+                        // created or changed behind the cursors are published by it.
+                        state.topologyPhase = Phase::Nodes;
+                        state.topologyNodeIdCursor = 0;
+                        state.topologyEdgeIdCursor = 0;
+                        state.topologyRetractionKeyCursor.clear();
+                        return false;
+                    }
+                    const auto& [key, winner] = winners.front();
+                    state.topologyRetractionKeyCursor = key;
+                    if (winner.isTombstone() || winner.origin != memorySync_->localNodeId()) {
+                        continue;
+                    }
+                    auto retracted = adapter.retractIfLocallyAbsent(key, winner);
+                    if (!retracted) {
+                        throw std::runtime_error(retracted.error().message);
+                    }
+                    if (retracted.value()) {
+                        ++recordsRetracted;
+                        notifyMemorySyncStage("backfill.after_retraction");
+                    }
+                    return true;
+                }
             }
-
-            if (state.topologyTypeIndex >= state.topologyNodeTypes.size()) {
-                // Refresh the bounded type snapshot on the next cycle so node types created after
-                // startup become visible. Per-type offsets prevent replaying nodes already swept.
-                state.topologySnapshotInitialized = false;
-                state.topologyNodeTypes.clear();
-                state.topologyTypeIndex = 0;
-                return false;
-            }
-            const auto& nodeType = state.topologyNodeTypes[state.topologyTypeIndex];
-            auto nodes = kgStore->findNodesByType(nodeType, 1, state.topologyNodeOffsets[nodeType]);
-            if (!nodes) {
-                throw std::runtime_error(nodes.error().message);
-            }
-            if (nodes.value().empty()) {
-                ++state.topologyTypeIndex;
-                continue;
-            }
-
-            const auto& node = nodes.value().front();
-            auto published = adapter.publishNode(node);
-            if (!published) {
-                throw std::runtime_error(published.error().message);
-            }
-            state.topologyNodeId = node.id;
-            state.topologyNodeKey = node.nodeKey;
-            state.topologyNodeActive = true;
-            ++nodesPublished;
-            notifyMemorySyncStage("backfill.after_node");
-            return true;
         }
         return false;
     };
 
-    const auto advanceDomain = [&] {
-        using Domain = MemorySyncBackfillState::Domain;
-        switch (state.nextDomain) {
-            case Domain::Documents:
-                state.nextDomain = Domain::Vectors;
-                break;
-            case Domain::Vectors:
-                state.nextDomain = Domain::Topology;
-                break;
-            case Domain::Topology:
-                state.nextDomain = Domain::Documents;
-                break;
-        }
-    };
-
+    // Domains are served in priority order: every item goes to the first domain that still has
+    // work this cycle. Documents (metadata and content) are what peers need to read the corpus;
+    // vectors and topology are derived from them and only defer on a peer until the document
+    // arrives. A publish costs a large share of the per-cycle time budget, so a fair rotation let
+    // derived records delay the documents every peer is waiting for.
+    using Domain = MemorySyncBackfillState::Domain;
+    constexpr std::array kDomainPriority{Domain::Documents, Domain::Vectors, Domain::Topology};
+    std::array<bool, kDomainPriority.size()> domainDone{};
     bool domainFailed = false;
-    std::size_t consecutiveEmptyDomains = 0;
-    while (!shouldStop() && consecutiveEmptyDomains < 3) {
-        const auto domain = state.nextDomain;
-        advanceDomain();
+    while (!shouldStop()) {
         bool published = false;
-        try {
-            using Domain = MemorySyncBackfillState::Domain;
-            switch (domain) {
-                case Domain::Documents:
-                    published = publishDocument();
-                    break;
-                case Domain::Vectors:
-                    published = publishVector();
-                    break;
-                case Domain::Topology:
-                    published = publishTopology();
-                    break;
+        for (std::size_t index = 0; index < kDomainPriority.size() && !published; ++index) {
+            if (domainDone[index]) {
+                continue;
             }
-        } catch (const std::exception& error) {
-            domainFailed = true;
-            spdlog::warn("[ServiceManager] memory_sync backfill domain failed: {}", error.what());
-        } catch (...) {
-            domainFailed = true;
-            spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
+            try {
+                switch (kDomainPriority[index]) {
+                    case Domain::Documents:
+                        published = publishDocument();
+                        break;
+                    case Domain::Vectors:
+                        published = publishVector();
+                        break;
+                    case Domain::Topology:
+                        published = publishTopology();
+                        break;
+                }
+            } catch (const std::exception& error) {
+                domainFailed = true;
+                spdlog::warn("[ServiceManager] memory_sync backfill domain failed: {}",
+                             error.what());
+            } catch (...) {
+                domainFailed = true;
+                spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
+            }
+            // A domain with nothing left, or one that failed, sits out the rest of this cycle.
+            domainDone[index] = !published;
         }
-
-        if (published) {
-            --remainingItems;
-            consecutiveEmptyDomains = 0;
-        } else {
-            ++consecutiveEmptyDomains;
+        if (!published) {
+            break;
         }
+        --remainingItems;
     }
 
     spdlog::debug(
         "[ServiceManager] memory_sync backfill scanned documents={} blobs={} vectors={} nodes={} "
-        "edges={} skipped={}",
+        "edges={} retracted={} skipped={}",
         documentsPublished, blobsPublished, vectorsPublished, nodesPublished, edgesPublished,
-        skippedDocuments);
+        recordsRetracted, skippedDocuments);
     if (domainFailed) {
         memorySyncApplyHealth_.recordPublishFailed();
     }

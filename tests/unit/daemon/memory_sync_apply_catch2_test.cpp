@@ -32,6 +32,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
 #include <yams/memory_sync/memory_sync_service.h>
+#include <yams/memory_sync/records.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/topology_sync_adapter.h>
 #include <yams/storage/storage_backend.h>
@@ -184,6 +185,46 @@ struct MeshNode {
         return hasEdge(origin.sourceKey(), origin.targetKey());
     }
 
+    metadata::KGNode addNode(const std::string& key, const std::string& type) const {
+        metadata::KGNode node{.nodeKey = key, .label = key, .type = type};
+        const auto id = kgStore->upsertNode(node);
+        REQUIRE(id.has_value());
+        node.id = id.value();
+        return node;
+    }
+
+    void addEdge(const metadata::KGNode& source, const metadata::KGNode& target) const {
+        const metadata::KGEdge edge{.srcNodeId = source.id,
+                                    .dstNodeId = target.id,
+                                    .relation = std::string(kRelation),
+                                    .weight = 1.0F};
+        REQUIRE(kgStore->addEdge(edge).has_value());
+    }
+
+    /// What a topology rebuild does to a replaced cluster node: delete it, cascading its edges.
+    void deleteNode(const metadata::KGNode& node) const {
+        REQUIRE(kgStore->deleteNodeById(node.id).has_value());
+    }
+
+    bool hasNode(const std::string& key) const {
+        const auto node = kgStore->getNodeByKey(key);
+        REQUIRE(node.has_value());
+        return node.value().has_value();
+    }
+
+    /// Drive the outbound backfill alone, one bounded publish cycle per call.
+    void backfill(std::size_t cycles) {
+        for (std::size_t i = 0; i < cycles; ++i) {
+            manager->testingPublishMemorySyncBackfill();
+        }
+    }
+
+    std::uint64_t deferredTopology() const {
+        const auto status = manager->getMemorySyncStatus();
+        REQUIRE(status.has_value());
+        return status.value().apply.deferredIn(memory_sync::ApplyStage::Topology);
+    }
+
     std::string name;
     yams::test::ScopedEnvVar disableWatcher{"YAMS_DISABLE_SESSION_WATCHER", std::string("1")};
     DaemonConfig config;
@@ -288,4 +329,170 @@ TEST_CASE("Memory sync content apply stores good blobs past a corrupt one",
     CHECK(apply.applyFailedCycles == 1);
     CHECK(apply.lastFailureStage == "content");
     CHECK(apply.lastFailure.find("do not match the claimed hash") != std::string::npos);
+}
+
+namespace {
+
+std::string topologyNodeKey(std::string_view nodeKey) {
+    return "topology-node/" + memory_sync::escapeRecordKeySegment(nodeKey);
+}
+
+std::string topologyEdgeKey(std::string_view sourceKey, std::string_view targetKey) {
+    memory_sync::TopologyEdgeRecord record;
+    record.sourceNodeKey = sourceKey;
+    record.relation = kRelation;
+    record.targetNodeKey = targetKey;
+    return "topology-edge/" + record.id();
+}
+
+/// A read-only view of what has been published to the shared store.
+struct SharedStoreView {
+    explicit SharedStoreView(const fs::path& sharedStore)
+        : sync(makeBackend(sharedStore),
+               memory_sync::MemorySyncConfig{"observer", 60'000, std::string(kCorpus), 1}) {}
+
+    void refresh() { REQUIRE(sync.syncOnce().has_value()); }
+    bool published(const std::string& key) const { return sync.readCached(key).has_value(); }
+    bool tombstoned(const std::string& key) const { return sync.hasCommittedTombstone(key); }
+
+    memory_sync::MemorySyncService sync;
+};
+
+} // namespace
+
+TEST_CASE("Memory sync topology backfill publishes every node despite deletes between items",
+          "[daemon][memory-sync][backfill][topology]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    SharedStoreView view{sharedStore};
+    origin.manager->testingSetMemorySyncBackfillItemBudget(1);
+
+    std::vector<metadata::KGNode> previous;
+    for (int i = 0; i < 3; ++i) {
+        previous.push_back(origin.addNode("topology:cluster:old-" + std::to_string(i), "cluster"));
+    }
+    origin.backfill(2);
+
+    // A topology rebuild lands between two backfill items: it deletes every cluster node,
+    // including the ones the sweep already passed, and inserts the replacements.
+    for (const auto& node : previous) {
+        origin.deleteNode(node);
+    }
+    std::vector<std::string> current;
+    for (int i = 0; i < 3; ++i) {
+        current.push_back(
+            origin.addNode("topology:cluster:new-" + std::to_string(i), "cluster").nodeKey);
+    }
+    origin.backfill(16);
+
+    view.refresh();
+    for (const auto& key : current) {
+        INFO("node=" << key);
+        CHECK(view.published(topologyNodeKey(key)));
+    }
+}
+
+TEST_CASE("Memory sync topology backfill publishes an edge added after its node was swept",
+          "[daemon][memory-sync][backfill][topology]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    MeshNode peer{root.path, "peer", sharedStore};
+    SharedStoreView view{sharedStore};
+    origin.manager->testingSetMemorySyncBackfillItemBudget(1);
+
+    const auto document = origin.addNode("doc:late-edge-source", "document");
+    const auto neighbor = origin.addNode("doc:late-edge-target", "document");
+    // Let the sweep pass both nodes (and finish the pass) before the edge exists.
+    origin.backfill(8);
+    view.refresh();
+    REQUIRE(view.published(topologyNodeKey(document.nodeKey)));
+    REQUIRE(view.published(topologyNodeKey(neighbor.nodeKey)));
+
+    origin.addEdge(document, neighbor);
+    origin.backfill(8);
+
+    view.refresh();
+    CHECK(view.published(topologyEdgeKey(document.nodeKey, neighbor.nodeKey)));
+    peer.runCycle();
+    CHECK(peer.hasEdge(document.nodeKey, neighbor.nodeKey));
+    CHECK(peer.deferredTopology() == 0);
+}
+
+TEST_CASE("Memory sync retracts a cluster node and its edges when a rebuild deletes them",
+          "[daemon][memory-sync][backfill][topology][retraction]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    MeshNode peer{root.path, "peer", sharedStore};
+    SharedStoreView view{sharedStore};
+
+    const auto document = origin.addNode("doc:rebuild-member", "document");
+    const auto stale = origin.addNode("topology:cluster:stale", "topology_cluster");
+    origin.addEdge(document, stale);
+    origin.runCycle();
+    peer.runCycle();
+    REQUIRE(peer.hasEdge(document.nodeKey, stale.nodeKey));
+
+    // The rebuild replaces the cluster: the old node goes (cascading its member edge) and the
+    // document joins a new one.
+    origin.deleteNode(stale);
+    const auto fresh = origin.addNode("topology:cluster:fresh", "topology_cluster");
+    origin.addEdge(document, fresh);
+
+    for (int round = 0; round < 3; ++round) {
+        origin.runCycle();
+        peer.runCycle();
+    }
+
+    // The origin's own published records must not resurrect what its rebuild deleted.
+    CHECK_FALSE(origin.hasNode(stale.nodeKey));
+    view.refresh();
+    CHECK(view.tombstoned(topologyNodeKey(stale.nodeKey)));
+    CHECK(view.tombstoned(topologyEdgeKey(document.nodeKey, stale.nodeKey)));
+    CHECK_FALSE(peer.hasNode(stale.nodeKey));
+    CHECK_FALSE(peer.hasEdge(document.nodeKey, stale.nodeKey));
+    CHECK(peer.hasEdge(document.nodeKey, fresh.nodeKey));
+    CHECK(origin.deferredTopology() == 0);
+    CHECK(peer.deferredTopology() == 0);
+}
+
+TEST_CASE("Memory sync clears a deferral on an edge whose cluster node was deleted unpublished",
+          "[daemon][memory-sync][backfill][topology][retraction]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    MeshNode peer{root.path, "peer", sharedStore};
+
+    // The state the production mesh was left in: the member edge and its document reached the
+    // shared store, but the rebuild deleted the cluster node before it was ever published.
+    const auto document = origin.addNode("doc:orphaned-member", "document");
+    const auto cluster = origin.addNode("topology:cluster:never-published", "topology_cluster");
+    origin.addEdge(document, cluster);
+    {
+        metadata::TopologySyncAdapter publisher{*origin.kgStore, *origin.sync_};
+        const auto edges = origin.kgStore->getEdgesFrom(document.id, std::string(kRelation));
+        REQUIRE(edges.has_value());
+        REQUIRE(edges.value().size() == 1);
+        REQUIRE(publisher.publishNode(document).has_value());
+        REQUIRE(publisher.publishEdge(document.nodeKey, edges.value().front(), cluster.nodeKey)
+                    .has_value());
+    }
+    origin.deleteNode(cluster);
+    peer.runCycle();
+    REQUIRE(peer.deferredTopology() == 1);
+
+    for (int round = 0; round < 3; ++round) {
+        origin.runCycle();
+        peer.runCycle();
+    }
+
+    CHECK_FALSE(peer.hasEdge(document.nodeKey, cluster.nodeKey));
+    CHECK(origin.deferredTopology() == 0);
+    CHECK(peer.deferredTopology() == 0);
 }
