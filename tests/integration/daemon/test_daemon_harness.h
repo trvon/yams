@@ -13,6 +13,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <yams/compat/unistd.h>
 #include <yams/daemon/client/asio_connection_pool.h>
@@ -49,6 +50,15 @@ struct DaemonHarnessOptions {
     bool enableAutoRepair = true;
     bool isolateState = false;
     bool isolateConfig = false;
+    // Full process isolation for benchmarks and tests that must never observe the developer's
+    // machine: implies isolateState and isolateConfig, points HOME and every XDG_* base dir at
+    // the run's temp root (XDG_RUNTIME_DIR on POSIX; APPDATA/LOCALAPPDATA/USERPROFILE on
+    // Windows), and scrubs ambient YAMS_CONFIG/YAMS_CONFIG_PATH/YAMS_DATA_DIR/YAMS_STORAGE/
+    // YAMS_DAEMON_SOCKET[_PATH] plus the model/backend overrides that ConfigResolver ranks above
+    // TOML (YAMS_EMBED_BACKEND, YAMS_PREFERRED_MODEL, YAMS_RERANKER_MODEL, YAMS_EMBED_DIM) for
+    // the lifetime of the daemon. Everything is restored when the daemon stops. An explicit
+    // `configPath` still wins over the generated minimal config.
+    bool isolateEnvironment = false;
     std::string isolatedConfigContents;
     bool requireReadyLifecycle = false;
     bool skipSocketVerificationOnReady = false;
@@ -86,6 +96,14 @@ struct DaemonHarnessOptions {
 class DaemonHarness {
 public:
     using Options = DaemonHarnessOptions;
+
+    // Options preset for benchmarks: full environment isolation with caller-owned overrides
+    // layered on top.
+    static Options isolatedOptions() {
+        Options options;
+        options.isolateEnvironment = true;
+        return options;
+    }
 
     explicit DaemonHarness(Options options = Options()) : options_(std::move(options)) {
         namespace fs = std::filesystem;
@@ -196,7 +214,12 @@ private:
         // (daemon cannot be restarted after stop() - must create new instance)
         spdlog::info("[DaemonHarness] Creating new daemon instance...");
 
-        if (options_.isolateState) {
+        const bool isolateConfig = options_.isolateConfig || options_.isolateEnvironment;
+        if (options_.isolateEnvironment) {
+            isolateAmbientEnvironment();
+        }
+
+        if (options_.isolateState || options_.isolateEnvironment) {
             originalCwd_ = std::filesystem::current_path();
             std::filesystem::current_path(root_);
             xdgStateEnvironment_.emplace("XDG_STATE_HOME", (root_ / "state").string());
@@ -205,7 +228,7 @@ private:
         }
 
         auto effectiveConfigPath = options_.configPath;
-        if (!effectiveConfigPath && options_.isolateConfig) {
+        if (!effectiveConfigPath && isolateConfig) {
             const auto configDirectory = root_ / "config" / "yams";
             std::filesystem::create_directories(configDirectory);
             effectiveConfigPath = configDirectory / "config.toml";
@@ -600,6 +623,49 @@ private:
         startAttempted_ = false;
     }
 
+    // Give the run a private HOME/XDG tree under root_ and hide ambient path overrides. The
+    // config/data/socket variables are scrubbed here; the daemon re-seeds them from its explicit
+    // DaemonConfig paths.
+    void isolateAmbientEnvironment() {
+        namespace fs = std::filesystem;
+        static constexpr const char* kScrubbed[] = {
+            "YAMS_CONFIG",
+            "YAMS_CONFIG_PATH",
+            "YAMS_DATA_DIR",
+            "YAMS_STORAGE",
+            "YAMS_DAEMON_SOCKET",
+            "YAMS_DAEMON_SOCKET_PATH",
+            // ConfigResolver gives these precedence over TOML, so the generated config would not
+            // be deterministic if the developer's shell exported them.
+            "YAMS_EMBED_BACKEND",
+            "YAMS_PREFERRED_MODEL",
+            "YAMS_RERANKER_MODEL",
+            "YAMS_EMBED_DIM",
+        };
+        for (const char* name : kScrubbed) {
+            isolationEnvironment_.emplace_back(name, std::nullopt);
+        }
+        const std::pair<const char*, fs::path> relocated[] = {
+            {"HOME", root_ / "home"},
+            {"XDG_CONFIG_HOME", root_ / "config"},
+            {"XDG_STATE_HOME", root_ / "state"},
+            {"XDG_DATA_HOME", root_ / "xdg_data"},
+            {"XDG_CACHE_HOME", root_ / "cache"},
+#ifdef _WIN32
+            {"APPDATA", root_ / "appdata" / "roaming"},
+            {"LOCALAPPDATA", root_ / "appdata" / "local"},
+            {"USERPROFILE", root_ / "home"},
+#else
+            {"XDG_RUNTIME_DIR", root_ / "runtime"},
+#endif
+        };
+        for (const auto& [name, dir] : relocated) {
+            std::error_code ec;
+            fs::create_directories(dir, ec);
+            isolationEnvironment_.emplace_back(name, dir.string());
+        }
+    }
+
     void restoreProcessState() noexcept {
         if (isolateStateActive_) {
             std::error_code ec;
@@ -612,6 +678,10 @@ private:
         configPathEnvironment_.reset();
         configEnvironment_.reset();
         xdgConfigEnvironment_.reset();
+        // Reverse order so each guard restores the value it captured.
+        while (!isolationEnvironment_.empty()) {
+            isolationEnvironment_.pop_back();
+        }
     }
 
     void cleanup() {
@@ -636,6 +706,7 @@ private:
     std::optional<ScopedEnvVar> xdgConfigEnvironment_;
     std::optional<ScopedEnvVar> configEnvironment_;
     std::optional<ScopedEnvVar> configPathEnvironment_;
+    std::vector<ScopedEnvVar> isolationEnvironment_;
     bool isolateStateActive_ = false;
     Options options_;
 };

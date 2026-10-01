@@ -310,6 +310,18 @@ else
       ],
     )
 
+    test('daemon_harness_full_isolation',
+      daemon_harness_exe,
+      suite: ['integration', 'daemon', 'catch2', 'harness'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: [
+        'DaemonHarness full isolation ignores ambient developer config and data',
+        '--allow-running-no-tests',
+      ],
+    )
+
     # Split shutdown tests into individual processes
     test('daemon_shutdown_timing',
       daemon_shutdown_exe,

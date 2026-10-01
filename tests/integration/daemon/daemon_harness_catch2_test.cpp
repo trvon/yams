@@ -8,7 +8,11 @@
 
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 using namespace std::chrono_literals;
 using yams::test::DaemonHarness;
@@ -34,7 +38,133 @@ DaemonHarness::Options ownedPathOptions(const std::filesystem::path& root) {
     return options;
 }
 
+bool pathWithin(const std::filesystem::path& candidate, const std::filesystem::path& root) {
+    const auto normalizedRoot = root.lexically_normal();
+    const auto normalizedCandidate = candidate.lexically_normal();
+    auto rootIt = normalizedRoot.begin();
+    auto candidateIt = normalizedCandidate.begin();
+    for (; rootIt != normalizedRoot.end(); ++rootIt, ++candidateIt) {
+        if (rootIt->empty()) {
+            continue;
+        }
+        if (candidateIt == normalizedCandidate.end() || *candidateIt != *rootIt) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Ambient variables a developer machine may export. The isolation contract is that none of them
+// reach a harness-owned daemon.
+constexpr std::string_view kDecoyDataMarker = "DECOY_DATA_MUST_NOT_BE_USED";
+
 } // namespace
+
+TEST_CASE("DaemonHarness full isolation ignores ambient developer config and data",
+          "[daemon][harness][config][isolation]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    TempDirGuard decoy{"yams_decoy_"};
+    const auto decoyHome = decoy.path() / "home";
+    const auto decoyConfigHome = decoy.path() / "xdg_config";
+    const auto decoyConfig = decoyConfigHome / "yams" / "config.toml";
+    const auto decoyData = decoy.path() / std::string{kDecoyDataMarker};
+    const auto decoySocket = decoy.path() / "decoy.sock";
+    const auto decoyRuntime = decoy.path() / "xdg_runtime";
+    std::filesystem::create_directories(decoyRuntime);
+    const std::string decoyContents = "config_version = 3\n[core]\ndata_dir = \"" +
+                                      decoyData.string() + "\"\n# " +
+                                      std::string{kDecoyDataMarker} + "\n";
+    write_file(decoyConfig, decoyContents);
+    write_file(decoyHome / ".config" / "yams" / "config.toml", decoyContents);
+
+    const std::pair<const char*, std::string> ambient[] = {
+        {"HOME", decoyHome.string()},
+        {"XDG_CONFIG_HOME", decoyConfigHome.string()},
+        {"XDG_STATE_HOME", (decoy.path() / "xdg_state").string()},
+        {"XDG_DATA_HOME", (decoy.path() / "xdg_data").string()},
+        {"XDG_CACHE_HOME", (decoy.path() / "xdg_cache").string()},
+        {"XDG_RUNTIME_DIR", decoyRuntime.string()},
+        {"YAMS_EMBED_BACKEND", "decoy-backend"},
+        {"YAMS_PREFERRED_MODEL", "decoy-model"},
+        {"YAMS_RERANKER_MODEL", "decoy-reranker"},
+        {"YAMS_EMBED_DIM", "7"},
+        {"YAMS_CONFIG", decoyConfig.string()},
+        {"YAMS_CONFIG_PATH", decoyConfig.string()},
+        {"YAMS_DATA_DIR", decoyData.string()},
+        {"YAMS_STORAGE", decoyData.string()},
+        {"YAMS_DAEMON_SOCKET", decoySocket.string()},
+        {"YAMS_DAEMON_SOCKET_PATH", decoySocket.string()},
+    };
+    std::vector<ScopedEnvVar> ambientGuards;
+    for (const auto& [name, value] : ambient) {
+        ambientGuards.emplace_back(name, value);
+    }
+
+    DaemonHarness::Options options;
+    options.enableModelProvider = false;
+    options.useMockModelProvider = false;
+    options.enableAutoRepair = false;
+    options.requireReadyLifecycle = true;
+    // No explicit data/config/socket paths: the harness alone must keep the run contained.
+    options.isolateEnvironment = true;
+
+    std::filesystem::path observedConfig;
+    options.configureDaemon = [&](yams::daemon::DaemonConfig& config) {
+        observedConfig = config.configFilePath;
+    };
+
+    DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.startWithRetry(30s, 1, [](yams::daemon::YamsDaemon*) {}));
+    const auto& root = harness.rootDir();
+
+    REQUIRE_FALSE(observedConfig.empty());
+    CHECK(pathWithin(observedConfig, root));
+    CHECK(pathWithin(harness.dataDir(), root));
+
+    for (const char* name :
+         {"HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+          "XDG_RUNTIME_DIR", "YAMS_CONFIG", "YAMS_CONFIG_PATH", "YAMS_DATA_DIR", "YAMS_STORAGE"}) {
+        const auto value = yams::config::getenv_optional(name);
+        INFO(name << "=" << value.value_or("<unset>"));
+        REQUIRE(value.has_value());
+        CHECK(pathWithin(*value, root));
+    }
+    CHECK((yams::config::getenv_optional("YAMS_DAEMON_SOCKET") == harness.socketPath().string()));
+    const auto legacySocket = yams::config::getenv_optional("YAMS_DAEMON_SOCKET_PATH");
+    CHECK((!legacySocket.has_value() || legacySocket == harness.socketPath().string()));
+
+    // Ambient-path resolvers used by the daemon and its components see only the temp root.
+    CHECK(pathWithin(yams::config::get_config_path(), root));
+    CHECK(pathWithin(yams::config::get_config_dir(), root));
+    CHECK(pathWithin(yams::config::get_data_dir(), root));
+    CHECK(pathWithin(yams::config::get_cache_dir(), root));
+    CHECK(pathWithin(yams::config::get_state_dir(), root));
+    CHECK(pathWithin(yams::config::get_runtime_dir(), root));
+    const auto statusFile = yams::config::get_daemon_status_file();
+    CHECK(pathWithin(statusFile, root));
+    CHECK(std::filesystem::exists(statusFile));
+    // Model/backend overrides outrank TOML in ConfigResolver, so they must not be in effect.
+    for (const char* name :
+         {"YAMS_EMBED_BACKEND", "YAMS_PREFERRED_MODEL", "YAMS_RERANKER_MODEL", "YAMS_EMBED_DIM"}) {
+        INFO(name);
+        CHECK_FALSE(yams::config::getenv_optional(name).has_value());
+    }
+    CHECK((readText(observedConfig).find(kDecoyDataMarker) == std::string::npos));
+
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+
+    // The decoy was never read as config nor populated as data, and the ambient env is back.
+    CHECK_FALSE(std::filesystem::exists(decoyData));
+    CHECK(std::filesystem::is_empty(decoyRuntime));
+    CHECK((readText(decoyConfig) == decoyContents));
+    for (const auto& [name, value] : ambient) {
+        const auto restored = yams::config::getenv_optional(name);
+        INFO(name << " restored=" << restored.value_or("<unset>"));
+        CHECK((restored == std::optional<std::string>{value}));
+    }
+}
 
 TEST_CASE("DaemonHarness rolls back owned endpoints when startup callback fails",
           "[daemon][harness][cleanup][startup]") {
