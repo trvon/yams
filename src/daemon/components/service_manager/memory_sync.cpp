@@ -237,8 +237,10 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
     }
     std::uint64_t peerCount = 0;
     p2p::P2pInboundStats inbound;
+    p2p::P2pOutboundStats outbound;
     if (p2pManager_) {
         inbound = p2pManager_->inboundStats();
+        outbound = p2pManager_->outboundStats();
         auto peers = p2pManager_->peers();
         if (peers) {
             peerCount = peers.value().size();
@@ -249,15 +251,14 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
                          peers.error().message);
         }
     }
-    std::uint64_t lastFailureAgeMs = 0;
-    if (inbound.lastFailureUnixMs > 0) {
-        const auto nowMs =
-            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           std::chrono::system_clock::now().time_since_epoch())
-                                           .count());
-        lastFailureAgeMs =
-            nowMs > inbound.lastFailureUnixMs ? nowMs - inbound.lastFailureUnixMs : 0;
-    }
+    const auto nowMs =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count());
+    const auto ageMs = [nowMs](std::uint64_t unixMs) -> std::uint64_t {
+        return unixMs > 0 && nowMs > unixMs ? nowMs - unixMs : 0;
+    };
+    const auto lastFailureAgeMs = ageMs(inbound.lastFailureUnixMs);
     return MemorySyncStatus{
         memorySync_->started(),
         memorySync_->mergedRecordCount(),
@@ -281,7 +282,12 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
         inbound.lastFailureStage,
         inbound.lastFailure,
         lastFailureAgeMs,
-        memorySyncApplyHealth_.snapshot(std::chrono::steady_clock::now())};
+        memorySyncApplyHealth_.snapshot(std::chrono::steady_clock::now()),
+        memorySync_->replicationState().quarantinedWriters.size(),
+        outbound.sessions,
+        outbound.failures,
+        std::move(outbound.lastFailure),
+        ageMs(outbound.lastFailureUnixMs)};
 }
 
 Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view contentHash,

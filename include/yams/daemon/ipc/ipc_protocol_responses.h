@@ -5005,6 +5005,14 @@ struct MemorySyncResponse {
     std::string lastInboundFailureStage;
     std::string lastInboundFailure;
     std::uint64_t lastInboundFailureAgeMs{0};
+    // Durable writer quarantines and outbound sessions, also protobuf-only. Inbound and outbound
+    // session failures are aborted and retried; quarantinedWriters counts only writers whose
+    // history contradicted their authenticated commitments.
+    std::uint64_t quarantinedWriters{0};
+    std::uint64_t outboundSessions{0};
+    std::uint64_t outboundFailures{0};
+    std::string lastOutboundFailure;
+    std::uint64_t lastOutboundFailureAgeMs{0};
     // Apply-path health, also protobuf-only. applyFailedCycles counts reconciled cycles in which
     // an inbound apply stage hard-failed; failedCycles keeps meaning reconciliation failures.
     std::uint64_t applyCycles{0};

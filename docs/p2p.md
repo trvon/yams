@@ -102,6 +102,14 @@ convergence with explicit per-node corpus/frontier checks after the required ful
 - `publish_skipped_cycles` / `publish_failed_cycles`: cycles whose outbound publish was preempted
   by the replicated-delete outbox, and outbound publishes with a failed domain. Inbound apply
   failures never stop a node from publishing its own corpus.
+- `inbound_sessions` / `inbound_failures` and `outbound_sessions` / `outbound_failures`: sync
+  sessions accepted from and initiated to peers. A failed session is aborted and retried on the
+  next cycle; the last failure in each direction is printed with its reason and logged.
+- `quarantined_writers`: writers this node durably quarantined because their history contradicted
+  their authenticated commitments. It stays until an operator replaces the corpus epoch, and each
+  quarantine logs `durably quarantined writer <id>: <reason>`. `quarantined` counts records
+  rejected by the most recent reconciliation, which also includes transient rejections such as a
+  record whose causal dependency from a third writer has not arrived yet.
 
 ## Enroll and connect peers
 

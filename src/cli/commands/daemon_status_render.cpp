@@ -280,6 +280,10 @@ void renderMemorySyncSection(const yams::daemon::MemorySyncResponse* sync, std::
         {"Quarantined",
          severity_text(health(m.quarantinedRecords > 0), std::to_string(m.quarantinedRecords)),
          m.quarantinedRecords > 0 ? "check daemon log for reasons" : ""});
+    rows.push_back(
+        {"Quarantined writers",
+         severity_text(health(m.quarantinedWriters > 0), std::to_string(m.quarantinedWriters)),
+         m.quarantinedWriters > 0 ? "durable; check daemon log for the reason" : ""});
     rows.push_back({"Auth failures",
                     severity_text(health(m.authFailures > 0), std::to_string(m.authFailures)), ""});
     rows.push_back(
