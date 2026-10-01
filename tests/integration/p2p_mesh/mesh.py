@@ -429,12 +429,19 @@ class Mesh:
     # -- seed -----------------------------------------------------------
     def cmd_seed(self, a) -> None:
         self.need_state()
+        if a.docs_per_node < 1:
+            die("--docs-per-node must be >= 1")
+        if not 1 <= a.topics <= len(TOPICS):
+            die(f"--topics must be between 1 and {len(TOPICS)}")
         topics = TOPICS[: a.topics]
         added = []
-        rounds = max(1, a.docs_per_node // len(topics))
+        # Exactly --docs-per-node documents per node: full rounds over every topic, then a
+        # truncated final round.
+        rounds = -(-a.docs_per_node // len(topics))
         for r in range(rounds):
+            in_round = min(len(topics), a.docs_per_node - r * len(topics))
             for n in self.nodes:
-                for t, (topic, blurb) in enumerate(topics):
+                for t, (topic, blurb) in enumerate(topics[:in_round]):
                     # Same topic everywhere (so semantic-neighbour edges cross nodes), but every
                     # document body is unique to its author node and round.
                     body = (
@@ -456,7 +463,8 @@ class Mesh:
                     time.sleep(a.stagger)
         self.state["docs"] = self.state.get("docs", []) + added
         self.save()
-        log(f"seeded {len(added)} documents ({rounds} rounds x {len(self.nodes)} nodes x {len(topics)} topics)")
+        log(f"seeded {len(added)} documents ({a.docs_per_node} per node over {len(topics)} topics, "
+            f"{len(self.nodes)} nodes)")
         if a.settle:
             log(f"waiting {a.settle}s for local post-ingest (embeddings/topology)")
             time.sleep(a.settle)
