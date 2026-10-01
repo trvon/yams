@@ -1108,6 +1108,25 @@ MemorySyncLoop::validateHistoryExtension(std::string_view writerId,
     // writer's authenticated frontier, so it is the only safe place to resume the chain.
     const auto durable = historyCommitments_.contains(writer) ? historyCommitments_.at(writer)
                                                               : WriterHistoryCommitment{};
+    // A staged operation at or below the durable prefix is a replay only if it is the record
+    // durable history committed to at that counter. applyDeltas cannot tell on its own: it
+    // recognizes a fork only by an operation id it still remembers, and that memory is lost on
+    // restart and bounded by maxTrackedIdentities, so a different record for an old counter
+    // would otherwise pass as a replay instead of the fork it is.
+    for (const auto& [counter, recordHash] : ordered) {
+        if (counter > durable.counter) {
+            break;
+        }
+        auto committed = durableRecordHashAt(writer, counter);
+        if (!committed) {
+            return committed.error();
+        }
+        if (committed.value() != recordHash) {
+            return violation(ErrorCode::HashMismatch, "replayed writer counter " +
+                                                          std::to_string(counter) +
+                                                          " does not match durable history");
+        }
+    }
     if (durable.counter >= expectedFrontier.counter) {
         if (expectedFrontier.counter == 0) {
             return std::optional<WriterHistoryViolation>{}; // An empty prefix extends any history.
@@ -1121,10 +1140,9 @@ MemorySyncLoop::validateHistoryExtension(std::string_view writerId,
                    : violation(ErrorCode::HashMismatch,
                                "existing writer history does not match advertised frontier");
     }
-    // Staged operations at or below the durable prefix are replays: applyDeltas leaves them
-    // untouched and treats a different record under a known operation id as a fork. Only the
-    // operations above the prefix can change state, and they must link it to the frontier
-    // exactly.
+    // Staged operations at or below the durable prefix are verified replays, which applyDeltas
+    // leaves untouched. Only the operations above the prefix can change state, and they must
+    // link it to the frontier exactly.
     auto commitment = durable;
     for (const auto& [counter, recordHash] : ordered) {
         if (counter <= durable.counter) {
@@ -3008,6 +3026,24 @@ MemorySyncLoop::computeHistoryCommitmentAt(std::string_view writerId, std::uint6
                      "writer counter entry does not extend its durable prefix"};
     }
     return WriterHistoryCommitment{.counter = targetCounter, .digest = entry.value().prefixDigest};
+}
+
+Result<std::string> MemorySyncLoop::durableRecordHashAt(std::string_view writerId,
+                                                        std::uint64_t counter) {
+    if (auto indexed = ensureHistoryEntries(writerId, counter); !indexed) {
+        return indexed.error();
+    }
+    auto entry = loadHistoryEntry(writerId, counter);
+    if (!entry && entry.error().code == ErrorCode::NotFound) {
+        if (auto rebuilt = ensureHistoryEntries(writerId, counter, true); !rebuilt) {
+            return rebuilt.error();
+        }
+        entry = loadHistoryEntry(writerId, counter);
+    }
+    if (!entry) {
+        return entry.error();
+    }
+    return entry.value().recordHash;
 }
 
 Result<void> MemorySyncLoop::requireLocalHistoryCommitment() const {

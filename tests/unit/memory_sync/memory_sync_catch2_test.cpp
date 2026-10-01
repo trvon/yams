@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <set>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -1961,6 +1962,70 @@ TEST_CASE("a staged window that rewrites history above the durable prefix is a v
     auto honest = reader.validateHistoryExtension("writer", honestWindow.value().deltas, frontier);
     REQUIRE(honest.has_value());
     CHECK_FALSE(honest.value().has_value());
+}
+
+TEST_CASE("a replayed counter that differs from durable history is a violation after restart",
+          "[memory-sync][direct-delta][commitment][restart][security]") {
+    BackendFixture writerFixture{"direct-replay-fork-writer"};
+    BackendFixture readerFixture{"direct-replay-fork-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "replay-fork-corpus", 1};
+    REQUIRE(writer.publish("user/one", bytes("one")).has_value());
+    REQUIRE(writer.publish("user/two", bytes("two")).has_value());
+    const auto frontier = writer.replicationState().commitments.at("writer");
+    auto window = writer.exportLocalDeltasAfter({}, 8);
+    REQUIRE(window.has_value());
+    REQUIRE(window.value().deltas.size() == 2);
+
+    // A different, internally valid record for the writer's first counter: same operation id,
+    // different content, so a different record hash.
+    auto forkedFirst = window.value().deltas.front();
+    forkedFirst.payload = bytes("forked-one");
+    forkedFirst.record.entryHash = digest(forkedFirst.payload);
+
+    SECTION("a window that only replays durable counters") {
+        {
+            MemorySyncLoop reader{readerFixture.backend, "reader", "replay-fork-corpus", 1};
+            REQUIRE(reader.applyDeltas(window.value().deltas).has_value());
+        }
+        // After a restart the reader no longer remembers the applied operation ids, so durable
+        // history is the only record of what each counter committed to.
+        MemorySyncLoop restarted{readerFixture.backend, "reader", "replay-fork-corpus", 1};
+        const std::vector<MemoryDelta> forkedWindow{forkedFirst};
+        auto forked = restarted.validateHistoryExtension("writer", forkedWindow, frontier);
+        REQUIRE(forked.has_value());
+        REQUIRE(forked.value().has_value());
+        CHECK(forked.value()->code == yams::ErrorCode::HashMismatch);
+
+        // An identical replay is still a harmless no-op.
+        auto replay = restarted.validateHistoryExtension("writer", window.value().deltas, frontier);
+        REQUIRE(replay.has_value());
+        CHECK_FALSE(replay.value().has_value());
+        auto applied = restarted.applyDeltas(window.value().deltas);
+        REQUIRE(applied.has_value());
+        CHECK(applied.value().replayed == 2);
+        CHECK(applied.value().merged == 0);
+        CHECK(applied.value().quarantined.empty());
+        CHECK_FALSE(restarted.writerQuarantined("writer"));
+    }
+
+    SECTION("a window that overlaps the durable prefix and then extends it") {
+        {
+            MemorySyncLoop reader{readerFixture.backend, "reader", "replay-fork-corpus", 1};
+            REQUIRE(reader.applyDeltas(std::span(window.value().deltas).first(1)).has_value());
+        }
+        MemorySyncLoop restarted{readerFixture.backend, "reader", "replay-fork-corpus", 1};
+        // The fork rides along an honest extension that links the durable prefix to the
+        // frontier, so only the replayed counter betrays it.
+        const std::vector<MemoryDelta> forkedWindow{forkedFirst, window.value().deltas.back()};
+        auto forked = restarted.validateHistoryExtension("writer", forkedWindow, frontier);
+        REQUIRE(forked.has_value());
+        REQUIRE(forked.value().has_value());
+        CHECK(forked.value()->code == yams::ErrorCode::HashMismatch);
+
+        auto honest = restarted.validateHistoryExtension("writer", window.value().deltas, frontier);
+        REQUIRE(honest.has_value());
+        CHECK_FALSE(honest.value().has_value());
+    }
 }
 
 TEST_CASE("durable quarantine is not blocked by malformed adapter payload",

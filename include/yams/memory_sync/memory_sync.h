@@ -240,7 +240,8 @@ public:
     /// Validate a complete bounded incoming session against the authenticated writer's
     /// handshake-frozen frontier before any operation becomes visible. Another session with
     /// the same writer may have advanced the durable prefix since the handshake: staged
-    /// operations at or below it are replays, and the rest must chain from it exactly to the
+    /// operations at or below it are replays only if their record hashes match durable history
+    /// (any other record there is a fork), and the rest must chain from it exactly to the
     /// frontier. An empty window verifies the durable prefix at the frontier. Returns a
     /// violation for writer faults and an Error for local or transient failures.
     Result<std::optional<WriterHistoryViolation>>
@@ -525,6 +526,10 @@ private:
 
     Result<WriterHistoryCommitment> computeHistoryCommitmentAt(std::string_view writerId,
                                                                std::uint64_t targetCounter);
+
+    /// Record hash durable history committed to at `counter` (at most the writer's durable
+    /// prefix), rebuilding missing history entries like computeHistoryCommitmentAt.
+    Result<std::string> durableRecordHashAt(std::string_view writerId, std::uint64_t counter);
 
     Result<void> requireLocalHistoryCommitment() const;
 
