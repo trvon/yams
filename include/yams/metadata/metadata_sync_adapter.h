@@ -67,7 +67,12 @@ public:
     /// Reconcile the sync backend and apply every winning document record to the local
     /// repository through the idempotent batch-insert seam. Returns the number of
     /// document records applied (0 when the index carries none).
+    ///
+    /// A winner whose content bytes have not replicated locally yet is deferred: it is skipped,
+    /// the rest of the batch applies, and its logical key is listed in deferredKeys(). It stays a
+    /// winner in the replicated index, so the next apply() retries it once the bytes land.
     Result<std::size_t> apply() {
+        deferredKeys_.clear();
         auto merged = sync_.syncOnce();
         if (!merged) {
             return merged.error();
@@ -138,8 +143,8 @@ public:
                     return exists.error();
                 }
                 if (!exists.value()) {
-                    return Error{ErrorCode::NotFound,
-                                 "replicated metadata content prerequisite is missing"};
+                    deferredKeys_.push_back(key);
+                    continue;
                 }
             }
             items.push_back(toInsert(record));
@@ -192,6 +197,9 @@ public:
         }
         return applied;
     }
+
+    /// Logical keys the last apply() deferred because their content prerequisite is missing.
+    const std::vector<std::string>& deferredKeys() const noexcept { return deferredKeys_; }
 
 private:
     static bool documentMatches(const DocumentInfo& lhs, const DocumentInfo& rhs) {
@@ -282,6 +290,7 @@ private:
     memory_sync::MemorySyncService& sync_;
     ContentExists contentExists_;
     AppliedObserver appliedObserver_;
+    std::vector<std::string> deferredKeys_;
 };
 
 } // namespace yams::metadata

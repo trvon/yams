@@ -6,7 +6,8 @@
 #include <string>
 #include <string_view>
 #include <unordered_map> // IWYU pragma: keep
-#include <vector>        // IWYU pragma: keep
+#include <unordered_set>
+#include <vector> // IWYU pragma: keep
 
 #include <nlohmann/json.hpp>
 
@@ -97,7 +98,14 @@ public:
     }
 
     /// Apply deletions before nodes/edges, then resolve peer-local IDs for inserts.
+    ///
+    /// An edge whose endpoint node is neither present locally nor arriving in this batch (or is
+    /// being deleted by it) is deferred: it is skipped, the rest of the batch applies, and its
+    /// logical key is listed in deferredKeys(). Publication order across peers does not put a
+    /// target node ahead of the edges into it, so this is an ordering race, not an error; the
+    /// edge stays a winner in the replicated index and the next apply() retries it.
     Result<TopologySyncApplyStats> apply() {
+        deferredKeys_.clear();
         auto merged = sync_.syncOnce();
         if (!merged) {
             return merged.error();
@@ -228,27 +236,33 @@ public:
                 changedNodes.push_back(std::move(desired));
             }
         }
-        for (const auto& record : edges) {
-            auto sourceResult = loadNode(record.sourceNodeKey);
-            if (!sourceResult) {
-                return sourceResult.error();
-            }
-            auto targetResult = loadNode(record.targetNodeKey);
-            if (!targetResult) {
-                return targetResult.error();
-            }
-            const bool sourceArrives = std::any_of(nodes.begin(), nodes.end(), [&](const auto& n) {
-                return n.nodeKey == record.sourceNodeKey;
-            });
-            const bool targetArrives = std::any_of(nodes.begin(), nodes.end(), [&](const auto& n) {
-                return n.nodeKey == record.targetNodeKey;
-            });
-            if ((!sourceResult.value() && !sourceArrives) ||
-                (!targetResult.value() && !targetArrives)) {
-                return Error{ErrorCode::NotFound,
-                             "topology edge references a missing replicated node"};
-            }
+        std::unordered_set<std::string> arrivingNodes;
+        for (const auto& record : nodes) {
+            arrivingNodes.insert(record.nodeKey);
         }
+        const std::unordered_set<std::string> departingNodes(deletedNodes.begin(),
+                                                             deletedNodes.end());
+        std::vector<memory_sync::TopologyEdgeRecord> readyEdges;
+        readyEdges.reserve(edges.size());
+        for (auto& record : edges) {
+            bool endpointsResolved = true;
+            for (const auto* endpoint : {&record.sourceNodeKey, &record.targetNodeKey}) {
+                auto existing = loadNode(*endpoint);
+                if (!existing) {
+                    return existing.error();
+                }
+                const bool present =
+                    existing.value().has_value() && !departingNodes.contains(*endpoint);
+                endpointsResolved =
+                    endpointsResolved && (present || arrivingNodes.contains(*endpoint));
+            }
+            if (!endpointsResolved) {
+                deferredKeys_.push_back(edgeKey(record));
+                continue;
+            }
+            readyEdges.push_back(std::move(record));
+        }
+        edges = std::move(readyEdges);
 
         if (deletedEdgeIds.empty() && deletedNodeIds.empty() && changedNodes.empty() &&
             edges.empty()) {
@@ -284,8 +298,9 @@ public:
             const auto sourceIt = nodeIds.find(record.sourceNodeKey);
             const auto targetIt = nodeIds.find(record.targetNodeKey);
             if (sourceIt == nodeIds.end() || targetIt == nodeIds.end()) {
-                return Error{ErrorCode::NotFound,
-                             "topology edge references a missing replicated node"};
+                // Planning deferred every edge without resolvable endpoints.
+                return Error{ErrorCode::InternalError,
+                             "topology edge endpoint was not resolved after planning"};
             }
             const auto desired = toEdge(record, sourceIt->second, targetIt->second);
             auto existing = store_.getEdgesFrom(desired.srcNodeId, desired.relation);
@@ -320,6 +335,9 @@ public:
         }
         return stats;
     }
+
+    /// Logical keys of edges the last apply() deferred because an endpoint node is missing.
+    const std::vector<std::string>& deferredKeys() const noexcept { return deferredKeys_; }
 
 private:
     template <typename Record> Result<void> publish(const std::string& key, const Record& record) {
@@ -394,6 +412,7 @@ private:
 
     KnowledgeGraphStore& store_;
     memory_sync::MemorySyncService& sync_;
+    std::vector<std::string> deferredKeys_;
 };
 
 } // namespace yams::metadata

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -210,7 +211,60 @@ TEST_CASE("vector sync adapter rejects payload identity mismatches before mutati
     }
 }
 
-TEST_CASE("vector sync adapter requires replicated content before mutation",
+TEST_CASE("vector sync adapter defers a record whose content has not replicated yet",
+          "[vector][memory-sync][prerequisite][defer]") {
+    const auto skip = skipReasonIfAny();
+    if (!skip.empty()) {
+        SKIP(skip);
+    }
+    TempDirGuard temp;
+    auto target = makeVectorDb(4);
+    MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    MemorySyncService reader{makeBackend(temp.path / "sync"), MemorySyncConfig{"B", 50}};
+
+    const std::string readyHash(64, 'a');
+    const std::string waitingHash(64, 'b');
+    EmbeddingRecord ready;
+    ready.model = "model";
+    ready.chunkId = "ready-chunk";
+    ready.documentId = readyHash;
+    ready.dimensions = 4;
+    ready.values = {1.0F, 0.0F, 0.0F, 0.0F};
+    EmbeddingRecord waiting = ready;
+    waiting.chunkId = "waiting-chunk";
+    waiting.documentId = waitingHash;
+    waiting.values = {0.0F, 1.0F, 0.0F, 0.0F};
+    REQUIRE(writer.publish("embedding/model/ready-chunk", bytes(nlohmann::json(ready).dump()))
+                .has_value());
+    REQUIRE(writer.publish("embedding/model/waiting-chunk", bytes(nlohmann::json(waiting).dump()))
+                .has_value());
+
+    // Only the ready record's content blob has landed locally.
+    std::set<std::string> localContent{readyHash};
+    const auto contentExists = [&](std::string_view hash) -> yams::Result<bool> {
+        return localContent.contains(std::string(hash));
+    };
+
+    VectorSyncAdapter consumer{*target, reader, {}, nullptr, contentExists};
+    const auto first = consumer.apply();
+    REQUIRE(first.has_value());
+    CHECK(first.value() == 1);
+    CHECK(target->getVector("ready-chunk").has_value());
+    CHECK_FALSE(target->getVector("waiting-chunk").has_value());
+    CHECK(consumer.deferredKeys() == std::vector<std::string>{"embedding/model/waiting-chunk"});
+
+    // The deferred winner stays pending in the replicated index and applies once its
+    // prerequisite arrives on a later cycle.
+    localContent.insert(waitingHash);
+    VectorSyncAdapter retry{*target, reader, {}, nullptr, contentExists};
+    const auto second = retry.apply();
+    REQUIRE(second.has_value());
+    CHECK(second.value() == 1);
+    CHECK(target->getVector("waiting-chunk").has_value());
+    CHECK(retry.deferredKeys().empty());
+}
+
+TEST_CASE("vector sync adapter still fails the stage when the content probe errors",
           "[vector][memory-sync][prerequisite]") {
     const auto skip = skipReasonIfAny();
     if (!skip.empty()) {
@@ -223,19 +277,21 @@ TEST_CASE("vector sync adapter requires replicated content before mutation",
 
     EmbeddingRecord record;
     record.model = "model";
-    record.chunkId = "missing-content";
-    record.documentId = std::string(64, 'a');
+    record.chunkId = "probe-error";
+    record.documentId = std::string(64, 'c');
     record.dimensions = 4;
     record.values = {1.0F, 0.0F, 0.0F, 0.0F};
-    REQUIRE(writer.publish("embedding/model/missing-content", bytes(nlohmann::json(record).dump()))
+    REQUIRE(writer.publish("embedding/model/probe-error", bytes(nlohmann::json(record).dump()))
                 .has_value());
 
     VectorSyncAdapter consumer{
-        *target, reader, {}, nullptr, [](std::string_view) -> yams::Result<bool> { return false; }};
+        *target, reader, {}, nullptr, [](std::string_view) -> yams::Result<bool> {
+            return yams::Error{yams::ErrorCode::IOError, "probe failed"};
+        }};
     const auto applied = consumer.apply();
     REQUIRE_FALSE(applied.has_value());
-    CHECK(applied.error().code == yams::ErrorCode::NotFound);
-    CHECK_FALSE(target->getVector("missing-content").has_value());
+    CHECK(applied.error().code == yams::ErrorCode::IOError);
+    CHECK_FALSE(target->getVector("probe-error").has_value());
 }
 
 TEST_CASE("vector sync adapter preserves rebuild dirty state after partial mutation",

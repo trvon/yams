@@ -2,9 +2,14 @@
 // Copyright 2026 YAMS Contributors
 #pragma once
 
+#include <cstddef>
+#include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <yams/api/content_store.h>
 #include <yams/core/types.h>
@@ -14,6 +19,17 @@
 #include <yams/storage/storage_engine.h>
 
 namespace yams::memory_sync {
+
+/// Outcome of applying every content-blob winner of one reconciled index.
+struct ContentBlobApplyPass {
+    /// Blobs stored or removed locally.
+    std::size_t applied{0};
+    /// Winners whose bytes are not in the sync cache yet; the next cycle retries them.
+    std::vector<std::string> deferredKeys;
+    /// First genuine failure. The scan still attempts every blob, so `deferredKeys` stays
+    /// complete even when this is set.
+    std::optional<Error> failure;
+};
 
 /// Adapts content-addressed storage writes to the memory-sync blob namespace.
 /// The adapter is deliberately narrow: callers inject it where an ingestion or
@@ -110,6 +126,58 @@ public:
     /// Apply a winner from the service's already-reconciled cache. Daemon apply
     /// paths use this variant to avoid one full backend listing per content blob.
     Result<void> applyCached(std::string_view hash) { return applyImpl(hash, true); }
+
+    /// Apply every content-blob winner in `winners` (other stores are ignored) from the sync
+    /// cache. Blobs are content-addressed and independent, so one bad blob must not starve the
+    /// rest: every blob is attempted, and the first genuine failure is reported alongside the
+    /// blobs that were deferred because their bytes were not hydrated yet.
+    ContentBlobApplyPass applyWinners(const std::map<std::string, MemoryIndexRecord>& winners) {
+        constexpr std::string_view kPrefix = "content-blob/";
+        ContentBlobApplyPass pass;
+        const auto recordFailure = [&pass](Error error) {
+            if (!pass.failure) {
+                pass.failure = std::move(error);
+            }
+        };
+        for (const auto& [key, record] : winners) {
+            if (!key.starts_with(kPrefix)) {
+                continue;
+            }
+            const std::string_view hash{key.data() + kPrefix.size(), key.size() - kPrefix.size()};
+            if (!isSha256Digest(hash)) {
+                recordFailure(
+                    Error{ErrorCode::InvalidData, "invalid content-blob memory-sync key"});
+                continue;
+            }
+            if (record.isTombstone()) {
+                auto removed = applyDelete(hash);
+                if (!removed) {
+                    recordFailure(removed.error());
+                    continue;
+                }
+                pass.applied += removed.value() ? 1 : 0;
+                continue;
+            }
+            auto exists = contentExists(hash);
+            if (!exists) {
+                recordFailure(exists.error());
+                continue;
+            }
+            if (exists.value()) {
+                continue;
+            }
+            if (auto stored = applyCached(hash); !stored) {
+                if (stored.error().code == ErrorCode::NotFound) {
+                    pass.deferredKeys.push_back(key);
+                } else {
+                    recordFailure(stored.error());
+                }
+                continue;
+            }
+            ++pass.applied;
+        }
+        return pass;
+    }
 
 private:
     Result<void> applyImpl(std::string_view hash, bool cachedOnly) {

@@ -136,8 +136,8 @@ src/daemon/components/EmbeddingService.cpp:2620:portability/env-read # reviewed 
 src/daemon/components/IngestService.cpp:57:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:808:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:818:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:567:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:570:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:585:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:588:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestExecutor.cpp:44:portability/env-read # reviewed raw environment read
 src/daemon/components/dispatcher/request_dispatcher_models.cpp:38:portability/env-read # reviewed raw environment read
 src/detection/file_type_detector.cpp:612:portability/env-read # reviewed raw environment read
@@ -382,8 +382,8 @@ tests/unit/vector/vector_dimension_validation_catch2_test.cpp:27:portability/env
 tests/unit/vector/vector_schema_migration_vec0_catch2_test.cpp:27:portability/path-cstr # std::string filename, not filesystem::path
 tests/unit/vector/vector_smoke_catch2_test.cpp:31:portability/env-read # reviewed raw environment read
 tests/unit/vector/vector_smoke_catch2_test.cpp:37:portability/env-read # reviewed raw environment read
-tests/unit/vector/vector_sync_adapter_catch2_test.cpp:31:portability/env-read # reviewed raw environment read
-tests/unit/vector/vector_sync_adapter_catch2_test.cpp:37:portability/env-read # reviewed raw environment read
+tests/unit/vector/vector_sync_adapter_catch2_test.cpp:32:portability/env-read # reviewed raw environment read
+tests/unit/vector/vector_sync_adapter_catch2_test.cpp:38:portability/env-read # reviewed raw environment read
 tools/fuzzing/fuzz_plugin_abi_mount.cpp:18:portability/env-read # reviewed raw environment read
 tools/yams-cli/main.cpp:89:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_colbert_session.cpp:61:portability/env-read # reviewed raw environment read

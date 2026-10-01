@@ -866,7 +866,7 @@ TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
     CHECK(harness.shutdownSucceeded());
 }
 
-TEST_CASE("Daemon memory sync prerequisite failures stop dependent adapters and retry",
+TEST_CASE("Daemon memory sync stage failures neither skip later stages nor block retry",
           "[integration][daemon][memory-sync][prerequisite]") {
     auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174012",
                                                 "apply-prerequisite-corpus");
@@ -883,13 +883,24 @@ TEST_CASE("Daemon memory sync prerequisite failures stop dependent adapters and 
     std::vector<std::string> stages;
     serviceManager->testingSetMemorySyncStageObserver(
         [&](std::string_view stage) { stages.emplace_back(stage); });
+    const auto applyHealth = [&] {
+        auto status = serviceManager->getMemorySyncStatus();
+        REQUIRE(status.has_value());
+        return status.value().apply;
+    };
+    using yams::memory_sync::ApplyStage;
 
     const auto payload = bytes("prerequisite-content");
     const auto hash = digest(payload);
     REQUIRE(peer.publish("content-blob/" + hash, bytes("wrong-content")).has_value());
     REQUIRE(daemonSync->syncOnce().has_value());
     serviceManager->testingApplyMemorySyncWinners();
-    CHECK(stages.empty());
+    // A corrupt content blob fails the content stage, yet every later stage still runs.
+    CHECK(stages == std::vector<std::string>{"apply.after_content", "apply.after_metadata",
+                                             "apply.after_vector", "apply.after_topology"});
+    CHECK(applyHealth().failuresIn(ApplyStage::Content) >= 1);
+    CHECK(applyHealth().applyFailedCycles >= 1);
+    CHECK(applyHealth().lastFailureStage == "content");
 
     auto contentStore = serviceManager->getContentStore();
     REQUIRE(contentStore != nullptr);
@@ -912,7 +923,11 @@ TEST_CASE("Daemon memory sync prerequisite failures stop dependent adapters and 
     REQUIRE(daemonSync->syncOnce().has_value());
     stages.clear();
     serviceManager->testingApplyMemorySyncWinners();
-    CHECK(stages == std::vector<std::string>{"apply.after_content"});
+    // A malformed document fails only the metadata stage.
+    CHECK(stages == std::vector<std::string>{"apply.after_content", "apply.after_metadata",
+                                             "apply.after_vector", "apply.after_topology"});
+    CHECK(applyHealth().failuresIn(ApplyStage::Metadata) >= 1);
+    CHECK(applyHealth().lastFailureStage == "metadata");
 
     yams::memory_sync::MetadataDocumentRecord record;
     record.documentId = metadataHash;
@@ -945,8 +960,16 @@ TEST_CASE("Daemon memory sync prerequisite failures stop dependent adapters and 
     REQUIRE(daemonSync->syncOnce().has_value());
     stages.clear();
     serviceManager->testingApplyMemorySyncWinners();
+    // A topology identity mismatch fails the topology stage after the others completed.
     CHECK(stages == std::vector<std::string>{"apply.after_content", "apply.after_metadata",
-                                             "apply.after_vector"});
+                                             "apply.after_vector", "apply.after_topology"});
+    CHECK(applyHealth().failuresIn(ApplyStage::Topology) >= 1);
+    CHECK(applyHealth().lastFailureStage == "topology");
+    auto kgStoreBeforeRepair = serviceManager->getKgStore();
+    REQUIRE(kgStoreBeforeRepair != nullptr);
+    const auto rejectedNode = kgStoreBeforeRepair->getNodeByKey("payload-node");
+    REQUIRE(rejectedNode.has_value());
+    CHECK_FALSE(rejectedNode.value().has_value());
 
     topologyRecord.nodeKey = "envelope-node";
     topologyRecord.label = "repaired";

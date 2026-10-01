@@ -328,6 +328,24 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
     response.lastInboundFailureStage = std::move(status.value().lastInboundFailureStage);
     response.lastInboundFailure = std::move(status.value().lastInboundFailure);
     response.lastInboundFailureAgeMs = status.value().lastInboundFailureAgeMs;
+    using memory_sync::ApplyStage;
+    auto& apply = status.value().apply;
+    response.applyCycles = apply.applyCycles;
+    response.applyFailedCycles = apply.applyFailedCycles;
+    response.deferredContent = apply.deferredIn(ApplyStage::Content);
+    response.deferredMetadata = apply.deferredIn(ApplyStage::Metadata);
+    response.deferredVector = apply.deferredIn(ApplyStage::Vector);
+    response.deferredTopology = apply.deferredIn(ApplyStage::Topology);
+    response.oldestDeferralAgeMs = apply.oldestDeferralAgeMs;
+    response.applyFailuresContent = apply.failuresIn(ApplyStage::Content);
+    response.applyFailuresMetadata = apply.failuresIn(ApplyStage::Metadata);
+    response.applyFailuresVector = apply.failuresIn(ApplyStage::Vector);
+    response.applyFailuresTopology = apply.failuresIn(ApplyStage::Topology);
+    response.lastApplyFailureStage = std::move(apply.lastFailureStage);
+    response.lastApplyFailure = std::move(apply.lastFailure);
+    response.lastApplyFailureAgeMs = apply.lastFailureAgeMs;
+    response.publishSkippedCycles = apply.publishSkippedCycles;
+    response.publishFailedCycles = apply.publishFailedCycles;
     co_return response;
 }
 

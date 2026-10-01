@@ -69,7 +69,13 @@ public:
     /// Reconcile the sync backend and apply every winning embedding record to the local
     /// vector database. Existing chunks are updated in place; new chunks are inserted.
     /// Rebuilds the search index when any record was applied. Returns the number applied.
+    ///
+    /// A winner whose document content has not replicated locally yet is deferred: it is
+    /// skipped, the rest of the batch applies, and its logical key is listed in
+    /// deferredKeys(). Nothing marks it applied, so it stays a winner in the replicated index
+    /// and the next apply() retries it. Malformed records and store failures still fail.
     Result<std::size_t> apply() {
+        deferredKeys_.clear();
         auto merged = sync_.syncOnce();
         if (!merged) {
             return merged.error();
@@ -128,8 +134,8 @@ public:
                     return exists.error();
                 }
                 if (!exists.value()) {
-                    return Error{ErrorCode::NotFound,
-                                 "replicated embedding content prerequisite is missing"};
+                    deferredKeys_.push_back(key);
+                    continue;
                 }
             }
             const auto [it, inserted] = modelsByChunk.emplace(record.chunkId, record.model);
@@ -188,6 +194,9 @@ public:
         }
         return applied;
     }
+
+    /// Logical keys the last apply() deferred because their content prerequisite is missing.
+    const std::vector<std::string>& deferredKeys() const noexcept { return deferredKeys_; }
 
 private:
     static bool vectorMatches(const VectorRecord& lhs, const VectorRecord& rhs) {
@@ -262,6 +271,7 @@ private:
     bool localRebuildDirty_{false};
     bool* rebuildDirty_;
     ContentExists contentExists_;
+    std::vector<std::string> deferredKeys_;
 };
 
 } // namespace yams::vector

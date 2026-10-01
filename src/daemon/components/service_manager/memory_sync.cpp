@@ -280,7 +280,8 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
         inbound.failures,
         inbound.lastFailureStage,
         inbound.lastFailure,
-        lastFailureAgeMs};
+        lastFailureAgeMs,
+        memorySyncApplyHealth_.snapshot(std::chrono::steady_clock::now())};
 }
 
 Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view contentHash,
@@ -403,7 +404,7 @@ Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view co
     return {};
 }
 
-Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
+Result<memory_sync::ApplyStagePass> ServiceManager::applyMemorySyncContentBlobs() {
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
@@ -417,40 +418,16 @@ Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
         return merged.error();
     }
 
+    // The adapter attempts every blob, so a corrupt blob neither starves the blobs after it nor
+    // hides the blobs this scan deferred: both outcomes are recorded.
     memory_sync::ContentBlobSyncAdapter adapter{*contentStore, *memorySync_};
-    const std::string prefix =
-        std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::ContentBlob)) + "/";
-    std::size_t applied = 0;
-    for (const auto& [key, envelope] : merged.value()) {
-        (void)envelope;
-        if (!key.starts_with(prefix)) {
-            continue;
-        }
-        const std::string_view hash{key.data() + prefix.size(), key.size() - prefix.size()};
-        if (!memory_sync::isSha256Digest(hash)) {
-            return Error{ErrorCode::InvalidData, "invalid content-blob memory-sync key"};
-        }
-        if (envelope.isTombstone()) {
-            auto removed = adapter.applyDelete(hash);
-            if (!removed) {
-                return removed.error();
-            }
-            applied += removed.value() ? 1 : 0;
-            continue;
-        }
-        auto exists = contentStore->exists(std::string(hash));
-        if (!exists) {
-            return exists.error();
-        }
-        if (exists.value()) {
-            continue;
-        }
-        if (auto stored = adapter.applyCached(hash); !stored) {
-            return stored.error();
-        }
-        ++applied;
+    auto pass = adapter.applyWinners(merged.value());
+    memory_sync::ApplyStagePass out;
+    out.deferredKeys = std::move(pass.deferredKeys);
+    if (pass.failure) {
+        out.failure = pass.failure->message;
     }
-    return applied;
+    return out;
 }
 
 void ServiceManager::notifyMemorySyncStage(std::string_view stage) noexcept {
@@ -597,6 +574,9 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     // A pre-delete intent can survive a crash between local deletion and tombstone publication.
     // Promote it only after local metadata is absent, then skip this stale callback snapshot.
     if (drainMemorySyncDocumentDeleteOutbox()) {
+        // Counted so a delete outbox that keeps preempting cycles cannot silently starve the
+        // outbound publish.
+        memorySyncApplyHealth_.recordPublishSkipped();
         return;
     }
     try {
@@ -608,110 +588,141 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     } catch (...) {
         spdlog::debug("[memory_sync] quarantine reason logging skipped");
     }
-    try {
-        if (auto result = applyMemorySyncContentBlobs(); !result) {
-            spdlog::warn("[ServiceManager] memory_sync content apply failed: {}",
-                         result.error().message);
-            return;
+    // Stage dependencies. Inbound stages run in prerequisite order so that a prerequisite which
+    // lands in this cycle is already visible to its dependents in the same cycle:
+    //   content  - independent; content-addressed bytes.
+    //   metadata - per document, needs that document's content bytes locally.
+    //   vector   - per embedding, needs its document's content bytes locally.
+    //   topology - per edge, needs both endpoint nodes (replicated by the same stage).
+    // Those dependencies are enforced per record against the local stores, never by gating a whole
+    // stage on an earlier stage's success, so a failed stage cannot hide unrelated records from
+    // the stages after it. The outbound publish depends on no inbound stage: gating it on inbound
+    // success let a mesh deadlock, because when every node held an inbound record whose
+    // prerequisite only a peer could publish, every node refused to publish and the
+    // prerequisites never arrived. Only a stop request ends the cycle early.
+    // A stage that defers records is healthy; only a hard failure marks the cycle failed.
+    bool stageFailed = false;
+    const auto runStage = [this, &stageFailed](memory_sync::ApplyStage stage,
+                                               std::string_view completedStage, auto&& applyStage) {
+        if (memorySync_->stopRequested()) {
+            return false;
         }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync content apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync content apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_content");
-
-    if (memorySync_->stopRequested()) {
-        return;
-    }
-    try {
-        if (auto repository = getMetadataRepo()) {
-            auto contentStore = getContentStore();
-            if (!contentStore) {
-                spdlog::warn("[ServiceManager] memory_sync metadata apply requires content store");
-                return;
+        const auto name = memory_sync::applyStageName(stage);
+        const auto recordFailure = [&](std::string message) {
+            stageFailed = true;
+            spdlog::warn("[ServiceManager] memory_sync {} apply failed: {}", name, message);
+            memorySyncApplyHealth_.recordFailure(stage, std::move(message),
+                                                 std::chrono::steady_clock::now());
+        };
+        try {
+            // An error means the pass did not scan every record; a pass value that scanned every
+            // record can carry deferrals and a failure together, and both are recorded.
+            auto pass = applyStage();
+            if (!pass) {
+                recordFailure(pass.error().message);
+            } else {
+                const auto& deferred = pass.value().deferredKeys;
+                if (!deferred.empty()) {
+                    spdlog::debug("[ServiceManager] memory_sync {} apply deferred {} record(s) "
+                                  "awaiting replicated prerequisites",
+                                  name, deferred.size());
+                }
+                if (pass.value().failure) {
+                    stageFailed = true;
+                    spdlog::warn("[ServiceManager] memory_sync {} apply failed: {}", name,
+                                 *pass.value().failure);
+                }
+                const auto stale = memorySyncApplyHealth_.recordPass(
+                    stage, pass.value(), std::chrono::steady_clock::now());
+                for (const auto& key : stale) {
+                    spdlog::warn("[ServiceManager] memory_sync {} record {} has been deferred for "
+                                 "over {} minutes; its replicated prerequisite has not arrived",
+                                 name, key, memory_sync::ApplyHealth::kStaleDeferralAge.count());
+                }
             }
-            metadata::MetadataSyncAdapter adapter{
-                *repository, *memorySync_,
-                [contentStore](std::string_view hash) {
-                    return contentStore->exists(std::string(hash));
-                },
-                [this](const metadata::DocumentInfo& document) {
-                    enqueuePostIngest(document.sha256Hash, document.mimeType);
-                }};
-            if (auto result = adapter.apply(); !result) {
-                spdlog::warn("[ServiceManager] memory_sync metadata apply failed: {}",
-                             result.error().message);
-                return;
-            }
+        } catch (const std::exception& e) {
+            recordFailure(std::string("threw: ") + e.what());
+        } catch (...) {
+            recordFailure("threw an unknown exception");
         }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync metadata apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync metadata apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_metadata");
+        notifyMemorySyncStage(completedStage);
+        return true;
+    };
 
-    if (memorySync_->stopRequested()) {
-        return;
-    }
-    try {
-        if (auto vectorDatabase = getVectorDatabase()) {
-            auto contentStore = getContentStore();
-            if (!contentStore) {
-                spdlog::warn("[ServiceManager] memory_sync vector apply requires content store");
-                return;
-            }
-            vector::VectorSyncAdapter::RebuildCallback rebuild;
-            if (vectorIndexCoordinator_) {
-                rebuild = [coordinator = vectorIndexCoordinator_]() {
-                    return coordinator->requestRebuildBlocking(RebuildReason::EmbeddingBatch);
-                };
-            }
-            vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_, std::move(rebuild),
-                                              &memorySyncVectorRebuildDirty_,
+    using StagePass = memory_sync::ApplyStagePass;
+    const auto applyContent = [this]() -> Result<StagePass> {
+        return applyMemorySyncContentBlobs();
+    };
+    const auto applyMetadata = [this]() -> Result<StagePass> {
+        auto repository = getMetadataRepo();
+        if (!repository) {
+            return StagePass{};
+        }
+        auto contentStore = getContentStore();
+        if (!contentStore) {
+            return Error{ErrorCode::InvalidState, "metadata apply requires the content store"};
+        }
+        metadata::MetadataSyncAdapter adapter{*repository, *memorySync_,
                                               [contentStore](std::string_view hash) {
                                                   return contentStore->exists(std::string(hash));
+                                              },
+                                              [this](const metadata::DocumentInfo& document) {
+                                                  enqueuePostIngest(document.sha256Hash,
+                                                                    document.mimeType);
                                               }};
-            if (auto result = adapter.apply(); !result) {
-                spdlog::warn("[ServiceManager] memory_sync vector apply failed: {}",
-                             result.error().message);
-                return;
-            }
+        auto applied = adapter.apply();
+        if (!applied) {
+            return applied.error();
         }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync vector apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync vector apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_vector");
+        return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+    };
+    const auto applyVectors = [this]() -> Result<StagePass> {
+        auto vectorDatabase = getVectorDatabase();
+        if (!vectorDatabase) {
+            return StagePass{};
+        }
+        auto contentStore = getContentStore();
+        if (!contentStore) {
+            return Error{ErrorCode::InvalidState, "vector apply requires the content store"};
+        }
+        vector::VectorSyncAdapter::RebuildCallback rebuild;
+        if (vectorIndexCoordinator_) {
+            rebuild = [coordinator = vectorIndexCoordinator_]() {
+                return coordinator->requestRebuildBlocking(RebuildReason::EmbeddingBatch);
+            };
+        }
+        vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_, std::move(rebuild),
+                                          &memorySyncVectorRebuildDirty_,
+                                          [contentStore](std::string_view hash) {
+                                              return contentStore->exists(std::string(hash));
+                                          }};
+        auto applied = adapter.apply();
+        if (!applied) {
+            return applied.error();
+        }
+        return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+    };
+    const auto applyTopology = [this]() -> Result<StagePass> {
+        auto kgStore = getKgStore();
+        if (!kgStore) {
+            return StagePass{};
+        }
+        metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
+        auto applied = adapter.apply();
+        if (!applied) {
+            return applied.error();
+        }
+        return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+    };
 
-    if (memorySync_->stopRequested()) {
+    using memory_sync::ApplyStage;
+    if (!runStage(ApplyStage::Content, "apply.after_content", applyContent) ||
+        !runStage(ApplyStage::Metadata, "apply.after_metadata", applyMetadata) ||
+        !runStage(ApplyStage::Vector, "apply.after_vector", applyVectors) ||
+        !runStage(ApplyStage::Topology, "apply.after_topology", applyTopology)) {
         return;
     }
-    try {
-        if (auto kgStore = getKgStore()) {
-            metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
-            if (auto result = adapter.apply(); !result) {
-                spdlog::warn("[ServiceManager] memory_sync topology apply failed: {}",
-                             result.error().message);
-                return;
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync topology apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync topology apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_topology");
+    memorySyncApplyHealth_.recordCycle(stageFailed);
 
     if (memorySync_->stopRequested()) {
         return;
@@ -943,6 +954,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         }
     };
 
+    bool domainFailed = false;
     std::size_t consecutiveEmptyDomains = 0;
     while (!shouldStop() && consecutiveEmptyDomains < 3) {
         const auto domain = state.nextDomain;
@@ -962,8 +974,10 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                     break;
             }
         } catch (const std::exception& error) {
+            domainFailed = true;
             spdlog::warn("[ServiceManager] memory_sync backfill domain failed: {}", error.what());
         } catch (...) {
+            domainFailed = true;
             spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
         }
 
@@ -980,10 +994,21 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         "edges={} skipped={}",
         documentsPublished, blobsPublished, vectorsPublished, nodesPublished, edgesPublished,
         skippedDocuments);
+    if (domainFailed) {
+        memorySyncApplyHealth_.recordPublishFailed();
+    }
 } catch (const std::exception& error) {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed: {}", error.what());
+    try {
+        memorySyncApplyHealth_.recordPublishFailed();
+    } catch (...) {
+    }
 } catch (...) {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed (unknown)");
+    try {
+        memorySyncApplyHealth_.recordPublishFailed();
+    } catch (...) {
+    }
 }
 
 Result<void> ServiceManager::configureMemorySyncApply() {
