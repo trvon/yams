@@ -280,6 +280,24 @@ void renderMemorySyncSection(const yams::daemon::MemorySyncResponse* sync, std::
         {"Quarantined",
          severity_text(health(m.quarantinedRecords > 0), std::to_string(m.quarantinedRecords)),
          m.quarantinedRecords > 0 ? "check daemon log for reasons" : ""});
+    rows.push_back(
+        {"Quarantined writers",
+         severity_text(health(m.quarantinedWriters > 0), std::to_string(m.quarantinedWriters)),
+         m.quarantinedWriters > 0 ? "durable; check daemon log for the reason" : ""});
+    // Sessions this node initiated. A failed one is aborted and retried, never quarantined, so
+    // a direction that keeps failing is visible only here and in the daemon log.
+    if (m.backend == "direct" || m.outboundSessions > 0) {
+        rows.push_back({"Outbound sessions",
+                        std::to_string(m.outboundSessions) + " started · " +
+                            std::to_string(m.outboundFailures) + " failed",
+                        severity_text(health(m.outboundFailures > 0), "")});
+        if (m.outboundFailures > 0) {
+            // lastOutboundFailure is "<peer>: <error>".
+            rows.push_back({"Last outbound failure",
+                            severity_text(Severity::Warn, m.lastOutboundFailure),
+                            format_duration(m.lastOutboundFailureAgeMs / 1000) + " ago"});
+        }
+    }
     rows.push_back({"Auth failures",
                     severity_text(health(m.authFailures > 0), std::to_string(m.authFailures)), ""});
     rows.push_back(

@@ -328,6 +328,11 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
     response.lastInboundFailureStage = std::move(status.value().lastInboundFailureStage);
     response.lastInboundFailure = std::move(status.value().lastInboundFailure);
     response.lastInboundFailureAgeMs = status.value().lastInboundFailureAgeMs;
+    response.quarantinedWriters = status.value().quarantinedWriters;
+    response.outboundSessions = status.value().outboundSessions;
+    response.outboundFailures = status.value().outboundFailures;
+    response.lastOutboundFailure = std::move(status.value().lastOutboundFailure);
+    response.lastOutboundFailureAgeMs = status.value().lastOutboundFailureAgeMs;
     using memory_sync::ApplyStage;
     auto& apply = status.value().apply;
     response.applyCycles = apply.applyCycles;

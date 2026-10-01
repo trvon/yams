@@ -201,7 +201,10 @@ Result<std::string> formatP2pStatus(const daemon::MemorySyncResponse& response, 
             << " deferred=" << response.deferredRecords()
             << " oldest_deferral_age_ms=" << response.oldestDeferralAgeMs
             << " publish_skipped_cycles=" << response.publishSkippedCycles
-            << " publish_failed_cycles=" << response.publishFailedCycles;
+            << " publish_failed_cycles=" << response.publishFailedCycles
+            << " quarantined_writers=" << response.quarantinedWriters
+            << " outbound_sessions=" << response.outboundSessions
+            << " outbound_failures=" << response.outboundFailures;
         out << "\napply deferred_content=" << response.deferredContent
             << " deferred_metadata=" << response.deferredMetadata
             << " deferred_vector=" << response.deferredVector
@@ -218,6 +221,10 @@ Result<std::string> formatP2pStatus(const daemon::MemorySyncResponse& response, 
             out << "\nlast inbound failure (" << response.lastInboundFailureAgeMs / 1000
                 << "s ago) at " << response.lastInboundFailureStage << ": "
                 << response.lastInboundFailure;
+        }
+        if (response.outboundFailures > 0) {
+            out << "\nlast outbound failure (" << response.lastOutboundFailureAgeMs / 1000
+                << "s ago) to " << response.lastOutboundFailure;
         }
         return out.str();
     }
@@ -244,6 +251,13 @@ Result<std::string> formatP2pStatus(const daemon::MemorySyncResponse& response, 
                                           {"error", response.lastInboundFailure},
                                           {"age_ms", response.lastInboundFailureAgeMs}};
     }
+    output["outbound_sessions"] = response.outboundSessions;
+    output["outbound_failures"] = response.outboundFailures;
+    if (response.outboundFailures > 0) {
+        output["last_outbound_failure"] = {{"error", response.lastOutboundFailure},
+                                           {"age_ms", response.lastOutboundFailureAgeMs}};
+    }
+    output["quarantined_writers"] = response.quarantinedWriters;
     nlohmann::json apply;
     apply["cycles"] = response.applyCycles;
     apply["failed_cycles"] = response.applyFailedCycles;

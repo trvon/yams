@@ -79,6 +79,15 @@ struct P2pInboundStats {
     std::uint64_t lastFailureUnixMs{0};
 };
 
+/// Outcome of sessions this manager initiated (explicit connects and reconnects). A failed
+/// session is aborted and retried; it never quarantines on its own.
+struct P2pOutboundStats {
+    std::uint64_t sessions{0};
+    std::uint64_t failures{0};
+    std::string lastFailure; ///< "<peer node id>: <error>"
+    std::uint64_t lastFailureUnixMs{0};
+};
+
 class P2pManager {
 public:
     static Result<std::unique_ptr<P2pManager>> create(P2pManagerOptions options,
@@ -100,6 +109,7 @@ public:
     Result<P2pLocalIdentity> localIdentity() const;
     Result<std::vector<PeerRegistryRecord>> peers() const;
     [[nodiscard]] P2pInboundStats inboundStats() const;
+    [[nodiscard]] P2pOutboundStats outboundStats() const;
 
 #if YAMS_DAEMON_TEST_HOOKS_ENABLED
     /// Inject a reconnect-loop action for deterministic thread-boundary tests.

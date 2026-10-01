@@ -226,6 +226,11 @@ template <> struct ProtoBinding<MemorySyncResponse> {
         out->set_last_apply_failure_age_ms(response.lastApplyFailureAgeMs);
         out->set_publish_skipped_cycles(response.publishSkippedCycles);
         out->set_publish_failed_cycles(response.publishFailedCycles);
+        out->set_quarantined_writers(response.quarantinedWriters);
+        out->set_outbound_sessions(response.outboundSessions);
+        out->set_outbound_failures(response.outboundFailures);
+        out->set_last_outbound_failure(yams::common::sanitizeUtf8(response.lastOutboundFailure));
+        out->set_last_outbound_failure_age_ms(response.lastOutboundFailureAgeMs);
     }
     static MemorySyncResponse get(const Envelope& env) {
         const auto& in = env.memory_sync_response();
@@ -267,6 +272,11 @@ template <> struct ProtoBinding<MemorySyncResponse> {
         response.lastApplyFailureAgeMs = in.last_apply_failure_age_ms();
         response.publishSkippedCycles = in.publish_skipped_cycles();
         response.publishFailedCycles = in.publish_failed_cycles();
+        response.quarantinedWriters = in.quarantined_writers();
+        response.outboundSessions = in.outbound_sessions();
+        response.outboundFailures = in.outbound_failures();
+        response.lastOutboundFailure = in.last_outbound_failure();
+        response.lastOutboundFailureAgeMs = in.last_outbound_failure_age_ms();
         return response;
     }
 };

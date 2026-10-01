@@ -209,6 +209,14 @@ public:
         /// `failedCycles` counts reconciliation failures; apply.applyFailedCycles counts
         /// reconciled cycles in which an inbound apply stage hard-failed.
         memory_sync::ApplyHealthSnapshot apply;
+        /// Writers this node durably quarantined. Session failures are transient and
+        /// retried; only a writer whose history contradicts its authenticated commitments is
+        /// quarantined, and that stays until an operator re-enrolls a new corpus epoch.
+        std::uint64_t quarantinedWriters{0};
+        std::uint64_t outboundSessions{0};
+        std::uint64_t outboundFailures{0};
+        std::string lastOutboundFailure;
+        std::uint64_t lastOutboundFailureAgeMs{0};
     };
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);

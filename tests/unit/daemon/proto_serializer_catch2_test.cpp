@@ -160,6 +160,11 @@ TEST_CASE("ProtoSerializer MemorySync request and response preserve binary value
     response.lastApplyFailureAgeMs = 4200;
     response.publishSkippedCycles = 9;
     response.publishFailedCycles = 10;
+    response.quarantinedWriters = 1;
+    response.outboundSessions = 40;
+    response.outboundFailures = 3;
+    response.lastOutboundFailure = "peer-b: p2p peer made no causal progress";
+    response.lastOutboundFailureAgeMs = 2500;
     Message responseMessage{};
     responseMessage.requestId = 91;
     responseMessage.payload = Response{response};
@@ -192,6 +197,11 @@ TEST_CASE("ProtoSerializer MemorySync request and response preserve binary value
     CHECK(roundTrippedResponse->lastInboundFailureStage == "handshake");
     CHECK(roundTrippedResponse->lastInboundFailure == "peer is not enrolled");
     CHECK(roundTrippedResponse->lastInboundFailureAgeMs == 1500);
+    CHECK(roundTrippedResponse->quarantinedWriters == 1);
+    CHECK(roundTrippedResponse->outboundSessions == 40);
+    CHECK(roundTrippedResponse->outboundFailures == 3);
+    CHECK(roundTrippedResponse->lastOutboundFailure == "peer-b: p2p peer made no causal progress");
+    CHECK(roundTrippedResponse->lastOutboundFailureAgeMs == 2500);
     CHECK(roundTrippedResponse->applyCycles == 1268);
     CHECK(roundTrippedResponse->applyFailedCycles == 3);
     CHECK(roundTrippedResponse->deferredContent == 1);

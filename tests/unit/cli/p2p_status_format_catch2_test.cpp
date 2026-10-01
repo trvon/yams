@@ -96,6 +96,44 @@ TEST_CASE("p2p status JSON nests apply health", "[cli][p2p][status][memory-sync]
     CHECK(parsed.at("failed_cycles") == 0);
 }
 
+TEST_CASE("p2p status separates transient session failures from durable quarantines",
+          "[cli][p2p][status][quarantine]") {
+    auto m = stuckMeshNode();
+    m.inboundSessions = 30;
+    m.inboundFailures = 4;
+    m.lastInboundFailureStage = "delta_exchange";
+    m.lastInboundFailure = "p2p peer made no causal progress applying direct deltas";
+    m.outboundSessions = 28;
+    m.outboundFailures = 2;
+    m.lastOutboundFailure = "peer-b: authenticated peer writer prefix was not verified";
+    m.lastOutboundFailureAgeMs = 7'000;
+    m.quarantinedWriters = 1;
+
+    const auto text = yams::cli::formatP2pStatus(m, false);
+    REQUIRE(text.has_value());
+    const auto firstLine = text.value().substr(0, text.value().find('\n'));
+    CHECK(firstLine.find(" quarantined_writers=1") != std::string::npos);
+    CHECK(firstLine.find(" outbound_sessions=28") != std::string::npos);
+    CHECK(firstLine.find(" outbound_failures=2") != std::string::npos);
+    CHECK(text.value().find("\nlast outbound failure (7s ago) to peer-b: authenticated peer "
+                            "writer prefix was not verified") != std::string::npos);
+
+    const auto json = yams::cli::formatP2pStatus(m, true);
+    REQUIRE(json.has_value());
+    const auto parsed = nlohmann::json::parse(json.value());
+    CHECK(parsed.at("quarantined_writers") == 1);
+    CHECK(parsed.at("outbound_sessions") == 28);
+    CHECK(parsed.at("outbound_failures") == 2);
+    CHECK(parsed.at("last_outbound_failure").at("age_ms") == 7'000);
+
+    m.outboundFailures = 0;
+    m.quarantinedWriters = 0;
+    const auto healthy = yams::cli::formatP2pStatus(m, false);
+    REQUIRE(healthy.has_value());
+    CHECK(healthy.value().find(" quarantined_writers=0") != std::string::npos);
+    CHECK(healthy.value().find("last outbound failure") == std::string::npos);
+}
+
 TEST_CASE("p2p status refuses a stopped memory sync service", "[cli][p2p][status]") {
     yams::daemon::MemorySyncResponse m;
     m.started = false;
