@@ -15,6 +15,8 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
 // pi-lens-ignore: fatal error
 #include <yams/core/types.h>
@@ -339,6 +341,32 @@ public:
         }
         const auto record = state->merged.find(std::string(key));
         return record != state->merged.end() && record->second.isTombstone();
+    }
+
+    /// Up to `limit` committed winners whose logical key starts with `prefix` and sorts after
+    /// `afterKey`, in key order. The cursor is a logical key, not a position, so a caller paging
+    /// through the winners neither skips nor repeats a key when records are published or merged
+    /// between pages.
+    [[nodiscard]] std::vector<std::pair<std::string, MemoryIndexRecord>>
+    committedWinnersAfter(std::string_view prefix, std::string_view afterKey,
+                          std::size_t limit) const {
+        std::vector<std::pair<std::string, MemoryIndexRecord>> page;
+        const auto state = committedSnapshot();
+        if (!state || limit == 0) {
+            return page;
+        }
+        const std::string start = afterKey < prefix ? std::string(prefix) : std::string(afterKey);
+        auto it = state->merged.lower_bound(start);
+        if (it != state->merged.end() && it->first == afterKey) {
+            ++it;
+        }
+        for (; it != state->merged.end() && page.size() < limit; ++it) {
+            if (!it->first.starts_with(prefix)) {
+                break;
+            }
+            page.emplace_back(it->first, it->second);
+        }
+        return page;
     }
 
     std::size_t mergedRecordCount() const noexcept {

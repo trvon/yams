@@ -98,7 +98,9 @@ convergence with explicit per-node corpus/frontier checks after the required ful
   not arrived (an embedding or document whose content blob is missing, an edge whose endpoint node
   is missing). They stay pending in the replicated index and are retried every cycle.
   `oldest_deferral_age_ms` is how long the oldest one has waited; one deferred for more than ten
-  minutes is also logged, since its prerequisite probably never reached this node.
+  minutes is also logged, since its prerequisite probably never reached this node. An edge whose
+  endpoint node is known to be deleted (tombstoned, for example a cluster node that a topology
+  rebuild replaced) is dropped rather than deferred.
 - `publish_skipped_cycles` / `publish_failed_cycles`: cycles whose outbound publish was preempted
   by the replicated-delete outbox, and outbound publishes with a failed domain. Inbound apply
   failures never stop a node from publishing its own corpus.
@@ -110,6 +112,12 @@ convergence with explicit per-node corpus/frontier checks after the required ful
   quarantine logs `durably quarantined writer <id>: <reason>`. `quarantined` counts records
   rejected by the most recent reconciliation, which also includes transient rejections such as a
   record whose causal dependency from a third writer has not arrived yet.
+
+Knowledge-graph topology is published by a repeating sweep over stable row ids: every node, then
+every edge together with both of its endpoint nodes, then a check that tombstones this node's own
+published nodes and edges its graph no longer holds. Graph changes made after a sweep went by,
+including topology rebuilds that replace cluster nodes, reach peers on a later sweep; unchanged
+records publish nothing. A node never applies its own published topology back into its graph.
 
 ## Enroll and connect peers
 

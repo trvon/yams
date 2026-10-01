@@ -1187,8 +1187,14 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
     }
     CHECK(thirdCycle == 2);
 
+    // The topology sweep publishes every node before the edges, so the edge follows the second
+    // node within a bounded number of further cycles.
     stages.clear();
-    serviceManager->testingPublishMemorySyncBackfill();
+    for (int cycle = 0; cycle < 4 && std::find(stages.begin(), stages.end(),
+                                               "backfill.after_edge") == stages.end();
+         ++cycle) {
+        serviceManager->testingPublishMemorySyncBackfill();
+    }
     REQUIRE(peer.syncOnce().has_value());
     CHECK(std::find(stages.begin(), stages.end(), "backfill.after_edge") != stages.end());
 

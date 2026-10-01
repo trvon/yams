@@ -23,10 +23,18 @@ struct TopologySyncApplyStats {
     std::size_t edgesApplied{0};
     std::size_t nodesDeleted{0};
     std::size_t edgesDeleted{0};
+    /// Edges not applied because an endpoint node is known to be deleted.
+    std::size_t edgesDropped{0};
 };
 
 /// Replicates stable-key knowledge-graph nodes and edges. Numeric node IDs never
 /// cross the wire; apply resolves fresh peer-local IDs before inserting edges.
+///
+/// The local graph is authoritative for this writer's own records: apply() never writes a record
+/// this node published back into its own graph, and retractIfLocallyAbsent() tombstones an own
+/// record once the local graph no longer holds it (a topology rebuild deleted the cluster node,
+/// cascading its edges). Applying own records instead would resurrect what the rebuild deleted,
+/// so the deletion could never be observed, let alone replicated.
 class TopologySyncAdapter {
 public:
     TopologySyncAdapter(KnowledgeGraphStore& store, memory_sync::MemorySyncService& sync)
@@ -77,6 +85,85 @@ public:
         return publish(edgeKey(record), record);
     }
 
+    /// Publish an edge together with both endpoint nodes, endpoints first. A peer that receives
+    /// this writer's edge has therefore received both endpoints from the same writer before it,
+    /// whatever order the nodes and edges are swept in. Unchanged records publish nothing.
+    Result<void> publishEdgeWithEndpoints(const KGNode& source, const KGEdge& edge,
+                                          const KGNode& target) {
+        if (auto published = publishNode(source); !published) {
+            return published.error();
+        }
+        if (auto published = publishNode(target); !published) {
+            return published.error();
+        }
+        return publishEdge(source.nodeKey, edge, target.nodeKey);
+    }
+
+    /// Tombstone this writer's own committed topology record when the local graph no longer
+    /// holds it. Returns true when a tombstone was published. Records of other writers, deleted
+    /// records, and records still present locally are left alone.
+    Result<bool> retractIfLocallyAbsent(std::string_view key,
+                                        const memory_sync::MemoryIndexRecord& winner) {
+        if (winner.isTombstone() || winner.origin != sync_.localNodeId()) {
+            return false;
+        }
+        const std::string nodePrefix = storePrefix(memory_sync::MemoryStore::TopologyNode);
+        const std::string edgePrefix = storePrefix(memory_sync::MemoryStore::TopologyEdge);
+        if (!key.starts_with(nodePrefix) && !key.starts_with(edgePrefix)) {
+            return false;
+        }
+        auto payload = sync_.readCached(key);
+        if (!payload) {
+            // Not hydrated into the committed snapshot yet; the next pass checks it again.
+            if (payload.error().code == ErrorCode::NotFound) {
+                return false;
+            }
+            return payload.error();
+        }
+        const std::string_view text(reinterpret_cast<const char*>(payload.value().data()),
+                                    payload.value().size());
+        try {
+            if (key.starts_with(nodePrefix)) {
+                auto record = nlohmann::json::parse(text).get<memory_sync::TopologyNodeRecord>();
+                if (nodeKey(record.nodeKey) != key) {
+                    return Error{ErrorCode::InvalidData,
+                                 "topology node identity does not match logical key"};
+                }
+                auto existing = store_.getNodeByKey(record.nodeKey);
+                if (!existing) {
+                    return existing.error();
+                }
+                if (existing.value()) {
+                    return false;
+                }
+                if (auto erased = publishDeleteNode(record.nodeKey); !erased) {
+                    return erased.error();
+                }
+                return true;
+            }
+            auto record = nlohmann::json::parse(text).get<memory_sync::TopologyEdgeRecord>();
+            if (edgeKey(record) != key) {
+                return Error{ErrorCode::InvalidData,
+                             "topology edge identity does not match logical key"};
+            }
+            auto present = hasLocalEdge(record);
+            if (!present) {
+                return present.error();
+            }
+            if (present.value()) {
+                return false;
+            }
+            if (auto erased =
+                    publishDeleteEdge(record.sourceNodeKey, record.relation, record.targetNodeKey);
+                !erased) {
+                return erased.error();
+            }
+            return true;
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InvalidData, e.what()};
+        }
+    }
+
     Result<void> publishDeleteNode(std::string_view stableNodeKey) {
         if (stableNodeKey.empty()) {
             return Error{ErrorCode::InvalidArgument, "topology node key must not be empty"};
@@ -97,13 +184,19 @@ public:
         return sync_.erase(edgeKey(record), nlohmann::json(record).dump());
     }
 
-    /// Apply deletions before nodes/edges, then resolve peer-local IDs for inserts.
+    /// Apply deletions before nodes/edges, then resolve peer-local IDs for inserts. Records this
+    /// node wrote itself are validated but never applied (see the class comment).
     ///
-    /// An edge whose endpoint node is neither present locally nor arriving in this batch (or is
-    /// being deleted by it) is deferred: it is skipped, the rest of the batch applies, and its
-    /// logical key is listed in deferredKeys(). Publication order across peers does not put a
-    /// target node ahead of the edges into it, so this is an ordering race, not an error; the
-    /// edge stays a winner in the replicated index and the next apply() retries it.
+    /// An edge whose endpoint node is neither present locally nor arriving in this batch is
+    /// deferred: it is skipped, the rest of the batch applies, and its logical key is listed in
+    /// deferredKeys(). Publication order across peers does not put a target node ahead of the
+    /// edges into it, so this is an ordering race, not an error; the edge stays a winner in the
+    /// replicated index and the next apply() retries it.
+    ///
+    /// An edge whose endpoint is known to be deleted (its winner is a tombstone, or it is this
+    /// node's own record and the local graph no longer holds it) is dropped instead: waiting
+    /// cannot make the endpoint arrive. It is counted in edgesDropped and applies again if the
+    /// endpoint is ever re-published.
     Result<TopologySyncApplyStats> apply() {
         deferredKeys_.clear();
         auto merged = sync_.syncOnce();
@@ -117,11 +210,17 @@ public:
         std::vector<memory_sync::TopologyEdgeRecord> edges;
         std::vector<std::string> deletedNodes;
         std::vector<memory_sync::TopologyEdgeRecord> deletedEdges;
+        // Endpoint keys whose winner cannot be applied here: tombstones of any writer, and this
+        // node's own records (authoritative only in the local graph).
+        std::unordered_set<std::string> tombstonedNodes;
+        std::unordered_set<std::string> ownNodes;
+        const auto& localWriter = sync_.localNodeId();
 
         for (const auto& [key, envelope] : merged.value()) {
             if (!key.starts_with(nodePrefix) && !key.starts_with(edgePrefix)) {
                 continue;
             }
+            const bool own = envelope.origin == localWriter;
             if (envelope.isTombstone()) {
                 try {
                     if (key.starts_with(nodePrefix)) {
@@ -130,7 +229,10 @@ public:
                                 ErrorCode::InvalidData,
                                 "topology node tombstone identity does not match logical key"};
                         }
-                        deletedNodes.push_back(envelope.tombstonePayload);
+                        tombstonedNodes.insert(envelope.tombstonePayload);
+                        if (!own) {
+                            deletedNodes.push_back(envelope.tombstonePayload);
+                        }
                     } else {
                         auto record = nlohmann::json::parse(envelope.tombstonePayload)
                                           .get<memory_sync::TopologyEdgeRecord>();
@@ -139,7 +241,9 @@ public:
                                 ErrorCode::InvalidData,
                                 "topology edge tombstone identity does not match logical key"};
                         }
-                        deletedEdges.push_back(std::move(record));
+                        if (!own) {
+                            deletedEdges.push_back(std::move(record));
+                        }
                     }
                 } catch (const std::exception& e) {
                     return Error{ErrorCode::InvalidData, e.what()};
@@ -160,7 +264,11 @@ public:
                         return Error{ErrorCode::InvalidData,
                                      "topology node identity does not match logical key"};
                     }
-                    nodes.push_back(std::move(record));
+                    if (own) {
+                        ownNodes.insert(record.nodeKey);
+                    } else {
+                        nodes.push_back(std::move(record));
+                    }
                 } else {
                     auto record =
                         nlohmann::json::parse(text).get<memory_sync::TopologyEdgeRecord>();
@@ -168,7 +276,9 @@ public:
                         return Error{ErrorCode::InvalidData,
                                      "topology edge identity does not match logical key"};
                     }
-                    edges.push_back(std::move(record));
+                    if (!own) {
+                        edges.push_back(std::move(record));
+                    }
                 }
             } catch (const std::exception& e) {
                 return Error{ErrorCode::InvalidData, e.what()};
@@ -207,14 +317,12 @@ public:
             if (!source || !target) {
                 continue;
             }
-            auto existingResult = store_.getEdgesFrom(source->id, record.relation);
+            auto existingResult = store_.getEdgesBetween(source->id, target->id, record.relation);
             if (!existingResult) {
                 return existingResult.error();
             }
             for (const auto& edge : existingResult.value()) {
-                if (edge.dstNodeId == target->id) {
-                    deletedEdgeIds.push_back(edge.id);
-                }
+                deletedEdgeIds.push_back(edge.id);
             }
         }
         for (const auto& key : deletedNodes) {
@@ -246,6 +354,7 @@ public:
         readyEdges.reserve(edges.size());
         for (auto& record : edges) {
             bool endpointsResolved = true;
+            bool endpointDeleted = false;
             for (const auto* endpoint : {&record.sourceNodeKey, &record.targetNodeKey}) {
                 auto existing = loadNode(*endpoint);
                 if (!existing) {
@@ -253,8 +362,18 @@ public:
                 }
                 const bool present =
                     existing.value().has_value() && !departingNodes.contains(*endpoint);
-                endpointsResolved =
-                    endpointsResolved && (present || arrivingNodes.contains(*endpoint));
+                if (present || arrivingNodes.contains(*endpoint)) {
+                    continue;
+                }
+                endpointsResolved = false;
+                // Neither present nor arriving: a tombstoned endpoint, or an own record the local
+                // graph no longer holds, was deleted and will not arrive.
+                endpointDeleted = endpointDeleted || tombstonedNodes.contains(*endpoint) ||
+                                  ownNodes.contains(*endpoint);
+            }
+            if (endpointDeleted) {
+                ++stats.edgesDropped;
+                continue;
             }
             if (!endpointsResolved) {
                 deferredKeys_.push_back(edgeKey(record));
@@ -303,15 +422,13 @@ public:
                              "topology edge endpoint was not resolved after planning"};
             }
             const auto desired = toEdge(record, sourceIt->second, targetIt->second);
-            auto existing = store_.getEdgesFrom(desired.srcNodeId, desired.relation);
+            auto existing =
+                store_.getEdgesBetween(desired.srcNodeId, desired.dstNodeId, desired.relation);
             if (!existing) {
                 return existing.error();
             }
             bool exact = false;
             for (const auto& current : existing.value()) {
-                if (current.dstNodeId != desired.dstNodeId) {
-                    continue;
-                }
                 if (current.weight == desired.weight &&
                     current.createdTime == desired.createdTime &&
                     current.properties == desired.properties) {
@@ -340,6 +457,26 @@ public:
     const std::vector<std::string>& deferredKeys() const noexcept { return deferredKeys_; }
 
 private:
+    Result<bool> hasLocalEdge(const memory_sync::TopologyEdgeRecord& record) {
+        auto source = store_.getNodeByKey(record.sourceNodeKey);
+        if (!source) {
+            return source.error();
+        }
+        auto target = store_.getNodeByKey(record.targetNodeKey);
+        if (!target) {
+            return target.error();
+        }
+        if (!source.value() || !target.value()) {
+            return false;
+        }
+        auto edges =
+            store_.getEdgesBetween(source.value()->id, target.value()->id, record.relation);
+        if (!edges) {
+            return edges.error();
+        }
+        return !edges.value().empty();
+    }
+
     template <typename Record> Result<void> publish(const std::string& key, const Record& record) {
         const std::string dump = nlohmann::json(record).dump();
         std::vector<std::byte> bytes(dump.size());

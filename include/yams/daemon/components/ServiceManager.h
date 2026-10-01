@@ -1025,14 +1025,16 @@ private:
         std::int64_t documentIdCursor{0};
         std::string vectorDocumentHashCursor;
         std::string vectorChunkIdCursor;
-        bool topologySnapshotInitialized{false};
-        std::vector<std::string> topologyNodeTypes;
-        std::size_t topologyTypeIndex{0};
-        std::unordered_map<std::string, std::size_t> topologyNodeOffsets;
-        std::size_t topologyEdgeOffset{0};
-        std::int64_t topologyNodeId{0};
-        std::string topologyNodeKey;
-        bool topologyNodeActive{false};
+        // Topology is swept in repeating passes: every node, then every edge (each with its
+        // endpoints), then this writer's committed topology records, so edges and nodes created
+        // or changed after a pass went by are published, and records the local graph dropped
+        // are retracted, on a later pass. The cursors are keyset positions (AUTOINCREMENT ids,
+        // logical keys), so inserts and deletes between items never shift them.
+        enum class TopologyPhase { Nodes, Edges, Retractions };
+        TopologyPhase topologyPhase{TopologyPhase::Nodes};
+        std::int64_t topologyNodeIdCursor{0};
+        std::int64_t topologyEdgeIdCursor{0};
+        std::string topologyRetractionKeyCursor;
         Domain nextDomain{Domain::Documents};
         std::size_t itemBudgetPerCycle{256};
         std::chrono::milliseconds timeBudgetPerCycle{100};
