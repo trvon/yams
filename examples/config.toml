@@ -13,9 +13,11 @@ migrated_from = 0
 migration_date = "2025-01-16"
 
 [core]
-# Data storage directory - all other data files nest under this by default
-# ~ will be expanded to home directory
-data_dir = "~/.yams/data"
+# Data storage directory - all other data files nest under this by default.
+# ~ is expanded to the home directory. The built-in default is $XDG_DATA_HOME/yams
+# (~/.local/share/yams) on Linux and macOS and %LOCALAPPDATA%\yams on Windows.
+# A value here takes precedence over YAMS_DATA_DIR.
+data_dir = "~/.local/share/yams"
 # Storage engine: "local" or "distributed" (future)
 storage_engine = "local"
 # Enable Write-Ahead Logging for crash recovery
@@ -99,12 +101,10 @@ hash_algorithm = "sha256"
 [compression]
 # Enable compression for new content
 enable = true
-# Compression algorithm: "zstd" or "lzma"
+# Compression algorithm. Zstandard is the only compressor.
 algorithm = "zstd"
 # ZSTD compression level (1-22)
 zstd_level = 9
-# LZMA compression level (0-9)
-lzma_level = 6
 # Minimum size to consider for compression
 chunk_threshold = 1024
 # Always compress files larger than this
@@ -113,8 +113,6 @@ always_compress_above = 10485760 # 10MB
 never_compress_below = 1024 # 1KB
 # Compress content older than N days
 compress_after_days = 1
-# Use LZMA for content older than N days
-archive_after_days = 30
 # Maximum parallel compression operations
 max_concurrent_compressions = 4
 # Use background compression
@@ -262,10 +260,11 @@ intro_boost = 0.75
 enable = true
 # Auto-start daemon if not running when needed
 auto_start = true
-# Unix domain socket path for IPC
-socket_path = "/tmp/yams-daemon.sock"
-# PID file for daemon process management
-pid_file = "/tmp/yams-daemon.pid"
+# Unix domain socket path for IPC. Leave unset to use the per-user default:
+# $XDG_RUNTIME_DIR/yams-daemon.sock, else /tmp/yams-daemon-<uid>.sock.
+# socket_path = "/tmp/yams-daemon.sock"
+# PID file for daemon process management (default: next to the socket's runtime dir)
+# pid_file = "/tmp/yams-daemon.pid"
 # Connection timeout in milliseconds
 connect_timeout_ms = 1000
 # Request timeout in milliseconds
@@ -329,6 +328,18 @@ vector_vacuum_interval_hours = 24
 # exists, and sessions that still own documents (0 disables).
 session_expiry_days = 30
 
+# Host-load awareness. While the machine is busy (Linux PSI "some avg10", else load average
+# per CPU; macOS load average and memory pressure), the daemon defers background work:
+# topology rebuilds, repair scans, snapshot backfill, vectors.db VACUUM and semantic backfill.
+# Integrity checks, crash recovery and WAL checkpoints are never deferred.
+[tuning.resource]
+# host_pressure = true               # false ignores host load
+# host_cpu_pressure_pct = 40         # 1..100; raise on shared build hosts
+# host_io_pressure_pct = 30
+# host_memory_pressure_pct = 10
+# host_load_per_cpu = 1.5            # fallback when PSI is unavailable
+# background_max_deferral_s = 300    # longest deferral before work runs anyway; 0 never defers
+
 # Centralized tuning knobs (advanced): defaults are safe; uncomment to override
 [tuning]
 # Default tuning preset applied by the daemon. Options: "efficient", "balanced", "aggressive".
@@ -366,14 +377,13 @@ grep_admission_wait_ms = 20000
 # Post-ingest pipeline concurrency caps. Omit a key to let the daemon auto-tune from the CPU
 # budget (see TuneAdvisor::postIngestBudgetedConcurrency). Env vars (YAMS_POST_*_CONCURRENT)
 # take precedence over these config keys. Valid ranges match the setter clamps:
-#   total_concurrent: 1..256 ; embed_concurrent, symbol_concurrent: 1..32
+#   total_concurrent: 1..256 ; embed_concurrent: 1..32
 #   extraction_concurrent, kg_concurrent: 1..64 ; entity_concurrent, title_concurrent: 1..16
 [tuning.post_ingest]
 # total_concurrent = 8
 # embed_concurrent = 4
 # extraction_concurrent = 3
 # kg_concurrent = 6
-# symbol_concurrent = 3
 # entity_concurrent = 2
 # title_concurrent = 2
 
