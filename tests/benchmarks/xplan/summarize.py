@@ -12,6 +12,7 @@ from typing import Any
 from artifacts import metrics_path, read_json
 from model import ExperimentPlan
 from report import write_report
+from significance import welch_from_metrics
 
 
 def _find_baseline_row(
@@ -32,39 +33,34 @@ def _delta_cell(
 ) -> tuple[str, dict[str, Any] | None]:
     """Return (rendered cell, structured delta) for one metric vs baseline.
 
-    Marks the delta `~` when |delta| <= pooled stdev (within run-to-run noise, needs
-    repeats>1), `*` when it clears noise, and bare when no variance is available (n<=1).
+    Uses Welch's t-test on the per-arm means (standard error, not run-to-run stdev):
+    `*` = significant at 95%, `~` = within noise, bare = not testable (n<2 on either side).
     """
     av = arm_metrics.get(key)
     bv = base_metrics.get(key)
     if not isinstance(av, (int, float)) or not isinstance(bv, (int, float)):
         return "", None
+    test = welch_from_metrics(arm_metrics, base_metrics, key)
+    if test is None:
+        return "", None
     delta = float(av) - float(bv)
     a_sd = arm_metrics.get(f"{key}_stdev")
     b_sd = base_metrics.get(f"{key}_stdev")
-    a_n = arm_metrics.get(f"{key}_n")
-    b_n = base_metrics.get(f"{key}_n")
     pooled = None
-    if (
-        isinstance(a_sd, (int, float))
-        and isinstance(b_sd, (int, float))
-        and isinstance(a_n, (int, float))
-        and isinstance(b_n, (int, float))
-        and float(a_n) > 1.0
-        and float(b_n) > 1.0
+    if test["significant"] is not None and isinstance(a_sd, (int, float)) and isinstance(
+        b_sd, (int, float)
     ):
         pooled = math.sqrt(float(a_sd) ** 2 + float(b_sd) ** 2)
-    if pooled is None:
-        mark = ""
-    elif abs(delta) <= pooled:
-        mark = " ~"
-    else:
-        mark = " *"
-    cell = f"{delta:+.4g}{mark}"
+    cell = f"{delta:+.4g}{(' ' + test['marker']) if test['marker'] else ''}"
     return cell, {
         "delta": delta,
         "pooled_stdev": pooled,
-        "within_noise": (pooled is not None and abs(delta) <= pooled),
+        "se": test["se"],
+        "t": test["t"],
+        "df": test["df"],
+        "p_value": test["p_value"],
+        "significant": test["significant"],
+        "within_noise": test["significant"] is False,
     }
 
 
@@ -892,8 +888,8 @@ def write_summary(
     if show_delta:
         lines += [
             f"- Δ columns are vs baseline arm `{plan.baseline}` (repeats={plan.repeats}). "
-            "`*` = delta exceeds pooled run-to-run stdev (real); `~` = within noise; "
-            "no mark = single-run (n=1), variance unknown.",
+            "`*` = Welch t-test significant at 95% (standard error, n-aware); `~` = within noise; "
+            "no mark = not testable (n<2), variance unknown.",
         ]
         if plan.repeats <= 1:
             lines += [

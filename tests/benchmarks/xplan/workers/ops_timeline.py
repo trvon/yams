@@ -10,6 +10,17 @@ from workers.multi_client import run_multi_client, write_timeline_from_record
 from workers.util import read_json_file
 
 
+REQUIRED_METRICS = (
+    "idle_fraction",
+    "sample_count",
+    "work_share_rpc",
+    "work_share_post_ingest",
+    "work_share_repair",
+    "work_share_background",
+    "backlog_peak",
+)
+
+
 def run_ops_timeline(ctx: WorkerContext) -> WorkerResult:
     # Baseline single-client path always runs idle probe after drain — good for idle mapping.
     # Filter by name fragment; Catch2 accepts substring filters.
@@ -28,32 +39,26 @@ def run_ops_timeline(ctx: WorkerContext) -> WorkerResult:
     )
 
     if ctx.dry_run:
-        result.metrics = {
-            "idle_fraction": 0.0,
-            "work_share_rpc": 0.0,
-            "work_share_post_ingest": 0.0,
-            "work_share_repair": 0.0,
-            "work_share_background": 0.0,
-            "backlog_peak": 0.0,
-            "sample_count": 0.0,
-            "idle_work_visible_us": 0.0,
-            "drain_elapsed_ms": 0.0,
-        }
-        # Empty timeline for structure
+        # A dry run measured nothing: report no metrics rather than a fabricated idle/zero row.
         (ctx.arm_dir / "timeline.jsonl").write_text(
             json.dumps({"t_ms": 0, "phase": "dry_run"}) + "\n", encoding="utf-8"
         )
-        result.status = "ok"
-        result.message = "dry-run ops_timeline"
+        result.metrics = {}
+        result.status = "stub"
+        result.message = "dry-run ops_timeline (no measurements)"
         return result
 
-    result.metrics.setdefault("idle_fraction", 0.0)
-    result.metrics.setdefault("sample_count", 0.0)
-    result.metrics.setdefault("work_share_rpc", 0.0)
-    result.metrics.setdefault("work_share_post_ingest", 0.0)
-    result.metrics.setdefault("work_share_repair", 0.0)
-    result.metrics.setdefault("work_share_background", 0.0)
-    result.metrics.setdefault("backlog_peak", 0.0)
+    # Never default a missing measurement to 0.0: a zero idle_fraction / backlog_peak is a
+    # real (and flattering) observation. Missing means the probe did not report it.
+    missing = [key for key in REQUIRED_METRICS if key not in result.metrics]
+    if missing:
+        result.attributes["missing_metrics"] = missing
+        if result.status == "ok" and result.exit_code == 0:
+            result.status = "failed"
+            result.exit_code = 1
+        result.message = (
+            f"{result.message} | missing metrics: {', '.join(missing)}".lstrip(" |")
+        )
 
     raw = read_json_file(Path(result.raw_path)) if result.raw_path else None
     if isinstance(raw, dict):

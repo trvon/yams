@@ -10,6 +10,7 @@ from typing import Any
 
 from artifacts import host_info, read_json
 from model import ExperimentPlan
+from significance import is_regression, metric_direction, welch_from_metrics
 
 
 def _fmt(val: Any) -> str:
@@ -63,7 +64,18 @@ def _ablation_deltas(
             if isinstance(bv, (int, float)) and isinstance(av, (int, float)):
                 abs_d = float(av) - float(bv)
                 rel = (abs_d / float(bv)) if float(bv) != 0 else None
-                deltas[k] = {"abs": abs_d, "rel": rel, "baseline": bv, "arm": av}
+                test = welch_from_metrics(m, b_metrics, k) or {}
+                deltas[k] = {
+                    "abs": abs_d,
+                    "rel": rel,
+                    "baseline": bv,
+                    "arm": av,
+                    "marker": test.get("marker", ""),
+                    "significant": test.get("significant"),
+                    "t": test.get("t"),
+                    "df": test.get("df"),
+                    "p_value": test.get("p_value"),
+                }
         out.append(
             {
                 "arm": row.get("arm"),
@@ -274,7 +286,9 @@ def write_report(
             "## Ablation deltas vs baseline",
             "",
             f"Baseline: `{report['baseline_arm']}`. "
-            "Relative delta = (arm − baseline) / baseline.",
+            "Relative delta = (arm − baseline) / baseline. "
+            "`*` = Welch t-test significant at 95%; `~` = within noise; "
+            "no mark = not testable (n<2).",
             "",
         ]
         # One small table per primary metric
@@ -290,9 +304,10 @@ def write_report(
                     continue
                 rel = dd.get("rel")
                 rel_s = f"{rel*100:.2f}%" if isinstance(rel, float) else ""
+                mark = f" {dd['marker']}" if dd.get("marker") else ""
                 lines.append(
                     f"| `{d['arm']}` | {_fmt(dd.get('baseline'))} | {_fmt(dd.get('arm'))} | "
-                    f"{_fmt(dd.get('abs'))} | {rel_s} |"
+                    f"{_fmt(dd.get('abs'))}{mark} | {rel_s} |"
                 )
             lines.append("")
 
@@ -419,75 +434,216 @@ def write_report(
     return report
 
 
-def compare_reports(a_dir: Path, b_dir: Path, out_path: Path | None = None) -> dict[str, Any]:
-    """Compare two report.json / summary.json directories."""
-    def load(d: Path) -> dict[str, Any]:
-        for name in ("report.json", "summary.json"):
-            p = d / name
-            if p.is_file():
-                return read_json(p)
-        raise FileNotFoundError(f"no report.json/summary.json in {d}")
+class CompareRefused(ValueError):
+    """The two runs are not comparable (different plan/config/binary/corpus, or dry-run)."""
 
-    a = load(a_dir)
-    b = load(b_dir)
+    def __init__(self, mismatches: list[str]):
+        self.mismatches = list(mismatches)
+        super().__init__("; ".join(self.mismatches))
+
+
+_CORPUS_PARAM_KEYS = ("dataset", "dataset_path", "corpus_size", "num_queries", "topk")
+
+
+def _load_report(d: Path) -> dict[str, Any]:
+    for name in ("report.json", "summary.json"):
+        p = d / name
+        if p.is_file():
+            return read_json(p)
+    raise FileNotFoundError(f"no report.json/summary.json in {d}")
+
+
+def _read_optional(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        doc = read_json(path)
+    except Exception:  # noqa: BLE001 - unreadable provenance is treated as unknown
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def run_identity(d: Path) -> dict[str, Any]:
+    """What must match for two runs to be comparable: plan, config, binary, corpus."""
+    report = _read_optional(d / "report.json") or _read_optional(d / "summary.json")
+    resolved = _read_optional(d / "plan.resolved.json")
+    manifest = _read_optional(d / "run_manifest.json")
+    mode = _read_optional(d / "mode_manifest.json")
+    fixed_params = ((resolved.get("fixed") or {}).get("params")) or {}
+    corpus: dict[str, Any] = {}
+    for arm in resolved.get("arms") or []:
+        merged = {**fixed_params, **(arm.get("factors") or {}), **(arm.get("params") or {})}
+        corpus[str(arm.get("name"))] = {
+            k: merged[k] for k in _CORPUS_PARAM_KEYS if k in merged
+        }
+    effective = manifest.get("effective") or {}
+    return {
+        "plan": report.get("plan") or resolved.get("name"),
+        "config_hash": manifest.get("config_hash") or resolved.get("bench_config_hash"),
+        "binary_sha256": mode.get("retrieval_quality_binary_sha256"),
+        "corpus": corpus,
+        "dry_run": bool(effective.get("dry_run") or report.get("dry_run")),
+    }
+
+
+def identity_mismatches(a: dict[str, Any], b: dict[str, Any], common_arms: list[str]) -> list[str]:
+    out: list[str] = []
+    if a["dry_run"] or b["dry_run"]:
+        which = "A" if a["dry_run"] else "B"
+        out.append(f"run {which} is a dry-run: it has no measurements to compare")
+    if a["plan"] != b["plan"]:
+        out.append(f"plan differs: A={a['plan']!r} B={b['plan']!r}")
+    if a["config_hash"] != b["config_hash"]:
+        out.append(f"config hash differs: A={a['config_hash']!r} B={b['config_hash']!r}")
+    if a["binary_sha256"] != b["binary_sha256"]:
+        out.append(
+            f"binary sha256 differs: A={a['binary_sha256']!r} B={b['binary_sha256']!r}"
+        )
+    for arm in common_arms:
+        ca, cb = a["corpus"].get(arm), b["corpus"].get(arm)
+        if ca != cb:
+            out.append(f"corpus differs for arm {arm!r}: A={ca!r} B={cb!r}")
+            break
+    return out
+
+
+def _compare_out_paths(a_dir: Path, b_dir: Path, out_path: Path | None) -> tuple[Path, Path]:
+    """(markdown path, json path). Never defaults into either run directory."""
+    if out_path is None:
+        sibling = b_dir.parent / f"compare-{a_dir.name}-vs-{b_dir.name}"
+        return sibling / "compare.md", sibling / "compare.json"
+    if out_path.suffix:  # explicit file
+        return out_path, out_path.with_name("compare.json")
+    return out_path / "compare.md", out_path / "compare.json"
+
+
+def compare_reports(
+    a_dir: Path,
+    b_dir: Path,
+    out_path: Path | None = None,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Compare run A (baseline) with run B (candidate); B - A, Welch-tested per metric.
+
+    Raises CompareRefused when the runs differ in plan, config hash, binary sha256 or corpus
+    (or either is a dry-run) unless `force`. The returned dict carries `regressions`: the
+    metrics that moved the wrong way with statistical significance.
+    """
+    a = _load_report(a_dir)
+    b = _load_report(b_dir)
     a_arms = {r.get("arm"): r for r in a.get("arms", [])}
     b_arms = {r.get("arm"): r for r in b.get("arms", [])}
     common = sorted(set(a_arms) & set(b_arms))
-    keys: set[str] = set()
-    for name in common:
-        keys.update((a_arms[name].get("metrics") or {}).keys())
-        keys.update((b_arms[name].get("metrics") or {}).keys())
-    keys_l = sorted(keys)
+
+    ident_a, ident_b = run_identity(a_dir), run_identity(b_dir)
+    mismatches = identity_mismatches(ident_a, ident_b, common)
+    if mismatches and not force:
+        raise CompareRefused(mismatches)
 
     comparison: dict[str, Any] = {
         "a": str(a_dir),
         "b": str(b_dir),
         "plan_a": a.get("plan"),
         "plan_b": b.get("plan"),
+        "identity_a": ident_a,
+        "identity_b": ident_b,
+        "identity_mismatches": mismatches,
+        "forced": bool(force and mismatches),
         "arms": [],
+        "regressions": [],
+        "skipped_invalid_arms": [],
     }
     lines = [
-        f"# xplan compare",
+        "# xplan compare",
         "",
-        f"- A: `{a_dir}`",
-        f"- B: `{b_dir}`",
+        f"- A (baseline): `{a_dir}`",
+        f"- B (candidate): `{b_dir}`",
+        "- Δ = B − A. `*` = Welch t-test significant at 95%; `~` = within noise; "
+        "no mark = not testable (n<2). `REGRESSION` = significant move in the worse direction.",
+    ]
+    if mismatches:
+        lines += ["", "## WARNING: runs are not equivalent (--force)", ""]
+        lines += [f"- {m}" for m in mismatches]
+    lines += [
         "",
-        "| arm | metric | A | B | abs Δ | rel Δ |",
-        "| --- | --- | ---: | ---: | ---: | ---: |",
+        "| arm | metric | A | B | abs Δ | rel Δ | better | verdict |",
+        "| --- | --- | ---: | ---: | ---: | ---: | :---: | --- |",
     ]
     for arm in common:
+        if not (a_arms[arm].get("valid", True) and b_arms[arm].get("valid", True)):
+            comparison["skipped_invalid_arms"].append(arm)
+            continue
         ma = a_arms[arm].get("metrics") or {}
         mb = b_arms[arm].get("metrics") or {}
         arm_entry: dict[str, Any] = {"arm": arm, "metrics": {}}
-        for k in keys_l:
+        for k in sorted(set(ma) | set(mb)):
+            # Spread/count bookkeeping is input to the test, not a metric to compare.
+            if k.endswith("_stdev") or k.endswith("_n"):
+                continue
             va, vb = ma.get(k), mb.get(k)
+            if isinstance(va, bool) or isinstance(vb, bool):
+                continue
             if not (isinstance(va, (int, float)) and isinstance(vb, (int, float))):
                 continue
             abs_d = float(vb) - float(va)
             rel = abs_d / float(va) if float(va) != 0 else None
-            arm_entry["metrics"][k] = {"a": va, "b": vb, "abs": abs_d, "rel": rel}
+            test = welch_from_metrics(mb, ma, k) or {}
+            direction = metric_direction(k)
+            regression = bool(test.get("significant")) and is_regression(k, abs_d)
+            improvement = (
+                bool(test.get("significant")) and not regression and direction != "unknown"
+            )
+            verdict = "REGRESSION" if regression else ("improved" if improvement else "")
+            entry = {
+                "a": va,
+                "b": vb,
+                "abs": abs_d,
+                "rel": rel,
+                "direction": direction,
+                "marker": test.get("marker", ""),
+                "significant": test.get("significant"),
+                "t": test.get("t"),
+                "df": test.get("df"),
+                "p_value": test.get("p_value"),
+                "regression": regression,
+            }
+            arm_entry["metrics"][k] = entry
+            if regression:
+                comparison["regressions"].append({"arm": arm, "metric": k, **entry})
             rel_s = f"{rel*100:.2f}%" if isinstance(rel, float) else ""
+            mark = f" {entry['marker']}" if entry["marker"] else ""
             lines.append(
-                f"| `{arm}` | `{k}` | {_fmt(va)} | {_fmt(vb)} | {_fmt(abs_d)} | {rel_s} |"
+                f"| `{arm}` | `{k}` | {_fmt(va)} | {_fmt(vb)} | {_fmt(abs_d)}{mark} | "
+                f"{rel_s} | {direction[0] if direction != 'unknown' else '?'} | {verdict} |"
             )
         comparison["arms"].append(arm_entry)
     lines.append("")
     only_a = sorted(set(a_arms) - set(b_arms))
     only_b = sorted(set(b_arms) - set(a_arms))
+    if comparison["skipped_invalid_arms"]:
+        lines += [
+            "## Skipped (invalid in A or B)",
+            "",
+            ", ".join(f"`{x}`" for x in comparison["skipped_invalid_arms"]),
+            "",
+        ]
     if only_a:
         lines += ["## Only in A", "", ", ".join(f"`{x}`" for x in only_a), ""]
     if only_b:
         lines += ["## Only in B", "", ", ".join(f"`{x}`" for x in only_b), ""]
+    if comparison["regressions"]:
+        lines += ["## Regressions", ""]
+        for r in comparison["regressions"]:
+            lines.append(f"- `{r['arm']}` `{r['metric']}`: {_fmt(r['a'])} -> {_fmt(r['b'])}")
+        lines.append("")
 
-    text = "\n".join(lines)
-    if out_path is None:
-        out_path = b_dir / "compare.md"
-    out_path.write_text(text, encoding="utf-8")
-    (out_path.with_suffix(".json") if out_path.suffix else Path(str(out_path) + ".json")).write_text(
-        json.dumps(comparison, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    md_path, json_path = _compare_out_paths(a_dir, b_dir, out_path)
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    json_path.write_text(
+        json.dumps(comparison, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
     )
-    # Prefer sibling compare.json next to compare.md
-    out_path.with_name("compare.json").write_text(
-        json.dumps(comparison, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    comparison["out_md"] = str(md_path)
+    comparison["out_json"] = str(json_path)
     return comparison

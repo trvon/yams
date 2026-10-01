@@ -105,6 +105,20 @@ def validate_arm(
     if status == "stub":
         return result
 
+    # Workers record metrics they could not observe instead of defaulting them to 0.
+    attrs = metrics.get("attributes")
+    if isinstance(attrs, dict):
+        for step_name, step_attrs in attrs.items():
+            if isinstance(step_attrs, dict) and step_attrs.get("missing_metrics"):
+                result.ok = False
+                result.issues.append(
+                    ValidationIssue(
+                        "error",
+                        f"{step_name} reported missing metrics: "
+                        f"{', '.join(map(str, step_attrs['missing_metrics']))}",
+                    )
+                )
+
     for key in ordered:
         if key not in values:
             result.ok = False

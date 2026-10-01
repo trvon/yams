@@ -17,12 +17,15 @@ _ALLOWED_LANES = {"filesystem", "s3-persistent", "s3-temporary"}
 
 def _convergence_metrics(evidence_dir: Path) -> dict[str, float]:
     path = evidence_dir / "convergence-lag.jsonl"
+    """Convergence metrics from evidence; absent evidence yields no metrics (not 0 ms lag)."""
     if not path.is_file():
-        return {"convergence_samples": 0.0, "convergence_lag_max_ms": 0.0}
+        return {}
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    if not rows:
+        return {"convergence_samples": 0.0}
     return {
         "convergence_samples": float(len(rows)),
-        "convergence_lag_max_ms": float(max((row["lag_ms"] for row in rows), default=0)),
+        "convergence_lag_max_ms": float(max(row["lag_ms"] for row in rows)),
     }
 
 
@@ -46,15 +49,11 @@ def run_p2p_memory_sync(ctx: WorkerContext) -> WorkerResult:
             {"dry_run": True, "harness": str(harness), "lane": lane},
         )
         return WorkerResult(
-            status="ok",
+            status="stub",
             exit_code=0,
-            metrics={
-                "lane_pass": 0.0,
-                "convergence_samples": 0.0,
-                "convergence_lag_max_ms": 0.0,
-            },
+            metrics={},
             attributes={"dry_run": True, "lane": lane},
-            message=f"dry-run P2P memory-sync lane {lane}",
+            message=f"dry-run P2P memory-sync lane {lane} (no measurements)",
         )
 
     if not harness.is_file():
@@ -65,7 +64,7 @@ def run_p2p_memory_sync(ctx: WorkerContext) -> WorkerResult:
         return WorkerResult(
             status="skipped",
             exit_code=0,
-            metrics={"lane_pass": 0.0},
+            metrics={},
             attributes={"lane": lane, "prerequisite": "docker"},
             message="Docker is unavailable; local P2P lane not executed",
         )
@@ -80,7 +79,7 @@ def run_p2p_memory_sync(ctx: WorkerContext) -> WorkerResult:
         return WorkerResult(
             status="skipped",
             exit_code=0,
-            metrics={"lane_pass": 0.0},
+            metrics={},
             attributes={"lane": lane, "prerequisite": "docker compose"},
             message=f"Docker Compose unavailable: {compose.stderr.strip()}",
         )
@@ -108,10 +107,13 @@ def run_p2p_memory_sync(ctx: WorkerContext) -> WorkerResult:
             message=f"P2P lane timed out: {exc}",
         )
 
-    metrics = {
-        "lane_pass": 1.0 if proc.returncode == 0 else 0.0,
-        **_convergence_metrics(evidence_dir),
-    }
+    convergence = _convergence_metrics(evidence_dir)
+    metrics = {"lane_pass": 1.0 if proc.returncode == 0 else 0.0, **convergence}
+    missing = [
+        key
+        for key in ("convergence_samples", "convergence_lag_max_ms")
+        if key not in convergence
+    ]
     return WorkerResult(
         status="ok" if proc.returncode == 0 else "failed",
         exit_code=proc.returncode,
@@ -121,6 +123,7 @@ def run_p2p_memory_sync(ctx: WorkerContext) -> WorkerResult:
             "evidence": str(evidence_dir),
             "stdout": str(stdout_path),
             "stderr": str(stderr_path),
+            **({"missing_metrics": missing} if missing else {}),
         },
         message=f"P2P memory-sync lane {lane} exit={proc.returncode}",
         raw_path=str(stdout_path),

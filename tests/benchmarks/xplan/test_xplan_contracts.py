@@ -685,7 +685,7 @@ import workers.retrieval_quality
                         stamp="",
                         build_dir="",
                         out_dir=str(run_dir),
-                        dry_run=True,
+                        dry_run=False,
                         continue_on_failure=False,
                         skip_summary=True,
                     )
@@ -4275,6 +4275,480 @@ class PlanPreflightTests(unittest.TestCase):
             for arm in plan.arms:
                 with self.subTest(plan=plan.name, arm=arm.name):
                     self.assertFalse(set(arm.factors) & set(UNSUPPORTED_FACTORS))
+
+
+class MissingMetricsAreNotZeroTests(unittest.TestCase):
+    def _ctx(self, tmp: str, *, dry_run: bool):
+        return SimpleNamespace(
+            dry_run=dry_run,
+            arm_dir=Path(tmp),
+            params={"load_docs": 3},
+            repo_root=Path(tmp),
+            arm=SimpleNamespace(plan=SimpleNamespace(timeout_sec=1)),
+            step=SimpleNamespace(timeout_sec=1),
+            env={},
+        )
+
+    def test_ops_timeline_missing_probe_metrics_fail_instead_of_defaulting_to_zero(self) -> None:
+        import workers.ops_timeline as ops_timeline
+
+        partial = WorkerResult(status="ok", exit_code=0, metrics={"idle_fraction": 0.4})
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            ops_timeline, "run_multi_client", return_value=partial
+        ):
+            result = ops_timeline.run_ops_timeline(self._ctx(tmp, dry_run=False))
+        self.assertEqual("failed", result.status)
+        self.assertNotEqual(0, result.exit_code)
+        self.assertIn("backlog_peak", result.attributes["missing_metrics"])
+        self.assertNotIn("backlog_peak", result.metrics)
+        self.assertNotIn("sample_count", result.metrics)
+        self.assertEqual(0.4, result.metrics["idle_fraction"])
+
+    def test_ops_timeline_complete_metrics_pass_through_untouched(self) -> None:
+        import workers.ops_timeline as ops_timeline
+
+        metrics = {key: 0.0 for key in ops_timeline.REQUIRED_METRICS}
+        metrics["backlog_peak"] = 7.0
+        full = WorkerResult(status="ok", exit_code=0, metrics=dict(metrics))
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            ops_timeline, "run_multi_client", return_value=full
+        ):
+            result = ops_timeline.run_ops_timeline(self._ctx(tmp, dry_run=False))
+        self.assertEqual("ok", result.status)
+        self.assertEqual(metrics, result.metrics)
+        self.assertNotIn("missing_metrics", result.attributes)
+
+    def test_ops_timeline_dry_run_reports_no_measurements(self) -> None:
+        import workers.ops_timeline as ops_timeline
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            ops_timeline,
+            "run_multi_client",
+            return_value=WorkerResult(status="ok", exit_code=0),
+        ):
+            result = ops_timeline.run_ops_timeline(self._ctx(tmp, dry_run=True))
+        self.assertEqual({}, result.metrics)
+        self.assertEqual("stub", result.status)
+
+    def test_p2p_absent_convergence_evidence_is_missing_not_zero_lag(self) -> None:
+        from workers.p2p_memory_sync import _convergence_metrics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence = Path(tmp)
+            self.assertEqual({}, _convergence_metrics(evidence))
+            (evidence / "convergence-lag.jsonl").write_text("", encoding="utf-8")
+            self.assertEqual({"convergence_samples": 0.0}, _convergence_metrics(evidence))
+            (evidence / "convergence-lag.jsonl").write_text(
+                '{"lag_ms": 12}\n{"lag_ms": 340}\n', encoding="utf-8"
+            )
+            self.assertEqual(
+                {"convergence_samples": 2.0, "convergence_lag_max_ms": 340.0},
+                _convergence_metrics(evidence),
+            )
+
+    def test_p2p_dry_run_reports_no_measurements(self) -> None:
+        from workers.p2p_memory_sync import run_p2p_memory_sync
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self._ctx(tmp, dry_run=True)
+            ctx.params = {"lane": "filesystem"}
+            result = run_p2p_memory_sync(ctx)
+        self.assertEqual({}, result.metrics)
+        self.assertEqual("stub", result.status)
+
+    def test_runner_discards_placeholder_metrics_from_any_dry_run_worker(self) -> None:
+        fake = WorkerResult(status="ok", exit_code=0, metrics={"mrr": 0.0, "qps": 0.0})
+        stub = xplan_runner.as_dry_run_result(fake)
+        self.assertEqual({}, stub.metrics)
+        self.assertEqual("stub", stub.status)
+        self.assertEqual(2, stub.attributes["dry_run_metrics_discarded"])
+        failed = xplan_runner.as_dry_run_result(
+            WorkerResult(status="failed", exit_code=2, metrics={"x": 1.0})
+        )
+        self.assertEqual("failed", failed.status)
+
+    def test_dry_run_arms_record_no_metrics_and_fail_a_real_run_validation(self) -> None:
+        from validate import validate_arm
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "name": "dry",
+                        "arms": [{"name": "control"}],
+                        "steps": [
+                            {
+                                "worker": "external_script",
+                                "params": {"script": "noop.sh"},
+                                "metrics": ["script_ran"],
+                            }
+                        ],
+                        "validate": {"require_files": ["metrics.json"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_dir = root / "run"
+            snapshot = {
+                "worktree_dirty": False,
+                "worktree_patch_sha256": "",
+                "source_snapshot_sha256": "s",
+            }
+            with (
+                patch.object(xplan_runner, "capture_git_source_snapshot", return_value=snapshot),
+                patch.object(xplan_runner, "source_set_sha256", return_value="x"),
+                redirect_stdout(io.StringIO()),
+            ):
+                rc = xplan_runner.cmd_run(
+                    SimpleNamespace(
+                        plan=str(plan_path),
+                        arm=[],
+                        stamp="",
+                        build_dir="",
+                        out_dir=str(run_dir),
+                        dry_run=True,
+                        continue_on_failure=False,
+                        skip_summary=True,
+                    )
+                )
+            self.assertEqual(0, rc)
+            arm_dir = run_dir / "arms" / "control"
+            doc = json.loads((arm_dir / "metrics.json").read_text())
+            self.assertEqual({}, doc["metrics"])
+            self.assertEqual("stub", doc["status"])
+            # The same stub document is not an acceptable real measurement.
+            plan = ExperimentPlan.load(plan_path)
+            verdict = validate_arm(plan, "control", arm_dir, plan.steps)
+            self.assertFalse(verdict.ok)
+
+    def test_validation_fails_when_a_worker_reports_missing_metrics(self) -> None:
+        from validate import validate_arm
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "name": "m",
+                        "arms": [{"name": "a"}],
+                        "steps": [{"worker": "ops_timeline"}],
+                        "validate": {"require_files": ["metrics.json"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            arm_dir = root / "a"
+            arm_dir.mkdir()
+            (arm_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "metrics": {"idle_fraction": 0.1},
+                        "attributes": {"step0_ops_timeline": {"missing_metrics": ["backlog_peak"]}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            plan = ExperimentPlan.load(plan_path)
+            verdict = validate_arm(plan, "a", arm_dir, plan.steps)
+            self.assertFalse(verdict.ok)
+            self.assertTrue(any("backlog_peak" in i.message for i in verdict.issues))
+
+
+class SignificanceTests(unittest.TestCase):
+    def test_critical_values_are_conservative_in_df(self) -> None:
+        from significance import T_CRIT_95, t_critical_95
+
+        self.assertEqual(T_CRIT_95[4], t_critical_95(4.0))
+        self.assertEqual(T_CRIT_95[4], t_critical_95(4.9))  # rounds down: larger crit value
+        self.assertEqual(T_CRIT_95[30], t_critical_95(35.0))
+        self.assertEqual(T_CRIT_95[120], t_critical_95(500.0))
+        self.assertAlmostEqual(1.96, t_critical_95(float("inf")))
+        self.assertGreater(t_critical_95(2.0), t_critical_95(10.0))
+
+    def test_welch_uses_standard_error_not_pooled_run_spread(self) -> None:
+        from significance import welch
+
+        # delta 0.1 with per-run sd 0.1, n=10 each: the old |delta| <= sqrt(sd^2+sd^2)=0.141
+        # rule called this noise; the standard error is 0.0447 so t=2.236 > 2.101 (df=18).
+        result = welch(0.6, 0.1, 10, 0.5, 0.1, 10)
+        self.assertAlmostEqual(0.0447, result["se"], places=4)
+        self.assertAlmostEqual(2.236, result["t"], places=3)
+        self.assertAlmostEqual(18.0, result["df"], places=6)
+        self.assertTrue(result["significant"])
+        self.assertEqual("*", result["marker"])
+
+    def test_welch_marks_noise_and_untestable_cases(self) -> None:
+        from significance import welch
+
+        noise = welch(0.50, 0.10, 3, 0.45, 0.10, 3)
+        self.assertFalse(noise["significant"])
+        self.assertEqual("~", noise["marker"])
+        single = welch(0.9, 0.0, 1, 0.1, 0.0, 1)
+        self.assertIsNone(single["significant"])
+        self.assertEqual("", single["marker"])
+        half = welch(0.9, 0.0, 3, 0.1, 0.0, 1)
+        self.assertEqual("", half["marker"])
+
+    def test_welch_zero_spread_is_deterministic(self) -> None:
+        from significance import welch
+
+        self.assertEqual("*", welch(1.0, 0.0, 3, 0.5, 0.0, 3)["marker"])
+        self.assertEqual("~", welch(1.0, 0.0, 3, 1.0, 0.0, 3)["marker"])
+
+    def test_welch_df_is_satterthwaite_for_unequal_variance(self) -> None:
+        from significance import welch
+
+        result = welch(10.0, 1.0, 5, 12.0, 4.0, 5)
+        va, vb = 1.0 / 5, 16.0 / 5
+        expected = (va + vb) ** 2 / (va**2 / 4 + vb**2 / 4)
+        self.assertAlmostEqual(expected, result["df"])
+        self.assertLess(result["df"], 8.0)
+
+    def test_metric_direction_table(self) -> None:
+        from significance import metric_direction
+
+        higher = ["mrr", "ndcg_at_k", "recall_at_k", "map", "docs_per_s", "total_ops_per_s",
+                  "useful_recall_at_512_bytes", "lane_pass"]
+        lower = ["search_latency_ms_p95", "proc_maxrss_mb", "total_failures",
+                 "search_known_hit_error_rate", "repair_wall_ms", "drain_elapsed_ms",
+                 "output_bytes_p95"]
+        for key in higher:
+            self.assertEqual("higher", metric_direction(key), key)
+        for key in lower:
+            self.assertEqual("lower", metric_direction(key), key)
+        self.assertEqual("unknown", metric_direction("topology_applied"))
+
+    def test_summary_delta_cell_uses_welch(self) -> None:
+        arm = {"mrr": 0.6, "mrr_stdev": 0.1, "mrr_n": 10.0}
+        base = {"mrr": 0.5, "mrr_stdev": 0.1, "mrr_n": 10.0}
+        cell, detail = xplan_summarize._delta_cell(arm, base, "mrr")
+        self.assertEqual("+0.1 *", cell)
+        self.assertTrue(detail["significant"])
+        self.assertFalse(detail["within_noise"])
+        noisy = {"mrr": 0.55, "mrr_stdev": 0.2, "mrr_n": 3.0}
+        cell, detail = xplan_summarize._delta_cell(noisy, base | {"mrr_n": 3.0}, "mrr")
+        self.assertTrue(cell.endswith("~"))
+        self.assertTrue(detail["within_noise"])
+
+    def test_ablation_md_deltas_carry_the_same_marking(self) -> None:
+        from report import _ablation_deltas
+
+        base = {"arm": "base", "metrics": {"mrr": 0.5, "mrr_stdev": 0.1, "mrr_n": 10.0}}
+        arm = {"arm": "x", "metrics": {"mrr": 0.6, "mrr_stdev": 0.1, "mrr_n": 10.0}}
+        [row] = _ablation_deltas([base, arm], base, ["mrr"])
+        self.assertEqual("*", row["deltas"]["mrr"]["marker"])
+        self.assertTrue(row["deltas"]["mrr"]["significant"])
+
+    def test_aggregate_reps_uses_sample_stdev_and_keeps_n(self) -> None:
+        aggregated = xplan_runner.aggregate_reps(
+            [{"mrr": 1.0}, {"mrr": 2.0}, {"mrr": 3.0}]
+        )
+        self.assertEqual(2.0, aggregated["mrr"])
+        self.assertAlmostEqual(1.0, aggregated["mrr_stdev"])  # pstdev would be 0.8165
+        self.assertEqual(3.0, aggregated["mrr_n"])
+
+    def test_single_rep_multi_arm_plans_warn_and_kpi_plans_use_three_repeats(self) -> None:
+        def plan(repeats: int, arms: int) -> ExperimentPlan:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "p.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "name": "p",
+                            "repeats": repeats,
+                            "arms": [{"name": f"a{i}"} for i in range(arms)],
+                            "steps": [{"worker": "ops_timeline"}],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return ExperimentPlan.load(path)
+
+        self.assertIn("repeats=1", xplan_runner.single_rep_arm_comparison_warning(plan(1, 3)))
+        self.assertIsNone(xplan_runner.single_rep_arm_comparison_warning(plan(3, 3)))
+        self.assertIsNone(xplan_runner.single_rep_arm_comparison_warning(plan(1, 1)))
+        for name in (
+            "search_component_ablation",
+            "subsystem_overhead",
+            "retrieval_load",
+            "repair_ability",
+            "ops_timeline",
+        ):
+            with self.subTest(plan=name):
+                loaded = ExperimentPlan.load(XPLAN_ROOT / "plans" / f"{name}.json")
+                self.assertGreaterEqual(loaded.repeats, 3)
+
+
+class CompareTests(unittest.TestCase):
+    def _run(
+        self,
+        root: Path,
+        name: str,
+        arms: dict[str, dict],
+        *,
+        plan: str = "p",
+        config_hash: str = "cfg1",
+        binary: str | None = "bin1",
+        dataset: str = "scifact",
+        dry_run: bool = False,
+    ) -> Path:
+        run_dir = root / name
+        run_dir.mkdir(parents=True)
+        rows = [{"arm": arm, "valid": True, "metrics": metrics} for arm, metrics in arms.items()]
+        (run_dir / "report.json").write_text(
+            json.dumps({"plan": plan, "arms": rows, "dry_run": dry_run}), encoding="utf-8"
+        )
+        (run_dir / "run_manifest.json").write_text(
+            json.dumps({"config_hash": config_hash, "effective": {"dry_run": dry_run}}),
+            encoding="utf-8",
+        )
+        (run_dir / "mode_manifest.json").write_text(
+            json.dumps({"retrieval_quality_binary_sha256": binary}), encoding="utf-8"
+        )
+        (run_dir / "plan.resolved.json").write_text(
+            json.dumps(
+                {
+                    "name": plan,
+                    "fixed": {"params": {"dataset": dataset, "corpus_size": 2000}},
+                    "arms": [{"name": arm, "factors": {}, "params": {}} for arm in arms],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return run_dir
+
+    @staticmethod
+    def _m(mean: float, sd: float = 0.01, n: float = 3.0, key: str = "mrr") -> dict:
+        return {key: mean, f"{key}_stdev": sd, f"{key}_n": n}
+
+    def test_identical_runs_compare_and_write_outside_both_run_dirs(self) -> None:
+        from report import compare_reports
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = self._run(root, "a", {"x": self._m(0.50)})
+            b = self._run(root, "b", {"x": self._m(0.51)})
+            result = compare_reports(a, b)
+            self.assertEqual([], result["regressions"])
+            self.assertFalse((a / "compare.md").exists() or (a / "compare.json").exists())
+            self.assertFalse((b / "compare.md").exists() or (b / "compare.json").exists())
+            self.assertEqual(root / "compare-a-vs-b", Path(result["out_md"]).parent)
+            self.assertTrue(Path(result["out_json"]).is_file())
+            # one compare.json, in the output location only
+            self.assertEqual(1, len(list(root.rglob("compare.json"))))
+
+    def test_explicit_out_file_and_dir(self) -> None:
+        from report import compare_reports
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = self._run(root, "a", {"x": self._m(0.5)})
+            b = self._run(root, "b", {"x": self._m(0.5)})
+            r1 = compare_reports(a, b, root / "out1" / "cmp.md")
+            self.assertEqual(root / "out1" / "cmp.md", Path(r1["out_md"]))
+            self.assertEqual(root / "out1" / "compare.json", Path(r1["out_json"]))
+            r2 = compare_reports(a, b, root / "out2")
+            self.assertEqual(root / "out2" / "compare.md", Path(r2["out_md"]))
+
+    def test_stdev_and_n_bookkeeping_are_not_compared_as_metrics(self) -> None:
+        from report import compare_reports
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = self._run(root, "a", {"x": self._m(0.5)})
+            b = self._run(root, "b", {"x": self._m(0.6)})
+            result = compare_reports(a, b)
+            self.assertEqual(["mrr"], sorted(result["arms"][0]["metrics"]))
+            self.assertNotIn("mrr_stdev", Path(result["out_md"]).read_text())
+
+    def test_refuses_runs_that_differ_in_plan_config_binary_or_corpus(self) -> None:
+        from report import CompareRefused, compare_reports
+
+        cases = {
+            "plan": {"plan": "other"},
+            "config hash": {"config_hash": "cfg2"},
+            "binary sha256": {"binary": "bin2"},
+            "corpus": {"dataset": "nfcorpus"},
+        }
+        for label, override in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                a = self._run(root, "a", {"x": self._m(0.5)})
+                b = self._run(root, "b", {"x": self._m(0.5)}, **override)
+                with self.assertRaises(CompareRefused) as ctx:
+                    compare_reports(a, b)
+                self.assertIn(label, str(ctx.exception))
+                self.assertFalse((root / "compare-a-vs-b").exists(), "nothing written on refusal")
+                forced = compare_reports(a, b, force=True)
+                self.assertTrue(forced["forced"])
+                self.assertTrue(forced["identity_mismatches"])
+
+    def test_refuses_dry_run_artifacts(self) -> None:
+        from report import CompareRefused, compare_reports
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = self._run(root, "a", {"x": self._m(0.5)})
+            b = self._run(root, "b", {"x": {}}, dry_run=True)
+            with self.assertRaisesRegex(CompareRefused, "dry-run"):
+                compare_reports(a, b)
+
+    def test_regression_direction_follows_the_metric(self) -> None:
+        from report import compare_reports
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = self._run(
+                root, "a",
+                {"x": {**self._m(0.50), **self._m(100.0, 1.0, 3.0, "search_latency_ms_p95")}},
+            )
+            b = self._run(
+                root, "b",
+                {"x": {**self._m(0.60), **self._m(130.0, 1.0, 3.0, "search_latency_ms_p95")}},
+            )
+            result = compare_reports(a, b)
+            regressed = {r["metric"] for r in result["regressions"]}
+            self.assertEqual({"search_latency_ms_p95"}, regressed)  # mrr up is an improvement
+
+    def test_untestable_or_noisy_regressions_do_not_trip_the_gate(self) -> None:
+        from report import compare_reports
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = self._run(root, "a", {"x": self._m(0.50, 0.0, 1.0)})
+            b = self._run(root, "b", {"x": self._m(0.20, 0.0, 1.0)})  # n=1: not testable
+            self.assertEqual([], compare_reports(a, b)["regressions"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = self._run(root, "a", {"x": self._m(0.50, 0.2, 3.0)})
+            b = self._run(root, "b", {"x": self._m(0.40, 0.2, 3.0)})  # within noise
+            self.assertEqual([], compare_reports(a, b)["regressions"])
+
+    def test_cli_exit_codes(self) -> None:
+        def run(a: Path, b: Path, *extra: str) -> tuple[int, str]:
+            err = io.StringIO()
+            with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                rc = xplan_runner.main(["compare", str(a), str(b), *extra])
+            return rc, err.getvalue()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = self._run(root, "a", {"x": self._m(0.50)})
+            ok = self._run(root, "ok", {"x": self._m(0.50)})
+            worse = self._run(root, "worse", {"x": self._m(0.30)})
+            other = self._run(root, "other", {"x": self._m(0.50)}, binary="bin2")
+            self.assertEqual(0, run(a, ok)[0])
+            rc, err = run(a, worse)
+            self.assertEqual(3, rc)
+            self.assertIn("mrr", err)
+            rc, err = run(a, other)
+            self.assertEqual(2, rc)
+            self.assertIn("binary sha256", err)
+            self.assertEqual(0, run(a, other, "--force")[0])
 
 
 if __name__ == "__main__":

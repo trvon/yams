@@ -22,11 +22,22 @@ python3 tests/benchmarks/xplan/runner.py run <plan> --arm baseline --arm no_kg
 # Regenerate docs for an existing artifact directory
 python3 tests/benchmarks/xplan/runner.py report build/benchmarks/<plan>/<stamp>
 
-# Compare two stamps
+# Fail plans that set env/factors no product code reads (also runs before every `run`)
+python3 tests/benchmarks/xplan/runner.py preflight [plan ...]
+
+# Compare two stamps: A = baseline, B = candidate. Refuses (exit 2) when plan, config
+# hash, binary sha256 or corpus differ (--force overrides), marks deltas with Welch's
+# t-test, and exits 3 on a statistically significant regression. Output goes to a new
+# sibling dir (or --out), never into A or B.
 python3 tests/benchmarks/xplan/runner.py compare \
   build/benchmarks/ingest_pipeline/<stampA> \
   build/benchmarks/ingest_pipeline/<stampB>
 ```
+
+Honesty rules: a missing metric is missing (never `0.0`); `--dry-run` arms are `stub`
+with no metrics and cannot be compared; an ablation whose env key nothing reads is
+rejected (`workers/ablation.py` `UNSUPPORTED_FACTORS`); delta marks `*`/`~` are Welch
+t-test results (needs `repeats>=2`; use `repeats>=3` for decisions).
 
 ## Generated report files (per run)
 

@@ -51,7 +51,7 @@ from workers.base import WorkerContext  # noqa: E402
 def aggregate_reps(rep_metrics: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate per-repeat metric dicts into mean + stdev + n for numeric keys.
 
-    Numeric keys → mean at `{key}`, plus `{key}_stdev` (0.0 if n==1) and `{key}_n`.
+    Numeric keys → mean at `{key}`, plus `{key}_stdev` (sample/n-1; 0.0 if n==1) and `{key}_n`.
     Non-numeric keys → last observed value. Single rep → values pass through unchanged
     (still emits `{key}_n=1`) so downstream code has a uniform shape.
     """
@@ -77,11 +77,36 @@ def aggregate_reps(rep_metrics: list[dict[str, Any]]) -> dict[str, Any]:
                 numeric.append(float(v))
         if numeric and len(numeric) == len(vals):
             out[key] = statistics.mean(numeric)
-            out[f"{key}_stdev"] = statistics.pstdev(numeric) if len(numeric) > 1 else 0.0
+            # Sample (n-1) stdev: reps are a sample of run-to-run noise, not the population.
+            out[f"{key}_stdev"] = statistics.stdev(numeric) if len(numeric) > 1 else 0.0
             out[f"{key}_n"] = float(len(numeric))
         else:
             out[key] = vals[-1]
     return out
+
+
+def as_dry_run_result(result: Any) -> Any:
+    """A dry run measured nothing: drop any metrics a worker pre-filled and mark it a stub.
+
+    Zero-filled placeholder KPIs look like real (and often flattering) observations once they
+    land in tables or comparisons, so they are never kept.
+    """
+    attributes = dict(result.attributes)
+    attributes["dry_run"] = True
+    attributes["dry_run_metrics_discarded"] = len(result.metrics or {})
+    status = "stub" if result.status == "ok" else result.status
+    return replace(result, status=status, metrics={}, attributes=attributes)
+
+
+def single_rep_arm_comparison_warning(plan: ExperimentPlan) -> str | None:
+    """Warn when arms are compared from one observation each (no variance, no significance)."""
+    if plan.repeats > 1 or len(plan.arms) < 2:
+        return None
+    return (
+        f"WARNING: plan {plan.name} compares {len(plan.arms)} arms with repeats=1; deltas "
+        "have no variance estimate and cannot be marked significant. Set repeats>=3 before "
+        "ranking levers."
+    )
 
 
 def repo_root_from(path: Path | None = None) -> Path:
@@ -453,6 +478,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"  - {issue}", file=sys.stderr)
         return 2
 
+    repeat_warning = single_rep_arm_comparison_warning(plan)
+    if repeat_warning:
+        print(repeat_warning, file=sys.stderr, flush=True)
+
     for arm in plan.arms:
         for step in plan.steps:
             if step.worker != "retrieval_quality":
@@ -639,6 +668,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                         params=worker_params,
                     )
                     result = worker_fn(wctx)
+                    if args.dry_run:
+                        result = as_dry_run_result(result)
                     step_results.append(
                         {
                             "rep": rep,
@@ -833,13 +864,31 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    from report import compare_reports
+    """Compare runs A (baseline) and B (candidate).
+
+    Exit codes: 0 no significant regression, 2 runs not comparable (use --force to override),
+    3 a statistically significant regression was found.
+    """
+    from report import CompareRefused, compare_reports
 
     a = Path(args.a).resolve()
     b = Path(args.b).resolve()
-    out = Path(args.out).resolve() if args.out else (b / "compare.md")
-    compare_reports(a, b, out)
-    print(f"COMPARE={out}", flush=True)
+    out = Path(args.out).resolve() if args.out else None
+    try:
+        result = compare_reports(a, b, out, force=bool(args.force))
+    except CompareRefused as exc:
+        print("compare refused: the runs are not equivalent:", file=sys.stderr)
+        for mismatch in exc.mismatches:
+            print(f"  - {mismatch}", file=sys.stderr)
+        print("pass --force to compare anyway (recorded in compare.json)", file=sys.stderr)
+        return 2
+    print(f"COMPARE={result['out_md']}", flush=True)
+    regressions = result["regressions"]
+    if regressions:
+        print(f"{len(regressions)} significant regression(s):", file=sys.stderr)
+        for r in regressions:
+            print(f"  - {r['arm']} {r['metric']}: {r['a']:.6g} -> {r['b']:.6g}", file=sys.stderr)
+        return 3
     return 0
 
 
@@ -879,7 +928,17 @@ def build_parser() -> argparse.ArgumentParser:
     cp = sub.add_parser("compare", help="Compare two run artifact directories")
     cp.add_argument("a", help="Baseline run dir (A)")
     cp.add_argument("b", help="Candidate run dir (B)")
-    cp.add_argument("--out", default="", help="Output compare.md path (default: B/compare.md)")
+    cp.add_argument(
+        "--out",
+        default="",
+        help="Output compare.md path or directory (default: new sibling dir of B; "
+        "never written into A or B)",
+    )
+    cp.add_argument(
+        "--force",
+        action="store_true",
+        help="Compare even when plan/config/binary/corpus differ (mismatches are recorded)",
+    )
     cp.set_defaults(func=cmd_compare)
 
     pf = sub.add_parser(

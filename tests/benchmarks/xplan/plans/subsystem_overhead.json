@@ -6,6 +6,7 @@
   "timeout_sec": 3600,
   "continue_on_arm_failure": true,
   "mode": "live-ish",
+  "repeats": 3,
   "fixed": {
     "env": {
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
