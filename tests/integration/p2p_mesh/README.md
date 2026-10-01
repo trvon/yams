@@ -25,6 +25,9 @@ records.
   `credentials not found in native keychain` first in `PATH`.
 
 State and artifacts live under `build/p2p_mesh/` (override with `--work DIR` or `MESH_WORK`).
+Every `up`/`run` uses its own compose project (`yamsmesh-<random>`, or `--project NAME`), so
+containers, network, volumes and image tag never collide with another mesh on the same host;
+give concurrent meshes different `--work` directories.
 
 ## Commands
 
@@ -50,7 +53,9 @@ python3 $M run --nodes 5 --build-dir build/release --docs-per-node 16 --timeout 
 `converge` polls `yams list` on every node until every seeded hash is present, then proves it
 with `yams get --hash` on every node. It records records, peers and failed cycles per node, and,
 on builds whose `yams p2p status --json` has an `apply` block, the deferred and failure counters.
-After convergence it requires `apply.deferred.total` to drain to 0 (exit 3 otherwise).
+After convergence it requires `apply.deferred.total` to drain to 0 (exit 3 otherwise) and
+`quarantined_writers` to be 0 on every node (exit 4 otherwise): an honest mesh never durably
+quarantines a writer.
 `status` also counts the memory_sync apply-failure log lines per node.
 
 ## Scenarios
