@@ -22,7 +22,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 DEFAULT_WORK = REPO / "build" / "p2p_mesh"
-PROJECT = "yamsmesh"
+PROJECT_PREFIX = "yamsmesh"
 CORPUS_ID = "mesh-memory"
 LISTEN_PORT = 9721
 
@@ -74,15 +74,17 @@ def run(cmd, *, check=True, capture=True, timeout=None, input_text=None, env=Non
 
 
 class Mesh:
-    def __init__(self, work: Path, project: str = PROJECT):
+    def __init__(self, work: Path, project: str | None = None):
         self.work = work
-        self.project = project
+        # Each `up` gets its own compose project (containers, network, volumes, image tag), so
+        # concurrent meshes on one host never collide. The name is persisted in state.json.
+        self.project = project or f"{PROJECT_PREFIX}-{uuid.uuid4().hex[:8]}"
         self.state_path = work / "state.json"
         self.compose_path = work / "docker-compose.yml"
         self.state: dict = {}
         if self.state_path.exists():
             self.state = json.loads(self.state_path.read_text())
-            self.project = self.state.get("project", project)
+            self.project = self.state.get("project", self.project)
 
     # -- state ---------------------------------------------------------
     def save(self) -> None:
@@ -225,6 +227,9 @@ class Mesh:
         if a.nodes < 2:
             die("--nodes must be >= 2")
         self.work.mkdir(parents=True, exist_ok=True)
+        if a.project:
+            self.project = a.project
+        log(f"compose project {self.project}")
         ctx = self.stage_payload(Path(a.build_dir).resolve() if a.build_dir else None,
                                  Path(a.deb).resolve() if a.deb else None)
         shutil.copy2(HERE / "Dockerfile", ctx / "Dockerfile")
@@ -474,6 +479,7 @@ class Mesh:
             "peers": st.get("peer_count"),
             "failed_cycles": st.get("failed_cycles"),
             "quarantined": st.get("quarantined"),
+            "quarantined_writers": st.get("quarantined_writers"),
             "apply": ap or None,
             "deferred": (ap.get("deferred") or {}).get("total") if ap else None,
         }
@@ -544,8 +550,17 @@ class Mesh:
         self.save()
         self.work.mkdir(parents=True, exist_ok=True)
         (self.work / "converge.json").write_text(json.dumps(result, indent=2))
+        quarantined = {k: s["quarantined_writers"] for k, s in result["final"].items()
+                       if s.get("quarantined_writers")}
+        result["quarantined_writers"] = quarantined
+        (self.work / "converge.json").write_text(json.dumps(result, indent=2))
         if converged:
             log(f"CONVERGED in {result['seconds']}s: every document hash is readable on every node")
+            if quarantined:
+                # An honest mesh never quarantines a writer; a durable quarantine means a node
+                # rejected a peer's history and will diverge from it from now on.
+                log(f"FAILED: writers durably quarantined: {quarantined}")
+                return 4
             if result.get("deferred_drained") is False:
                 log("WARNING: deferred records did not drain to 0 after convergence")
                 return 3
@@ -612,14 +627,16 @@ class Mesh:
             f"- converged: {conv['converged']} in {conv['seconds']}s (timeout {a.timeout}s)",
             f"- deferred drained: {conv.get('deferred_drained', 'n/a (build has no apply status)')}",
             "",
-            "| node | readable | records | failed_cycles | peers | quarantined | deferred | vector fails | topology fails |",
-            "|---|---|---|---|---|---|---|---|---|",
+            "| node | readable | records | failed_cycles | peers | quarantined | quarantined_writers "
+            "| deferred | vector fails | topology fails |",
+            "|---|---|---|---|---|---|---|---|---|---|",
         ]
         for name, e in summary.items():
             fin = conv["final"][name]
             lines.append(
                 f"| {name} | {conv['readable'][name]}/{conv['documents']} | {fin['records']} | "
                 f"{fin['failed_cycles']} | {fin['peers']} | {fin['quarantined']} | "
+                f"{fin.get('quarantined_writers')} | "
                 f"{fin['deferred'] if fin['deferred'] is not None else 'n/a'} | "
                 f"{e['failures'].get('memory_sync vector apply failed', 0)} | "
                 f"{e['failures'].get('memory_sync topology apply failed', 0)} |"
@@ -666,6 +683,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="extra raw line appended to [memory_sync] (repeatable)")
     up.add_argument("--log-level", default="info")
     up.add_argument("--force", action="store_true")
+    up.add_argument("--project", help="compose project name (default: unique per run)")
 
     seed = sub.add_parser("seed", help="add documents on every node")
     seed.add_argument("--docs-per-node", type=int, default=16)
@@ -702,6 +720,7 @@ def build_parser() -> argparse.ArgumentParser:
     rn.add_argument("--config", action="append")
     rn.add_argument("--log-level", default="info")
     rn.add_argument("--force", action="store_true")
+    rn.add_argument("--project", help="compose project name (default: unique per run)")
     rn.add_argument("--docs-per-node", type=int, default=40)
     rn.add_argument("--topics", type=int, default=8)
     rn.add_argument("--words", type=int, default=40)
