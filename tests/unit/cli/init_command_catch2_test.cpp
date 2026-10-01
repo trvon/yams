@@ -126,6 +126,21 @@ private:
     std::streambuf* oldCout_;
 };
 
+// Redirects std::cin from a scripted string for the duration of the scope.
+class ScopedStdin {
+public:
+    explicit ScopedStdin(const std::string& input)
+        : stream_(input), old_(std::cin.rdbuf(stream_.rdbuf())) {}
+    ~ScopedStdin() { std::cin.rdbuf(old_); }
+
+    ScopedStdin(const ScopedStdin&) = delete;
+    ScopedStdin& operator=(const ScopedStdin&) = delete;
+
+private:
+    std::istringstream stream_;
+    std::streambuf* old_;
+};
+
 } // namespace
 
 TEST_CASE("InitCommand: All models have valid HuggingFace URLs", "[cli][init][models]") {
@@ -432,10 +447,77 @@ TEST_CASE("InitCommand: re-init does not overwrite an existing vector dimension 
     // that record with 1024, or `yams doctor` would stop seeing the real mismatch.
     yams::cli::vecutil::writeVectorSentinel(helper.dataDir, 384);
 
-    REQUIRE(helper.runCommand(
-                {"yams", "init", "--force", "--non-interactive", "--no-keygen"}) == 0);
+    REQUIRE(helper.runCommand({"yams", "init", "--force", "--non-interactive", "--no-keygen"}) ==
+            0);
 
     const auto sentinelDim = yams::daemon::ConfigResolver::readVectorSentinelDim(helper.dataDir);
     REQUIRE(sentinelDim.has_value());
     CHECK(*sentinelDim == 384);
+}
+
+TEST_CASE("InitCommand: already-initialized interactive init prompts for the tuning profile once",
+          "[cli][init][catch2]") {
+    CliTestHelper helper;
+    // Create an initialized instance without prompts first.
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+
+    // Re-run interactively with scripted answers: accept the default storage dir,
+    // pick tuning profile 2, then decline GLiNER/reranker/skill so nothing is
+    // downloaded. Before the fix the tuning prompt was shown twice (once in
+    // execute() and again in handleAlreadyInitialized()).
+    // Scripted stdin in prompt order: storage dir (accept default), tuning "2",
+    // then "n" to decline GLiNER, reranker and agent-skill downloads. Each prompt
+    // is answered explicitly so EOF never falls back to defaultYes=true.
+    ScopedStdin stdinScript("\n2\nn\nn\nn\n");
+    CaptureStdout capture;
+    const int rc = helper.runCommand({"yams", "init", "--no-keygen"});
+    const std::string output = capture.str();
+
+    CHECK(rc == 0);
+    size_t occurrences = 0;
+    for (size_t pos = output.find("Select a tuning profile"); pos != std::string::npos;
+         pos = output.find("Select a tuning profile", pos + 1)) {
+        ++occurrences;
+    }
+    CHECK(occurrences == 1);
+    CHECK(output.find("2. Efficient") != std::string::npos);
+    CHECK(yams::config::parse_config_value(helper.configPath, "tuning", "profile") == "efficient");
+}
+
+TEST_CASE("InitCommand: declining semantic search disables both sections and writes no sentinel",
+          "[cli][init][catch2]") {
+    CliTestHelper helper;
+
+    // Fresh interactive init, scripted in prompt order: storage dir (default),
+    // tuning "2", semantic search "n", S3 "n", plugins "n", reranker "n",
+    // agent skill "n". Answers are explicit so EOF cannot default to yes and
+    // trigger a model download.
+    ScopedStdin stdinScript("\n2\nn\nn\nn\nn\nn\n");
+    CaptureStdout capture;
+    const int rc = helper.runCommand({"yams", "init", "--no-keygen"});
+    const std::string output = capture.str();
+    CHECK(rc == 0);
+
+    // The fresh path must still prompt for tuning exactly once.
+    size_t occurrences = 0;
+    for (size_t pos = output.find("Select a tuning profile"); pos != std::string::npos;
+         pos = output.find("Select a tuning profile", pos + 1)) {
+        ++occurrences;
+    }
+    CHECK(occurrences == 1);
+
+    // Declining semantic search disables both sections and persists it.
+    CHECK(yams::config::parse_config_value(helper.configPath, "vector_database", "enable") ==
+          "false");
+    CHECK(yams::config::parse_config_value(helper.configPath, "embeddings", "enable") == "false");
+
+    // No vector store dimension sentinel should be written when disabled.
+    CHECK_FALSE(fs::exists(helper.dataDir / "vectors_sentinel.json"));
+
+    // Dimension keys stay mutually consistent even with semantic search off.
+    const auto dims = yams::config::read_dimension_config(helper.configPath);
+    if (dims.embeddings && dims.vectorDb && dims.index) {
+        CHECK(*dims.embeddings == *dims.vectorDb);
+        CHECK(*dims.embeddings == *dims.index);
+    }
 }

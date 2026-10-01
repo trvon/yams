@@ -180,7 +180,9 @@ public:
                     noKeygen_ = !prompt_yes_no("Generate auth keys? [Y/n]: ",
                                                YesNoOptions{.defaultYes = true});
                 }
-                tuningProfile_ = promptForTuningProfile();
+                // The tuning profile is collected after the idempotency check: the
+                // already-initialized path prompts for it in handleAlreadyInitialized(),
+                // so prompting here too produced a duplicate prompt.
             }
 
             // Ensure we use the resolved dataPath in CLI
@@ -199,6 +201,11 @@ public:
 
             if (alreadyInitialized && !force_) {
                 return handleAlreadyInitialized(dataPath, configPath);
+            }
+
+            // Fresh setup (including --force re-init): collect the tuning profile once here.
+            if (!nonInteractive_) {
+                tuningProfile_ = promptForTuningProfile();
             }
 
             // 4) Initialize storage (database + content store)
