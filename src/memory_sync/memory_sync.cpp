@@ -2,6 +2,8 @@
 // Bodies of MemorySyncLoop, moved out of the header (see memory_sync.h for the contract).
 #include <yams/memory_sync/memory_sync.h>
 
+#include <spdlog/spdlog.h>
+
 namespace yams::memory_sync {
 
 Result<void> MemorySyncLoop::publish(std::string_view logicalKey,
@@ -927,7 +929,7 @@ Result<DeltaApplyResult> MemorySyncLoop::applyDeltas(std::span<const MemoryDelta
         }
         if (decision.action == DirectDeltaAction::Reject) {
             if (decision.reason == "duplicate writer operation fork") {
-                auto durable = quarantineWriter(delta->record.origin, nodeId_);
+                auto durable = quarantineWriter(delta->record.origin, nodeId_, decision.reason);
                 if (!durable) {
                     return durable.error();
                 }
@@ -1166,7 +1168,8 @@ bool MemorySyncLoop::writerQuarantined(std::string_view writerId) const noexcept
 }
 
 Result<bool> MemorySyncLoop::quarantineWriter(std::string_view writerId,
-                                              std::string_view sourceNodeId) {
+                                              std::string_view sourceNodeId,
+                                              std::string_view reason) {
     if (writerId.empty() || sourceNodeId.empty()) {
         return Error{ErrorCode::InvalidArgument, "writer quarantine identity is empty"};
     }
@@ -1201,6 +1204,14 @@ Result<bool> MemorySyncLoop::quarantineWriter(std::string_view writerId,
     quarantineInvalidationSources_ = std::move(invalidationSources);
     ++durableQuarantineGeneration_;
     removeVisibleWinnersFrom(writerId);
+    // The only place a writer becomes quarantined, so the only place that logs it: every path
+    // reports why, plus the counters an operator needs to compare against the writer's own.
+    const auto history = historyCommitments_.find(std::string(writerId));
+    spdlog::warn("[memory_sync] durably quarantined writer {}: {} (source={} history_counter={} "
+                 "version_counter={})",
+                 writerId, reason, sourceNodeId,
+                 history == historyCommitments_.end() ? 0 : history->second.counter,
+                 version_.get(std::string(writerId)));
     return true;
 }
 
@@ -2947,7 +2958,8 @@ Result<void> MemorySyncLoop::commitScannedHistory(const std::vector<ScanCandidat
             continue;
         }
         if (forkedOperations_.contains(candidate->record.operationId)) {
-            auto quarantined = quarantineWriter(writer, nodeId_);
+            auto quarantined = quarantineWriter(writer, nodeId_,
+                                                "duplicate writer operation fork in shared store");
             if (!quarantined) {
                 return quarantined.error();
             }

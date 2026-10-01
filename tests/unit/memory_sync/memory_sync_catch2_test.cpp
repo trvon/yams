@@ -6,10 +6,15 @@
 #include <array>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <set>
 #include <span>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 
 #include <yams/memory_sync/memory_sync.h>
 #include <yams/memory_sync/writer_auth.h>
@@ -2028,6 +2033,55 @@ TEST_CASE("a replayed counter that differs from durable history is a violation a
     }
 }
 
+TEST_CASE("every durable writer quarantine logs its reason and counters exactly once",
+          "[memory-sync][direct-delta][quarantine][logging]") {
+    BackendFixture writerFixture{"quarantine-log-writer"};
+    BackendFixture readerFixture{"quarantine-log-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "quarantine-log-corpus", 1};
+    MemorySyncLoop reader{readerFixture.backend, "reader", "quarantine-log-corpus", 1};
+    REQUIRE(writer.publish("user/key", bytes("original")).has_value());
+    auto batch = writer.exportLocalDeltasAfter({});
+    REQUIRE(batch.has_value());
+    REQUIRE(reader.applyDeltas(batch.value().deltas).has_value());
+
+    std::ostringstream captured;
+    auto previous = spdlog::default_logger();
+    auto logger = std::make_shared<spdlog::logger>(
+        "quarantine_log_capture", std::make_shared<spdlog::sinks::ostream_sink_mt>(captured));
+    logger->set_level(spdlog::level::info);
+    spdlog::set_default_logger(logger);
+    struct RestoreLogger {
+        std::shared_ptr<spdlog::logger> previous;
+        ~RestoreLogger() { spdlog::set_default_logger(previous); }
+    } restore{previous};
+
+    // The duplicate-operation fork path inside applyDeltas quarantines without any caller log.
+    auto fork = batch.value().deltas;
+    fork.front().payload = bytes("forked");
+    fork.front().record.entryHash = digest(fork.front().payload);
+    auto forked = reader.applyDeltas(fork);
+    REQUIRE(forked.has_value());
+    REQUIRE(reader.writerQuarantined("writer"));
+
+    // Quarantining an already-quarantined writer is not a new quarantine and is not logged.
+    auto repeated = reader.quarantineWriter("writer", "reader", "repeated request");
+    REQUIRE(repeated.has_value());
+    CHECK_FALSE(repeated.value());
+
+    logger->flush();
+    const auto out = captured.str();
+    INFO(out);
+    const std::string needle = "durably quarantined writer writer";
+    const auto first = out.find(needle);
+    REQUIRE(first != std::string::npos);
+    CHECK(out.find(needle, first + needle.size()) == std::string::npos);
+    CHECK(out.find("duplicate writer operation fork") != std::string::npos);
+    CHECK(out.find("source=reader") != std::string::npos);
+    CHECK(out.find("history_counter=1") != std::string::npos);
+    CHECK(out.find("version_counter=1") != std::string::npos);
+    CHECK(out.find("repeated request") == std::string::npos);
+}
+
 TEST_CASE("durable quarantine is not blocked by malformed adapter payload",
           "[memory-sync][direct-delta][quarantine][security]") {
     BackendFixture writerFixture{"direct-malformed-adapter-writer"};
@@ -2040,7 +2094,7 @@ TEST_CASE("durable quarantine is not blocked by malformed adapter payload",
     REQUIRE(batch.has_value());
     REQUIRE(reader.applyDeltas(batch.value().deltas).has_value());
 
-    auto quarantined = reader.quarantineWriter("writer", "reader");
+    auto quarantined = reader.quarantineWriter("writer", "reader", "test request");
     REQUIRE(quarantined.has_value());
     CHECK(quarantined.value());
     CHECK(reader.writerQuarantined("writer"));
@@ -2067,7 +2121,7 @@ TEST_CASE("direct writer quarantine removes winners and survives restart",
     REQUIRE(reader.readCached("user/one").has_value());
     REQUIRE(reader.readCached("user/two").has_value());
 
-    auto quarantined = reader.quarantineWriter("writer", "reader");
+    auto quarantined = reader.quarantineWriter("writer", "reader", "test request");
     REQUIRE(quarantined.has_value());
     CHECK(quarantined.value());
     CHECK(reader.writerQuarantined("writer"));
@@ -2090,7 +2144,7 @@ TEST_CASE("replication checkpoints isolate concurrent local node state",
     BackendFixture fixture{"direct-checkpoint-node-isolation"};
     MemorySyncLoop nodeA{fixture.backend, "node-a", "checkpoint-corpus", 1};
     MemorySyncLoop nodeB{fixture.backend, "node-b", "checkpoint-corpus", 1};
-    REQUIRE(nodeA.quarantineWriter("forked-writer", "node-a").has_value());
+    REQUIRE(nodeA.quarantineWriter("forked-writer", "node-a", "test request").has_value());
     REQUIRE(nodeB.publish("user/from-b", bytes("b")).has_value());
 
     MemorySyncLoop restartedA{fixture.backend, "node-a", "checkpoint-corpus", 1};
@@ -2131,7 +2185,7 @@ TEST_CASE("quarantined local writer cannot write or export",
     MemorySyncLoop writer{fixture.backend, "writer", "quarantine-corpus", 1};
     REQUIRE(writer.publish("user/before", bytes("before")).has_value());
 
-    auto quarantined = writer.quarantineWriter("writer", "peer");
+    auto quarantined = writer.quarantineWriter("writer", "peer", "test request");
     REQUIRE(quarantined.has_value());
     CHECK(quarantined.value());
     CHECK(writer.writerQuarantined("writer"));

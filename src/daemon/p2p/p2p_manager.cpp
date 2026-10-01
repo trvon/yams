@@ -112,14 +112,14 @@ Result<void> enforcePeerHistory(memory_sync::MemorySyncService& service, const s
     if (!mismatch.value()) {
         return {};
     }
-    auto quarantined = service.quarantineWriter(peer.peerNodeId, nodeId);
+    // quarantineWriter logs the quarantine with the local counters; add the handshake's.
+    const auto reason = std::string("history commitment mismatch at p2p handshake (frontier=") +
+                        std::to_string(peer.peerVersion.get(peer.peerNodeId)) +
+                        " prefix_matches=" + (peer.peerPrefixMatches ? "true" : "false") + ")";
+    auto quarantined = service.quarantineWriter(peer.peerNodeId, nodeId, reason);
     if (!quarantined) {
         return quarantined.error();
     }
-    spdlog::warn("[p2p] durably quarantined writer {}: history commitment mismatch "
-                 "(local={} frontier={} prefix_matches={})",
-                 peer.peerNodeId, localState.version.get(peer.peerNodeId),
-                 peer.peerVersion.get(peer.peerNodeId), peer.peerPrefixMatches);
     return Error{ErrorCode::InvalidData, "authenticated peer writer history commitment mismatch"};
 }
 

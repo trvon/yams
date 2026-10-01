@@ -739,15 +739,14 @@ Result<DeltaExchangeStats> receiveAll(FrameSource& frames, const std::string& lo
             return verdict.error(); // Local or racy: abort this session and retry next cycle.
         }
         if (verdict.value()) {
-            auto quarantined = service.quarantineWriter(handshake.peerNodeId, localNodeId);
+            // quarantineWriter logs the quarantine with the local counters; add the session's.
+            const auto reason = verdict.value()->reason +
+                                " (p2p session frontier=" + std::to_string(expectedCounter) +
+                                " staged=" + std::to_string(staged.size()) + ")";
+            auto quarantined = service.quarantineWriter(handshake.peerNodeId, localNodeId, reason);
             if (!quarantined) {
                 return quarantined.error();
             }
-            spdlog::warn("[p2p] durably quarantined writer {}: {} (local={} frontier={} "
-                         "staged={})",
-                         handshake.peerNodeId, verdict.value()->reason,
-                         service.currentVersion().get(handshake.peerNodeId), expectedCounter,
-                         staged.size());
             return Error{verdict.value()->code, verdict.value()->reason};
         }
         if (staged.empty()) {

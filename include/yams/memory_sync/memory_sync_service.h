@@ -479,11 +479,12 @@ public:
         return result;
     }
 
-    Result<bool> quarantineWriter(std::string_view writerId, std::string_view sourceNodeId) {
+    Result<bool> quarantineWriter(std::string_view writerId, std::string_view sourceNodeId,
+                                  std::string_view reason) {
         Result<bool> result;
         {
             std::lock_guard<std::mutex> lock(loopMutex_);
-            result = loop_.quarantineWriter(writerId, sourceNodeId);
+            result = loop_.quarantineWriter(writerId, sourceNodeId, reason);
             if (result && result.value()) {
                 refreshCommittedState();
             }

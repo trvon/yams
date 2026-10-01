@@ -255,7 +255,11 @@ public:
 
     /// Durably invalidate one writer before removing any visible winners. The checkpoint is
     /// persisted first so a crash cannot make invalidated history visible again after restart.
-    Result<bool> quarantineWriter(std::string_view writerId, std::string_view sourceNodeId);
+    /// Every new quarantine is logged here, with `reason` and the writer's local counters, so
+    /// no caller can quarantine silently; returns false (and logs nothing) when the writer was
+    /// already quarantined.
+    Result<bool> quarantineWriter(std::string_view writerId, std::string_view sourceNodeId,
+                                  std::string_view reason);
 
     /// Collect tombstone history only when the complete configured replica set has
     /// acknowledged the exact delete operation and the retention horizon has elapsed.
