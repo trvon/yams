@@ -93,6 +93,20 @@ Keep physical-device claims separate and reproducible.
 5. Measure before optimizing: workload + KPI + baseline, change one thing,
    re-measure. `YAMS_*` profiling macros only with a clear question.
 
+## Build Setup
+
+- Configure/build through the repo script; it resolves Conan + Meson and prefers
+  Clang: `./setup.sh Debug` (also `Release`, `Profiling`, `Fuzzing`).
+- Build dirs are chosen per type: `Debug` -> `build/debug` (the unit-test lane;
+  `.clangd` points here), `Release` -> `build/release`, `Profiling` ->
+  `build/profiling`, `Fuzzing` -> `build/fuzzing`. Override with `YAMS_BUILD_DIR`.
+  The legacy `builddir` name is still accepted by some helper scripts.
+- Debug enables TSAN by default; pass `--no-tsan` for faster local iteration.
+- Tests are opt-in outside Debug. If `meson compile -C <dir> <target>` reports
+  `target not found`, that dir was configured without tests; reconfigure with
+  `meson setup --reconfigure <dir> -Dbuild-tests=true --wrap-mode=default`.
+- One writer per build dir; never run parallel `meson compile` invocations.
+
 ## Testing Conventions
 
 - Catch2 v3; files end `_catch2_test.cpp`; live in `tests/unit/<subsystem>/`;

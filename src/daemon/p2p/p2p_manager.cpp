@@ -103,14 +103,20 @@ Result<void> enforcePeerHistory(memory_sync::MemorySyncService& service, const s
     if (localState.quarantinedWriters.contains(peer.peerNodeId)) {
         return Error{ErrorCode::InvalidData, "peer writer is durably quarantined"};
     }
-    auto mismatch = requiresPeerWriterQuarantine(localState, peer);
+    auto mismatch = requiresPeerWriterQuarantine(localState, peer, [&](std::uint64_t counter) {
+        return service.historyCommitmentAt(peer.peerNodeId, counter);
+    });
     if (!mismatch) {
         return mismatch.error();
     }
     if (!mismatch.value()) {
         return {};
     }
-    auto quarantined = service.quarantineWriter(peer.peerNodeId, nodeId);
+    // quarantineWriter logs the quarantine with the local counters; add the handshake's.
+    const auto reason = std::string("history commitment mismatch at p2p handshake (frontier=") +
+                        std::to_string(peer.peerVersion.get(peer.peerNodeId)) +
+                        " prefix_matches=" + (peer.peerPrefixMatches ? "true" : "false") + ")";
+    auto quarantined = service.quarantineWriter(peer.peerNodeId, nodeId, reason);
     if (!quarantined) {
         return quarantined.error();
     }
@@ -405,7 +411,7 @@ public:
         if (!spec) {
             return spec.error();
         }
-        return connectSpec(spec.value(), std::nullopt, std::nullopt);
+        return connectAndRecord(spec.value(), std::nullopt, std::nullopt);
     }
 
     Result<void> disconnect(std::string_view nodeId) {
@@ -446,6 +452,11 @@ public:
     P2pInboundStats inboundStats() const {
         std::lock_guard<std::mutex> lock(inboundMutex_);
         return inbound_;
+    }
+
+    P2pOutboundStats outboundStats() const {
+        std::lock_guard<std::mutex> lock(outboundMutex_);
+        return outbound_;
     }
 
     Result<P2pLocalIdentity> localIdentity() const {
@@ -538,6 +549,26 @@ private:
                              .quarantined = exchanged.value().quarantined};
     }
 
+    // Outbound sessions abort on any failure and are retried by the reconnect loop; count and
+    // log them like inbound ones so a failing direction is visible.
+    Result<P2pSyncResult> connectAndRecord(const P2pConnectionSpec& spec,
+                                           const std::optional<std::string>& expectedNode,
+                                           const std::optional<std::string>& expectedPin) {
+        auto result = connectSpec(spec, expectedNode, expectedPin);
+        std::lock_guard<std::mutex> lock(outboundMutex_);
+        ++outbound_.sessions;
+        if (!result) {
+            ++outbound_.failures;
+            outbound_.lastFailure =
+                expectedNode.value_or(spec.endpoint()) + ": " + result.error().message;
+            outbound_.lastFailureUnixMs =
+                static_cast<std::uint64_t>(std::max<std::int64_t>(0, unixTimeMs()));
+            spdlog::warn("[p2p] outbound session to {} failed: {}",
+                         expectedNode.value_or(spec.endpoint()), result.error().message);
+        }
+        return result;
+    }
+
     void handleInbound(P2pConnection connection) {
         detail::ConnectionFrameSource frames(connection);
         auto outcome = detail::runInboundSession(
@@ -604,7 +635,7 @@ private:
                             continue;
                         }
                         spec.value().remember = true;
-                        auto connected = connectSpec(spec.value(), peer.nodeId, peer.spkiPin);
+                        auto connected = connectAndRecord(spec.value(), peer.nodeId, peer.spkiPin);
                         if (connected) {
                             retries.erase(peer.nodeId);
                             continue;
@@ -638,7 +669,9 @@ private:
     std::unique_ptr<PeerRegistry> registry_;
     mutable std::mutex lifecycleMutex_;
     mutable std::mutex inboundMutex_;
+    mutable std::mutex outboundMutex_;
     P2pInboundStats inbound_;
+    P2pOutboundStats outbound_;
     std::mutex reconnectMutex_;
     std::condition_variable reconnectCv_;
     std::unique_ptr<P2pListener> listener_;
@@ -707,6 +740,9 @@ Result<P2pLocalIdentity> P2pManager::localIdentity() const {
 }
 P2pInboundStats P2pManager::inboundStats() const {
     return impl_->inboundStats();
+}
+P2pOutboundStats P2pManager::outboundStats() const {
+    return impl_->outboundStats();
 }
 Result<std::vector<PeerRegistryRecord>> P2pManager::peers() const {
     return impl_->peers();

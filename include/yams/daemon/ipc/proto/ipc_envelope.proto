@@ -1236,6 +1236,32 @@ message MemorySyncResponse {
   string last_inbound_failure_stage = 19;
   string last_inbound_failure = 20;
   uint64 last_inbound_failure_age_ms = 21;
+  // Apply-path health. apply_failed_cycles counts reconciled cycles in which an inbound apply
+  // stage hard-failed; failed_cycles keeps meaning reconciliation failures. deferred_* are the
+  // records each stage left pending because a replicated prerequisite has not arrived yet.
+  uint64 apply_cycles = 22;
+  uint64 apply_failed_cycles = 23;
+  uint64 deferred_content = 24;
+  uint64 deferred_metadata = 25;
+  uint64 deferred_vector = 26;
+  uint64 deferred_topology = 27;
+  uint64 oldest_deferral_age_ms = 28;
+  uint64 apply_failures_content = 29;
+  uint64 apply_failures_metadata = 30;
+  uint64 apply_failures_vector = 31;
+  uint64 apply_failures_topology = 32;
+  string last_apply_failure_stage = 33;
+  string last_apply_failure = 34;
+  uint64 last_apply_failure_age_ms = 35;
+  uint64 publish_skipped_cycles = 36;
+  uint64 publish_failed_cycles = 37;
+  // Writers durably quarantined for contradicting their authenticated history, and outbound
+  // session outcomes. Session failures in either direction are transient and retried.
+  uint64 quarantined_writers = 38;
+  uint64 outbound_sessions = 39;
+  uint64 outbound_failures = 40;
+  string last_outbound_failure = 41;
+  uint64 last_outbound_failure_age_ms = 42;
 }
 
 // ENVELOPE

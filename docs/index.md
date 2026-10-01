@@ -9,6 +9,9 @@ retrieval.
 
 ## Start
 
+Install with Homebrew, APT, DNF, pacman, Docker or the Windows MSI; see
+[Install and setup](install.md).
+
 ```bash
 brew install trvon/yams/yams
 yams init
@@ -35,6 +38,7 @@ yams serve
 
 ## Reference
 
+- [Install and setup](install.md): every channel, file locations, the daemon service, key settings
 - [Build from source](BUILD.md)
 - [P2P corpus sync](p2p.md)
 - [Benchmarks](benchmarks/)

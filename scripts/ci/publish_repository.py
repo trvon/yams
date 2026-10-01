@@ -325,7 +325,6 @@ class WranglerObjectStore:
                 str(source),
                 "--content-type",
                 content_type,
-                "--force",
             ],
             check=False,
         )

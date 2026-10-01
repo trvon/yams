@@ -376,5 +376,58 @@ TEST_CASE("memory sync section renders only when the loop has started",
         CHECK(out.find("yams p2p peers for details") != std::string::npos);
         CHECK(out.find("check daemon log for reasons") != std::string::npos);
         CHECK(out.find("5 ok · 1 failed") != std::string::npos);
+        CHECK(out.find("0 ok · 0 with stage failures") != std::string::npos);
+        CHECK(out.find("0 records") != std::string::npos);
+        CHECK(out.find("Last apply error") == std::string::npos);
+        CHECK(out.find("Publish") == std::string::npos);
+    }
+
+    SECTION("started with a stuck apply path") {
+        m.started = true;
+        m.applyCycles = 1268;
+        m.applyFailedCycles = 1268;
+        m.deferredTopology = 2;
+        m.oldestDeferralAgeMs = 11 * 60 * 1000;
+        m.applyFailuresTopology = 1268;
+        m.lastApplyFailureStage = "topology";
+        m.lastApplyFailure = "edge identity mismatch";
+        m.publishSkippedCycles = 3;
+        std::ostringstream os;
+        yams::cli::renderMemorySyncSection(&m, os);
+        const std::string out = os.str();
+        CHECK(out.find("0 ok · 1268 with stage failures") != std::string::npos);
+        CHECK(out.find("2 records (oldest") != std::string::npos);
+        CHECK(out.find("prerequisite not replicated") != std::string::npos);
+        CHECK(out.find("topology: edge identity mismatch") != std::string::npos);
+        CHECK(out.find("3 skipped · 0 failed") != std::string::npos);
+    }
+
+    SECTION("started with failing outbound sessions and a quarantined writer") {
+        m.started = true;
+        m.quarantinedWriters = 1;
+        m.outboundSessions = 12;
+        m.outboundFailures = 3;
+        m.lastOutboundFailure = "node-b: connection refused";
+        m.lastOutboundFailureAgeMs = 90'000;
+        std::ostringstream os;
+        yams::cli::renderMemorySyncSection(&m, os);
+        const std::string out = os.str();
+        CHECK(out.find("Quarantined writers") != std::string::npos);
+        CHECK(out.find("durable; check daemon log for the reason") != std::string::npos);
+        CHECK(out.find("Outbound sessions") != std::string::npos);
+        CHECK(out.find("12 started · 3 failed") != std::string::npos);
+        CHECK(out.find("Last outbound failure") != std::string::npos);
+        CHECK(out.find("node-b: connection refused") != std::string::npos);
+        CHECK(out.find("1m 30s ago") != std::string::npos);
+    }
+
+    SECTION("started with healthy outbound sessions") {
+        m.started = true;
+        m.outboundSessions = 4;
+        std::ostringstream os;
+        yams::cli::renderMemorySyncSection(&m, os);
+        const std::string out = os.str();
+        CHECK(out.find("4 started · 0 failed") != std::string::npos);
+        CHECK(out.find("Last outbound failure") == std::string::npos);
     }
 }

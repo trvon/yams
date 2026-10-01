@@ -249,6 +249,65 @@ struct KGStoreRepoFixture {
 };
 } // namespace
 
+TEST_CASE_METHOD(KGStoreFixture, "KG Store keyset scans neither skip nor repeat under churn",
+                 "[unit][metadata][kg][keyset]") {
+    std::vector<KGNode> nodes;
+    for (int i = 0; i < 4; ++i) {
+        KGNode node{.nodeKey = "keyset:old-" + std::to_string(i), .type = "cluster"};
+        auto id = store_->upsertNode(node);
+        REQUIRE(id.has_value());
+        node.id = id.value();
+        nodes.push_back(node);
+    }
+    REQUIRE(store_->addEdge({.srcNodeId = nodes[0].id, .dstNodeId = nodes[1].id, .relation = "r"})
+                .has_value());
+
+    auto first = store_->getNodesAfterId(0, 2);
+    REQUIRE(first.has_value());
+    REQUIRE(first.value().size() == 2);
+    CHECK(first.value()[0].nodeKey == "keyset:old-0");
+    CHECK(first.value()[1].nodeKey == "keyset:old-1");
+    const auto cursor = first.value()[1].id;
+
+    // Delete rows on both sides of the cursor and insert new ones before resuming.
+    REQUIRE(store_->deleteNodeById(nodes[0].id).has_value());
+    REQUIRE(store_->deleteNodeById(nodes[2].id).has_value());
+    REQUIRE(store_->upsertNode({.nodeKey = "keyset:new-0", .type = "cluster"}).has_value());
+    REQUIRE(store_->upsertNode({.nodeKey = "keyset:new-1", .type = "cluster"}).has_value());
+
+    auto rest = store_->getNodesAfterId(cursor, 16);
+    REQUIRE(rest.has_value());
+    std::vector<std::string> keys;
+    for (const auto& node : rest.value()) {
+        keys.push_back(node.nodeKey);
+    }
+    CHECK(keys == std::vector<std::string>{"keyset:old-3", "keyset:new-0", "keyset:new-1"});
+
+    // The deleted source cascaded its edge; a new edge is reached by a resumed edge scan.
+    auto edges = store_->getEdgesAfterId(0, 16);
+    REQUIRE(edges.has_value());
+    CHECK(edges.value().empty());
+    REQUIRE(store_->addEdge({.srcNodeId = nodes[1].id, .dstNodeId = nodes[3].id, .relation = "r"})
+                .has_value());
+    REQUIRE(store_->addEdge({.srcNodeId = nodes[1].id, .dstNodeId = nodes[3].id, .relation = "s"})
+                .has_value());
+    edges = store_->getEdgesAfterId(0, 16);
+    REQUIRE(edges.has_value());
+    REQUIRE(edges.value().size() == 2);
+    CHECK(edges.value()[0].id < edges.value()[1].id);
+    auto resumed = store_->getEdgesAfterId(edges.value()[0].id, 16);
+    REQUIRE(resumed.has_value());
+    REQUIRE(resumed.value().size() == 1);
+    CHECK(resumed.value().front().relation == "s");
+    auto between = store_->getEdgesBetween(nodes[1].id, nodes[3].id, "r");
+    REQUIRE(between.has_value());
+    REQUIRE(between.value().size() == 1);
+    CHECK(between.value().front().id == edges.value()[0].id);
+    auto otherRelation = store_->getEdgesBetween(nodes[1].id, nodes[3].id, "t");
+    REQUIRE(otherRelation.has_value());
+    CHECK(otherRelation.value().empty());
+}
+
 TEST_CASE("KG Store: batch upsert nodes is idempotent", "[unit][metadata][kg]") {
     KGStoreFixture fix;
 

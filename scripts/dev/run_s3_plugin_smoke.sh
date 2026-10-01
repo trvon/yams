@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-builddir="${1:-builddir}"
+builddir="${1:-build/debug}"
 smoke_exe="${builddir}/tests/plugins/yams_s3_plugin_smoke"
 
 required=(

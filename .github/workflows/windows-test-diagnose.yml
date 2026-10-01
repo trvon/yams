@@ -1,0 +1,273 @@
+# Manual-only diagnostic: run one Catch2 binary on Windows case by case to find tests that
+# hang. Runs on workflow_dispatch, or on a push to a diagnose/** branch (dispatch needs the
+# workflow on the default branch first). Never runs on regular pushes, pull requests or a
+# schedule. Mirrors the Windows build setup in tests.yml. Before killing a hung case it prints
+# the case's output so far, its top-level windows (a modal CRT assert or abort dialog is the
+# usual silent hang), and every thread's stack plus !analyze from cdb.exe.
+name: Windows test diagnose
+
+"on":
+  push:
+    branches: ["diagnose/**"]
+  workflow_dispatch:
+    inputs:
+      test_binary:
+        description: "Catch2 test executable under build/debug/tests (without .exe)"
+        default: "catch2_search_service"
+      case_timeout_s:
+        description: "Seconds before a single test case is treated as hung"
+        default: "120"
+      test_filter:
+        description: "Catch2 test spec limiting the cases, e.g. [extract-scope] (empty runs all)"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: Diagnose ${{ inputs.test_binary || 'catch2_search_service' }} (windows-x86_64)
+    runs-on: windows-latest
+    timeout-minutes: 240
+    env:
+      BUILD_DIR: build/debug
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Initialize required submodules
+        shell: bash
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          git submodule update --init --depth 1 third_party/simeon
+          git submodule update --init --depth 1 third_party/symspell
+
+      - name: Install Python build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTOOLS_DIR="${RUNNER_TEMP}/yams-python-tools"
+          python -m venv "$PYTOOLS_DIR"
+          "$PYTOOLS_DIR/Scripts/python.exe" -m pip install --upgrade pip
+          "$PYTOOLS_DIR/Scripts/python.exe" -m pip install --upgrade \
+            'conan==2.21.*' 'meson==1.4.*' 'ninja==1.11.*'
+          echo "$PYTOOLS_DIR/Scripts" >> "$GITHUB_PATH"
+
+      - name: Install Zig
+        shell: pwsh
+        run: |
+          $zigVersion = "0.15.2"
+          $zigUrl = "https://ziglang.org/download/${zigVersion}/zig-x86_64-windows-${zigVersion}.zip"
+          $zigZip = "$env:TEMP\zig.zip"
+          $zigDir = "C:\zig"
+          Invoke-WebRequest -Uri $zigUrl -OutFile $zigZip
+          Expand-Archive -Path $zigZip -DestinationPath $zigDir -Force
+          Move-Item "$zigDir\zig-x86_64-windows-${zigVersion}\*" $zigDir -Force
+          "$zigDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.conan2/p
+            ~/.conan2/r
+            ~/.conan2/recipes
+            ~/.conan2/metadata
+            ~/.conan2/s
+          key: conan2-${{ runner.os }}-windows-x86_64-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
+          restore-keys: |
+            conan2-${{ runner.os }}-windows-x86_64-
+            conan2-${{ runner.os }}-
+
+      - name: Setup Conan profile
+        shell: bash
+        run: |
+          mkdir -p ~/.conan2
+          cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
+          conan profile detect --force
+          sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
+
+      - name: Configure and build (Debug)
+        shell: pwsh
+        env:
+          YAMS_ENABLE_MOBILE_BINDINGS: "false"
+        run: |
+          .\setup.ps1 Debug
+
+      - name: Locate cdb.exe for hang evidence
+        shell: pwsh
+        run: |
+          $kitRoots = @("${env:ProgramFiles(x86)}\Windows Kits", "$env:ProgramFiles\Windows Kits") |
+            Where-Object { Test-Path $_ }
+          function Find-Cdb {
+            $known = $kitRoots | ForEach-Object { Join-Path $_ "10\Debuggers\x64\cdb.exe" } |
+              Where-Object { Test-Path $_ } | Select-Object -First 1
+            if ($known) { return $known }
+            Get-ChildItem $kitRoots -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\x64\\' } |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          $cdb = Find-Cdb
+          if (-not $cdb) {
+            Write-Host "cdb.exe not found; installing the Windows SDK debuggers"
+            choco install windows-sdk-10-version-2004-windbg -y --no-progress | Out-Host
+            $kitRoots = @("${env:ProgramFiles(x86)}\Windows Kits", "$env:ProgramFiles\Windows Kits") |
+              Where-Object { Test-Path $_ }
+            $cdb = Find-Cdb
+          }
+          if ($cdb) {
+            Write-Host "cdb: $cdb"
+            "CDB_EXE=$cdb" >> $env:GITHUB_ENV
+          } else {
+            Write-Warning "cdb.exe unavailable; hung cases will report windows and output only"
+          }
+
+      - name: Run each test case with a per-case timeout
+        shell: pwsh
+        env:
+          YAMS_TEST_SAFE_SINGLE_INSTANCE: "1"
+          YAMS_SQLITE_MINIMAL_PRAGMAS: "1"
+          YAMS_SQLITE_VEC_INIT_TIMEOUT_MS: "1500"
+          YAMS_SQLITE_BUSY_TIMEOUT_MS: "1000"
+          YAMS_VDB_IN_MEMORY: "1"
+          YAMS_SQLITE_VEC_SKIP_INIT: "1"
+          YAMS_DISABLE_VECTORS: "1"
+          YAMS_TESTING: "1"
+          TEST_BINARY: ${{ inputs.test_binary || 'catch2_search_service' }}
+          CASE_TIMEOUT_S: ${{ inputs.case_timeout_s || '120' }}
+          TEST_FILTER: ${{ inputs.test_filter || '' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($candidate in @("$env:BUILD_DIR/build-debug/conan/conanbuild.ps1",
+                                   "$env:BUILD_DIR/conan/conanbuild.ps1")) {
+            if (Test-Path $candidate) { . $candidate; break }
+          }
+          $exe = Join-Path $env:BUILD_DIR "tests\$env:TEST_BINARY.exe"
+          if (-not (Test-Path $exe)) { Write-Error "Test binary not found: $exe"; exit 1 }
+          $exe = (Resolve-Path $exe).Path
+          $timeoutMs = [int]$env:CASE_TIMEOUT_S * 1000
+
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class HangWindows {
+            delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+            [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+            [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+            static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+            static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+            [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+            public static List<string> For(uint pid) {
+              var found = new List<string>();
+              EnumWindows((h, l) => {
+                uint owner;
+                GetWindowThreadProcessId(h, out owner);
+                if (owner == pid) {
+                  var t = new StringBuilder(512);
+                  GetWindowText(h, t, t.Capacity);
+                  var c = new StringBuilder(256);
+                  GetClassName(h, c, c.Capacity);
+                  found.Add(String.Format("hwnd=0x{0:x} visible={1} class='{2}' title='{3}'",
+                                          h.ToInt64(), IsWindowVisible(h), c, t));
+                }
+                return true;
+              }, IntPtr.Zero);
+              return found;
+            }
+          }
+          "@
+
+          # Evidence for a hung case, gathered before it is killed: its top-level windows (a
+          # modal CRT assert/abort dialog shows up here), any WER helper, and every thread's
+          # stack plus !analyze from cdb.
+          function Show-HangEvidence([int]$procId) {
+            Write-Host "--- top-level windows of pid $procId ---"
+            $wins = [HangWindows]::For([uint32]$procId)
+            if ($wins.Count -eq 0) { Write-Host "(none)" } else { $wins | ForEach-Object { Write-Host $_ } }
+            Write-Host "--- WER / JIT debugger processes ---"
+            Get-Process -Name WerFault, WerFaultSecure, vsjitdebugger -ErrorAction SilentlyContinue |
+              Format-Table Id, ProcessName, MainWindowTitle -AutoSize | Out-String | Write-Host
+            if (-not $env:CDB_EXE) { return }
+            $symPath = "$(Split-Path $exe);srv*$env:RUNNER_TEMP\sym*https://msdl.microsoft.com/download/symbols"
+            $cdbOut = Join-Path $env:RUNNER_TEMP "cdb-$procId.txt"
+            $cmds = ".reload;~*kpn 80;!analyze -v -hang;qd"
+            $cdbArgs = "-p $procId -lines -y `"$symPath`" -c `"$cmds`""
+            $dbg = Start-Process -FilePath $env:CDB_EXE -ArgumentList $cdbArgs -NoNewWindow -PassThru `
+              -RedirectStandardOutput $cdbOut -RedirectStandardError "$cdbOut.err"
+            if (-not $dbg.WaitForExit(600000)) {
+              Write-Host "cdb did not finish within 600s; killing it"
+              Stop-Process -Id $dbg.Id -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host "--- cdb: ~*kpn, !analyze -v -hang ---"
+            Get-Content $cdbOut -ErrorAction SilentlyContinue | Write-Host
+            Get-Content "$cdbOut.err" -ErrorAction SilentlyContinue | Write-Host
+          }
+
+          # Catch2 v3: --list-tests with quiet verbosity prints one test name per line.
+          $listArgs = @("--list-tests", "--verbosity", "quiet")
+          if ($env:TEST_FILTER) { $listArgs = @($env:TEST_FILTER) + $listArgs }
+          $names = @(& $exe @listArgs 2>$null | Where-Object { $_ -and $_.Trim() })
+          Write-Host "Found $($names.Count) test cases in $env:TEST_BINARY (filter '$env:TEST_FILTER')"
+          if ($names.Count -eq 0) { Write-Error "No test cases matched"; exit 1 }
+
+          $hung = @()
+          $failed = @()
+          $results = foreach ($name in $names) {
+            # Catch2 test specs treat \ , [ ] specially; escape them to match the exact name.
+            $spec = $name -replace '([\\,\[\]])', '\$1'
+            $out = Join-Path $env:RUNNER_TEMP "case.out"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            # -s / -d yes print every assertion and section as it runs, so a hang shows how far
+            # the case got; stderr carries CRT assertion reports (tests/support/catch2_main.cpp).
+            $p = Start-Process -FilePath $exe -ArgumentList "`"$spec`" -s -d yes" `
+              -NoNewWindow -PassThru -RedirectStandardOutput $out `
+              -RedirectStandardError "$out.err"
+            $finished = $p.WaitForExit($timeoutMs)
+            $sw.Stop()
+            if (-not $finished) {
+              $status = "HUNG"
+              $hung += $name
+              Write-Host "::group::HUNG after $($env:CASE_TIMEOUT_S)s: $name"
+              Write-Host "--- stdout (tail) ---"
+              Get-Content $out -Tail 80 -ErrorAction SilentlyContinue | Write-Host
+              Write-Host "--- stderr (tail) ---"
+              Get-Content "$out.err" -Tail 80 -ErrorAction SilentlyContinue | Write-Host
+              Show-HangEvidence $p.Id
+              Write-Host "::endgroup::"
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            } elseif ($p.ExitCode -ne 0) {
+              $status = "FAIL($($p.ExitCode))"
+              $failed += $name
+              Write-Host "::group::FAIL($($p.ExitCode)): $name"
+              Write-Host "--- stdout (tail) ---"
+              Get-Content $out -Tail 80 -ErrorAction SilentlyContinue | Write-Host
+              Write-Host "--- stderr (tail) ---"
+              Get-Content "$out.err" -Tail 80 -ErrorAction SilentlyContinue | Write-Host
+              Write-Host "::endgroup::"
+            } else {
+              $status = "ok"
+            }
+            [pscustomobject]@{ Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1);
+                               Status = $status; Case = $name }
+          }
+
+          $results | Sort-Object Seconds -Descending | Format-Table -AutoSize | Out-String -Width 300
+          "## $env:TEST_BINARY on Windows" >> $env:GITHUB_STEP_SUMMARY
+          "| seconds | status | case |" >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          $results | Sort-Object Seconds -Descending | ForEach-Object {
+            "| $($_.Seconds) | $($_.Status) | $($_.Case) |" >> $env:GITHUB_STEP_SUMMARY
+          }
+          if ($hung.Count -gt 0 -or $failed.Count -gt 0) {
+            Write-Host "Hung: $($hung -join '; ')"
+            Write-Host "Failed: $($failed -join '; ')"
+            exit 1
+          }

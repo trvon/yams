@@ -62,6 +62,7 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
+#include <yams/memory_sync/apply_health.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine.h>
@@ -204,6 +205,18 @@ public:
         std::string lastInboundFailureStage;
         std::string lastInboundFailure;
         std::uint64_t lastInboundFailureAgeMs{0};
+        /// Apply-path health: deferred records, stage failures, and outbound-publish outcomes.
+        /// `failedCycles` counts reconciliation failures; apply.applyFailedCycles counts
+        /// reconciled cycles in which an inbound apply stage hard-failed.
+        memory_sync::ApplyHealthSnapshot apply;
+        /// Writers this node durably quarantined. Session failures are transient and
+        /// retried; only a writer whose history contradicts its authenticated commitments is
+        /// quarantined, and that stays until an operator re-enrolls a new corpus epoch.
+        std::uint64_t quarantinedWriters{0};
+        std::uint64_t outboundSessions{0};
+        std::uint64_t outboundFailures{0};
+        std::string lastOutboundFailure;
+        std::uint64_t lastOutboundFailureAgeMs{0};
     };
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);
@@ -455,6 +468,12 @@ public:
     }
     void testingApplyMemorySyncWinners() { applyMemorySyncWinners(); }
     void testingPublishMemorySyncBackfill() { publishMemorySyncBackfill(); }
+    /// Let the next apply cycle reach the rate-limited outbound backfill immediately, so a test
+    /// can drive a bounded number of full sync cycles without wall-clock waits.
+    void testingExpireMemorySyncBackfillSchedule() {
+        std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
+        nextMemorySyncBackfill_ = {};
+    }
     void testingSetMemorySyncBackfillItemBudget(std::size_t budget) {
         std::lock_guard<std::mutex> lock(memorySyncBackfillMutex_);
         memorySyncBackfillState_.itemBudgetPerCycle = std::max<std::size_t>(budget, 1);
@@ -723,6 +742,11 @@ public:
             databaseManager_->setContentStore(std::move(store));
         }
     }
+    void __test_setKgStore(std::shared_ptr<metadata::KnowledgeGraphStore> store) {
+        if (databaseManager_) {
+            databaseManager_->setKgStore(std::move(store));
+        }
+    }
     void __test_setRetrievalSessionManager(std::unique_ptr<RetrievalSessionManager> sessions) {
         retrievalSessions_ = std::move(sessions);
     }
@@ -839,7 +863,7 @@ private:
     void publishMemorySyncBackfill() noexcept;
     void notifyMemorySyncStage(std::string_view stage) noexcept;
     void notifyMemorySyncDeleteOutboxStage(std::string_view stage) noexcept;
-    Result<std::size_t> applyMemorySyncContentBlobs();
+    Result<memory_sync::ApplyStagePass> applyMemorySyncContentBlobs();
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                                               yams::compat::stop_token token);
     bool finalizeDatabaseStartup(const std::filesystem::path& dbPath,
@@ -993,21 +1017,24 @@ private:
     std::atomic<std::uint64_t> memorySyncApplyAttempts_{0};
     std::atomic<std::uint64_t> memorySyncBackfillAttempts_{0};
     bool memorySyncVectorRebuildDirty_{false};
+    // Deferred-record ages, stage failures, and publish outcomes for status; internally locked.
+    memory_sync::ApplyHealth memorySyncApplyHealth_;
     struct MemorySyncBackfillState {
         enum class Domain { Documents, Vectors, Topology };
 
         std::int64_t documentIdCursor{0};
         std::string vectorDocumentHashCursor;
         std::string vectorChunkIdCursor;
-        bool topologySnapshotInitialized{false};
-        std::vector<std::string> topologyNodeTypes;
-        std::size_t topologyTypeIndex{0};
-        std::unordered_map<std::string, std::size_t> topologyNodeOffsets;
-        std::size_t topologyEdgeOffset{0};
-        std::int64_t topologyNodeId{0};
-        std::string topologyNodeKey;
-        bool topologyNodeActive{false};
-        Domain nextDomain{Domain::Documents};
+        // Topology is swept in repeating passes: every node, then every edge (each with its
+        // endpoints), then this writer's committed topology records, so edges and nodes created
+        // or changed after a pass went by are published, and records the local graph dropped
+        // are retracted, on a later pass. The cursors are keyset positions (AUTOINCREMENT ids,
+        // logical keys), so inserts and deletes between items never shift them.
+        enum class TopologyPhase { Nodes, Edges, Retractions };
+        TopologyPhase topologyPhase{TopologyPhase::Nodes};
+        std::int64_t topologyNodeIdCursor{0};
+        std::int64_t topologyEdgeIdCursor{0};
+        std::string topologyRetractionKeyCursor;
         std::size_t itemBudgetPerCycle{256};
         std::chrono::milliseconds timeBudgetPerCycle{100};
     } memorySyncBackfillState_;

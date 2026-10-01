@@ -14,6 +14,7 @@ exclude_docs: |
 
 nav:
   - Home: index.md
+  - Install: install.md
   - Build: BUILD.md
   - Benchmarks: benchmarks/index.md
   - Roadmap: roadmap.md

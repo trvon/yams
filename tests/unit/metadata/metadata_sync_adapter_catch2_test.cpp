@@ -6,6 +6,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -511,4 +512,49 @@ TEST_CASE("metadata sync adapter rejects publishing without a content-hash ident
     const auto published = adapter.publish(info, {});
     REQUIRE_FALSE(published.has_value());
     CHECK(published.error().code == yams::ErrorCode::InvalidArgument);
+}
+
+TEST_CASE("metadata sync adapter defers a document whose content has not replicated yet",
+          "[metadata][memory-sync][prerequisite][defer]") {
+    TempDirGuard temp;
+    RepoFixture repoA("meta_sync_defer_a_");
+    RepoFixture repoB("meta_sync_defer_b_");
+    MemorySyncService syncA{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    MemorySyncService syncB{makeBackend(temp.path / "sync"), MemorySyncConfig{"B", 50}};
+    MetadataSyncAdapter publisher{*repoA.repository_, syncA};
+
+    const auto ready = makeDocument("/corpus/ready.md", std::string(kDocHash));
+    const auto waiting = makeDocument("/corpus/waiting.md", std::string(kOtherDocHash));
+    REQUIRE(publisher.publish(ready, {}).has_value());
+    REQUIRE(publisher.publish(waiting, {}).has_value());
+
+    // Only the ready document's content bytes have landed locally.
+    std::set<std::string> localContent{std::string(kDocHash)};
+    const auto contentExists = [&](std::string_view hash) -> yams::Result<bool> {
+        return localContent.contains(std::string(hash));
+    };
+
+    MetadataSyncAdapter consumer{*repoB.repository_, syncB, contentExists};
+    const auto first = consumer.apply();
+    REQUIRE(first.has_value());
+    CHECK(first.value() == 1);
+    const auto readyApplied = repoB.repository_->getDocumentByHash(std::string(kDocHash));
+    REQUIRE(readyApplied.has_value());
+    CHECK(readyApplied.value().has_value());
+    const auto waitingBefore = repoB.repository_->getDocumentByHash(std::string(kOtherDocHash));
+    REQUIRE(waitingBefore.has_value());
+    CHECK_FALSE(waitingBefore.value().has_value());
+    CHECK(consumer.deferredKeys() ==
+          std::vector<std::string>{"document/" + std::string(kOtherDocHash)});
+
+    // The deferred winner stays pending and becomes visible once its content lands.
+    localContent.insert(std::string(kOtherDocHash));
+    MetadataSyncAdapter retry{*repoB.repository_, syncB, contentExists};
+    const auto second = retry.apply();
+    REQUIRE(second.has_value());
+    CHECK(second.value() == 1);
+    const auto waitingAfter = repoB.repository_->getDocumentByHash(std::string(kOtherDocHash));
+    REQUIRE(waitingAfter.has_value());
+    CHECK(waitingAfter.value().has_value());
+    CHECK(retry.deferredKeys().empty());
 }

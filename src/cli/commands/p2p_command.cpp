@@ -16,6 +16,7 @@
 
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/p2p_status_format.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/core/types.h>
@@ -175,7 +176,9 @@ Result<std::string> formatPeers(const daemon::MemorySyncResponse& response, bool
     return out.str();
 }
 
-Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, bool json) {
+} // namespace
+
+Result<std::string> formatP2pStatus(const daemon::MemorySyncResponse& response, bool json) {
     if (!response.started) {
         return Error{ErrorCode::InvalidState, "memory sync service is not started"};
     }
@@ -192,11 +195,36 @@ Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, boo
             << " failed_cycles=" << response.failedCycles
             << " last_success_age_ms=" << response.lastSuccessAgeMs
             << " inbound_sessions=" << response.inboundSessions
-            << " inbound_failures=" << response.inboundFailures;
+            << " inbound_failures=" << response.inboundFailures
+            << " apply_cycles=" << response.applyCycles
+            << " apply_failed_cycles=" << response.applyFailedCycles
+            << " deferred=" << response.deferredRecords()
+            << " oldest_deferral_age_ms=" << response.oldestDeferralAgeMs
+            << " publish_skipped_cycles=" << response.publishSkippedCycles
+            << " publish_failed_cycles=" << response.publishFailedCycles
+            << " quarantined_writers=" << response.quarantinedWriters
+            << " outbound_sessions=" << response.outboundSessions
+            << " outbound_failures=" << response.outboundFailures;
+        out << "\napply deferred_content=" << response.deferredContent
+            << " deferred_metadata=" << response.deferredMetadata
+            << " deferred_vector=" << response.deferredVector
+            << " deferred_topology=" << response.deferredTopology
+            << " failures_content=" << response.applyFailuresContent
+            << " failures_metadata=" << response.applyFailuresMetadata
+            << " failures_vector=" << response.applyFailuresVector
+            << " failures_topology=" << response.applyFailuresTopology;
+        if (response.applyFailures() > 0) {
+            out << "\nlast apply failure (" << response.lastApplyFailureAgeMs / 1000 << "s ago) at "
+                << response.lastApplyFailureStage << ": " << response.lastApplyFailure;
+        }
         if (response.inboundFailures > 0) {
             out << "\nlast inbound failure (" << response.lastInboundFailureAgeMs / 1000
                 << "s ago) at " << response.lastInboundFailureStage << ": "
                 << response.lastInboundFailure;
+        }
+        if (response.outboundFailures > 0) {
+            out << "\nlast outbound failure (" << response.lastOutboundFailureAgeMs / 1000
+                << "s ago) to " << response.lastOutboundFailure;
         }
         return out.str();
     }
@@ -223,10 +251,37 @@ Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, boo
                                           {"error", response.lastInboundFailure},
                                           {"age_ms", response.lastInboundFailureAgeMs}};
     }
+    output["outbound_sessions"] = response.outboundSessions;
+    output["outbound_failures"] = response.outboundFailures;
+    if (response.outboundFailures > 0) {
+        output["last_outbound_failure"] = {{"error", response.lastOutboundFailure},
+                                           {"age_ms", response.lastOutboundFailureAgeMs}};
+    }
+    output["quarantined_writers"] = response.quarantinedWriters;
+    nlohmann::json apply;
+    apply["cycles"] = response.applyCycles;
+    apply["failed_cycles"] = response.applyFailedCycles;
+    apply["deferred"] = {{"total", response.deferredRecords()},
+                         {"content", response.deferredContent},
+                         {"metadata", response.deferredMetadata},
+                         {"vector", response.deferredVector},
+                         {"topology", response.deferredTopology}};
+    apply["oldest_deferral_age_ms"] = response.oldestDeferralAgeMs;
+    apply["failures"] = {{"total", response.applyFailures()},
+                         {"content", response.applyFailuresContent},
+                         {"metadata", response.applyFailuresMetadata},
+                         {"vector", response.applyFailuresVector},
+                         {"topology", response.applyFailuresTopology}};
+    if (response.applyFailures() > 0) {
+        apply["last_failure"] = {{"stage", response.lastApplyFailureStage},
+                                 {"error", response.lastApplyFailure},
+                                 {"age_ms", response.lastApplyFailureAgeMs}};
+    }
+    apply["publish_skipped_cycles"] = response.publishSkippedCycles;
+    apply["publish_failed_cycles"] = response.publishFailedCycles;
+    output["apply"] = std::move(apply);
     return output.dump(2);
 }
-
-} // namespace
 
 class P2PCommand : public ICommand {
 public:
@@ -465,7 +520,7 @@ private:
         if (!response) {
             return response.error();
         }
-        auto output = formatStatus(response.value(), jsonOutput_);
+        auto output = formatP2pStatus(response.value(), jsonOutput_);
         if (!output) {
             return output.error();
         }

@@ -160,8 +160,8 @@ The ONNX plugin supports GPU acceleration via platform-specific execution provid
 ```bash
 # CoreML is included in standard macOS ONNX Runtime builds
 conan install . -o onnxruntime/*:with_gpu=coreml
-meson setup builddir
-meson compile -C builddir
+meson setup build/debug
+meson compile -C build/debug
 ```
 CoreML automatically uses Apple Silicon's Neural Engine and GPU for compatible operations.
 
@@ -169,8 +169,8 @@ CoreML automatically uses Apple Silicon's Neural Engine and GPU for compatible o
 ```bash
 # Download CUDA-enabled ONNX Runtime binary
 conan install . -o onnxruntime/*:with_gpu=cuda
-meson setup builddir
-meson compile -C builddir
+meson setup build/debug
+meson compile -C build/debug
 ```
 Requires CUDA toolkit and cuDNN installed on the system.
 
@@ -178,8 +178,8 @@ Requires CUDA toolkit and cuDNN installed on the system.
 ```powershell
 # Download DirectML-enabled ONNX Runtime binary
 conan install . -o onnxruntime/*:with_gpu=directml
-meson setup builddir
-meson compile -C builddir
+meson setup build/debug
+meson compile -C build/debug
 ```
 DirectML works with any DirectX 12 capable GPU (NVIDIA, AMD, Intel).
 

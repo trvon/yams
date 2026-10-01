@@ -312,6 +312,7 @@ if [[ -z "$BUILD_DIR" ]]; then
     # Look for common build directories, preferring active Meson trees with compile_commands.json
     for candidate in \
         "builddir-nosan" \
+        "build/debug" \
         "builddir" \
         "builddir-asan" \
         "builddir-ubsan" \

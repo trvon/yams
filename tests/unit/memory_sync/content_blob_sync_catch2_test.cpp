@@ -129,3 +129,37 @@ TEST_CASE("content blob adapter rejects non-content-addressed identifiers",
     REQUIRE_FALSE(stored.has_value());
     CHECK(stored.error().code == yams::ErrorCode::InvalidArgument);
 }
+
+TEST_CASE("content blob winner pass reports a failure and a deferral from the same scan",
+          "[memory-sync][content-blob][defer]") {
+    TempDirGuard temp;
+    auto writerStore = makeContentStore(temp.path / "content-writer");
+    auto readerStore = makeContentStore(temp.path / "content-reader");
+    MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"W", 50}};
+    MemorySyncService reader{makeBackend(temp.path / "sync"), MemorySyncConfig{"R", 50}};
+
+    // A corrupt blob: its key claims one hash while the replicated bytes hash to another.
+    const auto claimed = digest(bytes("claimed-bytes"));
+    REQUIRE(writer.publish("content-blob/" + claimed, bytes("different-bytes")).has_value());
+    auto winners = reader.syncOnce();
+    REQUIRE(winners.has_value());
+    REQUIRE(winners.value().contains("content-blob/" + claimed));
+
+    // A winner whose bytes have not reached the reader's sync cache yet.
+    const auto late = bytes("late-bytes");
+    const auto lateHash = digest(late);
+    ContentBlobSyncAdapter writerAdapter{*writerStore, writer};
+    REQUIRE(writerAdapter.store(lateHash, late).has_value());
+    const auto writerView = writer.syncOnce();
+    REQUIRE(writerView.has_value());
+    const auto lateKey = "content-blob/" + lateHash;
+    winners.value().emplace(lateKey, writerView.value().at(lateKey));
+
+    ContentBlobSyncAdapter readerAdapter{*readerStore, reader};
+    const auto pass = readerAdapter.applyWinners(winners.value());
+    REQUIRE(pass.failure.has_value());
+    CHECK(pass.failure->code == yams::ErrorCode::HashMismatch);
+    REQUIRE(pass.deferredKeys.size() == 1);
+    CHECK(pass.deferredKeys.front() == lateKey);
+    CHECK(pass.applied == 0);
+}

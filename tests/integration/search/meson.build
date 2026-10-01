@@ -18,11 +18,10 @@ else
 
   dbg = (get_option('buildtype') == 'debug')
   if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
-    # Catch2 needs its main library
-    catch2_main_dep = dependency('catch2-with-main', required: false)
-    if not catch2_main_dep.found()
-      catch2_main_dep = dependency('Catch2WithMain', required: false, method: 'cmake')
-    endif
+    # Use the shared tests/support/catch2_main.cpp (catch2_main_dep from tests/meson.build).
+    # Meson variables are global: reassigning catch2_main_dep here to Catch2's own main used to
+    # leak into every test executable defined after this subdir, dropping the shared main's
+    # argument normalization and Windows CRT-report setup.
 
     hybrid_search_integration_exe = executable('yams_hybrid_search_integration',
       hybrid_search_integration_srcs,

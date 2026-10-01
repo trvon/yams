@@ -105,10 +105,20 @@ struct PeerHandshakeResult {
     [[nodiscard]] std::uint64_t peerWatermark(std::string_view writerId) const;
 };
 
-/// Compare only the TLS-authenticated peer writer when both sides claim the same
-/// counter. Missing or malformed equal-counter commitments fail closed.
+/// Resolves the local durable commitment of the authenticated peer writer at a counter.
+using PeerPrefixResolver =
+    std::function<Result<memory_sync::WriterHistoryCommitment>(std::uint64_t counter)>;
+
+/// Decide whether the TLS-authenticated peer writer's history contradicts local history.
+/// `true` is evidence for durable quarantine; an Error means the comparison is not possible
+/// now (a transient state) and the session should abort without quarantine. `local` is live
+/// state, so another session with the same peer may have advanced it past the handshake:
+/// a local prefix between the verified proof and the frozen frontier is still consistent,
+/// and one beyond the frontier is compared at the frontier through `resolveLocalPrefix`.
+/// Missing or malformed equal-counter commitments fail closed.
 Result<bool> requiresPeerWriterQuarantine(const memory_sync::ReplicationState& local,
-                                          const PeerHandshakeResult& peer);
+                                          const PeerHandshakeResult& peer,
+                                          const PeerPrefixResolver& resolveLocalPrefix = {});
 
 /// Client role: hello -> hello_ack -> state -> peer state.
 Result<PeerHandshakeResult> initiatePeerHandshake(P2pConnection& connection,

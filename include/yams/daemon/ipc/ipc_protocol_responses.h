@@ -5005,6 +5005,40 @@ struct MemorySyncResponse {
     std::string lastInboundFailureStage;
     std::string lastInboundFailure;
     std::uint64_t lastInboundFailureAgeMs{0};
+    // Durable writer quarantines and outbound sessions, also protobuf-only. Inbound and outbound
+    // session failures are aborted and retried; quarantinedWriters counts only writers whose
+    // history contradicted their authenticated commitments.
+    std::uint64_t quarantinedWriters{0};
+    std::uint64_t outboundSessions{0};
+    std::uint64_t outboundFailures{0};
+    std::string lastOutboundFailure;
+    std::uint64_t lastOutboundFailureAgeMs{0};
+    // Apply-path health, also protobuf-only. applyFailedCycles counts reconciled cycles in which
+    // an inbound apply stage hard-failed; failedCycles keeps meaning reconciliation failures.
+    std::uint64_t applyCycles{0};
+    std::uint64_t applyFailedCycles{0};
+    std::uint64_t deferredContent{0};
+    std::uint64_t deferredMetadata{0};
+    std::uint64_t deferredVector{0};
+    std::uint64_t deferredTopology{0};
+    std::uint64_t oldestDeferralAgeMs{0};
+    std::uint64_t applyFailuresContent{0};
+    std::uint64_t applyFailuresMetadata{0};
+    std::uint64_t applyFailuresVector{0};
+    std::uint64_t applyFailuresTopology{0};
+    std::string lastApplyFailureStage;
+    std::string lastApplyFailure;
+    std::uint64_t lastApplyFailureAgeMs{0};
+    std::uint64_t publishSkippedCycles{0};
+    std::uint64_t publishFailedCycles{0};
+
+    std::uint64_t deferredRecords() const noexcept {
+        return deferredContent + deferredMetadata + deferredVector + deferredTopology;
+    }
+    std::uint64_t applyFailures() const noexcept {
+        return applyFailuresContent + applyFailuresMetadata + applyFailuresVector +
+               applyFailuresTopology;
+    }
 
     template <typename Serializer>
     requires IsSerializer<Serializer>

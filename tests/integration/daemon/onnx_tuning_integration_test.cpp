@@ -424,8 +424,8 @@ TEST_CASE("AbiModelProviderAdapter acquires SlotGuard during real embedding",
     opts.modelPoolLazyLoading = false; // Preload model on startup
     opts.preloadModels = {"all-MiniLM-L6-v2"};
 
-    // Set plugin directory to builddir/plugins
-    opts.pluginDir = std::filesystem::current_path() / "builddir" / "plugins";
+    // Set plugin directory to build/debug/plugins
+    opts.pluginDir = std::filesystem::current_path() / "build/debug" / "plugins";
 
     // Configure ONNX plugin with preferred model (uses plugin's model resolution)
     opts.pluginConfigs["onnx_plugin"] = R"({"preferred_model": "all-MiniLM-L6-v2"})";
@@ -588,7 +588,7 @@ TEST_CASE("Config selecting onnx backend uses ONNX provider for embeddings",
     opts.configureModelPool = true;
     opts.modelPoolLazyLoading = false;
     opts.preloadModels = {"all-MiniLM-L6-v2"};
-    opts.pluginDir = std::filesystem::current_path() / "builddir" / "plugins";
+    opts.pluginDir = std::filesystem::current_path() / "build/debug" / "plugins";
     opts.pluginConfigs["onnx_plugin"] = R"({"preferred_model": "all-MiniLM-L6-v2"})";
     opts.configPath = configPath;
 

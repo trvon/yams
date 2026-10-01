@@ -144,6 +144,27 @@ TEST_CASE("ProtoSerializer MemorySync request and response preserve binary value
     response.lastInboundFailureStage = "handshake";
     response.lastInboundFailure = "peer is not enrolled";
     response.lastInboundFailureAgeMs = 1500;
+    response.applyCycles = 1268;
+    response.applyFailedCycles = 3;
+    response.deferredContent = 1;
+    response.deferredMetadata = 2;
+    response.deferredVector = 17;
+    response.deferredTopology = 4;
+    response.oldestDeferralAgeMs = 90'000;
+    response.applyFailuresContent = 5;
+    response.applyFailuresMetadata = 6;
+    response.applyFailuresVector = 7;
+    response.applyFailuresTopology = 8;
+    response.lastApplyFailureStage = "topology";
+    response.lastApplyFailure = "topology edge identity does not match logical key";
+    response.lastApplyFailureAgeMs = 4200;
+    response.publishSkippedCycles = 9;
+    response.publishFailedCycles = 10;
+    response.quarantinedWriters = 1;
+    response.outboundSessions = 40;
+    response.outboundFailures = 3;
+    response.lastOutboundFailure = "peer-b: p2p peer made no causal progress";
+    response.lastOutboundFailureAgeMs = 2500;
     Message responseMessage{};
     responseMessage.requestId = 91;
     responseMessage.payload = Response{response};
@@ -176,6 +197,30 @@ TEST_CASE("ProtoSerializer MemorySync request and response preserve binary value
     CHECK(roundTrippedResponse->lastInboundFailureStage == "handshake");
     CHECK(roundTrippedResponse->lastInboundFailure == "peer is not enrolled");
     CHECK(roundTrippedResponse->lastInboundFailureAgeMs == 1500);
+    CHECK(roundTrippedResponse->quarantinedWriters == 1);
+    CHECK(roundTrippedResponse->outboundSessions == 40);
+    CHECK(roundTrippedResponse->outboundFailures == 3);
+    CHECK(roundTrippedResponse->lastOutboundFailure == "peer-b: p2p peer made no causal progress");
+    CHECK(roundTrippedResponse->lastOutboundFailureAgeMs == 2500);
+    CHECK(roundTrippedResponse->applyCycles == 1268);
+    CHECK(roundTrippedResponse->applyFailedCycles == 3);
+    CHECK(roundTrippedResponse->deferredContent == 1);
+    CHECK(roundTrippedResponse->deferredMetadata == 2);
+    CHECK(roundTrippedResponse->deferredVector == 17);
+    CHECK(roundTrippedResponse->deferredTopology == 4);
+    CHECK(roundTrippedResponse->deferredRecords() == 24);
+    CHECK(roundTrippedResponse->oldestDeferralAgeMs == 90'000);
+    CHECK(roundTrippedResponse->applyFailuresContent == 5);
+    CHECK(roundTrippedResponse->applyFailuresMetadata == 6);
+    CHECK(roundTrippedResponse->applyFailuresVector == 7);
+    CHECK(roundTrippedResponse->applyFailuresTopology == 8);
+    CHECK(roundTrippedResponse->applyFailures() == 26);
+    CHECK(roundTrippedResponse->lastApplyFailureStage == "topology");
+    CHECK(roundTrippedResponse->lastApplyFailure ==
+          "topology edge identity does not match logical key");
+    CHECK(roundTrippedResponse->lastApplyFailureAgeMs == 4200);
+    CHECK(roundTrippedResponse->publishSkippedCycles == 9);
+    CHECK(roundTrippedResponse->publishFailedCycles == 10);
 }
 
 TEST_CASE("ProtoSerializer StatusResponse preserves daemon log file path",

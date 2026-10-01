@@ -45,13 +45,13 @@
 			"label": "build (Debug)",
 			"type": "shell",
 			"windows": {
-				"command": "builddir\\build-debug\\conan\\conanbuild.ps1; meson compile -j 4 -C builddir"
+				"command": "build/debug\\build-debug\\conan\\conanbuild.ps1; meson compile -j 4 -C build/debug"
 			},
 			"linux": {
-				"command": "meson compile -j 4 -C builddir"
+				"command": "meson compile -j 4 -C build/debug"
 			},
 			"osx": {
-				"command": "meson compile -j 4 -C builddir"
+				"command": "meson compile -j 4 -C build/debug"
 			},
 			"problemMatcher": [
 				"$msCompile"
@@ -69,13 +69,13 @@
 			"label": "meson-build-debug",
 			"type": "shell",
 			"windows": {
-				"command": "if (Test-Path builddir\\build-debug\\conan\\conanbuild.ps1) { builddir\\build-debug\\conan\\conanbuild.ps1 }; meson compile -C builddir"
+				"command": "if (Test-Path build/debug\\build-debug\\conan\\conanbuild.ps1) { build/debug\\build-debug\\conan\\conanbuild.ps1 }; meson compile -C build/debug"
 			},
 			"linux": {
-				"command": "meson compile -j 4 -C builddir"
+				"command": "meson compile -j 4 -C build/debug"
 			},
 			"osx": {
-				"command": "meson compile -j 4 -C builddir"
+				"command": "meson compile -j 4 -C build/debug"
 			},
 			"problemMatcher": [
 				"$msCompile"
@@ -134,7 +134,7 @@
 			"dependsOn": [
 				"build (Debug)"
 			],
-			"command": "meson test -j 4 -C builddir --print-errorlogs",
+			"command": "meson test -j 4 -C build/debug --print-errorlogs",
 			"problemMatcher": [
 				"$gcc"
 			],
@@ -151,13 +151,13 @@
 			"label": "clean",
 			"type": "shell",
 			"windows": {
-				"command": "Remove-Item -Recurse -Force builddir,build -ErrorAction SilentlyContinue"
+				"command": "Remove-Item -Recurse -Force build/debug,build -ErrorAction SilentlyContinue"
 			},
 			"linux": {
-				"command": "rm -rf builddir build"
+				"command": "rm -rf build/debug build"
 			},
 			"osx": {
-				"command": "rm -rf builddir build"
+				"command": "rm -rf build/debug build"
 			},
 			"problemMatcher": [],
 			"group": "none"
@@ -206,7 +206,7 @@
 		{
 			"label": "triage: client timeout cases",
 			"type": "shell",
-			"command": "for c in \"Client timeout recovery: Immediate EOF detection and retry\" \"Client timeout recovery: Honors YAMS_IPC_TIMEOUT_MS for idle reap\" \"Client timeout recovery: Streaming request connection handling\" \"Client timeout recovery: Connection pool management\" \"Client timeout recovery: Rapid request cycle\" \"Client timeout recovery: Daemon restart handling\" \"Client timeout recovery: Error message quality\" \"Client timeout recovery: Connection refused when daemon down\" \"Client timeout recovery: Shutdown cancels in-flight request\" \"Client timeout recovery: Tag filtering matrix for list and search\"; do echo \"=== $c\"; ./builddir/tests/integration/daemon/yams_client_timeout_recovery_tests_catch2 \"$c\" >/tmp/ctr_case.log 2>&1; code=$?; echo \"exit=$code\"; if [ $code -ne 0 ]; then tail -n 120 /tmp/ctr_case.log; break; fi; done"
+			"command": "for c in \"Client timeout recovery: Immediate EOF detection and retry\" \"Client timeout recovery: Honors YAMS_IPC_TIMEOUT_MS for idle reap\" \"Client timeout recovery: Streaming request connection handling\" \"Client timeout recovery: Connection pool management\" \"Client timeout recovery: Rapid request cycle\" \"Client timeout recovery: Daemon restart handling\" \"Client timeout recovery: Error message quality\" \"Client timeout recovery: Connection refused when daemon down\" \"Client timeout recovery: Shutdown cancels in-flight request\" \"Client timeout recovery: Tag filtering matrix for list and search\"; do echo \"=== $c\"; ./build/debug/tests/integration/daemon/yams_client_timeout_recovery_tests_catch2 \"$c\" >/tmp/ctr_case.log 2>&1; code=$?; echo \"exit=$code\"; if [ $code -ne 0 ]; then tail -n 120 /tmp/ctr_case.log; break; fi; done"
 		},
 		{
 			"label": "triage: tsan signatures",
@@ -216,43 +216,43 @@
 		{
 			"label": "triage: client-timeout verbose",
 			"type": "shell",
-			"command": "meson test -C builddir \"yams:client_timeout_recovery\" --print-errorlogs --test-args=\"-s\""
+			"command": "meson test -C build/debug \"yams:client_timeout_recovery\" --print-errorlogs --test-args=\"-s\""
 		},
 		{
 			"label": "triage: find failed assertion",
 			"type": "shell",
-			"command": "python3 - <<'PY'\nfrom pathlib import Path\ntext=Path('builddir/meson-logs/testlog.txt').read_text(errors='replace')\nfor pat in ['FAILED:', 'failed:', 'REQUIRE(', 'CHECK(', 'Assertion', 'test cases:']:\n    print('\\n--',pat)\n    for i,line in enumerate(text.splitlines(),1):\n        if pat in line:\n            print(i,line)\n            if pat!='test cases:':\n                pass\n            \nPY"
+			"command": "python3 - <<'PY'\nfrom pathlib import Path\ntext=Path('build/debug/meson-logs/testlog.txt').read_text(errors='replace')\nfor pat in ['FAILED:', 'failed:', 'REQUIRE(', 'CHECK(', 'Assertion', 'test cases:']:\n    print('\\n--',pat)\n    for i,line in enumerate(text.splitlines(),1):\n        if pat in line:\n            print(i,line)\n            if pat!='test cases:':\n                pass\n            \nPY"
 		},
 		{
 			"label": "triage: failed-line-context",
 			"type": "shell",
-			"command": "python3 - <<'PY'\nfrom pathlib import Path\nlines=Path('builddir/meson-logs/testlog.txt').read_text(errors='replace').splitlines()\nfor i,l in enumerate(lines):\n    if 'FAILED:' in l:\n        s=max(0,i-6); e=min(len(lines),i+12)\n        print('\\n'.join(f'{j+1}: {lines[j]}' for j in range(s,e)))\n        print('---')\nPY"
+			"command": "python3 - <<'PY'\nfrom pathlib import Path\nlines=Path('build/debug/meson-logs/testlog.txt').read_text(errors='replace').splitlines()\nfor i,l in enumerate(lines):\n    if 'FAILED:' in l:\n        s=max(0,i-6); e=min(len(lines),i+12)\n        print('\\n'.join(f'{j+1}: {lines[j]}' for j in range(s,e)))\n        print('---')\nPY"
 		},
 		{
 			"label": "triage: daemon-shutdown failed line",
 			"type": "shell",
-			"command": "python3 - <<'PY'\nfrom pathlib import Path\nlines=Path('builddir/meson-logs/testlog.txt').read_text(errors='replace').splitlines()\nfor i,l in enumerate(lines):\n    if 'FAILED:' in l:\n        s=max(0,i-8); e=min(len(lines),i+12)\n        print('\\n'.join(f'{j+1}: {lines[j]}' for j in range(s,e)))\n        print('---')\nPY"
+			"command": "python3 - <<'PY'\nfrom pathlib import Path\nlines=Path('build/debug/meson-logs/testlog.txt').read_text(errors='replace').splitlines()\nfor i,l in enumerate(lines):\n    if 'FAILED:' in l:\n        s=max(0,i-8); e=min(len(lines),i+12)\n        print('\\n'.join(f'{j+1}: {lines[j]}' for j in range(s,e)))\n        print('---')\nPY"
 		},
 		{
 			"label": "triage: daemon-shutdown verbose",
 			"type": "shell",
-			"command": "meson test -C builddir \"yams:daemon_shutdown_inflight_ops\" --print-errorlogs --test-args=\"-s\" && python3 - <<'PY'\nfrom pathlib import Path\nlines=Path('builddir/meson-logs/testlog.txt').read_text(errors='replace').splitlines()\nfor i,l in enumerate(lines):\n    if 'FAILED:' in l:\n        s=max(0,i-6); e=min(len(lines),i+12)\n        print('\\n'.join(f'{j+1}: {lines[j]}' for j in range(s,e)))\n        print('---')\nPY"
+			"command": "meson test -C build/debug \"yams:daemon_shutdown_inflight_ops\" --print-errorlogs --test-args=\"-s\" && python3 - <<'PY'\nfrom pathlib import Path\nlines=Path('build/debug/meson-logs/testlog.txt').read_text(errors='replace').splitlines()\nfor i,l in enumerate(lines):\n    if 'FAILED:' in l:\n        s=max(0,i-6); e=min(len(lines),i+12)\n        print('\\n'.join(f'{j+1}: {lines[j]}' for j in range(s,e)))\n        print('---')\nPY"
 		},
 		{
 			"label": "stability: daemon-shutdown repeats",
 			"type": "shell",
-			"command": "for i in 1 2 3; do echo \"RUN $i\"; meson test -C builddir \"yams:daemon_shutdown_inflight_ops\" --print-errorlogs || exit 1; done"
+			"command": "for i in 1 2 3; do echo \"RUN $i\"; meson test -C build/debug \"yams:daemon_shutdown_inflight_ops\" --print-errorlogs || exit 1; done"
 		},
 		{
 			"label": "bench: search baseline (adaptive off)",
 			"type": "shell",
-			"command": "mkdir -p bench_results && YAMS_ENABLE_ENV_OVERRIDES=1 YAMS_BENCH_ENABLE_EMBEDDINGS=1 YAMS_BENCH_DOC_COUNT=500 YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK=0 ./builddir/tests/benchmarks/yams_retrieval_service_benchmarks --benchmark_filter='BM_RetrievalService_Search_(Keyword|Hybrid)' --benchmark_repetitions=5 --benchmark_report_aggregates_only=true --benchmark_out=bench_results/search_latency_baseline.json --benchmark_out_format=json",
+			"command": "mkdir -p bench_results && YAMS_ENABLE_ENV_OVERRIDES=1 YAMS_BENCH_ENABLE_EMBEDDINGS=1 YAMS_BENCH_DOC_COUNT=500 YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK=0 ./build/debug/tests/benchmarks/yams_retrieval_service_benchmarks --benchmark_filter='BM_RetrievalService_Search_(Keyword|Hybrid)' --benchmark_repetitions=5 --benchmark_report_aggregates_only=true --benchmark_out=bench_results/search_latency_baseline.json --benchmark_out_format=json",
 			"group": "test"
 		},
 		{
 			"label": "bench: search adaptive fallback",
 			"type": "shell",
-			"command": "mkdir -p bench_results && YAMS_ENABLE_ENV_OVERRIDES=1 YAMS_BENCH_ENABLE_EMBEDDINGS=1 YAMS_BENCH_DOC_COUNT=500 YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK=1 YAMS_SEARCH_ADAPTIVE_MIN_TIER1_HITS=0 ./builddir/tests/benchmarks/yams_retrieval_service_benchmarks --benchmark_filter='BM_RetrievalService_Search_(Keyword|Hybrid)' --benchmark_repetitions=5 --benchmark_report_aggregates_only=true --benchmark_out=bench_results/search_latency_adaptive.json --benchmark_out_format=json",
+			"command": "mkdir -p bench_results && YAMS_ENABLE_ENV_OVERRIDES=1 YAMS_BENCH_ENABLE_EMBEDDINGS=1 YAMS_BENCH_DOC_COUNT=500 YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK=1 YAMS_SEARCH_ADAPTIVE_MIN_TIER1_HITS=0 ./build/debug/tests/benchmarks/yams_retrieval_service_benchmarks --benchmark_filter='BM_RetrievalService_Search_(Keyword|Hybrid)' --benchmark_repetitions=5 --benchmark_report_aggregates_only=true --benchmark_out=bench_results/search_latency_adaptive.json --benchmark_out_format=json",
 			"group": "test"
 		},
 		{
@@ -264,7 +264,7 @@
 		{
 			"label": "bench: search graph rerank",
 			"type": "shell",
-			"command": "mkdir -p bench_results && YAMS_ENABLE_ENV_OVERRIDES=1 YAMS_BENCH_ENABLE_EMBEDDINGS=1 YAMS_BENCH_DOC_COUNT=500 YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK=0 YAMS_SEARCH_ENABLE_GRAPH_RERANK=1 YAMS_SEARCH_GRAPH_RERANK_TOPN=25 YAMS_SEARCH_GRAPH_RERANK_WEIGHT=0.15 YAMS_SEARCH_GRAPH_RERANK_MAX_BOOST=0.20 YAMS_SEARCH_GRAPH_BUDGET_MS=10 ./builddir/tests/benchmarks/yams_retrieval_service_benchmarks --benchmark_filter='BM_RetrievalService_Search_(Keyword|Hybrid)' --benchmark_repetitions=5 --benchmark_report_aggregates_only=true --benchmark_out=bench_results/search_latency_graph_rerank.json --benchmark_out_format=json",
+			"command": "mkdir -p bench_results && YAMS_ENABLE_ENV_OVERRIDES=1 YAMS_BENCH_ENABLE_EMBEDDINGS=1 YAMS_BENCH_DOC_COUNT=500 YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK=0 YAMS_SEARCH_ENABLE_GRAPH_RERANK=1 YAMS_SEARCH_GRAPH_RERANK_TOPN=25 YAMS_SEARCH_GRAPH_RERANK_WEIGHT=0.15 YAMS_SEARCH_GRAPH_RERANK_MAX_BOOST=0.20 YAMS_SEARCH_GRAPH_BUDGET_MS=10 ./build/debug/tests/benchmarks/yams_retrieval_service_benchmarks --benchmark_filter='BM_RetrievalService_Search_(Keyword|Hybrid)' --benchmark_repetitions=5 --benchmark_report_aggregates_only=true --benchmark_out=bench_results/search_latency_graph_rerank.json --benchmark_out_format=json",
 			"group": "test"
 		},
 		{

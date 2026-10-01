@@ -10,6 +10,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
@@ -103,6 +104,14 @@ struct WriterHistoryCommitment {
     std::string digest;
 
     bool operator==(const WriterHistoryCommitment&) const = default;
+};
+
+/// Evidence that a writer's staged window contradicts its authenticated history: a fork, a
+/// forged frontier, a gap, or a record that fails authentication. Only this warrants durable
+/// writer quarantine; local or racy failures are reported as an Error instead.
+struct WriterHistoryViolation {
+    ErrorCode code{ErrorCode::InvalidData};
+    std::string reason;
 };
 
 struct ReplicationState {
@@ -224,10 +233,20 @@ public:
                                                             std::size_t maxRecords,
                                                             std::size_t maxWireBytes);
 
+    /// Commitment for any writer's exact prefix in local durable history.
+    Result<WriterHistoryCommitment> historyCommitmentAt(std::string_view writerId,
+                                                        std::uint64_t counter);
+
     /// Validate a complete bounded incoming session against the authenticated writer's
-    /// advertised frontier before any operation becomes visible.
-    Result<void> validateHistoryExtension(std::span<const MemoryDelta> deltas,
-                                          const WriterHistoryCommitment& expectedFrontier);
+    /// handshake-frozen frontier before any operation becomes visible. Another session with
+    /// the same writer may have advanced the durable prefix since the handshake: staged
+    /// operations at or below it are replays only if their record hashes match durable history
+    /// (any other record there is a fork), and the rest must chain from it exactly to the
+    /// frontier. An empty window verifies the durable prefix at the frontier. Returns a
+    /// violation for writer faults and an Error for local or transient failures.
+    Result<std::optional<WriterHistoryViolation>>
+    validateHistoryExtension(std::string_view writerId, std::span<const MemoryDelta> deltas,
+                             const WriterHistoryCommitment& expectedFrontier);
 
     [[nodiscard]] bool writerQuarantined(std::string_view writerId) const noexcept;
     [[nodiscard]] std::uint64_t durableQuarantineGeneration() const noexcept {
@@ -236,7 +255,11 @@ public:
 
     /// Durably invalidate one writer before removing any visible winners. The checkpoint is
     /// persisted first so a crash cannot make invalidated history visible again after restart.
-    Result<bool> quarantineWriter(std::string_view writerId, std::string_view sourceNodeId);
+    /// Every new quarantine is logged here, with `reason` and the writer's local counters, so
+    /// no caller can quarantine silently; returns false (and logs nothing) when the writer was
+    /// already quarantined.
+    Result<bool> quarantineWriter(std::string_view writerId, std::string_view sourceNodeId,
+                                  std::string_view reason);
 
     /// Collect tombstone history only when the complete configured replica set has
     /// acknowledged the exact delete operation and the retention horizon has elapsed.
@@ -507,6 +530,10 @@ private:
 
     Result<WriterHistoryCommitment> computeHistoryCommitmentAt(std::string_view writerId,
                                                                std::uint64_t targetCounter);
+
+    /// Record hash durable history committed to at `counter` (at most the writer's durable
+    /// prefix), rebuilding missing history entries like computeHistoryCommitmentAt.
+    Result<std::string> durableRecordHashAt(std::string_view writerId, std::uint64_t counter);
 
     Result<void> requireLocalHistoryCommitment() const;
 
