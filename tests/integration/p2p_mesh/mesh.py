@@ -470,6 +470,11 @@ class Mesh:
             time.sleep(a.settle)
 
     # -- converge -------------------------------------------------------
+    @staticmethod
+    def is_zero(value) -> bool:
+        """An explicit numeric zero; a missing field or failed status read is not zero."""
+        return isinstance(value, int) and not isinstance(value, bool) and value == 0
+
     def listed_hashes(self, n: dict) -> set[str] | None:
         """All document hashes the node lists (one CLI call)."""
         proc = self.yams(n, "list", "--format", "json", "--limit", "1000000", timeout=120)
@@ -560,7 +565,7 @@ class Mesh:
             drain_deadline = time.time() + a.drain_timeout
             while True:
                 summaries = {n["name"]: self.apply_summary(n) for n in self.nodes}
-                if all((s["deferred"] or 0) == 0 for s in summaries.values()):
+                if all(self.is_zero(s["deferred"]) for s in summaries.values()):
                     result["deferred_drained"] = True
                     break
                 if time.time() >= drain_deadline:
@@ -572,8 +577,12 @@ class Mesh:
         self.save()
         self.work.mkdir(parents=True, exist_ok=True)
         (self.work / "converge.json").write_text(json.dumps(result, indent=2))
-        quarantined = {k: s["quarantined_writers"] for k, s in result["final"].items()
-                       if s.get("quarantined_writers")}
+        # Builds without the field report it on no node; once any node reports it, every node
+        # must report an explicit zero (a failed status read does not pass).
+        quarantined = {}
+        if any(s.get("quarantined_writers") is not None for s in result["final"].values()):
+            quarantined = {k: s.get("quarantined_writers") for k, s in result["final"].items()
+                           if not self.is_zero(s.get("quarantined_writers"))}
         result["quarantined_writers"] = quarantined
         (self.work / "converge.json").write_text(json.dumps(result, indent=2))
         if converged:
@@ -581,7 +590,7 @@ class Mesh:
             if quarantined:
                 # An honest mesh never quarantines a writer; a durable quarantine means a node
                 # rejected a peer's history and will diverge from it from now on.
-                log(f"FAILED: writers durably quarantined: {quarantined}")
+                log(f"FAILED: quarantined_writers is not 0 (None: status unreadable): {quarantined}")
                 return 4
             if result.get("deferred_drained") is False:
                 log("WARNING: deferred records did not drain to 0 after convergence")
