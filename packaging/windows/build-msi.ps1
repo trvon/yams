@@ -133,6 +133,32 @@ Write-Host "Effective stage root: $EffectiveStageDir" -ForegroundColor Cyan
 # Use EffectiveStageDir for WiX (it contains bin/yams.exe)
 $StageDir = $EffectiveStageDir
 
+# Every executable the MSI ships must be staged. A missing daemon or MCP server would
+# otherwise produce an installer where daemon-backed commands and `yams serve` fail.
+$requiredExecutables = @("yams.exe", "yams-daemon.exe", "yams-mcp-server.exe")
+foreach ($exe in $requiredExecutables) {
+    $exePath = Join-Path $StageDir "bin\$exe"
+    if (-not (Test-Path $exePath)) {
+        Write-Error "Required executable missing from stage: $exePath"
+        exit 1
+    }
+}
+
+# The reverse check: any executable staged in bin\ must be listed in yams.wxs, so a new
+# tool cannot ship in the stage but silently drop out of the installer.
+$wxsPath = Join-Path $PSScriptRoot "yams.wxs"
+$wxsText = Get-Content -Raw $wxsPath
+# yams-cli.exe is the build name of the CLI; meson stages it with yams.exe as an alias, and
+# the MSI ships that alias as yams.exe.
+$packagedAs = @{ "yams-cli.exe" = "yams.exe" }
+Get-ChildItem -Path (Join-Path $StageDir "bin") -Filter "*.exe" | ForEach-Object {
+    $name = if ($packagedAs.ContainsKey($_.Name)) { $packagedAs[$_.Name] } else { $_.Name }
+    if ($wxsText -notmatch [regex]::Escape("bin\$name")) {
+        Write-Error "Staged executable $($_.Name) is not packaged by yams.wxs"
+        exit 1
+    }
+}
+
 $tbbDll = Join-Path $StageDir "bin\tbb12.dll"
 $includeTbb = if (Test-Path $tbbDll) { "true" } else { "false" }
 if ($includeTbb -eq "true") {

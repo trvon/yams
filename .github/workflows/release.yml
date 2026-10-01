@@ -1676,8 +1676,8 @@ jobs:
         env:
           STABLE_GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
           STABLE_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
-          EXPERIMENTAL_GPG_PRIVATE_KEY: ${{ secrets.EXPERIMENTAL_GPG_PRIVATE_KEY || '' }}
-          EXPERIMENTAL_GPG_PASSPHRASE: ${{ secrets.EXPERIMENTAL_GPG_PASSPHRASE || '' }}
+          EXPERIMENTAL_GPG_PRIVATE_KEY: ${{ secrets.EXPERIMENTAL_GPG_PRIVATE_KEY || secrets.GPG_PRIVATE_KEY || '' }}
+          EXPERIMENTAL_GPG_PASSPHRASE: ${{ secrets.EXPERIMENTAL_GPG_PASSPHRASE || secrets.GPG_PASSPHRASE || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2130,8 +2130,8 @@ jobs:
         env:
           STABLE_GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
           STABLE_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
-          EXPERIMENTAL_GPG_PRIVATE_KEY: ${{ secrets.EXPERIMENTAL_GPG_PRIVATE_KEY || '' }}
-          EXPERIMENTAL_GPG_PASSPHRASE: ${{ secrets.EXPERIMENTAL_GPG_PASSPHRASE || '' }}
+          EXPERIMENTAL_GPG_PRIVATE_KEY: ${{ secrets.EXPERIMENTAL_GPG_PRIVATE_KEY || secrets.GPG_PRIVATE_KEY || '' }}
+          EXPERIMENTAL_GPG_PASSPHRASE: ${{ secrets.EXPERIMENTAL_GPG_PASSPHRASE || secrets.GPG_PASSPHRASE || '' }}
           REPOSITORY_CHANNEL: ${{ steps.meta.outputs.channel == 'stable' && 'stable' || 'experimental' }}
           REPOSITORY_VERSION: ${{ steps.meta.outputs.version }}
         shell: bash
@@ -2274,8 +2274,8 @@ jobs:
         env:
           STABLE_GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
           STABLE_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
-          EXPERIMENTAL_GPG_PRIVATE_KEY: ${{ secrets.EXPERIMENTAL_GPG_PRIVATE_KEY || '' }}
-          EXPERIMENTAL_GPG_PASSPHRASE: ${{ secrets.EXPERIMENTAL_GPG_PASSPHRASE || '' }}
+          EXPERIMENTAL_GPG_PRIVATE_KEY: ${{ secrets.EXPERIMENTAL_GPG_PRIVATE_KEY || secrets.GPG_PRIVATE_KEY || '' }}
+          EXPERIMENTAL_GPG_PASSPHRASE: ${{ secrets.EXPERIMENTAL_GPG_PASSPHRASE || secrets.GPG_PASSPHRASE || '' }}
           REPOSITORY_PREFIX: ${{ steps.meta.outputs.channel != 'stable' && 'experimental/' || '' }}
         shell: bash
         run: |
@@ -2754,10 +2754,10 @@ jobs:
         env:
           STABLE_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.R2_SECRET_ACCESS_KEY }}
           STABLE_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          EXPERIMENTAL_CLOUDFLARE_API_TOKEN: ${{ secrets.EXPERIMENTAL_CLOUDFLARE_API_TOKEN }}
-          EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID }}
+          EXPERIMENTAL_CLOUDFLARE_API_TOKEN: ${{ secrets.EXPERIMENTAL_CLOUDFLARE_API_TOKEN || secrets.CLOUDFLARE_API_TOKEN || secrets.R2_SECRET_ACCESS_KEY }}
+          EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
           STABLE_GPG_PUBLIC_KEY_B64: ${{ secrets.GPG_PUBLIC_KEY_B64 || '' }}
-          EXPERIMENTAL_GPG_PUBLIC_KEY_B64: ${{ secrets.EXPERIMENTAL_GPG_PUBLIC_KEY_B64 || '' }}
+          EXPERIMENTAL_GPG_PUBLIC_KEY_B64: ${{ secrets.EXPERIMENTAL_GPG_PUBLIC_KEY_B64 || secrets.GPG_PUBLIC_KEY_B64 || '' }}
         shell: bash
         run: |
           set -euo pipefail
