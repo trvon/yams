@@ -111,7 +111,8 @@ int main(int /*argc*/, char** /*argv*/) {
     auto opts = yams::test::DaemonHarness::isolatedOptions();
     opts.useMockModelProvider = true;
     // Deterministic in-process embeddings so the "embed" fault kind is repairable without
-    // consulting any installed model configuration.
+    // consulting any installed model configuration. The harness isolation also scrubs
+    // YAMS_EMBED_BACKEND/YAMS_PREFERRED_MODEL, which would otherwise outrank this TOML.
     opts.isolatedConfigContents =
         "[embeddings]\nbackend = \"simeon\"\npreferred_model = \"simeon-default\"\n";
     opts.autoLoadPlugins = false;

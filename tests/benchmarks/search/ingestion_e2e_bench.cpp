@@ -370,11 +370,20 @@ public:
         saveAndUnsetEnvironment("YAMS_DAEMON_SOCKET_PATH");
         saveAndUnsetEnvironment("YAMS_EMBED_BACKEND");
         saveAndUnsetEnvironment("YAMS_PREFERRED_MODEL");
+        saveAndUnsetEnvironment("YAMS_RERANKER_MODEL");
+        saveAndUnsetEnvironment("YAMS_EMBED_DIM");
         saveAndSetEnvironment("HOME", root_ / "home");
         saveAndSetEnvironment("XDG_DATA_HOME", root_ / "xdg_data");
         saveAndSetEnvironment("XDG_STATE_HOME", root_ / "state");
         saveAndSetEnvironment("XDG_CONFIG_HOME", root_ / "config");
         saveAndSetEnvironment("XDG_CACHE_HOME", root_ / "cache");
+#ifdef _WIN32
+        saveAndSetEnvironment("APPDATA", root_ / "appdata" / "roaming");
+        saveAndSetEnvironment("LOCALAPPDATA", root_ / "appdata" / "local");
+        saveAndSetEnvironment("USERPROFILE", root_ / "home");
+#else
+        saveAndSetEnvironment("XDG_RUNTIME_DIR", root_ / "runtime");
+#endif
         saveAndSetEnvironment("YAMS_DATA_DIR", data_);
         yams::common::ensureDirectories(root_ / "state" / "yams" / "sessions");
 

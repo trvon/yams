@@ -70,6 +70,8 @@ TEST_CASE("DaemonHarness full isolation ignores ambient developer config and dat
     const auto decoyConfig = decoyConfigHome / "yams" / "config.toml";
     const auto decoyData = decoy.path() / std::string{kDecoyDataMarker};
     const auto decoySocket = decoy.path() / "decoy.sock";
+    const auto decoyRuntime = decoy.path() / "xdg_runtime";
+    std::filesystem::create_directories(decoyRuntime);
     const std::string decoyContents = "config_version = 3\n[core]\ndata_dir = \"" +
                                       decoyData.string() + "\"\n# " +
                                       std::string{kDecoyDataMarker} + "\n";
@@ -82,6 +84,11 @@ TEST_CASE("DaemonHarness full isolation ignores ambient developer config and dat
         {"XDG_STATE_HOME", (decoy.path() / "xdg_state").string()},
         {"XDG_DATA_HOME", (decoy.path() / "xdg_data").string()},
         {"XDG_CACHE_HOME", (decoy.path() / "xdg_cache").string()},
+        {"XDG_RUNTIME_DIR", decoyRuntime.string()},
+        {"YAMS_EMBED_BACKEND", "decoy-backend"},
+        {"YAMS_PREFERRED_MODEL", "decoy-model"},
+        {"YAMS_RERANKER_MODEL", "decoy-reranker"},
+        {"YAMS_EMBED_DIM", "7"},
         {"YAMS_CONFIG", decoyConfig.string()},
         {"YAMS_CONFIG_PATH", decoyConfig.string()},
         {"YAMS_DATA_DIR", decoyData.string()},
@@ -117,7 +124,7 @@ TEST_CASE("DaemonHarness full isolation ignores ambient developer config and dat
 
     for (const char* name :
          {"HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
-          "YAMS_CONFIG", "YAMS_CONFIG_PATH", "YAMS_DATA_DIR", "YAMS_STORAGE"}) {
+          "XDG_RUNTIME_DIR", "YAMS_CONFIG", "YAMS_CONFIG_PATH", "YAMS_DATA_DIR", "YAMS_STORAGE"}) {
         const auto value = yams::config::getenv_optional(name);
         INFO(name << "=" << value.value_or("<unset>"));
         REQUIRE(value.has_value());
@@ -133,6 +140,16 @@ TEST_CASE("DaemonHarness full isolation ignores ambient developer config and dat
     CHECK(pathWithin(yams::config::get_data_dir(), root));
     CHECK(pathWithin(yams::config::get_cache_dir(), root));
     CHECK(pathWithin(yams::config::get_state_dir(), root));
+    CHECK(pathWithin(yams::config::get_runtime_dir(), root));
+    const auto statusFile = yams::config::get_daemon_status_file();
+    CHECK(pathWithin(statusFile, root));
+    CHECK(std::filesystem::exists(statusFile));
+    // Model/backend overrides outrank TOML in ConfigResolver, so they must not be in effect.
+    for (const char* name :
+         {"YAMS_EMBED_BACKEND", "YAMS_PREFERRED_MODEL", "YAMS_RERANKER_MODEL", "YAMS_EMBED_DIM"}) {
+        INFO(name);
+        CHECK_FALSE(yams::config::getenv_optional(name).has_value());
+    }
     CHECK((readText(observedConfig).find(kDecoyDataMarker) == std::string::npos));
 
     harness.stop();
@@ -140,6 +157,7 @@ TEST_CASE("DaemonHarness full isolation ignores ambient developer config and dat
 
     // The decoy was never read as config nor populated as data, and the ambient env is back.
     CHECK_FALSE(std::filesystem::exists(decoyData));
+    CHECK(std::filesystem::is_empty(decoyRuntime));
     CHECK((readText(decoyConfig) == decoyContents));
     for (const auto& [name, value] : ambient) {
         const auto restored = yams::config::getenv_optional(name);

@@ -52,10 +52,12 @@ struct DaemonHarnessOptions {
     bool isolateConfig = false;
     // Full process isolation for benchmarks and tests that must never observe the developer's
     // machine: implies isolateState and isolateConfig, points HOME and every XDG_* base dir at
-    // the run's temp root, and scrubs ambient YAMS_CONFIG/YAMS_CONFIG_PATH/YAMS_DATA_DIR/
-    // YAMS_STORAGE/YAMS_DAEMON_SOCKET[_PATH] for the lifetime of the daemon. Everything is
-    // restored when the daemon stops. An explicit `configPath` still wins over the generated
-    // minimal config.
+    // the run's temp root (XDG_RUNTIME_DIR on POSIX; APPDATA/LOCALAPPDATA/USERPROFILE on
+    // Windows), and scrubs ambient YAMS_CONFIG/YAMS_CONFIG_PATH/YAMS_DATA_DIR/YAMS_STORAGE/
+    // YAMS_DAEMON_SOCKET[_PATH] plus the model/backend overrides that ConfigResolver ranks above
+    // TOML (YAMS_EMBED_BACKEND, YAMS_PREFERRED_MODEL, YAMS_RERANKER_MODEL, YAMS_EMBED_DIM) for
+    // the lifetime of the daemon. Everything is restored when the daemon stops. An explicit
+    // `configPath` still wins over the generated minimal config.
     bool isolateEnvironment = false;
     std::string isolatedConfigContents;
     bool requireReadyLifecycle = false;
@@ -627,8 +629,18 @@ private:
     void isolateAmbientEnvironment() {
         namespace fs = std::filesystem;
         static constexpr const char* kScrubbed[] = {
-            "YAMS_CONFIG",  "YAMS_CONFIG_PATH",   "YAMS_DATA_DIR",
-            "YAMS_STORAGE", "YAMS_DAEMON_SOCKET", "YAMS_DAEMON_SOCKET_PATH",
+            "YAMS_CONFIG",
+            "YAMS_CONFIG_PATH",
+            "YAMS_DATA_DIR",
+            "YAMS_STORAGE",
+            "YAMS_DAEMON_SOCKET",
+            "YAMS_DAEMON_SOCKET_PATH",
+            // ConfigResolver gives these precedence over TOML, so the generated config would not
+            // be deterministic if the developer's shell exported them.
+            "YAMS_EMBED_BACKEND",
+            "YAMS_PREFERRED_MODEL",
+            "YAMS_RERANKER_MODEL",
+            "YAMS_EMBED_DIM",
         };
         for (const char* name : kScrubbed) {
             isolationEnvironment_.emplace_back(name, std::nullopt);
@@ -639,6 +651,13 @@ private:
             {"XDG_STATE_HOME", root_ / "state"},
             {"XDG_DATA_HOME", root_ / "xdg_data"},
             {"XDG_CACHE_HOME", root_ / "cache"},
+#ifdef _WIN32
+            {"APPDATA", root_ / "appdata" / "roaming"},
+            {"LOCALAPPDATA", root_ / "appdata" / "local"},
+            {"USERPROFILE", root_ / "home"},
+#else
+            {"XDG_RUNTIME_DIR", root_ / "runtime"},
+#endif
         };
         for (const auto& [name, dir] : relocated) {
             std::error_code ec;
