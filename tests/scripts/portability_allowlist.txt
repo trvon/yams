@@ -84,11 +84,11 @@ src/benchmarks/internal_event_bus_benchmark.cpp:13:portability/env-read # review
 src/cli/commands/add_command.cpp:266:portability/env-read # reviewed raw environment read
 src/cli/commands/doctor/checks/model_check.cpp:16:portability/env-read # reviewed raw environment read
 src/cli/commands/doctor/plugin_trust.cpp:29:portability/env-read # reviewed raw environment read
-src/cli/commands/init_command.cpp:481:portability/env-read # reviewed raw environment read
-src/cli/commands/init_command.cpp:915:portability/env-read # reviewed raw environment read
-src/cli/commands/init_command.cpp:1922:portability/env-read # reviewed raw environment read
-src/cli/commands/init_command.cpp:1925:portability/env-read # reviewed raw environment read
-src/cli/commands/init_command.cpp:1935:portability/env-read # reviewed raw environment read
+src/cli/commands/init_command.cpp:511:portability/env-read # reviewed raw environment read
+src/cli/commands/init_command.cpp:947:portability/env-read # reviewed raw environment read
+src/cli/commands/init_command.cpp:1954:portability/env-read # reviewed raw environment read
+src/cli/commands/init_command.cpp:1957:portability/env-read # reviewed raw environment read
+src/cli/commands/init_command.cpp:1967:portability/env-read # reviewed raw environment read
 src/cli/commands/model_command.cpp:100:portability/env-read # reviewed raw environment read
 src/cli/commands/model_command.cpp:569:portability/env-read # reviewed raw environment read
 src/cli/commands/model_command.cpp:578:portability/env-read # reviewed raw environment read
