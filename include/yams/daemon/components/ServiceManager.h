@@ -855,7 +855,7 @@ private:
     void publishMemorySyncBackfill() noexcept;
     void notifyMemorySyncStage(std::string_view stage) noexcept;
     void notifyMemorySyncDeleteOutboxStage(std::string_view stage) noexcept;
-    Result<std::size_t> applyMemorySyncContentBlobs(std::vector<std::string>& deferredKeys);
+    Result<memory_sync::ApplyStagePass> applyMemorySyncContentBlobs();
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                                               yams::compat::stop_token token);
     bool finalizeDatabaseStartup(const std::filesystem::path& dbPath,

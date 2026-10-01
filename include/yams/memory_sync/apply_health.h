@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -70,6 +71,15 @@ struct ApplyHealthSnapshot {
     }
 };
 
+/// Outcome of one stage pass that scanned every record. A pass can defer some records and fail
+/// on others: one corrupt record must not hide the prerequisites the same scan found missing.
+struct ApplyStagePass {
+    /// Records the pass left unapplied because a replicated prerequisite is not local yet.
+    std::vector<std::string> deferredKeys;
+    /// First hard failure of the pass, if any.
+    std::optional<std::string> failure;
+};
+
 /// Tracks deferred records, stage failures, and outbound-publish outcomes of the apply path.
 ///
 /// Deferred records themselves live in the replicated memory-sync index: an adapter skips a
@@ -96,11 +106,10 @@ public:
         auto& state = stages_[index(stage)];
         std::unordered_map<std::string, Deferral> next;
         next.reserve(std::min(keys.size(), kMaxTrackedDeferralsPerStage));
-        // Carry existing deferrals first so the cap never evicts the oldest first-seen times.
+        // Carry every tracked key that is still deferred, wherever it sits in `keys`, before any
+        // new key takes a slot: the cap must never evict an older first-seen time for a newer
+        // one. This pass cannot overflow the cap, since `tracked` itself never exceeds it.
         for (const auto& key : keys) {
-            if (next.size() >= kMaxTrackedDeferralsPerStage) {
-                break;
-            }
             if (const auto it = state.tracked.find(key); it != state.tracked.end()) {
                 next.emplace(key, it->second);
             }
@@ -127,8 +136,19 @@ public:
         return stale;
     }
 
-    /// Record a hard stage failure. The stage's deferred set is left as last observed, since a
-    /// failed pass says nothing about which prerequisites are still missing.
+    /// Record a stage pass that scanned every record: its deferred set replaces the stage's, and
+    /// its failure, if any, is counted. Returns the newly stale deferrals, as recordDeferred.
+    std::vector<std::string> recordPass(ApplyStage stage, const ApplyStagePass& pass,
+                                        Clock::time_point now) {
+        if (pass.failure) {
+            recordFailure(stage, *pass.failure, now);
+        }
+        return recordDeferred(stage, pass.deferredKeys, now);
+    }
+
+    /// Record a hard stage failure from a pass that did not scan every record. The stage's
+    /// deferred set is left as last observed, since an incomplete pass says nothing about which
+    /// prerequisites are still missing.
     void recordFailure(ApplyStage stage, std::string message, Clock::time_point now) {
         std::lock_guard<std::mutex> lock(mutex_);
         ++stages_[index(stage)].failures;
