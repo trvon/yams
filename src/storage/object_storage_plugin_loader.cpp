@@ -157,6 +157,13 @@ static fs::path resolvePluginPath(const std::vector<std::string>& names) {
             return buildPlugin;
         }
 
+        // Standardized Debug tree (setup.sh Debug -> build/debug).
+        fs::path debugBuildPlugin =
+            fs::path("build") / "debug" / "plugins" / "object_storage_s3" / name;
+        if (fs::exists(debugBuildPlugin)) {
+            return debugBuildPlugin;
+        }
+
         fs::path builddirPlugin = fs::path("builddir") / "plugins" / "object_storage_s3" / name;
         if (fs::exists(builddirPlugin)) {
             return builddirPlugin;
@@ -165,6 +172,12 @@ static fs::path resolvePluginPath(const std::vector<std::string>& names) {
         fs::path buildFlat = fs::path("build") / name;
         if (fs::exists(buildFlat)) {
             return buildFlat;
+        }
+
+        // Standardized Debug tree (setup.sh Debug -> build/debug).
+        fs::path debugBuildFlat = fs::path("build") / "debug" / name;
+        if (fs::exists(debugBuildFlat)) {
+            return debugBuildFlat;
         }
 
         fs::path builddirFlat = fs::path("builddir") / name;

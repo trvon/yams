@@ -19,8 +19,8 @@ person, organization, location, date, event, product, technology, concept
 ## Build
 
 ```bash
-meson compile -C builddir
-# Output: builddir/plugins/glint/yams_glint.{dylib,so,dll}
+meson compile -C build/debug
+# Output: build/debug/plugins/glint/yams_glint.{dylib,so,dll}
 ```
 
 ## Environment

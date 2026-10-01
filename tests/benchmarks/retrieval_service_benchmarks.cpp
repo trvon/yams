@@ -96,7 +96,7 @@ std::filesystem::path resolveBenchmarkPluginDir() {
     const auto cwd = fs::current_path();
     const std::vector<fs::path> candidates = {
         cwd / "build" / "debug" / "plugins",
-        cwd / "builddir" / "plugins",
+        cwd / "build/debug" / "plugins",
         cwd / "build" / "plugins",
     };
     std::error_code ec;
@@ -105,7 +105,7 @@ std::filesystem::path resolveBenchmarkPluginDir() {
             return candidate;
         }
     }
-    return cwd / "builddir" / "plugins";
+    return cwd / "build/debug" / "plugins";
 }
 
 std::filesystem::path writeEmbeddingBackendConfig(const BenchConfig& config) {

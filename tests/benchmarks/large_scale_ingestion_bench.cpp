@@ -832,7 +832,7 @@ bool SetupHarness(const IngestionBenchConfig& config) {
             if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
                 harnessOptions.pluginDir = std::filesystem::path(envPluginDir);
             } else {
-                harnessOptions.pluginDir = std::filesystem::current_path() / "builddir" / "plugins";
+                harnessOptions.pluginDir = std::filesystem::current_path() / "build/debug" / "plugins";
             }
         }
     }

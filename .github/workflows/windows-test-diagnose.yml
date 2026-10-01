@@ -10,7 +10,7 @@ name: Windows test diagnose
   workflow_dispatch:
     inputs:
       test_binary:
-        description: "Catch2 test executable under builddir/tests (without .exe)"
+        description: "Catch2 test executable under build/debug/tests (without .exe)"
         default: "catch2_search_service"
       case_timeout_s:
         description: "Seconds before a single test case is treated as hung"
@@ -25,7 +25,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 240
     env:
-      BUILD_DIR: builddir
+      BUILD_DIR: build/debug
     steps:
       - name: Checkout
         uses: actions/checkout@v4
