@@ -36,6 +36,14 @@
           <Component Id="YamsExe" Guid="6BCEBA1E-C995-46DA-8FF5-0BC6A53D74EA">
             <File Id="yams_exe" Source="$(var.StageDir)\bin\yams.exe" KeyPath="yes" />
           </Component>
+          <!-- Daemon and MCP server: the CLI starts yams-daemon.exe on demand, and `yams serve`
+               needs yams-mcp-server.exe. Both are staged by meson install next to yams.exe. -->
+          <Component Id="YamsDaemonExe" Guid="052B7981-7E7E-4A4B-BA1E-508D19E762B3">
+            <File Id="yams_daemon_exe" Source="$(var.StageDir)\bin\yams-daemon.exe" KeyPath="yes" />
+          </Component>
+          <Component Id="YamsMcpServerExe" Guid="64FF7995-EEE6-4E3D-A1F9-CD79FD86F2AF">
+            <File Id="yams_mcp_server_exe" Source="$(var.StageDir)\bin\yams-mcp-server.exe" KeyPath="yes" />
+          </Component>
           <!-- ONNX Runtime DLLs - required for embeddings -->
           <Component Id="OnnxRuntimeDll" Guid="A7E3B2C1-5D4F-4E6A-8B9C-1D2E3F4A5B6C">
             <File Id="onnxruntime_dll" Source="$(var.StageDir)\bin\onnxruntime.dll" KeyPath="yes" />
@@ -73,6 +81,8 @@
     <!-- Main feature: YAMS binary and runtime dependencies -->
     <Feature Id="MainFeature" Title="YAMS" Level="1" ConfigurableDirectory="INSTALLFOLDER">
       <ComponentRef Id="YamsExe" />
+      <ComponentRef Id="YamsDaemonExe" />
+      <ComponentRef Id="YamsMcpServerExe" />
       <ComponentRef Id="OnnxRuntimeDll" />
       <ComponentRef Id="OnnxRuntimeProvidersSharedDll" />
       <?if $(var.IncludeTbb) = "true" ?>
