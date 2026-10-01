@@ -47,9 +47,9 @@ endif
 # Set platform-specific rpath
 # macOS uses @executable_path, Linux uses $ORIGIN
 if host_machine.system() == 'darwin'
-  cli_install_rpath = '@executable_path/../lib'
+  cli_install_rpath = '@executable_path/../' + get_option('libdir') / 'yams'
 else
-  cli_install_rpath = '$ORIGIN/../lib'
+  cli_install_rpath = '$ORIGIN/../' + get_option('libdir') / 'yams'
 endif
 
 # On Windows, use delay-load for onnxruntime.dll to allow SetDllDirectory before loading
@@ -73,20 +73,23 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
   foreach dll_info : windows_runtime_dlls
     dll_name = dll_info[0]
     dll_src = dll_info[1]
-    fs.copyfile(dll_src, dll_name, install: true, install_dir: get_option('bindir'))
+    fs.copyfile(dll_src, dll_name, install: true, install_dir: get_option('bindir'), install_tag: 'runtime')
   endforeach
 endif
 
-# Install shared libraries from conan dependencies
+# Ship the ONNX Runtime shared library privately in <libdir>/yams, where the
+# ONNX plugin's runtime loader and the Glint plugin's $ORIGIN/.. RUNPATH find
+# it, instead of the system libdir. Only the runtime .so/.dylib files.
 onnx_dep = onnxruntime_resolved_dep
 if onnx_dep.found() and host_machine.system() != 'windows'
   onnx_libdir = onnx_dep.get_variable('libdir', default_value: '')
   if onnx_libdir != ''
     install_subdir(onnx_libdir,
-      install_dir: get_option('libdir'),
+      install_dir: get_option('libdir') / 'yams',
+      install_tag: 'runtime',
       strip_directory: true,
-      exclude_files: ['pkgconfig'],
-      exclude_directories: ['pkgconfig'],
+      exclude_files: ['pkgconfig', 'libonnxruntime.a'],
+      exclude_directories: ['pkgconfig', 'cmake'],
     )
   endif
 endif
@@ -104,4 +107,5 @@ endif
 install_symlink(symlink_name,
   install_dir: get_option('bindir'),
   pointing_to: symlink_target,
+  install_tag: 'runtime',
 )

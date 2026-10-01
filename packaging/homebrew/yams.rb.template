@@ -45,6 +45,9 @@ class Yams < Formula
     # Those developer artifacts dominate keg size and are not needed for normal CLI/daemon use.
     if (root/"lib").exist?
       lib.install Dir[(root/"lib/*.{dylib,so}").to_s]
+      # Private runtime libraries (ONNX resource registry) live in lib/yams and are
+      # found through @loader_path / @executable_path RUNPATHs.
+      (lib/"yams").install Dir[(root/"lib/yams/*.{dylib,so}").to_s]
       if (root/"lib/yams/plugins").exist?
         (lib/"yams/plugins").mkpath
         (lib/"yams/plugins").install Dir[(root/"lib/yams/plugins/*").to_s]
@@ -53,6 +56,7 @@ class Yams < Formula
 
     # Remove bundled onnxruntime — Homebrew manages this dependency
     rm_f Dir[lib/"libonnxruntime*"]
+    rm_f Dir[lib/"yams/libonnxruntime*"]
 
     # Runtime assets (schemas, etc.)
     share.install Dir[(root/"share/*").to_s] if (root/"share").exist?

@@ -738,8 +738,6 @@ version_header = custom_target(
   ],
   build_always_stale: true,
   build_by_default: true,
-  install: true,
-  install_dir: get_option('includedir') / 'yams',
 )
 
 # Make builddir available as include path for generated headers
@@ -753,9 +751,12 @@ version_generated_dep = declare_dependency(
 yams_build_cli = get_option('build-cli') and not wasi_enabled
 yams_build_mcp = get_option('build-mcp-server')
 
-# Install public headers under the compiler's include prefix without duplicating
-# the top-level 'include' directory (was producing prefix/include/include/...).
-install_subdir('include', install_dir: get_option('includedir'), strip_directory: true)
+# Install surface: the runtime set is executables, plugins, the private
+# lib/yams/ runtime libraries, share/yams data and the systemd unit. The C++
+# libraries under src/ are internal static archives linked into those
+# executables, so neither they nor their headers or pkg-config files are
+# installed. The only devel payload is the mobile C ABI (src/mobile), tagged
+# 'devel'. scripts/ci/check_install_surface.py enforces this.
 
 # --- tl-expected global resolution ---
 # tl-expected is a header-only library. Homebrew installs it without pkgconfig.
@@ -896,22 +897,7 @@ if get_option('build-fuzzers') and not wasi_enabled
 endif
 
 sql_install_dir = join_paths(get_option('datadir'), 'yams', 'sql')
-install_data('sql/reference_schema.sql', install_dir: sql_install_dir)
-
-if not wasi_enabled
-  yams_pc_config = configuration_data()
-  yams_pc_config.set('PREFIX', get_option('prefix'))
-  yams_pc_config.set('LIBDIR', get_option('libdir'))
-  yams_pc_config.set('INCLUDEDIR', get_option('includedir'))
-  yams_pc_config.set('VERSION', _effective_version)
-  configure_file(
-    input: files('packaging/yams.pc.in'),
-    output: 'yams.pc',
-    configuration: yams_pc_config,
-    install: true,
-    install_dir: join_paths(get_option('libdir'), 'pkgconfig'),
-  )
-endif
+install_data('sql/reference_schema.sql', install_dir: sql_install_dir, install_tag: 'runtime')
 
 summary({
   'project': meson.project_name(),

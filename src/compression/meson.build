@@ -22,14 +22,7 @@ yams_compression = static_library('yams_compression',
   compression_src,
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, openssl_dep, zstd_dep, threads_dep, yams_core],
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_compression,
-  name: 'yams-compression',
-  description: 'YAMS compression (zstd)',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_compression_dep = declare_dependency(

@@ -10,7 +10,7 @@ yams_repair_lib = static_library('yams_repair',
     dependency('spdlog'),
   ],
   include_directories: include_directories('../../include'),
-  install: true,
+  install: false,
 )
 
 yams_repair_dep = declare_dependency(

@@ -38,16 +38,8 @@ strip_file() {
   esac
 }
 
-rm -rf "$install_root/include"
-
-for libdir in "$install_root/lib" "$install_root/lib64"; do
-  [ -d "$libdir" ] || continue
-  rm -rf "$libdir/pkgconfig" "$libdir/cmake"
-done
-
-rm -rf "$install_root/share/pkgconfig" "$install_root/share/cmake"
-
-find "$install_root" -type f \( -name '*.a' -o -name '*.la' \) -delete
+# Headers, static archives and pkg-config files are no longer installed (the
+# Meson install rules only stage the runtime set), so this only strips.
 
 if [ -d "$install_root/bin" ]; then
   while IFS= read -r -d '' path; do

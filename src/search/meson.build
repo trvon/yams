@@ -68,14 +68,7 @@ yams_search = static_library('yams_search',
   ],
   dependencies: [spdlog_dep, nlohmann_json_dep, boost_dep, yams_core, yams_metadata, yams_topology, yams_vector, simeon_retrieval_dep, symspell_dep] + search_tracy_deps,
   cpp_args: search_tracy_args,
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_search,
-  name: 'yams-search',
-  description: 'YAMS search library',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_search_dep = declare_dependency(

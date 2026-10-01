@@ -91,9 +91,9 @@ endif
 
 onnx_plugin_install_rpath = ''
 if host_machine.system() == 'darwin'
-  onnx_plugin_install_rpath = '@loader_path/../..'
+  onnx_plugin_install_rpath = '@loader_path/..'
 elif host_machine.system() == 'linux'
-  onnx_plugin_install_rpath = '$ORIGIN/../..'
+  onnx_plugin_install_rpath = '$ORIGIN/..'
 endif
 
 yams_onnx_plugin = shared_module('yams_onnx_plugin',

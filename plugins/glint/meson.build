@@ -69,9 +69,9 @@ endif
 
 glint_plugin_install_rpath = ''
 if host_machine.system() == 'darwin'
-  glint_plugin_install_rpath = '@loader_path/../..'
+  glint_plugin_install_rpath = '@loader_path/..'
 elif host_machine.system() == 'linux'
-  glint_plugin_install_rpath = '$ORIGIN/../..'
+  glint_plugin_install_rpath = '$ORIGIN/..'
 endif
 
 shared_module(

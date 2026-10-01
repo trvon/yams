@@ -25,15 +25,26 @@ if host_machine.system() == 'windows'
   onnx_resource_args += ['-DYAMS_ONNX_RESOURCE_BUILDING']
 endif
 
+# Private runtime library: on Linux/macOS it installs next to the plugins in
+# <libdir>/yams (found through $ORIGIN / @loader_path RUNPATHs), not in the
+# system libdir, and carries no soname version because nothing outside this
+# build links it. Windows keeps its DLL layout.
+onnx_resource_install_kwargs = {'install_dir': get_option('libdir') / 'yams'}
+if host_machine.system() == 'windows'
+  onnx_resource_install_kwargs = {
+    'install_dir': get_option('libdir'),
+    'version': meson.project_version(),
+  }
+endif
+
 yams_onnx_resource_lib = shared_library('yams_onnx_resource',
   onnx_resource_sources,
   include_directories: include_directories('../../../include'),
   dependencies: onnx_resource_deps,
   cpp_args: onnx_resource_args,
   install: true,
-  install_dir: get_option('libdir'),
-  # Version for soname on Linux
-  version: meson.project_version(),
+  install_tag: 'runtime',
+  kwargs: onnx_resource_install_kwargs,
 )
 
 yams_onnx_resource_dep = declare_dependency(

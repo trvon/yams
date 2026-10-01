@@ -19,14 +19,7 @@ yams_extraction = static_library('yams_extraction',
   ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, yams_core, nlohmann_json_dep, yams_metadata_dep],
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_extraction,
-  name: 'yams-extraction',
-  description: 'YAMS text extraction',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_extraction_dep = declare_dependency(
@@ -34,4 +27,3 @@ yams_extraction_dep = declare_dependency(
   include_directories: include_directories('../../include'),
 )
 meson.override_dependency('yams_extraction', yams_extraction_dep)
-
