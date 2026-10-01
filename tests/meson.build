@@ -2667,6 +2667,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  text_basic_handler_exe = executable('text_basic_handler',
+    files('unit/extraction/text_basic_handler_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   builtin_content_extractor_exe = executable('builtin_content_extractor',
     files('unit/extraction/builtin_content_extractor_catch2_test.cpp'),
     include_directories: incs,
@@ -3224,6 +3233,12 @@ if catch2_dep.found()
   )
 
   test('plain_text_extractor', plain_text_extractor_exe,
+    suite: ['catch2', 'unit', 'extraction'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('text_basic_handler', text_basic_handler_exe,
     suite: ['catch2', 'unit', 'extraction'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60

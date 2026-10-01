@@ -72,8 +72,8 @@ public:
         cap.mimes = {"text/plain",       "text/markdown",  "text/x-c",  "text/x-c++hdr",
                      "text/x-c++src",    "text/x-python",  "text/x-go", "text/x-java",
                      "application/json", "application/xml"};
-        cap.extensions =
-            std::vector<std::string>(supportedExtensions().begin(), supportedExtensions().end());
+        const auto& exts = supportedExtensions();
+        cap.extensions = std::vector<std::string>(exts.begin(), exts.end());
         cap.supportsRange = true; // line ranges
         cap.supportsSection = false;
         cap.supportsSelector = false;
@@ -252,8 +252,10 @@ public:
         registry.registerHandler(std::make_shared<TextBasicHandler>());
     }
 
-private:
-    static std::unordered_set<std::string> supportedExtensions() {
+    // Lower-cased, dot-prefixed extensions this handler accepts. Returned by reference to the
+    // one shared set: a by-value return handed capabilities() begin()/end() iterators from two
+    // different temporaries, which the MSVC debug STL rejects with a modal assertion dialog.
+    static const std::unordered_set<std::string>& supportedExtensions() {
         // Common textual/code extensions
         static const std::unordered_set<std::string> exts = {
             ".txt",  ".md",  ".log", ".json", ".jsonl", ".xml", ".yml",  ".yaml", ".csv",
@@ -265,6 +267,7 @@ private:
         return exts;
     }
 
+private:
     // Utilities
     static bool iequals(std::string_view a, std::string_view b) {
         if (a.size() != b.size())
