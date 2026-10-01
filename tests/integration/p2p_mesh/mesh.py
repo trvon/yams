@@ -226,6 +226,13 @@ class Mesh:
             die("pass exactly one of --build-dir or --deb")
         if a.nodes < 2:
             die("--nodes must be >= 2")
+        if self.state.get("nodes"):
+            # --force: remove the previous mesh first. Recreated services would otherwise reuse
+            # its named /node volumes (stale /node/ready, keys, config), and services of a
+            # larger previous mesh would be left running as orphans.
+            log(f"tearing down previous mesh {self.project}")
+            self.cmd_down(argparse.Namespace(keep_image=False, purge=False))
+            self.project = f"{PROJECT_PREFIX}-{uuid.uuid4().hex[:8]}"
         self.work.mkdir(parents=True, exist_ok=True)
         if a.project:
             self.project = a.project
