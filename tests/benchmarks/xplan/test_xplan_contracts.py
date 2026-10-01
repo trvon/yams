@@ -75,9 +75,12 @@ class VectorBuildCompositionTests(unittest.TestCase):
         end = meson_source.index("\n)", start)
         return meson_source[start:end]
 
-    def test_optional_sqlite_vec_isa_flags_stay_in_vendor_translation_units(
+    def test_sqlite_vec_backend_shares_vendor_simd_defines(
         self,
     ) -> None:
+        # The backend instantiates sqlite-vec's header-only kernels (static_cosine_ann_index),
+        # so it must be compiled with the same feature and ISA defines as the vendor library;
+        # otherwise the inline kernels get two bodies (ODR violation, see c74629dd).
         meson_source = (
             XPLAN_ROOT.parents[2] / "src" / "vector" / "meson.build"
         ).read_text(encoding="utf-8")
@@ -94,9 +97,9 @@ class VectorBuildCompositionTests(unittest.TestCase):
         backend_end = meson_source.index("\n)", backend_start)
         backend_target = meson_source[backend_start:backend_end]
 
-        self.assertIn("vec_simd_cppargs", vendor_target)
-        self.assertNotIn("vec_simd_cppargs", backend_target)
-        self.assertNotIn("sqlite_vec_feature_cppargs", backend_target)
+        for args in ("sqlite_vec_feature_cppargs", "vec_simd_cppargs"):
+            self.assertIn(args, vendor_target)
+            self.assertIn(args, backend_target)
 
     def test_simeon_vector_and_retrieval_sources_are_separate_targets(self) -> None:
         meson_source = (
