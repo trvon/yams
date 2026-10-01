@@ -4,7 +4,38 @@
 #include <string_view>
 #include <vector>
 
+#if defined(_MSC_VER)
+#include <crtdbg.h>
+#include <cstdio>
+#include <cstdlib>
+#include <stdlib.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace {
+
+#if defined(_MSC_VER)
+// A Debug CRT assertion (debug-iterator check, _ASSERTE, invalid parameter) or abort() opens a
+// modal dialog by default. In a non-interactive test run nobody can dismiss it, so the case hangs
+// until the harness timeout with no output. Route every such report to stderr and suppress the
+// Windows Error Reporting dialogs so the case fails fast with the message instead.
+void reportCrtFailuresToStderr() {
+    ::SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    _set_error_mode(_OUT_TO_STDERR);
+    _set_abort_behavior(0, _CALL_REPORTFAULT);
+    for (int reportType : {_CRT_WARN, _CRT_ERROR, _CRT_ASSERT}) {
+        _CrtSetReportMode(reportType, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+        _CrtSetReportFile(reportType, _CRTDBG_FILE_STDERR);
+    }
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+}
+#endif
 
 bool isOption(std::string_view arg) {
     return !arg.empty() && arg.front() == '-';
@@ -47,6 +78,9 @@ std::vector<std::string> normalizeArgs(int argc, char* argv[]) {
 } // namespace
 
 int main(int argc, char* argv[]) {
+#if defined(_MSC_VER)
+    reportCrtFailuresToStderr();
+#endif
     auto args = normalizeArgs(argc, argv);
     std::vector<char*> normalizedArgv;
     normalizedArgv.reserve(args.size());
