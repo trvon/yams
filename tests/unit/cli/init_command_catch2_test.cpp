@@ -13,7 +13,14 @@
 #include <string>
 #include <vector>
 
+#include <yams/cli/doctor/checks/dim_consistency.h>
+#include <yams/cli/doctor/doctor_context.h>
+#include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
+#include <yams/config/config_migration.h>
+#include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/daemon.h>
 
 #include "../../common/test_helpers_catch2.h"
 
@@ -21,6 +28,7 @@ namespace yams::cli {
 std::string formatLaterCommand(const std::string& command);
 std::string formatInitSummary(const std::filesystem::path& configPath,
                               const std::filesystem::path& dataPath);
+size_t resolveModelDimension(std::string_view modelName);
 } // namespace yams::cli
 
 namespace fs = std::filesystem;
@@ -227,4 +235,207 @@ TEST_CASE("InitCommand - post-setup guidance is formatted per branch", "[cli][in
         CHECK(text.find("Next") != std::string::npos);
         CHECK(text.find("yams list | yams doctor") != std::string::npos);
     }
+}
+
+TEST_CASE("InitCommand: resolveModelDimension maps model names to expected dimensions",
+          "[cli][init][models]") {
+    CHECK(yams::cli::resolveModelDimension("simeon-default") == 1024);
+    CHECK(yams::cli::resolveModelDimension("simeon") == 1024);
+    CHECK(yams::cli::resolveModelDimension("") == 1024);
+    CHECK(yams::cli::resolveModelDimension("all-MiniLM-L6-v2") == 384);
+    CHECK(yams::cli::resolveModelDimension("multi-qa-MiniLM-L6-cos-v1") == 384);
+    CHECK(yams::cli::resolveModelDimension("mxbai-edge-colbert-v0-17m") == 48);
+    CHECK(yams::cli::resolveModelDimension("embeddinggemma-300m") == 768);
+}
+
+TEST_CASE("ConfigMigrator: Default config has consistent 1024 dimensions across all sections",
+          "[config][migration][catch2]") {
+    const auto defaults = yams::config::ConfigMigrator::getLatestConfigDefaults();
+
+    REQUIRE(defaults.find("embeddings") != defaults.end());
+    REQUIRE(defaults.find("vector_database") != defaults.end());
+    REQUIRE(defaults.find("vector_index") != defaults.end());
+
+    CHECK(defaults.at("embeddings").at("embedding_dim") == "1024");
+    CHECK(defaults.at("embeddings").at("backend") == "simeon");
+    CHECK(defaults.at("embeddings").at("preferred_model") == "simeon-default");
+
+    CHECK(defaults.at("vector_database").at("embedding_dim") == "1024");
+    CHECK(defaults.at("vector_index").at("dimension") == "1024");
+}
+
+TEST_CASE("ConfigMigrator: createDefaultLatestConfig generates valid zero-warning config",
+          "[config][migration][catch2]") {
+    CliTestHelper helper;
+    auto migrator = std::make_unique<yams::config::ConfigMigrator>();
+    auto result = migrator->createDefaultLatestConfig(helper.configPath);
+    REQUIRE(result.has_value());
+
+    const auto dims = yams::config::read_dimension_config(helper.configPath);
+    REQUIRE(dims.embeddings.has_value());
+    REQUIRE(dims.vectorDb.has_value());
+    REQUIRE(dims.index.has_value());
+    CHECK(*dims.embeddings == 1024);
+    CHECK(*dims.vectorDb == 1024);
+    CHECK(*dims.index == 1024);
+
+    yams::daemon::DaemonConfig dcfg;
+    dcfg.configFilePath = helper.configPath;
+    const auto resolved = yams::daemon::ConfigResolver::resolveEmbeddingConfig(dcfg, {});
+    CHECK(resolved.dimension == std::optional<std::size_t>{1024U});
+    CHECK(resolved.backend == "simeon");
+    CHECK(resolved.preferredModel == "simeon-default");
+
+    for (const auto& w : resolved.warnings) {
+        INFO("Unexpected warning: " << w);
+        CHECK(w.find("dimension conflict") == std::string::npos);
+        CHECK(w.find("overrides compatibility key") == std::string::npos);
+    }
+}
+
+TEST_CASE("InitCommand: Fresh instance setup generates conflict-free embedding config and sentinel",
+          "[cli][init][catch2]") {
+    CliTestHelper helper;
+
+    const int rc = helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"});
+    REQUIRE(rc == 0);
+
+    // Verify config file was written
+    REQUIRE(fs::exists(helper.configPath));
+
+    // 1) Read dimension config using typed helper: all three must be 1024
+    const auto dims = yams::config::read_dimension_config(helper.configPath);
+    REQUIRE(dims.embeddings.has_value());
+    REQUIRE(dims.vectorDb.has_value());
+    REQUIRE(dims.index.has_value());
+    CHECK(*dims.embeddings == 1024);
+    CHECK(*dims.vectorDb == 1024);
+    CHECK(*dims.index == 1024);
+
+    // 2) Resolve embedding policy as a daemon/CLI component would on startup
+    yams::daemon::DaemonConfig dcfg;
+    dcfg.configFilePath = helper.configPath;
+    const auto resolved =
+        yams::daemon::ConfigResolver::resolveEmbeddingConfig(dcfg, helper.dataDir);
+
+    CHECK(resolved.backend == "simeon");
+    CHECK(resolved.preferredModel == "simeon-default");
+    CHECK(resolved.isTrainingFree);
+    REQUIRE(resolved.dimension.has_value());
+    CHECK(*resolved.dimension == 1024);
+
+    // CRITICAL: Ensure NO dimension conflict warnings were generated
+    for (const auto& warning : resolved.warnings) {
+        INFO("Unexpected warning: " << warning);
+        CHECK(warning.find("dimension conflict") == std::string::npos);
+        CHECK(warning.find("overrides compatibility key") == std::string::npos);
+    }
+
+    // 3) Verify vectors.db was created and vectors_sentinel.json was written with matching dim
+    REQUIRE(fs::exists(helper.dataDir / "vectors.db"));
+    const auto sentinelDim = yams::daemon::ConfigResolver::readVectorSentinelDim(helper.dataDir);
+    REQUIRE(sentinelDim.has_value());
+    CHECK(*sentinelDim == 1024);
+
+    // 4) Verify Doctor consistency check reports clean state
+    auto cli = std::make_unique<yams::cli::YamsCLI>();
+    yams::cli::doctor::DoctorContext ctx(cli.get());
+    yams::cli::doctor::DimConsistencyCheck check;
+    const auto dimResult = check.execute(ctx, nullptr);
+    CHECK_FALSE(dimResult.configInconsistent);
+    CHECK_FALSE(dimResult.mismatch);
+    CHECK(dimResult.targetDim == 1024);
+}
+
+TEST_CASE("ConfigMigrator: v2 migration keeps an existing 384 dimension across all keys",
+          "[config][migration][catch2]") {
+    CliTestHelper helper;
+    // A v2 config that predates the current 1024 default: two keys are present and
+    // agree on 384, while a sibling key is missing and would otherwise receive the
+    // new 1024 default during migration.
+    REQUIRE_FALSE(yams::test::write_file(helper.configPath, R"toml(
+[version]
+config_version = 2
+
+[embeddings]
+backend = "onnxruntime"
+preferred_model = "all-MiniLM-L6-v2"
+embedding_dim = 384
+
+[vector_database]
+embedding_dim = 384
+)toml")
+                      .empty());
+
+    auto migrator = std::make_unique<yams::config::ConfigMigrator>();
+    auto result = migrator->migrateToLatest(helper.configPath, false);
+    REQUIRE(result.has_value());
+
+    const auto dims = yams::config::read_dimension_config(helper.configPath);
+    REQUIRE(dims.embeddings.has_value());
+    REQUIRE(dims.vectorDb.has_value());
+    REQUIRE(dims.index.has_value());
+    CHECK(*dims.embeddings == 384);
+    CHECK(*dims.vectorDb == 384);
+    CHECK(*dims.index == 384);
+
+    yams::daemon::DaemonConfig dcfg;
+    dcfg.configFilePath = helper.configPath;
+    const auto resolved = yams::daemon::ConfigResolver::resolveEmbeddingConfig(dcfg, {});
+    REQUIRE(resolved.dimension.has_value());
+    CHECK(*resolved.dimension == 384);
+    for (const auto& warning : resolved.warnings) {
+        INFO("Unexpected warning: " << warning);
+        CHECK(warning.find("dimension conflict") == std::string::npos);
+        CHECK(warning.find("overrides compatibility key") == std::string::npos);
+    }
+}
+
+TEST_CASE("ConfigMigrator: v1 migration preserves the install's existing dimension",
+          "[config][migration][catch2]") {
+    CliTestHelper helper;
+    // v1 configs have no [version] section and are treated as version 1.
+    REQUIRE_FALSE(yams::test::write_file(helper.configPath, R"toml(
+[core]
+data_dir = "/tmp/yams-legacy-384"
+
+[embeddings]
+backend = "onnxruntime"
+preferred_model = "all-MiniLM-L6-v2"
+embedding_dim = 384
+
+[vector_database]
+embedding_dim = 384
+)toml")
+                      .empty());
+
+    auto migrator = std::make_unique<yams::config::ConfigMigrator>();
+    auto result = migrator->migrateToLatest(helper.configPath, false);
+    REQUIRE(result.has_value());
+
+    const auto dims = yams::config::read_dimension_config(helper.configPath);
+    REQUIRE(dims.embeddings.has_value());
+    REQUIRE(dims.vectorDb.has_value());
+    REQUIRE(dims.index.has_value());
+    CHECK(*dims.embeddings == 384);
+    CHECK(*dims.vectorDb == 384);
+    CHECK(*dims.index == 384);
+}
+
+TEST_CASE("InitCommand: re-init does not overwrite an existing vector dimension sentinel",
+          "[cli][init][catch2]") {
+    CliTestHelper helper;
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+
+    // Simulate an install whose stored dimension differs from the freshly resolved
+    // default (for example an older 384-d corpus). A forced re-init must not clobber
+    // that record with 1024, or `yams doctor` would stop seeing the real mismatch.
+    yams::cli::vecutil::writeVectorSentinel(helper.dataDir, 384);
+
+    REQUIRE(helper.runCommand(
+                {"yams", "init", "--force", "--non-interactive", "--no-keygen"}) == 0);
+
+    const auto sentinelDim = yams::daemon::ConfigResolver::readVectorSentinelDim(helper.dataDir);
+    REQUIRE(sentinelDim.has_value());
+    CHECK(*sentinelDim == 384);
 }
