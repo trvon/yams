@@ -1,4 +1,7 @@
-FROM debian:trixie-slim
+# Debian/Ubuntu systemd-in-Docker substrate for scripts/local-ci/package-validate.sh.
+# BASE_IMAGE selects the distro (debian:trixie-slim, ubuntu:24.04, ...).
+ARG BASE_IMAGE=debian:trixie-slim
+FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV container=docker
@@ -11,11 +14,11 @@ RUN set -eux; \
     procps \
     psmisc \
     iproute2 \
-    ca-certificates \
-    gnupg && \
+    binutils \
+    passwd \
+    util-linux \
+    ca-certificates && \
   rm -rf /var/lib/apt/lists/*
-
-RUN useradd -m -s /bin/bash tester
 
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]

@@ -500,6 +500,7 @@ jobs:
         env:
           ARCH_DOCKER_PLATFORM: ${{ matrix.docker_platform }}
           ARCH_BASE_IMAGE: ${{ matrix.arch_base_image }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           : "${ARCH_PKG_PATH:?ARCH_PKG_PATH not set}"
@@ -525,8 +526,19 @@ jobs:
           printf '%s\n' "$package_info" | grep -F 'pkgname = yams' >/dev/null
           echo "Validated package metadata architecture: ${metadata_arch}"
 
+          # Publish gate: install, layout, service, CLI, reboot, removal and the
+          # upgrade from the latest published release (when it has an Arch package).
+          upgrade_args=()
+          prev_dir="$(mktemp -d)"
+          prev_tag="$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
+          if [ -n "$prev_tag" ] && gh release download "$prev_tag" -R "$GITHUB_REPOSITORY" -D "$prev_dir" -p "yams-*-${expected_arch}.pkg.tar.zst" 2>/dev/null; then
+            prev_pkg="$(find "$prev_dir" -name 'yams-*.pkg.tar.zst' -print -quit)"
+            if [ -n "$prev_pkg" ]; then upgrade_args=(--upgrade-from-arch "$prev_pkg"); fi
+          fi
+          echo "Upgrade source: ${prev_tag:-none} ${upgrade_args[*]:-}"
+
           chmod +x scripts/local-ci/package-validate.sh
-          bash scripts/local-ci/package-validate.sh --only arch --arch "$ARCH_PKG_PATH"
+          bash scripts/local-ci/package-validate.sh --only arch --arch "$ARCH_PKG_PATH" "${upgrade_args[@]}"
 
       - name: Skip remaining steps for Arch container builds
         if: matrix.arch_container == true
@@ -1526,6 +1538,8 @@ jobs:
       - name: Validate Linux package install (systemd lanes)
         if: ${{ matrix.build_packages == true && runner.os == 'Linux' && github.actor != 'nektos/act' && inputs.fast_mode != 'true' && matrix.arch_container != true }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           case "${{ matrix.suffix }}" in
@@ -1551,6 +1565,21 @@ jobs:
             exit 1
           fi
 
+          # Upgrade path: the same lanes first install the latest published
+          # release's packages, store a document, then upgrade to these.
+          prev_dir="$(mktemp -d)"
+          prev_tag="$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
+          if [ -n "$prev_tag" ]; then
+            gh release download "$prev_tag" -R "$GITHUB_REPOSITORY" -D "$prev_dir" \
+              -p "yams-*linux-${expected_arch}.deb" -p "yams-*linux-${expected_arch}.rpm" 2>/dev/null || true
+            prev_deb="$(find "$prev_dir" -name 'yams-*.deb' -print -quit)"
+            prev_rpm="$(find "$prev_dir" -name 'yams-*.rpm' -print -quit)"
+            if [ -n "${prev_deb}" ] && [ -n "${deb}" ]; then args+=(--upgrade-from-deb "${prev_deb}"); fi
+            if [ -n "${prev_rpm}" ] && [ -n "${rpm}" ]; then args+=(--upgrade-from-rpm "${prev_rpm}"); fi
+          fi
+          echo "Upgrade source: ${prev_tag:-none}"
+
+          # Publish gate: Debian, Ubuntu and Fedora lanes (see the script header).
           chmod +x scripts/local-ci/package-validate.sh
           bash scripts/local-ci/package-validate.sh --only linux "${args[@]}"
 

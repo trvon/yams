@@ -1,322 +1,296 @@
 #!/usr/bin/env bash
 # yams/scripts/local-ci/package-validate.sh
 #
-# Install the built Linux packages into clean systemd containers and smoke-test
-# the yams-daemon service end to end:
+# Install-validate the YAMS Linux packages (.deb, .rpm, Arch .pkg.tar.zst) the
+# way a user would, in clean distro containers that boot systemd as PID 1.
+# Single entry point for local runs (grim, any Linux box or Docker Desktop VM
+# with Docker) and the release workflow's publish gate.
 #
-#   1) Boot a clean distro container under /sbin/init (real systemd)
-#   2) Install the package (.deb on Debian, .rpm on Fedora)
-#   3) Assert the unit is enabled, becomes active, and the socket exists
-#   4) Assert `yams --version` and `yams daemon status` work over the socket
-#   5) Remove (and, for .deb, purge) and assert the service is torn down
+# Per distro lane, in a fresh container:
+#   install  - package manager install, no env vars, no manual steps
+#   layout   - installed file list against a runtime allowlist; no headers,
+#              static libs, pkg-config or CMake files; no world-writable,
+#              setuid or non-root files; every ELF's DT_NEEDED resolves and
+#              RPATH/RUNPATH is $ORIGIN or /usr/lib[/yams] only
+#   service  - unit enabled + active, runs as the `yams` account, socket
+#              group `yams` and closed to others, `systemd-analyze verify`
+#              clean, `systemd-analyze security` exposure under a budget,
+#              corpus in /var/lib/yams and log in /var/log/yams
+#   cli      - with no YAMS_* variables: root, a `yams`-group member (files
+#              in $HOME and /tmp) and a non-member: status, add, search,
+#              shared corpus, no private fallback store, clear error for a
+#              directory the daemon cannot read, non-member denied,
+#              `yams daemon stop` defers to systemd
+#   persist  - container reboot: unit back, socket perms, data still there
+#   remove   - uninstall stops/disables the unit; deb purge removes state
+# With --upgrade-from-<fmt>, a second container installs that older package,
+# stores a document, upgrades to the new package and checks the unit restarted
+# onto the new binary with the document intact.
 #
-# It does NOT build the packages. Build them first, e.g.:
-#   bash scripts/build-deb.sh package_only <version> build/release stage
-# (or via the full scripts/build-deb.sh run). The .rpm is cross-built on the
-# Debian/Ubuntu builder; this script only validates installs.
+# Checks never stop at the first failure: each lane prints PASS/FAIL lines and
+# a summary, and the script exits non-zero if any check failed.
 #
-# Requirements on host:
-#   - Docker available on PATH, on a Linux host (or Docker Desktop's Linux VM)
-#   - systemd-in-docker needs --privileged + cgroup access (handled below)
+# Usage:
+#   package-validate.sh [--only LANES] [--deb F] [--rpm F] [--arch F]
+#                       [--upgrade-from-deb F] [--upgrade-from-rpm F]
+#                       [--upgrade-from-arch F] [--build-dir DIR]
+#                       [--report FILE] [--keep]
+#
+#   LANES: debian, ubuntu, fedora, arch, or groups: deb (debian,ubuntu),
+#   rpm (fedora), linux (deb+rpm, default), all (linux+arch); comma-separated.
+#   Packages not given are discovered under --build-dir (default build/release).
 #
 # Examples:
-#   bash scripts/local-ci/package-validate.sh                 # validate deb + rpm
-#   bash scripts/local-ci/package-validate.sh --only deb      # validate deb only
-#   bash scripts/local-ci/package-validate.sh --only all      # validate deb + rpm + arch
-#   bash scripts/local-ci/package-validate.sh --deb path/to/yams.deb --rpm path/to/yams.rpm
+#   bash scripts/local-ci/package-validate.sh --only all \
+#     --deb yams-0.21.0-linux-x86_64.deb --rpm yams-0.21.0-linux-x86_64.rpm \
+#     --arch yams-0.21.0-1-x86_64.pkg.tar.zst \
+#     --upgrade-from-deb yams-0.20.3-linux-x86_64.deb
 #
-# Notes:
-#   - Substrate images come from packaging/systemd/{debian-lane,fedora-lane}.Dockerfile
-#   - macOS native Docker cannot run systemd; rely on a Linux CI runner.
-
+# Environment:
+#   ARCH_DOCKER_PLATFORM / ARCH_BASE_IMAGE   Arch lane platform and base image
+#   UBUNTU_IMAGE (ubuntu:24.04) DEBIAN_IMAGE (debian:trixie-slim)
+#   FEDORA_IMAGE (fedora:42)
+#   YAMS_VALIDATE_MAX_EXPOSURE (3.0)         systemd-analyze security budget
+#
+# Containers need --privileged and a private cgroup namespace (cgroup v2) so
+# systemd can run units with their sandboxing; nothing touches host cgroups.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-
-BUILD_DIR_DEFAULT="${REPO_ROOT}/build/release"
-DEBIAN_DOCKERFILE="${REPO_ROOT}/packaging/systemd/debian-lane.Dockerfile"
-FEDORA_DOCKERFILE="${REPO_ROOT}/packaging/systemd/fedora-lane.Dockerfile"
-ARCH_DOCKERFILE="${REPO_ROOT}/packaging/systemd/arch-lane.Dockerfile"
-SOCKET_PATH="/run/yams/yams-daemon.sock"
+CHECKS="${SCRIPT_DIR}/package-validate-checks.sh"
+SUBSTRATE_DIR="${REPO_ROOT}/packaging/systemd"
 
 ONLY="linux"
-BUILD_DIR="${BUILD_DIR_DEFAULT}"
-DEB_PKG=""
-RPM_PKG=""
-ARCH_PKG=""
+BUILD_DIR="${REPO_ROOT}/build/release"
+DEB_PKG="" RPM_PKG="" ARCH_PKG=""
+UP_DEB="" UP_RPM="" UP_ARCH=""
+REPORT=""
+KEEP=0
 
 log() { printf '\033[1;34m[validate]\033[0m %s\n' "$*"; }
-ok() { printf '\033[1;32m[ ok ]\033[0m %s\n' "$*"; }
-fail() { printf '\033[1;31m[fail]\033[0m %s\n' "$*" >&2; }
-
-usage() {
-	sed -n '2,40p' "${BASH_SOURCE[0]}"
-}
-
-should_run_lane() {
-	local lane="$1"
-	case "${ONLY}" in
-	all) return 0 ;;
-	linux) [ "${lane}" = "deb" ] || [ "${lane}" = "rpm" ] ;;
-	deb | rpm | arch) [ "${ONLY}" = "${lane}" ] ;;
-	*,*) case ",${ONLY}," in *",${lane},"*) return 0 ;; *) return 1 ;; esac ;;
-	*) return 1 ;;
-	esac
-}
+okmsg() { printf '\033[1;32m[ ok ]\033[0m %s\n' "$*"; }
+err() { printf '\033[1;31m[fail]\033[0m %s\n' "$*" >&2; }
+usage() { sed -n '2,58p' "${BASH_SOURCE[0]}"; }
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
-	--only)
-		ONLY="$2"
-		shift 2
-		;;
-	--build-dir)
-		BUILD_DIR="$2"
-		shift 2
-		;;
-	--deb)
-		DEB_PKG="$2"
-		shift 2
-		;;
-	--rpm)
-		RPM_PKG="$2"
-		shift 2
-		;;
-	--arch)
-		ARCH_PKG="$2"
-		shift 2
-		;;
-	-h | --help)
-		usage
-		exit 0
-		;;
-	*)
-		fail "unknown argument: $1"
-		usage
-		exit 2
-		;;
+	--only) ONLY="$2"; shift 2 ;;
+	--build-dir) BUILD_DIR="$2"; shift 2 ;;
+	--deb) DEB_PKG="$2"; shift 2 ;;
+	--rpm) RPM_PKG="$2"; shift 2 ;;
+	--arch) ARCH_PKG="$2"; shift 2 ;;
+	--upgrade-from-deb) UP_DEB="$2"; shift 2 ;;
+	--upgrade-from-rpm) UP_RPM="$2"; shift 2 ;;
+	--upgrade-from-arch) UP_ARCH="$2"; shift 2 ;;
+	--report) REPORT="$2"; shift 2 ;;
+	--keep) KEEP=1; shift ;;
+	-h | --help) usage; exit 0 ;;
+	*) err "unknown argument: $1"; usage; exit 2 ;;
 	esac
 done
 
-case "${ONLY}" in
-all | linux | deb | rpm | arch | *,*) ;;
-*)
-	fail "unsupported --only value: ${ONLY} (expected linux, all, deb, rpm, arch, or comma-separated lanes)"
-	exit 2
-	;;
-esac
+# Expand lane groups into an ordered, de-duplicated lane list.
+LANES=()
+add_lane() { case " ${LANES[*]-} " in *" $1 "*) ;; *) LANES+=("$1") ;; esac; }
+IFS=',' read -r -a requested <<<"${ONLY}"
+for item in "${requested[@]}"; do
+	case "${item}" in
+	all) add_lane debian; add_lane ubuntu; add_lane fedora; add_lane arch ;;
+	linux) add_lane debian; add_lane ubuntu; add_lane fedora ;;
+	deb) add_lane debian; add_lane ubuntu ;;
+	rpm) add_lane fedora ;;
+	debian | ubuntu | fedora | arch) add_lane "${item}" ;;
+	*) err "unsupported lane: ${item}"; exit 2 ;;
+	esac
+done
+[ "${#LANES[@]}" -gt 0 ] || { err "no lanes selected"; exit 2; }
 
-if ! command -v docker >/dev/null 2>&1; then
-	fail "docker not found on PATH"
-	exit 2
-fi
+command -v docker >/dev/null 2>&1 || { err "docker not found on PATH"; exit 2; }
+[ -f "${CHECKS}" ] || { err "missing ${CHECKS}"; exit 2; }
 
-# A missing build dir must not abort under `set -e -o pipefail`; the lane then
-# reports "package not found" instead of the script exiting silently.
 discover_pkg() {
-	local pattern="$1"
 	[ -d "${BUILD_DIR}" ] || return 0
-	{ find "${BUILD_DIR}" -maxdepth 4 -type f -name "${pattern}" 2>/dev/null || true; } |
-		LC_ALL=C sort | tail -n1
+	{ find "${BUILD_DIR}" -maxdepth 4 -type f -name "$1" 2>/dev/null || true; } | LC_ALL=C sort | tail -n1
 }
+abs() { [ -n "$1" ] && printf '%s/%s' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")"; }
 
-if should_run_lane deb && [ -z "${DEB_PKG}" ]; then DEB_PKG="$(discover_pkg 'yams-*.deb')"; fi
-if should_run_lane rpm && [ -z "${RPM_PKG}" ]; then RPM_PKG="$(discover_pkg 'yams-*.rpm')"; fi
-if should_run_lane arch && [ -z "${ARCH_PKG}" ]; then
-	ARCH_PKG="$(discover_pkg "yams-*-${ARCH_PKG_ARCH:-x86_64}.pkg.tar.zst")"
-fi
+[ -n "${DEB_PKG}" ] || DEB_PKG="$(discover_pkg 'yams-*.deb')"
+[ -n "${RPM_PKG}" ] || RPM_PKG="$(discover_pkg 'yams-*.rpm')"
+[ -n "${ARCH_PKG}" ] || ARCH_PKG="$(discover_pkg "yams-*-${ARCH_PKG_ARCH:-x86_64}.pkg.tar.zst")"
 
-# Unique run tag so parallel invocations don't collide.
 RUN_TAG="$$"
-
-# Run a systemd container, install + smoke-test a package, then tear it down.
-# Args: <name> <dockerfile> <image-tag> <pkg-path> <install-cmd> <remove-cmd> [purge-cmd]
-validate_lane() {
-	local name="$1" dockerfile="$2" image="$3" pkg="$4"
-	local install_cmd="$5" remove_cmd="$6" purge_cmd="${7:-}"
-
-	if [ -z "${pkg}" ] || [ ! -f "${pkg}" ]; then
-		fail "${name}: package not found (looked in ${BUILD_DIR}); skip with --only or pass --deb/--rpm"
-		return 1
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/yams-pkg-validate.XXXXXX")"
+CONTAINERS=()
+cleanup() {
+	if [ "${KEEP}" -eq 0 ]; then
+		for c in "${CONTAINERS[@]-}"; do [ -n "${c}" ] && docker rm -f "${c}" >/dev/null 2>&1 || true; done
+	else
+		log "kept containers: ${CONTAINERS[*]-}"
 	fi
+	rm -rf "${WORK}"
+}
+trap cleanup EXIT
 
-	local platform_args=()
-	if [ "${name}" = "arch" ]; then
-		platform_args=(--platform="${ARCH_DOCKER_PLATFORM:-linux/amd64}")
-	fi
-	local build_args=()
-	if [ "${name}" = "arch" ] && [ -n "${ARCH_BASE_IMAGE:-}" ]; then
-		build_args=(--build-arg "ARCH_BASE_IMAGE=${ARCH_BASE_IMAGE}")
-	fi
+lane_fmt() { case "$1" in debian | ubuntu) echo deb ;; fedora) echo rpm ;; arch) echo arch ;; esac; }
+lane_pkg() { case "$1" in debian | ubuntu) echo "${DEB_PKG}" ;; fedora) echo "${RPM_PKG}" ;; arch) echo "${ARCH_PKG}" ;; esac; }
+lane_upgrade_from() { case "$1" in debian | ubuntu) echo "${UP_DEB}" ;; fedora) echo "${UP_RPM}" ;; arch) echo "${UP_ARCH}" ;; esac; }
 
-	log "${name}: building substrate image from ${dockerfile#"${REPO_ROOT}"/}"
-	if ! docker build "${platform_args[@]}" "${build_args[@]}" -f "${dockerfile}" -t "${image}" "${REPO_ROOT}/packaging/systemd" >/dev/null; then
-		fail "${name}: failed to build substrate image"
-		return 1
-	fi
+platform_args() { [ "$1" = arch ] && printf -- '--platform=%s\n' "${ARCH_DOCKER_PLATFORM:-linux/amd64}"; return 0; }
 
-	local container="yams-validate-${name}-${RUN_TAG}"
-	docker rm -f "${container}" >/dev/null 2>&1 || true
-
-	log "${name}: booting systemd container"
-	if ! docker run -d --name "${container}" \
-		"${platform_args[@]}" \
-		--privileged \
-		--cgroupns=host \
-		-v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-		--tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
-		"${image}" >/dev/null; then
-		fail "${name}: failed to start systemd container"
-		return 1
-	fi
-
-	local rc=0
-	# shellcheck disable=SC2064
-	trap "docker rm -f '${container}' >/dev/null 2>&1 || true" RETURN
-
-	# Wait for systemd to finish booting (running or degraded is acceptable).
-	local state=""
-	for _ in $(seq 1 60); do
-		state="$(docker exec "${container}" systemctl is-system-running 2>/dev/null || true)"
-		case "${state}" in
-		running | degraded) break ;;
-		esac
-		sleep 0.5
-	done
-	case "${state}" in
-	running | degraded) ok "${name}: systemd booted (${state})" ;;
-	*)
-		fail "${name}: systemd did not boot (state='${state}')"
-		docker logs "${container}" 2>/dev/null || true
-		return 1
+build_substrate() { # build_substrate <lane> -> image tag on stdout
+	local lane="$1" image="yams/validate-$1:local" dockerfile
+	local -a args=()
+	case "${lane}" in
+	debian) dockerfile=debian-lane.Dockerfile; args=(--build-arg "BASE_IMAGE=${DEBIAN_IMAGE:-debian:trixie-slim}") ;;
+	ubuntu) dockerfile=debian-lane.Dockerfile; args=(--build-arg "BASE_IMAGE=${UBUNTU_IMAGE:-ubuntu:24.04}") ;;
+	fedora) dockerfile=fedora-lane.Dockerfile; args=(--build-arg "BASE_IMAGE=${FEDORA_IMAGE:-fedora:42}") ;;
+	arch)
+		dockerfile=arch-lane.Dockerfile
+		[ -n "${ARCH_BASE_IMAGE:-}" ] && args=(--build-arg "ARCH_BASE_IMAGE=${ARCH_BASE_IMAGE}")
 		;;
 	esac
-
-	# Copy into /root (HOME), not /tmp: the container boots with --tmpfs /tmp,
-	# which shadows a docker cp into that path.
-	docker cp "${pkg}" "${container}:/root/$(basename "${pkg}")"
-
-	log "${name}: installing $(basename "${pkg}")"
-	if ! docker exec "${container}" bash -lc "${install_cmd}"; then
-		fail "${name}: install failed"
-		return 1
-	fi
-	ok "${name}: installed"
-
-	# Service must be enabled by the preset-driven maintainer scripts.
-	if docker exec "${container}" systemctl is-enabled yams-daemon.service >/dev/null 2>&1; then
-		ok "${name}: yams-daemon.service is enabled"
-	else
-		fail "${name}: yams-daemon.service is NOT enabled"
-		rc=1
-	fi
-
-	# Service must reach active state.
-	local active=""
-	for _ in $(seq 1 60); do
-		active="$(docker exec "${container}" systemctl is-active yams-daemon.service 2>/dev/null || true)"
-		[ "${active}" = "active" ] && break
-		sleep 0.5
-	done
-	if [ "${active}" = "active" ]; then
-		ok "${name}: yams-daemon.service is active"
-	else
-		fail "${name}: yams-daemon.service not active (state='${active}')"
-		docker exec "${container}" journalctl -u yams-daemon.service --no-pager -n 50 2>/dev/null || true
-		rc=1
-	fi
-
-	if docker exec "${container}" test -S "${SOCKET_PATH}"; then
-		ok "${name}: socket present at ${SOCKET_PATH}"
-	else
-		fail "${name}: socket missing at ${SOCKET_PATH}"
-		rc=1
-	fi
-
-	if docker exec "${container}" yams --version >/dev/null 2>&1; then
-		ok "${name}: yams --version works"
-	else
-		fail "${name}: yams --version failed"
-		rc=1
-	fi
-
-	if docker exec "${container}" env "YAMS_DAEMON_SOCKET=${SOCKET_PATH}" yams daemon status >/dev/null 2>&1; then
-		ok "${name}: yams daemon status reachable over socket"
-	else
-		fail "${name}: yams daemon status failed over ${SOCKET_PATH}"
-		rc=1
-	fi
-
-	log "${name}: removing package"
-	if ! docker exec "${container}" bash -lc "${remove_cmd}"; then
-		fail "${name}: remove failed"
-		rc=1
-	else
-		if [ "$(docker exec "${container}" systemctl is-active yams-daemon.service 2>/dev/null || true)" = "active" ]; then
-			fail "${name}: service still active after remove"
-			rc=1
-		else
-			ok "${name}: service stopped after remove"
-		fi
-	fi
-
-	if [ -n "${purge_cmd}" ]; then
-		log "${name}: purging package"
-		if ! docker exec "${container}" bash -lc "${purge_cmd}"; then
-			fail "${name}: purge failed"
-			rc=1
-		else
-			ok "${name}: purged"
-		fi
-	fi
-
-	return "${rc}"
+	local -a plat=()
+	mapfile -t plat < <(platform_args "${lane}")
+	docker build -q "${plat[@]}" "${args[@]}" -f "${SUBSTRATE_DIR}/${dockerfile}" -t "${image}" "${SUBSTRATE_DIR}" >/dev/null
+	printf '%s' "${image}"
 }
 
+boot() { # boot <lane> <image> <name>
+	local lane="$1" image="$2" name="$3"
+	local -a plat=()
+	mapfile -t plat < <(platform_args "${lane}")
+	docker rm -f "${name}" >/dev/null 2>&1 || true
+	docker run -d --name "${name}" "${plat[@]}" --privileged --cgroupns=private \
+		--tmpfs /run --tmpfs /run/lock --tmpfs /tmp "${image}" >/dev/null
+	CONTAINERS+=("${name}")
+	wait_boot "${name}"
+}
+
+wait_boot() {
+	local name="$1" state=""
+	for _ in $(seq 1 120); do
+		state="$(docker exec "${name}" systemctl is-system-running 2>/dev/null || true)"
+		case "${state}" in running | degraded) return 0 ;; esac
+		sleep 0.5
+	done
+	err "${name}: systemd did not boot (state='${state}')"
+	docker logs "${name}" 2>&1 | tail -n 20 >&2 || true
+	return 1
+}
+
+reboot() {
+	docker restart "$1" >/dev/null
+	wait_boot "$1"
+}
+
+stage_files() { # stage_files <container> <file>...
+	local c="$1"
+	shift
+	docker exec "${c}" mkdir -p /var/tmp/yams-validate
+	docker cp "${CHECKS}" "${c}:/var/tmp/yams-validate/checks.sh"
+	for f in "$@"; do
+		if [ -n "${f}" ]; then docker cp "${f}" "${c}:/var/tmp/yams-validate/$(basename "${f}")"; fi
+	done
+}
+
+run_phase() { # run_phase <lane> <container> <phase> [pkg]
+	local lane="$1" c="$2" phase="$3" pkg="${4:-}" out="${WORK}/$1.results"
+	local arg=""
+	[ -n "${pkg}" ] && arg="/var/tmp/yams-validate/$(basename "${pkg}")"
+	log "${lane}: ${phase}"
+	docker exec "${c}" bash /var/tmp/yams-validate/checks.sh "${phase}" "$(lane_fmt "${lane}")" "${arg}" 2>&1 |
+		sed "s/^/${lane} /" | tee -a "${out}" | while IFS= read -r line; do
+		case "${line}" in
+		*" PASS "*) printf '  \033[32m%s\033[0m\n' "${line#* }" ;;
+		*" FAIL "*) printf '  \033[31m%s\033[0m\n' "${line#* }" ;;
+		*) printf '  %s\n' "${line#* }" ;;
+		esac
+	done
+}
+
+note_fail() { printf '%s FAIL %s %s\n' "$1" "$2" "$3" >>"${WORK}/$1.results"; err "$1: $2 $3"; }
+
+validate_lane() {
+	local lane="$1" pkg upgrade_from image
+	pkg="$(abs "$(lane_pkg "${lane}")")" || true
+	upgrade_from="$(abs "$(lane_upgrade_from "${lane}")")" || true
+	: >"${WORK}/${lane}.results"
+	if [ -z "${pkg}" ] || [ ! -f "${pkg}" ]; then
+		note_fail "${lane}" package-missing "no $(lane_fmt "${lane}") package (pass it or build into ${BUILD_DIR})"
+		return
+	fi
+	log "${lane}: validating $(basename "${pkg}")"
+	if ! image="$(build_substrate "${lane}")"; then
+		note_fail "${lane}" substrate "failed to build substrate image"
+		return
+	fi
+
+	local c="yams-validate-${lane}-${RUN_TAG}"
+	if ! boot "${lane}" "${image}" "${c}"; then
+		note_fail "${lane}" boot "systemd did not boot"
+		return
+	fi
+	stage_files "${c}" "${pkg}"
+	run_phase "${lane}" "${c}" install "${pkg}"
+	run_phase "${lane}" "${c}" layout
+	run_phase "${lane}" "${c}" service
+	run_phase "${lane}" "${c}" cli
+	log "${lane}: rebooting container"
+	if reboot "${c}"; then
+		run_phase "${lane}" "${c}" persist
+	else
+		note_fail "${lane}" reboot "container did not boot again"
+	fi
+	run_phase "${lane}" "${c}" remove
+	docker rm -f "${c}" >/dev/null 2>&1 || true
+
+	if [ -n "${upgrade_from}" ]; then
+		if [ ! -f "${upgrade_from}" ]; then
+			note_fail "${lane}" upgrade-from "missing ${upgrade_from}"
+			return
+		fi
+		local u="yams-validate-${lane}-upgrade-${RUN_TAG}"
+		if ! boot "${lane}" "${image}" "${u}"; then
+			note_fail "${lane}" upgrade-boot "systemd did not boot"
+			return
+		fi
+		stage_files "${u}" "${upgrade_from}" "${pkg}"
+		log "${lane}: upgrade path $(basename "${upgrade_from}") -> $(basename "${pkg}")"
+		run_phase "${lane}" "${u}" install "${upgrade_from}"
+		run_phase "${lane}" "${u}" seed
+		run_phase "${lane}" "${u}" install "${pkg}"
+		run_phase "${lane}" "${u}" upgraded
+		docker rm -f "${u}" >/dev/null 2>&1 || true
+	fi
+}
+
+for lane in "${LANES[@]}"; do
+	validate_lane "${lane}" || note_fail "${lane}" harness "lane aborted"
+done
+
+# Summary
 OVERALL=0
-RAN=0
-
-if should_run_lane deb; then
-	RAN=$((RAN + 1))
-	deb_base="$(basename "${DEB_PKG:-yams.deb}")"
-	# Remove the Docker base image's policy-rc.d (exit 101), which blocks service
-	# auto-start during apt install. A real Debian/Ubuntu host has no such file, so
-	# removing it lets the package's postinst exercise its genuine enable+start path.
-	validate_lane "debian" "${DEBIAN_DOCKERFILE}" "yams/validate-debian:trixie" "${DEB_PKG}" \
-		"rm -f /usr/sbin/policy-rc.d; apt-get update >/dev/null 2>&1 || true; apt-get install -y /root/${deb_base} && dpkg -s yams >/dev/null" \
-		"apt-get remove -y yams" \
-		"apt-get purge -y yams" || OVERALL=1
+SUMMARY="${WORK}/summary.txt"
+{
+	printf '%-8s %5s %5s  %s\n' LANE PASS FAIL FAILED-CHECKS
+	for lane in "${LANES[@]}"; do
+		f="${WORK}/${lane}.results"
+		p="$(grep -c " PASS " "${f}" 2>/dev/null || true)"
+		n="$(grep -c " FAIL " "${f}" 2>/dev/null || true)"
+		failed="$(grep " FAIL " "${f}" 2>/dev/null | awk '{print $3}' | paste -sd, - || true)"
+		printf '%-8s %5s %5s  %s\n' "${lane}" "${p:-0}" "${n:-0}" "${failed}"
+		[ "${n:-0}" -eq 0 ] || OVERALL=1
+	done
+} >"${SUMMARY}"
+echo
+cat "${SUMMARY}"
+if [ -n "${REPORT}" ]; then
+	{
+		cat "${SUMMARY}"
+		echo
+		cat "${WORK}"/*.results
+	} >"${REPORT}"
 fi
-
-if should_run_lane rpm; then
-	RAN=$((RAN + 1))
-	rpm_base="$(basename "${RPM_PKG:-yams.rpm}")"
-	validate_lane "fedora" "${FEDORA_DOCKERFILE}" "yams/validate-fedora:42" "${RPM_PKG}" \
-		"dnf install -y /root/${rpm_base}" \
-		"dnf remove -y yams" \
-		"" || OVERALL=1
-fi
-
-if should_run_lane arch; then
-	RAN=$((RAN + 1))
-	arch_base="$(basename "${ARCH_PKG:-yams.pkg.tar.zst}")"
-	# Pacman defaults to confirming prompts; --noconfirm prevents interactive hangs.
-	# --overwrite '*' handles any file conflicts on re-installs in the same container.
-	validate_lane "arch" "${ARCH_DOCKERFILE}" "yams/validate-arch:latest" "${ARCH_PKG}" \
-		"pacman -Sy --noconfirm >/dev/null 2>&1; pacman -U --noconfirm --overwrite '*' /root/${arch_base} && pacman -Q yams >/dev/null" \
-		"pacman -R --noconfirm yams" \
-		"" || OVERALL=1
-fi
-
-if [ "${RAN}" -eq 0 ]; then
-	fail "no package validation lanes selected by --only ${ONLY}"
-	exit 2
-fi
-
-if [ "${OVERALL}" -eq 0 ]; then
-	ok "all package validation lanes passed"
-else
-	fail "one or more package validation lanes failed"
-fi
+if [ "${OVERALL}" -eq 0 ]; then okmsg "all package validation lanes passed"; else err "package validation failed"; fi
 exit "${OVERALL}"
