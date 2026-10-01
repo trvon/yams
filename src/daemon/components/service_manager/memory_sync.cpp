@@ -608,110 +608,112 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     } catch (...) {
         spdlog::debug("[memory_sync] quarantine reason logging skipped");
     }
-    try {
-        if (auto result = applyMemorySyncContentBlobs(); !result) {
-            spdlog::warn("[ServiceManager] memory_sync content apply failed: {}",
-                         result.error().message);
-            return;
+    // Stage dependencies. Inbound stages run in prerequisite order so that a prerequisite which
+    // lands in this cycle is already visible to its dependents in the same cycle:
+    //   content  - independent; content-addressed bytes.
+    //   metadata - per document, needs that document's content bytes locally.
+    //   vector   - per embedding, needs its document's content bytes locally.
+    //   topology - per edge, needs both endpoint nodes (replicated by the same stage).
+    // Those dependencies are enforced per record against the local stores, never by gating a whole
+    // stage on an earlier stage's success, so a failed stage cannot hide unrelated records from
+    // the stages after it. The outbound publish depends on no inbound stage: gating it on inbound
+    // success let a mesh deadlock, because when every node held an inbound record whose
+    // prerequisite only a peer could publish, every node refused to publish and the
+    // prerequisites never arrived. Only a stop request ends the cycle early.
+    const auto runStage = [this](std::string_view name, std::string_view completedStage,
+                                 auto&& applyStage) {
+        if (memorySync_->stopRequested()) {
+            return false;
         }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync content apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync content apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_content");
-
-    if (memorySync_->stopRequested()) {
-        return;
-    }
-    try {
-        if (auto repository = getMetadataRepo()) {
-            auto contentStore = getContentStore();
-            if (!contentStore) {
-                spdlog::warn("[ServiceManager] memory_sync metadata apply requires content store");
-                return;
-            }
-            metadata::MetadataSyncAdapter adapter{
-                *repository, *memorySync_,
-                [contentStore](std::string_view hash) {
-                    return contentStore->exists(std::string(hash));
-                },
-                [this](const metadata::DocumentInfo& document) {
-                    enqueuePostIngest(document.sha256Hash, document.mimeType);
-                }};
-            if (auto result = adapter.apply(); !result) {
-                spdlog::warn("[ServiceManager] memory_sync metadata apply failed: {}",
+        try {
+            if (auto result = applyStage(); !result) {
+                spdlog::warn("[ServiceManager] memory_sync {} apply failed: {}", name,
                              result.error().message);
-                return;
             }
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] memory_sync {} apply threw: {}", name, e.what());
+        } catch (...) {
+            spdlog::warn("[ServiceManager] memory_sync {} apply threw (unknown)", name);
         }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync metadata apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync metadata apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_metadata");
+        notifyMemorySyncStage(completedStage);
+        return true;
+    };
 
-    if (memorySync_->stopRequested()) {
-        return;
-    }
-    try {
-        if (auto vectorDatabase = getVectorDatabase()) {
-            auto contentStore = getContentStore();
-            if (!contentStore) {
-                spdlog::warn("[ServiceManager] memory_sync vector apply requires content store");
-                return;
-            }
-            vector::VectorSyncAdapter::RebuildCallback rebuild;
-            if (vectorIndexCoordinator_) {
-                rebuild = [coordinator = vectorIndexCoordinator_]() {
-                    return coordinator->requestRebuildBlocking(RebuildReason::EmbeddingBatch);
-                };
-            }
-            vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_, std::move(rebuild),
-                                              &memorySyncVectorRebuildDirty_,
+    const auto applyContent = [this]() -> Result<void> {
+        auto applied = applyMemorySyncContentBlobs();
+        if (!applied) {
+            return applied.error();
+        }
+        return {};
+    };
+    const auto applyMetadata = [this]() -> Result<void> {
+        auto repository = getMetadataRepo();
+        if (!repository) {
+            return {};
+        }
+        auto contentStore = getContentStore();
+        if (!contentStore) {
+            return Error{ErrorCode::InvalidState, "metadata apply requires the content store"};
+        }
+        metadata::MetadataSyncAdapter adapter{*repository, *memorySync_,
                                               [contentStore](std::string_view hash) {
                                                   return contentStore->exists(std::string(hash));
+                                              },
+                                              [this](const metadata::DocumentInfo& document) {
+                                                  enqueuePostIngest(document.sha256Hash,
+                                                                    document.mimeType);
                                               }};
-            if (auto result = adapter.apply(); !result) {
-                spdlog::warn("[ServiceManager] memory_sync vector apply failed: {}",
-                             result.error().message);
-                return;
-            }
+        auto applied = adapter.apply();
+        if (!applied) {
+            return applied.error();
         }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync vector apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync vector apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_vector");
+        return {};
+    };
+    const auto applyVectors = [this]() -> Result<void> {
+        auto vectorDatabase = getVectorDatabase();
+        if (!vectorDatabase) {
+            return {};
+        }
+        auto contentStore = getContentStore();
+        if (!contentStore) {
+            return Error{ErrorCode::InvalidState, "vector apply requires the content store"};
+        }
+        vector::VectorSyncAdapter::RebuildCallback rebuild;
+        if (vectorIndexCoordinator_) {
+            rebuild = [coordinator = vectorIndexCoordinator_]() {
+                return coordinator->requestRebuildBlocking(RebuildReason::EmbeddingBatch);
+            };
+        }
+        vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_, std::move(rebuild),
+                                          &memorySyncVectorRebuildDirty_,
+                                          [contentStore](std::string_view hash) {
+                                              return contentStore->exists(std::string(hash));
+                                          }};
+        auto applied = adapter.apply();
+        if (!applied) {
+            return applied.error();
+        }
+        return {};
+    };
+    const auto applyTopology = [this]() -> Result<void> {
+        auto kgStore = getKgStore();
+        if (!kgStore) {
+            return {};
+        }
+        metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
+        auto applied = adapter.apply();
+        if (!applied) {
+            return applied.error();
+        }
+        return {};
+    };
 
-    if (memorySync_->stopRequested()) {
+    if (!runStage("content", "apply.after_content", applyContent) ||
+        !runStage("metadata", "apply.after_metadata", applyMetadata) ||
+        !runStage("vector", "apply.after_vector", applyVectors) ||
+        !runStage("topology", "apply.after_topology", applyTopology)) {
         return;
     }
-    try {
-        if (auto kgStore = getKgStore()) {
-            metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
-            if (auto result = adapter.apply(); !result) {
-                spdlog::warn("[ServiceManager] memory_sync topology apply failed: {}",
-                             result.error().message);
-                return;
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync topology apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync topology apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_topology");
 
     if (memorySync_->stopRequested()) {
         return;

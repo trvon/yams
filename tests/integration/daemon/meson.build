@@ -631,7 +631,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon memory sync prerequisite failures stop dependent adapters and retry', '--allow-running-no-tests'],
+      args: ['Daemon memory sync stage failures neither skip later stages nor block retry', '--allow-running-no-tests'],
     )
     test('daemon_memory_sync_content_prerequisite',
       memory_sync_service_integration_exe,

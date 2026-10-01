@@ -455,6 +455,12 @@ public:
     }
     void testingApplyMemorySyncWinners() { applyMemorySyncWinners(); }
     void testingPublishMemorySyncBackfill() { publishMemorySyncBackfill(); }
+    /// Let the next apply cycle reach the rate-limited outbound backfill immediately, so a test
+    /// can drive a bounded number of full sync cycles without wall-clock waits.
+    void testingExpireMemorySyncBackfillSchedule() {
+        std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
+        nextMemorySyncBackfill_ = {};
+    }
     void testingSetMemorySyncBackfillItemBudget(std::size_t budget) {
         std::lock_guard<std::mutex> lock(memorySyncBackfillMutex_);
         memorySyncBackfillState_.itemBudgetPerCycle = std::max<std::size_t>(budget, 1);
@@ -721,6 +727,11 @@ public:
     void __test_setContentStore(std::shared_ptr<api::IContentStore> store) {
         if (databaseManager_) {
             databaseManager_->setContentStore(std::move(store));
+        }
+    }
+    void __test_setKgStore(std::shared_ptr<metadata::KnowledgeGraphStore> store) {
+        if (databaseManager_) {
+            databaseManager_->setKgStore(std::move(store));
         }
     }
     void __test_setRetrievalSessionManager(std::unique_ptr<RetrievalSessionManager> sessions) {

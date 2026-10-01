@@ -978,6 +978,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_memory_sync_apply_exe = executable('catch2_memory_sync_apply',
+    files('unit/daemon/memory_sync_apply_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_db_recovery_exe = executable('catch2_db_recovery',
     files('unit/daemon/db_recovery_test.cpp'),
     include_directories: incs,
@@ -3713,6 +3722,12 @@ if catch2_dep.found()
 
   test('service_manager', catch2_service_manager_exe,
     suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('memory_sync_apply', catch2_memory_sync_apply_exe,
+    suite: ['catch2', 'unit', 'daemon', 'memory-sync'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
