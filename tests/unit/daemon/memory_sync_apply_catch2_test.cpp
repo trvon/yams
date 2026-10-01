@@ -13,16 +13,20 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <vector>
 
 #include "../../common/test_helpers_catch2.h"
 
 #include <yams/api/content_store_builder.h>
+#include <yams/crypto/hasher.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -40,6 +44,19 @@ namespace {
 
 constexpr std::string_view kCorpus = "apply-deadlock-corpus";
 constexpr std::string_view kRelation = "links_to";
+
+std::vector<std::byte> bytes(std::string_view text) {
+    std::vector<std::byte> out(text.size());
+    std::memcpy(out.data(), text.data(), text.size());
+    return out;
+}
+
+std::string digest(std::span<const std::byte> data) {
+    crypto::SHA256Hasher hasher;
+    hasher.init();
+    hasher.update(data);
+    return hasher.finalize();
+}
 
 std::unique_ptr<storage::FilesystemBackend> makeBackend(const fs::path& path) {
     storage::BackendConfig config;
@@ -207,4 +224,37 @@ TEST_CASE("Memory sync nodes holding each other's missing prerequisites still co
     CHECK(nodeA.hasEdgeOf(nodeB));
     CHECK(nodeB.hasEdgeOf(nodeA));
     CHECK(converged);
+}
+
+TEST_CASE("Memory sync content apply stores good blobs past a corrupt one",
+          "[daemon][memory-sync][apply][content]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore};
+
+    // Blobs apply in key order; put the corrupt one first so it cannot hide the good one.
+    const auto first = bytes("content-apply-first");
+    const auto second = bytes("content-apply-second");
+    const auto firstHash = digest(first);
+    const auto secondHash = digest(second);
+    const bool firstSortsFirst = firstHash < secondHash;
+    const auto& corruptHash = firstSortsFirst ? firstHash : secondHash;
+    const auto& goodHash = firstSortsFirst ? secondHash : firstHash;
+    const auto& goodBytes = firstSortsFirst ? second : first;
+    REQUIRE(
+        writer.sync_->publish("content-blob/" + corruptHash, bytes("not-the-bytes")).has_value());
+    REQUIRE(writer.sync_->publish("content-blob/" + goodHash, goodBytes).has_value());
+
+    reader.runCycle();
+
+    auto contentStore = reader.manager->getContentStore();
+    REQUIRE(contentStore != nullptr);
+    const auto good = contentStore->exists(goodHash);
+    REQUIRE(good.has_value());
+    CHECK(good.value());
+    const auto corrupt = contentStore->exists(corruptHash);
+    REQUIRE(corrupt.has_value());
+    CHECK_FALSE(corrupt.value());
 }

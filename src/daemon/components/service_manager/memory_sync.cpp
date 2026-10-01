@@ -403,7 +403,9 @@ Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view co
     return {};
 }
 
-Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
+Result<std::size_t>
+ServiceManager::applyMemorySyncContentBlobs(std::vector<std::string>& deferredKeys) {
+    deferredKeys.clear();
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
@@ -417,38 +419,57 @@ Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
         return merged.error();
     }
 
+    // Blobs are content-addressed and independent, so one bad blob must not starve the rest:
+    // every blob is attempted, and the first genuine failure fails the stage afterwards. A blob
+    // whose bytes were not hydrated into the sync cache yet is deferred and retried next cycle.
     memory_sync::ContentBlobSyncAdapter adapter{*contentStore, *memorySync_};
     const std::string prefix =
         std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::ContentBlob)) + "/";
     std::size_t applied = 0;
+    std::optional<Error> firstFailure;
+    const auto recordFailure = [&firstFailure](Error error) {
+        if (!firstFailure) {
+            firstFailure = std::move(error);
+        }
+    };
     for (const auto& [key, envelope] : merged.value()) {
-        (void)envelope;
         if (!key.starts_with(prefix)) {
             continue;
         }
         const std::string_view hash{key.data() + prefix.size(), key.size() - prefix.size()};
         if (!memory_sync::isSha256Digest(hash)) {
-            return Error{ErrorCode::InvalidData, "invalid content-blob memory-sync key"};
+            recordFailure(Error{ErrorCode::InvalidData, "invalid content-blob memory-sync key"});
+            continue;
         }
         if (envelope.isTombstone()) {
             auto removed = adapter.applyDelete(hash);
             if (!removed) {
-                return removed.error();
+                recordFailure(removed.error());
+                continue;
             }
             applied += removed.value() ? 1 : 0;
             continue;
         }
         auto exists = contentStore->exists(std::string(hash));
         if (!exists) {
-            return exists.error();
+            recordFailure(exists.error());
+            continue;
         }
         if (exists.value()) {
             continue;
         }
         if (auto stored = adapter.applyCached(hash); !stored) {
-            return stored.error();
+            if (stored.error().code == ErrorCode::NotFound) {
+                deferredKeys.push_back(key);
+            } else {
+                recordFailure(stored.error());
+            }
+            continue;
         }
         ++applied;
+    }
+    if (firstFailure) {
+        return *firstFailure;
     }
     return applied;
 }
@@ -626,9 +647,14 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
             return false;
         }
         try {
-            if (auto result = applyStage(); !result) {
+            auto deferred = applyStage();
+            if (!deferred) {
                 spdlog::warn("[ServiceManager] memory_sync {} apply failed: {}", name,
-                             result.error().message);
+                             deferred.error().message);
+            } else if (!deferred.value().empty()) {
+                spdlog::debug("[ServiceManager] memory_sync {} apply deferred {} record(s) "
+                              "awaiting replicated prerequisites",
+                              name, deferred.value().size());
             }
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] memory_sync {} apply threw: {}", name, e.what());
@@ -639,17 +665,19 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return true;
     };
 
-    const auto applyContent = [this]() -> Result<void> {
-        auto applied = applyMemorySyncContentBlobs();
+    using DeferredKeys = std::vector<std::string>;
+    const auto applyContent = [this]() -> Result<DeferredKeys> {
+        DeferredKeys deferred;
+        auto applied = applyMemorySyncContentBlobs(deferred);
         if (!applied) {
             return applied.error();
         }
-        return {};
+        return deferred;
     };
-    const auto applyMetadata = [this]() -> Result<void> {
+    const auto applyMetadata = [this]() -> Result<DeferredKeys> {
         auto repository = getMetadataRepo();
         if (!repository) {
-            return {};
+            return DeferredKeys{};
         }
         auto contentStore = getContentStore();
         if (!contentStore) {
@@ -667,12 +695,12 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         if (!applied) {
             return applied.error();
         }
-        return {};
+        return adapter.deferredKeys();
     };
-    const auto applyVectors = [this]() -> Result<void> {
+    const auto applyVectors = [this]() -> Result<DeferredKeys> {
         auto vectorDatabase = getVectorDatabase();
         if (!vectorDatabase) {
-            return {};
+            return DeferredKeys{};
         }
         auto contentStore = getContentStore();
         if (!contentStore) {
@@ -693,19 +721,19 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         if (!applied) {
             return applied.error();
         }
-        return {};
+        return adapter.deferredKeys();
     };
-    const auto applyTopology = [this]() -> Result<void> {
+    const auto applyTopology = [this]() -> Result<DeferredKeys> {
         auto kgStore = getKgStore();
         if (!kgStore) {
-            return {};
+            return DeferredKeys{};
         }
         metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
         auto applied = adapter.apply();
         if (!applied) {
             return applied.error();
         }
-        return {};
+        return adapter.deferredKeys();
     };
 
     if (!runStage("content", "apply.after_content", applyContent) ||

@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -265,4 +266,69 @@ TEST_CASE("topology sync adapter rejects incomplete stable identities",
     CHECK_FALSE(adapter.publishNode(KGNode{}).has_value());
     const KGEdge edge{.relation = "CALLS"};
     CHECK_FALSE(adapter.publishEdge("", edge, "target").has_value());
+}
+
+TEST_CASE("topology sync adapter defers an edge whose endpoint has not replicated yet",
+          "[metadata][topology][memory-sync][prerequisite][defer]") {
+    TempDirGuard temp;
+    KGFixture graphA("topology_sync_defer_a_");
+    KGFixture graphB("topology_sync_defer_b_");
+    MemorySyncService syncA{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    MemorySyncService syncB{makeBackend(temp.path / "sync"), MemorySyncConfig{"B", 50}};
+    TopologySyncAdapter adapterA{*graphA.store, syncA};
+
+    const KGNode source{.nodeKey = "entity:source", .label = "source", .type = "alpha"};
+    const KGNode present{.nodeKey = "entity:present", .label = "present", .type = "alpha"};
+    const KGNode late{.nodeKey = "entity:late", .label = "late", .type = "omega"};
+    const auto sourceId = graphA.store->upsertNode(source);
+    const auto presentId = graphA.store->upsertNode(present);
+    const auto lateId = graphA.store->upsertNode(late);
+    REQUIRE(sourceId.has_value());
+    REQUIRE(presentId.has_value());
+    REQUIRE(lateId.has_value());
+    const KGEdge toPresent{
+        .srcNodeId = sourceId.value(), .dstNodeId = presentId.value(), .relation = "LINKS"};
+    const KGEdge toLate{
+        .srcNodeId = sourceId.value(), .dstNodeId = lateId.value(), .relation = "LINKS"};
+
+    // The edge to `late` is replicated before its target node: a publication-order race.
+    REQUIRE(adapterA.publishNode(source).has_value());
+    REQUIRE(adapterA.publishNode(present).has_value());
+    REQUIRE(adapterA.publishEdge(source.nodeKey, toPresent, present.nodeKey).has_value());
+    REQUIRE(adapterA.publishEdge(source.nodeKey, toLate, late.nodeKey).has_value());
+
+    const auto edgeTargets = [&](std::string_view targetKey) {
+        const auto sourceB = graphB.store->getNodeByKey(source.nodeKey);
+        const auto targetB = graphB.store->getNodeByKey(targetKey);
+        REQUIRE(sourceB.has_value());
+        REQUIRE(targetB.has_value());
+        if (!sourceB.value() || !targetB.value()) {
+            return false;
+        }
+        const auto edges = graphB.store->getEdgesFrom(sourceB.value()->id, "LINKS");
+        REQUIRE(edges.has_value());
+        return std::any_of(edges.value().begin(), edges.value().end(), [&](const KGEdge& edge) {
+            return edge.dstNodeId == targetB.value()->id;
+        });
+    };
+
+    TopologySyncAdapter consumer{*graphB.store, syncB};
+    const auto first = consumer.apply();
+    REQUIRE(first.has_value());
+    CHECK(first.value().nodesApplied == 2);
+    CHECK(first.value().edgesApplied == 1);
+    CHECK(edgeTargets(present.nodeKey));
+    CHECK_FALSE(edgeTargets(late.nodeKey));
+    REQUIRE(consumer.deferredKeys().size() == 1);
+    CHECK(consumer.deferredKeys().front() == "topology-edge/entity%3Asource/LINKS/entity%3Alate");
+
+    // The deferred edge stays pending and lands once its target node replicates.
+    REQUIRE(adapterA.publishNode(late).has_value());
+    TopologySyncAdapter retry{*graphB.store, syncB};
+    const auto second = retry.apply();
+    REQUIRE(second.has_value());
+    CHECK(second.value().nodesApplied == 1);
+    CHECK(second.value().edgesApplied == 1);
+    CHECK(edgeTargets(late.nodeKey));
+    CHECK(retry.deferredKeys().empty());
 }
