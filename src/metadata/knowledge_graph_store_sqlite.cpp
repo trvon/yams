@@ -206,6 +206,26 @@ KGNode hydrateKgNodeRow(const Statement& stmt) {
     return node;
 }
 
+// Columns: id, src_node_id, dst_node_id, relation, weight, created_time, properties.
+KGEdge hydrateKgEdgeRow(const Statement& stmt) {
+    KGEdge edge;
+    edge.id = stmt.getInt64(0);
+    edge.srcNodeId = stmt.getInt64(1);
+    edge.dstNodeId = stmt.getInt64(2);
+    edge.relation = stmt.getString(3);
+    edge.weight = static_cast<float>(stmt.getDouble(4));
+    if (!stmt.isNull(5)) {
+        edge.createdTime = stmt.getInt64(5);
+    }
+    if (!stmt.isNull(6)) {
+        edge.properties = stmt.getString(6);
+    }
+    return edge;
+}
+
+constexpr std::string_view kKgEdgeColumns =
+    "id, src_node_id, dst_node_id, relation, weight, created_time, properties";
+
 std::string buildKgPathRangePredicate(std::size_t rangeCount) {
     constexpr auto kFilePath = "CASE WHEN properties IS NOT NULL AND json_valid(properties) "
                                "THEN json_extract(properties, '$.file_path') END";
@@ -564,6 +584,42 @@ public:
                 if (!stmt.isNull(6))
                     n.properties = stmt.getString(6);
                 out.push_back(std::move(n));
+            }
+            return out;
+        });
+    }
+
+    Result<std::vector<KGNode>> getNodesAfterId(std::int64_t afterNodeId,
+                                                std::size_t limit) override {
+        if (limit == 0) {
+            return std::vector<KGNode>{};
+        }
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+            auto stmtR = db.prepareCached(
+                "SELECT id, node_key, label, type, created_time, updated_time, properties "
+                "FROM kg_nodes WHERE id > ? ORDER BY id LIMIT ?");
+            if (!stmtR) {
+                return stmtR.error();
+            }
+            auto& stmt = *stmtR.value();
+            if (auto bound = stmt.bind(1, afterNodeId); !bound) {
+                return bound.error();
+            }
+            if (auto bound = stmt.bind(2, static_cast<int64_t>(std::min<std::size_t>(
+                                              limit, std::numeric_limits<int64_t>::max())));
+                !bound) {
+                return bound.error();
+            }
+            std::vector<KGNode> out;
+            while (true) {
+                auto step = stmt.step();
+                if (!step) {
+                    return step.error();
+                }
+                if (!step.value()) {
+                    break;
+                }
+                out.push_back(hydrateKgNodeRow(stmt));
             }
             return out;
         });
@@ -1113,6 +1169,76 @@ public:
                 if (!stmt->isNull(6))
                     e.properties = stmt->getString(6);
                 out.push_back(std::move(e));
+            }
+            return out;
+        });
+    }
+
+    Result<std::vector<KGEdge>> getEdgesAfterId(std::int64_t afterEdgeId,
+                                                std::size_t limit) override {
+        if (limit == 0) {
+            return std::vector<KGEdge>{};
+        }
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGEdge>> {
+            auto stmtR = db.prepareCached("SELECT " + std::string(kKgEdgeColumns) +
+                                          " FROM kg_edges WHERE id > ? ORDER BY id LIMIT ?");
+            if (!stmtR) {
+                return stmtR.error();
+            }
+            auto& stmt = *stmtR.value();
+            if (auto bound = stmt.bind(1, afterEdgeId); !bound) {
+                return bound.error();
+            }
+            if (auto bound = stmt.bind(2, static_cast<int64_t>(std::min<std::size_t>(
+                                              limit, std::numeric_limits<int64_t>::max())));
+                !bound) {
+                return bound.error();
+            }
+            std::vector<KGEdge> out;
+            while (true) {
+                auto step = stmt.step();
+                if (!step) {
+                    return step.error();
+                }
+                if (!step.value()) {
+                    break;
+                }
+                out.push_back(hydrateKgEdgeRow(stmt));
+            }
+            return out;
+        });
+    }
+
+    Result<std::vector<KGEdge>> getEdgesBetween(std::int64_t srcNodeId, std::int64_t dstNodeId,
+                                                std::string_view relation) override {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGEdge>> {
+            auto stmtR = db.prepareCached(
+                "SELECT " + std::string(kKgEdgeColumns) +
+                " FROM kg_edges WHERE src_node_id = ? AND dst_node_id = ? AND relation = ? "
+                "ORDER BY id");
+            if (!stmtR) {
+                return stmtR.error();
+            }
+            auto& stmt = *stmtR.value();
+            if (auto bound = stmt.bind(1, srcNodeId); !bound) {
+                return bound.error();
+            }
+            if (auto bound = stmt.bind(2, dstNodeId); !bound) {
+                return bound.error();
+            }
+            if (auto bound = stmt.bind(3, relation); !bound) {
+                return bound.error();
+            }
+            std::vector<KGEdge> out;
+            while (true) {
+                auto step = stmt.step();
+                if (!step) {
+                    return step.error();
+                }
+                if (!step.value()) {
+                    break;
+                }
+                out.push_back(hydrateKgEdgeRow(stmt));
             }
             return out;
         });

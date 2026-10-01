@@ -254,6 +254,15 @@ public:
     virtual Result<std::vector<KGNode>>
     findNodesByType(std::string_view type, std::size_t limit = 100, std::size_t offset = 0) = 0;
     virtual Result<std::size_t> countNodesByType(std::string_view type) = 0;
+
+    // Keyset scan of every node in ascending id order: up to `limit` nodes whose id is greater
+    // than `afterNodeId`. Ids are AUTOINCREMENT and never reused, so a cursor holding the last id
+    // returned neither skips nor repeats a node when nodes are inserted or deleted between calls,
+    // which an OFFSET scan does.
+    virtual Result<std::vector<KGNode>> getNodesAfterId(std::int64_t /*afterNodeId*/,
+                                                        std::size_t /*limit*/) {
+        return Error{ErrorCode::NotImplemented, "Keyset node scan is not implemented"};
+    }
     virtual Result<std::vector<KGNode>>
     findNodesByTypeInPathRanges(std::string_view type, const std::vector<KGPathRange>& ranges,
                                 std::size_t limit = 100, std::size_t offset = 0) = 0;
@@ -349,6 +358,22 @@ public:
                                                         std::size_t maxNeighbors = 256) = 0;
 
     // Delete an edge
+    // Keyset scan of every edge in ascending id order: up to `limit` edges whose id is greater
+    // than `afterEdgeId`. An edge added after a scan passed its source node still has a larger id
+    // than the cursor, so a resumed scan reaches it.
+    virtual Result<std::vector<KGEdge>> getEdgesAfterId(std::int64_t /*afterEdgeId*/,
+                                                        std::size_t /*limit*/) {
+        return Error{ErrorCode::NotImplemented, "Keyset edge scan is not implemented"};
+    }
+
+    // Every edge from `srcNodeId` to `dstNodeId` with `relation`, in ascending id order. Unlike
+    // getEdgesFrom, the result is not truncated by a page limit.
+    virtual Result<std::vector<KGEdge>> getEdgesBetween(std::int64_t /*srcNodeId*/,
+                                                        std::int64_t /*dstNodeId*/,
+                                                        std::string_view /*relation*/) {
+        return Error{ErrorCode::NotImplemented, "Edge lookup by endpoints is not implemented"};
+    }
+
     virtual Result<void> removeEdgeById(std::int64_t edgeId) = 0;
 
     // -----------------------------------------------------------------------------
