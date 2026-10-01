@@ -510,8 +510,10 @@ class Mesh:
         trace = []
         it = 0
         converged = False
+        bad = None
         while True:
             it += 1
+            bad = None
             missing = {}
             summaries = {}
             for n in self.nodes:
@@ -531,19 +533,24 @@ class Mesh:
                           "nodes": summaries})
             if all(not v for v in missing.values()):
                 # Final proof with the real read path: `yams get` by hash on every node.
-                bad = {n["name"]: [h for h in sorted(want) if not self.readable(n, h)]
-                       for n in self.nodes} if not a.fast else {}
-                if all(not v for v in bad.values()):
+                if not a.fast:
+                    bad = {n["name"]: [h for h in sorted(want) if not self.readable(n, h)]
+                           for n in self.nodes}
+                if bad is None or all(not v for v in bad.values()):
                     converged = True
                     break
             if time.time() >= deadline:
                 break
             time.sleep(a.interval)
+        # When every hash was listed but `yams get` still failed for some, the read-path result
+        # is the truth: report those hashes as unreadable rather than the empty listing gap.
+        unreadable = bad if bad is not None else missing
         result = {
             "converged": converged,
             "seconds": round(time.time() - start, 1),
             "documents": len(want),
-            "readable": {k: len(want) - len(v) for k, v in missing.items()},
+            "readable": {k: len(want) - len(v) for k, v in unreadable.items()},
+            "unreadable_via_get": bad,
             "final": summaries,
             "trace": trace,
         }
