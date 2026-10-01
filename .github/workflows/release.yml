@@ -1219,6 +1219,26 @@ jobs:
             exit 1
           fi
 
+      - name: Check install surface (Linux/macOS)
+        if: runner.os != 'Windows' && matrix.arch_container != true
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${STAGE_DIR:?STAGE_DIR not set}"
+          PREFIX="${YAMS_INSTALL_PREFIX:-}"
+          if [ -z "$PREFIX" ]; then
+            if [ "$RUNNER_OS" = "Linux" ]; then PREFIX="/usr"; else PREFIX="/usr/local"; fi
+          fi
+          # Paths, size/export budgets, forbidden third-party exports, RUNPATH,
+          # hardening and strip state of the exact payload that gets packaged.
+          rc=0
+          python3 scripts/ci/check_install_surface.py \
+            --stage "$STAGE_DIR" --prefix "$PREFIX" --libdir lib \
+            --json "$BUILD_DIR/install-surface.json" > "$BUILD_DIR/install-surface.txt" || rc=$?
+          cat "$BUILD_DIR/install-surface.txt"
+          { echo '```'; cat "$BUILD_DIR/install-surface.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
       - name: Install and Package MSI (Windows)
         if: runner.os == 'Windows' && inputs.fast_mode != 'true'
         shell: pwsh
