@@ -2,9 +2,9 @@
 #
 # The daemon runs as the unprivileged `yams` system account (created from
 # /usr/lib/sysusers.d/yams.conf). Its socket /run/yams/yams-daemon.sock is
-# mode 0660, group `yams`: root and members of the `yams` group can use it, and
-# the yams CLI finds it without configuration. Group membership grants full
-# read/write access to the system corpus.
+# group `yams` read/write and closed to others: root and members of the
+# `yams` group can use it, and the yams CLI finds it without configuration.
+# Group membership grants full read/write access to the system corpus.
 #
 # Per-user daemons are separate: `yams daemon install --user` writes a user
 # unit and never uses this socket.

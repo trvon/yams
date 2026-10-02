@@ -169,7 +169,7 @@ The deb, rpm and Arch packages install, enable and start a **system** service,
 (created from `/usr/lib/sysusers.d/yams.conf`) with:
 
 - data in `/var/lib/yams`
-- socket at `/run/yams/yams-daemon.sock`, mode `0660`, group `yams`
+- socket at `/run/yams/yams-daemon.sock`, group `yams` read/write, no access for others
 - log at `/var/log/yams/daemon.log`
 
 Root and members of the `yams` group can use it. Add your account and log in

@@ -68,11 +68,15 @@ as_user() {
 }
 
 # Poll a search until it reports <needle> (indexing is asynchronous).
+# SEARCH_SOCKET, when set, pins root's search to that socket (to test data,
+# not discovery).
 search_finds() { # search_finds <user> <query> <needle>
 	local user="$1" query="$2" needle="$3" out=""
+	local -a pin=()
+	if [ -n "${SEARCH_SOCKET:-}" ]; then pin=("YAMS_DAEMON_SOCKET=${SEARCH_SOCKET}"); fi
 	for _ in $(seq 1 60); do
 		if [ "${user}" = root ]; then
-			out="$(cd /root && env -i HOME=/root PATH=/usr/bin:/bin timeout 30 yams search "${query}" 2>&1 || true)"
+			out="$(cd /root && env -i HOME=/root PATH=/usr/bin:/bin ${pin[@]+"${pin[@]}"} timeout 30 yams search "${query}" 2>&1 || true)"
 		else
 			out="$(as_user "${user}" "timeout 30 yams search '${query}'" 2>&1 || true)"
 		fi
@@ -140,8 +144,10 @@ phase_layout() {
 	allow+='|^/usr/lib/systemd/system/yams-daemon\.service$'
 	allow+='|^/usr/lib/systemd/system-preset/80-yams\.preset$'
 	allow+='|^/usr/lib/sysusers\.d/yams\.conf$'
-	allow+='|^/usr/share/doc/yams/[A-Za-z0-9_.-]+$'
-	allow+='|^/usr/share/licenses/yams/[A-Za-z0-9_.-]+$'
+	allow+='|^/usr/share/doc/yams(/[A-Za-z0-9_.-]+)?$'
+	allow+='|^/usr/share/licenses/yams(/[A-Za-z0-9_.-]+)?$'
+	# rpm's debuginfo build-id links (symlinks to the shipped ELF files).
+	allow+='|^/usr/lib/\.build-id(/[0-9a-f]{2}(/[0-9a-f]+)?)?$'
 	allow+='|^/usr/share/yams/[A-Za-z0-9_./-]+$'
 	local unexpected
 	unexpected="$(printf '%s\n' "${files}" | grep -Ev "${allow}" || true)"
@@ -167,7 +173,8 @@ phase_layout() {
 	local bad_perm=""
 	local f
 	while IFS= read -r f; do
-		[ -L "${f}" ] && continue
+		# Skip symlinks and paths the image's dpkg path-exclude dropped (docs).
+		if [ -L "${f}" ] || [ ! -e "${f}" ]; then continue; fi
 		if [ -n "$(find "${f}" -maxdepth 0 \( -perm -0002 -o -perm -4000 -o -perm -2000 \) 2>/dev/null)" ]; then
 			bad_perm+="${f} "
 		fi
@@ -184,7 +191,7 @@ phase_layout() {
 	# ELF: dependencies resolve on a clean system and no build-tree rpath leaks.
 	local elf_bad="" rpath_bad="" elf_count=0
 	while IFS= read -r f; do
-		[ -L "${f}" ] && continue
+		if [ -L "${f}" ] || [ ! -e "${f}" ]; then continue; fi
 		[ "$(head -c4 "${f}" 2>/dev/null | od -An -c | tr -d ' ')" = "177ELF" ] || continue
 		elf_count=$((elf_count + 1))
 		local missing
@@ -272,7 +279,7 @@ phase_service() {
 	if grep -Eq 'chmod[[:space:]]+0?666' "/usr/lib/systemd/system/${UNIT}"; then
 		fail unit-no-chmod666 "unit makes the socket world-writable (chmod 0666)"
 	else
-		pass unit-no-chmod666 "unit leaves socket mode to the daemon (0660-style)"
+		pass unit-no-chmod666 "unit leaves socket mode to the daemon (group rw, others none)"
 	fi
 
 	local exposure
@@ -368,6 +375,42 @@ phase_cli() {
 		pass cli-outsider-denied "non-member cannot open ${SOCKET}"
 	fi
 
+	# (d) a per-user service (`yams daemon install --user`) keeps working beside the
+	# system one, and that user's CLI uses it rather than the system socket.
+	local ouid
+	ouid="$(id -u outsider)"
+	loginctl enable-linger outsider >/dev/null 2>&1 || true
+	for _ in $(seq 1 60); do
+		[ -S "/run/user/${ouid}/bus" ] && break
+		sleep 0.5
+	done
+	local uenv="export XDG_RUNTIME_DIR=/run/user/${ouid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ouid}/bus;"
+	local ot
+	ot="$(token outsider)"
+	as_user outsider "printf 'outsider note %s\n' '${ot}' > ~/outsider-note.txt"
+	rc=0
+	out="$(as_user outsider "${uenv} timeout 120 yams daemon install --user" 2>&1)" || rc=$?
+	local uactive=""
+	for _ in $(seq 1 60); do
+		uactive="$(systemctl --user -M outsider@ is-active yams-daemon.service 2>/dev/null || true)"
+		[ "${uactive}" = active ] && [ -S "/run/user/${ouid}/yams-daemon.sock" ] && break
+		sleep 0.5
+	done
+	if [ "${rc}" -eq 0 ] && [ "${uactive}" = active ]; then
+		pass cli-user-service "yams daemon install --user starts a per-user unit"
+	else
+		fail cli-user-service "rc=${rc} state=${uactive:-?}: $(printf '%s' "${out}" | tail -n 3 | tr '\n' ' ')"
+	fi
+	rc=0
+	out="$(as_user outsider "${uenv} timeout 120 yams add ~/outsider-note.txt && timeout 60 yams daemon status" 2>&1)" || rc=$?
+	if [ "${rc}" -eq 0 ] && as_user outsider 'test -e ~/.local/share/yams/yams.db'; then
+		pass cli-user-service-used "per-user CLI talks to its own daemon and store"
+	else
+		fail cli-user-service-used "rc=${rc}: $(printf '%s' "${out}" | tail -n 3 | tr '\n' ' ')"
+	fi
+	as_user outsider "${uenv} yams daemon uninstall --user" >/dev/null 2>&1 || true
+	loginctl disable-linger outsider >/dev/null 2>&1 || true
+
 	# Daemon lifecycle stays with systemd.
 	rc=0
 	out="$(cd /root && env -i HOME=/root PATH=/usr/bin:/bin timeout 60 yams daemon stop 2>&1)" || rc=$?
@@ -451,10 +494,21 @@ phase_upgraded() {
 	fi
 	local ut
 	ut="$(recall UPGRADE)"
-	if [ -n "${ut}" ] && search_finds root "${ut}" upgrade-note; then
+	# Pin the socket: this checks the corpus survived, not client discovery.
+	if [ -n "${ut}" ] && SEARCH_SOCKET="${SOCKET}" search_finds root "${ut}" upgrade-note; then
 		pass upgrade-data-kept "document stored before the upgrade is still searchable"
 	else
 		fail upgrade-data-kept "document stored before the upgrade is gone or unreachable"
+	fi
+}
+
+check_no_dangling_links() { # check_no_dangling_links <id>
+	local dangling
+	dangling="$(find /etc/systemd/system -name "${UNIT}" -xtype l 2>/dev/null || true)"
+	if [ -z "${dangling}" ]; then
+		pass "$1" "no dangling enablement symlinks"
+	else
+		fail "$1" "$(printf '%s ' ${dangling})"
 	fi
 }
 
@@ -476,13 +530,9 @@ phase_remove() {
 		pass remove-stopped "${UNIT} stopped"
 	fi
 	check remove-binaries "binaries removed" test ! -e /usr/bin/yams-daemon
-	local dangling
-	dangling="$(find /etc/systemd/system -name "${UNIT}" -xtype l 2>/dev/null | grep -v '/dev/null' || true)"
-	if [ -z "${dangling}" ]; then
-		pass remove-no-dangling-links "no dangling enablement symlinks"
-	else
-		fail remove-no-dangling-links "${dangling}"
-	fi
+	# Debian keeps enablement state until purge (deb-systemd-helper masks on
+	# remove), so for deb the dangling-link check runs after purge.
+	[ "${PM}" = deb ] || check_no_dangling_links remove-no-dangling-links
 	if [ "${PM}" = deb ]; then
 		rc=0
 		apt-get purge -y yams >>"${log}" 2>&1 || rc=$?
@@ -492,6 +542,7 @@ phase_remove() {
 			{ [ -e "${d}" ] || [ -L "${d}" ]; } && left+="${d} "
 		done
 		if [ -z "${left}" ]; then pass purge-state "state and logs removed on purge"; else fail purge-state "left behind after purge: ${left}"; fi
+		check_no_dangling_links purge-no-dangling-links
 	else
 		info remove-state "state kept by design on ${PM} removal: $(ls -d ${STATE_DIR} 2>/dev/null || echo none)"
 	fi

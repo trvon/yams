@@ -124,9 +124,9 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/yams-pkg-validate.XXXXXX")"
 CONTAINERS=()
 cleanup() {
 	if [ "${KEEP}" -eq 0 ]; then
-		for c in "${CONTAINERS[@]-}"; do [ -n "${c}" ] && docker rm -f "${c}" >/dev/null 2>&1 || true; done
+		for c in ${CONTAINERS[@]+"${CONTAINERS[@]}"}; do docker rm -f "${c}" >/dev/null 2>&1 || true; done
 	else
-		log "kept containers: ${CONTAINERS[*]-}"
+		log "kept containers: ${CONTAINERS[*]+${CONTAINERS[*]}}"
 	fi
 	rm -rf "${WORK}"
 }
@@ -136,7 +136,9 @@ lane_fmt() { case "$1" in debian | ubuntu) echo deb ;; fedora) echo rpm ;; arch)
 lane_pkg() { case "$1" in debian | ubuntu) echo "${DEB_PKG}" ;; fedora) echo "${RPM_PKG}" ;; arch) echo "${ARCH_PKG}" ;; esac; }
 lane_upgrade_from() { case "$1" in debian | ubuntu) echo "${UP_DEB}" ;; fedora) echo "${UP_RPM}" ;; arch) echo "${UP_ARCH}" ;; esac; }
 
-platform_args() { [ "$1" = arch ] && printf -- '--platform=%s\n' "${ARCH_DOCKER_PLATFORM:-linux/amd64}"; return 0; }
+# Docker platform for a lane (empty = native). Bash 3.2 compatible (macOS):
+# no mapfile, and empty arrays are expanded with ${a[@]+"${a[@]}"}.
+lane_platform() { if [ "$1" = arch ]; then printf '%s' "${ARCH_DOCKER_PLATFORM:-linux/amd64}"; fi; }
 
 build_substrate() { # build_substrate <lane> -> image tag on stdout
 	local lane="$1" image="yams/validate-$1:local" dockerfile
@@ -147,21 +149,22 @@ build_substrate() { # build_substrate <lane> -> image tag on stdout
 	fedora) dockerfile=fedora-lane.Dockerfile; args=(--build-arg "BASE_IMAGE=${FEDORA_IMAGE:-fedora:42}") ;;
 	arch)
 		dockerfile=arch-lane.Dockerfile
-		[ -n "${ARCH_BASE_IMAGE:-}" ] && args=(--build-arg "ARCH_BASE_IMAGE=${ARCH_BASE_IMAGE}")
+		if [ -n "${ARCH_BASE_IMAGE:-}" ]; then args=(--build-arg "ARCH_BASE_IMAGE=${ARCH_BASE_IMAGE}"); fi
 		;;
 	esac
-	local -a plat=()
-	mapfile -t plat < <(platform_args "${lane}")
-	docker build -q "${plat[@]}" "${args[@]}" -f "${SUBSTRATE_DIR}/${dockerfile}" -t "${image}" "${SUBSTRATE_DIR}" >/dev/null
+	local plat
+	plat="$(lane_platform "${lane}")"
+	docker build -q ${plat:+--platform="${plat}"} ${args[@]+"${args[@]}"} \
+		-f "${SUBSTRATE_DIR}/${dockerfile}" -t "${image}" "${SUBSTRATE_DIR}" >/dev/null
 	printf '%s' "${image}"
 }
 
 boot() { # boot <lane> <image> <name>
 	local lane="$1" image="$2" name="$3"
-	local -a plat=()
-	mapfile -t plat < <(platform_args "${lane}")
+	local plat
+	plat="$(lane_platform "${lane}")"
 	docker rm -f "${name}" >/dev/null 2>&1 || true
-	docker run -d --name "${name}" "${plat[@]}" --privileged --cgroupns=private \
+	docker run -d --name "${name}" ${plat:+--platform="${plat}"} --privileged --cgroupns=private \
 		--tmpfs /run --tmpfs /run/lock --tmpfs /tmp "${image}" >/dev/null
 	CONTAINERS+=("${name}")
 	wait_boot "${name}"
