@@ -1,5 +1,5 @@
 {
-  "_comment": "Runtime install surface contract for scripts/ci/check_install_surface.py. Paths are relative to the install prefix; {libdir} is the Meson libdir relative to the prefix. Budgets carry ~15% headroom over the measured Linux x86_64 Release payload; raise one only with a measured reason in the commit message.",
+  "_comment": "Runtime install surface contract for scripts/ci/check_install_surface.py. Paths are relative to the install prefix; {libdir} is the Meson libdir relative to the prefix. Size budgets apply to ELF payloads and carry ~20% headroom over the measured Linux x86_64 release payload (grim, clang 21, 2026-10); the onnx/glint budgets come from the v0.20.3 packages. Raise a budget only with a measured reason in the commit message.",
   "paths": {
     "allowed": [
       "bin/yams",
@@ -42,28 +42,28 @@
   "size_budgets": [
     {
       "pattern": "bin/yams-cli",
-      "max_bytes": 39100000,
+      "max_bytes": 40600000,
       "kinds": [
         "elf"
       ]
     },
     {
       "pattern": "bin/yams-daemon",
-      "max_bytes": 32700000,
+      "max_bytes": 34200000,
       "kinds": [
         "elf"
       ]
     },
     {
       "pattern": "bin/yams-mcp-server",
-      "max_bytes": 21500000,
+      "max_bytes": 20100000,
       "kinds": [
         "elf"
       ]
     },
     {
       "pattern": "{libdir}/yams/plugins/libyams_object_storage_s3.*",
-      "max_bytes": 9050000,
+      "max_bytes": 7500000,
       "kinds": [
         "elf"
       ]
@@ -84,14 +84,14 @@
     },
     {
       "pattern": "{libdir}/yams/plugins/yams_zyp.*",
-      "max_bytes": 90000,
+      "max_bytes": 77000,
       "kinds": [
         "elf"
       ]
     },
     {
       "pattern": "{libdir}/yams/libyams_onnx_resource.*",
-      "max_bytes": 525000,
+      "max_bytes": 64000,
       "kinds": [
         "elf"
       ]
@@ -112,11 +112,11 @@
     },
     {
       "pattern": "{libdir}/yams/libyams_onnx_resource.*",
-      "max": 64
+      "max": 32
     },
     {
       "pattern": "bin/*",
-      "max": 128
+      "max": 64
     }
   ],
   "forbidden_exports": [

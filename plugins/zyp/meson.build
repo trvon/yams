@@ -165,7 +165,9 @@ zyp_plugin = shared_module('yams_zyp',
   ],
   dependencies: [zpdf_dep],
   cpp_args: zyp_cpp_args,
-  link_args: zyp_link_args,
+  link_args: zyp_link_args + plugin_export_link_args,
+  link_depends: plugin_export_link_depends,
+  gnu_symbol_visibility: 'hidden',
 #build_rpath ensures the plugin can find libzpdf during build / test
   build_rpath: zpdf_build_dir,
 #install_rpath ensures the plugin can find libzpdf after installation

@@ -909,10 +909,11 @@ YAMS_PLUGIN_API int yams_plugin_get_health_json(char** out_json) {
 }
 }
 
-extern "C" yams::storage::IStorageBackend* yams_plugin_create_object_storage() {
+extern "C" YAMS_PLUGIN_API yams::storage::IStorageBackend* yams_plugin_create_object_storage() {
     return new S3Backend();
 }
 
-extern "C" void yams_plugin_destroy_object_storage(yams::storage::IStorageBackend* backend) {
+extern "C" YAMS_PLUGIN_API void
+yams_plugin_destroy_object_storage(yams::storage::IStorageBackend* backend) {
     delete backend;
 }

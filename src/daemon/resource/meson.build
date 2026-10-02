@@ -4,7 +4,9 @@
 
 spdlog_dep = dependency('spdlog', required: true)
 
-onnx_resource_deps = [spdlog_dep]
+# No logging dependency: diagnostics go through a host-installed sink
+# (onnx_registry_spdlog_sink.h), so no spdlog copy lives in this library.
+onnx_resource_deps = []
 
 # Ensure TSAN runtime is linked for this shared library when sanitizer is enabled
 if get_option('enable-tsan') and host_machine.system() == 'linux'
@@ -42,6 +44,8 @@ yams_onnx_resource_lib = shared_library('yams_onnx_resource',
   include_directories: include_directories('../../../include'),
   dependencies: onnx_resource_deps,
   cpp_args: onnx_resource_args,
+  gnu_symbol_visibility: 'hidden',
+  link_args: meson.get_compiler('cpp').get_supported_link_arguments('-Wl,--exclude-libs,ALL'),
   install: true,
   install_tag: 'runtime',
   kwargs: onnx_resource_install_kwargs,

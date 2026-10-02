@@ -47,6 +47,13 @@ enum class OnnxLane : std::uint8_t {
 
 constexpr std::uint8_t kOnnxLaneCount = 4;
 
+/// Severity of a registry diagnostic passed to the host log sink.
+enum class OnnxRegistryLogLevel : std::uint8_t { Debug, Info, Warn };
+
+/// Host-provided log sink. The registry lives in a private shared library that
+/// links no logging library, so the host binary routes its messages.
+using OnnxRegistryLogSink = void (*)(OnnxRegistryLogLevel level, const char* message) noexcept;
+
 // ============================================================================
 // Lane Metrics
 // ============================================================================
@@ -69,6 +76,10 @@ class YAMS_ONNX_RESOURCE_API OnnxConcurrencyRegistry {
 public:
     /// Singleton accessor
     static OnnxConcurrencyRegistry& instance() noexcept;
+
+    /// Route registry diagnostics to the host's logger (nullptr drops them).
+    /// See yams/daemon/resource/onnx_registry_spdlog_sink.h for the spdlog sink.
+    static void setLogSink(OnnxRegistryLogSink sink) noexcept;
 
     // Non-copyable, non-movable
     OnnxConcurrencyRegistry(const OnnxConcurrencyRegistry&) = delete;
