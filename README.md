@@ -9,14 +9,12 @@ graph, and grep surfaces.
 ## Why YAMS
 
 YAMS is local memory for people who work with LLMs. It runs on your machine and
-is harness-agnostic: Claude Code, Codex, OpenCode, any MCP client, or a plain
-shell script all read and write the same corpus through the `yams` CLI or
-`yams serve`. Switching tools does not mean starting over.
+is harness-agnostic.
 
-We believe LLM memory should be just that: memory, and yours. It lives in a data
-directory you choose, in formats you can inspect (content-addressed files and
-SQLite), and it can be exported or deleted whenever you decide. No account, no
-hosted service, and no model provider sits between you and what you have stored.
+We believe LLM memory should be memory, and yours. It lives in a data
+directory you choose, in formats you can inspect and it can be exported 
+or deleted whenever you decide. No account, no hosted service, and no model 
+provider sits between you and what you have stored.
 
 ## What it provides
 
