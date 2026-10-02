@@ -553,7 +553,7 @@ if catch2_dep.found()
   )
 
   catch2_daemon_components_exe = executable('catch2_daemon_components',
-    files('unit/daemon/daemon_components_test.cpp'),
+    files('unit/daemon/daemon_components_test.cpp', 'unit/daemon/systemd_user_unit_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],

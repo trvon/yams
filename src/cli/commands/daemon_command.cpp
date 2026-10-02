@@ -18,6 +18,7 @@
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/process_discovery.h>
+#include <yams/daemon/client/systemd_user_unit.h>
 #include <yams/daemon/ipc/socket_utils.h>
 #include <yams/daemon/metric_keys.h>
 #include <yams/daemon/shutdown_budget.h>
@@ -764,8 +765,37 @@ private:
         return pidFile_.empty() ? YamsCLI::resolveConfiguredDaemonPidFilePath().string() : pidFile_;
     }
 
+    // The packaged systemd user unit runs the default daemon (default paths, default binary).
+    bool customDaemonOptions() const {
+        return !socketPath_.empty() || !dataDir_.empty() || !startConfigPath_.empty() ||
+               !startDaemonBinary_.empty() || !pidFile_.empty();
+    }
+
+    static bool packagedUserUnitInstalled() {
+        std::error_code ec;
+        return std::filesystem::exists("/usr/lib/systemd/user/yams-daemon.service", ec) ||
+               std::filesystem::exists("/lib/systemd/user/yams-daemon.service", ec);
+    }
+
     void startDaemon() {
         namespace fs = std::filesystem;
+
+        // A daemon managed by the systemd user unit is started (and restarted) by systemd.
+        if (!customDaemonOptions() && !startForeground_) {
+            namespace dc = yams::daemon::client;
+            const auto unit = dc::queryUserUnit();
+            if (unit == dc::UserUnitState::Active && !startRestart_) {
+                std::cout << "[INFO] YAMS daemon is already running (systemd user unit "
+                             "yams-daemon.service)\n";
+                return;
+            }
+            if (unit != dc::UserUnitState::Unavailable &&
+                dc::runUserUnit(unit == dc::UserUnitState::Active ? "restart" : "start")) {
+                std::cout << "[OK] Started the yams-daemon.service systemd user unit "
+                             "(systemctl --user status yams-daemon.service)\n";
+                return;
+            }
+        }
 
         // Resolve paths if not explicitly provided
         // For start: do NOT persist a resolved socket into socketPath_ unless user passed it.
@@ -993,6 +1023,15 @@ private:
     }
 
     bool stopDaemon() {
+        // Stop a unit-managed daemon through systemd so the unit state stays truthful.
+        if (socketPath_.empty() &&
+            yams::daemon::client::queryUserUnit() == yams::daemon::client::UserUnitState::Active) {
+            if (yams::daemon::client::runUserUnit("stop")) {
+                std::cout << "[OK] Stopped the yams-daemon.service systemd user unit\n";
+                return true;
+            }
+            spdlog::warn("systemctl --user stop yams-daemon.service failed; stopping over IPC");
+        }
         pidFile_ = resolveConfiguredPidFilePath();
         // Resolve paths if not explicitly provided (do not persist into socketPath_)
         const std::string configuredSocket = resolveConfiguredSocketPath();
@@ -1907,6 +1946,15 @@ private:
     }
 
     void restartDaemon() {
+        if (socketPath_.empty() &&
+            yams::daemon::client::queryUserUnit() == yams::daemon::client::UserUnitState::Active) {
+            if (yams::daemon::client::runUserUnit("restart")) {
+                std::cout << "[OK] Restarted the yams-daemon.service systemd user unit\n";
+                return;
+            }
+            spdlog::warn(
+                "systemctl --user restart yams-daemon.service failed; restarting over IPC");
+        }
         pidFile_ = resolveConfiguredPidFilePath();
 
         const std::string configuredSocket = resolveConfiguredSocketPath();
@@ -2231,6 +2279,21 @@ private:
         namespace fs = std::filesystem;
         const bool userScope = installUserScope_ || !isRootUser();
 
+        // With the Linux packages the user unit already exists in /usr/lib/systemd/user: enable
+        // it rather than writing a copy (a file in ~/.config/systemd/user would shadow it).
+        if (userScope && !customDaemonOptions() && packagedUserUnitInstalled()) {
+            (void)std::system("systemctl --user daemon-reload >/dev/null 2>&1");
+            if (yams::daemon::client::runUserUnit("enable --now")) {
+                std::cout << "[OK] Enabled and started the packaged yams-daemon.service user "
+                             "unit\n"
+                          << "[INFO] Keep it running after logout with: loginctl enable-linger\n";
+            } else {
+                std::cout << "[WARN] systemctl --user enable --now yams-daemon.service failed; "
+                             "is a user systemd manager running for this session?\n";
+            }
+            return;
+        }
+
         const std::string binPath = resolveDaemonBinaryForUnit();
         const std::string socketPath =
             socketPath_.empty() ? resolveConfiguredSocketPath() : socketPath_;
@@ -2307,6 +2370,10 @@ private:
             out << unit.str();
         }
         std::cout << "[OK] Wrote " << unitPath.string() << "\n";
+        if (userScope && packagedUserUnitInstalled()) {
+            std::cout << "[INFO] This file overrides the packaged unit in /usr/lib/systemd/user; "
+                         "'yams daemon uninstall --user' removes it again.\n";
+        }
 
         const std::string ctl = systemctlPath();
         const std::string scope = userScope ? " --user" : "";
@@ -2351,9 +2418,18 @@ private:
         std::error_code ec;
         if (fs::exists(unitPath, ec)) {
             fs::remove(unitPath, ec);
+            std::cout << (fs::exists(unitPath, ec) ? "[WARN] Could not remove " : "[OK] Removed ")
+                      << unitPath.string() << "\n";
+            (void)std::system((ctl + scope + " daemon-reload 2>&1").c_str());
+        } else {
+            std::cout << "[OK] Disabled yams-daemon.service" << (userScope ? " (user)" : "")
+                      << "\n";
         }
-        std::cout << (fs::exists(unitPath, ec) ? "[WARN] Could not remove " : "[OK] Removed ")
-                  << unitPath.string() << "\n";
+        if (userScope && packagedUserUnitInstalled()) {
+            std::cout << "[INFO] The packaged unit is enabled for all users by the package's "
+                         "user preset; keep it off for your account with: systemctl --user "
+                         "mask yams-daemon.service\n";
+        }
     }
 
     // Options (empty = auto-resolve based on environment)
