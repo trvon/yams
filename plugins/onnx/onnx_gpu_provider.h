@@ -182,9 +182,19 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
             coreml_opts["ModelFormat"] = detail::envOr("YAMS_COREML_MODEL_FORMAT", "MLProgram");
 
             // Model cache eliminates ~2s CoreML recompilation per session.
+            // Compiled CoreML models are specific to the ONNX Runtime that produced
+            // them; the plugins may use the system or the bundled runtime, so keep one
+            // cache per runtime version instead of failing on another version's cache.
             std::string cacheDir;
             if (!detail::envBool("YAMS_COREML_DISABLE_CACHE", false)) {
-                cacheDir = detail::envOr("YAMS_COREML_CACHE_DIR", modelCacheDir);
+                cacheDir = detail::envOr("YAMS_COREML_CACHE_DIR", "");
+                if (cacheDir.empty() && !modelCacheDir.empty()) {
+                    const auto& rt = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+                    cacheDir = (std::filesystem::path(modelCacheDir) /
+                                ("coreml-ort-" +
+                                 (rt.version.empty() ? std::string("unknown") : rt.version)))
+                                   .string();
+                }
             }
             if (!cacheDir.empty()) {
                 coreml_opts["ModelCacheDirectory"] = cacheDir;

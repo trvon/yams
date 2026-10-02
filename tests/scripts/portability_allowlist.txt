@@ -63,10 +63,10 @@ plugins/onnx/onnx_gpu_provider.h:45:portability/env-read # reviewed raw environm
 plugins/onnx/onnx_gpu_provider.h:56:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_gpu_provider.h:67:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_gpu_provider.h:116:portability/env-read # reviewed raw environment read
-plugins/onnx/onnx_gpu_provider.h:273:portability/env-read # reviewed raw environment read
-plugins/onnx/onnx_gpu_provider.h:310:portability/env-read # reviewed raw environment read
-plugins/onnx/onnx_gpu_provider.h:332:portability/env-read # reviewed raw environment read
-plugins/onnx/onnx_gpu_provider.h:333:portability/env-read # reviewed raw environment read
+plugins/onnx/onnx_gpu_provider.h:283:portability/env-read # reviewed raw environment read
+plugins/onnx/onnx_gpu_provider.h:320:portability/env-read # reviewed raw environment read
+plugins/onnx/onnx_gpu_provider.h:342:portability/env-read # reviewed raw environment read
+plugins/onnx/onnx_gpu_provider.h:343:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_plugin.cpp:69:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_plugin.cpp:73:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_plugin.cpp:78:portability/env-read # reviewed raw environment read
