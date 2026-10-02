@@ -217,12 +217,30 @@ else
     hardening_c_args += '-fstack-protector-strong'
   endif
 
-  # Fortify source (only for optimized builds)
-  if get_option('optimization') != '0'
-    if cpp.has_argument('-D_FORTIFY_SOURCE=2')
-      hardening_cpp_args += '-D_FORTIFY_SOURCE=2'
-      hardening_c_args += '-D_FORTIFY_SOURCE=2'
+  # Stack clash protection (probes large stack allocations), and on Linux the
+  # architecture's control-flow protection: CET IBT/SHSTK notes on x86_64, BTI/PAC
+  # on AArch64. get_supported_arguments() drops whatever the target rejects.
+  _hardening_codegen = cpp.get_supported_arguments('-fstack-clash-protection')
+  if host_machine.system() == 'linux'
+    if host_machine.cpu_family() == 'x86_64'
+      _hardening_codegen += cpp.get_supported_arguments('-fcf-protection=full')
+    elif host_machine.cpu_family() == 'aarch64'
+      _hardening_codegen += cpp.get_supported_arguments('-mbranch-protection=standard')
     endif
+  endif
+  hardening_cpp_args += _hardening_codegen
+  hardening_c_args += _hardening_codegen
+
+  # Fortify source (optimized builds only). Level 3 uses
+  # __builtin_dynamic_object_size, so more calls with runtime-sized buffers
+  # become __*_chk calls; glibc < 2.34 treats it as level 2. Undefine first so a
+  # toolchain default (e.g. Ubuntu's) does not produce a redefinition warning.
+  # FORTIFY only rewrites YAMS's own call sites: most libc calls in the binaries
+  # come from the Conan static archives, which are built without it, so the
+  # count of __*_chk imports stays small by construction.
+  if get_option('optimization') not in ['0', 'g']
+    hardening_cpp_args += ['-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=3']
+    hardening_c_args += ['-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=3']
   endif
 endif
 
