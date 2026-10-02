@@ -30,13 +30,12 @@ endif
 # Private runtime library: on Linux/macOS it installs next to the plugins in
 # <libdir>/yams (found through $ORIGIN / @loader_path RUNPATHs), not in the
 # system libdir, and carries no soname version because nothing outside this
-# build links it. Windows keeps its DLL layout.
+# build links it. On Windows the executables import the DLL at load time, so it
+# must sit next to them: Meson's default puts the DLL in bindir (the import
+# library stays in libdir).
 onnx_resource_install_kwargs = {'install_dir': get_option('libdir') / 'yams'}
 if host_machine.system() == 'windows'
-  onnx_resource_install_kwargs = {
-    'install_dir': get_option('libdir'),
-    'version': meson.project_version(),
-  }
+  onnx_resource_install_kwargs = {'version': meson.project_version()}
 endif
 
 yams_onnx_resource_lib = shared_library('yams_onnx_resource',
