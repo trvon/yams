@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <future>
 #include <limits>
@@ -1027,12 +1028,31 @@ private:
     bool memorySyncVectorRebuildDirty_{false};
     // Deferred-record ages, stage failures, and publish outcomes for status; internally locked.
     memory_sync::ApplyHealth memorySyncApplyHealth_;
+    // Documents whose vectors an embedding job committed and memory sync has not yet published,
+    // in commit order, without duplicates. Bounded: past the cap a commit is left to the vector
+    // sweep. Lost on restart, when the sweep starts over anyway.
+    static constexpr std::size_t kMemorySyncCommittedVectorDocumentsCap = 4096;
+    mutable std::mutex memorySyncCommittedVectorsMutex_;
+    std::deque<std::string> memorySyncCommittedVectorDocuments_;
+    std::unordered_set<std::string> memorySyncCommittedVectorDocumentSet_;
+    std::optional<std::string> takeMemorySyncCommittedVectorDocument();
     struct MemorySyncBackfillState {
-        enum class Domain { Documents, Vectors, Topology };
+        // CommittedVectors publishes the vectors embedding jobs just committed; Vectors and
+        // Topology are the catch-up sweeps.
+        enum class Domain { Documents, CommittedVectors, Vectors, Topology };
 
         std::int64_t documentIdCursor{0};
+        // The committed document being published and the last of its chunks already published.
+        std::string committedVectorDocument;
+        std::string committedVectorChunkCursor;
+        // Vectors are swept in repeating passes in (document_hash, chunk_id) order, so vectors
+        // added or re-embedded behind the cursor are published on a later pass.
         std::string vectorDocumentHashCursor;
         std::string vectorChunkIdCursor;
+        std::uint64_t vectorSweepPasses{0};
+        // The two sweeps always have work once they repeat, so they take turns at the items
+        // documents and committed vectors leave: neither can take every item of a cycle.
+        Domain nextSweep{Domain::Vectors};
         // Topology is swept in repeating passes: every node, then every edge (each with its
         // endpoints), then this writer's committed topology records, so edges and nodes created
         // or changed after a pass went by are published, and records the local graph dropped
