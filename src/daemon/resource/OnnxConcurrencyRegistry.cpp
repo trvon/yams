@@ -1,15 +1,22 @@
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 
-#include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
 #include <string>
 
 namespace yams::daemon {
 
 namespace {
 
-void logRegistry(spdlog::level::level_enum level, const std::string& message) {
-    spdlog::default_logger_raw()->log(level, message);
+// The registry ships in its own shared library and links no logger: a private
+// spdlog copy would own a separate default logger writing to stdout. Messages
+// go to the sink the host binary installs, or nowhere.
+constinit std::atomic<OnnxRegistryLogSink> g_logSink{nullptr};
+
+void logRegistry(OnnxRegistryLogLevel level, const std::string& message) {
+    if (auto sink = g_logSink.load(std::memory_order_acquire)) {
+        sink(level, message.c_str());
+    }
 }
 
 } // namespace
@@ -17,6 +24,20 @@ void logRegistry(spdlog::level::level_enum level, const std::string& message) {
 // ============================================================================
 // Singleton
 // ============================================================================
+
+void OnnxConcurrencyRegistry::setLogSink(OnnxRegistryLogSink sink) noexcept {
+    g_logSink.store(sink, std::memory_order_release);
+}
+
+void OnnxConcurrencyRegistry::emitHostLog(OnnxRegistryLogLevel level,
+                                          const char* message) noexcept {
+    if (message == nullptr) {
+        return;
+    }
+    if (auto sink = g_logSink.load(std::memory_order_acquire)) {
+        sink(level, message);
+    }
+}
 
 OnnxConcurrencyRegistry& OnnxConcurrencyRegistry::instance() noexcept {
     static OnnxConcurrencyRegistry instance;
@@ -40,8 +61,8 @@ OnnxConcurrencyRegistry::OnnxConcurrencyRegistry()
     // Default max slots: 8 (4 shared + 4 reserved across lanes)
     maxSlots_.store(8);
 
-    logRegistry(spdlog::level::debug, "[OnnxConcurrencyRegistry] Initialized with " +
-                                          std::to_string(maxSlots_.load()) + " max slots");
+    logRegistry(OnnxRegistryLogLevel::Debug, "[OnnxConcurrencyRegistry] Initialized with " +
+                                                 std::to_string(maxSlots_.load()) + " max slots");
 }
 
 // ============================================================================
@@ -81,7 +102,7 @@ bool OnnxConcurrencyRegistry::acquireSlot(OnnxLane lane, std::chrono::millisecon
             // Over budget — don't even try the semaphore
             state.queued.fetch_sub(1, std::memory_order_relaxed);
             state.timeouts.fetch_add(1, std::memory_order_relaxed);
-            logRegistry(spdlog::level::debug,
+            logRegistry(OnnxRegistryLogLevel::Debug,
                         "[OnnxConcurrencyRegistry] Over budget (" + std::to_string(total) + "/" +
                             std::to_string(max) + ") for lane " + std::to_string(laneIdx));
             return false;
@@ -101,7 +122,7 @@ bool OnnxConcurrencyRegistry::acquireSlot(OnnxLane lane, std::chrono::millisecon
 
     // Timeout
     state.timeouts.fetch_add(1, std::memory_order_relaxed);
-    logRegistry(spdlog::level::debug,
+    logRegistry(OnnxRegistryLogLevel::Debug,
                 "[OnnxConcurrencyRegistry] Slot acquisition timeout for lane " +
                     std::to_string(laneIdx));
     return false;
@@ -144,7 +165,7 @@ void OnnxConcurrencyRegistry::setMaxSlots(std::uint32_t total) {
     // For now, log the change and let natural slot recycling handle it
 
     if (total != oldMax) {
-        logRegistry(spdlog::level::info,
+        logRegistry(OnnxRegistryLogLevel::Info,
                     "[OnnxConcurrencyRegistry] Max slots changed: " + std::to_string(oldMax) +
                         " -> " + std::to_string(total) +
                         " (reserved=" + std::to_string(totalReserved) + ")");
@@ -156,10 +177,10 @@ void OnnxConcurrencyRegistry::setReservedSlots(OnnxLane lane, std::uint32_t rese
     std::uint32_t oldReserved =
         laneStates_[laneIdx].reserved.exchange(reserved, std::memory_order_release);
     if (reserved != oldReserved) {
-        logRegistry(spdlog::level::debug, "[OnnxConcurrencyRegistry] Lane " +
-                                              std::to_string(laneIdx) +
-                                              " reserved slots: " + std::to_string(oldReserved) +
-                                              " -> " + std::to_string(reserved));
+        logRegistry(OnnxRegistryLogLevel::Debug,
+                    "[OnnxConcurrencyRegistry] Lane " + std::to_string(laneIdx) +
+                        " reserved slots: " + std::to_string(oldReserved) + " -> " +
+                        std::to_string(reserved));
     }
 
     // Note: callers may update maxSlots and reserved slots in separate operations.
@@ -171,7 +192,7 @@ void OnnxConcurrencyRegistry::setReservedSlots(OnnxLane lane, std::uint32_t rese
     std::uint32_t currentMax = maxSlots_.load(std::memory_order_acquire);
     if (currentMax < totalReserved) {
         maxSlots_.store(totalReserved, std::memory_order_release);
-        logRegistry(spdlog::level::warn,
+        logRegistry(OnnxRegistryLogLevel::Warn,
                     "[OnnxConcurrencyRegistry] maxSlots raised to " +
                         std::to_string(totalReserved) +
                         " to satisfy reserved=" + std::to_string(totalReserved));

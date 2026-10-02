@@ -8,8 +8,12 @@
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <string>
 #include <thread>
 #include <zstd.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_monitor.h>
 #include <yams/compression/compression_stats.h>
@@ -711,9 +715,21 @@ private:
 
 namespace {
 
+// Scratch base for a wrapper whose underlying engine has no base path. It must be per user:
+// the StorageEngine base creates objects/ and temp/ under it with the process umask, so a
+// shared /tmp/yams-compressed-wrapper made by one user's daemon (e.g. the packaged systemd
+// user unit, UMask=0077) made every other user's daemon fail with "Failed to create storage
+// directory: Permission denied".
+std::filesystem::path wrapperScratchPath() {
+    std::string name = "yams-compressed-wrapper";
+#ifndef _WIN32
+    name += "-" + std::to_string(static_cast<unsigned long long>(::getuid()));
+#endif
+    return std::filesystem::temp_directory_path() / name;
+}
+
 std::filesystem::path wrapperBasePath(const std::shared_ptr<StorageEngine>& underlying) {
-    return underlying ? underlying->getBasePath()
-                      : (std::filesystem::temp_directory_path() / "yams-compressed-wrapper");
+    return underlying ? underlying->getBasePath() : wrapperScratchPath();
 }
 
 } // namespace
@@ -726,8 +742,7 @@ CompressedStorageEngine::CompressedStorageEngine(std::shared_ptr<StorageEngine> 
 
 CompressedStorageEngine::CompressedStorageEngine(std::shared_ptr<IStorageEngine> underlying,
                                                  Config config)
-    : StorageEngine(
-          {.basePath = std::filesystem::temp_directory_path() / "yams-compressed-wrapper"}),
+    : StorageEngine({.basePath = wrapperScratchPath()}),
       pImpl(std::make_unique<Impl>(std::move(underlying), std::move(config))) {}
 
 CompressedStorageEngine::~CompressedStorageEngine() = default;

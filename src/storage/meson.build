@@ -43,7 +43,7 @@ yams_storage_engine = static_library('yams_storage_engine',
     dl_dep,
   ] + apple_security_deps,
   cpp_args: storage_testing_cpp_args,
-  install: true,
+  install: false,
 )
 
 yams_reference_counter = static_library('yams_reference_counter',
@@ -55,19 +55,7 @@ yams_reference_counter = static_library('yams_reference_counter',
   ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, threads_dep, yams_core, sqlite_dep, declare_dependency(link_with: yams_storage_engine)],
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_storage_engine,
-  name: 'yams-storage-engine',
-  description: 'YAMS storage engine',
-  subdirs: ['yams'],
-)
-pkg.generate(yams_reference_counter,
-  name: 'yams-reference-counter',
-  description: 'YAMS reference counter',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_storage_engine_dep = declare_dependency(

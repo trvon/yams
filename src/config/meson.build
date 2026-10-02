@@ -6,14 +6,7 @@ yams_config = static_library('yams_config',
   [ 'config_migration.cpp', 'config_helpers.cpp', 'config_resolver_policies.cpp' ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, json_dep, yams_core],
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_config,
-  name: 'yams-config',
-  description: 'YAMS configuration helpers',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_config_dep = declare_dependency(
@@ -21,4 +14,3 @@ yams_config_dep = declare_dependency(
   include_directories: include_directories('../../include'),
 )
 meson.override_dependency('yams_config', yams_config_dep)
-

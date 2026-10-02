@@ -19,7 +19,7 @@ if mobile_dep.found() and catch2_dep.found() and catch2_main_dep.found()
 
   test('mobile_abi_smoke', mobile_test,
     suite: ['mobile', 'abi'],
-    timeout: get_option('unit-timeout'),
+    timeout: 1200,
   )
 else
   message('Catch2 or yams_mobile dependency not found; skipping mobile ABI smoke tests.')

@@ -7,7 +7,7 @@ yams_benchmarks_lib = static_library('yams_benchmarks',
     dependency('spdlog'),
   ],
   include_directories: include_directories('../../include'),
-  install: true,
+  install: false,
 )
 
 yams_benchmarks_dep = declare_dependency(
@@ -21,5 +21,5 @@ meson.override_dependency('yams_benchmarks', yams_benchmarks_dep)
 executable('yams_bus_bench',
   'internal_event_bus_benchmark.cpp',
   dependencies: [dependency('spdlog'), dependency('yams_core')],
-  install: true,
+  install: false,
 )

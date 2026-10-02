@@ -4,10 +4,12 @@
 
 spdlog_dep = dependency('spdlog', required: true)
 
-onnx_resource_deps = [spdlog_dep]
+# No logging dependency: diagnostics go through a host-installed sink
+# (onnx_registry_spdlog_sink.h), so no spdlog copy lives in this library.
+onnx_resource_deps = []
 
 # Ensure TSAN runtime is linked for this shared library when sanitizer is enabled
-if get_option('enable-tsan') and host_machine.system() == 'linux'
+if yams_sanitize_thread and host_machine.system() == 'linux'
   cpp_compiler = meson.get_compiler('cpp')
   tsan_dep = cpp_compiler.find_library('tsan', required: false)
   if tsan_dep.found()
@@ -25,15 +27,28 @@ if host_machine.system() == 'windows'
   onnx_resource_args += ['-DYAMS_ONNX_RESOURCE_BUILDING']
 endif
 
+# Private runtime library: on Linux/macOS it installs next to the plugins in
+# <libdir>/yams (found through $ORIGIN / @loader_path RUNPATHs), not in the
+# system libdir, and carries no soname version because nothing outside this
+# build links it. Windows keeps its DLL layout.
+onnx_resource_install_kwargs = {'install_dir': get_option('libdir') / 'yams'}
+if host_machine.system() == 'windows'
+  onnx_resource_install_kwargs = {
+    'install_dir': get_option('libdir'),
+    'version': meson.project_version(),
+  }
+endif
+
 yams_onnx_resource_lib = shared_library('yams_onnx_resource',
   onnx_resource_sources,
   include_directories: include_directories('../../../include'),
   dependencies: onnx_resource_deps,
   cpp_args: onnx_resource_args,
+  gnu_symbol_visibility: 'hidden',
+  link_args: meson.get_compiler('cpp').get_supported_link_arguments('-Wl,--exclude-libs,ALL'),
   install: true,
-  install_dir: get_option('libdir'),
-  # Version for soname on Linux
-  version: meson.project_version(),
+  install_tag: 'runtime',
+  kwargs: onnx_resource_install_kwargs,
 )
 
 yams_onnx_resource_dep = declare_dependency(

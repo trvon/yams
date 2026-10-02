@@ -13,7 +13,7 @@ yams_memory_sync = static_library('yams_memory_sync',
     dependency('yams_crypto'),
     dependency('yams_storage_engine'),
   ],
-  install: true,
+  install: false,
 )
 
 yams_memory_sync_dep = declare_dependency(

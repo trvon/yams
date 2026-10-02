@@ -38,7 +38,6 @@ yams_onnx_plugin_srcs = [
   'onnx_plugin.cpp',
   'model_provider.cpp',
   'onnx_text_processing.cpp',
-  'ort_runtime_loader.cpp',
   'onnx_model_pool.cpp',
   'onnx_colbert_session.cpp',
 ]
@@ -80,8 +79,8 @@ onnx_plugin_deps = [
   boost_dep,
 ] + win_extra_deps
 
-onnx_compile_dep = onnx_dep.partial_dependency(compile_args: true, includes: true)
-onnx_plugin_deps += [onnx_compile_dep]
+# ONNX Runtime is loaded at runtime by the shared loader (headers only here).
+onnx_plugin_deps += [yams_ort_loader_dep]
 
 onnx_plugin_link_args = []
 if host_machine.system() == 'linux'
@@ -91,16 +90,18 @@ endif
 
 onnx_plugin_install_rpath = ''
 if host_machine.system() == 'darwin'
-  onnx_plugin_install_rpath = '@loader_path/../..'
+  onnx_plugin_install_rpath = '@loader_path/..'
 elif host_machine.system() == 'linux'
-  onnx_plugin_install_rpath = '$ORIGIN/../..'
+  onnx_plugin_install_rpath = '$ORIGIN/..'
 endif
 
 yams_onnx_plugin = shared_module('yams_onnx_plugin',
   yams_onnx_plugin_srcs,
   include_directories: [include_directories('../../include')],
   dependencies: onnx_plugin_deps,
-  link_args: onnx_plugin_link_args,
+  link_args: onnx_plugin_link_args + plugin_export_link_args,
+  link_depends: plugin_export_link_depends,
+  gnu_symbol_visibility: 'hidden',
   cpp_args: plugin_cppargs,
   install: true,
   install_dir: plugins_dir,

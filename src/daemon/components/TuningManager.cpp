@@ -24,6 +24,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/resource/onnx_registry_spdlog_sink.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
@@ -106,7 +107,10 @@ RepairHoldHints computeRepairHoldHints(ResourcePressureLevel level, std::uint64_
 
 TuningManager::TuningManager(ServiceManager* sm, StateComponent* state,
                              WorkCoordinator* coordinator)
-    : sm_(sm), state_(state), coordinator_(coordinator), strand_(coordinator->getExecutor()) {}
+    : sm_(sm), state_(state), coordinator_(coordinator), strand_(coordinator->getExecutor()) {
+    // TuningManager drives the ONNX slot budget; send the registry's messages to our log.
+    installOnnxRegistrySpdlogSink();
+}
 
 TuningManager::~TuningManager() {
     stop();

@@ -16,14 +16,7 @@ yams_detection = static_library('yams_detection',
   include_directories: [include_directories('../../include'), include_directories('.')],
   dependencies: [spdlog_dep, json_dep, yams_core, yams_metadata, libmagic_dep],
   cpp_args: yams_detection_cppargs,
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_detection,
-  name: 'yams-detection',
-  description: 'YAMS file type detection',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_detection_dep = declare_dependency(

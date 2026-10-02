@@ -80,7 +80,8 @@ else
   )
 
   dbg = (get_option('buildtype') == 'debug')
-  if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
+  daemon_integration_timeout = 1200
+  if (get_option('enable-integration-tests') or dbg)
     # catch2_main_dep is inherited from parent tests/meson.build - no need to redeclare
 
     # Common environment for daemon tests
@@ -107,7 +108,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon socket connection lifecycle', '--allow-running-no-tests'],
     )
 
@@ -116,7 +117,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client request execution', '--allow-running-no-tests'],
     )
 
@@ -125,7 +126,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket', 'download-jobs'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client download job request execution', '--allow-running-no-tests'],
     )
 
@@ -134,7 +135,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client model request execution', '--allow-running-no-tests'],
     )
 
@@ -143,7 +144,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client plugin request execution', '--allow-running-no-tests'],
     )
 
@@ -152,7 +153,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client prune request execution', '--allow-running-no-tests'],
     )
 
@@ -161,7 +162,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client graph maintenance request execution', '--allow-running-no-tests'],
     )
 
@@ -170,7 +171,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client collection request execution', '--allow-running-no-tests'],
     )
 
@@ -179,7 +180,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client tree diff request execution', '--allow-running-no-tests'],
     )
 
@@ -188,7 +189,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client session request execution', '--allow-running-no-tests'],
     )
 
@@ -197,7 +198,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client repair request execution', '--allow-running-no-tests'],
     )
 
@@ -206,7 +207,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client error handling', '--allow-running-no-tests'],
     )
 
@@ -215,7 +216,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client concurrent requests', '--allow-running-no-tests'],
     )
 
@@ -224,7 +225,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client timeout behavior', '--allow-running-no-tests'],
     )
 
@@ -233,7 +234,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon client move semantics', '--allow-running-no-tests'],
     )
 
@@ -242,7 +243,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon socket file lifecycle', '--allow-running-no-tests'],
     )
 
@@ -267,7 +268,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'harness'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: [
         'DaemonHarness rolls back owned endpoints when startup callback fails',
         '--allow-running-no-tests',
@@ -279,7 +280,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'harness'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: [
         'DaemonHarness preserves endpoints claimed after fixture construction',
         '--allow-running-no-tests',
@@ -291,7 +292,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'harness'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: [
         'DaemonHarness restores process state when configuration throws',
         '--allow-running-no-tests',
@@ -303,7 +304,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'harness'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: [
         'DaemonHarness isolates config and observes lifecycle cleanup',
         '--allow-running-no-tests',
@@ -316,7 +317,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'shutdown'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon shutdown timing', '--allow-running-no-tests'],
     )
 
@@ -325,7 +326,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'shutdown'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon shutdown with in-flight operations', '--allow-running-no-tests'],
     )
 
@@ -334,7 +335,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'shutdown'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon stop outlives connections still draining on the IO threads',
         '--allow-running-no-tests'],
     )
@@ -355,7 +356,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'post-ingest'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['--allow-running-no-tests'],
     )
 
@@ -391,7 +392,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'timeout'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['--allow-running-no-tests'],
     )
 
@@ -410,7 +411,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'socket', 'memory-pressure', 'crash'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['--allow-running-no-tests'],
     )
 
@@ -427,7 +428,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'stats', 'crash'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
     )
 
     daemon_db_corruption_recovery_exe = executable('yams_daemon_db_corruption_recovery_tests_catch2',
@@ -443,7 +444,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'db_recovery'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['--allow-running-no-tests'],
     )
 
@@ -484,7 +485,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'kg', 'ghidra', 'pbi-3jb'],
       env: _kg_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['--allow-running-no-tests'],
     )
 
@@ -502,7 +503,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'sandbox', 'embeddings'],
       env: _kg_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['--allow-running-no-tests'],
     )
 
@@ -528,7 +529,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'proxy', 'slots'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['--allow-running-no-tests'],
     )
 
@@ -537,7 +538,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'sigterm'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon responds to external shutdown flag', '--allow-running-no-tests'],
     )
 
@@ -546,7 +547,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'sigterm'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Daemon shutdown timing with external flag', '--allow-running-no-tests'],
     )
 
@@ -728,7 +729,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'onnx', 'embedding'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Embedding lane slots are configured correctly', '--allow-running-no-tests'],
     )
 
@@ -737,7 +738,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'onnx', 'metrics'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['FSM metrics reflect ONNX configuration', '--allow-running-no-tests'],
     )
 
@@ -755,7 +756,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'onnx', 'lanes'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Lane metrics update during slot acquisition', '--allow-running-no-tests'],
     )
 
@@ -784,7 +785,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'onnx', 'timeout'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['ONNX slot exhaustion causes graceful timeout', '--allow-running-no-tests'],
     )
 
@@ -807,7 +808,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'governor', 'status'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['ResourceGovernor metrics exposed in daemon status', '--allow-running-no-tests'],
     )
 
@@ -816,7 +817,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'governor', 'singleton'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['ResourceGovernor singleton is accessible during daemon operation', '--allow-running-no-tests'],
     )
 
@@ -834,7 +835,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'governor', 'scaling'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Governor scaling caps adjust based on pressure level', '--allow-running-no-tests'],
     )
 
@@ -852,7 +853,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'governor', 'snapshot'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['ResourceGovernor snapshot contains valid metrics', '--allow-running-no-tests'],
     )
 
@@ -861,7 +862,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'governor', 'concurrent'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: ['Concurrent status queries return consistent governor data', '--allow-running-no-tests'],
     )
 
@@ -896,6 +897,6 @@ else
       args: ['--allow-running-no-tests'],
     )
   else
-    message('daemon_socket_client test disabled (enable with -Denable-daemon-integration=true).')
+    message('daemon_socket_client test disabled (enable with -Denable-integration-tests=true).')
   endif
 endif

@@ -12,7 +12,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "../../common/env_compat.h"
@@ -92,6 +94,48 @@ TEST_CASE("OnnxConcurrencyRegistry lane metrics are observable", "[daemon][gover
     CHECK(glinerMetrics.reserved >= 0);
     CHECK(embedMetrics.reserved >= 0);
     CHECK(rerankerMetrics.reserved >= 0);
+}
+
+namespace {
+
+/// Captures messages delivered through OnnxConcurrencyRegistry::setLogSink().
+struct CapturedRegistryLogs {
+    static inline std::vector<std::pair<OnnxRegistryLogLevel, std::string>> messages;
+    static void sink(OnnxRegistryLogLevel level, const char* message) noexcept {
+        messages.emplace_back(level, message);
+    }
+};
+
+/// Restores the registry log sink to "none" when a test case ends.
+struct LogSinkGuard {
+    explicit LogSinkGuard(OnnxRegistryLogSink sink) { OnnxConcurrencyRegistry::setLogSink(sink); }
+    ~LogSinkGuard() { OnnxConcurrencyRegistry::setLogSink(nullptr); }
+    LogSinkGuard(const LogSinkGuard&) = delete;
+    LogSinkGuard& operator=(const LogSinkGuard&) = delete;
+};
+
+} // namespace
+
+TEST_CASE("OnnxConcurrencyRegistry routes diagnostics through the host log sink",
+          "[daemon][governance][catch2]") {
+    // The registry is a private shared library that links no logger; the host
+    // binary installs a sink so registry messages land in the host's log.
+    auto& reg = OnnxConcurrencyRegistry::instance();
+    SlotConfigGuard configGuard(reg.totalSlots());
+    CapturedRegistryLogs::messages.clear();
+
+    {
+        LogSinkGuard sinkGuard(&CapturedRegistryLogs::sink);
+        reg.setMaxSlots(reg.totalSlots() + 1);
+    }
+    REQUIRE(CapturedRegistryLogs::messages.size() == 1);
+    CHECK(CapturedRegistryLogs::messages[0].first == OnnxRegistryLogLevel::Info);
+    CHECK(CapturedRegistryLogs::messages[0].second.find("Max slots changed") != std::string::npos);
+
+    // Without a sink the registry stays silent instead of falling back to a
+    // private default logger (which would write to the host's stdout).
+    reg.setMaxSlots(reg.totalSlots() + 1);
+    CHECK(CapturedRegistryLogs::messages.size() == 1);
 }
 
 // =============================================================================

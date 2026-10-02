@@ -40,14 +40,7 @@ yams_metadata = static_library('yams_metadata',
   ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, sqlite_dep, openssl_dep, json_dep, yams_core, yams_config_dep, yams_storage_engine_dep],
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_metadata,
-  name: 'yams-metadata',
-  description: 'YAMS metadata store',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_metadata_dep = declare_dependency(

@@ -33,14 +33,7 @@ yams_topology = static_library('yams_topology',
   include_directories: include_directories('../../include'),
   dependencies: [nlohmann_json_dep, spdlog_dep, yams_core, yams_metadata, yams_vector, yams_compression, simeon_retrieval_dep] + topology_tracy_deps,
   cpp_args: topology_tracy_args,
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_topology,
-  name: 'yams-topology',
-  description: 'YAMS topology artifact and routing helpers',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_topology_dep = declare_dependency(
