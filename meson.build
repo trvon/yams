@@ -928,6 +928,13 @@ endif
 sql_install_dir = join_paths(get_option('datadir'), 'yams', 'sql')
 install_data('sql/reference_schema.sql', install_dir: sql_install_dir, install_tag: 'runtime')
 
+# macOS: Meson installs dylibs with absolute install names; keep the private
+# libyams_onnx_resource @rpath-relative so staged/unzipped trees run in place.
+if host_machine.system() == 'darwin' and not wasi_enabled
+  meson.add_install_script(files('scripts/macos-rpath-install-names.sh'), get_option('libdir'),
+    install_tag: 'runtime')
+endif
+
 summary({
   'project': meson.project_name(),
   'version': meson.project_version(),
