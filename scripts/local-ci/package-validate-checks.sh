@@ -7,17 +7,23 @@
 #
 #   PASS <id> <detail>      FAIL <id> <detail>      INFO <id> <detail>
 #
+# The packages ship a systemd *user* unit; the checks drive it through a
+# normal user with lingering enabled (so a user manager runs without a login).
+#
 # Usage: package-validate-checks.sh <phase> <pkg-manager> [args]
 #   install  <pm> <pkg-file>        install like a user would (no env vars)
 #   layout   <pm>                   installed file list + ELF + permission audit
-#   service  <pm>                   unit enabled/active, account, socket, sandbox
-#   cli      <pm>                   root / group member / outsider CLI behaviour
+#   service  <pm>                   user unit + preset installed, globally enabled,
+#                                   no system unit
+#   user     <pm>                   a user's unit is enabled and active, socket in
+#                                   $XDG_RUNTIME_DIR, CLI works with no env vars,
+#                                   yams daemon stop/start/restart go via systemd
+#   onnx     <pm>                   after `yams init` the user daemon loads the
+#                                   onnx plugin with the bundled ONNX Runtime
 #   persist  <pm>                   after a container reboot
-#   seed     <pm>                   store a document through an older release
+#   seed     <pm>                   state of an older release (system service)
 #   upgraded <pm>                   after upgrading over `seed`
 #   remove   <pm>                   uninstall (deb: remove + purge)
-#   onnx     <pm>                   the system daemon loads the onnx plugin with
-#                                   the bundled ONNX Runtime
 #   minimal  <pm> <pkg-file>        raw base image, no systemd, nothing
 #                                   preinstalled: install pulls only declared deps
 #
@@ -29,12 +35,10 @@ PM="${2:?package manager}"
 ARG="${3:-}"
 
 UNIT=yams-daemon.service
-SOCKET=/run/yams/yams-daemon.sock
-STATE_DIR=/var/lib/yams
-LOG_DIR=/var/log/yams
+USER_UNIT_DIR=/usr/lib/systemd/user
+TUSER=alice   # the user whose daemon the checks drive (lingering)
+OUSER=bob     # a second user, for isolation
 TOKEN_FILE=/var/tmp/yams-validate-tokens
-# Highest acceptable `systemd-analyze security` exposure (0 = locked down, 10 = unsafe).
-MAX_EXPOSURE="${YAMS_VALIDATE_MAX_EXPOSURE:-3.0}"
 
 FAILS=0
 pass() { printf 'PASS %s %s\n' "$1" "${2:-}"; }
@@ -53,37 +57,71 @@ token() { printf 'yamsval%s%s' "$1" "$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n
 remember() { printf '%s=%s\n' "$1" "$2" >>"${TOKEN_FILE}"; }
 recall() { sed -n "s/^$1=//p" "${TOKEN_FILE}" 2>/dev/null | tail -n1; }
 
-wait_active() {
-	local state=""
-	for _ in $(seq 1 120); do
-		state="$(systemctl is-active "${UNIT}" 2>/dev/null || true)"
-		[ "${state}" = "active" ] && [ -S "${SOCKET}" ] && return 0
-		sleep 0.5
-	done
-	return 1
-}
-
-# Run a command as <user> through a login shell, so group membership and HOME
-# match a real login and no YAMS_* variable leaks in.
+# Run a command as <user> through a login shell (pam_systemd sets
+# XDG_RUNTIME_DIR like a real login); no YAMS_* variable leaks in.
 as_user() {
 	local user="$1"
 	shift
 	su - "${user}" -c "$*"
 }
 
+ensure_user() {
+	id "$1" >/dev/null 2>&1 || useradd -m -s /bin/bash "$1"
+	loginctl enable-linger "$1" >/dev/null 2>&1 || true
+}
+
+user_runtime() { printf '/run/user/%s' "$(id -u "$1")"; }
+
+# systemctl --user for <user>, with the runtime dir and bus set explicitly.
+uctl() {
+	local user="$1" rt
+	shift
+	rt="$(user_runtime "${user}")"
+	runuser -u "${user}" -- env XDG_RUNTIME_DIR="${rt}" systemctl --user "$@" 2>/dev/null || true
+}
+
+wait_user_manager() {
+	local uid
+	uid="$(id -u "$1")"
+	for _ in $(seq 1 120); do
+		[ "$(systemctl is-active "user@${uid}.service" 2>/dev/null)" = active ] &&
+			[ -S "/run/user/${uid}/systemd/private" ] && return 0
+		sleep 0.5
+	done
+	return 1
+}
+
+wait_user_active() {
+	local sock
+	sock="$(user_runtime "$1")/yams-daemon.sock"
+	for _ in $(seq 1 120); do
+		[ "$(uctl "$1" is-active "${UNIT}")" = active ] && [ -S "${sock}" ] && return 0
+		sleep 0.5
+	done
+	return 1
+}
+
+user_journal() {
+	uctl "$1" status "${UNIT}" --no-pager -n 15 | sed 's/^/INFO user-unit /'
+}
+
+# Exactly one daemon runs for TUSER, and it is the unit's MainPID (no CLI-spawned copy).
+check_single_daemon() {
+	local main pids
+	main="$(uctl "${TUSER}" show -p MainPID --value "${UNIT}")"
+	pids="$(pgrep -u "${TUSER}" -f '^/usr/bin/yams-daemon' | paste -sd' ' - || true)"
+	if [ -n "${main}" ] && [ "${main}" != 0 ] && [ "${pids}" = "${main}" ]; then
+		pass "$1" "the only daemon for ${TUSER} is the unit's (pid ${main})"
+	else
+		fail "$1" "unit MainPID=${main:-?}, ${TUSER}'s daemons: ${pids:-none}"
+	fi
+}
+
 # Poll a search until it reports <needle> (indexing is asynchronous).
-# SEARCH_SOCKET, when set, pins root's search to that socket (to test data,
-# not discovery).
 search_finds() { # search_finds <user> <query> <needle>
 	local user="$1" query="$2" needle="$3" out=""
-	local -a pin=()
-	if [ -n "${SEARCH_SOCKET:-}" ]; then pin=("YAMS_DAEMON_SOCKET=${SEARCH_SOCKET}"); fi
 	for _ in $(seq 1 60); do
-		if [ "${user}" = root ]; then
-			out="$(cd /root && env -i HOME=/root PATH=/usr/bin:/bin ${pin[@]+"${pin[@]}"} timeout 30 yams search "${query}" 2>&1 || true)"
-		else
-			out="$(as_user "${user}" "timeout 30 yams search '${query}'" 2>&1 || true)"
-		fi
+		out="$(as_user "${user}" "timeout 30 yams search '${query}'" 2>&1 || true)"
 		case "${out}" in *"${needle}"*) return 0 ;; esac
 		sleep 1
 	done
@@ -101,10 +139,6 @@ pkg_files() {
 		# Files and symlinks only; directories are shared with other packages.
 		if [ -L "${f}" ] || [ ! -d "${f}" ]; then printf '%s\n' "${f}"; fi
 	done | sort -u
-}
-
-journal_tail() {
-	journalctl -u "${UNIT}" --no-pager -n 25 2>/dev/null | sed 's/^/INFO journal /'
 }
 
 # ---------------------------------------------------------------------------
@@ -148,9 +182,8 @@ phase_layout() {
 	# Private fallback ONNX Runtime used by the ONNX/Glint plugins when no compatible
 	# system copy exists (core library, its soname symlinks, providers_shared).
 	allow+='|^/usr/lib(64)?/yams/onnxruntime/libonnxruntime(_providers_shared)?\.so(\.[0-9]+)*$'
-	allow+='|^/usr/lib/systemd/system/yams-daemon\.service$'
-	allow+='|^/usr/lib/systemd/system-preset/80-yams\.preset$'
-	allow+='|^/usr/lib/sysusers\.d/yams\.conf$'
+	allow+='|^/usr/lib/systemd/user/yams-daemon\.service$'
+	allow+='|^/usr/lib/systemd/user-preset/80-yams\.preset$'
 	allow+='|^/usr/share/doc/yams(/[A-Za-z0-9_./-]+)?$'
 	allow+='|^/usr/share/licenses/yams(/[A-Za-z0-9_.-]+)?$'
 	# rpm's debuginfo build-id links (symlinks to the shipped ELF files).
@@ -172,8 +205,8 @@ phase_layout() {
 		fail layout-no-devel "development files in runtime package: $(printf '%s ' ${devel})"
 	fi
 
-	for required in /usr/bin/yams /usr/bin/yams-daemon /usr/lib/systemd/system/yams-daemon.service \
-		/usr/lib/systemd/system-preset/80-yams.preset /usr/lib/sysusers.d/yams.conf; do
+	for required in /usr/bin/yams /usr/bin/yams-daemon /usr/lib/systemd/user/yams-daemon.service \
+		/usr/lib/systemd/user-preset/80-yams.preset; do
 		check "layout-has:${required}" "installed" test -e "${required}"
 	done
 
@@ -221,326 +254,134 @@ phase_layout() {
 }
 
 # ---------------------------------------------------------------------------
+# Packaging-level state of the user unit (as root, no user session needed).
 phase_service() {
-	if [ "$(systemctl is-enabled "${UNIT}" 2>/dev/null)" = enabled ]; then
-		pass service-enabled "${UNIT} enabled by the package preset"
+	check service-user-unit "user unit installed in ${USER_UNIT_DIR}" test -f "${USER_UNIT_DIR}/${UNIT}"
+	check service-user-preset "user preset installed" test -f /usr/lib/systemd/user-preset/80-yams.preset
+	if [ -e "/usr/lib/systemd/system/${UNIT}" ] || [ -e "/lib/systemd/system/${UNIT}" ]; then
+		fail service-no-system-unit "a system unit is still installed"
 	else
-		fail service-enabled "${UNIT} is '$(systemctl is-enabled "${UNIT}" 2>&1)'"
+		pass service-no-system-unit "no system unit (the daemon is per-user)"
 	fi
-	if wait_active; then
-		pass service-active "${UNIT} active and socket present"
+	local g
+	g="$(systemctl --global is-enabled "${UNIT}" 2>/dev/null || true)"
+	if [ "${g}" = enabled ]; then
+		pass service-global-enabled "enabled for all users (user preset applied)"
 	else
-		fail service-active "${UNIT} is '$(systemctl is-active "${UNIT}" 2>&1)'"
-		journal_tail
+		fail service-global-enabled "systemctl --global is-enabled says '${g:-?}'"
+	fi
+	if grep -Eq '^(ProtectHome|PrivateTmp)=' "${USER_UNIT_DIR}/${UNIT}"; then
+		fail unit-reads-home "unit hides the user's files (ProtectHome/PrivateTmp)"
+	else
+		pass unit-reads-home "unit can read the user's home and /tmp"
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# A normal user with lingering: the user manager starts the unit (globally
+# enabled), and the CLI uses it with no environment set up by hand.
+phase_user() {
+	ensure_user "${TUSER}"
+	if ! wait_user_manager "${TUSER}"; then
+		fail user-manager "user@$(id -u "${TUSER}").service did not start"
+		journalctl -u "user@$(id -u "${TUSER}").service" --no-pager -n 8 2>/dev/null | sed 's/^/INFO user-manager /'
 		return
 	fi
-
+	pass user-manager "user manager running for ${TUSER} (linger)"
 	local verify
-	verify="$(systemd-analyze verify "/usr/lib/systemd/system/${UNIT}" 2>&1 | grep -v 'Failed to .*Cgroup\|cgroup' || true)"
+	verify="$(runuser -u "${TUSER}" -- env XDG_RUNTIME_DIR="$(user_runtime "${TUSER}")" \
+		systemd-analyze --user verify "${USER_UNIT_DIR}/${UNIT}" 2>&1 | grep -viE 'cgroup' || true)"
 	if [ -z "${verify}" ]; then
-		pass unit-verify "systemd-analyze verify is clean"
+		pass unit-verify "systemd-analyze --user verify is clean"
 	else
 		fail unit-verify "$(printf '%s' "${verify}" | tr '\n' ' ')"
 	fi
-
-	local main_pid user
-	main_pid="$(systemctl show -p MainPID --value "${UNIT}")"
-	user="$(ps -o user= -p "${main_pid}" 2>/dev/null | tr -d ' ')"
-	if [ "${user}" = yams ]; then
-		pass service-account "daemon runs as the yams system account"
+	local xdg
+	xdg="$(as_user "${TUSER}" 'printf %s "$XDG_RUNTIME_DIR"')"
+	if [ "${xdg}" = "$(user_runtime "${TUSER}")" ]; then
+		pass user-login-env "login shell has XDG_RUNTIME_DIR=${xdg} (pam_systemd)"
 	else
-		fail service-account "daemon runs as '${user:-?}', expected yams"
+		info user-login-env "login shell lacks XDG_RUNTIME_DIR; systemctl --user calls set it"
 	fi
-	check account-group "yams system group exists" getent group yams
-
-	local mode owner group
-	mode="$(stat -c %a "${SOCKET}")"
-	owner="$(stat -c %U "${SOCKET}")"
-	group="$(stat -c %G "${SOCKET}")"
-	if [ "$((8#${mode} & 8#007))" -eq 0 ] && [ "${group}" = yams ]; then
-		pass socket-perms "${SOCKET} ${mode} ${owner}:${group} (no access for others)"
+	local en
+	en="$(uctl "${TUSER}" is-enabled "${UNIT}")"
+	if [ "${en}" = enabled ]; then pass user-enabled "${UNIT} enabled for ${TUSER}"; else fail user-enabled "is-enabled: '${en}'"; fi
+	if wait_user_active "${TUSER}"; then
+		pass user-active "${UNIT} active for ${TUSER} without a manual start"
 	else
-		fail socket-perms "${SOCKET} is ${mode} ${owner}:${group}; want group yams and no access for others"
-	fi
-	local dmode
-	dmode="$(stat -c %a /run/yams)"
-	if [ "$((8#${dmode} & 8#007))" -eq 0 ]; then
-		pass runtime-dir-perms "/run/yams ${dmode}"
-	else
-		fail runtime-dir-perms "/run/yams is ${dmode}; others can list it"
-	fi
-
-	local world
-	world="$(find /run/yams "${STATE_DIR}/" "${LOG_DIR}/" -xdev \( -perm -0002 ! -type l \) 2>/dev/null | head -n 5)"
-	if [ -z "${world}" ]; then
-		pass state-not-world-writable "nothing under /run/yams, ${STATE_DIR}, ${LOG_DIR} is world-writable"
-	else
-		fail state-not-world-writable "$(printf '%s ' ${world})"
-	fi
-
-	if grep -q '^PermissionsStartOnly' "/usr/lib/systemd/system/${UNIT}"; then
-		fail unit-deprecated "unit uses deprecated PermissionsStartOnly="
-	else
-		pass unit-deprecated "no deprecated directives"
-	fi
-	if grep -Eq 'chmod[[:space:]]+0?666' "/usr/lib/systemd/system/${UNIT}"; then
-		fail unit-no-chmod666 "unit makes the socket world-writable (chmod 0666)"
-	else
-		pass unit-no-chmod666 "unit leaves socket mode to the daemon (group rw, others none)"
-	fi
-
-	local exposure
-	exposure="$(systemd-analyze security --no-pager "${UNIT}" 2>/dev/null | sed -n 's/.*Overall exposure level for .*: \([0-9.]*\).*/\1/p')"
-	if [ -z "${exposure}" ]; then
-		info sandbox-exposure "systemd-analyze security unavailable"
-	elif awk -v e="${exposure}" -v m="${MAX_EXPOSURE}" 'BEGIN{exit !(e <= m)}'; then
-		pass sandbox-exposure "systemd-analyze security exposure ${exposure} <= ${MAX_EXPOSURE}"
-	else
-		fail sandbox-exposure "systemd-analyze security exposure ${exposure} > ${MAX_EXPOSURE}"
-	fi
-
-	check data-dir "state directory ${STATE_DIR} holds the corpus" test -e "${STATE_DIR}/yams.db"
-	check log-file "daemon log written to ${LOG_DIR}/daemon.log" test -s "${LOG_DIR}/daemon.log"
-}
-
-# ---------------------------------------------------------------------------
-phase_cli() {
-	: >"${TOKEN_FILE}"
-	id member >/dev/null 2>&1 || useradd -m -s /bin/bash member
-	id outsider >/dev/null 2>&1 || useradd -m -s /bin/bash outsider
-	if getent group yams >/dev/null 2>&1; then
-		usermod -aG yams member
-	else
-		fail cli-member-group "no yams group to add a user to"
-	fi
-
-	# (a) root, no environment beyond a login's.
-	local rt
-	rt="$(token root)"
-	remember ROOT "${rt}"
-	printf 'root note %s\n' "${rt}" >/root/root-note.txt
-	local out rc=0
-	out="$(cd /root && env -i HOME=/root PATH=/usr/bin:/bin timeout 120 yams daemon status 2>&1)" || rc=$?
-	if [ "${rc}" -eq 0 ] && ! printf '%s' "${out}" | grep -qi 'not running'; then
-		pass cli-root-status "yams daemon status reaches a daemon"
-	else
-		fail cli-root-status "rc=${rc}: $(printf '%s' "${out}" | tail -n 3 | tr '\n' ' ')"
-	fi
-	rc=0
-	out="$(cd /root && env -i HOME=/root PATH=/usr/bin:/bin timeout 120 yams add /root/root-note.txt 2>&1)" || rc=$?
-	if [ "${rc}" -eq 0 ]; then pass cli-root-add "yams add /root/root-note.txt"; else fail cli-root-add "rc=${rc}: $(printf '%s' "${out}" | tail -n 3 | tr '\n' ' ')"; fi
-	if search_finds root "${rt}" root-note; then
-		pass cli-root-search "root's document is searchable"
-	else
-		fail cli-root-search "root's document not found by yams search"
-	fi
-	# Proof the system daemon stored it: no private per-user store appeared.
-	if [ -e /root/.local/share/yams/yams.db ]; then
-		fail cli-root-uses-system-daemon "CLI wrote a private store /root/.local/share/yams instead of using ${SOCKET}"
-	else
-		pass cli-root-uses-system-daemon "no private store under /root; the system daemon served the CLI"
-	fi
-
-	# (b) a member of the yams group, files in $HOME and /tmp.
-	local mt mt2
-	mt="$(token member)"
-	mt2="$(token membertmp)"
-	remember MEMBER "${mt}"
-	as_user member "printf 'member note %s\n' '${mt}' > ~/member-note.txt; printf 'member tmp %s\n' '${mt2}' > /tmp/member-tmp.txt; mkdir -p ~/notes && printf 'x\n' > ~/notes/a.txt"
-	check cli-member-socket-access "group member can open ${SOCKET}" as_user member "test -w ${SOCKET}"
-	rc=0
-	out="$(as_user member 'timeout 120 yams add ~/member-note.txt' 2>&1)" || rc=$?
-	if [ "${rc}" -eq 0 ]; then pass cli-member-add-home "yams add ~/member-note.txt"; else fail cli-member-add-home "rc=${rc}: $(printf '%s' "${out}" | tail -n 3 | tr '\n' ' ')"; fi
-	rc=0
-	out="$(as_user member 'timeout 120 yams add /tmp/member-tmp.txt' 2>&1)" || rc=$?
-	if [ "${rc}" -eq 0 ]; then pass cli-member-add-tmp "yams add /tmp/member-tmp.txt"; else fail cli-member-add-tmp "rc=${rc}: $(printf '%s' "${out}" | tail -n 3 | tr '\n' ' ')"; fi
-	if search_finds member "${mt}" member-note; then pass cli-member-search-home "home file searchable"; else fail cli-member-search-home "member home note not found by yams search"; fi
-	if search_finds member "${mt2}" member-tmp; then pass cli-member-search-tmp "/tmp file searchable"; else fail cli-member-search-tmp "/tmp/member-tmp.txt not found by yams search"; fi
-	if search_finds member "${rt}" root-note; then
-		pass cli-member-shared-corpus "member sees the system corpus (root's document)"
-	else
-		fail cli-member-shared-corpus "member does not see root's document: not using the system daemon"
-	fi
-	if as_user member 'test -e ~/.local/share/yams/yams.db'; then
-		fail cli-member-uses-system-daemon "CLI wrote a private store ~member/.local/share/yams instead of using ${SOCKET}"
-	else
-		pass cli-member-uses-system-daemon "no private store for member"
-	fi
-	# A directory under $HOME cannot be walked by the sandboxed daemon: the CLI must say so.
-	rc=0
-	out="$(as_user member 'timeout 120 yams add ~/notes' 2>&1)" || rc=$?
-	if [ "${rc}" -ne 0 ] && printf '%s' "${out}" | grep -qi 'another user'; then
-		pass cli-member-add-dir-clear-error "directory add fails with an explanation"
-	else
-		fail cli-member-add-dir-clear-error "rc=${rc}: $(printf '%s' "${out}" | tail -n 2 | tr '\n' ' ')"
-	fi
-
-	# (c) a user outside the yams group must not reach the system socket.
-	if as_user outsider "test -w ${SOCKET}" 2>/dev/null; then
-		fail cli-outsider-denied "non-member can open ${SOCKET} (world-writable socket)"
-	else
-		pass cli-outsider-denied "non-member cannot open ${SOCKET}"
-	fi
-
-	# (d) a per-user service (`yams daemon install --user`) keeps working beside the
-	# system one, and that user's CLI uses it rather than the system socket.
-	local ouid
-	ouid="$(id -u outsider)"
-	loginctl enable-linger outsider >/dev/null 2>&1 || true
-	for _ in $(seq 1 60); do
-		[ -S "/run/user/${ouid}/bus" ] && break
-		sleep 0.5
-	done
-	local uenv="export XDG_RUNTIME_DIR=/run/user/${ouid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ouid}/bus;"
-	if [ "$(systemctl is-active "user@${ouid}.service" 2>/dev/null)" != active ]; then
-		# Some container hosts cannot run a user manager (PAM session setup fails);
-		# that says nothing about yams, so report it instead of failing.
-		info cli-user-service "skipped: user@${ouid}.service did not start in this container ($(journalctl -u "user@${ouid}.service" --no-pager -n 3 2>/dev/null | tail -n 1 | cut -c1-160))"
-		loginctl disable-linger outsider >/dev/null 2>&1 || true
-		phase_cli_lifecycle
+		fail user-active "${UNIT} is '$(uctl "${TUSER}" is-active "${UNIT}")'"
+		user_journal "${TUSER}"
 		return
 	fi
-	local ot
-	ot="$(token outsider)"
-	as_user outsider "printf 'outsider note %s\n' '${ot}' > ~/outsider-note.txt"
-	rc=0
-	out="$(as_user outsider "${uenv} timeout 120 yams daemon install --user" 2>&1)" || rc=$?
-	local uactive=""
-	for _ in $(seq 1 60); do
-		uactive="$(as_user outsider "${uenv} systemctl --user is-active yams-daemon.service" 2>/dev/null || true)"
-		[ "${uactive}" = active ] && [ -S "/run/user/${ouid}/yams-daemon.sock" ] && break
-		sleep 0.5
-	done
-	if [ "${rc}" -eq 0 ] && [ "${uactive}" = active ]; then
-		pass cli-user-service "yams daemon install --user starts a per-user unit"
-	else
-		fail cli-user-service "rc=${rc} state=${uactive:-?}: $(printf '%s' "${out}" | tail -n 3 | tr '\n' ' ')"
-	fi
-	rc=0
-	out="$(as_user outsider "${uenv} timeout 120 yams add ~/outsider-note.txt && timeout 60 yams daemon status" 2>&1)" || rc=$?
-	# The only daemon running for this user must be the unit's: no auto-spawned
-	# second daemon, and not the system one.
-	local umain upids
-	umain="$(as_user outsider "${uenv} systemctl --user show -p MainPID --value yams-daemon.service" 2>/dev/null || true)"
-	upids="$(pgrep -u outsider -f '^/usr/bin/yams-daemon' | paste -sd' ' - || true)"
-	if [ "${rc}" -eq 0 ] && [ -n "${umain}" ] && [ "${umain}" != 0 ] && [ "${upids}" = "${umain}" ] &&
-		as_user outsider 'test -e ~/.local/share/yams/yams.db'; then
-		pass cli-user-service-used "per-user CLI talks to its unit's daemon (pid ${umain}) and store"
-	else
-		fail cli-user-service-used "rc=${rc} unit-pid=${umain:-?} user-daemons=${upids:-none}: $(printf '%s' "${out}" | tail -n 2 | tr '\n' ' ')"
-	fi
-	as_user outsider "${uenv} yams daemon uninstall --user" >/dev/null 2>&1 || true
-	loginctl disable-linger outsider >/dev/null 2>&1 || true
-
-	phase_cli_lifecycle
-}
-
-# Daemon lifecycle stays with systemd: `yams daemon stop` must not stop the unit.
-phase_cli_lifecycle() {
-	local out
-	out="$(cd /root && env -i HOME=/root PATH=/usr/bin:/bin timeout 60 yams daemon stop 2>&1)" || true
-	if [ "$(systemctl is-active "${UNIT}" 2>/dev/null)" = active ]; then
-		pass cli-stop-defers-to-systemd "yams daemon stop leaves the system unit running"
-	else
-		fail cli-stop-defers-to-systemd "yams daemon stop killed the system unit: $(printf '%s' "${out}" | tail -n 2 | tr '\n' ' ')"
-		systemctl start "${UNIT}" >/dev/null 2>&1 || true
-		wait_active || true
-	fi
-}
-
-# ---------------------------------------------------------------------------
-phase_persist() {
-	if [ "$(systemctl is-enabled "${UNIT}" 2>/dev/null)" = enabled ] && wait_active; then
-		pass reboot-active "${UNIT} active after reboot"
-	else
-		fail reboot-active "${UNIT} is '$(systemctl is-active "${UNIT}" 2>&1)' after reboot"
-		journal_tail
-		return
-	fi
-	local mode
-	mode="$(stat -c %a "${SOCKET}")"
-	if [ "$((8#${mode} & 8#007))" -eq 0 ]; then pass reboot-socket-perms "${mode}"; else fail reboot-socket-perms "${SOCKET} is ${mode} after reboot"; fi
-	local rt
-	rt="$(recall ROOT)"
-	if [ -n "${rt}" ] && search_finds root "${rt}" root-note; then
-		pass reboot-data-persists "root's document survives a reboot"
-	else
-		fail reboot-data-persists "root's document missing after reboot"
-	fi
-}
-
-# ---------------------------------------------------------------------------
-phase_seed() {
-	: >"${TOKEN_FILE}"
-	if ! wait_active; then
-		fail upgrade-seed-active "old release's ${UNIT} not active"
-		journal_tail
-		return
-	fi
-	local ut
-	ut="$(token upgrade)"
-	remember UPGRADE "${ut}"
-	printf 'upgrade note %s\n' "${ut}" >/var/tmp/upgrade-note.txt
-	chmod 0644 /var/tmp/upgrade-note.txt
-	# Older CLIs cannot find the system socket; feed content on stdin so the
-	# sandboxed daemon need not read a path.
-	local rc=0
-	env -i HOME=/root PATH=/usr/bin:/bin YAMS_DAEMON_SOCKET="${SOCKET}" \
-		timeout 120 yams add - --name upgrade-note.txt </var/tmp/upgrade-note.txt >/dev/null 2>&1 || rc=$?
-	if [ "${rc}" -eq 0 ]; then pass upgrade-seed "stored a document through the old release"; else fail upgrade-seed "old release add rc=${rc}"; fi
-	local out=""
-	for _ in $(seq 1 60); do
-		out="$(env -i HOME=/root PATH=/usr/bin:/bin YAMS_DAEMON_SOCKET="${SOCKET}" timeout 30 yams search "${ut}" 2>&1 || true)"
-		case "${out}" in *upgrade-note*) break ;; esac
-		sleep 1
-	done
-	case "${out}" in
-	*upgrade-note*) pass upgrade-seed-indexed "old release indexed the document" ;;
-	*) fail upgrade-seed-indexed "old release never indexed the document" ;;
+	local sock perms
+	sock="$(user_runtime "${TUSER}")/yams-daemon.sock"
+	perms="$(stat -c '%a %U' "${sock}" 2>/dev/null || true)"
+	case "${perms}" in
+	*" ${TUSER}") pass user-socket "socket ${sock} (${perms})" ;;
+	*) fail user-socket "no socket owned by ${TUSER} at ${sock} (${perms:-missing})" ;;
 	esac
-	systemctl show -p MainPID --value "${UNIT}" >/var/tmp/yams-validate-oldpid
-}
 
-phase_upgraded() {
-	if wait_active; then
-		pass upgrade-active "${UNIT} active after upgrade"
+	local t rc=0 out
+	t="$(token user)"
+	remember USER "${t}"
+	as_user "${TUSER}" "printf 'user note %s\n' '${t}' > ~/user-note.txt; printf 'tmp note %s\n' '${t}x' > /tmp/user-tmp-note.txt"
+	out="$(as_user "${TUSER}" 'timeout 60 yams daemon status' 2>&1)" || rc=$?
+	if [ "${rc}" -eq 0 ] && ! printf '%s' "${out}" | grep -qi 'not running'; then
+		pass cli-status "yams daemon status reaches the unit's daemon"
 	else
-		fail upgrade-active "${UNIT} is '$(systemctl is-active "${UNIT}" 2>&1)' after upgrade"
-		journal_tail
-		return
+		fail cli-status "rc=${rc}: $(printf '%s' "${out}" | tail -n 2 | tr '\n' ' ')"
 	fi
-	local old new
-	old="$(cat /var/tmp/yams-validate-oldpid 2>/dev/null || true)"
-	new="$(systemctl show -p MainPID --value "${UNIT}")"
-	if [ -n "${new}" ] && [ "${new}" != "${old}" ] && ! readlink "/proc/${new}/exe" | grep -q deleted; then
-		pass upgrade-restarted "daemon restarted onto the new binary (pid ${old} -> ${new})"
+	rc=0
+	out="$(as_user "${TUSER}" 'timeout 120 yams add ~/user-note.txt && timeout 120 yams add /tmp/user-tmp-note.txt' 2>&1)" || rc=$?
+	if [ "${rc}" -eq 0 ]; then pass cli-add "yams add from \$HOME and /tmp"; else fail cli-add "rc=${rc}: $(printf '%s' "${out}" | tail -n 2 | tr '\n' ' ')"; fi
+	if search_finds "${TUSER}" "${t}" user-note; then pass cli-search "home file searchable"; else fail cli-search "home note not found by yams search"; fi
+	if as_user "${TUSER}" 'test -e ~/.local/share/yams/yams.db'; then
+		pass cli-data-dir "corpus in ~${TUSER}/.local/share/yams"
 	else
-		fail upgrade-restarted "daemon still runs the old binary (pid ${old} -> ${new})"
+		fail cli-data-dir "no ~/.local/share/yams/yams.db for ${TUSER}"
 	fi
-	local ut
-	ut="$(recall UPGRADE)"
-	# Pin the socket: this checks the corpus survived, not client discovery.
-	if [ -n "${ut}" ] && SEARCH_SOCKET="${SOCKET}" search_finds root "${ut}" upgrade-note; then
-		pass upgrade-data-kept "document stored before the upgrade is still searchable"
-	else
-		fail upgrade-data-kept "document stored before the upgrade is gone or unreachable"
-	fi
-}
+	check_single_daemon cli-single-daemon
+	check user-log "daemon log in ~/.local/state/yams" as_user "${TUSER}" 'test -s ~/.local/state/yams/daemon.log'
 
-check_no_dangling_links() { # check_no_dangling_links <id>
-	local dangling
-	dangling="$(find /etc/systemd/system -name "${UNIT}" -xtype l 2>/dev/null || true)"
-	if [ -z "${dangling}" ]; then
-		pass "$1" "no dangling enablement symlinks"
+	# Lifecycle commands go through systemd.
+	as_user "${TUSER}" 'timeout 60 yams daemon stop' >/dev/null 2>&1 || true
+	local st
+	st="$(uctl "${TUSER}" is-active "${UNIT}")"
+	if [ "${st}" != active ]; then pass cli-stop "yams daemon stop stopped the unit (${st})"; else fail cli-stop "unit still active after yams daemon stop"; fi
+	# A CLI command with the daemon down starts the unit, not a stray copy.
+	as_user "${TUSER}" "timeout 120 yams search '${t}'" >/dev/null 2>&1 || true
+	if wait_user_active "${TUSER}"; then
+		pass cli-autostart-unit "CLI auto-start brought the unit back"
 	else
-		fail "$1" "$(printf '%s ' ${dangling})"
+		fail cli-autostart-unit "unit is '$(uctl "${TUSER}" is-active "${UNIT}")' after a CLI command"
+	fi
+	check_single_daemon cli-autostart-single
+	local before after
+	before="$(uctl "${TUSER}" show -p MainPID --value "${UNIT}")"
+	as_user "${TUSER}" 'timeout 60 yams daemon restart' >/dev/null 2>&1 || true
+	wait_user_active "${TUSER}" || true
+	after="$(uctl "${TUSER}" show -p MainPID --value "${UNIT}")"
+	if [ -n "${after}" ] && [ "${after}" != 0 ] && [ "${after}" != "${before}" ]; then
+		pass cli-restart "yams daemon restart restarted the unit (pid ${before} -> ${after})"
+	else
+		fail cli-restart "MainPID ${before} -> ${after}"
+	fi
+	check cli-install-user "yams daemon install --user enables the packaged unit" \
+		as_user "${TUSER}" 'yams daemon install --user | grep -q "packaged" && test ! -e ~/.config/systemd/user/yams-daemon.service'
+
+	# Users are isolated: another user's runtime dir and socket are private.
+	ensure_user "${OUSER}"
+	if as_user "${OUSER}" "test -r $(user_runtime "${TUSER}")/yams-daemon.sock || test -x $(user_runtime "${TUSER}")"; then
+		fail user-isolation "${OUSER} can reach ${TUSER}'s runtime dir"
+	else
+		pass user-isolation "${OUSER} cannot reach ${TUSER}'s daemon"
 	fi
 }
 
 # ---------------------------------------------------------------------------
+# `yams init` writes the user's config; with it the unit loads the plugins and
+# the onnx plugin uses the bundled ONNX Runtime (lane images have no system copy).
 phase_onnx() {
-	# Lane images carry no system ONNX Runtime, so the plugin must pick the
-	# private copy in <libdir>/yams/onnxruntime.
 	local bundled
 	bundled="$(ls -d /usr/lib/yams/onnxruntime /usr/lib64/yams/onnxruntime 2>/dev/null | head -n 1)"
 	if [ -n "${bundled}" ] && ls "${bundled}"/libonnxruntime.so* >/dev/null 2>&1; then
@@ -549,45 +390,128 @@ phase_onnx() {
 		fail onnx-runtime-shipped "no libonnxruntime.so under /usr/lib/yams/onnxruntime"
 	fi
 	check onnx-plugin-shipped "onnx plugin installed" test -e /usr/lib/yams/plugins/libyams_onnx_plugin.so
-	# Plugins load only when configured; the unit reads /etc/yams/config.toml.
-	mkdir -p /etc/yams
-	printf '[daemon]\nauto_load_plugins = true\n' >/etc/yams/config.toml
-	: >"${LOG_DIR}/daemon.log"
-	systemctl restart "${UNIT}" >/dev/null 2>&1 || true
-	if wait_active; then
-		pass onnx-config-restart "system daemon restarted with /etc/yams/config.toml"
+	local rc=0 out
+	out="$(as_user "${TUSER}" 'timeout 300 yams init --non-interactive --no-keygen' 2>&1)" || rc=$?
+	if as_user "${TUSER}" "grep -Eq '^[[:space:]]*auto_load_plugins[[:space:]]*=[[:space:]]*true' ~/.config/yams/config.toml"; then
+		pass onnx-init-config "yams init wrote auto_load_plugins = true (rc=${rc})"
 	else
-		fail onnx-config-restart "${UNIT} did not come back with auto_load_plugins = true"
-		journal_tail
+		fail onnx-init-config "rc=${rc}; config lacks auto_load_plugins = true: $(printf '%s' "${out}" | tail -n 2 | tr '\n' ' ')"
+		as_user "${TUSER}" 'mkdir -p ~/.config/yams && printf "[daemon]\nauto_load_plugins = true\n" >> ~/.config/yams/config.toml'
+	fi
+	as_user "${TUSER}" ': > ~/.local/state/yams/daemon.log' 2>/dev/null || true
+	uctl "${TUSER}" restart "${UNIT}" >/dev/null
+	if ! wait_user_active "${TUSER}"; then
+		fail onnx-restart "unit did not come back after yams init"
+		user_journal "${TUSER}"
 		return
 	fi
 	local line="" health=""
 	for _ in $(seq 1 60); do
-		line="$(grep -hE 'Using (bundled|system) ONNX Runtime' "${LOG_DIR}/daemon.log" 2>/dev/null | tail -n 1)"
+		line="$(as_user "${TUSER}" "grep -hE 'Using (bundled|system) ONNX Runtime' ~/.local/state/yams/daemon.log 2>/dev/null | tail -n 1")"
 		[ -n "${line}" ] && break
 		sleep 1
 	done
-	health="$(cd /root && env -i HOME=/root PATH=/usr/bin:/bin timeout 60 yams plugin health 2>&1 || true)"
 	case "${line}" in
-	*"Using bundled ONNX Runtime"*)
-		pass onnx-runtime-bundled "system daemon: ${line##*] }"
-		;;
+	*"Using bundled ONNX Runtime"*) pass onnx-runtime-bundled "user daemon: ${line##*] }" ;;
 	*)
-		fail onnx-runtime-bundled "daemon log has no 'Using bundled ONNX Runtime' (${line:-no ONNX runtime line})"
-		grep -hiE 'onnx' "${LOG_DIR}/daemon.log" 2>/dev/null | tail -n 8 | sed 's/^/INFO onnx-log /'
+		fail onnx-runtime-bundled "no 'Using bundled ONNX Runtime' in the user's daemon log (${line:-none})"
+		as_user "${TUSER}" "grep -hiE 'onnx|plugin' ~/.local/state/yams/daemon.log | tail -n 8" | sed 's/^/INFO onnx-log /'
 		;;
 	esac
+	health="$(as_user "${TUSER}" 'timeout 60 yams plugin health' 2>&1 || true)"
 	if printf '%s' "${health}" | grep -qi 'onnx'; then
 		pass onnx-plugin-loaded "yams plugin health lists the onnx plugin"
 	else
 		fail onnx-plugin-loaded "yams plugin health does not list onnx"
-		printf '%s\n' "${health}" | tail -n 8 | sed 's/^/INFO plugin-health /'
+		printf '%s\n' "${health}" | tail -n 6 | sed 's/^/INFO plugin-health /'
+	fi
+	check_single_daemon onnx-single-daemon
+}
+
+# ---------------------------------------------------------------------------
+phase_persist() {
+	if ! wait_user_manager "${TUSER}"; then
+		fail reboot-user-manager "no user manager for ${TUSER} after reboot (linger)"
+		return
+	fi
+	if wait_user_active "${TUSER}"; then
+		pass reboot-active "${UNIT} active for ${TUSER} after reboot"
+	else
+		fail reboot-active "${UNIT} is '$(uctl "${TUSER}" is-active "${UNIT}")' after reboot"
+		user_journal "${TUSER}"
+		return
+	fi
+	local t
+	t="$(recall USER)"
+	if [ -n "${t}" ] && search_finds "${TUSER}" "${t}" user-note; then
+		pass reboot-data-persists "${TUSER}'s document survives a reboot"
+	else
+		fail reboot-data-persists "${TUSER}'s document missing after reboot"
 	fi
 }
 
 # ---------------------------------------------------------------------------
-# Raw distro base image, no systemd running, nothing preinstalled beyond the
-# image: proves the package's declared dependencies are sufficient.
+# Before upgrading from a release that ran a system service.
+phase_seed() {
+	: >"${TOKEN_FILE}"
+	local state=""
+	for _ in $(seq 1 120); do
+		state="$(systemctl is-active "${UNIT}" 2>/dev/null || true)"
+		[ "${state}" = active ] && break
+		sleep 0.5
+	done
+	if [ "${state}" = active ]; then
+		pass upgrade-old-system-unit "old release runs the system ${UNIT}"
+	else
+		info upgrade-old-system-unit "old release's system unit is '${state:-?}'"
+	fi
+	ensure_user "${TUSER}"
+	wait_user_manager "${TUSER}" || true
+	systemctl show -p MainPID --value "${UNIT}" >/var/tmp/yams-validate-oldpid 2>/dev/null || true
+}
+
+phase_upgraded() {
+	if [ "$(systemctl is-active "${UNIT}" 2>/dev/null)" = active ]; then
+		fail upgrade-system-unit-stopped "old system unit still running"
+	else
+		pass upgrade-system-unit-stopped "old system unit stopped"
+	fi
+	if [ -e "/usr/lib/systemd/system/${UNIT}" ] || [ -e "/lib/systemd/system/${UNIT}" ]; then
+		fail upgrade-system-unit-removed "system unit file still installed"
+	else
+		pass upgrade-system-unit-removed "system unit file removed"
+	fi
+	check_no_dangling_links upgrade-no-dangling-links
+	check upgrade-old-corpus-kept "/var/lib/yams left in place" test -e /var/lib/yams
+	local g
+	g="$(systemctl --global is-enabled "${UNIT}" 2>/dev/null || true)"
+	if [ "${g}" = enabled ]; then pass upgrade-global-enabled "user unit enabled for all users"; else fail upgrade-global-enabled "'${g:-?}'"; fi
+	# The already-running user manager learns about the unit; it starts at the
+	# next login, or now on request.
+	uctl "${TUSER}" daemon-reload >/dev/null
+	local en
+	en="$(uctl "${TUSER}" is-enabled "${UNIT}")"
+	if [ "${en}" = enabled ]; then pass upgrade-user-enabled "${UNIT} enabled for ${TUSER}"; else fail upgrade-user-enabled "'${en}'"; fi
+	uctl "${TUSER}" start "${UNIT}" >/dev/null
+	if wait_user_active "${TUSER}"; then
+		pass upgrade-user-active "${TUSER}'s user daemon runs after the upgrade"
+	else
+		fail upgrade-user-active "'$(uctl "${TUSER}" is-active "${UNIT}")'"
+		user_journal "${TUSER}"
+		return
+	fi
+	local t rc=0
+	t="$(token upgrade)"
+	as_user "${TUSER}" "printf 'upgrade note %s\n' '${t}' > ~/upgrade-note.txt"
+	as_user "${TUSER}" 'timeout 120 yams add ~/upgrade-note.txt' >/dev/null 2>&1 || rc=$?
+	if [ "${rc}" -eq 0 ] && search_finds "${TUSER}" "${t}" upgrade-note; then
+		pass upgrade-cli "${TUSER}'s CLI works against the user daemon"
+	else
+		fail upgrade-cli "add rc=${rc} or document not found"
+	fi
+}
+
+# ---------------------------------------------------------------------------
 phase_minimal() {
 	local pkg="${ARG:?package file}"
 	local log=/var/tmp/yams-validate-minimal.log rc=0
@@ -619,11 +543,7 @@ phase_minimal() {
 			fail minimal-configured "dpkg status '${status}' (half-configured?)"
 		fi
 	fi
-	if getent passwd yams >/dev/null 2>&1 && getent group yams >/dev/null 2>&1; then
-		pass minimal-account "yams account and group created without systemd running"
-	else
-		fail minimal-account "no yams account/group after install"
-	fi
+	check minimal-user-unit "user unit installed" test -f "${USER_UNIT_DIR}/${UNIT}"
 	check minimal-version "yams --version runs" yams --version
 	local t out
 	t="$(token minimal)"
@@ -639,13 +559,23 @@ phase_minimal() {
 		sleep 1
 	done
 	if [ "${found}" -eq 1 ]; then
-		pass minimal-cli "yams add + search work without a system service"
+		pass minimal-cli "yams add + search work without systemd"
 	else
 		fail minimal-cli "$(printf '%s' "${out}" | tail -n 2 | tr '\n' ' ')"
 	fi
 }
 
 # ---------------------------------------------------------------------------
+check_no_dangling_links() { # check_no_dangling_links <id>
+	local dangling
+	dangling="$(find /etc/systemd/system /etc/systemd/user -name "${UNIT}" -xtype l 2>/dev/null || true)"
+	if [ -z "${dangling}" ]; then
+		pass "$1" "no dangling enablement symlinks"
+	else
+		fail "$1" "$(printf '%s ' ${dangling})"
+	fi
+}
+
 phase_remove() {
 	local rc=0 log=/var/tmp/yams-validate-remove.log
 	case "${PM}" in
@@ -657,27 +587,27 @@ phase_remove() {
 		fail remove "rc=${rc}"
 		tail -n 20 "${log}" | sed 's/^/INFO remove-log /'
 	fi
-	if [ "$(systemctl is-active "${UNIT}" 2>/dev/null)" = active ]; then
-		fail remove-stopped "${UNIT} still active after removal"
+	local st
+	st="$(uctl "${TUSER}" is-active "${UNIT}")"
+	if [ "${st}" = active ]; then
+		fail remove-user-stopped "${TUSER}'s user daemon still active after removal"
 	else
-		pass remove-stopped "${UNIT} stopped"
+		pass remove-user-stopped "${TUSER}'s user daemon stopped (${st:-gone})"
+	fi
+	if pgrep -f '^/usr/bin/yams-daemon' >/dev/null 2>&1; then
+		fail remove-no-daemons "yams-daemon processes left: $(pgrep -fa '^/usr/bin/yams-daemon' | tr '\n' ' ')"
+	else
+		pass remove-no-daemons "no yams-daemon processes left"
 	fi
 	check remove-binaries "binaries removed" test ! -e /usr/bin/yams-daemon
-	# Debian keeps enablement state until purge (deb-systemd-helper masks on
-	# remove), so for deb the dangling-link check runs after purge.
-	[ "${PM}" = deb ] || check_no_dangling_links remove-no-dangling-links
+	check remove-global-disabled "global enablement removed" test ! -e "/etc/systemd/user/default.target.wants/${UNIT}"
+	check_no_dangling_links remove-no-dangling-links
+	check remove-user-data-kept "${TUSER}'s corpus kept" as_user "${TUSER}" 'test -e ~/.local/share/yams/yams.db'
 	if [ "${PM}" = deb ]; then
 		rc=0
 		apt-get purge -y yams >>"${log}" 2>&1 || rc=$?
 		if [ "${rc}" -eq 0 ]; then pass purge "package purged"; else fail purge "rc=${rc}"; fi
-		local left=""
-		for d in "${STATE_DIR}" "${LOG_DIR}" /var/lib/private/yams /var/log/private/yams; do
-			{ [ -e "${d}" ] || [ -L "${d}" ]; } && left+="${d} "
-		done
-		if [ -z "${left}" ]; then pass purge-state "state and logs removed on purge"; else fail purge-state "left behind after purge: ${left}"; fi
-		check_no_dangling_links purge-no-dangling-links
-	else
-		info remove-state "state kept by design on ${PM} removal: $(ls -d ${STATE_DIR} 2>/dev/null || echo none)"
+		check purge-user-data-kept "${TUSER}'s corpus kept after purge" as_user "${TUSER}" 'test -e ~/.local/share/yams/yams.db'
 	fi
 }
 
@@ -685,12 +615,12 @@ case "${PHASE}" in
 install) phase_install ;;
 layout) phase_layout ;;
 service) phase_service ;;
-cli) phase_cli ;;
+user) phase_user ;;
+onnx) phase_onnx ;;
 persist) phase_persist ;;
 seed) phase_seed ;;
 upgraded) phase_upgraded ;;
 remove) phase_remove ;;
-onnx) phase_onnx ;;
 minimal) phase_minimal ;;
 *)
 	echo "unknown phase: ${PHASE}" >&2

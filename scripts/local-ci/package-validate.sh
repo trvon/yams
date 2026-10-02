@@ -6,29 +6,31 @@
 # Single entry point for local runs (grim, any Linux box or Docker Desktop VM
 # with Docker) and the release workflow's publish gate.
 #
-# Per distro lane, in a fresh container:
+# The packages ship a systemd *user* unit. Per distro lane, in a fresh container:
 #   install  - package manager install, no env vars, no manual steps
 #   layout   - installed file list against a runtime allowlist; no headers,
 #              static libs, pkg-config or CMake files; no world-writable,
 #              setuid or non-root files; every ELF's DT_NEEDED resolves and
 #              RPATH/RUNPATH is $ORIGIN or /usr/lib[/yams] only
-#   service  - unit enabled + active, runs as the `yams` account, socket
-#              group `yams` and closed to others, `systemd-analyze verify`
-#              clean, `systemd-analyze security` exposure under a budget,
-#              corpus in /var/lib/yams and log in /var/log/yams
-#   cli      - with no YAMS_* variables: root, a `yams`-group member (files
-#              in $HOME and /tmp) and a non-member: status, add, search,
-#              shared corpus, no private fallback store, clear error for a
-#              directory the daemon cannot read, non-member denied,
-#              `yams daemon stop` defers to systemd
-#   persist  - container reboot: unit back, socket perms, data still there
-#   remove   - uninstall stops/disables the unit; deb purge removes state
-#   onnx     - the system daemon loads the onnx plugin with the bundled runtime
+#   service  - user unit + user preset installed, enabled for all users
+#              (systemctl --global), no system unit, `systemd-analyze --user
+#              verify` clean, home and /tmp readable by the daemon
+#   user     - a normal user with lingering: the unit is enabled and active
+#              without a manual start, socket in $XDG_RUNTIME_DIR, the CLI
+#              (no YAMS_* variables) adds from $HOME and /tmp, searches, uses
+#              ~/.local/share/yams, runs no second daemon; `yams daemon
+#              stop|restart` and CLI auto-start go through systemd; `daemon
+#              install --user` enables the packaged unit; users are isolated
+#   onnx     - after `yams init`, the user daemon loads the onnx plugin with
+#              the bundled ONNX Runtime
+#   persist  - container reboot: the user's unit is back, data still there
+#   remove   - running user daemons stopped, global enablement removed, user
+#              corpora kept (deb: also purge)
 #   minimal  - a second container from the bare base image (no systemd, no
 #              lane tooling) installs the package with declared deps only
-# With --upgrade-from-<fmt>, a second container installs that older package,
-# stores a document, upgrades to the new package and checks the unit restarted
-# onto the new binary with the document intact.
+# With --upgrade-from-<fmt>, a second container installs that older package
+# (0.20.x ran a system service), upgrades, and checks the system unit is gone,
+# its corpus left alone and the user's daemon works.
 #
 # Checks never stop at the first failure: each lane prints PASS/FAIL lines and
 # a summary, and the script exits non-zero if any check failed.
@@ -53,7 +55,6 @@
 #   ARCH_DOCKER_PLATFORM / ARCH_BASE_IMAGE   Arch lane platform and base image
 #   UBUNTU_IMAGE (ubuntu:24.04) DEBIAN_IMAGE (debian:trixie-slim)
 #   FEDORA_IMAGE (fedora:42)
-#   YAMS_VALIDATE_MAX_EXPOSURE (3.0)         systemd-analyze security budget
 #
 # Containers need --privileged and a private cgroup namespace (cgroup v2) so
 # systemd can run units with their sandboxing; nothing touches host cgroups.
@@ -74,7 +75,7 @@ KEEP=0
 log() { printf '\033[1;34m[validate]\033[0m %s\n' "$*"; }
 okmsg() { printf '\033[1;32m[ ok ]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[fail]\033[0m %s\n' "$*" >&2; }
-usage() { sed -n '2,58p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,59p' "${BASH_SOURCE[0]}"; }
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -251,7 +252,7 @@ validate_lane() {
 	run_phase "${lane}" "${c}" install "${pkg}"
 	run_phase "${lane}" "${c}" layout
 	run_phase "${lane}" "${c}" service
-	run_phase "${lane}" "${c}" cli
+	run_phase "${lane}" "${c}" user
 	run_phase "${lane}" "${c}" onnx
 	log "${lane}: rebooting container"
 	if reboot "${c}"; then
