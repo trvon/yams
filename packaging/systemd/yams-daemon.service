@@ -1,73 +1,35 @@
-# System-wide YAMS daemon shipped by the deb, rpm and Arch packages.
+# Per-user YAMS daemon, shipped by the deb, rpm and Arch packages as a
+# systemd *user* unit (/usr/lib/systemd/user/yams-daemon.service).
 #
-# The daemon runs as the unprivileged `yams` system account (created from
-# /usr/lib/sysusers.d/yams.conf). Its socket /run/yams/yams-daemon.sock is
-# group `yams` read/write and closed to others: root and members of the
-# `yams` group can use it, and the yams CLI finds it without configuration.
-# Group membership grants full read/write access to the system corpus.
+# It runs as the logged-in user with the same path resolution as the CLI:
+# config $XDG_CONFIG_HOME/yams/config.toml, data $XDG_DATA_HOME/yams (or the
+# config's core.data_dir), socket $XDG_RUNTIME_DIR/yams-daemon.sock (or the
+# config's daemon.socket_path) and log $XDG_STATE_HOME/yams/daemon.log. The
+# CLI finds it without any configuration.
 #
-# Per-user daemons are separate: `yams daemon install --user` writes a user
-# unit and never uses this socket.
+# The packages enable it for all users through the user preset
+# (80-yams.preset), so it starts with each user's session. Start it now with
+#   systemctl --user enable --now yams-daemon.service
+# Keep it running without a login session with `loginctl enable-linger <user>`.
 [Unit]
-Description=YAMS daemon (system service)
+Description=YAMS daemon (per-user)
 Documentation=https://github.com/trvon/yams/blob/main/docs/install.md
-After=network-online.target
-Wants=network-online.target
 
 [Service]
 Type=simple
-User=yams
-Group=yams
-# Owner rwx + group rw on the socket (set by the daemon); nothing for others.
-UMask=0007
-StateDirectory=yams
-StateDirectoryMode=0750
-RuntimeDirectory=yams
-RuntimeDirectoryMode=0750
-LogsDirectory=yams
-LogsDirectoryMode=0750
-WorkingDirectory=/var/lib/yams
-Environment=HOME=/var/lib/yams
-# Administrator configuration (optional; the package ships none). For example,
-# load the bundled plugins (ONNX embeddings, glint) with:
-#   [daemon]
-#   auto_load_plugins = true
-Environment=YAMS_CONFIG=/etc/yams/config.toml
-ExecStart=/usr/bin/yams-daemon --foreground --data-dir /var/lib/yams --socket /run/yams/yams-daemon.sock --pid-file /run/yams/yams-daemon.pid --log-file /var/log/yams/daemon.log
+ExecStart=/usr/bin/yams-daemon --foreground
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=16384
+UMask=0077
 
-# Sandbox. The daemon only reads what clients send it and writes the state,
-# runtime and log directories above, which ProtectSystem=strict leaves
-# writable. Files under /home and /tmp are invisible to it; the CLI uploads
-# file content when it talks to a daemon running as another user.
+# Light hardening only: the daemon must read the files its user adds, so the
+# home directory and /tmp stay visible (no ProtectHome=, no PrivateTmp=).
 NoNewPrivileges=yes
-CapabilityBoundingSet=
-AmbientCapabilities=
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-ProtectProc=invisible
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-RestrictNamespaces=yes
+LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
-LockPersonality=yes
-RemoveIPC=yes
 SystemCallArchitectures=native
-SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
-SystemCallErrorNumber=EPERM
-# MemoryDenyWriteExecute stays off: ONNX Runtime execution providers may
-# generate code at run time.
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

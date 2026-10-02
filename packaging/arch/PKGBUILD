@@ -122,11 +122,11 @@ package() {
     # Strip the staged binaries (the install rules already stage only the runtime set)
     bash scripts/split-debug-symbols.sh "${pkgdir}/usr"
 
-    # Install systemd unit + preset
+    # Install the systemd user unit + user preset
     install -Dm644 packaging/systemd/yams-daemon.service \
-        "${pkgdir}/usr/lib/systemd/system/yams-daemon.service"
+        "${pkgdir}/usr/lib/systemd/user/yams-daemon.service"
     install -Dm644 packaging/systemd/80-yams.preset \
-        "${pkgdir}/usr/lib/systemd/system-preset/80-yams.preset"
+        "${pkgdir}/usr/lib/systemd/user-preset/80-yams.preset"
 
     # Install license
     install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"

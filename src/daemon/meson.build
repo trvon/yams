@@ -268,18 +268,13 @@ yams_daemon_exe = executable('yams-daemon',
 )
 
 if host_machine.system() == 'linux'
+  # Per-user daemon: a systemd user unit plus the user preset that enables it.
   install_data('../../packaging/systemd/yams-daemon.service',
-    install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'system'),
+    install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'user'),
     install_tag: 'runtime',
   )
   install_data('../../packaging/systemd/80-yams.preset',
-    install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'system-preset'),
-    install_tag: 'runtime',
-  )
-  # System account (`yams` user + group) the unit runs as and the socket group.
-  install_data('../../packaging/systemd/yams.sysusers',
-    install_dir: join_paths(get_option('prefix'), 'lib', 'sysusers.d'),
-    rename: 'yams.conf',
+    install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'user-preset'),
     install_tag: 'runtime',
   )
 endif

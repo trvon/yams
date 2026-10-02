@@ -412,9 +412,8 @@ __DEBIAN_CONTROL__
       set -x
     fi
   fi
-  # passwd provides useradd/groupadd, the postinst's account fallback where
-  # systemd-sysusers is absent (containers and chroots without systemd).
-  depends_fallback="${depends_fallback}, init-system-helpers (>= 1.51), passwd"
+  # The maintainer scripts only call systemctl/runuser when they exist, so the
+  # package needs nothing beyond its shared-library dependencies.
   sed -i "s|@DEPENDENCIES@|${depends_fallback}|" "${control}"
 
   find "${work_dir}" -type d -exec chmod 0755 {} +
@@ -425,55 +424,75 @@ __DEBIAN_CONTROL__
     done
   fi
 
-  # Maintainer scripts: register, enable (per systemd preset) and start the
-  # daemon on install; stop on remove; mask/purge on remove/purge. Modeled on
-  # dh_installsystemd output. The unit + 80-yams.preset ship via the meson
-  # install tree, so these scripts only drive systemd state.
+  # Maintainer scripts. The package ships a systemd *user* unit
+  # (/usr/lib/systemd/user/yams-daemon.service) and a user preset that enables
+  # it; it starts with each user's next session. Releases up to 0.20.x shipped a
+  # *system* unit, which preinst stops and disables while its file still exists.
+  cat > "${work_dir}/DEBIAN/preinst" <<'__DEB_PREINST__'
+#!/bin/sh
+set -e
+
+UNIT=yams-daemon.service
+
+if [ "$1" = "install" ] || [ "$1" = "upgrade" ]; then
+    if [ -f "/usr/lib/systemd/system/$UNIT" ] || [ -f "/lib/systemd/system/$UNIT" ]; then
+        if command -v systemctl >/dev/null 2>&1; then
+            if [ -d /run/systemd/system ]; then
+                systemctl --system stop "$UNIT" >/dev/null 2>&1 || true
+            fi
+            systemctl --system disable "$UNIT" >/dev/null 2>&1 || true
+        fi
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper purge "$UNIT" >/dev/null 2>&1 || true
+            deb-systemd-helper unmask "$UNIT" >/dev/null 2>&1 || true
+        fi
+    fi
+fi
+
+exit 0
+__DEB_PREINST__
+
   cat > "${work_dir}/DEBIAN/postinst" <<'__DEB_POSTINST__'
 #!/bin/sh
 set -e
 
 UNIT=yams-daemon.service
 
-# The unit runs as the `yams` system account; its group gates the socket.
-# Prefer the shipped sysusers.d entry; fall back to useradd (package passwd, a
-# declared dependency) where systemd is not installed.
-create_account() {
-    if command -v systemd-sysusers >/dev/null 2>&1 &&
-        systemd-sysusers /usr/lib/sysusers.d/yams.conf; then
-        return 0
-    fi
-    if command -v useradd >/dev/null 2>&1; then
-        getent group yams >/dev/null 2>&1 || groupadd --system yams
-        getent passwd yams >/dev/null 2>&1 ||
-            useradd --system --gid yams --home-dir /var/lib/yams --no-create-home \
-                --shell /usr/sbin/nologin --comment "YAMS daemon" yams
-    fi
-    getent passwd yams >/dev/null 2>&1 && getent group yams >/dev/null 2>&1
+# Run `systemctl --user <args>` in every running user manager (no-op without
+# systemd, runuser or logged-in users). Used for daemon-reload, try-restart and
+# stop; the scripts never start per-user instances.
+yams_user_managers() {
+    command -v runuser >/dev/null 2>&1 || return 0
+    command -v systemctl >/dev/null 2>&1 || return 0
+    for d in /run/user/*; do
+        [ -S "$d/bus" ] || continue
+        uid="${d##*/}"
+        user="$(getent passwd "$uid" | cut -d: -f1)"
+        [ -n "$user" ] || continue
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
+            systemctl --user "$@" >/dev/null 2>&1 || true
+    done
 }
 
 if [ "$1" = "configure" ]; then
-    ACCOUNT_OK=1
-    if ! create_account; then
-        ACCOUNT_OK=0
-        # The CLI works without it; only the system service needs the account.
-        echo "yams: could not create the 'yams' system account (neither systemd-sysusers nor useradd works);" >&2
-        echo "yams: yams-daemon.service is not enabled. Create it with 'systemd-sysusers' or 'useradd --system yams' and reinstall." >&2
+    if command -v systemctl >/dev/null 2>&1; then
+        # First install, or upgrade from a release with the system unit: enable
+        # the user unit for all users per the user preset. Later upgrades keep
+        # an administrator's `systemctl --global disable`.
+        if [ -z "$2" ] || dpkg --compare-versions "$2" lt "0.20.4~"; then
+            systemctl --global preset "$UNIT" >/dev/null 2>&1 || true
+        fi
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload >/dev/null 2>&1 || true
+        fi
     fi
-    if [ "$ACCOUNT_OK" -eq 1 ] && [ -d /run/systemd/system ]; then
-        systemctl --system daemon-reload >/dev/null 2>&1 || true
-        deb-systemd-helper unmask "$UNIT" >/dev/null 2>&1 || true
-        # was-enabled is true on first install, so new installs are enabled.
-        if deb-systemd-helper --quiet was-enabled "$UNIT"; then
-            deb-systemd-helper enable "$UNIT" >/dev/null 2>&1 || true
-        else
-            deb-systemd-helper update-state "$UNIT" >/dev/null 2>&1 || true
-        fi
-        if [ -n "$2" ]; then
-            deb-systemd-invoke restart "$UNIT" >/dev/null 2>&1 || true
-        else
-            deb-systemd-invoke start "$UNIT" >/dev/null 2>&1 || true
-        fi
+    yams_user_managers daemon-reload
+    if [ -n "$2" ]; then
+        yams_user_managers try-restart "$UNIT"
+    else
+        echo "yams: the per-user daemon starts with your next login session; to start it now run"
+        echo "yams:   systemctl --user enable --now $UNIT"
     fi
 fi
 
@@ -486,9 +505,27 @@ set -e
 
 UNIT=yams-daemon.service
 
+# Run `systemctl --user <args>` in every running user manager (no-op without
+# systemd, runuser or logged-in users). Used for daemon-reload, try-restart and
+# stop; the scripts never start per-user instances.
+yams_user_managers() {
+    command -v runuser >/dev/null 2>&1 || return 0
+    command -v systemctl >/dev/null 2>&1 || return 0
+    for d in /run/user/*; do
+        [ -S "$d/bus" ] || continue
+        uid="${d##*/}"
+        user="$(getent passwd "$uid" | cut -d: -f1)"
+        [ -n "$user" ] || continue
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
+            systemctl --user "$@" >/dev/null 2>&1 || true
+    done
+}
+
 if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
-    if [ -d /run/systemd/system ]; then
-        deb-systemd-invoke stop "$UNIT" >/dev/null 2>&1 || true
+    yams_user_managers stop "$UNIT"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --global disable "$UNIT" >/dev/null 2>&1 || true
     fi
 fi
 
@@ -499,33 +536,33 @@ __DEB_PRERM__
 #!/bin/sh
 set -e
 
-UNIT=yams-daemon.service
+# Run `systemctl --user <args>` in every running user manager (no-op without
+# systemd, runuser or logged-in users). Used for daemon-reload, try-restart and
+# stop; the scripts never start per-user instances.
+yams_user_managers() {
+    command -v runuser >/dev/null 2>&1 || return 0
+    command -v systemctl >/dev/null 2>&1 || return 0
+    for d in /run/user/*; do
+        [ -S "$d/bus" ] || continue
+        uid="${d##*/}"
+        user="$(getent passwd "$uid" | cut -d: -f1)"
+        [ -n "$user" ] || continue
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
+            systemctl --user "$@" >/dev/null 2>&1 || true
+    done
+}
 
-if [ -d /run/systemd/system ]; then
-    systemctl --system daemon-reload >/dev/null 2>&1 || true
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    yams_user_managers daemon-reload
 fi
-
-if [ "$1" = "remove" ]; then
-    if command -v deb-systemd-helper >/dev/null 2>&1; then
-        deb-systemd-helper mask "$UNIT" >/dev/null 2>&1 || true
-    fi
-fi
-
-if [ "$1" = "purge" ]; then
-    if command -v deb-systemd-helper >/dev/null 2>&1; then
-        deb-systemd-helper purge "$UNIT" >/dev/null 2>&1 || true
-        deb-systemd-helper unmask "$UNIT" >/dev/null 2>&1 || true
-    fi
-    # Purge removes the system corpus and logs. Earlier releases ran the unit
-    # with DynamicUser=, which keeps them under /var/{lib,log}/private.
-    rm -rf /var/lib/yams /var/log/yams /var/lib/private/yams /var/log/private/yams
-    # The `yams` account stays (Debian policy: never reuse a system UID).
-fi
+# Users' corpora (~/.local/share/yams) are never touched. /var/lib/yams is the
+# unused corpus of the old system service (0.20.x); remove it by hand.
 
 exit 0
 __DEB_POSTRM__
 
-  chmod 0755 "${work_dir}/DEBIAN/postinst" "${work_dir}/DEBIAN/prerm" "${work_dir}/DEBIAN/postrm"
+  chmod 0755 "${work_dir}/DEBIAN/preinst" "${work_dir}/DEBIAN/postinst" "${work_dir}/DEBIAN/prerm" "${work_dir}/DEBIAN/postrm"
 
   local deb_name="yams-${version}-linux-$(normalize_arch_label "${deb_arch}")".deb
   if command -v fakeroot >/dev/null 2>&1; then
@@ -577,6 +614,7 @@ package_rpm() {
     [usr/share/fish]=1 [usr/share/fish/vendor_completions.d]=1
     [usr/share/licenses]=1
     [usr/lib/systemd]=1 [usr/lib/systemd/system]=1 [usr/lib/systemd/system-preset]=1
+    [usr/lib/systemd/user]=1 [usr/lib/systemd/user-preset]=1
     [etc]=1 [var]=1
   )
   (
@@ -614,6 +652,7 @@ BuildArch: __RPM_ARCH__
 Requires(post): systemd
 Requires(preun): systemd
 Requires(postun): systemd
+Requires(post): util-linux
 
 %description
 Yet Another Memory System (YAMS) provides content-addressed storage with deduplication and search designed for long-term large language model memory.
@@ -629,38 +668,85 @@ rm -rf %{buildroot}
 mkdir -p %{buildroot}
 cp -a %{_builddir}/%{name}-%{version}/. %{buildroot}/
 
-# Scriptlets are hand-expanded equivalents of the systemd-rpm-macros
-# (%%systemd_post / %%systemd_preun / %%systemd_postun_with_restart, escaped so
-# rpm does not expand them even in comments) so the rpm can
-# be cross-built on a host without systemd-rpm-macros. On first install we apply
-# the shipped preset (enable) and then start the unit; the explicit start is a
-# deliberate deviation from Fedora's "don't start on install" guidance.
-%post
-# The unit runs as the `yams` system account; its group gates the socket.
-# Created on install and upgrade (an upgrade from a DynamicUser= release needs it
-# before the old package's %%postun restarts the unit).
-if ! systemd-sysusers /usr/lib/sysusers.d/yams.conf >/dev/null 2>&1; then
-    getent group yams >/dev/null 2>&1 || groupadd -r yams >/dev/null 2>&1 || :
-    getent passwd yams >/dev/null 2>&1 ||
-        useradd -r -g yams -d /var/lib/yams -M -s /sbin/nologin -c "YAMS daemon" yams >/dev/null 2>&1 || :
+# Scriptlets for a systemd *user* unit, hand-written so the rpm can be built on
+# hosts without systemd-rpm-macros (macro names in comments are escaped, e.g.
+# %%systemd_user_post, because rpm expands macros even here). The user preset
+# enables the unit for all users; instances start with each user's session.
+%pre
+# Releases up to 0.20.x shipped a *system* unit: stop and disable it while its
+# file is still installed, and remember to apply the user preset in %%post.
+if [ $1 -ge 2 ] && [ -f /usr/lib/systemd/system/yams-daemon.service ]; then
+    systemctl --no-reload disable --now yams-daemon.service >/dev/null 2>&1 || :
+    mkdir -p /var/lib/rpm-state/yams && touch /var/lib/rpm-state/yams/migrate-user-unit || :
 fi
-if [ $1 -eq 1 ] ; then
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl preset yams-daemon.service >/dev/null 2>&1 || true
-    systemctl start yams-daemon.service >/dev/null 2>&1 || true
+
+%post
+# Run `systemctl --user <args>` in every running user manager (no-op without
+# systemd, runuser or logged-in users). Used for daemon-reload, try-restart and
+# stop; the scripts never start per-user instances.
+yams_user_managers() {
+    command -v runuser >/dev/null 2>&1 || return 0
+    command -v systemctl >/dev/null 2>&1 || return 0
+    for d in /run/user/*; do
+        [ -S "$d/bus" ] || continue
+        uid="${d##*/}"
+        user="$(getent passwd "$uid" | cut -d: -f1)"
+        [ -n "$user" ] || continue
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
+            systemctl --user "$@" >/dev/null 2>&1 || true
+    done
+}
+if [ $1 -eq 1 ] || [ -e /var/lib/rpm-state/yams/migrate-user-unit ]; then
+    systemctl --global preset yams-daemon.service >/dev/null 2>&1 || :
+    rm -rf /var/lib/rpm-state/yams
+fi
+yams_user_managers daemon-reload
+if [ $1 -ge 2 ]; then
+    yams_user_managers try-restart yams-daemon.service
 fi
 
 %preun
-if [ $1 -eq 0 ] ; then
-    systemctl --no-reload disable yams-daemon.service >/dev/null 2>&1 || true
-    systemctl stop yams-daemon.service >/dev/null 2>&1 || true
+# Run `systemctl --user <args>` in every running user manager (no-op without
+# systemd, runuser or logged-in users). Used for daemon-reload, try-restart and
+# stop; the scripts never start per-user instances.
+yams_user_managers() {
+    command -v runuser >/dev/null 2>&1 || return 0
+    command -v systemctl >/dev/null 2>&1 || return 0
+    for d in /run/user/*; do
+        [ -S "$d/bus" ] || continue
+        uid="${d##*/}"
+        user="$(getent passwd "$uid" | cut -d: -f1)"
+        [ -n "$user" ] || continue
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
+            systemctl --user "$@" >/dev/null 2>&1 || true
+    done
+}
+if [ $1 -eq 0 ]; then
+    yams_user_managers stop yams-daemon.service
+    systemctl --global disable yams-daemon.service >/dev/null 2>&1 || :
 fi
 
 %postun
-systemctl daemon-reload >/dev/null 2>&1 || true
-if [ $1 -ge 1 ] ; then
-    systemctl try-restart yams-daemon.service >/dev/null 2>&1 || true
-fi
+# Run `systemctl --user <args>` in every running user manager (no-op without
+# systemd, runuser or logged-in users). Used for daemon-reload, try-restart and
+# stop; the scripts never start per-user instances.
+yams_user_managers() {
+    command -v runuser >/dev/null 2>&1 || return 0
+    command -v systemctl >/dev/null 2>&1 || return 0
+    for d in /run/user/*; do
+        [ -S "$d/bus" ] || continue
+        uid="${d##*/}"
+        user="$(getent passwd "$uid" | cut -d: -f1)"
+        [ -n "$user" ] || continue
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
+            systemctl --user "$@" >/dev/null 2>&1 || true
+    done
+}
+systemctl daemon-reload >/dev/null 2>&1 || :
+yams_user_managers daemon-reload
 
 %files -f %{_sourcedir}/filelist
 %defattr(-,root,root,-)

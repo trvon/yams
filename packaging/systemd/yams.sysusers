@@ -1,3 +1,0 @@
-# System account for yams-daemon.service. Installed as /usr/lib/sysusers.d/yams.conf.
-# Members of the `yams` group may use the system daemon socket /run/yams/yams-daemon.sock.
-u yams - "YAMS daemon" /var/lib/yams -

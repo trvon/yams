@@ -300,11 +300,11 @@ build_main() {
 		exit 1
 	fi
 
-	# Install systemd unit + preset into stage.
+	# Install the systemd user unit + user preset into stage.
 	install -Dm644 packaging/systemd/yams-daemon.service \
-		"${stage_root}/usr/lib/systemd/system/yams-daemon.service"
+		"${stage_root}/usr/lib/systemd/user/yams-daemon.service"
 	install -Dm644 packaging/systemd/80-yams.preset \
-		"${stage_root}/usr/lib/systemd/system-preset/80-yams.preset"
+		"${stage_root}/usr/lib/systemd/user-preset/80-yams.preset"
 
 	log "Assembling Arch package from staged install"
 	work_dir="${PKG_BUILD_DIR}/arch-work"
