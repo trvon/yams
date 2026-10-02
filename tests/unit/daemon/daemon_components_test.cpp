@@ -388,9 +388,7 @@ TEST_CASE("Socket path resolution: Priority ordering", "[daemon][components][soc
         fs::create_directories(xdgDir);
         xdgRuntimeGuard.set(xdgDir.string());
 
-        // Per-user default only: a host running the packaged system daemon would otherwise
-        // (correctly) steer resolve_socket_path() to /run/yams/yams-daemon.sock.
-        auto result = socket_utils::resolve_own_daemon_socket_path();
+        auto result = socket_utils::resolve_socket_path();
         REQUIRE((result.parent_path() == xdgDir));
         REQUIRE((result.filename() == "yams-daemon.sock"));
     }
@@ -400,7 +398,7 @@ TEST_CASE("Socket path resolution: Priority ordering", "[daemon][components][soc
         xdgRuntimeGuard.unset();
 
         if (::geteuid() != 0) {
-            auto result = socket_utils::resolve_own_daemon_socket_path();
+            auto result = socket_utils::resolve_socket_path();
             REQUIRE((result.parent_path() == "/tmp"));
             // Socket name includes UID for non-root users
             auto uid = std::to_string(::getuid());

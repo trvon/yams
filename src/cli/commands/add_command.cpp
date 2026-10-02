@@ -5,9 +5,6 @@
 #include <cctype>
 #include <chrono>
 #include <climits>
-#include <cstdint>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -37,7 +34,6 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
-#include <yams/daemon/ipc/socket_utils.h>
 // Async helpers for interim non-blocking daemon operations
 #include <boost/asio/awaitable.hpp>
 #ifndef _WIN32
@@ -289,38 +285,6 @@ std::string getActiveSessionId(YamsCLI* cli, bool bypass, bool initContext = tru
     if (state != app::services::SessionState::Active)
         return {};
     return *currentSession;
-}
-
-// Upload budget for one file sent as content: the IPC frame limit is 16 MiB and the request
-// carries metadata besides the bytes.
-constexpr std::uintmax_t kMaxUploadBytes = 15ull * 1024ull * 1024ull;
-
-Result<std::string> readFileForUpload(const std::filesystem::path& filePath) {
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(filePath, ec);
-    if (ec) {
-        return Error{ErrorCode::FileNotFound,
-                     "cannot read '" + filePath.string() + "': " + ec.message()};
-    }
-    if (size > kMaxUploadBytes) {
-        return Error{ErrorCode::InvalidArgument,
-                     "'" + filePath.string() +
-                         "' exceeds the 15 MiB upload limit for a daemon running as another "
-                         "user; place it where that daemon can read it, or use a per-user "
-                         "daemon"};
-    }
-    std::ifstream in(filePath, std::ios::binary);
-    if (!in) {
-        return Error{ErrorCode::PermissionDenied, "cannot open '" + filePath.string() + "'"};
-    }
-    std::string content(static_cast<std::size_t>(size), '\0');
-    in.read(content.data(), static_cast<std::streamsize>(content.size()));
-    content.resize(static_cast<std::size_t>(in.gcount()));
-    if (content.empty()) {
-        return Error{ErrorCode::InvalidArgument,
-                     "'" + filePath.string() + "' is empty; nothing to upload"};
-    }
-    return content;
 }
 
 } // namespace
@@ -700,53 +664,15 @@ public:
                                     "Document name contains unsupported control characters"};
                 }
 
-                // A daemon running as another user (the packaged system service) cannot read
-                // this user's files: its sandbox hides /home and /tmp, and the paths may not be
-                // readable by its account anyway. Send single files as content instead of paths.
-                bool uploadFileContent = false;
-                if (!forceSyncForInProcess) {
-                    const auto daemonSocket =
-                        sharedClientCfg.socketPath.empty()
-                            ? yams::daemon::DaemonClient::resolveSocketPathConfigFirst()
-                            : sharedClientCfg.socketPath;
-                    uploadFileContent =
-                        yams::daemon::socket_utils::daemon_runs_as_other_user(daemonSocket);
-                    if (uploadFileContent) {
-                        spdlog::debug("add: daemon at '{}' runs as another user; uploading file "
-                                      "content",
-                                      daemonSocket.string());
-                    }
-                }
-
                 // Build batch of AddOptions for single files
                 std::vector<yams::app::services::AddOptions> fileBatch;
-                std::vector<std::filesystem::path> fileBatchPaths;
                 fileBatch.reserve(singleFiles.size());
                 for (const auto& filePath : singleFiles) {
                     auto aopts = makeBaseOpts();
+                    aopts.path = filePath.string();
                     aopts.recursive = false;
                     aopts.name = sanitizedName;
-                    if (uploadFileContent) {
-                        auto content = readFileForUpload(filePath);
-                        if (!content) {
-                            completedRequests++;
-                            daemonFailures.emplace_back(filePath, content.error());
-                            if (cli_->getJsonOutput()) {
-                                recordJsonFailure(filePath, content.error());
-                            }
-                            continue;
-                        }
-                        aopts.content = std::move(content.value());
-                        if (aopts.name.empty()) {
-                            std::error_code absEc;
-                            const auto absPath = std::filesystem::absolute(filePath, absEc);
-                            aopts.name = absEc ? filePath.string() : absPath.string();
-                        }
-                    } else {
-                        aopts.path = filePath.string();
-                    }
                     fileBatch.push_back(std::move(aopts));
-                    fileBatchPaths.push_back(filePath);
                 }
 
                 // Process single files in parallel batch
@@ -759,19 +685,19 @@ public:
                             totalAdded += result.value().documentsAdded;
                             totalUpdated += result.value().documentsUpdated;
                             totalSkipped += result.value().documentsSkipped;
-                            render(result.value(), fileBatchPaths[i]);
+                            render(result.value(), singleFiles[i]);
                             successfulRequests++;
                         } else {
                             pauseProgress();
                             const auto err = result.error();
                             const auto msg = scrubDaemonLoadMessage(err.message);
                             spdlog::warn("Daemon add failed for file '{}': {}",
-                                         fileBatchPaths[i].string(), msg);
+                                         singleFiles[i].string(), msg);
                             resumeProgress();
                             const auto renderedErr = Error{err.code, msg};
-                            daemonFailures.emplace_back(fileBatchPaths[i], renderedErr);
+                            daemonFailures.emplace_back(singleFiles[i], renderedErr);
                             if (cli_->getJsonOutput()) {
-                                recordJsonFailure(fileBatchPaths[i], renderedErr);
+                                recordJsonFailure(singleFiles[i], renderedErr);
                             }
                         }
                         if (daemonSpinner.enabled()) {
@@ -855,23 +781,6 @@ public:
                             if (cli_->getJsonOutput()) {
                                 recordJsonFailure(std::filesystem::path("-"), renderedErr);
                             }
-                        }
-                        continue;
-                    }
-                    if (uploadFileContent) {
-                        // Directory walks (include/exclude patterns, ignore files) run inside the
-                        // daemon, which cannot read this user's tree. Fail clearly instead of
-                        // queueing a walk that would find nothing.
-                        completedRequests++;
-                        const Error dirErr{
-                            ErrorCode::PermissionDenied,
-                            "the daemon runs as another user and cannot read directory '" +
-                                dir.string() +
-                                "'; add its files individually, or use a per-user daemon "
-                                "('yams daemon install --user')"};
-                        daemonFailures.emplace_back(dir, dirErr);
-                        if (cli_->getJsonOutput()) {
-                            recordJsonFailure(dir, dirErr);
                         }
                         continue;
                     }

@@ -992,27 +992,12 @@ private:
         }
     }
 
-    // The packaged system daemon belongs to systemd: stopping it over IPC leaves the unit in a
-    // state systemd did not request (Restart=on-failure does not bring a clean exit back).
-    static bool refuseSystemManagedDaemon(const std::string& socketPath, const char* action) {
-        if (!yams::daemon::socket_utils::is_system_daemon_socket(socketPath)) {
-            return false;
-        }
-        std::cerr << "[INFO] " << socketPath
-                  << " belongs to the yams-daemon.service system unit; use 'sudo systemctl "
-                  << action << " yams-daemon.service'.\n";
-        return true;
-    }
-
     bool stopDaemon() {
         pidFile_ = resolveConfiguredPidFilePath();
         // Resolve paths if not explicitly provided (do not persist into socketPath_)
         const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
             resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
-        if (refuseSystemManagedDaemon(effectiveSocket, "stop")) {
-            return false;
-        }
 
         std::optional<yams::cli::ui::SpinnerRunner> spinner;
         if (yams::cli::ui::stdout_is_tty()) {
@@ -1621,12 +1606,9 @@ private:
         const std::string effectiveSocket =
             resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
         // When the operator explicitly points the CLI at a custom daemon instance (--socket or
-        // YAMS_DAEMON_SOCKET), or the CLI uses the packaged system daemon, a differing data
-        // directory is expected, not an accident.
+        // YAMS_DAEMON_SOCKET), a differing data directory is expected, not an accident.
         const bool explicitCustomSocket =
-            !socketPath_.empty() ||
-            yams::config::getenv_nonempty("YAMS_DAEMON_SOCKET").has_value() ||
-            yams::daemon::socket_utils::is_system_daemon_socket(effectiveSocket);
+            !socketPath_.empty() || yams::config::getenv_nonempty("YAMS_DAEMON_SOCKET").has_value();
 
         if (detailed_) {
             // Enable client debug logging for ping/connect path
@@ -1930,9 +1912,6 @@ private:
         const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
             resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
-        if (refuseSystemManagedDaemon(effectiveSocket, "restart")) {
-            std::exit(1);
-        }
 
         pid_t pidBeforeStop = readPidFromFile(pidFile_);
         if (!yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFile_, pidBeforeStop)) {
@@ -2253,11 +2232,8 @@ private:
         const bool userScope = installUserScope_ || !isRootUser();
 
         const std::string binPath = resolveDaemonBinaryForUnit();
-        // The unit runs this user's own daemon: never the system socket a client may discover.
         const std::string socketPath =
-            socketPath_.empty()
-                ? yams::daemon::socket_utils::resolve_own_daemon_socket_path().string()
-                : socketPath_;
+            socketPath_.empty() ? resolveConfiguredSocketPath() : socketPath_;
         const std::string dataDir = dataDir_.empty() ? cli_->getDataPath().string() : dataDir_;
         const std::string configPath = startConfigPath_;
 
