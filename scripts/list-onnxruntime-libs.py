@@ -28,6 +28,7 @@ def main(dirs):
         if not any(CORE.match(n) for n in names):
             continue
         print(f"dir {d}")
+        links = {}
         for n in names:
             if not (CORE.match(n) or EXTRA.match(n)):
                 continue
@@ -36,9 +37,20 @@ def main(dirs):
                 target = os.readlink(path)
                 if os.sep in target:
                     target = os.path.basename(target)
-                print(f"link {n} {target}")
+                links[n] = target
             elif os.path.isfile(path):
                 print(f"file {n}")
+        # Meson installs symlinks in declaration order and refuses one whose
+        # target is not installed yet, so emit each chain from the real file
+        # outwards (libonnxruntime.so.1 -> .so.1.x.y before .so -> .so.1).
+        def depth(name, seen=()):
+            target = links.get(name)
+            if target is None or target in seen:
+                return 0
+            return 1 + depth(target, seen + (name,))
+
+        for n in sorted(links, key=lambda name: (depth(name), name)):
+            print(f"link {n} {links[n]}")
         return 0
     return 0
 
