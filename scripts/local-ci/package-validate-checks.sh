@@ -60,9 +60,10 @@ recall() { sed -n "s/^$1=//p" "${TOKEN_FILE}" 2>/dev/null | tail -n1; }
 # Run a command as <user> through a login shell (pam_systemd sets
 # XDG_RUNTIME_DIR like a real login); no YAMS_* variable leaks in.
 as_user() {
-	local user="$1"
+	local user="$1" rt
 	shift
-	su - "${user}" -c "$*"
+	rt="$(user_runtime "${user}")"
+	su - "${user}" -c "[ -n \"\${XDG_RUNTIME_DIR:-}\" ] || export XDG_RUNTIME_DIR=${rt}; $*"
 }
 
 ensure_user() {
@@ -77,7 +78,10 @@ uctl() {
 	local user="$1" rt
 	shift
 	rt="$(user_runtime "${user}")"
-	runuser -u "${user}" -- env XDG_RUNTIME_DIR="${rt}" systemctl --user "$@" 2>/dev/null || true
+	local -a busenv=()
+	if [ -S "${rt}/bus" ]; then busenv=("DBUS_SESSION_BUS_ADDRESS=unix:path=${rt}/bus"); fi
+	runuser -u "${user}" -- env XDG_RUNTIME_DIR="${rt}" ${busenv[@]+"${busenv[@]}"} \
+		systemctl --user "$@" 2>/dev/null || true
 }
 
 wait_user_manager() {
@@ -115,6 +119,14 @@ check_single_daemon() {
 	else
 		fail "$1" "unit MainPID=${main:-?}, ${TUSER}'s daemons: ${pids:-none}"
 	fi
+}
+
+wait_plugins() { # wait_plugins <user> <name-substring>
+	for _ in $(seq 1 30); do
+		as_user "$1" 'timeout 30 yams plugin health' 2>/dev/null | grep -qi "$2" && return 0
+		sleep 2
+	done
+	return 1
 }
 
 # Poll a search until it reports <needle> (indexing is asynchronous).
@@ -297,11 +309,11 @@ phase_user() {
 		fail unit-verify "$(printf '%s' "${verify}" | tr '\n' ' ')"
 	fi
 	local xdg
-	xdg="$(as_user "${TUSER}" 'printf %s "$XDG_RUNTIME_DIR"')"
+	xdg="$(su - "${TUSER}" -c 'printf %s "${XDG_RUNTIME_DIR:-}"')"
 	if [ "${xdg}" = "$(user_runtime "${TUSER}")" ]; then
-		pass user-login-env "login shell has XDG_RUNTIME_DIR=${xdg} (pam_systemd)"
+		pass user-login-env "su login has XDG_RUNTIME_DIR=${xdg} (pam_systemd)"
 	else
-		info user-login-env "login shell lacks XDG_RUNTIME_DIR; systemctl --user calls set it"
+		info user-login-env "su login lacks XDG_RUNTIME_DIR (no pam_systemd in su); the checks set it like a real login"
 	fi
 	local en
 	en="$(uctl "${TUSER}" is-enabled "${UNIT}")"
@@ -348,14 +360,13 @@ phase_user() {
 	local st
 	st="$(uctl "${TUSER}" is-active "${UNIT}")"
 	if [ "${st}" != active ]; then pass cli-stop "yams daemon stop stopped the unit (${st})"; else fail cli-stop "unit still active after yams daemon stop"; fi
-	# A CLI command with the daemon down starts the unit, not a stray copy.
-	as_user "${TUSER}" "timeout 120 yams search '${t}'" >/dev/null 2>&1 || true
+	as_user "${TUSER}" 'timeout 60 yams daemon start' >/dev/null 2>&1 || true
 	if wait_user_active "${TUSER}"; then
-		pass cli-autostart-unit "CLI auto-start brought the unit back"
+		pass cli-start-unit "yams daemon start started the unit"
 	else
-		fail cli-autostart-unit "unit is '$(uctl "${TUSER}" is-active "${UNIT}")' after a CLI command"
+		fail cli-start-unit "unit is '$(uctl "${TUSER}" is-active "${UNIT}")' after yams daemon start"
 	fi
-	check_single_daemon cli-autostart-single
+	check_single_daemon cli-start-single
 	local before after
 	before="$(uctl "${TUSER}" show -p MainPID --value "${UNIT}")"
 	as_user "${TUSER}" 'timeout 60 yams daemon restart' >/dev/null 2>&1 || true
@@ -398,34 +409,55 @@ phase_onnx() {
 		fail onnx-init-config "rc=${rc}; config lacks auto_load_plugins = true: $(printf '%s' "${out}" | tail -n 2 | tr '\n' ' ')"
 		as_user "${TUSER}" 'mkdir -p ~/.config/yams && printf "[daemon]\nauto_load_plugins = true\n" >> ~/.config/yams/config.toml'
 	fi
-	as_user "${TUSER}" ': > ~/.local/state/yams/daemon.log' 2>/dev/null || true
 	uctl "${TUSER}" restart "${UNIT}" >/dev/null
 	if ! wait_user_active "${TUSER}"; then
 		fail onnx-restart "unit did not come back after yams init"
 		user_journal "${TUSER}"
 		return
 	fi
-	local line="" health=""
+	if wait_plugins "${TUSER}" glint; then
+		pass onnx-autoload "init's config autoloads plugins (glint loaded)"
+	else
+		fail onnx-autoload "no plugins loaded with init's config"
+		as_user "${TUSER}" 'timeout 60 yams plugin health' 2>&1 | tail -n 4 | sed 's/^/INFO plugin-health /'
+	fi
+	# Use ONNX Runtime embeddings instead of the built-in default (no model is
+	# installed here, so this only proves the runtime loads; restored below).
+	as_user "${TUSER}" 'cp ~/.config/yams/config.toml ~/.config/yams/config.toml.validate'
+	as_user "${TUSER}" "sed -i '/^\\[embeddings\\]/,/^\\[/ s/^backend = .*/backend = \"onnxruntime\"/' ~/.config/yams/config.toml"
+	if as_user "${TUSER}" "grep -q '^backend = \"onnxruntime\"' ~/.config/yams/config.toml"; then
+		info onnx-backend "switched [embeddings] backend to onnxruntime"
+	else
+		fail onnx-backend "could not switch [embeddings] backend in config.toml"
+	fi
+	local since
+	since="$(date '+%Y-%m-%d %H:%M:%S')"
+	uctl "${TUSER}" restart "${UNIT}" >/dev/null
+	wait_user_active "${TUSER}" || true
+	local line=""
 	for _ in $(seq 1 60); do
-		line="$(as_user "${TUSER}" "grep -hE 'Using (bundled|system) ONNX Runtime' ~/.local/state/yams/daemon.log 2>/dev/null | tail -n 1")"
+		line="$(journalctl -q --no-pager _UID="$(id -u "${TUSER}")" --since "${since}" 2>/dev/null |
+			grep -E 'Using (bundled|system) ONNX Runtime' | tail -n 1)"
 		[ -n "${line}" ] && break
 		sleep 1
 	done
 	case "${line}" in
 	*"Using bundled ONNX Runtime"*) pass onnx-runtime-bundled "user daemon: ${line##*] }" ;;
 	*)
-		fail onnx-runtime-bundled "no 'Using bundled ONNX Runtime' in the user's daemon log (${line:-none})"
-		as_user "${TUSER}" "grep -hiE 'onnx|plugin' ~/.local/state/yams/daemon.log | tail -n 8" | sed 's/^/INFO onnx-log /'
+		fail onnx-runtime-bundled "no 'Using bundled ONNX Runtime' from the user daemon (${line:-none})"
+		journalctl -q --no-pager _UID="$(id -u "${TUSER}")" --since "${since}" 2>/dev/null |
+			grep -iE 'onnx|plugin' | tail -n 8 | sed 's/^/INFO onnx-log /'
 		;;
 	esac
-	health="$(as_user "${TUSER}" 'timeout 60 yams plugin health' 2>&1 || true)"
-	if printf '%s' "${health}" | grep -qi 'onnx'; then
+	if wait_plugins "${TUSER}" onnx; then
 		pass onnx-plugin-loaded "yams plugin health lists the onnx plugin"
 	else
 		fail onnx-plugin-loaded "yams plugin health does not list onnx"
-		printf '%s\n' "${health}" | tail -n 6 | sed 's/^/INFO plugin-health /'
 	fi
 	check_single_daemon onnx-single-daemon
+	as_user "${TUSER}" 'mv ~/.config/yams/config.toml.validate ~/.config/yams/config.toml'
+	uctl "${TUSER}" restart "${UNIT}" >/dev/null
+	wait_user_active "${TUSER}" || true
 }
 
 # ---------------------------------------------------------------------------

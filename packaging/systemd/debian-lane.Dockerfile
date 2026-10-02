@@ -16,6 +16,7 @@ RUN set -eux; \
     iproute2 \
     binutils \
     passwd \
+    dbus-user-session \
     libpam-systemd \
     util-linux \
     ca-certificates && \

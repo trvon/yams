@@ -179,13 +179,13 @@ systemctl --user daemon-reload
 systemctl --user enable --now yams-daemon.service
 ```
 
-The CLI needs no configuration to use it, and when the daemon is not running
-the CLI starts the unit (`systemctl --user start`) instead of a stray copy,
-as long as you have not pointed it elsewhere with `--socket`, `--data-dir`,
-`YAMS_DAEMON_SOCKET`, `YAMS_DATA_DIR` or `YAMS_CONFIG`. `yams daemon start`,
-`stop` and `restart` drive the unit through `systemctl --user` when it is
-installed. To keep the daemon running without a login session (for example on
-a server), enable lingering once: `sudo loginctl enable-linger "$USER"`.
+The CLI needs no configuration to use it. `yams daemon start`, `stop` and
+`restart` drive the unit through `systemctl --user` when it is installed, and
+clients that start a daemon on demand start the unit (`systemctl --user
+start`) rather than a separate copy, as long as you have not pointed them
+elsewhere with `--socket`, `--data-dir`, `YAMS_DAEMON_SOCKET`, `YAMS_DATA_DIR`
+or `YAMS_CONFIG`. To keep the daemon running without a login session (for
+example on a server), enable lingering once: `sudo loginctl enable-linger "$USER"`.
 
 Plugins, including ONNX embeddings with the bundled ONNX Runtime in
 `/usr/lib/yams/onnxruntime` and the glint entity extractor, load when your
