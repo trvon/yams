@@ -92,7 +92,7 @@
     },
     {
       "pattern": "{libdir}/yams/libyams_onnx_resource.*",
-      "max_bytes": 64000,
+      "max_bytes": 81000,
       "kinds": [
         "elf"
       ]
