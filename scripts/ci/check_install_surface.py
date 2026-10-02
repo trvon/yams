@@ -236,7 +236,11 @@ class MachOInspector:
             info.rpaths.append(match.group(1))
         info.debug_sections = sorted(set(re.findall(r"sectname (__debug_\w+)", load)))
         stabs = run([self.nm, "-ap", str(path)], check=False)
-        info.has_symtab = any(" - " in line for line in stabs.splitlines())
+        # Debug stabs (N_SO/N_OSO/N_FUN...) show as type "-". ld64 always emits one
+        # "OPT radr://5614542" marker that `strip -S` keeps; it carries no debug info.
+        info.has_symtab = any(
+            " - " in line and "radr://5614542" not in line for line in stabs.splitlines()
+        )
         exported = run([self.nm, "-gUjC", str(path)], check=False)
         info.exports = [line.strip() for line in exported.splitlines() if line.strip()]
         undefined = run([self.nm, "-guj", str(path)], check=False)
