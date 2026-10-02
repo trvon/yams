@@ -159,7 +159,7 @@ src/search/search_engine.cpp:379:portability/env-read # reviewed raw environment
 src/search/search_engine.cpp:392:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:3128:portability/env-read # reviewed raw environment read
 src/search/search_lexical_pipeline.cpp:601:portability/env-read # reviewed raw environment read
-src/storage/compressed_storage_engine.cpp:632:portability/env-read # reviewed raw environment read
+src/storage/compressed_storage_engine.cpp:636:portability/env-read # reviewed raw environment read
 src/storage/object_storage_plugin_loader.cpp:126:portability/env-read # reviewed raw environment read
 src/storage/object_storage_plugin_loader.cpp:130:portability/env-read # reviewed raw environment read
 src/storage/reference_counter.cpp:170:portability/env-read # reviewed raw environment read
