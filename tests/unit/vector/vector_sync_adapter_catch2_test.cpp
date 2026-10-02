@@ -460,3 +460,86 @@ TEST_CASE("vector sync adapter rejects publishing without identity",
     REQUIRE_FALSE(published.has_value());
     CHECK(published.error().code == yams::ErrorCode::InvalidArgument);
 }
+
+TEST_CASE("vector sync adapter applies good records past a bad one",
+          "[vector][memory-sync][bad-record][exact-scan]") {
+    const auto skip = skipReasonIfAny();
+    if (!skip.empty()) {
+        SKIP(skip);
+    }
+    TempDirGuard temp;
+    auto target = makeVectorDb(4);
+    MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    MemorySyncService reader{makeBackend(temp.path / "sync"), MemorySyncConfig{"B", 50}};
+    const std::string documentHash(64, 'd');
+    const std::set<std::string> localContent{documentHash};
+    const auto contentExists = [&](std::string_view hash) -> yams::Result<bool> {
+        return localContent.contains(std::string(hash));
+    };
+
+    // Winners are scanned in key order. The bad record sorts between two good ones, so it must
+    // hide neither the record before it nor the record after it.
+    EmbeddingRecord good;
+    good.model = "model";
+    good.documentId = documentHash;
+    good.dimensions = 4;
+    good.chunkId = "a-good";
+    good.values = {1.0F, 0.0F, 0.0F, 0.0F};
+    EmbeddingRecord later = good;
+    later.chunkId = "z-good";
+    later.values = {0.0F, 0.0F, 0.0F, 1.0F};
+    REQUIRE(
+        writer.publish("embedding/model/a-good", bytes(nlohmann::json(good).dump())).has_value());
+    REQUIRE(
+        writer.publish("embedding/model/z-good", bytes(nlohmann::json(later).dump())).has_value());
+
+    const std::string badKey = "embedding/model/m-bad";
+    EmbeddingRecord bad = good;
+    bad.chunkId = "m-bad";
+    std::string badPayload;
+    SECTION("corrupt payload") {
+        badPayload = "{not json";
+    }
+    SECTION("dimension disagrees with its values") {
+        bad.values = {1.0F, 0.0F, 0.0F};
+        badPayload = nlohmann::json(bad).dump();
+    }
+    SECTION("dimension the local store cannot hold") {
+        bad.dimensions = 3;
+        bad.values = {1.0F, 0.0F, 0.0F};
+        badPayload = nlohmann::json(bad).dump();
+    }
+    SECTION("document identity is not a content hash") {
+        bad.documentId = "missing-doc";
+        badPayload = nlohmann::json(bad).dump();
+    }
+    SECTION("identity disagrees with its key") {
+        bad.chunkId = "other-chunk";
+        badPayload = nlohmann::json(bad).dump();
+    }
+    REQUIRE(writer.publish(badKey, bytes(badPayload)).has_value());
+
+    std::size_t rebuildCalls = 0;
+    VectorSyncAdapter consumer{*target, reader,
+                               [&]() -> yams::Result<void> {
+                                   ++rebuildCalls;
+                                   return {};
+                               },
+                               nullptr, contentExists};
+    const auto applied = consumer.apply();
+    REQUIRE(applied.has_value());
+    CHECK(applied.value() == 2);
+    CHECK(target->getVector("a-good").has_value());
+    CHECK(target->getVector("z-good").has_value());
+    CHECK_FALSE(target->getVector("m-bad").has_value());
+    CHECK_FALSE(target->getVector("other-chunk").has_value());
+    CHECK(rebuildCalls == 1);
+    // A bad record is a failure, not a deferral: no replicated prerequisite will fix it.
+    CHECK(consumer.deferredKeys().empty());
+
+    // The bad record stays a winner and is retried; the good ones are not applied twice.
+    VectorSyncAdapter retry{*target, reader, {}, nullptr, contentExists};
+    const auto again = retry.apply();
+    REQUIRE(again.has_value());
+    CHECK(again.value() == 0);
+}

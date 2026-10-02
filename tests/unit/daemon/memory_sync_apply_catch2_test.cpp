@@ -30,12 +30,14 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/records.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/topology_sync_adapter.h>
 #include <yams/storage/storage_backend.h>
+#include <yams/vector/vector_database.h>
 
 namespace fs = std::filesystem;
 using namespace yams;
@@ -495,4 +497,113 @@ TEST_CASE("Memory sync clears a deferral on an edge whose cluster node was delet
     CHECK_FALSE(peer.hasEdge(document.nodeKey, cluster.nodeKey));
     CHECK(origin.deferredTopology() == 0);
     CHECK(peer.deferredTopology() == 0);
+}
+
+namespace {
+
+std::shared_ptr<vector::VectorDatabase> attachVectorDb(MeshNode& node) {
+    vector::VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.create_if_missing = true;
+    config.use_in_memory = true;
+    config.search_engine = vector::VectorSearchEngine::ExactScan;
+    auto database = std::make_shared<vector::VectorDatabase>(config);
+    REQUIRE(database->initializeChecked().has_value());
+    // Wire it as vector initialization does: the store, then the index coordinator.
+    node.manager->testingSetVectorDatabase(database);
+    if (auto coordinator = node.manager->getVectorIndexCoordinator()) {
+        coordinator->setVectorDatabase(database);
+    }
+    REQUIRE(node.manager->getVectorDatabase() == database);
+    return database;
+}
+
+vector::VectorRecord makeVector(std::string chunkId, char documentDigit, std::string model) {
+    vector::VectorRecord record;
+    record.chunk_id = std::move(chunkId);
+    record.document_hash = std::string(64, documentDigit);
+    record.model_id = std::move(model);
+    record.embedding = {1.0F, 0.0F, 0.0F, 0.0F};
+    record.embedding_dim = 4;
+    record.content = "vector backfill content";
+    return record;
+}
+
+} // namespace
+
+TEST_CASE("Memory sync vector backfill publishes good vectors past an unpublishable one",
+          "[daemon][memory-sync][backfill][vector]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+
+    // The sweep walks (document_hash, chunk_id) order. The first row can never publish: it has
+    // no model identity, as rows written before model ids were recorded do not. The rows behind
+    // it are good and must still replicate.
+    REQUIRE(vectors->insertVectorChecked(makeVector("legacy-chunk", '1', "")).has_value());
+    REQUIRE(vectors->insertVectorChecked(makeVector("good-chunk-a", '2', "model")).has_value());
+    REQUIRE(vectors->insertVectorChecked(makeVector("good-chunk-b", '3', "model")).has_value());
+
+    origin.backfill(4);
+
+    view.refresh();
+    CHECK(view.published("embedding/model/good-chunk-a"));
+    CHECK(view.published("embedding/model/good-chunk-b"));
+
+    // A skipped record is not an outbound failure; it is logged once and passed.
+    const auto status = origin.manager->getMemorySyncStatus();
+    REQUIRE(status.has_value());
+    CHECK(status.value().apply.publishFailedCycles == 0);
+}
+
+TEST_CASE("Memory sync vector apply stores good embeddings past a bad one",
+          "[daemon][memory-sync][apply][vector]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore};
+    auto vectors = attachVectorDb(reader);
+
+    // Both embeddings belong to a document whose bytes replicate in the same cycle.
+    const auto document = bytes("vector-apply-document");
+    const auto documentHash = digest(document);
+    REQUIRE(writer.sync_->publish("content-blob/" + documentHash, document).has_value());
+
+    // Winners apply in key order; the bad record sorts first so it cannot hide the good one.
+    memory_sync::EmbeddingRecord bad;
+    bad.model = "model";
+    bad.chunkId = "a-bad-dimension";
+    bad.documentId = documentHash;
+    bad.dimensions = 4;
+    bad.values = {1.0F, 0.0F, 0.0F};
+    memory_sync::EmbeddingRecord good = bad;
+    good.chunkId = "b-good";
+    good.values = {0.0F, 1.0F, 0.0F, 0.0F};
+    REQUIRE(
+        writer.sync_->publish("embedding/model/a-bad-dimension", bytes(nlohmann::json(bad).dump()))
+            .has_value());
+    REQUIRE(writer.sync_->publish("embedding/model/b-good", bytes(nlohmann::json(good).dump()))
+                .has_value());
+
+    reader.runCycle();
+
+    CHECK(vectors->getVector("b-good").has_value());
+    CHECK_FALSE(vectors->getVector("a-bad-dimension").has_value());
+
+    // The bad record is a genuine failure: it fails the stage and the cycle, visibly, and the
+    // stage still scanned every record.
+    const auto status = reader.manager->getMemorySyncStatus();
+    REQUIRE(status.has_value());
+    const auto& apply = status.value().apply;
+    CHECK(apply.failuresIn(memory_sync::ApplyStage::Vector) == 1);
+    CHECK(apply.deferredIn(memory_sync::ApplyStage::Vector) == 0);
+    CHECK(apply.applyCycles == 1);
+    CHECK(apply.applyFailedCycles == 1);
+    CHECK(apply.lastFailureStage == "vector");
+    CHECK(apply.lastFailure.find("embedding/model/a-bad-dimension") != std::string::npos);
 }

@@ -466,6 +466,11 @@ public:
         std::lock_guard<std::mutex> lock(memorySyncDeleteOutboxObserverMutex_);
         memorySyncDeleteOutboxObserver_ = std::move(observer);
     }
+    void testingSetVectorDatabase(std::shared_ptr<vector::VectorDatabase> database) {
+        if (vectorSystemManager_) {
+            vectorSystemManager_->testingSetVectorDatabase(std::move(database));
+        }
+    }
     void testingApplyMemorySyncWinners() { applyMemorySyncWinners(); }
     void testingPublishMemorySyncBackfill() { publishMemorySyncBackfill(); }
     /// Let the next apply cycle reach the rate-limited outbound backfill immediately, so a test
