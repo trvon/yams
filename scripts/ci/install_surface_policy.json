@@ -15,7 +15,8 @@
       "share/licenses/yams/*",
       "share/doc/yams/**",
       "lib/systemd/system/yams-daemon.service",
-      "lib/systemd/system-preset/80-yams.preset"
+      "lib/systemd/system-preset/80-yams.preset",
+      "lib/sysusers.d/yams.conf"
     ],
     "forbidden": [
       "include/**",

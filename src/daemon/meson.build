@@ -280,6 +280,7 @@ if host_machine.system() == 'linux'
   install_data('../../packaging/systemd/yams.sysusers',
     install_dir: join_paths(get_option('prefix'), 'lib', 'sysusers.d'),
     rename: 'yams.conf',
+    install_tag: 'runtime',
   )
 endif
 
