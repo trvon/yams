@@ -139,12 +139,12 @@ phase_layout() {
 	# Runtime package allowlist. Anything else is either a leak (headers,
 	# static libs, pkg-config, build trees) or a new file someone must review.
 	local allow='^/usr/bin/(yams|yams-cli|yams-daemon|yams-mcp-server)$'
-	allow+='|^/usr/lib(64)?/libyams_[A-Za-z0-9_]+\.so(\.[0-9]+)*$'
+	allow+='|^/usr/lib(64)?/(yams/)?libyams_[A-Za-z0-9_]+\.so(\.[0-9]+)*$'
 	allow+='|^/usr/lib(64)?/yams/plugins/[A-Za-z0-9_.-]+\.so$'
 	allow+='|^/usr/lib/systemd/system/yams-daemon\.service$'
 	allow+='|^/usr/lib/systemd/system-preset/80-yams\.preset$'
 	allow+='|^/usr/lib/sysusers\.d/yams\.conf$'
-	allow+='|^/usr/share/doc/yams(/[A-Za-z0-9_.-]+)?$'
+	allow+='|^/usr/share/doc/yams(/[A-Za-z0-9_./-]+)?$'
 	allow+='|^/usr/share/licenses/yams(/[A-Za-z0-9_.-]+)?$'
 	# rpm's debuginfo build-id links (symlinks to the shipped ELF files).
 	allow+='|^/usr/lib/\.build-id(/[0-9a-f]{2}(/[0-9a-f]+)?)?$'
