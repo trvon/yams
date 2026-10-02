@@ -28,6 +28,11 @@ LogsDirectory=yams
 LogsDirectoryMode=0750
 WorkingDirectory=/var/lib/yams
 Environment=HOME=/var/lib/yams
+# Administrator configuration (optional; the package ships none). For example,
+# load the bundled plugins (ONNX embeddings, glint) with:
+#   [daemon]
+#   auto_load_plugins = true
+Environment=YAMS_CONFIG=/etc/yams/config.toml
 ExecStart=/usr/bin/yams-daemon --foreground --data-dir /var/lib/yams --socket /run/yams/yams-daemon.sock --pid-file /run/yams/yams-daemon.pid --log-file /var/log/yams/daemon.log
 Restart=on-failure
 RestartSec=2

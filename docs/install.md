@@ -209,6 +209,21 @@ daemon. `yams daemon stop` and `restart` do not touch the system daemon; use
 access (`PrivateDevices=yes`); to use a GPU embedding backend from it, relax
 that in a drop-in (`sudo systemctl edit yams-daemon.service`).
 
+The system daemon reads its configuration from `/etc/yams/config.toml`; the
+package ships none. Plugins, including ONNX embeddings with the bundled ONNX
+Runtime in `/usr/lib/yams/onnxruntime` and the glint entity extractor, load
+only when enabled there:
+
+```toml
+[daemon]
+auto_load_plugins = true
+```
+
+Then `sudo systemctl restart yams-daemon.service`. A compatible system ONNX
+Runtime, if installed, is preferred over the bundled copy; `yams plugin health`
+and the daemon log (`Using bundled|system ONNX Runtime ...`) show which one
+was loaded.
+
 If you prefer your own per-user daemon and data directory, turn the system
 service off:
 

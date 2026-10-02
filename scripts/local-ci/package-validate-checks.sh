@@ -549,6 +549,18 @@ phase_onnx() {
 		fail onnx-runtime-shipped "no libonnxruntime.so under /usr/lib/yams/onnxruntime"
 	fi
 	check onnx-plugin-shipped "onnx plugin installed" test -e /usr/lib/yams/plugins/libyams_onnx_plugin.so
+	# Plugins load only when configured; the unit reads /etc/yams/config.toml.
+	mkdir -p /etc/yams
+	printf '[daemon]\nauto_load_plugins = true\n' >/etc/yams/config.toml
+	: >"${LOG_DIR}/daemon.log"
+	systemctl restart "${UNIT}" >/dev/null 2>&1 || true
+	if wait_active; then
+		pass onnx-config-restart "system daemon restarted with /etc/yams/config.toml"
+	else
+		fail onnx-config-restart "${UNIT} did not come back with auto_load_plugins = true"
+		journal_tail
+		return
+	fi
 	local line="" health=""
 	for _ in $(seq 1 60); do
 		line="$(grep -hE 'Using (bundled|system) ONNX Runtime' "${LOG_DIR}/daemon.log" 2>/dev/null | tail -n 1)"
