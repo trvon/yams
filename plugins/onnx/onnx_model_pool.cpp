@@ -15,8 +15,8 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
 
-#include "ort_cxx_api_wrapper.h"
-#include "ort_runtime_loader.h"
+#include "../ort_runtime/ort_cxx_api_wrapper.h"
+#include "../ort_runtime/ort_runtime_loader.h"
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -475,7 +475,7 @@ public:
         if (!runtimeInfo.available) {
             throw std::runtime_error(runtimeInfo.errorMessage.empty()
                                          ? std::string("ONNX Runtime unavailable")
-                                         : runtimeInfo.errorMessage);
+                                         : "ONNX Runtime unavailable: " + runtimeInfo.errorMessage);
         }
 
         memoryInfo_ = std::make_unique<Ort::MemoryInfo>(
@@ -2275,9 +2275,10 @@ Result<void> OnnxModelPool::initialize() {
 
     const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
     if (!runtimeInfo.available) {
-        return Error{ErrorCode::InternalError, runtimeInfo.errorMessage.empty()
-                                                   ? std::string("ONNX Runtime unavailable")
-                                                   : runtimeInfo.errorMessage};
+        return Error{ErrorCode::InternalError,
+                     runtimeInfo.errorMessage.empty()
+                         ? std::string("ONNX Runtime unavailable")
+                         : "ONNX Runtime unavailable: " + runtimeInfo.errorMessage};
     }
 
     // Eagerly initialize the global Ort::Env NOW, before any concurrent access.

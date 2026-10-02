@@ -29,6 +29,16 @@ void OnnxConcurrencyRegistry::setLogSink(OnnxRegistryLogSink sink) noexcept {
     g_logSink.store(sink, std::memory_order_release);
 }
 
+void OnnxConcurrencyRegistry::emitHostLog(OnnxRegistryLogLevel level,
+                                          const char* message) noexcept {
+    if (message == nullptr) {
+        return;
+    }
+    if (auto sink = g_logSink.load(std::memory_order_acquire)) {
+        sink(level, message);
+    }
+}
+
 OnnxConcurrencyRegistry& OnnxConcurrencyRegistry::instance() noexcept {
     static OnnxConcurrencyRegistry instance;
     return instance;

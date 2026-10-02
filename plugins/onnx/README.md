@@ -60,6 +60,31 @@ keep_model_hot   = true
 preload_on_startup = true
 ```
 
+### Which ONNX Runtime is used
+
+The ONNX and Glint plugins do not link ONNX Runtime; they load it at runtime and
+take the first compatible copy, in this order:
+
+1. `YAMS_ONNX_RUNTIME_LIB` / `YAMS_ONNX_RUNTIME_DIR` (pin a specific copy), then the
+   plugin config key `runtime_library` (a library file or directory):
+
+   ```
+   [plugins.onnx]
+   runtime_library = "/opt/onnxruntime/lib"
+   [plugins.glint]
+   runtime_library = "/opt/onnxruntime/lib"
+   ```
+2. A system ONNX Runtime: the platform loader search for `libonnxruntime.so.1`
+   (`libonnxruntime.1.dylib` on macOS), then `/opt/onnxruntime/lib` and the Homebrew
+   prefixes.
+3. The private copy YAMS packages ship in `<libdir>/yams/onnxruntime/`.
+
+A copy is compatible when it provides the ONNX Runtime C API version the plugins were
+built against (and at least ONNX Runtime 1.23); incompatible copies are skipped. The
+daemon log records the copy that was chosen and why, and plugin health reports it as
+`runtime_source` / `onnx_runtime.source`. With no compatible copy the plugins report
+"ONNX Runtime unavailable" instead of failing to load.
+
 ### Environment variables (plugin)
 
 - `YAMS_ONNX_HF_TOKEN` — Optional Hugging Face token for gated models.

@@ -8,8 +8,8 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
-#include "ort_cxx_api_wrapper.h"
-#include "ort_runtime_loader.h"
+#include "../ort_runtime/ort_cxx_api_wrapper.h"
+#include "../ort_runtime/ort_runtime_loader.h"
 
 #include <algorithm>
 #include <cmath>
@@ -69,7 +69,7 @@ public:
         if (!runtimeInfo.available) {
             throw std::runtime_error(runtimeInfo.errorMessage.empty()
                                          ? std::string("ONNX Runtime unavailable")
-                                         : runtimeInfo.errorMessage);
+                                         : "ONNX Runtime unavailable: " + runtimeInfo.errorMessage);
         }
 
         env_ = &get_colbert_ort_env();

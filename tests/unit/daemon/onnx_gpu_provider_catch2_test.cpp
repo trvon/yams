@@ -6,8 +6,8 @@
 #include <string>
 #include <vector>
 
-#include "plugins/onnx/ort_cxx_api_wrapper.h"
-#include "plugins/onnx/ort_runtime_loader.h"
+#include "plugins/ort_runtime/ort_cxx_api_wrapper.h"
+#include "plugins/ort_runtime/ort_runtime_loader.h"
 
 #if defined(__APPLE__)
 

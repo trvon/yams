@@ -81,6 +81,11 @@ public:
     /// See yams/daemon/resource/onnx_registry_spdlog_sink.h for the spdlog sink.
     static void setLogSink(OnnxRegistryLogSink sink) noexcept;
 
+    /// Deliver a message to the host log sink (if one is installed). Plugins that
+    /// link this library use it so ONNX diagnostics reach the daemon log instead of
+    /// the plugin's private logger.
+    static void emitHostLog(OnnxRegistryLogLevel level, const char* message) noexcept;
+
     // Non-copyable, non-movable
     OnnxConcurrencyRegistry(const OnnxConcurrencyRegistry&) = delete;
     OnnxConcurrencyRegistry& operator=(const OnnxConcurrencyRegistry&) = delete;

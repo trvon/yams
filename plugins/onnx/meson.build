@@ -38,7 +38,6 @@ yams_onnx_plugin_srcs = [
   'onnx_plugin.cpp',
   'model_provider.cpp',
   'onnx_text_processing.cpp',
-  'ort_runtime_loader.cpp',
   'onnx_model_pool.cpp',
   'onnx_colbert_session.cpp',
 ]
@@ -80,8 +79,8 @@ onnx_plugin_deps = [
   boost_dep,
 ] + win_extra_deps
 
-onnx_compile_dep = onnx_dep.partial_dependency(compile_args: true, includes: true)
-onnx_plugin_deps += [onnx_compile_dep]
+# ONNX Runtime is loaded at runtime by the shared loader (headers only here).
+onnx_plugin_deps += [yams_ort_loader_dep]
 
 onnx_plugin_link_args = []
 if host_machine.system() == 'linux'

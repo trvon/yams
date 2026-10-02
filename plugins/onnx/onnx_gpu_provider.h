@@ -5,8 +5,8 @@
 
 #include <spdlog/spdlog.h>
 
-#include "ort_cxx_api_wrapper.h"
-#include "ort_runtime_loader.h"
+#include "../ort_runtime/ort_cxx_api_wrapper.h"
+#include "../ort_runtime/ort_runtime_loader.h"
 
 #include <algorithm>
 #include <atomic>

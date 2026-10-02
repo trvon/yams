@@ -841,6 +841,22 @@ if catch2_dep.found()
     plugin_test_cpp_args += ['-Dyams_onnx_plugin_BUILT="' + onnx_plugin_path + '"']
   endif
 
+  # ONNX Runtime resolution policy (pure; no runtime needed): override >
+  # configured > system > bundled > legacy, skipping incompatible API versions.
+  catch2_ort_runtime_resolution_exe = executable('catch2_ort_runtime_resolution',
+    files(
+      'unit/plugins/ort_runtime_resolution_catch2_test.cpp',
+      '../plugins/ort_runtime/ort_runtime_resolution.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep],
+    install: false,
+  )
+  test('ort_runtime_resolution', catch2_ort_runtime_resolution_exe,
+    suite: ['catch2', 'unit', 'plugins', 'onnx'],
+    timeout: 30,
+  )
+
   catch2_daemon_plugin_exe = executable('catch2_daemon_plugin',
     files('unit/daemon/onnx_plugin_harness_test.cpp'),
     include_directories: incs,
@@ -857,7 +873,8 @@ if catch2_dep.found()
         'unit/daemon/onnx_model_provider_config_test.cpp',
         '../plugins/onnx/model_provider.cpp',
         '../plugins/onnx/onnx_text_processing.cpp',
-        '../plugins/onnx/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_resolution.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
@@ -872,7 +889,8 @@ if catch2_dep.found()
     catch2_gpu_provider_exe = executable('catch2_gpu_provider',
       files(
         'unit/daemon/onnx_gpu_provider_catch2_test.cpp',
-        '../plugins/onnx/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_resolution.cpp',
       ),
       include_directories: incs,
       dependencies: [catch2_dep, catch2_main_dep] + test_deps + [onnx_dep],
@@ -886,7 +904,8 @@ if catch2_dep.found()
         'unit/daemon/onnx_embedding_diagnostic_test.cpp',
         '../plugins/onnx/model_provider.cpp',
         '../plugins/onnx/onnx_text_processing.cpp',
-        '../plugins/onnx/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_resolution.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
@@ -1395,7 +1414,8 @@ if catch2_dep.found()
         'unit/daemon/onnx_model_pool_catch2_test.cpp',
         '../plugins/onnx/model_provider.cpp',
         '../plugins/onnx/onnx_text_processing.cpp',
-        '../plugins/onnx/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_resolution.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
