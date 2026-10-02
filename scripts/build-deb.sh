@@ -605,14 +605,15 @@ mkdir -p %{buildroot}
 cp -a %{_builddir}/%{name}-%{version}/. %{buildroot}/
 
 # Scriptlets are hand-expanded equivalents of the systemd-rpm-macros
-# (%systemd_post / %systemd_preun / %systemd_postun_with_restart) so the rpm can
+# (%%systemd_post / %%systemd_preun / %%systemd_postun_with_restart, escaped so
+# rpm does not expand them even in comments) so the rpm can
 # be cross-built on a host without systemd-rpm-macros. On first install we apply
 # the shipped preset (enable) and then start the unit; the explicit start is a
 # deliberate deviation from Fedora's "don't start on install" guidance.
 %post
 # The unit runs as the `yams` system account; its group gates the socket.
 # Created on install and upgrade (an upgrade from a DynamicUser= release needs it
-# before the old package's %postun restarts the unit).
+# before the old package's %%postun restarts the unit).
 systemd-sysusers /usr/lib/sysusers.d/yams.conf >/dev/null 2>&1 || :
 if [ $1 -eq 1 ] ; then
     systemctl daemon-reload >/dev/null 2>&1 || true
