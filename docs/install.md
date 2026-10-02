@@ -90,9 +90,9 @@ Download `yams-<version>-windows-x86_64.msi` from the
 [latest release](https://github.com/trvon/yams/releases/latest) and run it.
 It installs per machine to `%ProgramFiles%\YAMS` and adds `bin` to `PATH`.
 
-> The MSI currently ships the `yams` CLI and plugins but not `yams-daemon.exe`
-> or `yams-mcp-server.exe`, so daemon-backed commands and `yams serve` do not
-> work from the MSI yet.
+The MSI installs `yams.exe`, `yams-daemon.exe` and `yams-mcp-server.exe` in
+`bin`. It registers no Windows service; the CLI starts the daemon on demand.
+MSIs up to 0.20.3 lack the daemon and the MCP server.
 
 ### Release archives and source
 
