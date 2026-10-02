@@ -439,11 +439,15 @@ if not get_option('enable-onnx').disabled()
   endif
 endif
 
-# Normalize ONNX Runtime linkage to the current library location instead of any stale
-# Homebrew copies that may remain under /opt/homebrew/lib after upgrades.
 # Directories that hold the ONNX Runtime shared library used for this build; the
 # runtime install (tools/yams-cli) bundles it privately from the first that does.
+# Only the dependency's own libdir counts (Conan/pkg-config/CMake): a Homebrew
+# onnxruntime links other Homebrew dylibs by absolute path and is not relocatable,
+# and the Homebrew formula uses Homebrew's onnxruntime directly anyway.
 onnxruntime_bundle_dirs = []
+
+# Normalize ONNX Runtime linkage to the current library location instead of any stale
+# Homebrew copies that may remain under /opt/homebrew/lib after upgrades.
 if onnxruntime_resolved_dep.found()
   onnxruntime_link_dirs = []
   onnxruntime_pkg_libdir = onnxruntime_resolved_dep.get_variable(pkgconfig: 'libdir', default_value: '')
@@ -464,7 +468,11 @@ if onnxruntime_resolved_dep.found()
     endforeach
   endif
 
-  onnxruntime_bundle_dirs = onnxruntime_link_dirs
+  foreach _d : onnxruntime_link_dirs
+    if not (_d.startswith('/opt/homebrew') or _d.startswith('/usr/local/opt') or _d.startswith('/usr/local/Cellar'))
+      onnxruntime_bundle_dirs += [_d]
+    endif
+  endforeach
   onnxruntime_compile_dep = onnxruntime_resolved_dep.partial_dependency(compile_args: true, includes: true)
   onnxruntime_cpp = meson.get_compiler('cpp')
   onnxruntime_link_dep = onnxruntime_cpp.find_library('onnxruntime', dirs: onnxruntime_link_dirs, required: false)
