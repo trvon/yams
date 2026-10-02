@@ -16,6 +16,7 @@ RUN set -eux; \
     iproute2 \
     binutils \
     passwd \
+    libpam-systemd \
     util-linux \
     ca-certificates && \
   rm -rf /var/lib/apt/lists/*

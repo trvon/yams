@@ -172,12 +172,14 @@ boot() { # boot <lane> <image> <name>
 
 wait_boot() {
 	local name="$1" state=""
-	for _ in $(seq 1 120); do
+	# Up to 3 minutes: a reboot on a loaded host can sit in 'starting' for a while.
+	for _ in $(seq 1 360); do
 		state="$(docker exec "${name}" systemctl is-system-running 2>/dev/null || true)"
 		case "${state}" in running | degraded) return 0 ;; esac
 		sleep 0.5
 	done
 	err "${name}: systemd did not boot (state='${state}')"
+	docker exec "${name}" systemctl list-jobs --no-pager 2>&1 | head -n 20 >&2 || true
 	docker logs "${name}" 2>&1 | tail -n 20 >&2 || true
 	return 1
 }

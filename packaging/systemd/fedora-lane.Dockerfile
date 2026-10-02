@@ -7,6 +7,7 @@ ENV container=docker
 RUN set -eux; \
   dnf install -y \
     systemd \
+    systemd-pam \
     procps-ng \
     iproute \
     shadow-utils \

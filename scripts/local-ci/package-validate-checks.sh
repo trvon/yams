@@ -385,6 +385,14 @@ phase_cli() {
 		sleep 0.5
 	done
 	local uenv="export XDG_RUNTIME_DIR=/run/user/${ouid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ouid}/bus;"
+	if [ "$(systemctl is-active "user@${ouid}.service" 2>/dev/null)" != active ]; then
+		# Some container hosts cannot run a user manager (PAM session setup fails);
+		# that says nothing about yams, so report it instead of failing.
+		info cli-user-service "skipped: user@${ouid}.service did not start in this container ($(journalctl -u "user@${ouid}.service" --no-pager -n 3 2>/dev/null | tail -n 1 | cut -c1-160))"
+		loginctl disable-linger outsider >/dev/null 2>&1 || true
+		phase_cli_lifecycle
+		return
+	fi
 	local ot
 	ot="$(token outsider)"
 	as_user outsider "printf 'outsider note %s\n' '${ot}' > ~/outsider-note.txt"
@@ -392,7 +400,7 @@ phase_cli() {
 	out="$(as_user outsider "${uenv} timeout 120 yams daemon install --user" 2>&1)" || rc=$?
 	local uactive=""
 	for _ in $(seq 1 60); do
-		uactive="$(systemctl --user -M outsider@ is-active yams-daemon.service 2>/dev/null || true)"
+		uactive="$(as_user outsider "${uenv} systemctl --user is-active yams-daemon.service" 2>/dev/null || true)"
 		[ "${uactive}" = active ] && [ -S "/run/user/${ouid}/yams-daemon.sock" ] && break
 		sleep 0.5
 	done
@@ -403,17 +411,27 @@ phase_cli() {
 	fi
 	rc=0
 	out="$(as_user outsider "${uenv} timeout 120 yams add ~/outsider-note.txt && timeout 60 yams daemon status" 2>&1)" || rc=$?
-	if [ "${rc}" -eq 0 ] && as_user outsider 'test -e ~/.local/share/yams/yams.db'; then
-		pass cli-user-service-used "per-user CLI talks to its own daemon and store"
+	# The only daemon running for this user must be the unit's: no auto-spawned
+	# second daemon, and not the system one.
+	local umain upids
+	umain="$(as_user outsider "${uenv} systemctl --user show -p MainPID --value yams-daemon.service" 2>/dev/null || true)"
+	upids="$(pgrep -u outsider -f '^/usr/bin/yams-daemon' | paste -sd' ' - || true)"
+	if [ "${rc}" -eq 0 ] && [ -n "${umain}" ] && [ "${umain}" != 0 ] && [ "${upids}" = "${umain}" ] &&
+		as_user outsider 'test -e ~/.local/share/yams/yams.db'; then
+		pass cli-user-service-used "per-user CLI talks to its unit's daemon (pid ${umain}) and store"
 	else
-		fail cli-user-service-used "rc=${rc}: $(printf '%s' "${out}" | tail -n 3 | tr '\n' ' ')"
+		fail cli-user-service-used "rc=${rc} unit-pid=${umain:-?} user-daemons=${upids:-none}: $(printf '%s' "${out}" | tail -n 2 | tr '\n' ' ')"
 	fi
 	as_user outsider "${uenv} yams daemon uninstall --user" >/dev/null 2>&1 || true
 	loginctl disable-linger outsider >/dev/null 2>&1 || true
 
-	# Daemon lifecycle stays with systemd.
-	rc=0
-	out="$(cd /root && env -i HOME=/root PATH=/usr/bin:/bin timeout 60 yams daemon stop 2>&1)" || rc=$?
+	phase_cli_lifecycle
+}
+
+# Daemon lifecycle stays with systemd: `yams daemon stop` must not stop the unit.
+phase_cli_lifecycle() {
+	local out
+	out="$(cd /root && env -i HOME=/root PATH=/usr/bin:/bin timeout 60 yams daemon stop 2>&1)" || true
 	if [ "$(systemctl is-active "${UNIT}" 2>/dev/null)" = active ]; then
 		pass cli-stop-defers-to-systemd "yams daemon stop leaves the system unit running"
 	else
