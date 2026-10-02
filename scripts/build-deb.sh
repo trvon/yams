@@ -412,7 +412,9 @@ __DEBIAN_CONTROL__
       set -x
     fi
   fi
-  depends_fallback="${depends_fallback}, init-system-helpers (>= 1.51)"
+  # passwd provides useradd/groupadd, the postinst's account fallback where
+  # systemd-sysusers is absent (containers and chroots without systemd).
+  depends_fallback="${depends_fallback}, init-system-helpers (>= 1.51), passwd"
   sed -i "s|@DEPENDENCIES@|${depends_fallback}|" "${control}"
 
   find "${work_dir}" -type d -exec chmod 0755 {} +
@@ -433,14 +435,32 @@ set -e
 
 UNIT=yams-daemon.service
 
-if [ "$1" = "configure" ]; then
-    # The unit runs as the `yams` system account; its group gates the socket.
-    if command -v systemd-sysusers >/dev/null 2>&1; then
-        systemd-sysusers /usr/lib/sysusers.d/yams.conf
-    elif ! getent passwd yams >/dev/null 2>&1; then
-        adduser --system --group --home /var/lib/yams --no-create-home yams >/dev/null
+# The unit runs as the `yams` system account; its group gates the socket.
+# Prefer the shipped sysusers.d entry; fall back to useradd (package passwd, a
+# declared dependency) where systemd is not installed.
+create_account() {
+    if command -v systemd-sysusers >/dev/null 2>&1 &&
+        systemd-sysusers /usr/lib/sysusers.d/yams.conf; then
+        return 0
     fi
-    if [ -d /run/systemd/system ]; then
+    if command -v useradd >/dev/null 2>&1; then
+        getent group yams >/dev/null 2>&1 || groupadd --system yams
+        getent passwd yams >/dev/null 2>&1 ||
+            useradd --system --gid yams --home-dir /var/lib/yams --no-create-home \
+                --shell /usr/sbin/nologin --comment "YAMS daemon" yams
+    fi
+    getent passwd yams >/dev/null 2>&1 && getent group yams >/dev/null 2>&1
+}
+
+if [ "$1" = "configure" ]; then
+    ACCOUNT_OK=1
+    if ! create_account; then
+        ACCOUNT_OK=0
+        # The CLI works without it; only the system service needs the account.
+        echo "yams: could not create the 'yams' system account (neither systemd-sysusers nor useradd works);" >&2
+        echo "yams: yams-daemon.service is not enabled. Create it with 'systemd-sysusers' or 'useradd --system yams' and reinstall." >&2
+    fi
+    if [ "$ACCOUNT_OK" -eq 1 ] && [ -d /run/systemd/system ]; then
         systemctl --system daemon-reload >/dev/null 2>&1 || true
         deb-systemd-helper unmask "$UNIT" >/dev/null 2>&1 || true
         # was-enabled is true on first install, so new installs are enabled.
@@ -619,7 +639,11 @@ cp -a %{_builddir}/%{name}-%{version}/. %{buildroot}/
 # The unit runs as the `yams` system account; its group gates the socket.
 # Created on install and upgrade (an upgrade from a DynamicUser= release needs it
 # before the old package's %%postun restarts the unit).
-systemd-sysusers /usr/lib/sysusers.d/yams.conf >/dev/null 2>&1 || :
+if ! systemd-sysusers /usr/lib/sysusers.d/yams.conf >/dev/null 2>&1; then
+    getent group yams >/dev/null 2>&1 || groupadd -r yams >/dev/null 2>&1 || :
+    getent passwd yams >/dev/null 2>&1 ||
+        useradd -r -g yams -d /var/lib/yams -M -s /sbin/nologin -c "YAMS daemon" yams >/dev/null 2>&1 || :
+fi
 if [ $1 -eq 1 ] ; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl preset yams-daemon.service >/dev/null 2>&1 || true
