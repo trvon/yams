@@ -187,12 +187,23 @@ elsewhere with `--socket`, `--data-dir`, `YAMS_DAEMON_SOCKET`, `YAMS_DATA_DIR`
 or `YAMS_CONFIG`. To keep the daemon running without a login session (for
 example on a server), enable lingering once: `sudo loginctl enable-linger "$USER"`.
 
-Plugins, including ONNX embeddings with the bundled ONNX Runtime in
-`/usr/lib/yams/onnxruntime` and the glint entity extractor, load when your
-config enables them; `yams init` writes `auto_load_plugins = true` under
-`[daemon]`. Restart the unit after changing the config. A compatible system
-ONNX Runtime is preferred over the bundled copy; `yams plugin health` and the
-daemon log (`Using bundled|system ONNX Runtime ...`) show which one loaded.
+Plugins (ONNX embeddings, the glint entity extractor) load when your config
+enables them; `yams init` writes `auto_load_plugins = true` under `[daemon]`.
+Restart the unit after changing the config.
+
+The ONNX and glint plugins load the first ONNX Runtime 1.23 or newer from:
+
+1. `runtime_library` (a file or directory) under `[plugins.onnx]` or
+   `[plugins.glint]` in `config.toml`;
+2. a system copy: `libonnxruntime.so.1` on the loader path, then the system
+   library directories and `/opt/onnxruntime/lib`;
+3. the bundled copy in `lib/yams/onnxruntime/` (`/usr/lib/yams/onnxruntime/`
+   in the packages).
+
+`YAMS_ONNX_RUNTIME_LIB` (a library file) or `YAMS_ONNX_RUNTIME_DIR` (a
+directory) overrides all three. `yams plugin health` and the daemon log line
+`[ONNX] Using <source> ONNX Runtime <version> from <path>` show which copy
+loaded.
 
 The unit keeps its hardening light (`NoNewPrivileges`, `LockPersonality`,
 `RestrictRealtime`, `RestrictSUIDSGID`) so the daemon can read the files you
