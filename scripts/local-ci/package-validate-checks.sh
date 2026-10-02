@@ -141,6 +141,9 @@ phase_layout() {
 	local allow='^/usr/bin/(yams|yams-cli|yams-daemon|yams-mcp-server)$'
 	allow+='|^/usr/lib(64)?/(yams/)?libyams_[A-Za-z0-9_]+\.so(\.[0-9]+)*$'
 	allow+='|^/usr/lib(64)?/yams/plugins/[A-Za-z0-9_.-]+\.so$'
+	# Private fallback ONNX Runtime used by the ONNX/Glint plugins when no compatible
+	# system copy exists (core library, its soname symlinks, providers_shared).
+	allow+='|^/usr/lib(64)?/yams/onnxruntime/libonnxruntime(_providers_shared)?\.so(\.[0-9]+)*$'
 	allow+='|^/usr/lib/systemd/system/yams-daemon\.service$'
 	allow+='|^/usr/lib/systemd/system-preset/80-yams\.preset$'
 	allow+='|^/usr/lib/sysusers\.d/yams\.conf$'
