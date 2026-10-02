@@ -23,6 +23,9 @@
 #              `yams daemon stop` defers to systemd
 #   persist  - container reboot: unit back, socket perms, data still there
 #   remove   - uninstall stops/disables the unit; deb purge removes state
+#   onnx     - the system daemon loads the onnx plugin with the bundled runtime
+#   minimal  - a second container from the bare base image (no systemd, no
+#              lane tooling) installs the package with declared deps only
 # With --upgrade-from-<fmt>, a second container installs that older package,
 # stores a document, upgrades to the new package and checks the unit restarted
 # onto the new binary with the document intact.
@@ -134,6 +137,14 @@ trap cleanup EXIT
 
 lane_fmt() { case "$1" in debian | ubuntu) echo deb ;; fedora) echo rpm ;; arch) echo arch ;; esac; }
 lane_pkg() { case "$1" in debian | ubuntu) echo "${DEB_PKG}" ;; fedora) echo "${RPM_PKG}" ;; arch) echo "${ARCH_PKG}" ;; esac; }
+lane_base_image() {
+	case "$1" in
+	debian) echo "${DEBIAN_IMAGE:-debian:trixie-slim}" ;;
+	ubuntu) echo "${UBUNTU_IMAGE:-ubuntu:24.04}" ;;
+	fedora) echo "${FEDORA_IMAGE:-fedora:42}" ;;
+	arch) echo "${ARCH_BASE_IMAGE:-archlinux/archlinux:latest}" ;;
+	esac
+}
 lane_upgrade_from() { case "$1" in debian | ubuntu) echo "${UP_DEB}" ;; fedora) echo "${UP_RPM}" ;; arch) echo "${UP_ARCH}" ;; esac; }
 
 # Docker platform for a lane (empty = native). Bash 3.2 compatible (macOS):
@@ -241,6 +252,7 @@ validate_lane() {
 	run_phase "${lane}" "${c}" layout
 	run_phase "${lane}" "${c}" service
 	run_phase "${lane}" "${c}" cli
+	run_phase "${lane}" "${c}" onnx
 	log "${lane}: rebooting container"
 	if reboot "${c}"; then
 		run_phase "${lane}" "${c}" persist
@@ -249,6 +261,25 @@ validate_lane() {
 	fi
 	run_phase "${lane}" "${c}" remove
 	docker rm -f "${c}" >/dev/null 2>&1 || true
+
+	# Bare base image, no systemd, no lane tooling: only declared dependencies.
+	local m="yams-validate-${lane}-minimal-${RUN_TAG}" base plat
+	base="$(lane_base_image "${lane}")"
+	plat="$(lane_platform "${lane}")"
+	log "${lane}: minimal install on ${base}"
+	docker rm -f "${m}" >/dev/null 2>&1 || true
+	if docker run -d --name "${m}" ${plat:+--platform="${plat}"} "${base}" sleep infinity >/dev/null; then
+		CONTAINERS+=("${m}")
+		if [ "${lane}" = arch ]; then
+			# The Arch image's pacman sandbox needs these tweaks in containers.
+			docker exec "${m}" sh -c "grep -q '^DisableSandbox' /etc/pacman.conf || sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf; sed -i 's/^[[:space:]]*DownloadUser/# DownloadUser/' /etc/pacman.conf; pacman-key --init >/dev/null 2>&1; pacman-key --populate >/dev/null 2>&1" || true
+		fi
+		stage_files "${m}" "${pkg}"
+		run_phase "${lane}" "${m}" minimal "${pkg}"
+		docker rm -f "${m}" >/dev/null 2>&1 || true
+	else
+		note_fail "${lane}" minimal-boot "could not start ${base}"
+	fi
 
 	if [ -n "${upgrade_from}" ]; then
 		if [ ! -f "${upgrade_from}" ]; then

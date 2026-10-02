@@ -16,6 +16,10 @@
 #   seed     <pm>                   store a document through an older release
 #   upgraded <pm>                   after upgrading over `seed`
 #   remove   <pm>                   uninstall (deb: remove + purge)
+#   onnx     <pm>                   the system daemon loads the onnx plugin with
+#                                   the bundled ONNX Runtime
+#   minimal  <pm> <pkg-file>        raw base image, no systemd, nothing
+#                                   preinstalled: install pulls only declared deps
 #
 # <pm> is deb, rpm or arch. The exit status is the number of FAIL lines (0 = ok).
 set -uo pipefail
@@ -534,6 +538,102 @@ check_no_dangling_links() { # check_no_dangling_links <id>
 }
 
 # ---------------------------------------------------------------------------
+phase_onnx() {
+	# Lane images carry no system ONNX Runtime, so the plugin must pick the
+	# private copy in <libdir>/yams/onnxruntime.
+	local bundled
+	bundled="$(ls -d /usr/lib/yams/onnxruntime /usr/lib64/yams/onnxruntime 2>/dev/null | head -n 1)"
+	if [ -n "${bundled}" ] && ls "${bundled}"/libonnxruntime.so* >/dev/null 2>&1; then
+		pass onnx-runtime-shipped "bundled runtime present in ${bundled}"
+	else
+		fail onnx-runtime-shipped "no libonnxruntime.so under /usr/lib/yams/onnxruntime"
+	fi
+	check onnx-plugin-shipped "onnx plugin installed" test -e /usr/lib/yams/plugins/libyams_onnx_plugin.so
+	local line="" health=""
+	for _ in $(seq 1 60); do
+		line="$(grep -hE 'Using (bundled|system) ONNX Runtime' "${LOG_DIR}/daemon.log" 2>/dev/null | tail -n 1)"
+		[ -n "${line}" ] && break
+		sleep 1
+	done
+	health="$(cd /root && env -i HOME=/root PATH=/usr/bin:/bin timeout 60 yams plugin health 2>&1 || true)"
+	case "${line}" in
+	*"Using bundled ONNX Runtime"*)
+		pass onnx-runtime-bundled "system daemon: ${line##*] }"
+		;;
+	*)
+		fail onnx-runtime-bundled "daemon log has no 'Using bundled ONNX Runtime' (${line:-no ONNX runtime line})"
+		grep -hiE 'onnx' "${LOG_DIR}/daemon.log" 2>/dev/null | tail -n 8 | sed 's/^/INFO onnx-log /'
+		;;
+	esac
+	if printf '%s' "${health}" | grep -qi 'onnx'; then
+		pass onnx-plugin-loaded "yams plugin health lists the onnx plugin"
+	else
+		fail onnx-plugin-loaded "yams plugin health does not list onnx"
+		printf '%s\n' "${health}" | tail -n 8 | sed 's/^/INFO plugin-health /'
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# Raw distro base image, no systemd running, nothing preinstalled beyond the
+# image: proves the package's declared dependencies are sufficient.
+phase_minimal() {
+	local pkg="${ARG:?package file}"
+	local log=/var/tmp/yams-validate-minimal.log rc=0
+	case "${PM}" in
+	deb)
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get update >/dev/null 2>&1 || true
+		apt-get install -y "${pkg}" >"${log}" 2>&1 || rc=$?
+		;;
+	rpm) dnf install -y "${pkg}" >"${log}" 2>&1 || rc=$? ;;
+	arch)
+		pacman -Sy --noconfirm >/dev/null 2>&1 || true
+		pacman -U --noconfirm "${pkg}" >"${log}" 2>&1 || rc=$?
+		;;
+	esac
+	if [ "${rc}" -eq 0 ]; then
+		pass minimal-install "$(basename "${pkg}") installs on the bare base image"
+	else
+		fail minimal-install "rc=${rc}"
+		tail -n 15 "${log}" | sed 's/^/INFO minimal-install-log /'
+		return
+	fi
+	if [ "${PM}" = deb ]; then
+		local status
+		status="$(dpkg-query -W -f='${Status}' yams 2>/dev/null)"
+		if [ "${status}" = "install ok installed" ]; then
+			pass minimal-configured "dpkg status '${status}'"
+		else
+			fail minimal-configured "dpkg status '${status}' (half-configured?)"
+		fi
+	fi
+	if getent passwd yams >/dev/null 2>&1 && getent group yams >/dev/null 2>&1; then
+		pass minimal-account "yams account and group created without systemd running"
+	else
+		fail minimal-account "no yams account/group after install"
+	fi
+	check minimal-version "yams --version runs" yams --version
+	local t out
+	t="$(token minimal)"
+	mkdir -p /var/tmp/yams-min-home
+	printf 'minimal note %s\n' "${t}" >/var/tmp/yams-min-home/note.txt
+	out="$(env -i HOME=/var/tmp/yams-min-home PATH=/usr/bin:/bin timeout 180 yams add /var/tmp/yams-min-home/note.txt 2>&1)" || true
+	local found=0
+	for _ in $(seq 1 30); do
+		if env -i HOME=/var/tmp/yams-min-home PATH=/usr/bin:/bin timeout 60 yams search "${t}" 2>/dev/null | grep -q note; then
+			found=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "${found}" -eq 1 ]; then
+		pass minimal-cli "yams add + search work without a system service"
+	else
+		fail minimal-cli "$(printf '%s' "${out}" | tail -n 2 | tr '\n' ' ')"
+	fi
+}
+
+# ---------------------------------------------------------------------------
 phase_remove() {
 	local rc=0 log=/var/tmp/yams-validate-remove.log
 	case "${PM}" in
@@ -578,6 +678,8 @@ persist) phase_persist ;;
 seed) phase_seed ;;
 upgraded) phase_upgraded ;;
 remove) phase_remove ;;
+onnx) phase_onnx ;;
+minimal) phase_minimal ;;
 *)
 	echo "unknown phase: ${PHASE}" >&2
 	exit 64
