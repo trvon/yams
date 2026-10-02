@@ -73,10 +73,10 @@ if get_option('enable-mobile-bindings')
   )
 
   # The mobile C ABI is the one installable SDK surface: its header and
-  # pkg-config file ship only under the 'devel' install tag.
+  # pkg-config file ship only under the 'devel' install tag. install_headers()
+  # takes no install_tag; Meson always tags headers 'devel'.
   install_headers('../../include/yams/api/mobile_bindings.h',
     subdir: 'yams' / 'api',
-    install_tag: 'devel',
   )
 
   yams_mobile_dep = declare_dependency(
