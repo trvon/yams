@@ -275,6 +275,12 @@ if get_option('optimization') not in ['0', 'g'] and not get_option('b_coverage')
     endif
     if host_machine.system() == 'linux'
       yams_size_ldflags += cpp.get_supported_link_arguments('-Wl,-z,pack-relative-relocs')
+      # Keep statically linked third-party code (Conan zstd, zlib, ...) out of
+      # the dynamic symbol table. Otherwise an executable that also links a
+      # system shared library depending on the same library (Arch: libmagic ->
+      # libzstd/libz) exports its private copy and interposes it into that
+      # library: ~600 exported ZSTD_/deflate/inflate symbols per binary.
+      yams_size_ldflags += cpp.get_supported_link_arguments('-Wl,--exclude-libs,ALL')
     endif
   endif
 endif
