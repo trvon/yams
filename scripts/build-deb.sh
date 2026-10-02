@@ -465,12 +465,13 @@ yams_user_managers() {
     command -v runuser >/dev/null 2>&1 || return 0
     command -v systemctl >/dev/null 2>&1 || return 0
     for d in /run/user/*; do
-        [ -S "$d/bus" ] || continue
+        # A running user manager always has its private socket; the D-Bus user
+        # bus is optional (Debian/Ubuntu without dbus-user-session).
+        [ -S "$d/systemd/private" ] || continue
         uid="${d##*/}"
         user="$(getent passwd "$uid" | cut -d: -f1)"
         [ -n "$user" ] || continue
         runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
             systemctl --user "$@" >/dev/null 2>&1 || true
     done
 }
@@ -512,12 +513,13 @@ yams_user_managers() {
     command -v runuser >/dev/null 2>&1 || return 0
     command -v systemctl >/dev/null 2>&1 || return 0
     for d in /run/user/*; do
-        [ -S "$d/bus" ] || continue
+        # A running user manager always has its private socket; the D-Bus user
+        # bus is optional (Debian/Ubuntu without dbus-user-session).
+        [ -S "$d/systemd/private" ] || continue
         uid="${d##*/}"
         user="$(getent passwd "$uid" | cut -d: -f1)"
         [ -n "$user" ] || continue
         runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
             systemctl --user "$@" >/dev/null 2>&1 || true
     done
 }
@@ -543,12 +545,13 @@ yams_user_managers() {
     command -v runuser >/dev/null 2>&1 || return 0
     command -v systemctl >/dev/null 2>&1 || return 0
     for d in /run/user/*; do
-        [ -S "$d/bus" ] || continue
+        # A running user manager always has its private socket; the D-Bus user
+        # bus is optional (Debian/Ubuntu without dbus-user-session).
+        [ -S "$d/systemd/private" ] || continue
         uid="${d##*/}"
         user="$(getent passwd "$uid" | cut -d: -f1)"
         [ -n "$user" ] || continue
         runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
             systemctl --user "$@" >/dev/null 2>&1 || true
     done
 }
@@ -688,12 +691,13 @@ yams_user_managers() {
     command -v runuser >/dev/null 2>&1 || return 0
     command -v systemctl >/dev/null 2>&1 || return 0
     for d in /run/user/*; do
-        [ -S "$d/bus" ] || continue
+        # A running user manager always has its private socket; the D-Bus user
+        # bus is optional (Debian/Ubuntu without dbus-user-session).
+        [ -S "$d/systemd/private" ] || continue
         uid="${d##*/}"
         user="$(getent passwd "$uid" | cut -d: -f1)"
         [ -n "$user" ] || continue
         runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
             systemctl --user "$@" >/dev/null 2>&1 || true
     done
 }
@@ -714,12 +718,13 @@ yams_user_managers() {
     command -v runuser >/dev/null 2>&1 || return 0
     command -v systemctl >/dev/null 2>&1 || return 0
     for d in /run/user/*; do
-        [ -S "$d/bus" ] || continue
+        # A running user manager always has its private socket; the D-Bus user
+        # bus is optional (Debian/Ubuntu without dbus-user-session).
+        [ -S "$d/systemd/private" ] || continue
         uid="${d##*/}"
         user="$(getent passwd "$uid" | cut -d: -f1)"
         [ -n "$user" ] || continue
         runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
             systemctl --user "$@" >/dev/null 2>&1 || true
     done
 }
@@ -736,12 +741,13 @@ yams_user_managers() {
     command -v runuser >/dev/null 2>&1 || return 0
     command -v systemctl >/dev/null 2>&1 || return 0
     for d in /run/user/*; do
-        [ -S "$d/bus" ] || continue
+        # A running user manager always has its private socket; the D-Bus user
+        # bus is optional (Debian/Ubuntu without dbus-user-session).
+        [ -S "$d/systemd/private" ] || continue
         uid="${d##*/}"
         user="$(getent passwd "$uid" | cut -d: -f1)"
         [ -n "$user" ] || continue
         runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
             systemctl --user "$@" >/dev/null 2>&1 || true
     done
 }
