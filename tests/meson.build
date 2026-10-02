@@ -843,19 +843,22 @@ if catch2_dep.found()
 
   # ONNX Runtime resolution policy (pure; no runtime needed): override >
   # configured > system > bundled > legacy, skipping incompatible API versions.
-  catch2_ort_runtime_resolution_exe = executable('catch2_ort_runtime_resolution',
-    files(
-      'unit/plugins/ort_runtime_resolution_catch2_test.cpp',
-      '../plugins/ort_runtime/ort_runtime_resolution.cpp',
-    ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep],
-    install: false,
-  )
-  test('ort_runtime_resolution', catch2_ort_runtime_resolution_exe,
-    suite: ['catch2', 'unit', 'plugins', 'onnx'],
-    timeout: 30,
-  )
+  # Fixtures use ELF/Mach-O library names; Windows resolution is the DLL search.
+  if host_machine.system() != 'windows'
+    catch2_ort_runtime_resolution_exe = executable('catch2_ort_runtime_resolution',
+      files(
+        'unit/plugins/ort_runtime_resolution_catch2_test.cpp',
+        '../plugins/ort_runtime/ort_runtime_resolution.cpp',
+      ),
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep],
+      install: false,
+    )
+    test('ort_runtime_resolution', catch2_ort_runtime_resolution_exe,
+      suite: ['catch2', 'unit', 'plugins', 'onnx'],
+      timeout: 30,
+    )
+  endif
 
   catch2_daemon_plugin_exe = executable('catch2_daemon_plugin',
     files('unit/daemon/onnx_plugin_harness_test.cpp'),
