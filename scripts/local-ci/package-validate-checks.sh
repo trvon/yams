@@ -38,6 +38,7 @@ UNIT=yams-daemon.service
 USER_UNIT_DIR=/usr/lib/systemd/user
 TUSER=alice   # the user whose daemon the checks drive (lingering)
 OUSER=bob     # a second user, for isolation
+PUSER=carol   # probes the bundled ONNX Runtime with its own config
 TOKEN_FILE=/var/tmp/yams-validate-tokens
 
 FAILS=0
@@ -421,22 +422,27 @@ phase_onnx() {
 		fail onnx-autoload "no plugins loaded with init's config"
 		as_user "${TUSER}" 'timeout 60 yams plugin health' 2>&1 | tail -n 4 | sed 's/^/INFO plugin-health /'
 	fi
-	# Use ONNX Runtime embeddings instead of the built-in default (no model is
-	# installed here, so this only proves the runtime loads; restored below).
-	as_user "${TUSER}" 'cp ~/.config/yams/config.toml ~/.config/yams/config.toml.validate'
-	as_user "${TUSER}" "sed -i '/^\\[embeddings\\]/,/^\\[/ s/^backend = .*/backend = \"onnxruntime\"/' ~/.config/yams/config.toml"
-	if as_user "${TUSER}" "grep -q '^backend = \"onnxruntime\"' ~/.config/yams/config.toml"; then
-		info onnx-backend "switched [embeddings] backend to onnxruntime"
-	else
-		fail onnx-backend "could not switch [embeddings] backend in config.toml"
+	check_single_daemon onnx-single-daemon
+
+	# The bundled ONNX Runtime, probed with a separate user so TUSER keeps
+	# init's configuration for the later phases: plugin autoload with the
+	# default ("auto") embedding backend adopts the onnx model provider, which
+	# resolves the runtime at load (no model is installed, so nothing embeds).
+	ensure_user "${PUSER}"
+	if ! wait_user_manager "${PUSER}"; then
+		fail onnx-probe-user "no user manager for ${PUSER}"
+		return
 	fi
+	# config_version = 3 keeps the daemon from migrating this file to the full
+	# template (whose default embedding backend is the built-in simeon).
+	as_user "${PUSER}" 'mkdir -p ~/.config/yams && printf "[version]\nconfig_version = 3\n\n[daemon]\nauto_load_plugins = true\n\n[embeddings]\nenable = true\nbackend = \"auto\"\n" > ~/.config/yams/config.toml'
 	local since
 	since="$(date '+%Y-%m-%d %H:%M:%S')"
-	uctl "${TUSER}" restart "${UNIT}" >/dev/null
-	wait_user_active "${TUSER}" || true
+	uctl "${PUSER}" restart "${UNIT}" >/dev/null
+	wait_user_active "${PUSER}" || true
 	local line=""
 	for _ in $(seq 1 60); do
-		line="$(journalctl -q --no-pager _UID="$(id -u "${TUSER}")" --since "${since}" 2>/dev/null |
+		line="$(journalctl -q --no-pager _UID="$(id -u "${PUSER}")" --since "${since}" 2>/dev/null |
 			grep -E 'Using (bundled|system) ONNX Runtime' | tail -n 1)"
 		[ -n "${line}" ] && break
 		sleep 1
@@ -445,19 +451,17 @@ phase_onnx() {
 	*"Using bundled ONNX Runtime"*) pass onnx-runtime-bundled "user daemon: ${line##*] }" ;;
 	*)
 		fail onnx-runtime-bundled "no 'Using bundled ONNX Runtime' from the user daemon (${line:-none})"
-		journalctl -q --no-pager _UID="$(id -u "${TUSER}")" --since "${since}" 2>/dev/null |
+		journalctl -q --no-pager _UID="$(id -u "${PUSER}")" --since "${since}" 2>/dev/null |
 			grep -iE 'onnx|plugin' | tail -n 8 | sed 's/^/INFO onnx-log /'
 		;;
 	esac
-	if wait_plugins "${TUSER}" onnx; then
+	if wait_plugins "${PUSER}" onnx; then
 		pass onnx-plugin-loaded "yams plugin health lists the onnx plugin"
 	else
 		fail onnx-plugin-loaded "yams plugin health does not list onnx"
 	fi
-	check_single_daemon onnx-single-daemon
-	as_user "${TUSER}" 'mv ~/.config/yams/config.toml.validate ~/.config/yams/config.toml'
-	uctl "${TUSER}" restart "${UNIT}" >/dev/null
-	wait_user_active "${TUSER}" || true
+	uctl "${PUSER}" stop "${UNIT}" >/dev/null
+	loginctl disable-linger "${PUSER}" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
