@@ -44,7 +44,7 @@ depends=(
     glibc
 )
 optdepends=(
-    'onnxruntime: ONNX-based embedding acceleration'
+    'onnxruntime: use the system ONNX Runtime instead of the bundled copy'
 )
 install=yams.install
 source=("${pkgname}-${pkgver}.tar.gz::${_yams_git_source:-git+${url}}")

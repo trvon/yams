@@ -170,7 +170,7 @@ arch = ${pkg_arch}
 license = GPL-3.0-or-later
 depend = gcc-libs
 depend = glibc
-optdepend = onnxruntime: ONNX-based embedding acceleration
+optdepend = onnxruntime: use the system ONNX Runtime instead of the bundled copy
 EOF
 
 	cat >"${package_root}/.BUILDINFO" <<EOF

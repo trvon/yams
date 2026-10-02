@@ -77,20 +77,32 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
   endforeach
 endif
 
-# Ship the ONNX Runtime shared library privately in <libdir>/yams, where the
-# ONNX plugin's runtime loader and the Glint plugin's $ORIGIN/.. RUNPATH find
-# it, instead of the system libdir. Only the runtime .so/.dylib files.
-onnx_dep = onnxruntime_resolved_dep
-if onnx_dep.found() and host_machine.system() != 'windows'
-  onnx_libdir = onnx_dep.get_variable('libdir', default_value: '')
-  if onnx_libdir != ''
-    install_subdir(onnx_libdir,
-      install_dir: get_option('libdir') / 'yams',
-      install_tag: 'runtime',
-      strip_directory: true,
-      exclude_files: ['pkgconfig', 'libonnxruntime.a'],
-      exclude_directories: ['pkgconfig', 'cmake'],
-    )
+# Bundle the ONNX Runtime shared library this build was made with as a private
+# fallback copy in <libdir>/yams/onnxruntime. The ONNX and Glint plugins prefer a
+# compatible system ONNX Runtime and fall back to this copy (see
+# plugins/ort_runtime/ort_runtime_resolution.h). Real files are installed once and
+# versioned symlinks are recreated, so archives keep the soname chain intact.
+# Windows already ships onnxruntime.dll next to the executables.
+if onnxruntime_resolved_dep.found() and host_machine.system() != 'windows' and onnxruntime_bundle_dirs.length() > 0
+  _ort_list = run_command(python_exe, files('../../scripts/list-onnxruntime-libs.py'),
+    onnxruntime_bundle_dirs, check: true)
+  _ort_dir = ''
+  _ort_install_dir = get_option('libdir') / 'yams' / 'onnxruntime'
+  foreach _line : _ort_list.stdout().strip().split('\n')
+    _parts = _line.strip().split(' ')
+    if _parts.length() >= 2 and _parts[0] == 'dir'
+      _ort_dir = _line.strip().substring(4)
+    elif _parts.length() == 2 and _parts[0] == 'file'
+      install_data(_ort_dir / _parts[1], install_dir: _ort_install_dir, install_tag: 'runtime')
+    elif _parts.length() == 3 and _parts[0] == 'link'
+      install_symlink(_parts[1], pointing_to: _parts[2], install_dir: _ort_install_dir,
+        install_tag: 'runtime')
+    endif
+  endforeach
+  if _ort_dir == ''
+    warning('ONNX Runtime found but no shared library to bundle in: ' + ', '.join(onnxruntime_bundle_dirs))
+  else
+    message('Bundling ONNX Runtime from ' + _ort_dir + ' into ' + _ort_install_dir)
   endif
 endif
 

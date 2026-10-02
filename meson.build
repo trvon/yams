@@ -441,6 +441,9 @@ endif
 
 # Normalize ONNX Runtime linkage to the current library location instead of any stale
 # Homebrew copies that may remain under /opt/homebrew/lib after upgrades.
+# Directories that hold the ONNX Runtime shared library used for this build; the
+# runtime install (tools/yams-cli) bundles it privately from the first that does.
+onnxruntime_bundle_dirs = []
 if onnxruntime_resolved_dep.found()
   onnxruntime_link_dirs = []
   onnxruntime_pkg_libdir = onnxruntime_resolved_dep.get_variable(pkgconfig: 'libdir', default_value: '')
@@ -461,6 +464,7 @@ if onnxruntime_resolved_dep.found()
     endforeach
   endif
 
+  onnxruntime_bundle_dirs = onnxruntime_link_dirs
   onnxruntime_compile_dep = onnxruntime_resolved_dep.partial_dependency(compile_args: true, includes: true)
   onnxruntime_cpp = meson.get_compiler('cpp')
   onnxruntime_link_dep = onnxruntime_cpp.find_library('onnxruntime', dirs: onnxruntime_link_dirs, required: false)

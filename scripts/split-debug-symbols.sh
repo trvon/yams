@@ -124,6 +124,11 @@ fi
 
 while IFS= read -r -d '' path; do
   rel="${path#"$install_root"/}"
+  case "$rel" in
+    # The bundled ONNX Runtime is an upstream release build: leave it byte-identical
+    # (it ships stripped, and re-stripping would void a macOS code signature).
+    */yams/onnxruntime/*) continue ;;
+  esac
   case "$(magic_of "$path")" in
     elf)
       process_elf "$path" "$rel"

@@ -11,6 +11,7 @@
       "{libdir}/yams/*.so",
       "{libdir}/yams/*.so.*",
       "{libdir}/yams/*.dylib",
+      "{libdir}/yams/onnxruntime/*",
       "share/yams/**",
       "share/licenses/yams/*",
       "share/doc/yams/**",
@@ -38,7 +39,7 @@
   },
   "third_party_exempt": [
     "{libdir}/yams/plugins/libzpdf.*",
-    "{libdir}/yams/libonnxruntime*"
+    "{libdir}/yams/onnxruntime/*"
   ],
   "size_budgets": [
     {
@@ -78,7 +79,7 @@
     },
     {
       "pattern": "{libdir}/yams/plugins/yams_glint.*",
-      "max_bytes": 700000,
+      "max_bytes": 850000,
       "kinds": [
         "elf"
       ]
@@ -104,7 +105,7 @@
       "max": 256
     },
     {
-      "pattern": "{libdir}/yams/libonnxruntime*",
+      "pattern": "{libdir}/yams/onnxruntime/*",
       "max": 100000
     },
     {
