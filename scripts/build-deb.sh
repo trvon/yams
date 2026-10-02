@@ -578,6 +578,11 @@ package_rpm() {
 %global __strip /bin/true
 # zstd payload (level 19) instead of rpm's gzip-class default; rpm >= 4.14.
 %define _binary_payload w19.zstdio
+# Libraries under /usr/lib/yams are private (plugins, libyams_onnx_resource, the
+# bundled ONNX Runtime): do not advertise them as system sonames, and do not require
+# them from elsewhere since this package ships them.
+%global __provides_exclude_from ^/usr/lib(64)?/yams/.*$
+%global __requires_exclude ^(libyams_onnx_resource|libzpdf|libonnxruntime)\\.so.*$
 Name: yams
 Version: __VERSION__
 Release: __RELEASE__%{?dist}
