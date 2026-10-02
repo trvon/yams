@@ -497,8 +497,11 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"use_legacy_tuner", "false"},
               {"auto_repair_batch_size", "16"},
               {"auto_rebuild_on_dim_mismatch", "false"},
-              {"socket_path", "/tmp/yams-daemon.sock"},
-              {"pid_file", "/tmp/yams-daemon.pid"},
+              // Empty = the per-user defaults ($XDG_RUNTIME_DIR/yams-daemon.sock and its
+              // PID file). A fixed /tmp path here was shared by every user on the host, so
+              // two users' daemons (e.g. the packaged systemd user unit) fought for it.
+              {"socket_path", ""},
+              {"pid_file", ""},
               {"worker_threads", "0"},
               {"max_memory_gb", "0"},
               {"connect_timeout_ms", "1000"},
