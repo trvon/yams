@@ -232,6 +232,9 @@ public:
                                                bool retainContent = false);
     Result<void> publishMemorySyncDocumentDelete(std::string_view contentHash,
                                                  bool retainContent = false);
+    /// Called when an embedding job has committed vectors for these documents (new or
+    /// re-embedded), so memory sync publishes them without waiting for the vector sweep.
+    void notifyMemorySyncEmbeddingsCommitted(const std::vector<std::string>& documentHashes);
 
     struct SearchLoadMetrics {
         std::uint32_t active{0};

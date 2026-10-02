@@ -410,6 +410,9 @@ Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view co
     return {};
 }
 
+void ServiceManager::notifyMemorySyncEmbeddingsCommitted(
+    const std::vector<std::string>& /*documentHashes*/) {}
+
 Result<memory_sync::ApplyStagePass> ServiceManager::applyMemorySyncContentBlobs() {
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
