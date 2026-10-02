@@ -39,7 +39,7 @@ elif host_machine.system() != 'windows'
   mobile_link_depends += mobile_version_script
 endif
 
-if get_option('enable-tsan')
+if yams_sanitize_thread
   # When TSAN is enabled, we must ensure libtsan is linked
   # The -fsanitize=thread flag should do this, but for shared libraries
   # we need to be explicit to avoid undefined references

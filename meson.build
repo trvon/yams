@@ -95,18 +95,24 @@ if libcxx_hardening != 'none'
   endif
 endif
 
-# --- ThreadSanitizer for race detection ---
-enable_tsan = get_option('enable-tsan')
-enable_asan = get_option('enable-asan')
-enable_ubsan = get_option('enable-ubsan')
+# --- Sanitizers ---
+# Meson's b_sanitize is the single switch (e.g. -Db_sanitize=thread,
+# -Db_sanitize=address,undefined). These derived flags add the extra codegen
+# options each sanitizer lane wants and are reused by subdirs.
+_b_sanitize_str = '@0@'.format(get_option('b_sanitize'))
+yams_sanitize_thread = _b_sanitize_str.contains('thread')
+yams_sanitize_address = _b_sanitize_str.contains('address')
+yams_sanitize_undefined = _b_sanitize_str.contains('undefined')
+enable_tsan = yams_sanitize_thread
+enable_asan = yams_sanitize_address
+# Standalone UBSan lanes abort on the first report; with ASan it stays recoverable.
+enable_ubsan = yams_sanitize_undefined and not enable_asan and not enable_tsan
 enable_dcheck = get_option('enable-dcheck')
-
-if enable_tsan and enable_asan
-  error('TSAN and ASAN cannot be enabled in the same build. Configure separate build directories.')
-endif
-if (enable_tsan and enable_ubsan) or (enable_asan and enable_ubsan)
-  error('UBSan cannot be combined with TSan or ASan. Configure a separate build directory.')
-endif
+foreach _alias : [['enable-tsan', yams_sanitize_thread, 'thread'], ['enable-asan', yams_sanitize_address, 'address'], ['enable-ubsan', yams_sanitize_undefined, 'undefined']]
+  if get_option(_alias[0]) and not _alias[1]
+    warning('-D@0@=true does not enable a sanitizer; configure -Db_sanitize=@1@'.format(_alias[0], _alias[2]))
+  endif
+endforeach
 
 if enable_tsan
   buildtype = get_option('buildtype')
@@ -117,7 +123,7 @@ if enable_tsan
 
   # Check if compiler supports TSan
   if cpp.has_argument('-fsanitize=thread')
-    # Use additional flags for better stack traces (sanitizer is set via b_sanitize option)
+    # Use additional flags for better stack traces
     tsan_extra_flags = ['-fno-omit-frame-pointer']
     add_project_arguments(tsan_extra_flags, language: 'cpp')
     add_project_arguments(tsan_extra_flags, language: 'c')
@@ -178,16 +184,6 @@ if enable_dcheck
   message('YAMS_DCHECK enabled in this build (overrides NDEBUG for debug-only checks)')
 endif
 
-split_debug = get_option('split-debug')
-if split_debug
-  if cpp.has_argument('-gsplit-dwarf')
-    add_project_arguments('-gsplit-dwarf', language: 'cpp')
-    add_project_arguments('-gsplit-dwarf', language: 'c')
-    message('split-dwarf enabled: debug info emitted to .dwo files (reduced .o size)')
-  else
-    warning('split-debug requested but compiler does not support -gsplit-dwarf')
-  endif
-endif
 
 
 # --- General Hardening Flags ---
@@ -353,10 +349,6 @@ message('YAMS install prefix: ' + install_prefix)
 
 # --- Shared Conan/CMake discovery paths ---
 conan_candidate_dirs = []
-conan_gen_opt = get_option('conan-generators-dir')
-if conan_gen_opt != ''
-  conan_candidate_dirs += [join_paths(meson.project_source_root(), conan_gen_opt)]
-endif
 
 base_build = meson.project_build_root()
 default_candidates = [
@@ -397,11 +389,6 @@ foreach base : conan_candidate_dirs
   endif
 endforeach
 
-cli11_opt = get_option('cli11-cmake-path')
-if cli11_opt != ''
-  cli11_cmake_paths += cli11_opt
-endif
-
 onnx_cmake_paths = []
 foreach base : conan_candidate_dirs
   if fs.exists(base)
@@ -414,11 +401,6 @@ foreach base : conan_candidate_dirs
     endforeach
   endif
 endforeach
-
-onnx_opt_path = get_option('onnxruntime-cmake-path')
-if onnx_opt_path != ''
-  onnx_cmake_paths += onnx_opt_path
-endif
 
 # --- Shared dependency resolution ---
 cli11_resolved_dep = dependency('cli11', required: false, method: 'pkg-config')
@@ -633,7 +615,6 @@ endif
 if not wasi_enabled
   # Database backend selection (libsql or sqlite)
   db_backend = get_option('database-backend')
-  require_fts5 = get_option('require-fts5')
 
   # Try to find the selected database backend
   using_libsql = false
@@ -688,12 +669,7 @@ if not wasi_enabled
   else
     fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
     if fts5_prog.returncode() != 0
-      msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").'
-      if require_fts5
-        error(msg)
-      else
-        warning(msg)
-      endif
+      error('SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").')
     endif
   endif
 endif

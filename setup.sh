@@ -1104,9 +1104,10 @@ if [[ "${BUILD_TYPE}" == "Release" ]] && [[ "${ENABLE_RELEASE_TESTS}" == "true" 
 	echo "Tests enabled for Release build (benchmarks under tests/benchmarks will be built)"
 fi
 
+# Sanitizers are selected through Meson's b_sanitize; enable-tsan/enable-asan only
+# mirror that choice for third_party/symspell.
 MESON_OPTIONS+=("-Denable-tsan=${ENABLE_TSAN}")
 MESON_OPTIONS+=("-Denable-asan=${ENABLE_ASAN}")
-
 if [[ "${ENABLE_TSAN}" == "true" ]]; then
 	MESON_OPTIONS+=("-Db_sanitize=thread")
 	cc_tool="${CC##* }"

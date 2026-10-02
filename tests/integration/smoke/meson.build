@@ -34,12 +34,12 @@ else
 endif
 
 dbg = (get_option('buildtype') == 'debug')
-if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-smoke') or dbg) and integration_smoke_srcs.length() > 0 and catch2_dep.found()
+if (get_option('enable-integration-tests') or dbg) and integration_smoke_srcs.length() > 0 and catch2_dep.found()
   smoke_test_args = []
   if _test_thread_sanitizer
     smoke_test_args += ['~[mcpdocopsfixture]']
   endif
-  smoke_test_timeout = get_option('integration-smoke-timeout') * _test_timeout_scale
+  smoke_test_timeout = 600 * _test_timeout_scale
 
   integ_exe = executable('yams_integration_smoke_tests',
     integration_smoke_srcs + files('test_main_smoke_catch2.cpp'),
@@ -64,6 +64,6 @@ else
   if not catch2_dep.found()
     message('integration_smoke suite disabled (Catch2 not found).')
   else
-    message('integration_smoke suite disabled (enable with -Denable-integration-smoke=true).')
+    message('integration_smoke suite disabled (enable with -Denable-integration-tests=true).')
   endif
 endif

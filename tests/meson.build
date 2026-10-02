@@ -25,8 +25,8 @@ catch2_incs = []
 #Must be defined early before subdirs are included
 _tsan_suppressions_file = meson.project_source_root() / 'tsan.suppressions'
 _test_tsan_options = 'suppressions=' + _tsan_suppressions_file
-_test_thread_sanitizer = get_option('enable-tsan') or get_option('b_sanitize') == 'thread'
-_test_address_sanitizer = get_option('enable-asan') or get_option('b_sanitize').contains('address')
+_test_thread_sanitizer = yams_sanitize_thread
+_test_address_sanitizer = yams_sanitize_address
 _test_debug_integrations = get_option('buildtype') == 'debug' and not _test_address_sanitizer
 _test_timeout_scale = _test_thread_sanitizer ? 10 : get_option('test-timeout-scale')
 _test_timeout_cpp_arg = '-DYAMS_TEST_TIMEOUT_SCALE=' + _test_timeout_scale.to_string()
@@ -445,7 +445,7 @@ bench_timeout = get_option('bench-timeout')
 #
 #IMPORTANT : services integration includes both GTest - and Catch2 - based suites.
 #Do not gate the entire subdir on GTest.
-if get_option('enable-integration-tests') or get_option('enable-integration-services') or _test_debug_integrations
+if get_option('enable-integration-tests') or _test_debug_integrations
   subdir('integration/services')
 endif
 
@@ -3419,7 +3419,7 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  daemon_metrics_timeout = (get_option('enable-tsan') or get_option('enable-asan')) ? 240 : 180
+  daemon_metrics_timeout = (yams_sanitize_thread or yams_sanitize_address) ? 240 : 180
 
   test('daemon_metrics_status', catch2_daemon_metrics_status_exe,
     suite: ['catch2', 'unit', 'daemon', 'metrics', 'status'],
@@ -4205,7 +4205,7 @@ if catch2_dep.found()
     timeout: 30
   )
 
-  heavy_submodule_timeout = (get_option('enable-tsan') or get_option('enable-asan')) ? 600 : 300
+  heavy_submodule_timeout = (yams_sanitize_thread or yams_sanitize_address) ? 600 : 300
 
   test('compression_submodule', catch2_compression_submodule_exe,
     suite: ['catch2', 'unit', 'compression', 'yams-pmf'],

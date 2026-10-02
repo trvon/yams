@@ -9,7 +9,7 @@ spdlog_dep = dependency('spdlog', required: true)
 onnx_resource_deps = []
 
 # Ensure TSAN runtime is linked for this shared library when sanitizer is enabled
-if get_option('enable-tsan') and host_machine.system() == 'linux'
+if yams_sanitize_thread and host_machine.system() == 'linux'
   cpp_compiler = meson.get_compiler('cpp')
   tsan_dep = cpp_compiler.find_library('tsan', required: false)
   if tsan_dep.found()

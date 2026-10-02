@@ -174,7 +174,7 @@ jobs:
             conan_arch: x86_64
             needs_rosetta: false
             build_type: Debug
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-ubsan=true -Db_sanitize=undefined -Db_lundef=false -Dtest-timeout-scale=2 -Denable-dcheck=true"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Db_sanitize=undefined -Db_lundef=false -Dtest-timeout-scale=2 -Denable-dcheck=true"
           # Host-only mobile SDK lane: builds libyams_mobile plus its Catch2 ABI tests and
           # checks the exported C surface. It proves the Linux host build, not that an
           # Android .so or iOS XCFramework loads on a device.
@@ -188,7 +188,7 @@ jobs:
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-mobile-tests=true -Dtest-timeout-scale=2 -Denable-bench-tests=false -Dbuild-benchmarks=false -Denable-dcheck=true"
           # TSAN intentionally excluded from CI: boost::asio strand destruction triggers
           # a heap-use-after-free that TSAN detects but cannot be suppressed via tsan.suppressions.
-          # Run TSAN locally with: meson setup build/debug-tsan -Denable-tsan=true -Db_sanitize=thread
+          # Run TSAN locally with: meson setup build/debug-tsan -Db_sanitize=thread
     runs-on: ${{ matrix.runs_on }}
     # Windows debug builds can consume most of the previous 100-minute budget before tests start.
     timeout-minutes: 180
