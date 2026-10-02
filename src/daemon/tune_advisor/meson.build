@@ -7,7 +7,7 @@ yams_tune_advisor_lib = static_library('yams_tune_advisor',
   files('../components/TuneAdvisor.cpp'),
   include_directories: include_directories('../../../include'),
   dependencies: [dependency('yams_config'), dependency('yams_metadata')],
-  install: true,
+  install: false,
 )
 
 yams_tune_advisor_dep = declare_dependency(

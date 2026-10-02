@@ -308,14 +308,7 @@ yams_vector = static_library('yams_vector',
   dependencies: deps_vec + vector_platform_deps + vector_tracy_deps,
   link_with: [simeon_vector_lib, simeon_common_lib, sqlite_vec_backend_lib] + simeon_extra_libs + sqlite_vec_cpp_lib,
   cpp_args: vector_cppargs + simeon_simd_defines + vector_tracy_args,
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_vector,
-  name: 'yams-vector',
-  description: 'YAMS vector database',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_vector_dep = declare_dependency(

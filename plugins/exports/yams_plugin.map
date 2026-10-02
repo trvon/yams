@@ -1,0 +1,9 @@
+/* Loadable YAMS plugins export only the plugin C ABI (include/yams/plugins/abi.h)
+   plus the legacy object-storage factory (yams_plugin_create/destroy_object_storage).
+   Everything else, including statically linked OpenSSL/libcurl/zlib/spdlog, stays local. */
+{
+  global:
+    yams_plugin_*;
+  local:
+    *;
+};

@@ -227,7 +227,7 @@ print(
 PY
 
 RUN set -eux; \
-  bash scripts/prune-runtime-install.sh /opt/yams/usr/local
+  bash scripts/split-debug-symbols.sh /opt/yams/usr/local
 
 # Stage 1.25: smoke tests (optional)
 # Note: kept separate so Linux builder images can be produced even when

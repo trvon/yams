@@ -14,7 +14,7 @@
 #include <future>
 #include <optional>
 #include <thread>
-#include "ort_runtime_loader.h"
+#include "../ort_runtime/ort_runtime_loader.h"
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/onnx_colbert_session.h>
@@ -1750,6 +1750,8 @@ struct ProviderSingleton {
                 j["runtime_library"] = runtimeInfo.libraryPath;
             if (!runtimeInfo.reason.empty())
                 j["runtime_status"] = runtimeInfo.reason;
+            if (!runtimeInfo.source.empty())
+                j["runtime_source"] = runtimeInfo.source;
 
             // Report the actual execution provider used by a session (not a platform guess)
             std::string ep = "cpu";
@@ -1994,6 +1996,13 @@ extern "C" void yams_onnx_set_config_json(const char* json) {
     if (json && *json) {
         g_plugin_config_json = json;
         spdlog::info("[ONNX Plugin] Config JSON set: {}", g_plugin_config_json);
+        // Optional pin for the ONNX Runtime copy ([plugins.onnx] runtime_library).
+        auto cfg = nlohmann::json::parse(g_plugin_config_json, nullptr, false);
+        if (cfg.is_object() && cfg.contains("runtime_library") &&
+            cfg["runtime_library"].is_string()) {
+            yams::onnx_util::OrtRuntimeLoader::instance().setConfiguredLibrary(
+                cfg["runtime_library"].get<std::string>());
+        }
     }
 }
 
@@ -2084,6 +2093,9 @@ extern "C" const char* yams_onnx_get_health_json_cstr() {
     }
     if (!c.runtimeInfo.errorMessage.empty()) {
         j["runtime_error"] = c.runtimeInfo.errorMessage;
+    }
+    if (!c.runtimeInfo.source.empty()) {
+        j["runtime_source"] = c.runtimeInfo.source;
     }
 
     // Add model states for diagnostics

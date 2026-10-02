@@ -165,7 +165,9 @@ zyp_plugin = shared_module('yams_zyp',
   ],
   dependencies: [zpdf_dep],
   cpp_args: zyp_cpp_args,
-  link_args: zyp_link_args,
+  link_args: zyp_link_args + plugin_export_link_args,
+  link_depends: plugin_export_link_depends,
+  gnu_symbol_visibility: 'hidden',
 #build_rpath ensures the plugin can find libzpdf during build / test
   build_rpath: zpdf_build_dir,
 #install_rpath ensures the plugin can find libzpdf after installation
@@ -183,14 +185,16 @@ if host_machine.system() == 'windows'
     '$dest = if ($env:DESTDIR) { Join-Path $env:DESTDIR "@1@" } else { "@1@" }; New-Item -ItemType Directory -Force -Path $dest | Out-Null; Copy-Item -Path "@0@" -Destination $dest'.format(
       zpdf_build_dir / zpdf_lib_name,
       get_option('prefix') / plugins_dir
-    )
+    ),
+    install_tag: 'runtime',
   )
 else
   meson.add_install_script('sh', '-c',
     'mkdir -p "$DESTDIR@1@" && cp "@0@" "$DESTDIR@1@/"'.format(
       zpdf_build_dir / zpdf_lib_name,
       get_option('prefix') / plugins_dir
-    )
+    ),
+    install_tag: 'runtime',
   )
 endif
 

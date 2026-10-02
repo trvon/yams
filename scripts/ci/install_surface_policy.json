@@ -1,0 +1,155 @@
+{
+  "_comment": "Runtime install surface contract for scripts/ci/check_install_surface.py. Paths are relative to the install prefix; {libdir} is the Meson libdir relative to the prefix. Size budgets apply to ELF payloads and carry ~20% headroom over the measured Linux x86_64 release payload (grim, clang 21, 2026-10); the onnx/glint budgets come from the v0.20.3 packages. Raise a budget only with a measured reason in the commit message.",
+  "paths": {
+    "allowed": [
+      "bin/yams",
+      "bin/yams-cli",
+      "bin/yams-daemon",
+      "bin/yams-mcp-server",
+      "{libdir}/yams/plugins/*.so",
+      "{libdir}/yams/plugins/*.dylib",
+      "{libdir}/yams/*.so",
+      "{libdir}/yams/*.so.*",
+      "{libdir}/yams/*.dylib",
+      "{libdir}/yams/onnxruntime/*",
+      "share/yams/**",
+      "share/licenses/yams/*",
+      "share/doc/yams/**",
+      "lib/systemd/user/yams-daemon.service",
+      "lib/systemd/user-preset/80-yams.preset"
+    ],
+    "forbidden": [
+      "include/**",
+      "**/*.h",
+      "**/*.hpp",
+      "**/*.a",
+      "**/*.la",
+      "**/*.pc",
+      "**/pkgconfig/**",
+      "**/cmake/**"
+    ],
+    "required": [
+      "bin/yams",
+      "bin/yams-cli",
+      "bin/yams-daemon",
+      "share/yams/sql/reference_schema.sql",
+      "{libdir}/yams/plugins/*"
+    ]
+  },
+  "third_party_exempt": [
+    "{libdir}/yams/plugins/libzpdf.*",
+    "{libdir}/yams/onnxruntime/*"
+  ],
+  "size_budgets": [
+    {
+      "pattern": "bin/yams-cli",
+      "max_bytes": 40600000,
+      "kinds": [
+        "elf"
+      ]
+    },
+    {
+      "pattern": "bin/yams-daemon",
+      "max_bytes": 34200000,
+      "kinds": [
+        "elf"
+      ]
+    },
+    {
+      "pattern": "bin/yams-mcp-server",
+      "max_bytes": 20100000,
+      "kinds": [
+        "elf"
+      ]
+    },
+    {
+      "pattern": "{libdir}/yams/plugins/libyams_object_storage_s3.*",
+      "max_bytes": 7500000,
+      "kinds": [
+        "elf"
+      ]
+    },
+    {
+      "pattern": "{libdir}/yams/plugins/libyams_onnx_plugin.*",
+      "max_bytes": 2000000,
+      "kinds": [
+        "elf"
+      ]
+    },
+    {
+      "pattern": "{libdir}/yams/plugins/yams_glint.*",
+      "max_bytes": 850000,
+      "kinds": [
+        "elf"
+      ]
+    },
+    {
+      "pattern": "{libdir}/yams/plugins/yams_zyp.*",
+      "max_bytes": 77000,
+      "kinds": [
+        "elf"
+      ]
+    },
+    {
+      "pattern": "{libdir}/yams/libyams_onnx_resource.*",
+      "max_bytes": 64000,
+      "kinds": [
+        "elf"
+      ]
+    }
+  ],
+  "export_budgets": [
+    {
+      "pattern": "{libdir}/yams/plugins/libzpdf.*",
+      "max": 256
+    },
+    {
+      "pattern": "{libdir}/yams/onnxruntime/*",
+      "max": 100000
+    },
+    {
+      "pattern": "{libdir}/yams/plugins/*",
+      "max": 16
+    },
+    {
+      "pattern": "{libdir}/yams/libyams_onnx_resource.*",
+      "max": 32
+    },
+    {
+      "pattern": "bin/*",
+      "max": 64
+    }
+  ],
+  "forbidden_exports": [
+    "^sqlite3_",
+    "^libsql_",
+    "^SSL_",
+    "^EVP_",
+    "^OPENSSL_",
+    "^CRYPTO_",
+    "^curl_",
+    "^Curl_",
+    "^deflate",
+    "^inflate",
+    "^ZSTD_",
+    "^LZ4",
+    "boost::",
+    "google::protobuf",
+    "spdlog::",
+    "fmt::",
+    "nlohmann::",
+    "^Ort"
+  ],
+  "hardening": {
+    "pie": true,
+    "bind_now": true,
+    "relro": true,
+    "nx": true,
+    "cet_x86_64": "warn",
+    "fortify_imports": "warn"
+  },
+  "stripped": {
+    "no_debug_sections": true,
+    "no_symtab": true
+  }
+}

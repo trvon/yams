@@ -167,17 +167,10 @@ builddate = ${builddate}
 packager = ${packager}
 size = ${install_size}
 arch = ${pkg_arch}
-license = Apache-2.0
+license = GPL-3.0-or-later
 depend = gcc-libs
 depend = glibc
-depend = liburing
-depend = libarchive
-depend = taglib
-depend = sqlite
-depend = openssl
-depend = curl
-depend = boost-libs
-optdepend = onnxruntime: ONNX-based embedding acceleration
+optdepend = onnxruntime: use the system ONNX Runtime instead of the bundled copy
 EOF
 
 	cat >"${package_root}/.BUILDINFO" <<EOF
@@ -298,8 +291,8 @@ build_main() {
 	rm -rf "${stage_root}"
 	meson install -C "${YAMS_BUILD_DIR}" --destdir "${stage_root}" --no-rebuild
 
-	# Prune development payload
-	bash scripts/prune-runtime-install.sh "${stage_root}/usr" 2>/dev/null || true
+	# Strip the staged binaries (the install rules already stage only the runtime set)
+	bash scripts/split-debug-symbols.sh "${stage_root}/usr"
 
 	# Fail the package rather than silently shipping without the embedding provider.
 	if ! compgen -G "${stage_root}/usr/lib/yams/plugins/libyams_onnx_plugin.so*" >/dev/null; then
@@ -307,11 +300,11 @@ build_main() {
 		exit 1
 	fi
 
-	# Install systemd unit + preset into stage.
+	# Install the systemd user unit + user preset into stage.
 	install -Dm644 packaging/systemd/yams-daemon.service \
-		"${stage_root}/usr/lib/systemd/system/yams-daemon.service"
+		"${stage_root}/usr/lib/systemd/user/yams-daemon.service"
 	install -Dm644 packaging/systemd/80-yams.preset \
-		"${stage_root}/usr/lib/systemd/system-preset/80-yams.preset"
+		"${stage_root}/usr/lib/systemd/user-preset/80-yams.preset"
 
 	log "Assembling Arch package from staged install"
 	work_dir="${PKG_BUILD_DIR}/arch-work"

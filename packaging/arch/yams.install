@@ -1,38 +1,58 @@
-# Arch Linux install script for YAMS
-# Handles systemd daemon registration, enable, start, stop, and teardown.
+# Arch Linux install script for YAMS.
+# The package ships a systemd *user* unit (/usr/lib/systemd/user/yams-daemon.service)
+# and a user preset that enables it for every user; it starts with each user's
+# next session. Releases up to 0.20.x shipped a *system* unit, which pre_upgrade
+# stops and disables while its file is still installed.
 
 UNIT=yams-daemon.service
 
+# Run `systemctl --user <args>` in every running user manager (no-op without
+# systemd, runuser or logged-in users). Used for daemon-reload, try-restart and
+# stop; the scripts never start per-user instances.
+yams_user_managers() {
+    command -v runuser >/dev/null 2>&1 || return 0
+    command -v systemctl >/dev/null 2>&1 || return 0
+    for d in /run/user/*; do
+        # A running user manager always has its private socket; the D-Bus user
+        # bus is optional (Debian/Ubuntu without dbus-user-session).
+        [ -S "$d/systemd/private" ] || continue
+        uid="${d##*/}"
+        user="$(getent passwd "$uid" | cut -d: -f1)"
+        [ -n "$user" ] || continue
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
+            systemctl --user "$@" >/dev/null 2>&1 || true
+    done
+}
+
 post_install() {
-    if [ -d /run/systemd/system ]; then
-        systemctl --system daemon-reload >/dev/null 2>&1 || true
-        # Enable per systemd preset (80-yams.preset ships with the package)
-        systemctl preset "${UNIT}" >/dev/null 2>&1 || true
-        # Start now (first install — pacman -U)
-        systemctl start "${UNIT}" >/dev/null 2>&1 || true
+    systemctl --global preset "${UNIT}" >/dev/null 2>&1 || true
+    yams_user_managers daemon-reload
+    echo ">>> The per-user YAMS daemon starts with your next login session."
+    echo ">>> Start it now with: systemctl --user enable --now ${UNIT}"
+}
+
+pre_upgrade() {
+    if [ -f "/usr/lib/systemd/system/${UNIT}" ]; then
+        systemctl --system disable --now "${UNIT}" >/dev/null 2>&1 || true
     fi
 }
 
 post_upgrade() {
-    if [ -d /run/systemd/system ]; then
-        systemctl --system daemon-reload >/dev/null 2>&1 || true
-        # Restart if it was running, otherwise just re-enable
-        if systemctl is-active --quiet "${UNIT}" 2>/dev/null; then
-            systemctl restart "${UNIT}" >/dev/null 2>&1 || true
-        else
-            systemctl preset "${UNIT}" >/dev/null 2>&1 || true
-        fi
+    # From a release with the system unit ($2 = old version): enable per preset.
+    if [ "$(vercmp "$2" 0.20.4)" -lt 0 ]; then
+        systemctl --global preset "${UNIT}" >/dev/null 2>&1 || true
     fi
+    systemctl --system daemon-reload >/dev/null 2>&1 || true
+    yams_user_managers daemon-reload
+    yams_user_managers try-restart "${UNIT}"
 }
 
 pre_remove() {
-    if [ -d /run/systemd/system ]; then
-        systemctl stop "${UNIT}" >/dev/null 2>&1 || true
-    fi
+    yams_user_managers stop "${UNIT}"
+    systemctl --global disable "${UNIT}" >/dev/null 2>&1 || true
 }
 
 post_remove() {
-    if [ -d /run/systemd/system ]; then
-        systemctl --system daemon-reload >/dev/null 2>&1 || true
-    fi
+    yams_user_managers daemon-reload
+    echo ">>> ~/.local/share/yams (each user's corpus) was kept."
 }

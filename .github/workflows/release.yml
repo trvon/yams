@@ -500,6 +500,7 @@ jobs:
         env:
           ARCH_DOCKER_PLATFORM: ${{ matrix.docker_platform }}
           ARCH_BASE_IMAGE: ${{ matrix.arch_base_image }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           : "${ARCH_PKG_PATH:?ARCH_PKG_PATH not set}"
@@ -525,8 +526,19 @@ jobs:
           printf '%s\n' "$package_info" | grep -F 'pkgname = yams' >/dev/null
           echo "Validated package metadata architecture: ${metadata_arch}"
 
+          # Publish gate: install, layout, service, CLI, reboot, removal and the
+          # upgrade from the latest published release (when it has an Arch package).
+          upgrade_args=()
+          prev_dir="$(mktemp -d)"
+          prev_tag="$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
+          if [ -n "$prev_tag" ] && gh release download "$prev_tag" -R "$GITHUB_REPOSITORY" -D "$prev_dir" -p "yams-*-${expected_arch}.pkg.tar.zst" 2>/dev/null; then
+            prev_pkg="$(find "$prev_dir" -name 'yams-*.pkg.tar.zst' -print -quit)"
+            if [ -n "$prev_pkg" ]; then upgrade_args=(--upgrade-from-arch "$prev_pkg"); fi
+          fi
+          echo "Upgrade source: ${prev_tag:-none} ${upgrade_args[*]:-}"
+
           chmod +x scripts/local-ci/package-validate.sh
-          bash scripts/local-ci/package-validate.sh --only arch --arch "$ARCH_PKG_PATH"
+          bash scripts/local-ci/package-validate.sh --only arch --arch "$ARCH_PKG_PATH" "${upgrade_args[@]}"
 
       - name: Skip remaining steps for Arch container builds
         if: matrix.arch_container == true
@@ -1155,7 +1167,7 @@ jobs:
           fi
           echo "STAGE_DIR=$BD/stage" >> "$GITHUB_ENV"
 
-      - name: Prune staged runtime payload (Linux/macOS)
+      - name: Split debug symbols from staged payload (Linux/macOS)
         if: runner.os != 'Windows' && matrix.arch_container != true
         shell: bash
         run: |
@@ -1177,7 +1189,9 @@ jobs:
             exit 1
           fi
 
-          bash scripts/prune-runtime-install.sh "$INSTALL_ROOT"
+          # Release builds keep -g; ship stripped binaries and keep the symbols as
+          # a separate workflow artifact (ELF .debug + .build-id links, macOS dSYM).
+          bash scripts/split-debug-symbols.sh "$INSTALL_ROOT" "$BUILD_DIR/debug-symbols"
 
       - name: Verify staged runtime assets (Linux/macOS)
         if: runner.os != 'Windows' && matrix.arch_container != true
@@ -1218,6 +1232,35 @@ jobs:
             ls -al "$STAGE_DIR$PREFIX/lib/yams/plugins" >&2 || true
             exit 1
           fi
+
+      - name: Check install surface (Linux/macOS)
+        if: runner.os != 'Windows' && matrix.arch_container != true
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${STAGE_DIR:?STAGE_DIR not set}"
+          PREFIX="${YAMS_INSTALL_PREFIX:-}"
+          if [ -z "$PREFIX" ]; then
+            if [ "$RUNNER_OS" = "Linux" ]; then PREFIX="/usr"; else PREFIX="/usr/local"; fi
+          fi
+          # Paths, size/export budgets, forbidden third-party exports, RUNPATH,
+          # hardening and strip state of the exact payload that gets packaged.
+          rc=0
+          python3 scripts/ci/check_install_surface.py \
+            --stage "$STAGE_DIR" --prefix "$PREFIX" --libdir lib \
+            --json "$BUILD_DIR/install-surface.json" > "$BUILD_DIR/install-surface.txt" || rc=$?
+          cat "$BUILD_DIR/install-surface.txt"
+          { echo '```'; cat "$BUILD_DIR/install-surface.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Upload debug symbols (Linux/macOS)
+        if: runner.os != 'Windows' && matrix.arch_container != true && github.actor != 'nektos/act'
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-symbols-${{ matrix.suffix }}${{ github.run_attempt > 1 && format('-a{0}', github.run_attempt) || '' }}
+          path: ${{ env.BUILD_DIR }}/debug-symbols
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Install and Package MSI (Windows)
         if: runner.os == 'Windows' && inputs.fast_mode != 'true'
@@ -1388,7 +1431,9 @@ jobs:
           OUTDIR="$GITHUB_WORKSPACE"
           if [ "${{ matrix.packaging }}" = "zip" ]; then
             ASSET="yams-${VERSION}-${SUFFIX}.zip"
-            zip -r "$OUTDIR/$ASSET" .
+            # -y stores symlinks (bin/yams -> yams-cli, versioned dylib links) as links
+            # instead of a second full copy of the target.
+            zip -ry "$OUTDIR/$ASSET" .
           else
             ASSET="yams-${VERSION}-${SUFFIX}.tar.gz"
             tar czf "$OUTDIR/$ASSET" .
@@ -1493,6 +1538,8 @@ jobs:
       - name: Validate Linux package install (systemd lanes)
         if: ${{ matrix.build_packages == true && runner.os == 'Linux' && github.actor != 'nektos/act' && inputs.fast_mode != 'true' && matrix.arch_container != true }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           case "${{ matrix.suffix }}" in
@@ -1518,6 +1565,21 @@ jobs:
             exit 1
           fi
 
+          # Upgrade path: the same lanes first install the latest published
+          # release's packages, store a document, then upgrade to these.
+          prev_dir="$(mktemp -d)"
+          prev_tag="$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
+          if [ -n "$prev_tag" ]; then
+            gh release download "$prev_tag" -R "$GITHUB_REPOSITORY" -D "$prev_dir" \
+              -p "yams-*linux-${expected_arch}.deb" -p "yams-*linux-${expected_arch}.rpm" 2>/dev/null || true
+            prev_deb="$(find "$prev_dir" -name 'yams-*.deb' -print -quit)"
+            prev_rpm="$(find "$prev_dir" -name 'yams-*.rpm' -print -quit)"
+            if [ -n "${prev_deb}" ] && [ -n "${deb}" ]; then args+=(--upgrade-from-deb "${prev_deb}"); fi
+            if [ -n "${prev_rpm}" ] && [ -n "${rpm}" ]; then args+=(--upgrade-from-rpm "${prev_rpm}"); fi
+          fi
+          echo "Upgrade source: ${prev_tag:-none}"
+
+          # Publish gate: Debian, Ubuntu and Fedora lanes (see the script header).
           chmod +x scripts/local-ci/package-validate.sh
           bash scripts/local-ci/package-validate.sh --only linux "${args[@]}"
 
@@ -1535,7 +1597,6 @@ jobs:
             ${{ env.BUILD_DIR }}/bench_results/*.json
             yams-*.deb
             yams-*.rpm
-            yams-*.AppImage
             yams-*.pkg
             yams-*.pkg.tar.zst
             winget-manifests/**
@@ -1624,7 +1685,7 @@ jobs:
               [ -f "$file" ] && copy_unique_asset "$file"
             done
             # Packages
-            for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.AppImage "$dir"/*.pkg.tar.zst "$dir"/*.msi; do
+            for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.pkg.tar.zst "$dir"/*.msi; do
               [ -f "$file" ] && copy_unique_asset "$file"
             done
             # Arch repo metadata
@@ -1657,7 +1718,7 @@ jobs:
             distributables+=("$f")
           done < <(find . -maxdepth 1 -type f \( \
             -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o \
-            -name '*.AppImage' -o -name '*.pkg' -o -name '*.msi' -o -name '*.pkg.tar.zst' \
+            -name '*.pkg' -o -name '*.msi' -o -name '*.pkg.tar.zst' \
           \) -printf '%f\n' | sort)
           if [ ${#distributables[@]} -gt 0 ]; then
             : > SHA256SUMS
@@ -2653,7 +2714,7 @@ jobs:
                 mv "$file" assets/ 2>/dev/null || true
               done
               # Move Linux packages
-              for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.AppImage "$dir"/*.pkg; do
+              for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.pkg; do
                 mv "$file" assets/ 2>/dev/null || true
               done
               # Collect benchmark results

@@ -17,7 +17,7 @@ else
   )
 
   dbg = (get_option('buildtype') == 'debug')
-  if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
+  if (get_option('enable-integration-tests') or dbg)
     # Use the shared tests/support/catch2_main.cpp (catch2_main_dep from tests/meson.build).
     # Meson variables are global: reassigning catch2_main_dep here to Catch2's own main used to
     # leak into every test executable defined after this subdir, dropping the shared main's
@@ -91,6 +91,6 @@ else
       args: ['--allow-running-no-tests'],
     )
   else
-    message('hybrid_search_integration test disabled (enable with -Denable-daemon-integration=true).')
+    message('hybrid_search_integration test disabled (enable with -Denable-integration-tests=true).')
   endif
 endif

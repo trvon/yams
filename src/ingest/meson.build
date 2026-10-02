@@ -8,7 +8,7 @@ yams_ingest_lib = static_library('yams_ingest',
     dependency('spdlog'),
   ],
   include_directories: include_directories('../../include'),
-  install: true,
+  install: false,
 )
 
 yams_ingest_dep = declare_dependency(
@@ -24,4 +24,3 @@ yams_ingest_dep = declare_dependency(
 )
 
 meson.override_dependency('yams_ingest', yams_ingest_dep)
-

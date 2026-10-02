@@ -179,7 +179,9 @@ release)
 	BUILD_TYPE="Release"
 	;;
 profiling)
-	BUILD_TYPE="Debug" # Use Debug as base for Conan/Meson
+	# Profile what ships: Release Conan dependencies and the Release Meson
+	# configuration (-O3 -g, NDEBUG), plus Tracy and frame pointers. No sanitizers.
+	BUILD_TYPE="Release"
 	ENABLE_PROFILING=true
 	;;
 fuzzing)
@@ -440,10 +442,10 @@ fi
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
 	BUILD_DIR="build/profiling"
 	CONAN_SUBDIR="build-profiling"
-	# Conan often writes profiling/debug toolchains under a nested build-debug directory
-	CONAN_ALT_SUBDIR="build-debug"
+	# Conan writes the Release-based profiling toolchain under a nested build-release directory
+	CONAN_ALT_SUBDIR="build-release"
 	# Profile optimized code: -O0 zone timings do not predict release hot spots.
-	BUILD_TYPE_MESON_LOWER="debugoptimized"
+	BUILD_TYPE_MESON_LOWER="release"
 elif [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 	BUILD_DIR="build/fuzzing"
 	CONAN_SUBDIR="build-fuzzing"
@@ -458,7 +460,7 @@ elif [[ "${BUILD_TYPE}" == "Debug" ]]; then
 else
 	BUILD_DIR="build/${BUILD_TYPE_INPUT_LOWER}"
 	CONAN_SUBDIR="build-${BUILD_TYPE_INPUT_LOWER}"
-	BUILD_TYPE_MESON_LOWER="debugoptimized"
+	BUILD_TYPE_MESON_LOWER="release"
 fi
 
 if [[ -n "${YAMS_BUILD_DIR:-}" ]]; then
@@ -971,8 +973,12 @@ if [[ "${YAMS_DISABLE_RE2:-}" == "true" ]]; then
 	MESON_OPTIONS+=("-Denable-re2=disabled")
 fi
 
-if [[ "${BUILD_TYPE_MESON_LOWER}" == "debugoptimized" ]]; then
-	MESON_OPTIONS+=("-Db_ndebug=true")
+# Release/Profiling: -O3 with NDEBUG, PIE, and -g kept so packaging can split the
+# debug info into separate symbol files (scripts/split-debug-symbols.sh) instead
+# of shipping it. Debug/Fuzzing keep -O0 -g with assertions.
+MESON_OPTIONS+=("-Db_pie=true")
+if [[ "${BUILD_TYPE_MESON_LOWER}" == "release" || "${BUILD_TYPE_MESON_LOWER}" == "debugoptimized" ]]; then
+	MESON_OPTIONS+=("-Db_ndebug=true" "-Ddebug=true")
 else
 	MESON_OPTIONS+=("-Db_ndebug=false")
 fi
@@ -1098,9 +1104,10 @@ if [[ "${BUILD_TYPE}" == "Release" ]] && [[ "${ENABLE_RELEASE_TESTS}" == "true" 
 	echo "Tests enabled for Release build (benchmarks under tests/benchmarks will be built)"
 fi
 
+# Sanitizers are selected through Meson's b_sanitize; enable-tsan/enable-asan only
+# mirror that choice for third_party/symspell.
 MESON_OPTIONS+=("-Denable-tsan=${ENABLE_TSAN}")
 MESON_OPTIONS+=("-Denable-asan=${ENABLE_ASAN}")
-
 if [[ "${ENABLE_TSAN}" == "true" ]]; then
 	MESON_OPTIONS+=("-Db_sanitize=thread")
 	cc_tool="${CC##* }"

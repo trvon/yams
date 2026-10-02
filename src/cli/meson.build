@@ -123,7 +123,7 @@ yams_cli_lib = static_library('yams_cli',
   include_directories: cli_inc_dirs,
   dependencies: cli_deps,
   cpp_args: cli_cppargs,
-  install: true,
+  install: false,
 )
 
 yams_cli_dep = declare_dependency(

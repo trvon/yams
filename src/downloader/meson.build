@@ -16,14 +16,7 @@ yams_downloader = static_library('yams_downloader',
   ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, json_dep, threads_dep, curl_dep, openssl_dep, yams_core],
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_downloader,
-  name: 'yams-downloader',
-  description: 'YAMS downloader',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_downloader_dep = declare_dependency(

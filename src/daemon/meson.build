@@ -201,7 +201,7 @@ yams_daemon_lib = static_library('yams_daemon',
     include_directories('.'),
     generated_inc,
   ],
-  install: true,
+  install: false,
 )
 
 yams_daemon_dep = declare_dependency(
@@ -241,9 +241,9 @@ meson.override_dependency('yams_daemon_client_embedded', yams_daemon_client_embe
 #Set platform - specific rpath for daemon
 #macOS uses @executable_path, Linux uses $ORIGIN
 if host_machine.system() == 'darwin'
-  daemon_install_rpath = '@executable_path/../lib'
+  daemon_install_rpath = '@executable_path/../' + get_option('libdir') / 'yams'
 else
-  daemon_install_rpath = '$ORIGIN/../lib'
+  daemon_install_rpath = '$ORIGIN/../' + get_option('libdir') / 'yams'
 endif
 
 yams_daemon_exe = executable('yams-daemon',
@@ -268,11 +268,14 @@ yams_daemon_exe = executable('yams-daemon',
 )
 
 if host_machine.system() == 'linux'
+  # Per-user daemon: a systemd user unit plus the user preset that enables it.
   install_data('../../packaging/systemd/yams-daemon.service',
-    install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'system'),
+    install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'user'),
+    install_tag: 'runtime',
   )
   install_data('../../packaging/systemd/80-yams.preset',
-    install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'system-preset'),
+    install_dir: join_paths(get_option('prefix'), 'lib', 'systemd', 'user-preset'),
+    install_tag: 'runtime',
   )
 endif
 
@@ -284,6 +287,6 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
   foreach dll_info : windows_runtime_dlls
     dll_name = dll_info[0]
     dll_src = dll_info[1]
-    fs.copyfile(dll_src, dll_name, install: true, install_dir: get_option('bindir'))
+    fs.copyfile(dll_src, dll_name, install: true, install_dir: get_option('bindir'), install_tag: 'runtime')
   endforeach
 endif

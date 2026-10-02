@@ -21,7 +21,7 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
       'YAMS_DISABLE_VECTORS': '1',
     },
     is_parallel: false,
-    timeout: get_option('integration-timeout'),
+    timeout: 600,
   )
 elif get_option('enable-integration-tests')
   if not catch2_dep.found()
