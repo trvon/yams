@@ -6,7 +6,6 @@
 ### Added
 
 * **cli:** drive the packaged systemd user unit when it is installed ([a8f8918](https://github.com/trvon/yams/commit/a8f891879f7701785386cb39d84cf36a3c2da386))
-* **cli:** find the packaged system daemon socket without configuration ([4550d3b](https://github.com/trvon/yams/commit/4550d3bbdf1ba2b4e0b7852124fd98b94e8c0688))
 * **packaging:** ship the daemon as a systemd user unit ([e389e38](https://github.com/trvon/yams/commit/e389e384b1de0036b2b41832ea1301b91b584235))
 * **plugins:** prefer a system ONNX Runtime, fall back to a bundled copy ([fe07469](https://github.com/trvon/yams/commit/fe074696201a5e0c775666221a6b66031834f65f))
 
@@ -17,10 +16,8 @@
 * **ci:** add the Arch repository to pacman.conf in the usage text ([091cfe0](https://github.com/trvon/yams/commit/091cfe00483118c06626129187fef675208b63b2))
 * **ci:** Arch usage snippet and publication sanity check (follow-up to [#233](https://github.com/trvon/yams/issues/233)) ([4afb779](https://github.com/trvon/yams/commit/4afb779d512a51c5af82d19900a1ac4ba9cbfed0))
 * **ci:** drop --force from wrangler r2 object put ([a04c30c](https://github.com/trvon/yams/commit/a04c30cbd9f20cc20142ad3280dcc8b2d5c4b775))
-* **ci:** drop --force from wrangler r2 object put ([5eeb3b8](https://github.com/trvon/yams/commit/5eeb3b8239af9afc688dba899a31b6be18466dc6))
 * **ci:** point stable YUM and Arch usage at the stable repository ([1df92a3](https://github.com/trvon/yams/commit/1df92a3801d41869d4e24d6e2e3e8c5fcbf593d2))
 * **cli:** create the data directory before installing a per-user unit ([647a34c](https://github.com/trvon/yams/commit/647a34cc42811bfca0c95cef6572bc78041273ff))
-* **cli:** send file content to a daemon that runs as another user ([8f9d23b](https://github.com/trvon/yams/commit/8f9d23bf854d81b58c44903b9ede13dd218559d1))
 * **config:** stop pinning the daemon socket and PID file to shared /tmp paths ([9af33b6](https://github.com/trvon/yams/commit/9af33b6b05e25dc1ed74a4d9d87b86f9c9c75782))
 * **extraction:** build TextBasicHandler capabilities from one extension set ([8a1f753](https://github.com/trvon/yams/commit/8a1f753ba3e7eef246630bc438838d2ea13d50bd))
 * **extraction:** stop the Windows lines: hang from a mismatched iterator range ([992b746](https://github.com/trvon/yams/commit/992b746b003d8219b0475651c67c7ebae27c916a))
@@ -30,19 +27,10 @@
 * **onnx:** keep one CoreML model cache per ONNX Runtime version ([7755f3e](https://github.com/trvon/yams/commit/7755f3e2b2b925408136468419205d628491a2a7))
 * **p2p:** stop quarantining honest writers for concurrent-session races ([#245](https://github.com/trvon/yams/issues/245)) ([e0d15dc](https://github.com/trvon/yams/commit/e0d15dc680fbb169390bb0fedcb717eeb6a3d3d8))
 * **p2p:** stop the memory-sync apply/publish deadlock and report apply health ([#243](https://github.com/trvon/yams/issues/243)) ([7be908e](https://github.com/trvon/yams/commit/7be908e5b7e32a0dee3a2031dcaead20666af65e))
-* **packaging:** create the yams account on systems without systemd or adduser ([a4a9dd4](https://github.com/trvon/yams/commit/a4a9dd4418362f25cefe59b24564020faa34b33b))
 * **packaging:** escape rpm macro names in spec comments ([3c64e1f](https://github.com/trvon/yams/commit/3c64e1fb8f42b10d3b1ff0c9001dc1ef98b4cd0b))
-* **packaging:** give the system daemon an /etc configuration file ([ca1710f](https://github.com/trvon/yams/commit/ca1710fdccfe69361aff91b0628db967e62a6daa))
 * **packaging:** reach running user managers without a D-Bus user bus ([999cafc](https://github.com/trvon/yams/commit/999cafc64ae15d4adf98ff56a38c035a2642a065))
-* **packaging:** run the daemon as a per-user systemd unit with XDG config ([627acc8](https://github.com/trvon/yams/commit/627acc84e8335713a3ad4e3c32378ff6c19965ab))
-* **packaging:** run the system daemon as a yams account behind a group socket ([ef119cb](https://github.com/trvon/yams/commit/ef119cb5d56ad84c023cfb34a118307ccb92db63))
 * **release:** ship the daemon in the MSI, unblock experimental publishing, find the Windows hang ([#238](https://github.com/trvon/yams/issues/238)) ([d0b8610](https://github.com/trvon/yams/commit/d0b86106d26e0f0f80451757bd87caf1c7d8fa16))
 * **storage:** give the compressed-storage wrapper a per-user scratch path ([1231b4c](https://github.com/trvon/yams/commit/1231b4c505b0da5d1c282a0d980d4f05757b953a))
-
-
-### Maintenance
-
-* promote experimental to main ([ee4529e](https://github.com/trvon/yams/commit/ee4529e1a1bc9898990a25670065c52e1505c3a9))
 
 ## [0.20.3](https://github.com/trvon/yams/compare/v0.20.2...v0.20.3) (2026-09-30)
 
