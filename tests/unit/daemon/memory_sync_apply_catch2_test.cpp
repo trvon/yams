@@ -649,6 +649,7 @@ void reembed(vector::VectorDatabase& vectors, const std::string& chunkId, char d
 
 TEST_CASE("Memory sync vector backfill wraps to publish vectors behind its cursor",
           "[daemon][memory-sync][backfill][vector]") {
+    const VectorStoreEnv vectorEnv;
     TempRoot root;
     const auto sharedStore = root.path / "shared-store";
     fs::create_directories(sharedStore);
@@ -678,6 +679,7 @@ TEST_CASE("Memory sync vector backfill wraps to publish vectors behind its curso
 
 TEST_CASE("Memory sync publishes committed embeddings without waiting for the vector sweep",
           "[daemon][memory-sync][backfill][vector]") {
+    const VectorStoreEnv vectorEnv;
     TempRoot root;
     const auto sharedStore = root.path / "shared-store";
     fs::create_directories(sharedStore);
@@ -714,6 +716,7 @@ TEST_CASE("Memory sync publishes committed embeddings without waiting for the ve
 
 TEST_CASE("Memory sync topology backfill keeps progressing while the vector sweep wraps",
           "[daemon][memory-sync][backfill][vector][topology]") {
+    const VectorStoreEnv vectorEnv;
     TempRoot root;
     const auto sharedStore = root.path / "shared-store";
     fs::create_directories(sharedStore);
