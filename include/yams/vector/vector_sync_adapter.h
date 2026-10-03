@@ -4,9 +4,11 @@
 
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map> // IWYU pragma: keep
+#include <unordered_set>
 #include <vector>
 
 #include <yams/core/types.h>
@@ -38,11 +40,21 @@ public:
 
     void setRebuildCallback(RebuildCallback rebuild) { rebuild_ = std::move(rebuild); }
 
-    /// Serialize a committed embedding and publish it under `embedding/<model>/<chunkId>`.
-    Result<void> publish(const VectorRecord& record) {
+    /// Whether a local embedding carries the identity a sync record needs. A row that fails this
+    /// can never publish, however often it is retried (rows written before model ids were
+    /// recorded have none).
+    static Result<void> checkPublishable(const VectorRecord& record) {
         if (record.chunk_id.empty() || record.model_id.empty()) {
             return Error{ErrorCode::InvalidArgument,
                          "embedding sync requires non-empty chunk_id and model_id"};
+        }
+        return {};
+    }
+
+    /// Serialize a committed embedding and publish it under `embedding/<model>/<chunkId>`.
+    Result<void> publish(const VectorRecord& record) {
+        if (auto publishable = checkPublishable(record); !publishable) {
+            return publishable.error();
         }
         const auto payload = toRecord(record);
         const std::string dump = nlohmann::json(payload).dump();
@@ -70,16 +82,28 @@ public:
     /// vector database. Existing chunks are updated in place; new chunks are inserted.
     /// Rebuilds the search index when any record was applied. Returns the number applied.
     ///
-    /// A winner whose document content has not replicated locally yet is deferred: it is
-    /// skipped, the rest of the batch applies, and its logical key is listed in
-    /// deferredKeys(). Nothing marks it applied, so it stays a winner in the replicated index
-    /// and the next apply() retries it. Malformed records and store failures still fail.
+    /// Embeddings are independent per chunk, so one bad record must not starve the rest: every
+    /// winner is scanned, and each is applied, deferred, or skipped on its own.
+    /// - A winner whose document content has not replicated locally yet is deferred and listed
+    ///   in deferredKeys().
+    /// - A winner that cannot apply (malformed payload, identity or dimension mismatch, a model
+    ///   the local store cannot hold for its chunk, a failed store write or content probe) is
+    ///   skipped, and the first such failure is kept in failure().
+    /// Nothing marks a skipped winner applied, so it stays a winner in the replicated index and
+    /// the next apply() retries it. Only a failure that ends the pass (reconciliation, the index
+    /// rebuild) is returned as an error.
     Result<std::size_t> apply() {
         deferredKeys_.clear();
+        failure_.reset();
         auto merged = sync_.syncOnce();
         if (!merged) {
             return merged.error();
         }
+        const auto recordFailure = [this](std::string_view key, const Error& error) {
+            if (!failure_) {
+                failure_ = Error{error.code, std::string(key) + ": " + error.message};
+            }
+        };
 
         const std::string prefix =
             std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::Embedding)) + "/";
@@ -88,99 +112,95 @@ public:
             std::string key;
             std::string chunkId;
         };
-        std::vector<memory_sync::EmbeddingRecord> records;
+        struct PendingRecord {
+            std::string key;
+            memory_sync::EmbeddingRecord record;
+        };
+        std::vector<PendingRecord> records;
         std::vector<PendingDeletion> deletions;
-        std::unordered_map<std::string, std::string> modelsByChunk;
         for (const auto& [key, envelope] : merged.value()) {
             if (!key.starts_with(prefix)) {
                 continue;
             }
             if (envelope.isTombstone()) {
                 if (!tombstoneMatchesKey(key, envelope.tombstonePayload)) {
-                    return Error{ErrorCode::InvalidData,
-                                 "embedding tombstone identity does not match logical key"};
+                    recordFailure(key,
+                                  Error{ErrorCode::InvalidData,
+                                        "embedding tombstone identity does not match logical key"});
+                    continue;
                 }
                 deletions.push_back(PendingDeletion{key, envelope.tombstonePayload});
                 continue;
             }
-            auto payload = sync_.readCached(key);
-            if (!payload) {
-                return payload.error();
-            }
-            memory_sync::EmbeddingRecord record;
-            try {
-                const std::string_view text(reinterpret_cast<const char*>(payload.value().data()),
-                                            payload.value().size());
-                record = nlohmann::json::parse(text).get<memory_sync::EmbeddingRecord>();
-            } catch (const std::exception& e) {
-                return Error{ErrorCode::InvalidData, e.what()};
-            }
-
-            if (record.chunkId.empty() || record.model.empty() ||
-                record.values.size() != record.dimensions) {
-                return Error{ErrorCode::InvalidData, "invalid replicated embedding record"};
-            }
-            if (embeddingKey(record.model, record.chunkId) != key) {
-                return Error{ErrorCode::InvalidData,
-                             "embedding record identity does not match logical key"};
+            auto record = readRecord(key);
+            if (!record) {
+                recordFailure(key, record.error());
+                continue;
             }
             if (contentExists_) {
-                if (!memory_sync::isSha256Digest(record.documentId)) {
-                    return Error{ErrorCode::InvalidData,
-                                 "replicated embedding document identity is not a SHA-256 hash"};
-                }
-                auto exists = contentExists_(record.documentId);
+                auto exists = contentExists_(record.value().documentId);
                 if (!exists) {
-                    return exists.error();
+                    recordFailure(key, exists.error());
+                    continue;
                 }
                 if (!exists.value()) {
                     deferredKeys_.push_back(key);
                     continue;
                 }
             }
-            const auto [it, inserted] = modelsByChunk.emplace(record.chunkId, record.model);
-            if (!inserted && it->second != record.model) {
-                return Error{ErrorCode::NotSupported,
-                             "vector database cannot represent multiple models for one chunk"};
-            }
-            records.push_back(std::move(record));
+            records.push_back(PendingRecord{key, std::move(record).value()});
         }
 
-        // Validate the complete winning batch before the first database mutation.
+        // The local store holds one model per chunk. Winners that disagree on a chunk's model
+        // are all skipped, so which one lands never depends on the order they arrived in.
+        std::unordered_map<std::string, std::string> modelsByChunk;
+        std::unordered_set<std::string> conflictingChunks;
+        for (const auto& pending : records) {
+            const auto [it, inserted] =
+                modelsByChunk.emplace(pending.record.chunkId, pending.record.model);
+            if (!inserted && it->second != pending.record.model) {
+                conflictingChunks.insert(pending.record.chunkId);
+            }
+        }
+
         for (const auto& deletion : deletions) {
             const auto existing = database_.getVector(deletion.chunkId);
-            if (existing && embeddingKey(existing->model_id, deletion.chunkId) != deletion.key) {
-                return Error{ErrorCode::InvalidData,
-                             "embedding tombstone model does not match local vector identity"};
+            if (!existing) {
+                continue;
             }
+            if (embeddingKey(existing->model_id, deletion.chunkId) != deletion.key) {
+                recordFailure(deletion.key,
+                              Error{ErrorCode::InvalidData,
+                                    "embedding tombstone model does not match local vector "
+                                    "identity"});
+                continue;
+            }
+            if (auto deleted = database_.deleteVectorChecked(deletion.chunkId); !deleted) {
+                recordFailure(deletion.key, deleted.error());
+                continue;
+            }
+            ++applied;
+            *rebuildDirty_ = true;
         }
-        for (const auto& record : records) {
+        for (const auto& pending : records) {
+            const auto& record = pending.record;
             const auto existing = database_.getVector(record.chunkId);
-            if (existing && existing->model_id != record.model) {
-                return Error{ErrorCode::NotSupported,
-                             "vector database cannot represent multiple models for one chunk"};
+            if (conflictingChunks.contains(record.chunkId) ||
+                (existing && existing->model_id != record.model)) {
+                recordFailure(pending.key, Error{ErrorCode::NotSupported,
+                                                 "vector database cannot represent multiple "
+                                                 "models for one chunk"});
+                continue;
             }
-        }
-
-        for (const auto& deletion : deletions) {
-            if (database_.getVector(deletion.chunkId)) {
-                if (auto deleted = database_.deleteVectorChecked(deletion.chunkId); !deleted) {
-                    return deleted.error();
-                }
-                ++applied;
-                *rebuildDirty_ = true;
-            }
-        }
-        for (const auto& record : records) {
             const auto rebuilt = toVectorRecord(record);
-            const auto existing = database_.getVector(record.chunkId);
             if (existing && vectorMatches(*existing, rebuilt)) {
                 continue;
             }
             auto written = existing ? database_.updateVectorChecked(record.chunkId, rebuilt)
                                     : database_.insertVectorChecked(rebuilt);
             if (!written) {
-                return written.error();
+                recordFailure(pending.key, written.error());
+                continue;
             }
             ++applied;
             *rebuildDirty_ = true;
@@ -198,7 +218,40 @@ public:
     /// Logical keys the last apply() deferred because their content prerequisite is missing.
     const std::vector<std::string>& deferredKeys() const noexcept { return deferredKeys_; }
 
+    /// First winner the last apply() skipped because it cannot apply, its message prefixed with
+    /// the record's logical key; empty when every winner applied or was deferred.
+    const std::optional<Error>& failure() const noexcept { return failure_; }
+
 private:
+    /// Read one winning embedding payload and validate it against its logical key.
+    Result<memory_sync::EmbeddingRecord> readRecord(const std::string& key) {
+        auto payload = sync_.readCached(key);
+        if (!payload) {
+            return payload.error();
+        }
+        memory_sync::EmbeddingRecord record;
+        try {
+            const std::string_view text(reinterpret_cast<const char*>(payload.value().data()),
+                                        payload.value().size());
+            record = nlohmann::json::parse(text).get<memory_sync::EmbeddingRecord>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InvalidData, e.what()};
+        }
+        if (record.chunkId.empty() || record.model.empty() ||
+            record.values.size() != record.dimensions) {
+            return Error{ErrorCode::InvalidData, "invalid replicated embedding record"};
+        }
+        if (embeddingKey(record.model, record.chunkId) != key) {
+            return Error{ErrorCode::InvalidData,
+                         "embedding record identity does not match logical key"};
+        }
+        if (contentExists_ && !memory_sync::isSha256Digest(record.documentId)) {
+            return Error{ErrorCode::InvalidData,
+                         "replicated embedding document identity is not a SHA-256 hash"};
+        }
+        return record;
+    }
+
     static bool vectorMatches(const VectorRecord& lhs, const VectorRecord& rhs) {
         return lhs.chunk_id == rhs.chunk_id && lhs.document_hash == rhs.document_hash &&
                lhs.model_id == rhs.model_id && lhs.model_version == rhs.model_version &&
@@ -272,6 +325,7 @@ private:
     bool* rebuildDirty_;
     ContentExists contentExists_;
     std::vector<std::string> deferredKeys_;
+    std::optional<Error> failure_;
 };
 
 } // namespace yams::vector

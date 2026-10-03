@@ -104,7 +104,9 @@ public:
         std::atomic_store_explicit(&phaseTimingSink_, std::move(sink), std::memory_order_release);
     }
 
-    void setTopologyRebuildRequester(std::function<void(const std::vector<std::string>&)> cb);
+    /// Called with the hashes of the documents a job committed vectors for (new or re-embedded),
+    /// after the vector insert and before readiness is published.
+    void setEmbeddingsCommittedCallback(std::function<void(const std::vector<std::string>&)> cb);
 
     // Exposes the immutable effective safeguard and its provenance for status/tests.
     EffectiveEmbeddingServiceConfig effectiveConcurrencyPolicy() const;
@@ -166,7 +168,7 @@ private:
     std::function<Result<std::string>(const std::string&,
                                       std::function<void(const ModelLoadEvent&)>)>
         ensureModelReady_;
-    std::function<void(const std::vector<std::string>&)> topologyRebuildRequester_;
+    std::function<void(const std::vector<std::string>&)> embeddingsCommittedCallback_;
 
     std::atomic<bool> stop_{false};
     std::mutex stageActivityMutex_;

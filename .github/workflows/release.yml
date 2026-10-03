@@ -117,9 +117,61 @@ jobs:
                 run.head_sha === sourceSha)
               .sort((left, right) => right.id - left.id);
             if (successful.length === 0) {
-              core.setFailed(
-                `No successful completed Tests workflow run has exact head_sha ${sourceSha}`,
-              );
+              // Name the red streak instead of refusing silently: the newest failing Tests run
+              // on experimental, its SHA and failing jobs, and when experimental was last green.
+              // Diagnostics only; the refusal below stands whatever they find.
+              const lines = [
+                `No successful completed Tests workflow run has exact head_sha ${sourceSha}.`,
+              ];
+              try {
+                const sameSha = runs.filter((run) => run.head_sha === sourceSha);
+                if (sameSha.length > 0) {
+                  const latest = sameSha.sort((left, right) => right.id - left.id)[0];
+                  lines.push(`Tests on this SHA concluded ${latest.conclusion}: ${latest.html_url}`);
+                }
+                const recent = (await github.rest.actions.listWorkflowRuns({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id: 'tests.yml',
+                  branch: 'experimental',
+                  event: 'push',
+                  status: 'completed',
+                  per_page: 50,
+                })).data.workflow_runs.filter((run) => run.conclusion !== 'cancelled');
+                const failing = recent.find((run) => run.conclusion !== 'success');
+                const lastGreen = recent.find((run) => run.conclusion === 'success');
+                if (failing) {
+                  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: failing.id,
+                    per_page: 100,
+                  });
+                  const failedJobs = jobs
+                    .filter((job) => job.conclusion === 'failure' || job.conclusion === 'timed_out')
+                    .map((job) => job.name);
+                  lines.push(
+                    `Newest failing Tests run on experimental: ${failing.html_url} ` +
+                    `(sha ${failing.head_sha.slice(0, 12)}, ${failing.created_at}, ${failing.conclusion}).`,
+                    `Failing jobs: ${failedJobs.length > 0 ? failedJobs.join(', ') : '(none reported)'}.`,
+                  );
+                }
+                const streak = lastGreen ? recent.indexOf(lastGreen) : recent.length;
+                lines.push(lastGreen
+                  ? `Last green Tests run on experimental: ${lastGreen.html_url} ` +
+                    `(${lastGreen.created_at}); ${streak} completed push run(s) since are red.`
+                  : `No green Tests run among the last ${recent.length} completed experimental push runs.`);
+              } catch (error) {
+                lines.push(`Could not summarize recent Tests runs: ${error.message}`);
+              }
+              for (const line of lines.slice(1)) {
+                core.error(line);
+              }
+              await core.summary
+                .addHeading('Nightly refused: experimental Tests are not green', 3)
+                .addList(lines)
+                .write();
+              core.setFailed(lines[0]);
               return;
             }
 
@@ -1299,6 +1351,28 @@ jobs:
               Write-Error "Meson install failed"
               exit 1
           }
+
+          # Smoke-test the staged CLI before packaging. A missing load-time DLL
+          # (STATUS_DLL_NOT_FOUND, 0xC0000135, or 0xC00004BC) fails here
+          # instead of shipping an MSI whose yams.exe cannot start (v0.20.3).
+          $yamsExe = Get-ChildItem -Path $stageDir -Recurse -Filter "yams.exe" | Select-Object -First 1
+          if (-not $yamsExe) {
+              Write-Error "Staged yams.exe not found under $stageDir"
+              exit 1
+          }
+          $proc = Start-Process -FilePath $yamsExe.FullName -ArgumentList "--version" `
+              -NoNewWindow -PassThru -RedirectStandardOutput "$buildDir\yams-version.txt"
+          $null = $proc.Handle  # cache the handle so ExitCode is populated
+          if (-not $proc.WaitForExit(60000)) {
+              $proc.Kill()
+              Write-Error "Staged yams.exe --version did not exit within 60s"
+              exit 1
+          }
+          if ($proc.ExitCode -ne 0) {
+              Write-Error ("Staged yams.exe --version exited 0x{0:X8}" -f $proc.ExitCode)
+              exit 1
+          }
+          Write-Host "Staged CLI: $(Get-Content "$buildDir\yams-version.txt" -Raw)"
 
           # Build MSI using the packaging script
           $msiScript = "packaging\windows\build-msi.ps1"

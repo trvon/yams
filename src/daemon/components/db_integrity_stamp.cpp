@@ -5,6 +5,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -495,6 +496,58 @@ struct StampClaim {
     Error error;
 };
 
+#if defined(_WIN32)
+// Renames the stamp to `claimPath` as one exclusive claim.
+//
+// MoveFileExW is not one: it opens the source sharing read, write and delete, then renames
+// through that handle, so two concurrent callers can both open the stamp and both "succeed",
+// the second renaming the first's claim file away (and their opens make each other's reads
+// fail with ERROR_SHARING_VIOLATION). Both consumers then reject a valid stamp. Opening the
+// stamp with no sharing makes the open itself the claim; a concurrent consumer waits for it
+// and then finds no stamp. The wait also covers short-lived opens by scanners and indexers.
+Result<void> claimStampExclusively(const std::wstring& stampPath, const std::wstring& claimPath) {
+    if (stampPath.empty() || claimPath.empty()) {
+        return Error{ErrorCode::InvalidArgument, "integrity stamp path is not valid UTF-8"};
+    }
+    constexpr ULONGLONG kSharingWaitMs = 2000;
+    const auto deadline = GetTickCount64() + kSharingWaitMs;
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    for (;;) {
+        handle = CreateFileW(stampPath.c_str(), DELETE | SYNCHRONIZE, 0, nullptr, OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle != INVALID_HANDLE_VALUE) {
+            break;
+        }
+        const auto error = GetLastError();
+        if ((error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED) ||
+            GetTickCount64() >= deadline) {
+            return Error{ErrorCode::IOError,
+                         "cannot atomically claim integrity stamp: error " + std::to_string(error)};
+        }
+        Sleep(1);
+    }
+
+    const auto nameBytes = claimPath.size() * sizeof(wchar_t);
+    // FILE_RENAME_INFO ends in a variable-length name; size the buffer for header plus name.
+    constexpr std::size_t kRenameHeaderBytes = sizeof(FILE_RENAME_INFO);
+    std::vector<unsigned char> buffer(kRenameHeaderBytes + nameBytes, 0);
+    auto* renameInfo = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+    renameInfo->ReplaceIfExists = FALSE;
+    renameInfo->RootDirectory = nullptr;
+    renameInfo->FileNameLength = static_cast<DWORD>(nameBytes);
+    std::memcpy(renameInfo->FileName, claimPath.data(), nameBytes);
+    const bool renamed = SetFileInformationByHandle(handle, FileRenameInfo, renameInfo,
+                                                    static_cast<DWORD>(buffer.size())) != 0;
+    const auto renameError = GetLastError();
+    CloseHandle(handle);
+    if (!renamed) {
+        return Error{ErrorCode::IOError, "cannot atomically claim integrity stamp: error " +
+                                             std::to_string(renameError)};
+    }
+    return {};
+}
+#endif
+
 StampClaim claimStamp(const std::string& stampPath) {
     auto claimPath = stampPath;
     claimPath += ".claim.";
@@ -507,11 +560,9 @@ StampClaim claimStamp(const std::string& stampPath) {
     claimPath += std::to_string(gClaimSequence.fetch_add(1, std::memory_order_relaxed));
 
 #if defined(_WIN32)
-    const auto wideStampPath = windowsPath(stampPath);
-    const auto wideClaimPath = windowsPath(claimPath);
-    if (wideStampPath.empty() || wideClaimPath.empty() ||
-        MoveFileExW(wideStampPath.c_str(), wideClaimPath.c_str(), MOVEFILE_WRITE_THROUGH) == 0) {
-        return {false, {}, Error{ErrorCode::IOError, "cannot atomically claim integrity stamp"}};
+    if (auto claimed = claimStampExclusively(windowsPath(stampPath), windowsPath(claimPath));
+        !claimed) {
+        return {false, {}, Error{claimed.error().code, claimed.error().message}};
     }
 #else
     if (::rename(stampPath.c_str(), claimPath.c_str()) != 0) {

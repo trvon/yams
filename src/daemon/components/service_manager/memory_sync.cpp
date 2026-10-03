@@ -410,6 +410,47 @@ Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view co
     return {};
 }
 
+void ServiceManager::notifyMemorySyncEmbeddingsCommitted(
+    const std::vector<std::string>& documentHashes) {
+    // Runs on the embedding worker, so it only queues: the backfill publishes on the sync
+    // cycle, which owns the memory-sync service's lifetime and the outbound budget.
+    if (!config_.memorySync.enabled || documentHashes.empty()) {
+        return;
+    }
+    std::size_t dropped = 0;
+    {
+        std::lock_guard<std::mutex> lock(memorySyncCommittedVectorsMutex_);
+        for (const auto& hash : documentHashes) {
+            if (memorySyncCommittedVectorDocumentSet_.contains(hash)) {
+                continue;
+            }
+            if (memorySyncCommittedVectorDocuments_.size() >=
+                kMemorySyncCommittedVectorDocumentsCap) {
+                ++dropped;
+                continue;
+            }
+            memorySyncCommittedVectorDocumentSet_.insert(hash);
+            memorySyncCommittedVectorDocuments_.push_back(hash);
+        }
+    }
+    if (dropped > 0) {
+        spdlog::debug("[ServiceManager] memory_sync committed-vector queue full; {} document(s) "
+                      "left to the vector sweep",
+                      dropped);
+    }
+}
+
+std::optional<std::string> ServiceManager::takeMemorySyncCommittedVectorDocument() {
+    std::lock_guard<std::mutex> lock(memorySyncCommittedVectorsMutex_);
+    if (memorySyncCommittedVectorDocuments_.empty()) {
+        return std::nullopt;
+    }
+    auto hash = std::move(memorySyncCommittedVectorDocuments_.front());
+    memorySyncCommittedVectorDocuments_.pop_front();
+    memorySyncCommittedVectorDocumentSet_.erase(hash);
+    return hash;
+}
+
 Result<memory_sync::ApplyStagePass> ServiceManager::applyMemorySyncContentBlobs() {
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
@@ -706,7 +747,11 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         if (!applied) {
             return applied.error();
         }
-        return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+        StagePass pass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+        if (const auto& failure = adapter.failure()) {
+            pass.failure = failure->message;
+        }
+        return pass;
     };
     const auto applyTopology = [this]() -> Result<StagePass> {
         auto kgStore = getKgStore();
@@ -771,6 +816,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     std::size_t edgesPublished = 0;
     std::size_t recordsRetracted = 0;
     std::size_t skippedDocuments = 0;
+    std::size_t skippedVectors = 0;
 
     const auto publishDocument = [&]() -> bool {
         if (!repository || !contentStore) {
@@ -840,6 +886,72 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         return true;
     };
 
+    // Publish one vector row. A row that can never publish (no sync identity, unrecoverable
+    // record) is skipped so a pass continues past it instead of wedging on the same row every
+    // cycle, as documents are; it is reported once, on the first sweep pass or when committed,
+    // not again on every later pass. Other failures throw so the row is retried later.
+    const auto publishVectorRecord = [&](const vector::VectorRecord& record, bool reportSkip) {
+        const auto skipVector = [&](const Error& error) {
+            if (reportSkip) {
+                spdlog::warn("[ServiceManager] memory_sync backfill skipping vector {} of "
+                             "document {} (unpublishable): {}",
+                             record.chunk_id, record.document_hash, error.message);
+            }
+            ++skippedVectors;
+            notifyMemorySyncStage("backfill.skip_vector");
+        };
+        if (auto publishable = vector::VectorSyncAdapter::checkPublishable(record); !publishable) {
+            skipVector(publishable.error());
+            return;
+        }
+        vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_};
+        auto published = adapter.publish(record);
+        if (!published) {
+            if (isUnrecoverableBlobFailure(published.error().code)) {
+                skipVector(published.error());
+                return;
+            }
+            throw std::runtime_error(published.error().message);
+        }
+        ++vectorsPublished;
+        notifyMemorySyncStage("backfill.after_vector");
+    };
+
+    // Vectors an embedding job committed, one row per item, document by document, so a new or
+    // re-embedded vector reaches peers on the next cycle wherever the sweep happens to be.
+    const auto publishCommittedVector = [&]() -> bool {
+        if (!vectorDatabase) {
+            return false;
+        }
+        while (!shouldStop()) {
+            if (state.committedVectorDocument.empty()) {
+                auto next = takeMemorySyncCommittedVectorDocument();
+                if (!next) {
+                    return false;
+                }
+                state.committedVectorDocument = std::move(*next);
+                state.committedVectorChunkCursor.clear();
+            }
+            auto records = vectorDatabase->getVectorsPage(state.committedVectorDocument,
+                                                          state.committedVectorChunkCursor, 1);
+            if (!records) {
+                throw std::runtime_error(records.error().message);
+            }
+            if (records.value().empty() ||
+                records.value().front().document_hash != state.committedVectorDocument) {
+                // Every chunk of this document is out (or it has none left).
+                state.committedVectorDocument.clear();
+                state.committedVectorChunkCursor.clear();
+                continue;
+            }
+            const auto& record = records.value().front();
+            publishVectorRecord(record, /*reportSkip=*/true);
+            state.committedVectorChunkCursor = record.chunk_id;
+            return true;
+        }
+        return false;
+    };
+
     const auto publishVector = [&]() -> bool {
         if (!vectorDatabase) {
             return false;
@@ -850,18 +962,19 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
             throw std::runtime_error(records.error().message);
         }
         if (records.value().empty()) {
+            // Pass complete. The next one starts from the beginning, so vectors added or
+            // re-embedded behind the cursor are published by it, as topology passes repeat.
+            if (!state.vectorDocumentHashCursor.empty()) {
+                ++state.vectorSweepPasses;
+            }
+            state.vectorDocumentHashCursor.clear();
+            state.vectorChunkIdCursor.clear();
             return false;
         }
         const auto& record = records.value().front();
-        vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_};
-        auto published = adapter.publish(record);
-        if (!published) {
-            throw std::runtime_error(published.error().message);
-        }
+        publishVectorRecord(record, /*reportSkip=*/state.vectorSweepPasses == 0);
         state.vectorDocumentHashCursor = record.document_hash;
         state.vectorChunkIdCursor = record.chunk_id;
-        ++vectorsPublished;
-        notifyMemorySyncStage("backfill.after_vector");
         return true;
     };
 
@@ -963,21 +1076,34 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     // work this cycle. Documents (metadata and content) are what peers need to read the corpus;
     // vectors and topology are derived from them and only defer on a peer until the document
     // arrives. A publish costs a large share of the per-cycle time budget, so a fair rotation let
-    // derived records delay the documents every peer is waiting for.
+    // derived records delay the documents every peer is waiting for. Committed vectors are new
+    // work announced by embedding jobs, bounded by what was embedded, so they come next. The two
+    // catch-up sweeps repeat forever and so always have work: they alternate, item by item and
+    // across cycles, and a sweep that is done for this cycle leaves its turns to the other.
     using Domain = MemorySyncBackfillState::Domain;
-    constexpr std::array kDomainPriority{Domain::Documents, Domain::Vectors, Domain::Topology};
-    std::array<bool, kDomainPriority.size()> domainDone{};
+    constexpr std::size_t kDomainCount = 4;
+    std::array<bool, kDomainCount> domainDone{};
     bool domainFailed = false;
     while (!shouldStop()) {
-        bool published = false;
-        for (std::size_t index = 0; index < kDomainPriority.size() && !published; ++index) {
-            if (domainDone[index]) {
+        const Domain firstSweep = state.nextSweep;
+        const Domain secondSweep =
+            firstSweep == Domain::Vectors ? Domain::Topology : Domain::Vectors;
+        const std::array<Domain, kDomainCount> order{Domain::Documents, Domain::CommittedVectors,
+                                                     firstSweep, secondSweep};
+        std::optional<Domain> served;
+        for (const auto domain : order) {
+            auto& done = domainDone[static_cast<std::size_t>(domain)];
+            if (done) {
                 continue;
             }
+            bool published = false;
             try {
-                switch (kDomainPriority[index]) {
+                switch (domain) {
                     case Domain::Documents:
                         published = publishDocument();
+                        break;
+                    case Domain::CommittedVectors:
+                        published = publishCommittedVector();
                         break;
                     case Domain::Vectors:
                         published = publishVector();
@@ -994,20 +1120,29 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                 domainFailed = true;
                 spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
             }
+            if (published) {
+                served = domain;
+                break;
+            }
             // A domain with nothing left, or one that failed, sits out the rest of this cycle.
-            domainDone[index] = !published;
+            done = true;
         }
-        if (!published) {
+        if (!served) {
             break;
+        }
+        if (*served == Domain::Vectors) {
+            state.nextSweep = Domain::Topology;
+        } else if (*served == Domain::Topology) {
+            state.nextSweep = Domain::Vectors;
         }
         --remainingItems;
     }
 
     spdlog::debug(
         "[ServiceManager] memory_sync backfill scanned documents={} blobs={} vectors={} nodes={} "
-        "edges={} retracted={} skipped={}",
+        "edges={} retracted={} skipped_documents={} skipped_vectors={}",
         documentsPublished, blobsPublished, vectorsPublished, nodesPublished, edgesPublished,
-        recordsRetracted, skippedDocuments);
+        recordsRetracted, skippedDocuments, skippedVectors);
     if (domainFailed) {
         memorySyncApplyHealth_.recordPublishFailed();
     }
