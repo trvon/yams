@@ -1,5 +1,5 @@
 project('yams', ['cpp', 'c'],
-  version: '0.20.4', # x-release-please-version
+  version: '0.20.5', # x-release-please-version
   default_options: [
     'buildtype=release',
     'b_pie=true',
