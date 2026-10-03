@@ -47,12 +47,12 @@ enum class ProcessState : uint8_t {
  */
 struct PluginProcessConfig {
     std::filesystem::path executable; ///< Executable path (python3, ruby, node, etc.)
-    std::vector<std::string> args;    ///< Command-line arguments
-    std::unordered_map<std::string, std::string> env; ///< Environment variables
-    std::optional<std::filesystem::path> workdir;     ///< Working directory (optional)
-    std::chrono::milliseconds init_timeout{30'000};   ///< Initialization timeout
-    std::chrono::milliseconds rpc_timeout{60'000};    ///< Default RPC call timeout
-    bool redirect_stderr{true};                       ///< Capture stderr for logging
+    std::vector<std::string> args{};  ///< Command-line arguments
+    std::unordered_map<std::string, std::string> env{}; ///< Environment variables
+    std::optional<std::filesystem::path> workdir{};     ///< Working directory (optional)
+    std::chrono::milliseconds init_timeout{30'000};     ///< Initialization timeout
+    std::chrono::milliseconds rpc_timeout{60'000};      ///< Default RPC call timeout
+    bool redirect_stderr{true};                         ///< Capture stderr for logging
 
     /**
      * @brief Add environment variable (builder pattern)

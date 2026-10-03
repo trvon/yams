@@ -129,10 +129,10 @@ struct TopologyNeighbor {
 
 struct TopologyDocumentInput {
     std::string documentHash;
-    std::string filePath;
-    std::vector<float> embedding;
-    std::vector<TopologyNeighbor> neighbors;
-    std::unordered_map<std::string, std::string> metadata;
+    std::string filePath{};
+    std::vector<float> embedding{};
+    std::vector<TopologyNeighbor> neighbors{};
+    std::unordered_map<std::string, std::string> metadata{};
 };
 
 struct TopologyBuildConfig {
@@ -140,7 +140,7 @@ struct TopologyBuildConfig {
     TopologyInputKind inputKind{TopologyInputKind::Hybrid};
     // Versioned identity of the dense coordinates used for centroids and
     // representatives. Empty means theorem-backed narrowing must fail closed.
-    std::string embeddingSpaceIdentity;
+    std::string embeddingSpaceIdentity{};
     std::size_t maxDocuments{0};
     std::size_t maxNeighborsPerDocument{32};
     std::size_t maxDirtyRegionDocs{256};
@@ -205,13 +205,13 @@ struct TopologyDirtyRegion {
 struct DocumentClusterMembership {
     std::string documentHash;
     std::string clusterId;
-    std::optional<std::string> parentClusterId;
+    std::optional<std::string> parentClusterId{};
     std::size_t clusterLevel{0};
     double persistenceScore{0.0};
     double cohesionScore{0.0};
     double bridgeScore{0.0};
     DocumentTopologyRole role{DocumentTopologyRole::Core};
-    std::vector<std::string> overlapClusterIds;
+    std::vector<std::string> overlapClusterIds{};
 };
 
 struct ClusterRepresentative {
@@ -228,7 +228,7 @@ struct ClusterRoutingRepresentative {
 
 struct ClusterArtifact {
     std::string clusterId;
-    std::optional<std::string> parentClusterId;
+    std::optional<std::string> parentClusterId{};
     std::size_t level{0};
     std::size_t memberCount{0};
     double persistenceScore{0.0};
@@ -241,16 +241,16 @@ struct ClusterArtifact {
     /// remain together inside it. Both are zero when the construction supplied no pair evidence.
     std::size_t protectedPairCount{0};
     std::size_t preservedProtectedPairCount{0};
-    std::optional<ClusterRepresentative> medoid;
-    std::vector<std::string> memberDocumentHashes;
-    std::vector<std::string> overlapClusterIds;
+    std::optional<ClusterRepresentative> medoid{};
+    std::vector<std::string> memberDocumentHashes{};
+    std::vector<std::string> overlapClusterIds{};
     // Cluster centroid; empty when no member has an embedding. Spherical k-means stores the
     // unit mean direction it clusters against; the connected-component and Louvain engines
     // store the arithmetic member mean. Routing compares it by cosine, so only SOAR boundary
     // spill (Euclidean residuals) depends on its magnitude.
-    std::vector<float> centroidEmbedding;
+    std::vector<float> centroidEmbedding{};
     // Additional bounded representatives; centroidEmbedding is always the implicit first one.
-    std::vector<ClusterRoutingRepresentative> routingRepresentatives;
+    std::vector<ClusterRoutingRepresentative> routingRepresentatives{};
 };
 
 struct TopologyArtifactBatch {
@@ -305,12 +305,12 @@ struct WeightedDocumentSeed {
 struct TopologyRouteRequest {
     std::string queryText;
     std::vector<std::string> seedDocumentHashes;
-    std::vector<WeightedDocumentSeed> weightedSeedDocuments;
+    std::vector<WeightedDocumentSeed> weightedSeedDocuments{};
     std::size_t limit{8};
     RouteScoringMode scoringMode{RouteScoringMode::Current};
     // Phase S: optional dense signal for sparse-guided routing.
     // Empty queryEmbedding falls back to seed-only scoring (current behaviour).
-    std::vector<float> queryEmbedding;
+    std::vector<float> queryEmbedding{};
     // Blend factor for SparseGuidedClusterRouter: score = alpha · bm25_mass +
     // (1-alpha) · centroid_cosine. 0.0 = pure dense; 1.0 = pure sparse.
     float sparseDenseAlpha{0.5F};
@@ -334,14 +334,14 @@ struct TopologyRouteRequest {
 
 struct ClusterRoute {
     std::string clusterId;
-    std::optional<std::string> medoidDocumentHash;
+    std::optional<std::string> medoidDocumentHash{};
     double routeScore{0.0};
     double stabilityScore{0.0};
     std::size_t memberCount{0};
     /// Pre-scalarization query-to-chart costs. Missing values mean that the route request did not
     /// provide usable evidence on that axis; they must not be interpreted as zero cost.
-    std::optional<double> semanticCost;
-    std::optional<double> sparseCost;
+    std::optional<double> semanticCost{};
+    std::optional<double> sparseCost{};
     double persistencePenalty{1.0};
     double cohesionPenalty{1.0};
     double sizePenalty{0.0};

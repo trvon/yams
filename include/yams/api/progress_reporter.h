@@ -15,7 +15,7 @@ struct Progress {
     uint64_t totalBytes = 0;
     double percentage = 0.0;
     std::chrono::seconds estimatedRemaining{0};
-    std::chrono::steady_clock::time_point startTime;
+    std::chrono::steady_clock::time_point startTime{};
     std::string currentOperation;
     bool isCancelled = false;
 };

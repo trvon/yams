@@ -364,12 +364,12 @@ public:
 
 struct GrepRequest {
     std::string pattern;
-    std::vector<std::string> paths; // optional subset to search (files/dirs)
-    std::string scopePathPrefix;    // workspace root for daemon-owned cwd scoping
+    std::vector<std::string> paths{}; // optional subset to search (files/dirs)
+    std::string scopePathPrefix{};    // workspace root for daemon-owned cwd scoping
 
     // File selection
-    std::vector<std::string> includePatterns; // file patterns to include
-    bool recursive{true};                     // recursive directory search
+    std::vector<std::string> includePatterns{}; // file patterns to include
+    bool recursive{true};                       // recursive directory search
 
     // Context
     int beforeContext{0};
@@ -396,13 +396,13 @@ struct GrepRequest {
     int semanticLimit{10}; // limit for semantic results
 
     // Tag filtering
-    std::vector<std::string> tags; // filter by tags
-    bool matchAllTags{false};      // require all specified tags
+    std::vector<std::string> tags{}; // filter by tags
+    bool matchAllTags{false};        // require all specified tags
 
     // Session-isolated memory (PBI-082)
-    bool useSession{true};    // scope to active session when true (default)
-    std::string sessionName;  // explicit session to search (empty = current)
-    bool globalSearch{false}; // bypass session isolation, search global docs only
+    bool useSession{true};     // scope to active session when true (default)
+    std::string sessionName{}; // explicit session to search (empty = current)
+    bool globalSearch{false};  // bypass session isolation, search global docs only
 
     // Limits
     int maxCount{0}; // stop after N matches per file (0 => unlimited)
@@ -816,11 +816,11 @@ struct DeleteByNameRequest {
 
 struct DeleteByNameResult {
     std::string name;
-    std::string hash;
+    std::string hash{};
     bool deleted{false};
     bool contentRemoved{false};
     ErrorCode errorCode{ErrorCode::Success};
-    std::optional<std::string> error;
+    std::optional<std::string> error{};
 };
 
 struct DeleteByNameResponse {
@@ -832,7 +832,7 @@ struct DeleteByNameResponse {
 
 struct PruneVersionsRequest {
     std::size_t keepLatest{1};
-    std::optional<std::string> seriesKey;
+    std::optional<std::string> seriesKey{};
     bool dryRun{true};
 };
 

@@ -67,7 +67,7 @@ struct SearchRequest {
     std::string collection = {}; // Scope to a named corpus (collection metadata key)
 
     // Daemon-local runtime state. Deliberately excluded from serialization.
-    std::shared_ptr<const std::atomic<bool>> cancellationSignal;
+    std::shared_ptr<const std::atomic<bool>> cancellationSignal{};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -2434,7 +2434,7 @@ struct GraphQueryRequest {
 
 struct GraphExploreRequest {
     std::string query;
-    std::string scopePathPrefix;
+    std::string scopePathPrefix{};
     uint64_t maxFiles{8};
     uint64_t maxSymbols{32};
     uint64_t maxTotalChars{24000};

@@ -45,13 +45,13 @@ struct KnowledgeGraphStoreConfig {
  * Node representation (kg_nodes).
  */
 struct KGNode {
-    std::int64_t id = 0;                     // PRIMARY KEY (assigned by DB)
-    std::string nodeKey;                     // Unique logical key
-    std::optional<std::string> label;        // Human-readable name
-    std::optional<std::string> type;         // Node type/category
-    std::optional<std::int64_t> createdTime; // Unix seconds
-    std::optional<std::int64_t> updatedTime; // Unix seconds
-    std::optional<std::string> properties;   // JSON properties blob
+    std::int64_t id = 0;                       // PRIMARY KEY (assigned by DB)
+    std::string nodeKey;                       // Unique logical key
+    std::optional<std::string> label{};        // Human-readable name
+    std::optional<std::string> type{};         // Node type/category
+    std::optional<std::int64_t> createdTime{}; // Unix seconds
+    std::optional<std::int64_t> updatedTime{}; // Unix seconds
+    std::optional<std::string> properties{};   // JSON properties blob
 };
 
 /**
@@ -69,13 +69,13 @@ struct KGAlias {
  * Edge representation (kg_edges).
  */
 struct KGEdge {
-    std::int64_t id = 0;                     // PRIMARY KEY (assigned by DB)
-    std::int64_t srcNodeId = 0;              // REFERENCES kg_nodes(id)
-    std::int64_t dstNodeId = 0;              // REFERENCES kg_nodes(id)
-    std::string relation;                    // Relation/predicate
-    float weight = 1.0f;                     // Optional weight
-    std::optional<std::int64_t> createdTime; // Unix seconds
-    std::optional<std::string> properties;   // JSON properties blob
+    std::int64_t id = 0;                       // PRIMARY KEY (assigned by DB)
+    std::int64_t srcNodeId = 0;                // REFERENCES kg_nodes(id)
+    std::int64_t dstNodeId = 0;                // REFERENCES kg_nodes(id)
+    std::string relation;                      // Relation/predicate
+    float weight = 1.0f;                       // Optional weight
+    std::optional<std::int64_t> createdTime{}; // Unix seconds
+    std::optional<std::string> properties{};   // JSON properties blob
 };
 
 /**
@@ -93,14 +93,14 @@ struct KGNodeEmbedding {
  * Document entity annotation (doc_entities).
  */
 struct DocEntity {
-    std::int64_t id = 0;                     // PRIMARY KEY (assigned by DB)
-    std::int64_t documentId = 0;             // REFERENCES documents(id)
-    std::string entityText;                  // Surface text from document
-    std::optional<std::int64_t> nodeId;      // Linked node (nullable)
-    std::optional<std::int64_t> startOffset; // Byte start (optional)
-    std::optional<std::int64_t> endOffset;   // Byte end (exclusive, optional)
-    std::optional<float> confidence;         // [0,1]
-    std::optional<std::string> extractor;    // Which extractor/linker produced this
+    std::int64_t id = 0;                       // PRIMARY KEY (assigned by DB)
+    std::int64_t documentId = 0;               // REFERENCES documents(id)
+    std::string entityText;                    // Surface text from document
+    std::optional<std::int64_t> nodeId;        // Linked node (nullable)
+    std::optional<std::int64_t> startOffset{}; // Byte start (optional)
+    std::optional<std::int64_t> endOffset{};   // Byte end (exclusive, optional)
+    std::optional<float> confidence{};         // [0,1]
+    std::optional<std::string> extractor{};    // Which extractor/linker produced this
 };
 
 /**
@@ -121,7 +121,7 @@ struct GraphVersionPruneConfig {
 struct PathNodeDescriptor {
     std::string snapshotId;
     std::string path; // Normalized path within snapshot
-    std::string rootTreeHash;
+    std::string rootTreeHash{};
     bool isDirectory = false;
 };
 

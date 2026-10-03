@@ -35,7 +35,7 @@ struct FeatureComposition {
 };
 
 struct TopologyExtractionConfig {
-    std::vector<std::string> documentHashes;
+    std::vector<std::string> documentHashes{};
     int limit{0};
     std::size_t maxNeighborsPerDocument{32};
     bool includeEmbeddings{true};

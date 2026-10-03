@@ -114,7 +114,7 @@ struct DeleteOrphanedDocEntitiesOp {};
 struct UpdateRepairStatusOp {
     std::vector<std::string> hashes;
     metadata::RepairStatus status;
-    std::vector<metadata::EmbeddingDerivationToken> derivations;
+    std::vector<metadata::EmbeddingDerivationToken> derivations{};
 };
 struct UpsertTreeSnapshotOp {
     metadata::TreeSnapshotRecord record;
@@ -143,7 +143,7 @@ struct CompleteDocumentEmbeddingsByHashesOp {
     std::string modelName;
     // Token-bearing completions are distinct attempts, never coalesced by hash/model alone.
     // Use either legacy hashes or derivations, not both.
-    std::vector<metadata::EmbeddingDerivationToken> derivations;
+    std::vector<metadata::EmbeddingDerivationToken> derivations{};
 };
 struct InsertRelationshipOp {
     metadata::DocumentRelationship relationship;
