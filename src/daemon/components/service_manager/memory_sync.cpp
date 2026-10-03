@@ -706,7 +706,11 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         if (!applied) {
             return applied.error();
         }
-        return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+        StagePass pass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+        if (const auto& failure = adapter.failure()) {
+            pass.failure = failure->message;
+        }
+        return pass;
     };
     const auto applyTopology = [this]() -> Result<StagePass> {
         auto kgStore = getKgStore();
@@ -771,6 +775,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     std::size_t edgesPublished = 0;
     std::size_t recordsRetracted = 0;
     std::size_t skippedDocuments = 0;
+    std::size_t skippedVectors = 0;
 
     const auto publishDocument = [&]() -> bool {
         if (!repository || !contentStore) {
@@ -853,9 +858,28 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
             return false;
         }
         const auto& record = records.value().front();
+        // A row that can never publish (no sync identity, unrecoverable record) is skipped so
+        // the sweep continues past it instead of wedging this domain on the same row every
+        // cycle, as documents are. Other failures propagate so the row is retried later.
+        const auto skipVector = [&](const Error& error) {
+            spdlog::warn("[ServiceManager] memory_sync backfill skipping vector {} of document {} "
+                         "(unpublishable): {}",
+                         record.chunk_id, record.document_hash, error.message);
+            state.vectorDocumentHashCursor = record.document_hash;
+            state.vectorChunkIdCursor = record.chunk_id;
+            ++skippedVectors;
+            notifyMemorySyncStage("backfill.skip_vector");
+            return true;
+        };
+        if (auto publishable = vector::VectorSyncAdapter::checkPublishable(record); !publishable) {
+            return skipVector(publishable.error());
+        }
         vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_};
         auto published = adapter.publish(record);
         if (!published) {
+            if (isUnrecoverableBlobFailure(published.error().code)) {
+                return skipVector(published.error());
+            }
             throw std::runtime_error(published.error().message);
         }
         state.vectorDocumentHashCursor = record.document_hash;
@@ -1005,9 +1029,9 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
 
     spdlog::debug(
         "[ServiceManager] memory_sync backfill scanned documents={} blobs={} vectors={} nodes={} "
-        "edges={} retracted={} skipped={}",
+        "edges={} retracted={} skipped_documents={} skipped_vectors={}",
         documentsPublished, blobsPublished, vectorsPublished, nodesPublished, edgesPublished,
-        recordsRetracted, skippedDocuments);
+        recordsRetracted, skippedDocuments, skippedVectors);
     if (domainFailed) {
         memorySyncApplyHealth_.recordPublishFailed();
     }

@@ -147,7 +147,7 @@ TEST_CASE("vector sync adapter converges an embedding from A to B",
     CHECK(dbB->getVectorCount() == 0);
 }
 
-TEST_CASE("vector sync adapter rejects payload identity mismatches before mutation",
+TEST_CASE("vector sync adapter skips and reports payload identity mismatches",
           "[vector][memory-sync][identity][exact-scan]") {
     const auto skip = skipReasonIfAny();
     if (!skip.empty()) {
@@ -171,8 +171,10 @@ TEST_CASE("vector sync adapter rejects payload identity mismatches before mutati
                     .has_value());
 
         const auto applied = consumer.apply();
-        REQUIRE_FALSE(applied.has_value());
-        CHECK(applied.error().code == yams::ErrorCode::InvalidData);
+        REQUIRE(applied.has_value());
+        CHECK(applied.value() == 0);
+        REQUIRE(consumer.failure().has_value());
+        CHECK(consumer.failure()->code == yams::ErrorCode::InvalidData);
         CHECK(target->getVectorCount() == 0);
     }
 
@@ -187,8 +189,10 @@ TEST_CASE("vector sync adapter rejects payload identity mismatches before mutati
         REQUIRE(writer.erase("embedding/model/chunk-a", "chunk-b").has_value());
 
         const auto applied = consumer.apply();
-        REQUIRE_FALSE(applied.has_value());
-        CHECK(applied.error().code == yams::ErrorCode::InvalidData);
+        REQUIRE(applied.has_value());
+        CHECK(applied.value() == 0);
+        REQUIRE(consumer.failure().has_value());
+        CHECK(consumer.failure()->code == yams::ErrorCode::InvalidData);
         CHECK(target->getVector("chunk-b").has_value());
     }
 
@@ -203,8 +207,10 @@ TEST_CASE("vector sync adapter rejects payload identity mismatches before mutati
         REQUIRE(writer.erase("embedding/other-model/shared-chunk", "shared-chunk").has_value());
 
         const auto applied = consumer.apply();
-        REQUIRE_FALSE(applied.has_value());
-        CHECK(applied.error().code == yams::ErrorCode::InvalidData);
+        REQUIRE(applied.has_value());
+        CHECK(applied.value() == 0);
+        REQUIRE(consumer.failure().has_value());
+        CHECK(consumer.failure()->code == yams::ErrorCode::InvalidData);
         const auto retained = target->getVector("shared-chunk");
         REQUIRE(retained.has_value());
         CHECK(retained->model_id == "retained-model");
@@ -264,7 +270,7 @@ TEST_CASE("vector sync adapter defers a record whose content has not replicated 
     CHECK(retry.deferredKeys().empty());
 }
 
-TEST_CASE("vector sync adapter still fails the stage when the content probe errors",
+TEST_CASE("vector sync adapter reports a content probe error as a record failure",
           "[vector][memory-sync][prerequisite]") {
     const auto skip = skipReasonIfAny();
     if (!skip.empty()) {
@@ -289,8 +295,13 @@ TEST_CASE("vector sync adapter still fails the stage when the content probe erro
             return yams::Error{yams::ErrorCode::IOError, "probe failed"};
         }};
     const auto applied = consumer.apply();
-    REQUIRE_FALSE(applied.has_value());
-    CHECK(applied.error().code == yams::ErrorCode::IOError);
+    REQUIRE(applied.has_value());
+    CHECK(applied.value() == 0);
+    // Not a deferral: the probe did not say the content is missing, it failed.
+    CHECK(consumer.deferredKeys().empty());
+    REQUIRE(consumer.failure().has_value());
+    CHECK(consumer.failure()->code == yams::ErrorCode::IOError);
+    CHECK(consumer.failure()->message.find("embedding/model/probe-error") != std::string::npos);
     CHECK_FALSE(target->getVector("probe-error").has_value());
 }
 
@@ -305,9 +316,13 @@ TEST_CASE("vector sync adapter preserves rebuild dirty state after partial mutat
     MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
     MemorySyncService reader{makeBackend(temp.path / "sync"), MemorySyncConfig{"B", 50}};
     bool rebuildDirty = false;
+    bool failRebuild = true;
     std::size_t rebuildCalls = 0;
     auto rebuild = [&]() -> yams::Result<void> {
         ++rebuildCalls;
+        if (failRebuild) {
+            return yams::Error{yams::ErrorCode::InternalError, "injected rebuild failure"};
+        }
         return {};
     };
     VectorSyncAdapter consumer{*target, reader, rebuild, &rebuildDirty};
@@ -327,22 +342,27 @@ TEST_CASE("vector sync adapter preserves rebuild dirty state after partial mutat
     REQUIRE(writer.publish("embedding/model/z-invalid", bytes(nlohmann::json(invalid).dump()))
                 .has_value());
 
+    // The valid row lands despite the invalid one, then the index rebuild fails.
     const auto failed = consumer.apply();
     REQUIRE_FALSE(failed.has_value());
     CHECK(target->getVector("a-valid").has_value());
     CHECK(rebuildDirty);
-    CHECK(rebuildCalls == 0);
+    CHECK(rebuildCalls == 1);
 
-    REQUIRE(writer.erase("embedding/model/z-invalid", "z-invalid").has_value());
+    // Nothing new applies on the retry, but the dirty index from the earlier pass is rebuilt.
+    failRebuild = false;
     VectorSyncAdapter retry{*target, reader, rebuild, &rebuildDirty};
     const auto recovered = retry.apply();
     REQUIRE(recovered.has_value());
     CHECK(recovered.value() == 0);
-    CHECK(rebuildCalls == 1);
+    CHECK(rebuildCalls == 2);
     CHECK_FALSE(rebuildDirty);
+    // The 3-dimensional row is well formed but the 4-dimensional store rejects it, every pass.
+    REQUIRE(retry.failure().has_value());
+    CHECK(retry.failure()->message.starts_with("embedding/model/z-invalid: "));
 }
 
-TEST_CASE("vector sync adapter rejects unsupported multi-model chunk identity before mutation",
+TEST_CASE("vector sync adapter skips every winner of a chunk claimed by two models",
           "[vector][memory-sync][exact-scan]") {
     const auto skip = skipReasonIfAny();
     if (!skip.empty()) {
@@ -369,12 +389,14 @@ TEST_CASE("vector sync adapter rejects unsupported multi-model chunk identity be
     REQUIRE(publisher.publish(second).has_value());
 
     const auto applied = consumer.apply();
-    REQUIRE_FALSE(applied.has_value());
-    CHECK(applied.error().code == yams::ErrorCode::NotSupported);
+    REQUIRE(applied.has_value());
+    CHECK(applied.value() == 0);
+    REQUIRE(consumer.failure().has_value());
+    CHECK(consumer.failure()->code == yams::ErrorCode::NotSupported);
     CHECK(target->getVectorCount() == 0);
 }
 
-TEST_CASE("vector sync adapter validates malformed winner batches before mutation",
+TEST_CASE("vector sync adapter applies the valid winner of a batch with a malformed one",
           "[vector][memory-sync][exact-scan]") {
     const auto skip = skipReasonIfAny();
     if (!skip.empty()) {
@@ -400,9 +422,13 @@ TEST_CASE("vector sync adapter validates malformed winner batches before mutatio
     REQUIRE(syncA.publish("embedding/model/broken", malformedBytes).has_value());
 
     const auto applied = consumer.apply();
-    REQUIRE_FALSE(applied.has_value());
-    CHECK(applied.error().code == yams::ErrorCode::InvalidData);
-    CHECK(target->getVectorCount() == 0);
+    REQUIRE(applied.has_value());
+    CHECK(applied.value() == 1);
+    REQUIRE(consumer.failure().has_value());
+    CHECK(consumer.failure()->code == yams::ErrorCode::InvalidData);
+    CHECK(consumer.failure()->message.find("embedding/model/broken") != std::string::npos);
+    CHECK(target->getVector("valid-chunk").has_value());
+    CHECK(target->getVectorCount() == 1);
 }
 
 TEST_CASE("vector sync adapter propagates index rebuild failure and retries winner",
@@ -459,4 +485,130 @@ TEST_CASE("vector sync adapter rejects publishing without identity",
     const auto published = adapter.publish(record);
     REQUIRE_FALSE(published.has_value());
     CHECK(published.error().code == yams::ErrorCode::InvalidArgument);
+}
+
+TEST_CASE("vector sync adapter applies good records past a bad one",
+          "[vector][memory-sync][bad-record][exact-scan]") {
+    const auto skip = skipReasonIfAny();
+    if (!skip.empty()) {
+        SKIP(skip);
+    }
+    TempDirGuard temp;
+    auto target = makeVectorDb(4);
+    MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    MemorySyncService reader{makeBackend(temp.path / "sync"), MemorySyncConfig{"B", 50}};
+    const std::string documentHash(64, 'd');
+    const std::set<std::string> localContent{documentHash};
+    const auto contentExists = [&](std::string_view hash) -> yams::Result<bool> {
+        return localContent.contains(std::string(hash));
+    };
+
+    // Winners are scanned in key order. The bad record sorts between two good ones, so it must
+    // hide neither the record before it nor the record after it.
+    EmbeddingRecord good;
+    good.model = "model";
+    good.documentId = documentHash;
+    good.dimensions = 4;
+    good.chunkId = "a-good";
+    good.values = {1.0F, 0.0F, 0.0F, 0.0F};
+    EmbeddingRecord later = good;
+    later.chunkId = "z-good";
+    later.values = {0.0F, 0.0F, 0.0F, 1.0F};
+    REQUIRE(
+        writer.publish("embedding/model/a-good", bytes(nlohmann::json(good).dump())).has_value());
+    REQUIRE(
+        writer.publish("embedding/model/z-good", bytes(nlohmann::json(later).dump())).has_value());
+
+    const std::string badKey = "embedding/model/m-bad";
+    EmbeddingRecord bad = good;
+    bad.chunkId = "m-bad";
+    std::string badPayload;
+    SECTION("corrupt payload") {
+        badPayload = "{not json";
+    }
+    SECTION("dimension disagrees with its values") {
+        bad.values = {1.0F, 0.0F, 0.0F};
+        badPayload = nlohmann::json(bad).dump();
+    }
+    SECTION("dimension the local store cannot hold") {
+        bad.dimensions = 3;
+        bad.values = {1.0F, 0.0F, 0.0F};
+        badPayload = nlohmann::json(bad).dump();
+    }
+    SECTION("document identity is not a content hash") {
+        bad.documentId = "missing-doc";
+        badPayload = nlohmann::json(bad).dump();
+    }
+    SECTION("identity disagrees with its key") {
+        bad.chunkId = "other-chunk";
+        badPayload = nlohmann::json(bad).dump();
+    }
+    REQUIRE(writer.publish(badKey, bytes(badPayload)).has_value());
+
+    std::size_t rebuildCalls = 0;
+    VectorSyncAdapter consumer{*target, reader,
+                               [&]() -> yams::Result<void> {
+                                   ++rebuildCalls;
+                                   return {};
+                               },
+                               nullptr, contentExists};
+    const auto applied = consumer.apply();
+    REQUIRE(applied.has_value());
+    CHECK(applied.value() == 2);
+    CHECK(target->getVector("a-good").has_value());
+    CHECK(target->getVector("z-good").has_value());
+    CHECK_FALSE(target->getVector("m-bad").has_value());
+    CHECK_FALSE(target->getVector("other-chunk").has_value());
+    CHECK(rebuildCalls == 1);
+    // A bad record is a failure, not a deferral: no replicated prerequisite will fix it.
+    CHECK(consumer.deferredKeys().empty());
+    REQUIRE(consumer.failure().has_value());
+    CHECK(consumer.failure()->message.starts_with(badKey + ": "));
+
+    // The bad record stays a winner and is retried; the good ones are not applied twice.
+    VectorSyncAdapter retry{*target, reader, {}, nullptr, contentExists};
+    const auto again = retry.apply();
+    REQUIRE(again.has_value());
+    CHECK(again.value() == 0);
+    REQUIRE(retry.failure().has_value());
+    CHECK(retry.failure()->message.starts_with(badKey + ": "));
+}
+
+TEST_CASE("vector sync adapter replaces a chunk's model when its old model is tombstoned",
+          "[vector][memory-sync][exact-scan]") {
+    const auto skip = skipReasonIfAny();
+    if (!skip.empty()) {
+        SKIP(skip);
+    }
+    TempDirGuard temp;
+    auto target = makeVectorDb(4);
+    MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    MemorySyncService reader{makeBackend(temp.path / "sync"), MemorySyncConfig{"B", 50}};
+
+    VectorRecord local;
+    local.chunk_id = "chunk";
+    local.document_hash = "doc";
+    local.model_id = "old-model";
+    local.embedding = {1.0F, 0.0F, 0.0F, 0.0F};
+    local.embedding_dim = 4;
+    REQUIRE(target->insertVectorChecked(local).has_value());
+
+    EmbeddingRecord replacement;
+    replacement.model = "new-model";
+    replacement.chunkId = "chunk";
+    replacement.documentId = "doc";
+    replacement.dimensions = 4;
+    replacement.values = {0.0F, 1.0F, 0.0F, 0.0F};
+    REQUIRE(writer.erase("embedding/old-model/chunk", "chunk").has_value());
+    REQUIRE(writer.publish("embedding/new-model/chunk", bytes(nlohmann::json(replacement).dump()))
+                .has_value());
+
+    VectorSyncAdapter consumer{*target, reader};
+    const auto applied = consumer.apply();
+    REQUIRE(applied.has_value());
+    CHECK(applied.value() == 2);
+    CHECK_FALSE(consumer.failure().has_value());
+    const auto current = target->getVector("chunk");
+    REQUIRE(current.has_value());
+    CHECK(current->model_id == "new-model");
 }

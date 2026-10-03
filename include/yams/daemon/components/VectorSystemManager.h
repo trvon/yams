@@ -87,6 +87,13 @@ public:
         return std::atomic_load_explicit(&vectorDatabase_, std::memory_order_acquire);
     }
 
+#ifdef YAMS_TESTING
+    void testingSetVectorDatabase(std::shared_ptr<vector::VectorDatabase> database) {
+        std::atomic_store_explicit(&vectorDatabase_, std::move(database),
+                                   std::memory_order_release);
+    }
+#endif
+
     /**
      * @brief Get embedding dimension from database config.
      * @return Dimension or 0 if not initialized
