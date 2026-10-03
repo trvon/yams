@@ -27,7 +27,7 @@ public:
     }
 
     boost::asio::awaitable<std::optional<Response>>
-    process_streaming(const Request& request) override {
+    process_streaming(const Request& /*request*/) override {
         // Simulate long running operation
         boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
         timer.expires_after(std::chrono::milliseconds(100));

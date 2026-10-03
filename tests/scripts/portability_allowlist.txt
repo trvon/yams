@@ -119,7 +119,7 @@ src/daemon/client/sandbox_detection.cpp:74:portability/env-read # reviewed raw e
 src/daemon/client/sandbox_probe.cpp:54:portability/env-read # reviewed raw environment read
 src/daemon/client/sandbox_probe.cpp:60:portability/env-read # reviewed raw environment read
 src/daemon/components/DaemonMetrics.cpp:131:portability/env-read # reviewed raw environment read
-src/daemon/components/DaemonMetrics.cpp:1956:portability/env-read # reviewed raw environment read
+src/daemon/components/DaemonMetrics.cpp:1958:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:418:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:427:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:577:portability/env-read # reviewed raw environment read

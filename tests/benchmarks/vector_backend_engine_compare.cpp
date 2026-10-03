@@ -163,7 +163,7 @@ private:
 
     os_signpost_id_t id_ = OS_SIGNPOST_ID_INVALID;
 #endif
-    ProfilePhase phase_;
+    [[maybe_unused]] ProfilePhase phase_;
 };
 
 ProfilePhase ingestPhase(VectorSearchEngine engine) {
