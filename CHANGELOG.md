@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.20.5](https://github.com/trvon/yams/compare/v0.20.4...v0.20.5) (2026-10-03)
+
+
+### Fixed
+
+* **memory-sync:** publish committed vectors and wrap the vector sweep ([#266](https://github.com/trvon/yams/issues/266)) ([1b66715](https://github.com/trvon/yams/commit/1b6671528d2a27271d9e43b9aa9d17d272a7aef6))
+* **memory-sync:** skip bad vector records instead of stalling the stage ([#265](https://github.com/trvon/yams/issues/265)) ([44daa47](https://github.com/trvon/yams/commit/44daa47b94a47e9e603b28ec423ce1040a06ec70))
+* **test:** make Tests green on every platform ([#264](https://github.com/trvon/yams/issues/264)) ([1701bca](https://github.com/trvon/yams/commit/1701bcab66a46ce298e75c05550e99db63a416e8))
+* unblock the 0.20.5 release (aarch64 budget, MSVC linkage, mobile configure, Windows MSI) ([#263](https://github.com/trvon/yams/issues/263)) ([dc7a4fb](https://github.com/trvon/yams/commit/dc7a4fb499af8a0d8461faefac40792c0e8daea4))
+
 ## [0.20.4](https://github.com/trvon/yams/compare/v0.20.3...v0.20.4) (2026-10-02)
 
 
