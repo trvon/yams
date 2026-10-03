@@ -1300,6 +1300,28 @@ jobs:
               exit 1
           }
 
+          # Smoke-test the staged CLI before packaging. A missing load-time DLL
+          # (STATUS_DLL_NOT_FOUND, 0xC0000135, or 0xC00004BC) fails here
+          # instead of shipping an MSI whose yams.exe cannot start (v0.20.3).
+          $yamsExe = Get-ChildItem -Path $stageDir -Recurse -Filter "yams.exe" | Select-Object -First 1
+          if (-not $yamsExe) {
+              Write-Error "Staged yams.exe not found under $stageDir"
+              exit 1
+          }
+          $proc = Start-Process -FilePath $yamsExe.FullName -ArgumentList "--version" `
+              -NoNewWindow -PassThru -RedirectStandardOutput "$buildDir\yams-version.txt"
+          $null = $proc.Handle  # cache the handle so ExitCode is populated
+          if (-not $proc.WaitForExit(60000)) {
+              $proc.Kill()
+              Write-Error "Staged yams.exe --version did not exit within 60s"
+              exit 1
+          }
+          if ($proc.ExitCode -ne 0) {
+              Write-Error ("Staged yams.exe --version exited 0x{0:X8}" -f $proc.ExitCode)
+              exit 1
+          }
+          Write-Host "Staged CLI: $(Get-Content "$buildDir\yams-version.txt" -Raw)"
+
           # Build MSI using the packaging script
           $msiScript = "packaging\windows\build-msi.ps1"
           & $msiScript -StageDir $stageDir -Version $version -OutputDir $buildDir
