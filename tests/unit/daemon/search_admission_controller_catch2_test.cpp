@@ -76,7 +76,7 @@ TEST_CASE("SearchAdmissionController concurrent tryStart respects cap",
     for (int i = 0; i < totalAttempts; ++i)
         ctrl.onQueued();
 
-    std::atomic<int> started{0};
+    std::atomic<std::uint32_t> started{0};
     std::vector<std::thread> threads;
     threads.reserve(totalAttempts);
 

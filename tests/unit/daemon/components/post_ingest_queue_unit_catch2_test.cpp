@@ -313,15 +313,15 @@ yams::search::QueryConcept makeConcept(const std::string& text, const std::strin
             static_cast<std::uint32_t>(start + text.size())};
 }
 
-const yams::metadata::KGNode& findNode(const DeferredKGBatch& batch, const std::string& key) {
+const yams::metadata::KGNode& findNode(const DeferredKGBatch& batch, std::string_view key) {
     const auto it = std::find_if(batch.nodes.begin(), batch.nodes.end(),
                                  [&](const auto& node) { return node.nodeKey == key; });
     REQUIRE(it != batch.nodes.end());
     return *it;
 }
 
-const DeferredEdge& findEdge(const DeferredKGBatch& batch, const std::string& source,
-                             const std::string& target, const std::string& relation) {
+const DeferredEdge& findEdge(const DeferredKGBatch& batch, std::string_view source,
+                             std::string_view target, std::string_view relation) {
     const auto it =
         std::find_if(batch.deferredEdges.begin(), batch.deferredEdges.end(), [&](const auto& edge) {
             return edge.srcNodeKey == source && edge.dstNodeKey == target &&

@@ -20,9 +20,9 @@
 //   YAMS_BENCH_RUN_ID            - stamped into every record
 //
 // Run:
-//   YAMS_BENCH_OUTPUT=/tmp/topology_ablation.jsonl \
-//     ./build/debug/tests/benchmarks/topology_ablation_bench \
-//     "[!benchmark][topology-ablation]" --allow-running-no-tests
+//   export YAMS_BENCH_OUTPUT=/tmp/topology_ablation.jsonl
+//   ./build/debug/tests/benchmarks/topology_ablation_bench "[!benchmark][topology-ablation]"
+//   (plus --allow-running-no-tests)
 
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_session.hpp>

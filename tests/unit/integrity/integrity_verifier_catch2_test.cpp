@@ -56,7 +56,7 @@ struct IntegrityVerifierFixture {
 
     ~IntegrityVerifierFixture() {
         if (verifier && verifier->isRunning()) {
-            verifier->stopBackgroundVerification();
+            static_cast<void>(verifier->stopBackgroundVerification());
         }
         verifier.reset();
         refCounter.reset();
@@ -218,7 +218,7 @@ TEST_CASE_METHOD(IntegrityVerifierFixture, "PauseResumeVerification", "[integrit
     CHECK(verifier->isRunning());
     CHECK_FALSE(verifier->isPaused());
 
-    verifier->stopBackgroundVerification();
+    static_cast<void>(verifier->stopBackgroundVerification());
 
     auto pauseFailResult = verifier->pauseVerification();
     CHECK_FALSE(pauseFailResult.has_value());
@@ -235,7 +235,7 @@ TEST_CASE_METHOD(IntegrityVerifierFixture, "StatisticsAndReporting", "[integrity
     const auto& initialStats = verifier->getStatistics();
     CHECK(initialStats.blocksVerifiedTotal.load() == 0);
 
-    verifier->verifyBlock(testHash);
+    static_cast<void>(verifier->verifyBlock(testHash));
 
     const auto& stats = verifier->getStatistics();
     CHECK(stats.blocksVerifiedTotal.load() == 1);
@@ -261,7 +261,7 @@ TEST_CASE_METHOD(IntegrityVerifierFixture, "RecentFailures", "[integrity][verifi
     storeTestBlock();
     corruptTestBlock();
 
-    verifier->verifyBlock(testHash);
+    static_cast<void>(verifier->verifyBlock(testHash));
 
     auto failures = verifier->getRecentFailures(10);
     REQUIRE(failures.size() == 1);
@@ -294,7 +294,7 @@ TEST_CASE_METHOD(IntegrityVerifierFixture, "CallbackFunctionality", "[integrity]
     verifier->setAlertCallback(
         [&](const IntegrityReport& /*report*/) { alertCallbackCalled = true; });
 
-    verifier->verifyBlock(testHash);
+    static_cast<void>(verifier->verifyBlock(testHash));
 
     CHECK(progressCallbackCalled);
     CHECK(capturedResult.blockHash == testHash);
