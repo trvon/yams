@@ -390,22 +390,21 @@ struct WALFile::Iterator::Impl {
         }
 
         // Check if we have enough bytes for header
-        if (position + sizeof(WALEntry::Header) > dataEnd) {
+        if (position + WALEntry::Header::size() > dataEnd) {
             return std::nullopt;
         }
 
-        // Read header
-        WALEntry::Header header;
-        std::memcpy(&header, static_cast<uint8_t*>(file->pImpl->mappedMemory) + position,
-                    sizeof(header));
-
-        // Validate header
-        if (!header.isValid()) {
+        // Read and validate header
+        const auto header = WALEntry::decodeHeader(std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(static_cast<uint8_t*>(file->pImpl->mappedMemory) +
+                                               position),
+            WALEntry::Header::size()));
+        if (!header || !header->isValid()) {
             return std::nullopt;
         }
 
         // Check if we have enough bytes for full entry
-        size_t entrySize = sizeof(WALEntry::Header) + header.dataSize;
+        size_t entrySize = WALEntry::Header::size() + header->dataSize;
         if (position + entrySize > dataEnd) {
             return std::nullopt;
         }

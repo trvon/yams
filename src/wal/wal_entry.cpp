@@ -2,6 +2,7 @@
 #include <yams/wal/wal_entry.h>
 
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <iomanip>
 #include <iterator>
@@ -27,46 +28,118 @@ uint32_t checkedMetadataPartSize(size_t size, const char* field) {
     return static_cast<uint32_t>(size);
 }
 
-template <typename T> std::span<const std::byte> objectBytes(const T& value) noexcept {
-    static_assert(std::is_trivially_copyable_v<T>,
-                  "WAL serialization only supports trivially-copyable POD payloads");
-    return std::as_bytes(std::span<const T>(&value, 1));
+using Header = yams::wal::WALEntry::Header;
+using HeaderBytes = std::array<std::byte, Header::size()>;
+using TransactionData = yams::wal::WALEntry::TransactionData;
+
+// On-disk v1 entry header: the in-memory Header layout on LP64/LLP64 targets, host byte order.
+// Bytes 44..47 are alignment padding and are always written as zero. Header and payload
+// encoding goes field by field so padding contents never reach disk or the checksum; the
+// assertions pin the layout so a struct change cannot silently change the file format.
+constexpr size_t kHeaderMagicOffset = 0;
+constexpr size_t kHeaderVersionOffset = 4;
+constexpr size_t kHeaderSequenceOffset = 8;
+constexpr size_t kHeaderTimestampOffset = 16;
+constexpr size_t kHeaderTransactionOffset = 24;
+constexpr size_t kHeaderOperationOffset = 32;
+constexpr size_t kHeaderFlagsOffset = 33;
+constexpr size_t kHeaderReservedOffset = 34;
+constexpr size_t kHeaderDataSizeOffset = 36;
+constexpr size_t kHeaderChecksumOffset = 40;
+constexpr size_t kHeaderEncodedSize = 48;
+
+static_assert(std::is_standard_layout_v<Header> && std::is_trivially_copyable_v<Header>);
+static_assert(Header::size() == kHeaderEncodedSize);
+static_assert(offsetof(Header, magic) == kHeaderMagicOffset && sizeof(Header::magic) == 4);
+static_assert(offsetof(Header, version) == kHeaderVersionOffset && sizeof(Header::version) == 4);
+static_assert(offsetof(Header, sequenceNum) == kHeaderSequenceOffset &&
+              sizeof(Header::sequenceNum) == 8);
+static_assert(offsetof(Header, timestamp) == kHeaderTimestampOffset &&
+              sizeof(Header::timestamp) == 8);
+static_assert(offsetof(Header, transactionId) == kHeaderTransactionOffset &&
+              sizeof(Header::transactionId) == 8);
+static_assert(offsetof(Header, operation) == kHeaderOperationOffset &&
+              sizeof(Header::operation) == 1);
+static_assert(offsetof(Header, flags) == kHeaderFlagsOffset && sizeof(Header::flags) == 1);
+static_assert(offsetof(Header, reserved) == kHeaderReservedOffset && sizeof(Header::reserved) == 2);
+static_assert(offsetof(Header, dataSize) == kHeaderDataSizeOffset && sizeof(Header::dataSize) == 4);
+static_assert(offsetof(Header, checksum) == kHeaderChecksumOffset && sizeof(Header::checksum) == 4);
+
+// TransactionData: uint64 + uint32 followed by 4 bytes of padding, encoded as 16 bytes.
+constexpr size_t kTxnIdOffset = 0;
+constexpr size_t kTxnCountOffset = 8;
+constexpr size_t kTxnEncodedSize = 16;
+static_assert(std::is_standard_layout_v<TransactionData>);
+static_assert(sizeof(TransactionData) == kTxnEncodedSize);
+static_assert(offsetof(TransactionData, transactionId) == kTxnIdOffset &&
+              sizeof(TransactionData::transactionId) == 8);
+static_assert(offsetof(TransactionData, participantCount) == kTxnCountOffset &&
+              sizeof(TransactionData::participantCount) == 4);
+
+template <typename T> void putScalar(std::span<std::byte> out, size_t offset, T value) noexcept {
+    static_assert(std::is_scalar_v<T>);
+    std::memcpy(out.data() + offset, &value, sizeof(T));
 }
 
+template <typename T> T getScalar(std::span<const std::byte> in, size_t offset) noexcept {
+    static_assert(std::is_scalar_v<T>);
+    T value;
+    std::memcpy(&value, in.data() + offset, sizeof(T));
+    return value;
+}
+
+HeaderBytes encodeHeader(const Header& header, uint32_t checksum) noexcept {
+    HeaderBytes out{};
+    putScalar(out, kHeaderMagicOffset, header.magic);
+    putScalar(out, kHeaderVersionOffset, header.version);
+    putScalar(out, kHeaderSequenceOffset, header.sequenceNum);
+    putScalar(out, kHeaderTimestampOffset, header.timestamp);
+    putScalar(out, kHeaderTransactionOffset, header.transactionId);
+    putScalar(out, kHeaderOperationOffset, header.operation);
+    putScalar(out, kHeaderFlagsOffset, header.flags);
+    putScalar(out, kHeaderReservedOffset, header.reserved);
+    putScalar(out, kHeaderDataSizeOffset, header.dataSize);
+    putScalar(out, kHeaderChecksumOffset, checksum);
+    return out;
+}
+
+// Precondition: in.size() >= Header::size().
+Header decodeHeaderBytes(std::span<const std::byte> in) noexcept {
+    Header header{};
+    header.magic = getScalar<uint32_t>(in, kHeaderMagicOffset);
+    header.version = getScalar<uint32_t>(in, kHeaderVersionOffset);
+    header.sequenceNum = getScalar<uint64_t>(in, kHeaderSequenceOffset);
+    header.timestamp = getScalar<uint64_t>(in, kHeaderTimestampOffset);
+    header.transactionId = getScalar<uint64_t>(in, kHeaderTransactionOffset);
+    header.operation = getScalar<yams::wal::WALEntry::OpType>(in, kHeaderOperationOffset);
+    header.flags = getScalar<uint8_t>(in, kHeaderFlagsOffset);
+    header.reserved = getScalar<uint16_t>(in, kHeaderReservedOffset);
+    header.dataSize = getScalar<uint32_t>(in, kHeaderDataSizeOffset);
+    header.checksum = getScalar<uint32_t>(in, kHeaderChecksumOffset);
+    return header;
+}
+
+// CRC32 over the encoded header (checksum field zero, padding zero) followed by the payload.
+uint32_t entryChecksum(const Header& header, std::span<const std::byte> data) {
+    const auto headerBytes = encodeHeader(header, 0);
+    std::vector<std::byte> temp;
+    temp.reserve(headerBytes.size() + data.size());
+    temp.insert(temp.end(), headerBytes.begin(), headerBytes.end());
+    temp.insert(temp.end(), data.begin(), data.end());
+    return crc32(temp.data(), temp.size());
+}
+
+// Payload structs other than TransactionData are copied whole; they must have no padding.
 template <typename T> void appendObjectBytes(std::vector<std::byte>& out, const T& value) {
-    const auto bytes = objectBytes(value);
-    out.insert(out.end(), bytes.begin(), bytes.end());
-}
-
-std::array<std::byte, yams::wal::WALEntry::Header::size()>
-stableHeaderBytes(yams::wal::WALEntry::Header header) {
-    // Header has natural padding on some targets. Zeroing a copy makes checksum bytes stable
-    // without changing the on-disk layout expected by existing WAL files.
-    yams::wal::WALEntry::Header stable{};
-    stable.magic = header.magic;
-    stable.version = header.version;
-    stable.sequenceNum = header.sequenceNum;
-    stable.timestamp = header.timestamp;
-    stable.transactionId = header.transactionId;
-    stable.operation = header.operation;
-    stable.flags = header.flags;
-    stable.reserved = header.reserved;
-    stable.dataSize = header.dataSize;
-    stable.checksum = header.checksum;
-
-    std::array<std::byte, yams::wal::WALEntry::Header::size()> bytes{};
-    std::memcpy(bytes.data(), &stable, sizeof(stable));
-    return bytes;
-}
-
-void appendHeaderBytes(std::vector<std::byte>& out, const yams::wal::WALEntry::Header& header) {
-    const auto bytes = stableHeaderBytes(header);
+    static_assert(std::is_trivially_copyable_v<T> && std::has_unique_object_representations_v<T>,
+                  "WAL payloads copied as raw bytes must be trivially copyable without padding");
+    const auto bytes = std::as_bytes(std::span<const T>(&value, 1));
     out.insert(out.end(), bytes.begin(), bytes.end());
 }
 
 template <typename T> std::optional<T> readObject(std::span<const std::byte> in) {
-    static_assert(std::is_trivially_copyable_v<T>,
-                  "WAL deserialization only supports trivially-copyable POD payloads");
+    static_assert(std::is_trivially_copyable_v<T> && std::has_unique_object_representations_v<T>,
+                  "WAL payloads read as raw bytes must be trivially copyable without padding");
     if (in.size() < sizeof(T)) {
         return std::nullopt;
     }
@@ -81,106 +154,64 @@ template <typename T> std::optional<T> readObject(std::span<const std::byte> in)
 
 namespace yams::wal {
 
+std::optional<WALEntry::Header> WALEntry::decodeHeader(std::span<const std::byte> buffer) {
+    if (buffer.size() < Header::size()) {
+        return std::nullopt;
+    }
+    return decodeHeaderBytes(buffer);
+}
+
 std::vector<std::byte> WALEntry::serialize() const {
     std::vector<std::byte> result;
     result.reserve(totalSize());
 
-    // Copy header (update checksum first)
-    auto headerCopy = header;
-    headerCopy.checksum = 0; // Zero out for calculation
-
-    appendHeaderBytes(result, headerCopy);
-
-    // Copy data
+    const auto headerBytes = encodeHeader(header, entryChecksum(header, data));
+    result.insert(result.end(), headerBytes.begin(), headerBytes.end());
     result.insert(result.end(), data.begin(), data.end());
-
-    // Calculate and set checksum
-    uint32_t checksum = crc32(result.data(), result.size());
-    std::memcpy(result.data() + offsetof(Header, checksum), &checksum, sizeof(checksum));
-
     return result;
 }
 
 std::optional<WALEntry> WALEntry::deserialize(std::span<const std::byte> buffer) {
-    constexpr size_t headerSize = sizeof(Header);
+    constexpr size_t headerSize = Header::size();
 
-    // Check minimum size
-    if (buffer.size() < headerSize) {
+    auto header = decodeHeader(buffer);
+    if (!header || !header->isValid()) {
         return std::nullopt;
     }
 
-    // Read header
+    if (buffer.size() - headerSize < header->dataSize) {
+        return std::nullopt;
+    }
+
     WALEntry entry;
-    auto header = readObject<Header>(buffer);
-    if (!header) {
-        return std::nullopt;
-    }
     entry.header = *header;
-
-    // Validate header
-    if (!entry.header.isValid()) {
-        return std::nullopt;
-    }
-
-    // Check buffer has enough data
-    if (buffer.size() < headerSize + entry.header.dataSize) {
-        return std::nullopt;
-    }
-
-    // Read data
     const auto dataBegin = std::next(buffer.begin(), static_cast<std::ptrdiff_t>(headerSize));
-    entry.data.assign(dataBegin,
-                      std::next(dataBegin, static_cast<std::ptrdiff_t>(entry.header.dataSize)));
+    const auto dataEnd = std::next(dataBegin, static_cast<std::ptrdiff_t>(entry.header.dataSize));
+    entry.data.assign(dataBegin, dataEnd);
 
-    // Verify checksum
-    if (!entry.verifyChecksum()) {
-        return std::nullopt;
+    if (entry.verifyChecksum()) {
+        return entry;
     }
 
+    // Builds whose compiler left the header padding uninitialized (e.g. GCC) wrote those
+    // bytes to disk and checksummed them. Accept such an entry when the CRC over the bytes as
+    // stored (checksum field zeroed) matches, then normalize the in-memory checksum to the
+    // canonical encoding so verifyChecksum() holds for every returned entry.
+    std::vector<std::byte> stored(buffer.begin(), dataEnd);
+    putScalar(std::span<std::byte>(stored), kHeaderChecksumOffset, uint32_t{0});
+    if (crc32(stored.data(), stored.size()) != entry.header.checksum) {
+        return std::nullopt;
+    }
+    entry.updateChecksum();
     return entry;
 }
 
 void WALEntry::updateChecksum() {
-    // Temporarily zero checksum
-    header.checksum = 0;
-
-    // Calculate checksum over header and data
-    std::vector<std::byte> temp;
-    temp.reserve(totalSize());
-
-    appendHeaderBytes(temp, header);
-    temp.insert(temp.end(), data.begin(), data.end());
-
-    header.checksum = crc32(temp.data(), temp.size());
+    header.checksum = entryChecksum(header, data);
 }
 
 bool WALEntry::verifyChecksum() const {
-    // Save current checksum
-    uint32_t savedChecksum = header.checksum;
-
-    // Zero it out for calculation
-    auto headerCopy = header;
-    headerCopy.checksum = 0;
-
-    // Calculate checksum
-    std::vector<std::byte> temp;
-    temp.reserve(totalSize());
-
-    appendHeaderBytes(temp, headerCopy);
-    temp.insert(temp.end(), data.begin(), data.end());
-
-    uint32_t calculatedChecksum = crc32(temp.data(), temp.size());
-
-    if (savedChecksum == calculatedChecksum) {
-        return true;
-    }
-
-    // Older WAL entries were checksummed over raw Header bytes, including padding.
-    // Keep recovery compatible while all new writes use stable zero-padded bytes.
-    temp.clear();
-    appendObjectBytes(temp, headerCopy);
-    temp.insert(temp.end(), data.begin(), data.end());
-    return savedChecksum == crc32(temp.data(), temp.size());
+    return header.checksum == entryChecksum(header, data);
 }
 
 // StoreBlockData implementation
@@ -307,23 +338,22 @@ WALEntry::UpdateMetadataData::decode(std::span<const std::byte> data) {
 
 // TransactionData implementation
 std::vector<std::byte> WALEntry::TransactionData::encode(uint64_t txnId, uint32_t count) {
-    TransactionData data{};
-    data.transactionId = txnId;
-    data.participantCount = count;
-
-    std::vector<std::byte> result;
-    result.reserve(sizeof(TransactionData));
-    appendObjectBytes(result, data);
+    std::vector<std::byte> result(kTxnEncodedSize, std::byte{0});
+    putScalar(std::span<std::byte>(result), kTxnIdOffset, txnId);
+    putScalar(std::span<std::byte>(result), kTxnCountOffset, count);
     return result;
 }
 
 std::optional<WALEntry::TransactionData>
 WALEntry::TransactionData::decode(std::span<const std::byte> data) {
-    if (data.size() < sizeof(TransactionData)) {
+    if (data.size() < kTxnEncodedSize) {
         return std::nullopt;
     }
 
-    return readObject<TransactionData>(data);
+    TransactionData result{};
+    result.transactionId = getScalar<uint64_t>(data, kTxnIdOffset);
+    result.participantCount = getScalar<uint32_t>(data, kTxnCountOffset);
+    return result;
 }
 
 // CheckpointData implementation
