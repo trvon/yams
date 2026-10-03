@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -501,6 +502,17 @@ TEST_CASE("Memory sync clears a deferral on an edge whose cluster node was delet
 
 namespace {
 
+// Pins the vector-store environment for one case. CI runs the unit lanes with vectors
+// disabled (YAMS_DISABLE_VECTORS, YAMS_SQLITE_VEC_SKIP_INIT) and the vector DB forced in
+// memory; VectorDatabase then skips creating its tables, so these cases must not inherit that.
+struct VectorStoreEnv {
+    yams::test::ScopedEnvVar disable{"YAMS_DISABLE_VECTORS", std::nullopt};
+    yams::test::ScopedEnvVar disableSingular{"YAMS_DISABLE_VECTOR", std::nullopt};
+    yams::test::ScopedEnvVar disableDb{"YAMS_DISABLE_VECTOR_DB", std::nullopt};
+    yams::test::ScopedEnvVar skipVecInit{"YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt};
+    yams::test::ScopedEnvVar inMemory{"YAMS_VDB_IN_MEMORY", std::nullopt};
+};
+
 std::shared_ptr<vector::VectorDatabase> attachVectorDb(MeshNode& node) {
     vector::VectorDatabaseConfig config;
     config.database_path = ":memory:";
@@ -534,6 +546,7 @@ vector::VectorRecord makeVector(std::string chunkId, char documentDigit, std::st
 
 TEST_CASE("Memory sync vector backfill publishes good vectors past an unpublishable one",
           "[daemon][memory-sync][backfill][vector]") {
+    const VectorStoreEnv vectorEnv;
     TempRoot root;
     const auto sharedStore = root.path / "shared-store";
     fs::create_directories(sharedStore);
@@ -562,6 +575,7 @@ TEST_CASE("Memory sync vector backfill publishes good vectors past an unpublisha
 
 TEST_CASE("Memory sync vector apply stores good embeddings past a bad one",
           "[daemon][memory-sync][apply][vector]") {
+    const VectorStoreEnv vectorEnv;
     TempRoot root;
     const auto sharedStore = root.path / "shared-store";
     fs::create_directories(sharedStore);
