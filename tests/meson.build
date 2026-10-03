@@ -2553,6 +2553,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  core_cpp23_features_fallback_exe = executable('core_cpp23_features_fallback',
+    files('unit/core/cpp23_features_fallback_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   core_magic_numbers_exe = executable('core_magic_numbers',
     files('unit/core/magic_numbers_test.cpp'),
     include_directories: incs,
@@ -3222,6 +3231,12 @@ if catch2_dep.found()
 
 #Core tests
   test('core_cpp23_features', core_cpp23_features_exe,
+    suite: ['catch2', 'unit', 'core', 'cpp23'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('core_cpp23_features_fallback', core_cpp23_features_fallback_exe,
     suite: ['catch2', 'unit', 'core', 'cpp23'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
