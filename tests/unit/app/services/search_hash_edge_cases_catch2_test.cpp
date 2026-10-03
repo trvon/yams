@@ -247,7 +247,7 @@ TEST_CASE("Hash edge cases: ambiguity no crash", "[unit][services][search][hash]
     auto r = runAwait(f.search->search(rq));
     REQUIRE(r);
     CHECK(r.value().type == "hash");
-    CHECK(r.value().total >= 0);
+    static_cast<void>(r.value().total);
 }
 
 TEST_CASE("Hash edge cases: direct hash prefix lookup via MetadataRepository",

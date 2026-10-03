@@ -340,7 +340,7 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine statistics",
 
     auto compressionStats = engine->getCompressionStats();
     // Check that stats have reasonable values
-    CHECK((compressionStats.totalCompressedFiles.load() >= 0));
+    static_cast<void>(compressionStats.totalCompressedFiles.load());
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine remove",

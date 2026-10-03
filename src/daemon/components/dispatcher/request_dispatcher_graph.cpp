@@ -469,9 +469,8 @@ RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
     if (!totalCount) {
         co_return dispatch::makeErrorResponse(totalCount.error().code, totalCount.error().message);
     }
-    if (totalCount.value() < 0 ||
-        static_cast<std::uint64_t>(totalCount.value()) >
-            static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    if (static_cast<std::uint64_t>(totalCount.value()) >
+        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
         co_return dispatch::makeErrorResponse(ErrorCode::InvalidData,
                                               "Invalid graph node count for listByType");
     }

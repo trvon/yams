@@ -2806,7 +2806,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
 
         REQUIRE(std::holds_alternative<ListResponse>(resp));
         const auto& listResp = std::get<ListResponse>(resp);
-        CHECK(listResp.totalCount >= 0);
+        static_cast<void>(listResp.totalCount);
     }
 
     SECTION("list request works when inflight limit is disabled") {

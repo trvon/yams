@@ -509,7 +509,7 @@ TEST_CASE("SearchService: offset", "[unit][services][search]") {
     if (r1.value().total > 1) {
         auto r2 = runAwait(f.searchService->search(f.createBasicSearchRequest("test")));
         REQUIRE(r2);
-        CHECK(r2.value().results.size() >= 0);
+        static_cast<void>(r2.value().results.size());
     }
 }
 
