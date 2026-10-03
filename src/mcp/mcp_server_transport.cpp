@@ -631,7 +631,7 @@ void MCPServer::start() {
                         [self, toolName, toolArgs, id_copy, progressToken,
                          completed]() -> boost::asio::awaitable<void> {
                             if (progressToken)
-                                MCPServer::tlsProgressToken_ = std::move(*progressToken);
+                                MCPServer::tlsProgressToken_ = *progressToken;
                             try {
                                 json raw = co_await self->callToolAsync(toolName, toolArgs);
                                 bool expected = false;
