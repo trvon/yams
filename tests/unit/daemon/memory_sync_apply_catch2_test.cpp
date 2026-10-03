@@ -621,3 +621,133 @@ TEST_CASE("Memory sync vector apply stores good embeddings past a bad one",
     CHECK(apply.lastFailureStage == "vector");
     CHECK(apply.lastFailure.find("embedding/model/a-bad-dimension") != std::string::npos);
 }
+
+namespace {
+
+std::string embeddingKey(std::string_view chunkId) {
+    return "embedding/model/" + std::string(chunkId);
+}
+
+std::vector<float> publishedValues(const SharedStoreView& view, std::string_view chunkId) {
+    const auto cached = view.sync.readCached(embeddingKey(chunkId));
+    REQUIRE(cached.has_value());
+    const std::string text(reinterpret_cast<const char*>(cached.value().data()),
+                           cached.value().size());
+    return nlohmann::json::parse(text).get<memory_sync::EmbeddingRecord>().values;
+}
+
+/// Re-embed a one-chunk document: its vector is replaced by one with new values, as an
+/// embedding job does when the document's content or model changes.
+void reembed(vector::VectorDatabase& vectors, const std::string& chunkId, char documentDigit) {
+    REQUIRE(vectors.deleteVectorsByDocumentChecked(std::string(64, documentDigit)).has_value());
+    auto record = makeVector(chunkId, documentDigit, "model");
+    record.embedding = {0.0F, 0.0F, 1.0F, 0.0F};
+    REQUIRE(vectors.insertVectorChecked(record).has_value());
+}
+
+} // namespace
+
+TEST_CASE("Memory sync vector backfill wraps to publish vectors behind its cursor",
+          "[daemon][memory-sync][backfill][vector]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    origin.manager->testingSetMemorySyncBackfillItemBudget(1);
+
+    REQUIRE(vectors->insertVectorChecked(makeVector("swept-early", '2', "model")).has_value());
+    REQUIRE(vectors->insertVectorChecked(makeVector("swept-late", '6', "model")).has_value());
+    // Let the sweep publish both rows and reach the end of the table.
+    origin.backfill(4);
+    view.refresh();
+    REQUIRE(view.published(embeddingKey("swept-early")));
+    REQUIRE(view.published(embeddingKey("swept-late")));
+
+    // Both changes sort below the sweep's last position, (document '6...', "swept-late"), and
+    // nothing announces them: only a sweep that starts over can reach them.
+    REQUIRE(vectors->insertVectorChecked(makeVector("added-behind", '1', "model")).has_value());
+    reembed(*vectors, "swept-early", '2');
+    origin.backfill(8);
+
+    view.refresh();
+    CHECK(view.published(embeddingKey("added-behind")));
+    CHECK(publishedValues(view, "swept-early") == std::vector<float>{0.0F, 0.0F, 1.0F, 0.0F});
+}
+
+TEST_CASE("Memory sync publishes committed embeddings without waiting for the vector sweep",
+          "[daemon][memory-sync][backfill][vector]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    origin.manager->testingSetMemorySyncBackfillItemBudget(1);
+
+    // A bulk document sorts first, so a sweep starting over spends many items before it could
+    // reach anything after it.
+    constexpr int kBulkChunks = 6;
+    for (int i = 0; i < kBulkChunks; ++i) {
+        REQUIRE(vectors->insertVectorChecked(makeVector("bulk-" + std::to_string(i), '1', "model"))
+                    .has_value());
+    }
+    REQUIRE(vectors->insertVectorChecked(makeVector("reembedded", '5', "model")).has_value());
+    origin.backfill(kBulkChunks + 3);
+    view.refresh();
+    REQUIRE(view.published(embeddingKey("reembedded")));
+
+    // An embedding job commits a new document's vectors and re-embeds an existing one.
+    REQUIRE(vectors->insertVectorChecked(makeVector("committed-new", '3', "model")).has_value());
+    reembed(*vectors, "reembedded", '5');
+    origin.manager->notifyMemorySyncEmbeddingsCommitted(
+        {std::string(64, '3'), std::string(64, '5')});
+
+    // One item per committed vector: fewer than the sweep needs to get past the bulk document.
+    origin.backfill(2);
+
+    view.refresh();
+    CHECK(view.published(embeddingKey("committed-new")));
+    CHECK(publishedValues(view, "reembedded") == std::vector<float>{0.0F, 0.0F, 1.0F, 0.0F});
+}
+
+TEST_CASE("Memory sync topology backfill keeps progressing while the vector sweep wraps",
+          "[daemon][memory-sync][backfill][vector][topology]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    origin.manager->testingSetMemorySyncBackfillItemBudget(1);
+
+    constexpr int kVectors = 8;
+    constexpr int kNodes = 4;
+    for (int i = 0; i < kVectors; ++i) {
+        REQUIRE(vectors->insertVectorChecked(makeVector("sweep-" + std::to_string(i), '1', "model"))
+                    .has_value());
+    }
+    std::vector<std::string> nodes;
+    for (int i = 0; i < kNodes; ++i) {
+        nodes.push_back(origin.addNode("doc:fair-" + std::to_string(i), "document").nodeKey);
+    }
+
+    // A wrapping vector sweep always has work. These cycles are fewer than the two sweeps need
+    // back to back, but enough for each to publish its share when neither can take every item.
+    origin.backfill(2 * kNodes + 2);
+
+    view.refresh();
+    for (const auto& key : nodes) {
+        INFO("node=" << key);
+        CHECK(view.published(topologyNodeKey(key)));
+    }
+    int vectorsPublished = 0;
+    for (int i = 0; i < kVectors; ++i) {
+        vectorsPublished += view.published(embeddingKey("sweep-" + std::to_string(i))) ? 1 : 0;
+    }
+    CHECK(vectorsPublished >= kNodes);
+}
