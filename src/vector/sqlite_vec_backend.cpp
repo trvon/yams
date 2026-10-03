@@ -727,7 +727,13 @@ public:
         sqlite3_exec(db_, "PRAGMA synchronous=NORMAL", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA cache_size=-2048", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA temp_store=MEMORY", nullptr, nullptr, nullptr);
+#ifndef _WIN32
         sqlite3_exec(db_, "PRAGMA mmap_size=268435456", nullptr, nullptr, nullptr); // 256MB
+#endif
+        // No mmap on Windows: while this connection maps vectors.db, SetEndOfFile from any
+        // other handle fails with ERROR_USER_MAPPED_FILE, which SQLite's winTruncate ignores.
+        // RepairService's idle VACUUM runs on its own connection, so the rewritten file would
+        // never shrink on disk.
 
         // Register all sqlite-vec functions: vec0 module (for V1 migration), distance functions
         // (l2, l1, cosine, hamming), utility functions (vec_length, vec_type, vec_f32, etc.),

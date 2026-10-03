@@ -383,11 +383,11 @@ public:
                     if (vectorDb->tableExists()) {
                         spdlog::debug("Vector database tables created successfully");
                     }
-                    // Only stamp the sentinel when this init created the vector store.
-                    // Re-initializing over an existing database must not overwrite the
-                    // recorded dimension with a freshly resolved default and mask a
-                    // stored-dimension mismatch from `yams doctor`.
-                    if (!vectorsDbExisted) {
+                    // Only stamp the sentinel when this init created vectors.db on disk (an
+                    // in-memory store writes none). Re-initializing over an existing database
+                    // must not overwrite the recorded dimension with a freshly resolved
+                    // default and mask a stored-dimension mismatch from `yams doctor`.
+                    if (!vectorsDbExisted && fs::exists(vectorsDbPath)) {
                         vecutil::writeVectorSentinel(dataPath, vectorDb->getEmbeddingDim());
                     }
                 }

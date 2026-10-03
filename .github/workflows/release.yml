@@ -117,9 +117,61 @@ jobs:
                 run.head_sha === sourceSha)
               .sort((left, right) => right.id - left.id);
             if (successful.length === 0) {
-              core.setFailed(
-                `No successful completed Tests workflow run has exact head_sha ${sourceSha}`,
-              );
+              // Name the red streak instead of refusing silently: the newest failing Tests run
+              // on experimental, its SHA and failing jobs, and when experimental was last green.
+              // Diagnostics only; the refusal below stands whatever they find.
+              const lines = [
+                `No successful completed Tests workflow run has exact head_sha ${sourceSha}.`,
+              ];
+              try {
+                const sameSha = runs.filter((run) => run.head_sha === sourceSha);
+                if (sameSha.length > 0) {
+                  const latest = sameSha.sort((left, right) => right.id - left.id)[0];
+                  lines.push(`Tests on this SHA concluded ${latest.conclusion}: ${latest.html_url}`);
+                }
+                const recent = (await github.rest.actions.listWorkflowRuns({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id: 'tests.yml',
+                  branch: 'experimental',
+                  event: 'push',
+                  status: 'completed',
+                  per_page: 50,
+                })).data.workflow_runs.filter((run) => run.conclusion !== 'cancelled');
+                const failing = recent.find((run) => run.conclusion !== 'success');
+                const lastGreen = recent.find((run) => run.conclusion === 'success');
+                if (failing) {
+                  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: failing.id,
+                    per_page: 100,
+                  });
+                  const failedJobs = jobs
+                    .filter((job) => job.conclusion === 'failure' || job.conclusion === 'timed_out')
+                    .map((job) => job.name);
+                  lines.push(
+                    `Newest failing Tests run on experimental: ${failing.html_url} ` +
+                    `(sha ${failing.head_sha.slice(0, 12)}, ${failing.created_at}, ${failing.conclusion}).`,
+                    `Failing jobs: ${failedJobs.length > 0 ? failedJobs.join(', ') : '(none reported)'}.`,
+                  );
+                }
+                const streak = lastGreen ? recent.indexOf(lastGreen) : recent.length;
+                lines.push(lastGreen
+                  ? `Last green Tests run on experimental: ${lastGreen.html_url} ` +
+                    `(${lastGreen.created_at}); ${streak} completed push run(s) since are red.`
+                  : `No green Tests run among the last ${recent.length} completed experimental push runs.`);
+              } catch (error) {
+                lines.push(`Could not summarize recent Tests runs: ${error.message}`);
+              }
+              for (const line of lines.slice(1)) {
+                core.error(line);
+              }
+              await core.summary
+                .addHeading('Nightly refused: experimental Tests are not green', 3)
+                .addList(lines)
+                .write();
+              core.setFailed(lines[0]);
               return;
             }
 

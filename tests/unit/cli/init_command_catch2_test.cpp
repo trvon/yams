@@ -126,6 +126,25 @@ private:
     std::streambuf* oldCout_;
 };
 
+// Pins the vector-store environment for one case. CI runs the unit lanes with vectors
+// disabled and the vector DB forced in memory; init cases that assert on the on-disk store
+// and its dimension sentinel must not inherit that, and the in-memory case must not depend
+// on it either.
+struct VectorStoreEnv {
+    yams::test::ScopedEnvVar disable{"YAMS_DISABLE_VECTORS", std::nullopt};
+    yams::test::ScopedEnvVar disableSingular{"YAMS_DISABLE_VECTOR", std::nullopt};
+    yams::test::ScopedEnvVar disableDb{"YAMS_DISABLE_VECTOR_DB", std::nullopt};
+    yams::test::ScopedEnvVar skipVecInit{"YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt};
+    yams::test::ScopedEnvVar inMemory;
+
+    static VectorStoreEnv onDisk() { return VectorStoreEnv{std::nullopt}; }
+    static VectorStoreEnv forcedInMemory() { return VectorStoreEnv{std::string("1")}; }
+
+private:
+    explicit VectorStoreEnv(std::optional<std::string> inMemoryValue)
+        : inMemory("YAMS_VDB_IN_MEMORY", std::move(inMemoryValue)) {}
+};
+
 // Redirects std::cin from a scripted string for the duration of the scope.
 class ScopedStdin {
 public:
@@ -310,6 +329,7 @@ TEST_CASE("ConfigMigrator: createDefaultLatestConfig generates valid zero-warnin
 
 TEST_CASE("InitCommand: Fresh instance setup generates conflict-free embedding config and sentinel",
           "[cli][init][catch2]") {
+    const auto vectorEnv = VectorStoreEnv::onDisk();
     CliTestHelper helper;
 
     const int rc = helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"});
@@ -439,6 +459,7 @@ embedding_dim = 384
 
 TEST_CASE("InitCommand: re-init does not overwrite an existing vector dimension sentinel",
           "[cli][init][catch2]") {
+    const auto vectorEnv = VectorStoreEnv::onDisk();
     CliTestHelper helper;
     REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
 
@@ -453,6 +474,20 @@ TEST_CASE("InitCommand: re-init does not overwrite an existing vector dimension 
     const auto sentinelDim = yams::daemon::ConfigResolver::readVectorSentinelDim(helper.dataDir);
     REQUIRE(sentinelDim.has_value());
     CHECK(*sentinelDim == 384);
+}
+
+TEST_CASE("InitCommand: an in-memory vector store leaves no vectors.db and no sentinel",
+          "[cli][init][catch2]") {
+    // The sentinel records the dimension of the on-disk vector store. When the vector DB is
+    // forced in memory nothing is written to disk, so init must not stamp a sentinel that a
+    // later on-disk init would then treat as authoritative.
+    const auto vectorEnv = VectorStoreEnv::forcedInMemory();
+    CliTestHelper helper;
+
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+    CHECK(fs::exists(helper.dataDir / "yams.db"));
+    CHECK_FALSE(fs::exists(helper.dataDir / "vectors.db"));
+    CHECK_FALSE(yams::daemon::ConfigResolver::readVectorSentinelDim(helper.dataDir).has_value());
 }
 
 TEST_CASE("InitCommand: already-initialized interactive init prompts for the tuning profile once",

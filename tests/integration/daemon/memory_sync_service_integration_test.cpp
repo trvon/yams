@@ -16,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <yams/api/content_store.h>
@@ -187,6 +188,20 @@ yams::test::DaemonHarness::Options makeMemorySyncHarnessOptions(std::string node
          << "sync_interval_ms = 60000\n";
     options.isolatedConfigContents = toml.str();
     return options;
+}
+
+// The daemon's own memory_sync worker reconciles once as soon as it starts and then runs the
+// apply/backfill callbacks on its thread. On a slow host that first cycle can land after the
+// harness reports ready, inside a test's observer window. Stage observers that count calls made
+// by the test tag the test's caller threads and ignore stages reported from any other thread.
+thread_local bool tlsTestStageCaller = false;
+
+template <typename Fn> void asTestStageCaller(Fn&& fn) {
+    tlsTestStageCaller = true;
+    struct Reset {
+        ~Reset() { tlsTestStageCaller = false; }
+    } reset;
+    std::forward<Fn>(fn)();
 }
 
 std::unique_ptr<yams::storage::FilesystemBackend>
@@ -752,7 +767,7 @@ TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
     std::promise<void> releaseFirstPromise;
     auto releaseFirst = releaseFirstPromise.get_future().share();
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
-        if (stage != "apply.after_content") {
+        if (stage != "apply.after_content" || !tlsTestStageCaller) {
             return;
         }
         if (contentStages.fetch_add(1, std::memory_order_acq_rel) == 0) {
@@ -764,18 +779,25 @@ TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
     });
 
     const auto applyAttemptsBefore = serviceManager->testingMemorySyncApplyAttempts();
-    auto first = std::async(std::launch::async,
-                            [serviceManager] { serviceManager->testingApplyMemorySyncWinners(); });
+    auto first = std::async(std::launch::async, [serviceManager] {
+        asTestStageCaller([serviceManager] { serviceManager->testingApplyMemorySyncWinners(); });
+    });
     REQUIRE(firstEntered.wait_for(5s) == std::future_status::ready);
     CHECK(serviceManager->testingMemorySyncApplyLockHeld());
-    auto second = std::async(std::launch::async,
-                             [serviceManager] { serviceManager->testingApplyMemorySyncWinners(); });
+    std::atomic<bool> secondCalling{false};
+    auto second = std::async(std::launch::async, [serviceManager, &secondCalling] {
+        secondCalling.store(true, std::memory_order_release);
+        asTestStageCaller([serviceManager] { serviceManager->testingApplyMemorySyncWinners(); });
+    });
+    // A worker cycle may add an attempt of its own, so wait for at least both test calls.
     const auto secondApplyDeadline = std::chrono::steady_clock::now() + 5s;
-    while (serviceManager->testingMemorySyncApplyAttempts() < applyAttemptsBefore + 2 &&
+    while ((!secondCalling.load(std::memory_order_acquire) ||
+            serviceManager->testingMemorySyncApplyAttempts() < applyAttemptsBefore + 2) &&
            std::chrono::steady_clock::now() < secondApplyDeadline) {
         std::this_thread::yield();
     }
-    REQUIRE(serviceManager->testingMemorySyncApplyAttempts() == applyAttemptsBefore + 2);
+    REQUIRE(secondCalling.load(std::memory_order_acquire));
+    REQUIRE(serviceManager->testingMemorySyncApplyAttempts() >= applyAttemptsBefore + 2);
     CHECK(contentStages.load(std::memory_order_acquire) == 1);
 
     releaseFirstPromise.set_value();
@@ -817,7 +839,7 @@ TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
     std::promise<void> releaseFirstBackfillPromise;
     auto releaseFirstBackfill = releaseFirstBackfillPromise.get_future().share();
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
-        if (!stage.starts_with("backfill.")) {
+        if (!stage.starts_with("backfill.") || !tlsTestStageCaller) {
             return;
         }
         if (backfillStages.fetch_add(1, std::memory_order_acq_rel) == 0) {
@@ -829,12 +851,12 @@ TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
     });
     const auto backfillAttemptsBefore = serviceManager->testingMemorySyncBackfillAttempts();
     auto firstBackfill = std::async(std::launch::async, [serviceManager] {
-        serviceManager->testingPublishMemorySyncBackfill();
+        asTestStageCaller([serviceManager] { serviceManager->testingPublishMemorySyncBackfill(); });
     });
     REQUIRE(firstBackfillEntered.wait_for(5s) == std::future_status::ready);
     CHECK(serviceManager->testingMemorySyncBackfillLockHeld());
     auto secondBackfill = std::async(std::launch::async, [serviceManager] {
-        serviceManager->testingPublishMemorySyncBackfill();
+        asTestStageCaller([serviceManager] { serviceManager->testingPublishMemorySyncBackfill(); });
     });
     const auto secondBackfillDeadline = std::chrono::steady_clock::now() + 5s;
     while (serviceManager->testingMemorySyncBackfillAttempts() < backfillAttemptsBefore + 2 &&
