@@ -1598,7 +1598,10 @@ if catch2_dep.found()
     files('unit/wal/wal_entry_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    cpp_args: test_cpp_noerror_args + [
+      '-DYAMS_TESTING=1',
+      '-DYAMS_WAL_FIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixtures' / 'wal'),
+    ],
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
