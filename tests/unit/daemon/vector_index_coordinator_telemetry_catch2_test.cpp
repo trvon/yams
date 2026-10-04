@@ -7,14 +7,19 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
+
+#include <spdlog/sinks/null_sink.h>
+#include <spdlog/spdlog.h>
 
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -22,43 +27,70 @@
 using namespace yams::daemon;
 using namespace std::chrono_literals;
 
+namespace {
+
+// Checkpoint tests assert state, not log output. A synchronous console sink can block after the
+// future times out, so keep diagnostic I/O outside their caller-completion deadline.
+class ScopedCheckpointLogger {
+public:
+    ScopedCheckpointLogger() : previous_(spdlog::default_logger()) {
+        spdlog::set_default_logger(std::make_shared<spdlog::logger>(
+            "checkpoint-test", std::make_shared<spdlog::sinks::null_sink_mt>()));
+    }
+    ~ScopedCheckpointLogger() { spdlog::set_default_logger(std::move(previous_)); }
+
+private:
+    std::shared_ptr<spdlog::logger> previous_;
+};
+
+} // namespace
+
 TEST_CASE("requestCheckpoint: stalled strand does not block the caller forever",
           "[coordinator][checkpoint]") {
+    ScopedCheckpointLogger logger;
     boost::asio::io_context io;
+    auto work = boost::asio::make_work_guard(io);
     VectorIndexCoordinator coord(io.get_executor(), nullptr, nullptr);
     coord.testing_setCheckpointWaitTimeout(20ms);
 
-    std::mutex mutex;
-    std::condition_variable completedCv;
-    bool completed = false;
-    bool result = true;
+    std::promise<void> started;
+    auto startedFuture = started.get_future();
+    std::promise<bool> completed;
+    auto completedFuture = completed.get_future();
     std::thread checkpointThread([&] {
-        result = coord.requestCheckpoint();
-        {
-            std::lock_guard lock(mutex);
-            completed = true;
-        }
-        completedCv.notify_one();
+        started.set_value();
+        completed.set_value(coord.requestCheckpoint());
     });
 
-    bool completedBeforeExecutorRan = false;
-    {
-        std::unique_lock lock(mutex);
-        completedBeforeExecutorRan = completedCv.wait_for(lock, 250ms, [&] { return completed; });
-    }
+    // Windows thread startup is not part of the checkpoint wait contract.
+    const bool workerStarted = startedFuture.wait_for(1s) == std::future_status::ready;
+    const bool completedBeforeExecutorRan =
+        workerStarted && completedFuture.wait_for(250ms) == std::future_status::ready;
+    const auto stalled = coord.checkpointSnapshot();
 
-    // Let the old unbounded implementation finish so a red test cannot hang its process.
+    // Let an unbounded implementation finish before asserting. The work guard also keeps this
+    // rescue runner alive if a delayed caller has not posted its callback yet.
+    std::thread rescue;
     if (!completedBeforeExecutorRan) {
-        io.run();
+        rescue = std::thread([&] { io.run(); });
     }
     checkpointThread.join();
+    work.reset();
+    if (rescue.joinable()) {
+        rescue.join();
+    }
 
+    REQUIRE(workerStarted);
     REQUIRE(completedBeforeExecutorRan);
-    CHECK_FALSE(result);
+    CHECK_FALSE(completedFuture.get());
+    CHECK(stalled.phase == VectorCheckpointPhase::Queued);
+    CHECK(stalled.timedOut == 1);
+    CHECK(stalled.started == 0);
 }
 
 TEST_CASE("requestCheckpoint: repeated timeouts keep one persistence callback queued",
           "[coordinator][checkpoint][coalesce]") {
+    ScopedCheckpointLogger logger;
     boost::asio::io_context io;
     VectorIndexCoordinator coord(io.get_executor(), nullptr, nullptr);
     coord.testing_setCheckpointWaitTimeout(10ms);
@@ -119,6 +151,7 @@ TEST_CASE("requestCheckpoint: repeated timeouts keep one persistence callback qu
 
 TEST_CASE("requestCheckpoint: timed-out callback may run after coordinator destruction",
           "[coordinator][checkpoint][lifetime]") {
+    ScopedCheckpointLogger logger;
     boost::asio::io_context io;
     {
         VectorIndexCoordinator coord(io.get_executor(), nullptr, nullptr);
