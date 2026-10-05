@@ -2912,6 +2912,7 @@ DaemonHarnessOptions benchHarnessOptions() {
         .autoLoadPlugins = false,
         .enableAutoRepair = true,
         .isolateState = true,
+        .isolateEnvironment = true,
     };
 }
 
@@ -2922,6 +2923,7 @@ DaemonHarnessOptions benchHarnessOptions(const BenchConfig& cfg) {
         .autoLoadPlugins = cfg.enablePlugins,
         .enableAutoRepair = true,
         .isolateState = true,
+        .isolateEnvironment = true,
         .pluginDir = cfg.pluginDir,
         .dataDir = cfg.dataDir,
         .configPath = cfg.configPath,
