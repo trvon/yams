@@ -106,8 +106,15 @@ int main(int /*argc*/, char** /*argv*/) {
     out["fault_docs"] = faultDocs;
     out["doc_size"] = docSize;
 
-    yams::test::DaemonHarnessOptions opts;
+    // Full isolation: temp HOME/XDG tree, explicit minimal config, scrubbed YAMS_* path vars, so a
+    // bench run can never read the developer's config or index their files.
+    auto opts = yams::test::DaemonHarness::isolatedOptions();
     opts.useMockModelProvider = true;
+    // Deterministic in-process embeddings so the "embed" fault kind is repairable without
+    // consulting any installed model configuration. The harness isolation also scrubs
+    // YAMS_EMBED_BACKEND/YAMS_PREFERRED_MODEL, which would otherwise outrank this TOML.
+    opts.isolatedConfigContents =
+        "[embeddings]\nbackend = \"simeon\"\npreferred_model = \"simeon-default\"\n";
     opts.autoLoadPlugins = false;
     // RepairService is only constructed when auto-repair is enabled; we still
     // drive on-demand RepairRequest for measurement (not background auto-scan).
@@ -166,8 +173,8 @@ int main(int /*argc*/, char** /*argv*/) {
     const auto injectEnd = std::chrono::steady_clock::now();
     out["faults_injected"] = injected;
     out["inject_failures"] = injectFailed;
-    out["inject_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(injectEnd - injectStart)
-                           .count();
+    out["inject_ms"] =
+        std::chrono::duration_cast<std::chrono::milliseconds>(injectEnd - injectStart).count();
 
     // Brief settle for post-ingest metadata commit.
     std::this_thread::sleep_for(500ms);
@@ -180,16 +187,16 @@ int main(int /*argc*/, char** /*argv*/) {
     std::string lastOp;
 
     const auto repairStart = std::chrono::steady_clock::now();
-    auto repairResult = yams::cli::run_sync(
-        client.callRepair(repairReq,
-                          [&](const yams::daemon::RepairEvent& ev) {
-                              ++eventCount;
-                              lastSucceeded = ev.succeeded;
-                              lastFailed = ev.failed;
-                              lastSkipped = ev.skipped;
-                              lastOp = ev.operation;
-                          }),
-        std::chrono::seconds(repairTimeoutS));
+    auto repairResult =
+        yams::cli::run_sync(client.callRepair(repairReq,
+                                              [&](const yams::daemon::RepairEvent& ev) {
+                                                  ++eventCount;
+                                                  lastSucceeded = ev.succeeded;
+                                                  lastFailed = ev.failed;
+                                                  lastSkipped = ev.skipped;
+                                                  lastOp = ev.operation;
+                                              }),
+                            std::chrono::seconds(repairTimeoutS));
     const auto repairEnd = std::chrono::steady_clock::now();
     const auto repairMs =
         std::chrono::duration_cast<std::chrono::milliseconds>(repairEnd - repairStart).count();
@@ -229,8 +236,7 @@ int main(int /*argc*/, char** /*argv*/) {
         out["operation_results"] = ops;
         out["faults_repaired"] = repaired;
         // Residual is a lower bound: inject failures + unrepaired.
-        const int64_t residual =
-            static_cast<int64_t>(injected) - static_cast<int64_t>(repaired);
+        const int64_t residual = static_cast<int64_t>(injected) - static_cast<int64_t>(repaired);
         out["residual_faults"] = residual > 0 ? residual : 0;
         out["repair_docs_per_s"] =
             repairMs > 0 ? (1000.0 * static_cast<double>(repaired) / static_cast<double>(repairMs))
