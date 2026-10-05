@@ -14,6 +14,9 @@
 #include <yams/plugins/entity_extractor_v2.h>
 
 #include "gliner_session.h"
+#ifdef YAMS_USE_ONNX_RUNTIME
+#include "ort_runtime_loader.h"
+#endif
 
 namespace {
 
@@ -306,6 +309,13 @@ YAMS_PLUGIN_API int yams_plugin_init(const char* config_json, const void* host_c
                 if (cfg.contains("tokenizer_path") && cfg["tokenizer_path"].is_string()) {
                     get_ctx().config.tokenizer_path = cfg["tokenizer_path"].get<std::string>();
                 }
+#ifdef YAMS_USE_ONNX_RUNTIME
+                // Optional pin for the ONNX Runtime copy ([plugins.glint] runtime_library).
+                if (cfg.contains("runtime_library") && cfg["runtime_library"].is_string()) {
+                    yams::onnx_util::OrtRuntimeLoader::instance().setConfiguredLibrary(
+                        cfg["runtime_library"].get<std::string>());
+                }
+#endif
                 if (cfg.contains("threshold") && cfg["threshold"].is_number()) {
                     get_ctx().config.threshold = cfg["threshold"].get<float>();
                 }
@@ -368,6 +378,26 @@ YAMS_PLUGIN_API int yams_plugin_get_health_json(char** out_json) {
     health["status"] = get_ctx().initialized ? "ready" : "not_initialized";
     health["model_path"] = get_ctx().config.model_path;
     health["threshold"] = get_ctx().config.threshold;
+
+#ifdef YAMS_USE_ONNX_RUNTIME
+    {
+        const auto& rt = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+        nlohmann::json runtime;
+        runtime["available"] = rt.available;
+        runtime["reason"] = rt.reason;
+        if (rt.available) {
+            runtime["source"] = rt.source;
+            runtime["version"] = rt.version;
+            runtime["path"] = rt.libraryPath;
+        } else {
+            runtime["error"] = rt.errorMessage;
+            health["status"] = "degraded";
+        }
+        health["onnx_runtime"] = std::move(runtime);
+    }
+#else
+    health["onnx_runtime"] = {{"available", false}, {"reason", "built_without_onnx_runtime"}};
+#endif
 
     if (get_ctx().session) {
         health["session_ready"] = get_ctx().session->is_ready();

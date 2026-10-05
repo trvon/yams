@@ -78,7 +78,7 @@ yams_app_services_lib = static_library('yams_app_services',
     tl_expected_dep,
   ] + _optional_deps,
   include_directories: include_directories('../../../include'),
-  install: true,
+  install: false,
 )
 
 yams_app_services_dep = declare_dependency(

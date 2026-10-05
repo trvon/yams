@@ -1,1 +1,4 @@
+# systemd user preset (/usr/lib/systemd/user-preset/80-yams.preset): enable the
+# per-user YAMS daemon for every user. Administrators can override it with a
+# lower-numbered preset in /etc/systemd/user-preset/ (e.g. "disable yams-daemon.service").
 enable yams-daemon.service

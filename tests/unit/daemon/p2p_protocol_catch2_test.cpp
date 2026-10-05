@@ -11,6 +11,7 @@
 
 #include "../../../src/daemon/p2p/p2p_fuzz.h"
 
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <string>
@@ -340,6 +341,70 @@ TEST_CASE("P2P history comparison binds only the authenticated peer writer",
     auto missing = yams::daemon::p2p::requiresPeerWriterQuarantine(local, peer);
     REQUIRE_FALSE(missing.has_value());
     CHECK(missing.error().code == yams::ErrorCode::ValidationError);
+}
+
+TEST_CASE("P2P handshake bounds a live writer window by its frozen snapshot",
+          "[daemon][p2p][handshake][window][concurrency]") {
+    // The handshake snapshot froze the local writer at counter 2; concurrent local writes have
+    // since advanced the live history (read by the resolver) to counter 4.
+    const auto digestAt = [](std::uint64_t counter) {
+        return std::string(64, static_cast<char>('0' + counter));
+    };
+    auto serverConfig = config("server-node");
+    serverConfig.localVersion.observe("server-node", 2);
+    serverConfig.localCommitments["server-node"] = {.counter = 2, .digest = digestAt(2)};
+    serverConfig.resolveLocalWindow = [digestAt](std::uint64_t peerCounter, std::size_t maxRecords,
+                                                 std::size_t) {
+        constexpr std::uint64_t kLiveCounter = 4;
+        const auto endpoint = std::min<std::uint64_t>(kLiveCounter, peerCounter + maxRecords);
+        return yams::Result<yams::memory_sync::WriterHistoryCommitment>{
+            yams::memory_sync::WriterHistoryCommitment{.counter = endpoint,
+                                                       .digest = digestAt(endpoint)}};
+    };
+    auto clientConfig = config("client-node");
+
+    InMemoryPeerTrustStore serverTrust;
+    InMemoryPeerTrustStore clientTrust;
+    auto result = runHandshake(serverConfig, clientConfig, serverTrust, clientTrust);
+    REQUIRE(result.server.has_value());
+    REQUIRE(result.client.has_value());
+    CHECK(result.client.value().peerVersion.get("server-node") == 2);
+    CHECK(result.client.value().peerCommitments.at("server-node").digest == digestAt(2));
+}
+
+TEST_CASE("P2P history comparison accepts a local prefix advanced by a concurrent session",
+          "[daemon][p2p][handshake][commitment][concurrency]") {
+    // The handshake verified local prefix 2 and froze the peer frontier at 5; another session
+    // with the same peer has since advanced the local prefix to 3.
+    yams::memory_sync::ReplicationState local;
+    local.version.observe("peer-node", 3);
+    local.commitments["peer-node"] = {.counter = 3, .digest = std::string(64, 'a')};
+
+    PeerHandshakeResult peer;
+    peer.peerNodeId = "peer-node";
+    peer.peerVersion.observe("peer-node", 5);
+    peer.peerCommitments["peer-node"] = {.counter = 5, .digest = std::string(64, 'b')};
+    peer.peerPrefixCounter = 2;
+    peer.peerPrefixVerified = true;
+    peer.peerPrefixMatches = true;
+    auto advanced = yams::daemon::p2p::requiresPeerWriterQuarantine(local, peer);
+    REQUIRE(advanced.has_value());
+    CHECK_FALSE(advanced.value());
+
+    peer.peerPrefixVerified = false;
+    auto unverified = yams::daemon::p2p::requiresPeerWriterQuarantine(local, peer);
+    REQUIRE_FALSE(unverified.has_value());
+
+    peer.peerPrefixVerified = true;
+    peer.peerPrefixCounter = 4;
+    auto behindProof = yams::daemon::p2p::requiresPeerWriterQuarantine(local, peer);
+    REQUIRE_FALSE(behindProof.has_value());
+
+    peer.peerPrefixCounter = 2;
+    peer.peerPrefixMatches = false;
+    auto forked = yams::daemon::p2p::requiresPeerWriterQuarantine(local, peer);
+    REQUIRE(forked.has_value());
+    CHECK(forked.value());
 }
 
 TEST_CASE("P2P handshake verifies a nonzero authenticated writer prefix before exchange",

@@ -58,7 +58,8 @@ meson install -C "$BUILD_DIR" --destdir "$stage_dir"
 install_root="$stage_dir$prefix"
 bin_dir="$install_root/bin"
 lib_dir="$install_root/lib"
-plugin_dir="$lib_dir/yams/plugins"
+private_lib_dir="$lib_dir/yams"
+plugin_dir="$private_lib_dir/plugins"
 cli_bin="$bin_dir/yams"
 plugin_path="$plugin_dir/libyams_onnx_plugin.dylib"
 
@@ -72,21 +73,21 @@ if [[ ! -f "$plugin_path" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$lib_dir/libyams_onnx_resource.dylib" && ! -f "$lib_dir/libyams_onnx_resource.0.dylib" ]]; then
-  echo "Missing ONNX resource library in $lib_dir" >&2
+if [[ ! -f "$private_lib_dir/libyams_onnx_resource.dylib" ]]; then
+  echo "Missing ONNX resource library in $private_lib_dir" >&2
   exit 1
 fi
 
-if ! compgen -G "$lib_dir/libonnxruntime*.dylib" >/dev/null; then
-  echo "Missing ONNX Runtime dylib in $lib_dir" >&2
+if ! compgen -G "$private_lib_dir/libonnxruntime*.dylib" >/dev/null; then
+  echo "Missing ONNX Runtime dylib in $private_lib_dir" >&2
   exit 1
 fi
 
 echo "Installed ONNX artifacts:"
 echo "  CLI: $cli_bin"
 echo "  Plugin: $plugin_path"
-echo "  Resource: $(ls "$lib_dir"/libyams_onnx_resource*.dylib | tr '\n' ' ')"
-echo "  Runtime: $(ls "$lib_dir"/libonnxruntime*.dylib | tr '\n' ' ')"
+echo "  Resource: $(ls "$private_lib_dir"/libyams_onnx_resource*.dylib | tr '\n' ' ')"
+echo "  Runtime: $(ls "$private_lib_dir"/libonnxruntime*.dylib | tr '\n' ' ')"
 
 echo "Checking installed plugin linkage"
 otool -L "$plugin_path"

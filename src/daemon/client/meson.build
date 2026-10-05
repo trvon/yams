@@ -89,6 +89,7 @@ yams_daemon_client_lib = static_library('yams_daemon_client',
     'daemon_client.cpp',
     'asio_transport.cpp',
     'process_discovery.cpp',
+    'systemd_user_unit.cpp',
     'sandbox_detection.cpp',
     'sandbox_probe.cpp',
     'global_io_context.cpp',
@@ -117,14 +118,7 @@ yams_daemon_client_lib = static_library('yams_daemon_client',
   cpp_args: daemon_client_testing_cpp_args +
     (cpp.get_id() == 'msvc' ? ['/wd4100'] : ['-Wno-unused-parameter']),
   include_directories: include_directories('../../../include'),
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_daemon_client_lib,
-  name: 'yams-daemon-client',
-  description: 'YAMS daemon client library',
-  subdirs: ['.', 'yams'],
+  install: false,
 )
 
 yams_daemon_client_dep = declare_dependency(

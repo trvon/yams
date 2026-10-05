@@ -849,12 +849,12 @@ CliBinarySelection findYamsBinary(const BenchConfig& cfg) {
     }
 
     for (const auto& relative :
-         {fs::path("builddir/tools/yams-cli/yams-cli"), fs::path("build/tools/yams-cli/yams-cli"),
+         {fs::path("build/debug/tools/yams-cli/yams-cli"), fs::path("build/tools/yams-cli/yams-cli"),
           fs::path("build/debug/tools/yams-cli/yams-cli"),
           fs::path("build/release/tools/yams-cli/yams-cli"),
           fs::path("build/asan/tools/yams-cli/yams-cli"),
           fs::path("build/opencode-tests/tools/yams-cli/yams-cli"),
-          fs::path("builddir/src/cli/yams"), fs::path("build/src/cli/yams"),
+          fs::path("build/debug/src/cli/yams"), fs::path("build/src/cli/yams"),
           fs::path("build/debug/src/cli/yams"), fs::path("build/release/src/cli/yams"),
           fs::path("build/asan/src/cli/yams"), fs::path("build/opencode-tests/src/cli/yams")}) {
 #ifdef _WIN32

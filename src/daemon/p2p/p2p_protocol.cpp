@@ -289,7 +289,10 @@ Result<WireWindowFrontier> makeLocalWindowFrontier(const PeerHandshakeConfig& co
     auto counter =
         boundedWriterCounter(peerCounter, localCounter, negotiatedRecords, fullBootstrap);
     if (!fullBootstrap && counter > peerCounter) {
-        auto selected = config.resolveLocalWindow(peerCounter, negotiatedRecords, negotiatedBytes);
+        // The resolver reads live history, which local writes may have advanced past the
+        // frozen snapshot; bound it by the snapshot window rather than the negotiated cap.
+        const auto frozenRecords = static_cast<std::size_t>(counter - peerCounter);
+        auto selected = config.resolveLocalWindow(peerCounter, frozenRecords, negotiatedBytes);
         if (!selected) {
             return selected.error();
         }
@@ -768,7 +771,8 @@ std::uint64_t PeerHandshakeResult::peerWatermark(std::string_view writerId) cons
 }
 
 Result<bool> requiresPeerWriterQuarantine(const memory_sync::ReplicationState& local,
-                                          const PeerHandshakeResult& peer) {
+                                          const PeerHandshakeResult& peer,
+                                          const PeerPrefixResolver& resolveLocalPrefix) {
     if (peer.peerNodeId.empty()) {
         return Error{ErrorCode::ValidationError, "authenticated peer writer identity is empty"};
     }
@@ -780,12 +784,34 @@ Result<bool> requiresPeerWriterQuarantine(const memory_sync::ReplicationState& l
     }
     const auto localCounter = local.version.get(peer.peerNodeId);
     const auto peerCounter = peer.peerVersion.get(peer.peerNodeId);
+    const auto peerCommitment = peer.peerCommitments.find(peer.peerNodeId);
     if (localCounter > peerCounter) {
-        return Error{ErrorCode::ValidationError,
-                     "authenticated peer writer rolled back below the local prefix"};
+        // Only sessions with this peer deliver its writer, so a local prefix beyond the frozen
+        // frontier came from a concurrent session; the durable prefix at the frontier tells
+        // that race apart from a peer that rolled its history back.
+        if (peerCounter == 0) {
+            return false; // An empty frontier is a prefix of any history.
+        }
+        if (!resolveLocalPrefix) {
+            return Error{ErrorCode::ValidationError,
+                         "authenticated peer writer rolled back below the local prefix"};
+        }
+        if (peerCommitment == peer.peerCommitments.end() ||
+            peerCommitment->second.counter != peerCounter ||
+            !memory_sync::isSha256Digest(peerCommitment->second.digest)) {
+            return Error{ErrorCode::ValidationError,
+                         "authenticated peer frontier commitment is missing or invalid"};
+        }
+        auto localAtFrontier = resolveLocalPrefix(peerCounter);
+        if (!localAtFrontier) {
+            return localAtFrontier.error();
+        }
+        return localAtFrontier.value() != peerCommitment->second;
     }
     if (localCounter < peerCounter) {
-        if (!peer.peerPrefixVerified || peer.peerPrefixCounter != localCounter) {
+        // The handshake proved the local prefix at peerPrefixCounter; a concurrent session may
+        // have extended it since. Delta exchange verifies the rest against the frontier.
+        if (!peer.peerPrefixVerified || localCounter < peer.peerPrefixCounter) {
             return Error{ErrorCode::ValidationError,
                          "authenticated peer writer prefix was not verified"};
         }
@@ -795,7 +821,6 @@ Result<bool> requiresPeerWriterQuarantine(const memory_sync::ReplicationState& l
         return false;
     }
     const auto localCommitment = local.commitments.find(peer.peerNodeId);
-    const auto peerCommitment = peer.peerCommitments.find(peer.peerNodeId);
     if (localCommitment == local.commitments.end() ||
         peerCommitment == peer.peerCommitments.end() ||
         localCommitment->second.counter != localCounter ||

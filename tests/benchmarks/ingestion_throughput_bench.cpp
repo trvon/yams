@@ -728,7 +728,7 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
         if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
             harnessOptions.pluginDir = fs::path(envPluginDir);
         } else {
-            harnessOptions.pluginDir = fs::current_path() / "builddir" / "plugins";
+            harnessOptions.pluginDir = fs::current_path() / "build/debug" / "plugins";
         }
     }
     harnessOptions.enableAutoRepair = false;

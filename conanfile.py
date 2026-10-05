@@ -45,7 +45,7 @@ def _tool_on_path_satisfies(name: str, minimum: tuple[int, int, int]) -> bool:
 
 class YamsConan(ConanFile):
     name = "yams"
-    version = "0.20.3"  # x-release-please-version
+    version = "0.20.5"  # x-release-please-version
     license = "GPL-3.0-or-later"
     author = "YAMS Contributors"
     url = "https://github.com/trvon/yams"
@@ -187,34 +187,36 @@ class YamsConan(ConanFile):
             # library. Keeping it header-only avoids Apple SDK-specific
             # failures in spdlog's bundled/external fmt compile path.
             self.options["spdlog"].header_only = True  # type: ignore
-            # The mobile corpus ABI only relies on Boost.Asio plus the linked
-            # system/thread modules. Disable unrelated Boost libraries so
-            # mobile cross-builds do not drag in platform-specific components
-            # like boost.context assembly or locale/iconv stacks.
-            for boost_opt in (
-                "without_cobalt",
-                "without_context",
-                "without_contract",
-                "without_coroutine",
-                "without_fiber",
-                "without_graph",
-                "without_iostreams",
-                "without_json",
-                "without_locale",
-                "without_log",
-                "without_math",
-                "without_nowide",
-                "without_program_options",
-                "without_random",
-                "without_regex",
-                "without_serialization",
-                "without_stacktrace",
-                "without_test",
-                "without_type_erasure",
-                "without_url",
-                "without_wave",
-            ):
-                setattr(self.options["boost"], boost_opt, True)  # type: ignore
+
+        # YAMS uses Boost.Asio (header-only) plus the linked system/thread
+        # modules on every platform. Disable the unrelated compiled Boost
+        # libraries everywhere: desktop builds no longer compile ~20 unused
+        # components, and mobile cross-builds avoid platform-specific ones like
+        # boost.context assembly or locale/iconv stacks.
+        for boost_opt in (
+            "without_cobalt",
+            "without_context",
+            "without_contract",
+            "without_coroutine",
+            "without_fiber",
+            "without_graph",
+            "without_iostreams",
+            "without_json",
+            "without_locale",
+            "without_log",
+            "without_math",
+            "without_nowide",
+            "without_program_options",
+            "without_random",
+            "without_regex",
+            "without_serialization",
+            "without_stacktrace",
+            "without_test",
+            "without_type_erasure",
+            "without_url",
+            "without_wave",
+        ):
+            setattr(self.options["boost"], boost_opt, True)  # type: ignore
 
         if self.options.enable_onnx:  # type: ignore
             self.options["onnxruntime"].fPIC = True

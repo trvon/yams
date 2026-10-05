@@ -19,6 +19,7 @@
 #include <yams/daemon/client/sandbox_detection.h>
 #include <yams/daemon/client/sandbox_probe.h>
 #include <yams/daemon/client/streaming_handlers.h>
+#include <yams/daemon/client/systemd_user_unit.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
@@ -2123,6 +2124,23 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     const auto dataDir = paths.dataDir.value;
     const auto pidFile = paths.pidFile.value;
     const auto configPath = paths.configFile.value;
+
+    // Prefer the packaged systemd user unit when it would run exactly this daemon (same
+    // socket, data dir and config, default binary): systemd then owns the process, and a
+    // later login does not race a CLI-spawned copy for the socket.
+    if (config.daemonBinary.empty() && !yams::config::getenv_nonempty("YAMS_DAEMON_BIN")) {
+        if (auto defaults = yams::config::resolve_runtime_paths();
+            defaults && client::userUnitMatchesPaths(defaults.value()) &&
+            defaults.value().socketPath.value == socketPath &&
+            defaults.value().dataDir.value == dataDir &&
+            defaults.value().configFile.value == configPath &&
+            client::queryUserUnit() == client::UserUnitState::Inactive &&
+            client::runUserUnit("start")) {
+            spdlog::info("Started the yams-daemon systemd user unit");
+            return Result<void>();
+        }
+    }
+
     // Copy deployment overrides before fork/CreateProcess. Explicit typed launch fields outrank
     // compatibility environment values, and the child receives all policy as CLI arguments.
     const std::optional<std::string> daemonBinOverride =

@@ -25,8 +25,8 @@ catch2_incs = []
 #Must be defined early before subdirs are included
 _tsan_suppressions_file = meson.project_source_root() / 'tsan.suppressions'
 _test_tsan_options = 'suppressions=' + _tsan_suppressions_file
-_test_thread_sanitizer = get_option('enable-tsan') or get_option('b_sanitize') == 'thread'
-_test_address_sanitizer = get_option('enable-asan') or get_option('b_sanitize').contains('address')
+_test_thread_sanitizer = yams_sanitize_thread
+_test_address_sanitizer = yams_sanitize_address
 _test_debug_integrations = get_option('buildtype') == 'debug' and not _test_address_sanitizer
 _test_timeout_scale = _test_thread_sanitizer ? 10 : get_option('test-timeout-scale')
 _test_timeout_cpp_arg = '-DYAMS_TEST_TIMEOUT_SCALE=' + _test_timeout_scale.to_string()
@@ -445,7 +445,7 @@ bench_timeout = get_option('bench-timeout')
 #
 #IMPORTANT : services integration includes both GTest - and Catch2 - based suites.
 #Do not gate the entire subdir on GTest.
-if get_option('enable-integration-tests') or get_option('enable-integration-services') or _test_debug_integrations
+if get_option('enable-integration-tests') or _test_debug_integrations
   subdir('integration/services')
 endif
 
@@ -553,7 +553,7 @@ if catch2_dep.found()
   )
 
   catch2_daemon_components_exe = executable('catch2_daemon_components',
-    files('unit/daemon/daemon_components_test.cpp'),
+    files('unit/daemon/daemon_components_test.cpp', 'unit/daemon/systemd_user_unit_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -841,6 +841,25 @@ if catch2_dep.found()
     plugin_test_cpp_args += ['-Dyams_onnx_plugin_BUILT="' + onnx_plugin_path + '"']
   endif
 
+  # ONNX Runtime resolution policy (pure; no runtime needed): override >
+  # configured > system > bundled > legacy, skipping incompatible API versions.
+  # Fixtures use ELF/Mach-O library names; Windows resolution is the DLL search.
+  if host_machine.system() != 'windows'
+    catch2_ort_runtime_resolution_exe = executable('catch2_ort_runtime_resolution',
+      files(
+        'unit/plugins/ort_runtime_resolution_catch2_test.cpp',
+        '../plugins/ort_runtime/ort_runtime_resolution.cpp',
+      ),
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep],
+      install: false,
+    )
+    test('ort_runtime_resolution', catch2_ort_runtime_resolution_exe,
+      suite: ['catch2', 'unit', 'plugins', 'onnx'],
+      timeout: 30,
+    )
+  endif
+
   catch2_daemon_plugin_exe = executable('catch2_daemon_plugin',
     files('unit/daemon/onnx_plugin_harness_test.cpp'),
     include_directories: incs,
@@ -857,7 +876,8 @@ if catch2_dep.found()
         'unit/daemon/onnx_model_provider_config_test.cpp',
         '../plugins/onnx/model_provider.cpp',
         '../plugins/onnx/onnx_text_processing.cpp',
-        '../plugins/onnx/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_resolution.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
@@ -872,7 +892,8 @@ if catch2_dep.found()
     catch2_gpu_provider_exe = executable('catch2_gpu_provider',
       files(
         'unit/daemon/onnx_gpu_provider_catch2_test.cpp',
-        '../plugins/onnx/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_resolution.cpp',
       ),
       include_directories: incs,
       dependencies: [catch2_dep, catch2_main_dep] + test_deps + [onnx_dep],
@@ -886,7 +907,8 @@ if catch2_dep.found()
         'unit/daemon/onnx_embedding_diagnostic_test.cpp',
         '../plugins/onnx/model_provider.cpp',
         '../plugins/onnx/onnx_text_processing.cpp',
-        '../plugins/onnx/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_resolution.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
@@ -971,6 +993,15 @@ if catch2_dep.found()
 
   catch2_service_manager_exe = executable('catch2_service_manager',
     files('unit/daemon/service_manager_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_memory_sync_apply_exe = executable('catch2_memory_sync_apply',
+    files('unit/daemon/memory_sync_apply_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -1386,7 +1417,8 @@ if catch2_dep.found()
         'unit/daemon/onnx_model_pool_catch2_test.cpp',
         '../plugins/onnx/model_provider.cpp',
         '../plugins/onnx/onnx_text_processing.cpp',
-        '../plugins/onnx/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_loader.cpp',
+        '../plugins/ort_runtime/ort_runtime_resolution.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_colbert_session.cpp',
         '../src/vector/tokenizer.cpp',
@@ -1428,6 +1460,15 @@ if catch2_dep.found()
     files('unit/memory_sync/version_vector_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_memory_sync_apply_health_exe = executable('catch2_memory_sync_apply_health',
+    files('unit/memory_sync/apply_health_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep],
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
     install: false,
@@ -1918,6 +1959,7 @@ if catch2_dep.found()
       'unit/cli/daemon_helpers_pool_catch2_test.cpp',
       'unit/cli/daemon_command_catch2_test.cpp',
       'unit/cli/daemon_status_render_catch2_test.cpp',
+      'unit/cli/p2p_status_format_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: cli_test_deps,
@@ -2667,6 +2709,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  text_basic_handler_exe = executable('text_basic_handler',
+    files('unit/extraction/text_basic_handler_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   builtin_content_extractor_exe = executable('builtin_content_extractor',
     files('unit/extraction/builtin_content_extractor_catch2_test.cpp'),
     include_directories: incs,
@@ -3229,6 +3280,12 @@ if catch2_dep.found()
     timeout: 60
   )
 
+  test('text_basic_handler', text_basic_handler_exe,
+    suite: ['catch2', 'unit', 'extraction'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('builtin_content_extractor', builtin_content_extractor_exe,
     suite: ['catch2', 'unit', 'extraction', 'content_extractor'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -3385,7 +3442,7 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  daemon_metrics_timeout = (get_option('enable-tsan') or get_option('enable-asan')) ? 240 : 180
+  daemon_metrics_timeout = (yams_sanitize_thread or yams_sanitize_address) ? 240 : 180
 
   test('daemon_metrics_status', catch2_daemon_metrics_status_exe,
     suite: ['catch2', 'unit', 'daemon', 'metrics', 'status'],
@@ -3717,6 +3774,12 @@ if catch2_dep.found()
     timeout: 120
   )
 
+  test('memory_sync_apply', catch2_memory_sync_apply_exe,
+    suite: ['catch2', 'unit', 'daemon', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
   test('db_recovery', catch2_db_recovery_exe,
     suite: ['catch2', 'unit', 'daemon', 'db_recovery'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -4032,6 +4095,12 @@ if catch2_dep.found()
     timeout: 60
   )
 
+  test('memory_sync_apply_health', catch2_memory_sync_apply_health_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('memory_sync_records', catch2_memory_sync_records_exe,
     suite: ['catch2', 'unit', 'memory-sync'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -4159,7 +4228,7 @@ if catch2_dep.found()
     timeout: 30
   )
 
-  heavy_submodule_timeout = (get_option('enable-tsan') or get_option('enable-asan')) ? 600 : 300
+  heavy_submodule_timeout = (yams_sanitize_thread or yams_sanitize_address) ? 600 : 300
 
   test('compression_submodule', catch2_compression_submodule_exe,
     suite: ['catch2', 'unit', 'compression', 'yams-pmf'],

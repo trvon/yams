@@ -24,7 +24,9 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -924,4 +926,178 @@ TEST_CASE("direct P2P delta exchange converges offline corpora and resumes from 
     REQUIRE(tombstone.server.has_value());
     CHECK(tombstone.client.value().deltasSent == 1);
     CHECK_FALSE(serverService.readCached("user/client-0").has_value());
+}
+
+namespace {
+
+// Concurrent sessions with one peer (this node's outbound session and the peer's inbound one)
+// each freeze a writer window at handshake and apply it later. These helpers replay the
+// receiver half of such a window through the production receive path without a socket.
+std::vector<std::byte> windowFrames(std::span<const yams::memory_sync::MemoryDelta> deltas) {
+    std::vector<std::byte> frames;
+    const auto appendJson = [&frames](const nlohmann::json& json) {
+        const auto encoded = json.dump();
+        yams::daemon::p2p::detail::appendFrame(
+            frames, std::span<const std::byte>(reinterpret_cast<const std::byte*>(encoded.data()),
+                                               encoded.size()));
+    };
+    appendJson({{"type", "delta_batch"}, {"count", deltas.size()}, {"has_more", false}});
+    for (const auto& delta : deltas) {
+        appendJson({{"type", "delta_record"},
+                    {"logical_key", delta.logicalKey},
+                    {"record", delta.record},
+                    {"payload_size", delta.payload.size()}});
+        if (!delta.payload.empty()) {
+            yams::daemon::p2p::detail::appendFrame(frames, delta.payload);
+        }
+    }
+    return frames;
+}
+
+yams::daemon::p2p::PeerHandshakeResult
+frozenWindow(const std::string& writer, const yams::memory_sync::WriterHistoryCommitment& frontier,
+             std::uint64_t verifiedPrefix) {
+    yams::daemon::p2p::PeerHandshakeResult handshake;
+    handshake.peerNodeId = writer;
+    handshake.peerVersion.observe(writer, frontier.counter);
+    handshake.peerSeen = handshake.peerVersion.counters();
+    if (frontier.counter != 0) {
+        handshake.peerCommitments[writer] = frontier;
+    }
+    handshake.peerPrefixCounter = verifiedPrefix;
+    handshake.peerPrefixVerified = true;
+    handshake.peerPrefixMatches = true;
+    return handshake;
+}
+
+yams::Result<DeltaExchangeStats>
+receiveWindow(MemorySyncService& receiver, std::span<const yams::memory_sync::MemoryDelta> deltas,
+              const yams::daemon::p2p::PeerHandshakeResult& handshake) {
+    const auto frames = windowFrames(deltas);
+    yams::daemon::p2p::detail::BufferFrameSource source(frames);
+    return yams::daemon::p2p::detail::receiveAllDeltas(
+        source, "server-node", receiver, handshake,
+        DeltaExchangeOptions{.maxDeltasPerBatch = 16, .maxBatches = 4, .timeout = 3s});
+}
+
+yams::memory_sync::WriterHistoryCommitment commitmentAt(MemorySyncService& writer,
+                                                        std::uint64_t counter) {
+    auto commitment = writer.localHistoryCommitmentAt(counter);
+    REQUIRE(commitment.has_value());
+    return commitment.value();
+}
+
+std::vector<yams::memory_sync::MemoryDelta>
+writerWindow(MemorySyncService& writer, std::uint64_t after, std::uint64_t through) {
+    yams::memory_sync::VersionVector peer;
+    peer.observe("client-node", after);
+    auto batch = writer.exportLocalDeltasAfter(peer, 64, through);
+    REQUIRE(batch.has_value());
+    REQUIRE(batch.value().deltas.size() == through - after);
+    return std::move(batch.value().deltas);
+}
+
+void publishSeries(MemorySyncService& writer, std::string_view prefix, int count) {
+    for (int index = 1; index <= count; ++index) {
+        REQUIRE(writer
+                    .publish("user/" + std::string(prefix) + std::to_string(index),
+                             bytes(std::string(prefix) + "-value-" + std::to_string(index)))
+                    .has_value());
+    }
+}
+
+} // namespace
+
+TEST_CASE("direct P2P concurrent sessions that advance a peer writer do not quarantine it",
+          "[daemon][p2p][delta][commitment][concurrency]") {
+    MemorySyncService writer{std::make_unique<InMemoryBackend>(),
+                             MemorySyncConfig{"client-node", 60'000, "wire-delta-corpus", 1}};
+    MemorySyncService receiver{std::make_unique<InMemoryBackend>(),
+                               MemorySyncConfig{"server-node", 60'000, "wire-delta-corpus", 1}};
+    publishSeries(writer, "a", 4);
+    const auto shorter = writerWindow(writer, 0, 2);
+    const auto longer = writerWindow(writer, 0, 4);
+
+    // Both sessions froze their windows at receiver counter 0; the shorter one applies first.
+    auto first =
+        receiveWindow(receiver, shorter, frozenWindow("client-node", commitmentAt(writer, 2), 0));
+    REQUIRE(first.has_value());
+    REQUIRE(receiver.currentVersion().get("client-node") == 2);
+
+    SECTION("a longer window overlapping the advanced prefix still applies") {
+        auto second = receiveWindow(receiver, longer,
+                                    frozenWindow("client-node", commitmentAt(writer, 4), 0));
+        REQUIRE(second.has_value());
+        CHECK(receiver.currentVersion().get("client-node") == 4);
+        CHECK_FALSE(receiver.replicationState().quarantinedWriters.contains("client-node"));
+        REQUIRE(receiver.readCached("user/a4").has_value());
+    }
+
+    SECTION("an empty window frozen below the advanced prefix verifies against history") {
+        auto second =
+            receiveWindow(receiver, {}, frozenWindow("client-node", commitmentAt(writer, 1), 1));
+        REQUIRE(second.has_value());
+        CHECK(receiver.currentVersion().get("client-node") == 2);
+        CHECK_FALSE(receiver.replicationState().quarantinedWriters.contains("client-node"));
+    }
+
+    SECTION("an empty window frozen before the writer existed is consistent with any prefix") {
+        auto second = receiveWindow(
+            receiver, {},
+            frozenWindow("client-node", yams::memory_sync::WriterHistoryCommitment{}, 0));
+        REQUIRE(second.has_value());
+        CHECK_FALSE(receiver.replicationState().quarantinedWriters.contains("client-node"));
+    }
+}
+
+TEST_CASE("direct P2P concurrent windows still quarantine a forked or forged writer",
+          "[daemon][p2p][delta][commitment][concurrency][security]") {
+    MemorySyncService writer{std::make_unique<InMemoryBackend>(),
+                             MemorySyncConfig{"client-node", 60'000, "wire-delta-corpus", 1}};
+    MemorySyncService receiver{std::make_unique<InMemoryBackend>(),
+                               MemorySyncConfig{"server-node", 60'000, "wire-delta-corpus", 1}};
+    publishSeries(writer, "a", 4);
+    auto first = receiveWindow(receiver, writerWindow(writer, 0, 2),
+                               frozenWindow("client-node", commitmentAt(writer, 2), 0));
+    REQUIRE(first.has_value());
+
+    SECTION("a fork that rewrote the advanced prefix") {
+        // Same writer identity, different history: its frontier cannot extend the
+        // receiver's durable prefix even though the window overlaps it.
+        MemorySyncService fork{std::make_unique<InMemoryBackend>(),
+                               MemorySyncConfig{"client-node", 60'000, "wire-delta-corpus", 1}};
+        publishSeries(fork, "forked", 4);
+        auto forked = receiveWindow(receiver, writerWindow(fork, 0, 4),
+                                    frozenWindow("client-node", commitmentAt(fork, 4), 0));
+        REQUIRE_FALSE(forked.has_value());
+        CHECK(receiver.replicationState().quarantinedWriters.contains("client-node"));
+        CHECK_FALSE(receiver.readCached("user/forked4").has_value());
+    }
+
+    SECTION("a forged frontier digest") {
+        auto forged = commitmentAt(writer, 4);
+        forged.digest = std::string(64, 'f');
+        auto rejected = receiveWindow(receiver, writerWindow(writer, 0, 4),
+                                      frozenWindow("client-node", forged, 0));
+        REQUIRE_FALSE(rejected.has_value());
+        CHECK(receiver.replicationState().quarantinedWriters.contains("client-node"));
+        CHECK_FALSE(receiver.readCached("user/a4").has_value());
+    }
+
+    SECTION("an empty window whose frontier contradicts the advanced prefix") {
+        auto forged = commitmentAt(writer, 1);
+        forged.digest = std::string(64, 'e');
+        auto rejected = receiveWindow(receiver, {}, frozenWindow("client-node", forged, 1));
+        REQUIRE_FALSE(rejected.has_value());
+        CHECK(receiver.replicationState().quarantinedWriters.contains("client-node"));
+    }
+
+    SECTION("a window that skips a counter below the frontier it advertised") {
+        auto skipped = writerWindow(writer, 0, 4);
+        skipped.erase(skipped.begin() + 2); // drop counter 3
+        auto rejected = receiveWindow(receiver, skipped,
+                                      frozenWindow("client-node", commitmentAt(writer, 4), 0));
+        REQUIRE_FALSE(rejected.has_value());
+        CHECK(receiver.replicationState().quarantinedWriters.contains("client-node"));
+    }
 }

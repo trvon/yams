@@ -1191,11 +1191,11 @@ TEST_CASE("MemorySyncService coalesces recursive post-sync callbacks",
     std::atomic<bool> nestedQuarantineSucceeded{false};
     reader.setAfterSyncCallback([&] {
         if (callbacks.fetch_add(1, std::memory_order_acq_rel) == 0) {
-            auto nested = reader.quarantineWriter("writer-b", "reader");
+            auto nested = reader.quarantineWriter("writer-b", "reader", "test request");
             nestedQuarantineSucceeded.store(nested && nested.value(), std::memory_order_release);
         }
     });
-    auto quarantined = reader.quarantineWriter("writer-a", "reader");
+    auto quarantined = reader.quarantineWriter("writer-a", "reader", "test request");
     REQUIRE(quarantined.has_value());
     CHECK(quarantined.value());
     CHECK(nestedQuarantineSucceeded.load(std::memory_order_acquire));
@@ -1240,18 +1240,18 @@ TEST_CASE("MemorySyncService preserves callback ownership across services",
     std::atomic<bool> nestedA{false};
     readerB.setAfterSyncCallback([&] {
         if (callbacksB.fetch_add(1, std::memory_order_acq_rel) == 0) {
-            auto quarantineA = readerA.quarantineWriter("writer-a2", "reader-a");
+            auto quarantineA = readerA.quarantineWriter("writer-a2", "reader-a", "test request");
             nestedA.store(quarantineA && quarantineA.value(), std::memory_order_release);
         }
     });
     readerA.setAfterSyncCallback([&] {
         if (callbacksA.fetch_add(1, std::memory_order_acq_rel) == 0) {
-            auto quarantineB = readerB.quarantineWriter("writer-b", "reader-b");
+            auto quarantineB = readerB.quarantineWriter("writer-b", "reader-b", "test request");
             nestedB.store(quarantineB && quarantineB.value(), std::memory_order_release);
         }
     });
 
-    auto quarantineA1 = readerA.quarantineWriter("writer-a1", "reader-a");
+    auto quarantineA1 = readerA.quarantineWriter("writer-a1", "reader-a", "test request");
     REQUIRE(quarantineA1.has_value());
     CHECK(quarantineA1.value());
     CHECK(nestedA.load(std::memory_order_acquire));
@@ -1284,14 +1284,14 @@ TEST_CASE("MemorySyncService publishes quarantine snapshot before adapter invali
         callbacks.fetch_add(1, std::memory_order_relaxed);
     });
 
-    auto quarantined = reader.quarantineWriter("writer", "reader");
+    auto quarantined = reader.quarantineWriter("writer", "reader", "test request");
     REQUIRE(quarantined.has_value());
     CHECK(quarantined.value());
     CHECK(callbacks.load(std::memory_order_relaxed) == 1);
     CHECK(reader.replicationState().quarantinedWriters.contains("writer"));
     CHECK_FALSE(reader.readCached("user/key").has_value());
 
-    auto repeated = reader.quarantineWriter("writer", "reader");
+    auto repeated = reader.quarantineWriter("writer", "reader", "test request");
     REQUIRE(repeated.has_value());
     CHECK_FALSE(repeated.value());
     CHECK(callbacks.load(std::memory_order_relaxed) == 1);

@@ -87,6 +87,40 @@ local peer registry, `successful_cycles` counts completed local reconciliation c
 success does not prove that every enrolled peer is reachable or has the same frontier. Confirm
 convergence with explicit per-node corpus/frontier checks after the required full-mesh sessions.
 
+`yams p2p status` also reports the apply path, which runs after each reconciliation:
+
+- `apply_cycles` / `apply_failed_cycles`: cycles that ran the inbound apply stages, and those in
+  which a stage (content, metadata, vector, topology) hard-failed on I/O, corrupt data, or a
+  broken invariant. `failed_cycles` stays about reconciliation itself, so a node can show
+  `failed_cycles=0` while `apply_failed_cycles` climbs; the `apply` line breaks failures down per
+  stage and the last failure is printed with its stage.
+- `deferred` and `deferred_<stage>`: replicated records not applied yet because a prerequisite has
+  not arrived (an embedding or document whose content blob is missing, an edge whose endpoint node
+  is missing). They stay pending in the replicated index and are retried every cycle.
+  `oldest_deferral_age_ms` is how long the oldest one has waited; one deferred for more than ten
+  minutes is also logged, since its prerequisite probably never reached this node. An edge whose
+  endpoint node is known to be deleted (tombstoned, for example a cluster node that a topology
+  rebuild replaced) is dropped rather than deferred.
+- `publish_skipped_cycles` / `publish_failed_cycles`: cycles whose outbound publish was preempted
+  by the replicated-delete outbox, and outbound publishes with a failed domain. Inbound apply
+  failures never stop a node from publishing its own corpus.
+- `inbound_sessions` / `inbound_failures` and `outbound_sessions` / `outbound_failures`: sync
+  sessions accepted from and initiated to peers. A failed session is aborted and retried on the
+  next cycle; the last failure in each direction is printed with its reason and logged.
+- `quarantined_writers`: writers this node durably quarantined because their history contradicted
+  their authenticated commitments. It stays until an operator replaces the corpus epoch, and each
+  quarantine logs `durably quarantined writer <id>: <reason>`. `quarantined` counts records
+  rejected by the most recent reconciliation, which also includes transient rejections such as a
+  record whose causal dependency from a third writer has not arrived yet.
+
+Knowledge-graph topology is published by a repeating sweep over stable row ids: every node, then
+every edge together with both of its endpoint nodes, then a check that tombstones this node's own
+published nodes and edges its graph no longer holds. Graph changes made after a sweep went by,
+including topology rebuilds that replace cluster nodes, reach peers on a later sweep; unchanged
+records publish nothing. A node never applies its own published topology back into its graph. The
+periodic backfill publishes documents first, then embeddings, then topology, so peers can read the
+corpus before the records derived from it have replicated.
+
 ## Enroll and connect peers
 
 Unknown inbound peers are rejected by default before application state or deltas are exchanged. On each node, obtain the local public identity:
@@ -123,7 +157,7 @@ Disconnect and disable automatic reconnect:
 yams p2p disconnect <peer-node-id>
 ```
 
-Direct protocol v4 is full mesh: with three nodes, connect every pair. Protocol versions are exact-match; upgrade all enrolled direct peers together because v3 and v4 do not interoperate. A node sends only its own incremental operations; it does not relay a third node's delta history. The authenticated handshake exchanges bounded per-writer full-history commitments and proves the receiver's exact nonzero prefix before application deltas move. Each connection stages one resource-bounded writer window whose exact endpoint is negotiated and authenticated during the handshake. The window must match that handshake-frozen prefix before any operation is applied; the next connection proves and resumes from the resulting durable prefix. Writer-counter entries make steady-state export proportional to the returned window instead of the complete retained history. A mismatch durably quarantines the authenticated writer, removes its visible winners through adapter invalidations, and stops the session; operators must investigate or re-enroll a replacement corpus epoch rather than clearing protocol history manually.
+Direct protocol v4 is full mesh: with three nodes, connect every pair. Protocol versions are exact-match; upgrade all enrolled direct peers together because v3 and v4 do not interoperate. A node sends only its own incremental operations; it does not relay a third node's delta history. The authenticated handshake exchanges bounded per-writer full-history commitments and proves the receiver's exact nonzero prefix before application deltas move. Each connection stages one resource-bounded writer window whose exact endpoint is negotiated and authenticated during the handshake. The window must match that handshake-frozen prefix before any operation is applied; the next connection proves and resumes from the resulting durable prefix. Writer-counter entries make steady-state export proportional to the returned window instead of the complete retained history. Each pair of nodes normally runs two sessions at once (one initiated from each side), so another session with the same peer may advance that peer's durable prefix after a window was frozen. The receiver then checks the window against durable history: operations at or below the advanced prefix are replays, the rest must link that prefix exactly to the authenticated frontier, and an empty window must match the durable commitment at its frontier. A window that cannot be checked yet aborts the session and is retried on the next cycle. A window that contradicts the authenticated history (a fork, a forged frontier, a gap, or a record that fails authentication) durably quarantines the authenticated writer, removes its visible winners through adapter invalidations, and stops the session; operators must investigate or re-enroll a replacement corpus epoch rather than clearing protocol history manually.
 
 Inbound TCP handshakes use a bounded pre-authentication pool that is separate from the bounded mutually authenticated session pool, so a stalled unauthenticated TLS client cannot reserve an application-session slot. Both pools have hard implementation ceilings independent of caller configuration. TLS handshakes retain their own short deadline, while every accepted or initiated connection also receives one absolute transport I/O deadline shared by all later protocol frames; repeated small frames cannot extend it. Local handler work between I/O calls remains cooperative and must preserve its own operation bounds. Listener, session, and reconnect thread boundaries contain and report exceptions instead of terminating the daemon. Shutdown schedules socket cancellation on each connection's own I/O context before joining workers, avoiding concurrent TLS socket teardown.
 

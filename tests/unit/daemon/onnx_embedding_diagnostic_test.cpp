@@ -13,7 +13,7 @@
 
 #include "../../common/env_compat.h"
 #include "../../common/test_helpers_catch2.h"
-#include "plugins/onnx/ort_runtime_loader.h"
+#include "plugins/ort_runtime/ort_runtime_loader.h"
 
 #include <algorithm>
 #include <atomic>

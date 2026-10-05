@@ -90,9 +90,11 @@ Download `yams-<version>-windows-x86_64.msi` from the
 [latest release](https://github.com/trvon/yams/releases/latest) and run it.
 It installs per machine to `%ProgramFiles%\YAMS` and adds `bin` to `PATH`.
 
-> The MSI currently ships the `yams` CLI and plugins but not `yams-daemon.exe`
-> or `yams-mcp-server.exe`, so daemon-backed commands and `yams serve` do not
-> work from the MSI yet.
+The MSI installs `yams.exe`, `yams-daemon.exe` and `yams-mcp-server.exe` in
+`bin`. It registers no Windows service; the CLI starts the daemon on demand.
+MSIs up to 0.20.3 lack the daemon and the MCP server. The 0.20.3 MSI also
+installed a `yams.exe` that could not start because `yams_onnx_resource-0.dll`
+was missing. Reinstall from the 0.20.5 MSI.
 
 ### Release archives and source
 
@@ -162,38 +164,108 @@ guess unless a higher-precedence source decides. The full policy is in
 
 ### Linux packages
 
-The deb, rpm and Arch packages install and enable a **system** service,
-`yams-daemon.service`. It runs as a dynamic system user with:
+The deb, rpm and Arch packages ship a systemd **user** unit,
+`/usr/lib/systemd/user/yams-daemon.service`, and a user preset that enables it
+for every user (`systemctl --global preset` on install). The daemon runs as you,
+with the same paths as the CLI:
 
-- data in `/var/lib/yams`
-- socket at `/run/yams/yams-daemon.sock`
-- log at `/var/log/yams/daemon.log`
+- config `$XDG_CONFIG_HOME/yams/config.toml` (default `~/.config/yams/config.toml`)
+- data `$XDG_DATA_HOME/yams` (default `~/.local/share/yams`, or `core.data_dir`)
+- socket `$XDG_RUNTIME_DIR/yams-daemon.sock` (or `daemon.socket_path`)
+- log `$XDG_STATE_HOME/yams/daemon.log` (default `~/.local/state/yams/daemon.log`)
 
-The CLI does not look for that socket by default. To use the system daemon,
-point clients at it:
+When upgrading from 0.20.3, follow the [upgrade steps](#upgrading-from-0203)
+before starting the unit.
 
-```bash
-export YAMS_DAEMON_SOCKET=/run/yams/yams-daemon.sock
-```
-
-If you prefer your own per-user daemon and data directory (the default for the
-CLI), turn the system service off:
+It starts with your next login session. To start it now:
 
 ```bash
-sudo systemctl disable --now yams-daemon.service
+systemctl --user daemon-reload
+systemctl --user enable --now yams-daemon.service
 ```
 
-### Per-user systemd service
+The CLI needs no configuration to use it. `yams daemon start`, `stop` and
+`restart` drive the unit through `systemctl --user` when it is installed, and
+clients that start a daemon on demand start the unit (`systemctl --user
+start`) rather than a separate copy, as long as you have not pointed them
+elsewhere with `--socket`, `--data-dir`, `YAMS_DAEMON_SOCKET`, `YAMS_DATA_DIR`
+or `YAMS_CONFIG`. To keep the daemon running without a login session (for
+example on a server), enable lingering once: `sudo loginctl enable-linger "$USER"`.
+
+Plugins (ONNX embeddings, the glint entity extractor) load when your config
+enables them; `yams init` writes `auto_load_plugins = true` under `[daemon]`.
+Restart the unit after changing the config.
+
+The ONNX and glint plugins load the first ONNX Runtime 1.23 or newer from:
+
+1. `runtime_library` (a file or directory) under `[plugins.onnx]` or
+   `[plugins.glint]` in `config.toml`;
+2. a system copy: `libonnxruntime.so.1` on the loader path, then the system
+   library directories and `/opt/onnxruntime/lib`;
+3. the bundled copy in `lib/yams/onnxruntime/` (`/usr/lib/yams/onnxruntime/`
+   in the packages).
+
+`YAMS_ONNX_RUNTIME_LIB` (a library file) or `YAMS_ONNX_RUNTIME_DIR` (a
+directory) overrides all three. `yams plugin health` and the daemon log line
+`[ONNX] Using <source> ONNX Runtime <version> from <path>` show which copy
+loaded.
+
+The unit keeps its hardening light (`NoNewPrivileges`, `LockPersonality`,
+`RestrictRealtime`, `RestrictSUIDSGID`) so the daemon can read the files you
+add from your home directory and `/tmp`.
+
+To opt out for your account: `systemctl --user mask yams-daemon.service`. An
+administrator can turn it off for everyone with
+`sudo systemctl --global disable yams-daemon.service`, or with a preset file
+in `/etc/systemd/user-preset/` containing `disable yams-daemon.service`.
+
+Upgrading reloads running user managers and restarts running user daemons.
+Removing the package stops running user daemons and disables the unit; it
+never touches `~/.local/share/yams`.
+
+### Upgrading from 0.20.3
+
+Linux package upgrades stop, disable and remove the old system unit. The corpus
+in `/var/lib/yams` is kept. The CLI corpus stays in your configured data
+directory (default `~/.local/share/yams`).
+
+Configs written by 0.20.3 `yams init` may pin shared `/tmp` paths. In
+`~/.config/yams/config.toml`, remove only these two settings from `[daemon]`
+if they have the values below:
+
+```toml
+socket_path = "/tmp/yams-daemon.sock"
+pid_file = "/tmp/yams-daemon.pid"
+```
+
+These are lines to remove, not add. A shared socket at `/tmp/yams-daemon.sock`
+collides between accounts on the same host. Keep any custom `socket_path` or
+`pid_file` you set on purpose.
+
+Then reload and start the user unit:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now yams-daemon.service
+systemctl --user restart yams-daemon.service
+```
+
+`restart` applies the revised config if the daemon is already active. The
+default socket is `$XDG_RUNTIME_DIR/yams-daemon.sock`.
+
+### Per-user systemd service without the packages
 
 ```bash
 yams daemon install --user      # writes ~/.config/systemd/user/yams-daemon.service
 yams daemon uninstall --user
 ```
 
-`yams daemon install` accepts `--socket`, `--data-dir`, `--config` and
-`--daemon-binary`. Run as root without `--user`, it writes
-`/etc/systemd/system/yams-daemon.service`, which takes precedence over the
-packaged unit of the same name.
+When the packaged unit is installed, `yams daemon install --user` with no
+options just enables it (`systemctl --user enable --now`). With `--socket`,
+`--data-dir`, `--config` or `--daemon-binary` it writes
+`~/.config/systemd/user/yams-daemon.service`, which overrides the packaged
+unit until `yams daemon uninstall --user` removes it. Run as root without
+`--user`, it writes a system unit in `/etc/systemd/system`.
 
 ### Everyday daemon commands
 
@@ -240,12 +312,11 @@ yams serve
 ```
 
 `yams serve` speaks MCP over stdio and talks to the local daemon; pass
-`--daemon-socket` (or set `YAMS_DAEMON_SOCKET`) to use a specific daemon, such
-as the packaged system service.
+`--daemon-socket` (or set `YAMS_DAEMON_SOCKET`) to use a specific daemon.
 
 ## Uninstall and removing your data
 
 Removing the package leaves your corpus in place. To delete it, remove the data,
 state and config directories listed above (for example
-`~/.local/share/yams`, `~/.local/state/yams` and `~/.config/yams`). For the
-packaged system service, the data is in `/var/lib/yams`.
+`~/.local/share/yams`, `~/.local/state/yams` and `~/.config/yams`). Releases up
+to 0.20.3 also left an unused system corpus in `/var/lib/yams`.

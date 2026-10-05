@@ -237,8 +237,10 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
     }
     std::uint64_t peerCount = 0;
     p2p::P2pInboundStats inbound;
+    p2p::P2pOutboundStats outbound;
     if (p2pManager_) {
         inbound = p2pManager_->inboundStats();
+        outbound = p2pManager_->outboundStats();
         auto peers = p2pManager_->peers();
         if (peers) {
             peerCount = peers.value().size();
@@ -249,15 +251,14 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
                          peers.error().message);
         }
     }
-    std::uint64_t lastFailureAgeMs = 0;
-    if (inbound.lastFailureUnixMs > 0) {
-        const auto nowMs =
-            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           std::chrono::system_clock::now().time_since_epoch())
-                                           .count());
-        lastFailureAgeMs =
-            nowMs > inbound.lastFailureUnixMs ? nowMs - inbound.lastFailureUnixMs : 0;
-    }
+    const auto nowMs =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count());
+    const auto ageMs = [nowMs](std::uint64_t unixMs) -> std::uint64_t {
+        return unixMs > 0 && nowMs > unixMs ? nowMs - unixMs : 0;
+    };
+    const auto lastFailureAgeMs = ageMs(inbound.lastFailureUnixMs);
     return MemorySyncStatus{
         memorySync_->started(),
         memorySync_->mergedRecordCount(),
@@ -280,7 +281,13 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
         inbound.failures,
         inbound.lastFailureStage,
         inbound.lastFailure,
-        lastFailureAgeMs};
+        lastFailureAgeMs,
+        memorySyncApplyHealth_.snapshot(std::chrono::steady_clock::now()),
+        memorySync_->replicationState().quarantinedWriters.size(),
+        outbound.sessions,
+        outbound.failures,
+        std::move(outbound.lastFailure),
+        ageMs(outbound.lastFailureUnixMs)};
 }
 
 Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view contentHash,
@@ -403,7 +410,48 @@ Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view co
     return {};
 }
 
-Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
+void ServiceManager::notifyMemorySyncEmbeddingsCommitted(
+    const std::vector<std::string>& documentHashes) {
+    // Runs on the embedding worker, so it only queues: the backfill publishes on the sync
+    // cycle, which owns the memory-sync service's lifetime and the outbound budget.
+    if (!config_.memorySync.enabled || documentHashes.empty()) {
+        return;
+    }
+    std::size_t dropped = 0;
+    {
+        std::lock_guard<std::mutex> lock(memorySyncCommittedVectorsMutex_);
+        for (const auto& hash : documentHashes) {
+            if (memorySyncCommittedVectorDocumentSet_.contains(hash)) {
+                continue;
+            }
+            if (memorySyncCommittedVectorDocuments_.size() >=
+                kMemorySyncCommittedVectorDocumentsCap) {
+                ++dropped;
+                continue;
+            }
+            memorySyncCommittedVectorDocumentSet_.insert(hash);
+            memorySyncCommittedVectorDocuments_.push_back(hash);
+        }
+    }
+    if (dropped > 0) {
+        spdlog::debug("[ServiceManager] memory_sync committed-vector queue full; {} document(s) "
+                      "left to the vector sweep",
+                      dropped);
+    }
+}
+
+std::optional<std::string> ServiceManager::takeMemorySyncCommittedVectorDocument() {
+    std::lock_guard<std::mutex> lock(memorySyncCommittedVectorsMutex_);
+    if (memorySyncCommittedVectorDocuments_.empty()) {
+        return std::nullopt;
+    }
+    auto hash = std::move(memorySyncCommittedVectorDocuments_.front());
+    memorySyncCommittedVectorDocuments_.pop_front();
+    memorySyncCommittedVectorDocumentSet_.erase(hash);
+    return hash;
+}
+
+Result<memory_sync::ApplyStagePass> ServiceManager::applyMemorySyncContentBlobs() {
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
@@ -417,40 +465,16 @@ Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
         return merged.error();
     }
 
+    // The adapter attempts every blob, so a corrupt blob neither starves the blobs after it nor
+    // hides the blobs this scan deferred: both outcomes are recorded.
     memory_sync::ContentBlobSyncAdapter adapter{*contentStore, *memorySync_};
-    const std::string prefix =
-        std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::ContentBlob)) + "/";
-    std::size_t applied = 0;
-    for (const auto& [key, envelope] : merged.value()) {
-        (void)envelope;
-        if (!key.starts_with(prefix)) {
-            continue;
-        }
-        const std::string_view hash{key.data() + prefix.size(), key.size() - prefix.size()};
-        if (!memory_sync::isSha256Digest(hash)) {
-            return Error{ErrorCode::InvalidData, "invalid content-blob memory-sync key"};
-        }
-        if (envelope.isTombstone()) {
-            auto removed = adapter.applyDelete(hash);
-            if (!removed) {
-                return removed.error();
-            }
-            applied += removed.value() ? 1 : 0;
-            continue;
-        }
-        auto exists = contentStore->exists(std::string(hash));
-        if (!exists) {
-            return exists.error();
-        }
-        if (exists.value()) {
-            continue;
-        }
-        if (auto stored = adapter.applyCached(hash); !stored) {
-            return stored.error();
-        }
-        ++applied;
+    auto pass = adapter.applyWinners(merged.value());
+    memory_sync::ApplyStagePass out;
+    out.deferredKeys = std::move(pass.deferredKeys);
+    if (pass.failure) {
+        out.failure = pass.failure->message;
     }
-    return applied;
+    return out;
 }
 
 void ServiceManager::notifyMemorySyncStage(std::string_view stage) noexcept {
@@ -597,6 +621,9 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     // A pre-delete intent can survive a crash between local deletion and tombstone publication.
     // Promote it only after local metadata is absent, then skip this stale callback snapshot.
     if (drainMemorySyncDocumentDeleteOutbox()) {
+        // Counted so a delete outbox that keeps preempting cycles cannot silently starve the
+        // outbound publish.
+        memorySyncApplyHealth_.recordPublishSkipped();
         return;
     }
     try {
@@ -608,110 +635,150 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     } catch (...) {
         spdlog::debug("[memory_sync] quarantine reason logging skipped");
     }
-    try {
-        if (auto result = applyMemorySyncContentBlobs(); !result) {
-            spdlog::warn("[ServiceManager] memory_sync content apply failed: {}",
-                         result.error().message);
-            return;
+    // Stage dependencies. Inbound stages run in prerequisite order so that a prerequisite which
+    // lands in this cycle is already visible to its dependents in the same cycle:
+    //   content  - independent; content-addressed bytes.
+    //   metadata - per document, needs that document's content bytes locally.
+    //   vector   - per embedding, needs its document's content bytes locally.
+    //   topology - per edge, needs both endpoint nodes (replicated by the same stage).
+    // Those dependencies are enforced per record against the local stores, never by gating a whole
+    // stage on an earlier stage's success, so a failed stage cannot hide unrelated records from
+    // the stages after it. The outbound publish depends on no inbound stage: gating it on inbound
+    // success let a mesh deadlock, because when every node held an inbound record whose
+    // prerequisite only a peer could publish, every node refused to publish and the
+    // prerequisites never arrived. Only a stop request ends the cycle early.
+    // A stage that defers records is healthy; only a hard failure marks the cycle failed.
+    bool stageFailed = false;
+    const auto runStage = [this, &stageFailed](memory_sync::ApplyStage stage,
+                                               std::string_view completedStage, auto&& applyStage) {
+        if (memorySync_->stopRequested()) {
+            return false;
         }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync content apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync content apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_content");
-
-    if (memorySync_->stopRequested()) {
-        return;
-    }
-    try {
-        if (auto repository = getMetadataRepo()) {
-            auto contentStore = getContentStore();
-            if (!contentStore) {
-                spdlog::warn("[ServiceManager] memory_sync metadata apply requires content store");
-                return;
+        const auto name = memory_sync::applyStageName(stage);
+        const auto recordFailure = [&](std::string message) {
+            stageFailed = true;
+            spdlog::warn("[ServiceManager] memory_sync {} apply failed: {}", name, message);
+            memorySyncApplyHealth_.recordFailure(stage, std::move(message),
+                                                 std::chrono::steady_clock::now());
+        };
+        try {
+            // An error means the pass did not scan every record; a pass value that scanned every
+            // record can carry deferrals and a failure together, and both are recorded.
+            auto pass = applyStage();
+            if (!pass) {
+                recordFailure(pass.error().message);
+            } else {
+                const auto& deferred = pass.value().deferredKeys;
+                if (!deferred.empty()) {
+                    spdlog::debug("[ServiceManager] memory_sync {} apply deferred {} record(s) "
+                                  "awaiting replicated prerequisites",
+                                  name, deferred.size());
+                }
+                if (pass.value().failure) {
+                    stageFailed = true;
+                    spdlog::warn("[ServiceManager] memory_sync {} apply failed: {}", name,
+                                 *pass.value().failure);
+                }
+                const auto stale = memorySyncApplyHealth_.recordPass(
+                    stage, pass.value(), std::chrono::steady_clock::now());
+                for (const auto& key : stale) {
+                    spdlog::warn("[ServiceManager] memory_sync {} record {} has been deferred for "
+                                 "over {} minutes; its replicated prerequisite has not arrived",
+                                 name, key, memory_sync::ApplyHealth::kStaleDeferralAge.count());
+                }
             }
-            metadata::MetadataSyncAdapter adapter{
-                *repository, *memorySync_,
-                [contentStore](std::string_view hash) {
-                    return contentStore->exists(std::string(hash));
-                },
-                [this](const metadata::DocumentInfo& document) {
-                    enqueuePostIngest(document.sha256Hash, document.mimeType);
-                }};
-            if (auto result = adapter.apply(); !result) {
-                spdlog::warn("[ServiceManager] memory_sync metadata apply failed: {}",
-                             result.error().message);
-                return;
-            }
+        } catch (const std::exception& e) {
+            recordFailure(std::string("threw: ") + e.what());
+        } catch (...) {
+            recordFailure("threw an unknown exception");
         }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync metadata apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync metadata apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_metadata");
+        notifyMemorySyncStage(completedStage);
+        return true;
+    };
 
-    if (memorySync_->stopRequested()) {
-        return;
-    }
-    try {
-        if (auto vectorDatabase = getVectorDatabase()) {
-            auto contentStore = getContentStore();
-            if (!contentStore) {
-                spdlog::warn("[ServiceManager] memory_sync vector apply requires content store");
-                return;
-            }
-            vector::VectorSyncAdapter::RebuildCallback rebuild;
-            if (vectorIndexCoordinator_) {
-                rebuild = [coordinator = vectorIndexCoordinator_]() {
-                    return coordinator->requestRebuildBlocking(RebuildReason::EmbeddingBatch);
-                };
-            }
-            vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_, std::move(rebuild),
-                                              &memorySyncVectorRebuildDirty_,
+    using StagePass = memory_sync::ApplyStagePass;
+    const auto applyContent = [this]() -> Result<StagePass> {
+        return applyMemorySyncContentBlobs();
+    };
+    const auto applyMetadata = [this]() -> Result<StagePass> {
+        auto repository = getMetadataRepo();
+        if (!repository) {
+            return StagePass{};
+        }
+        auto contentStore = getContentStore();
+        if (!contentStore) {
+            return Error{ErrorCode::InvalidState, "metadata apply requires the content store"};
+        }
+        metadata::MetadataSyncAdapter adapter{*repository, *memorySync_,
                                               [contentStore](std::string_view hash) {
                                                   return contentStore->exists(std::string(hash));
+                                              },
+                                              [this](const metadata::DocumentInfo& document) {
+                                                  enqueuePostIngest(document.sha256Hash,
+                                                                    document.mimeType);
                                               }};
-            if (auto result = adapter.apply(); !result) {
-                spdlog::warn("[ServiceManager] memory_sync vector apply failed: {}",
-                             result.error().message);
-                return;
-            }
+        auto applied = adapter.apply();
+        if (!applied) {
+            return applied.error();
         }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync vector apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync vector apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_vector");
+        return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+    };
+    const auto applyVectors = [this]() -> Result<StagePass> {
+        auto vectorDatabase = getVectorDatabase();
+        if (!vectorDatabase) {
+            return StagePass{};
+        }
+        auto contentStore = getContentStore();
+        if (!contentStore) {
+            return Error{ErrorCode::InvalidState, "vector apply requires the content store"};
+        }
+        vector::VectorSyncAdapter::RebuildCallback rebuild;
+        if (vectorIndexCoordinator_) {
+            rebuild = [coordinator = vectorIndexCoordinator_]() {
+                return coordinator->requestRebuildBlocking(RebuildReason::EmbeddingBatch);
+            };
+        }
+        vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_, std::move(rebuild),
+                                          &memorySyncVectorRebuildDirty_,
+                                          [contentStore](std::string_view hash) {
+                                              return contentStore->exists(std::string(hash));
+                                          }};
+        auto applied = adapter.apply();
+        if (!applied) {
+            return applied.error();
+        }
+        StagePass pass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+        if (const auto& failure = adapter.failure()) {
+            pass.failure = failure->message;
+        }
+        return pass;
+    };
+    const auto applyTopology = [this]() -> Result<StagePass> {
+        auto kgStore = getKgStore();
+        if (!kgStore) {
+            return StagePass{};
+        }
+        metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
+        auto applied = adapter.apply();
+        if (!applied) {
+            return applied.error();
+        }
+        if (applied.value().edgesDropped > 0) {
+            spdlog::debug("[ServiceManager] memory_sync topology apply dropped {} edge(s) whose "
+                          "endpoint node was deleted",
+                          applied.value().edgesDropped);
+        }
+        return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+    };
 
-    if (memorySync_->stopRequested()) {
+    using memory_sync::ApplyStage;
+    if (!runStage(ApplyStage::Content, "apply.after_content", applyContent) ||
+        !runStage(ApplyStage::Metadata, "apply.after_metadata", applyMetadata) ||
+        !runStage(ApplyStage::Vector, "apply.after_vector", applyVectors) ||
+        !runStage(ApplyStage::Topology, "apply.after_topology", applyTopology)) {
         return;
     }
-    try {
-        if (auto kgStore = getKgStore()) {
-            metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
-            if (auto result = adapter.apply(); !result) {
-                spdlog::warn("[ServiceManager] memory_sync topology apply failed: {}",
-                             result.error().message);
-                return;
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync topology apply threw: {}", e.what());
-        return;
-    } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync topology apply threw (unknown)");
-        return;
-    }
-    notifyMemorySyncStage("apply.after_topology");
+    memorySyncApplyHealth_.recordCycle(stageFailed);
 
     if (memorySync_->stopRequested()) {
         return;
@@ -747,7 +814,9 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     std::size_t vectorsPublished = 0;
     std::size_t nodesPublished = 0;
     std::size_t edgesPublished = 0;
+    std::size_t recordsRetracted = 0;
     std::size_t skippedDocuments = 0;
+    std::size_t skippedVectors = 0;
 
     const auto publishDocument = [&]() -> bool {
         if (!repository || !contentStore) {
@@ -817,6 +886,72 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         return true;
     };
 
+    // Publish one vector row. A row that can never publish (no sync identity, unrecoverable
+    // record) is skipped so a pass continues past it instead of wedging on the same row every
+    // cycle, as documents are; it is reported once, on the first sweep pass or when committed,
+    // not again on every later pass. Other failures throw so the row is retried later.
+    const auto publishVectorRecord = [&](const vector::VectorRecord& record, bool reportSkip) {
+        const auto skipVector = [&](const Error& error) {
+            if (reportSkip) {
+                spdlog::warn("[ServiceManager] memory_sync backfill skipping vector {} of "
+                             "document {} (unpublishable): {}",
+                             record.chunk_id, record.document_hash, error.message);
+            }
+            ++skippedVectors;
+            notifyMemorySyncStage("backfill.skip_vector");
+        };
+        if (auto publishable = vector::VectorSyncAdapter::checkPublishable(record); !publishable) {
+            skipVector(publishable.error());
+            return;
+        }
+        vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_};
+        auto published = adapter.publish(record);
+        if (!published) {
+            if (isUnrecoverableBlobFailure(published.error().code)) {
+                skipVector(published.error());
+                return;
+            }
+            throw std::runtime_error(published.error().message);
+        }
+        ++vectorsPublished;
+        notifyMemorySyncStage("backfill.after_vector");
+    };
+
+    // Vectors an embedding job committed, one row per item, document by document, so a new or
+    // re-embedded vector reaches peers on the next cycle wherever the sweep happens to be.
+    const auto publishCommittedVector = [&]() -> bool {
+        if (!vectorDatabase) {
+            return false;
+        }
+        while (!shouldStop()) {
+            if (state.committedVectorDocument.empty()) {
+                auto next = takeMemorySyncCommittedVectorDocument();
+                if (!next) {
+                    return false;
+                }
+                state.committedVectorDocument = std::move(*next);
+                state.committedVectorChunkCursor.clear();
+            }
+            auto records = vectorDatabase->getVectorsPage(state.committedVectorDocument,
+                                                          state.committedVectorChunkCursor, 1);
+            if (!records) {
+                throw std::runtime_error(records.error().message);
+            }
+            if (records.value().empty() ||
+                records.value().front().document_hash != state.committedVectorDocument) {
+                // Every chunk of this document is out (or it has none left).
+                state.committedVectorDocument.clear();
+                state.committedVectorChunkCursor.clear();
+                continue;
+            }
+            const auto& record = records.value().front();
+            publishVectorRecord(record, /*reportSkip=*/true);
+            state.committedVectorChunkCursor = record.chunk_id;
+            return true;
+        }
+        return false;
+    };
+
     const auto publishVector = [&]() -> bool {
         if (!vectorDatabase) {
             return false;
@@ -827,18 +962,19 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
             throw std::runtime_error(records.error().message);
         }
         if (records.value().empty()) {
+            // Pass complete. The next one starts from the beginning, so vectors added or
+            // re-embedded behind the cursor are published by it, as topology passes repeat.
+            if (!state.vectorDocumentHashCursor.empty()) {
+                ++state.vectorSweepPasses;
+            }
+            state.vectorDocumentHashCursor.clear();
+            state.vectorChunkIdCursor.clear();
             return false;
         }
         const auto& record = records.value().front();
-        vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_};
-        auto published = adapter.publish(record);
-        if (!published) {
-            throw std::runtime_error(published.error().message);
-        }
+        publishVectorRecord(record, /*reportSkip=*/state.vectorSweepPasses == 0);
         state.vectorDocumentHashCursor = record.document_hash;
         state.vectorChunkIdCursor = record.chunk_id;
-        ++vectorsPublished;
-        notifyMemorySyncStage("backfill.after_vector");
         return true;
     };
 
@@ -846,144 +982,182 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         if (!kgStore) {
             return false;
         }
+        using Phase = MemorySyncBackfillState::TopologyPhase;
         metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
-        if (!state.topologySnapshotInitialized) {
-            auto nodeTypes = kgStore->getNodeTypeCounts();
-            if (!nodeTypes) {
-                throw std::runtime_error(nodeTypes.error().message);
-            }
-            state.topologyNodeTypes.reserve(nodeTypes.value().size());
-            for (const auto& [nodeType, count] : nodeTypes.value()) {
-                (void)count;
-                state.topologyNodeTypes.push_back(nodeType);
-            }
-            std::sort(state.topologyNodeTypes.begin(), state.topologyNodeTypes.end());
-            state.topologySnapshotInitialized = true;
-        }
-
         while (!shouldStop()) {
-            if (state.topologyNodeActive) {
-                auto edges = kgStore->getEdgesFrom(state.topologyNodeId, std::nullopt, 1,
-                                                   state.topologyEdgeOffset);
-                if (!edges) {
-                    throw std::runtime_error(edges.error().message);
+            switch (state.topologyPhase) {
+                case Phase::Nodes: {
+                    auto nodes = kgStore->getNodesAfterId(state.topologyNodeIdCursor, 1);
+                    if (!nodes) {
+                        throw std::runtime_error(nodes.error().message);
+                    }
+                    if (nodes.value().empty()) {
+                        state.topologyPhase = Phase::Edges;
+                        continue;
+                    }
+                    const auto& node = nodes.value().front();
+                    if (auto published = adapter.publishNode(node); !published) {
+                        throw std::runtime_error(published.error().message);
+                    }
+                    state.topologyNodeIdCursor = node.id;
+                    ++nodesPublished;
+                    notifyMemorySyncStage("backfill.after_node");
+                    return true;
                 }
-                if (!edges.value().empty()) {
+                case Phase::Edges: {
+                    auto edges = kgStore->getEdgesAfterId(state.topologyEdgeIdCursor, 1);
+                    if (!edges) {
+                        throw std::runtime_error(edges.error().message);
+                    }
+                    if (edges.value().empty()) {
+                        state.topologyPhase = Phase::Retractions;
+                        continue;
+                    }
                     const auto& edge = edges.value().front();
+                    auto source = kgStore->getNodeById(edge.srcNodeId);
+                    if (!source) {
+                        throw std::runtime_error(source.error().message);
+                    }
                     auto target = kgStore->getNodeById(edge.dstNodeId);
                     if (!target) {
                         throw std::runtime_error(target.error().message);
                     }
-                    ++state.topologyEdgeOffset;
-                    if (!target.value()) {
+                    if (!source.value() || !target.value()) {
+                        // An endpoint was deleted after the edge was read; its cascade removes
+                        // the edge too, so there is nothing to publish.
+                        state.topologyEdgeIdCursor = edge.id;
                         continue;
                     }
-                    auto published =
-                        adapter.publishEdge(state.topologyNodeKey, edge, target.value()->nodeKey);
-                    if (!published) {
-                        --state.topologyEdgeOffset;
+                    // Endpoints go out with the edge, so no peer ever holds this writer's edge
+                    // without its endpoint nodes, whichever pass would otherwise reach them.
+                    if (auto published = adapter.publishEdgeWithEndpoints(*source.value(), edge,
+                                                                          *target.value());
+                        !published) {
                         throw std::runtime_error(published.error().message);
                     }
+                    state.topologyEdgeIdCursor = edge.id;
                     ++edgesPublished;
                     notifyMemorySyncStage("backfill.after_edge");
                     return true;
                 }
-                state.topologyNodeActive = false;
-                state.topologyNodeId = 0;
-                state.topologyNodeKey.clear();
-                state.topologyEdgeOffset = 0;
-                ++state.topologyNodeOffsets[state.topologyNodeTypes[state.topologyTypeIndex]];
+                case Phase::Retractions: {
+                    auto winners = memorySync_->committedWinnersAfter(
+                        "topology-", state.topologyRetractionKeyCursor, 1);
+                    if (winners.empty()) {
+                        // Pass complete. The next one starts from the beginning, so records
+                        // created or changed behind the cursors are published by it.
+                        state.topologyPhase = Phase::Nodes;
+                        state.topologyNodeIdCursor = 0;
+                        state.topologyEdgeIdCursor = 0;
+                        state.topologyRetractionKeyCursor.clear();
+                        return false;
+                    }
+                    const auto& [key, winner] = winners.front();
+                    state.topologyRetractionKeyCursor = key;
+                    if (winner.isTombstone() || winner.origin != memorySync_->localNodeId()) {
+                        continue;
+                    }
+                    auto retracted = adapter.retractIfLocallyAbsent(key, winner);
+                    if (!retracted) {
+                        throw std::runtime_error(retracted.error().message);
+                    }
+                    if (retracted.value()) {
+                        ++recordsRetracted;
+                        notifyMemorySyncStage("backfill.after_retraction");
+                    }
+                    return true;
+                }
             }
-
-            if (state.topologyTypeIndex >= state.topologyNodeTypes.size()) {
-                // Refresh the bounded type snapshot on the next cycle so node types created after
-                // startup become visible. Per-type offsets prevent replaying nodes already swept.
-                state.topologySnapshotInitialized = false;
-                state.topologyNodeTypes.clear();
-                state.topologyTypeIndex = 0;
-                return false;
-            }
-            const auto& nodeType = state.topologyNodeTypes[state.topologyTypeIndex];
-            auto nodes = kgStore->findNodesByType(nodeType, 1, state.topologyNodeOffsets[nodeType]);
-            if (!nodes) {
-                throw std::runtime_error(nodes.error().message);
-            }
-            if (nodes.value().empty()) {
-                ++state.topologyTypeIndex;
-                continue;
-            }
-
-            const auto& node = nodes.value().front();
-            auto published = adapter.publishNode(node);
-            if (!published) {
-                throw std::runtime_error(published.error().message);
-            }
-            state.topologyNodeId = node.id;
-            state.topologyNodeKey = node.nodeKey;
-            state.topologyNodeActive = true;
-            ++nodesPublished;
-            notifyMemorySyncStage("backfill.after_node");
-            return true;
         }
         return false;
     };
 
-    const auto advanceDomain = [&] {
-        using Domain = MemorySyncBackfillState::Domain;
-        switch (state.nextDomain) {
-            case Domain::Documents:
-                state.nextDomain = Domain::Vectors;
-                break;
-            case Domain::Vectors:
-                state.nextDomain = Domain::Topology;
-                break;
-            case Domain::Topology:
-                state.nextDomain = Domain::Documents;
-                break;
-        }
-    };
-
-    std::size_t consecutiveEmptyDomains = 0;
-    while (!shouldStop() && consecutiveEmptyDomains < 3) {
-        const auto domain = state.nextDomain;
-        advanceDomain();
-        bool published = false;
-        try {
-            using Domain = MemorySyncBackfillState::Domain;
-            switch (domain) {
-                case Domain::Documents:
-                    published = publishDocument();
-                    break;
-                case Domain::Vectors:
-                    published = publishVector();
-                    break;
-                case Domain::Topology:
-                    published = publishTopology();
-                    break;
+    // Domains are served in priority order: every item goes to the first domain that still has
+    // work this cycle. Documents (metadata and content) are what peers need to read the corpus;
+    // vectors and topology are derived from them and only defer on a peer until the document
+    // arrives. A publish costs a large share of the per-cycle time budget, so a fair rotation let
+    // derived records delay the documents every peer is waiting for. Committed vectors are new
+    // work announced by embedding jobs, bounded by what was embedded, so they come next. The two
+    // catch-up sweeps repeat forever and so always have work: they alternate, item by item and
+    // across cycles, and a sweep that is done for this cycle leaves its turns to the other.
+    using Domain = MemorySyncBackfillState::Domain;
+    constexpr std::size_t kDomainCount = 4;
+    std::array<bool, kDomainCount> domainDone{};
+    bool domainFailed = false;
+    while (!shouldStop()) {
+        const Domain firstSweep = state.nextSweep;
+        const Domain secondSweep =
+            firstSweep == Domain::Vectors ? Domain::Topology : Domain::Vectors;
+        const std::array<Domain, kDomainCount> order{Domain::Documents, Domain::CommittedVectors,
+                                                     firstSweep, secondSweep};
+        std::optional<Domain> served;
+        for (const auto domain : order) {
+            auto& done = domainDone[static_cast<std::size_t>(domain)];
+            if (done) {
+                continue;
             }
-        } catch (const std::exception& error) {
-            spdlog::warn("[ServiceManager] memory_sync backfill domain failed: {}", error.what());
-        } catch (...) {
-            spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
+            bool published = false;
+            try {
+                switch (domain) {
+                    case Domain::Documents:
+                        published = publishDocument();
+                        break;
+                    case Domain::CommittedVectors:
+                        published = publishCommittedVector();
+                        break;
+                    case Domain::Vectors:
+                        published = publishVector();
+                        break;
+                    case Domain::Topology:
+                        published = publishTopology();
+                        break;
+                }
+            } catch (const std::exception& error) {
+                domainFailed = true;
+                spdlog::warn("[ServiceManager] memory_sync backfill domain failed: {}",
+                             error.what());
+            } catch (...) {
+                domainFailed = true;
+                spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
+            }
+            if (published) {
+                served = domain;
+                break;
+            }
+            // A domain with nothing left, or one that failed, sits out the rest of this cycle.
+            done = true;
         }
-
-        if (published) {
-            --remainingItems;
-            consecutiveEmptyDomains = 0;
-        } else {
-            ++consecutiveEmptyDomains;
+        if (!served) {
+            break;
         }
+        if (*served == Domain::Vectors) {
+            state.nextSweep = Domain::Topology;
+        } else if (*served == Domain::Topology) {
+            state.nextSweep = Domain::Vectors;
+        }
+        --remainingItems;
     }
 
     spdlog::debug(
         "[ServiceManager] memory_sync backfill scanned documents={} blobs={} vectors={} nodes={} "
-        "edges={} skipped={}",
+        "edges={} retracted={} skipped_documents={} skipped_vectors={}",
         documentsPublished, blobsPublished, vectorsPublished, nodesPublished, edgesPublished,
-        skippedDocuments);
+        recordsRetracted, skippedDocuments, skippedVectors);
+    if (domainFailed) {
+        memorySyncApplyHealth_.recordPublishFailed();
+    }
 } catch (const std::exception& error) {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed: {}", error.what());
+    try {
+        memorySyncApplyHealth_.recordPublishFailed();
+    } catch (...) {
+    }
 } catch (...) {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed (unknown)");
+    try {
+        memorySyncApplyHealth_.recordPublishFailed();
+    } catch (...) {
+    }
 }
 
 Result<void> ServiceManager::configureMemorySyncApply() {

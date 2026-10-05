@@ -17,14 +17,7 @@ yams_plugins_mgmt = static_library('yams_plugins_mgmt',
   ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, json_dep, threads_dep, curl_dep, openssl_dep, libarchive_dep, yams_core, yams_config],
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_plugins_mgmt,
-  name: 'yams-plugins-mgmt',
-  description: 'YAMS plugin management library',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_plugins_mgmt_dep = declare_dependency(

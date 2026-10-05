@@ -17,11 +17,19 @@ struct OrtRuntimeInfo {
     std::string version;
     std::string buildInfo;
     std::string errorMessage;
+    // Which copy was chosen: override, configured, system, bundled or legacy.
+    std::string source;
+    // Candidates that were found but rejected, with the reason.
+    std::vector<std::string> skipped;
 };
 
 class OrtRuntimeLoader {
 public:
     static OrtRuntimeLoader& instance();
+
+    // Plugin config "runtime_library" ([plugins.onnx] / [plugins.glint]): a library
+    // file or a directory. Must be set before the first ensureLoaded() to matter.
+    void setConfiguredLibrary(std::string pathOrDir);
 
     const OrtRuntimeInfo& ensureLoaded();
     bool isAvailable();
@@ -35,6 +43,7 @@ private:
     OrtRuntimeLoader() = default;
 
     std::mutex mutex_;
+    std::string configuredLibrary_;
     bool attempted_{false};
     void* handle_{nullptr};
     const OrtApiBase* apiBase_{nullptr};

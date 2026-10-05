@@ -85,8 +85,8 @@ jobs:
         run: |
           set -euo pipefail
           COMPILE_DB_DIR=""
-          if [ -f builddir/compile_commands.json ]; then
-            COMPILE_DB_DIR="builddir"
+          if [ -f build/debug/compile_commands.json ]; then
+            COMPILE_DB_DIR="build/debug"
           elif [ -f compile_commands.json ]; then
             COMPILE_DB_DIR="."
           else
@@ -124,7 +124,7 @@ jobs:
     if: ${{ success() }}
     name: Tests (${{ matrix.suffix }})
     env:
-      BUILD_DIR: builddir
+      BUILD_DIR: build/debug
       YAMS_CONAN_COMPILER_VERSION: ${{ matrix.conan_compiler_version || '' }}
       YAMS_MSBUILD_VS_VERSION: ${{ matrix.msbuild_vs_version || '' }}
     strategy:
@@ -174,7 +174,7 @@ jobs:
             conan_arch: x86_64
             needs_rosetta: false
             build_type: Debug
-            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-ubsan=true -Db_sanitize=undefined -Db_lundef=false -Dtest-timeout-scale=2 -Denable-dcheck=true"
+            extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Db_sanitize=undefined -Db_lundef=false -Dtest-timeout-scale=2 -Denable-dcheck=true"
           # Host-only mobile SDK lane: builds libyams_mobile plus its Catch2 ABI tests and
           # checks the exported C surface. It proves the Linux host build, not that an
           # Android .so or iOS XCFramework loads on a device.
@@ -188,7 +188,7 @@ jobs:
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Denable-mobile-tests=true -Dtest-timeout-scale=2 -Denable-bench-tests=false -Dbuild-benchmarks=false -Denable-dcheck=true"
           # TSAN intentionally excluded from CI: boost::asio strand destruction triggers
           # a heap-use-after-free that TSAN detects but cannot be suppressed via tsan.suppressions.
-          # Run TSAN locally with: meson setup builddir-tsan -Denable-tsan=true -Db_sanitize=thread
+          # Run TSAN locally with: meson setup build/debug-tsan -Db_sanitize=thread
     runs-on: ${{ matrix.runs_on }}
     # Windows debug builds can consume most of the previous 100-minute budget before tests start.
     timeout-minutes: 180
@@ -355,7 +355,7 @@ jobs:
           export PATH="$PYTOOLS_DIR/Scripts:$PATH"
           echo "meson version: $(meson --version || echo 'missing')"
           echo "ninja version: $(ninja --version || echo 'missing')"
-          # Clean stale builddir to avoid Meson version incompatibility
+          # Clean stale build dir to avoid Meson version incompatibility
           if [ -d "${{ env.BUILD_DIR }}" ]; then
             echo "Removing stale builddir to ensure clean Meson configuration"
             rm -rf "${{ env.BUILD_DIR }}"
@@ -604,25 +604,25 @@ jobs:
           # Source Conan build env so meson compile uses the same meson version
           # that setup.sh used for meson setup (Conan provides meson 1.10.x which
           # creates build.dat incompatible with older system meson).
-          CONAN_BUILD_ENV="builddir/build-debug/conan/conanbuild.sh"
+          CONAN_BUILD_ENV="build/debug/build-debug/conan/conanbuild.sh"
           # shellcheck source=/dev/null
           if [ -f "${CONAN_BUILD_ENV}" ]; then set +u; . "${CONAN_BUILD_ENV}"; set -u; fi
           if [ "${{ matrix.suffix }}" = "linux-x86_64-asan" ] || \
              [ "${{ matrix.suffix }}" = "linux-x86_64-ubsan" ]; then
-            $ARCH_PREFIX meson compile -C builddir \
+            $ARCH_PREFIX meson compile -C build/debug \
               catch2_daemon_metrics_status \
               catch2_post_ingest_queue_unit \
               catch2_storage_submodule \
               catch2_work_coordinator
           elif [ "${{ matrix.suffix }}" = "linux-x86_64-mobile" ]; then
-            $ARCH_PREFIX meson compile -C builddir -j "$MESON_COMPILE_JOBS" \
+            $ARCH_PREFIX meson compile -C build/debug -j "$MESON_COMPILE_JOBS" \
               yams_mobile \
               catch2_mobile_abi
           else
             if [ -n "$MESON_COMPILE_JOBS" ]; then
-              $ARCH_PREFIX meson compile -C builddir -j "$MESON_COMPILE_JOBS"
+              $ARCH_PREFIX meson compile -C build/debug -j "$MESON_COMPILE_JOBS"
             else
-              $ARCH_PREFIX meson compile -C builddir
+              $ARCH_PREFIX meson compile -C build/debug
             fi
           fi
 

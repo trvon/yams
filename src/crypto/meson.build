@@ -12,15 +12,7 @@ yams_crypto = static_library('yams_crypto',
   crypto_src,
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, openssl_dep, json_dep, yams_core],
-  install: true,
-)
-
-# pkg-config export for downstream (optional)
-pkg = import('pkgconfig')
-pkg.generate(yams_crypto,
-  name: 'yams-crypto',
-  description: 'YAMS crypto utilities',
-  subdirs: ['yams'],
+  install: false,
 )
 
 # Provide a Meson dependency for other subdirs

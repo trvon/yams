@@ -209,30 +209,75 @@ template <> struct ProtoBinding<MemorySyncResponse> {
             yams::common::sanitizeUtf8(response.lastInboundFailureStage));
         out->set_last_inbound_failure(yams::common::sanitizeUtf8(response.lastInboundFailure));
         out->set_last_inbound_failure_age_ms(response.lastInboundFailureAgeMs);
+        out->set_apply_cycles(response.applyCycles);
+        out->set_apply_failed_cycles(response.applyFailedCycles);
+        out->set_deferred_content(response.deferredContent);
+        out->set_deferred_metadata(response.deferredMetadata);
+        out->set_deferred_vector(response.deferredVector);
+        out->set_deferred_topology(response.deferredTopology);
+        out->set_oldest_deferral_age_ms(response.oldestDeferralAgeMs);
+        out->set_apply_failures_content(response.applyFailuresContent);
+        out->set_apply_failures_metadata(response.applyFailuresMetadata);
+        out->set_apply_failures_vector(response.applyFailuresVector);
+        out->set_apply_failures_topology(response.applyFailuresTopology);
+        out->set_last_apply_failure_stage(
+            yams::common::sanitizeUtf8(response.lastApplyFailureStage));
+        out->set_last_apply_failure(yams::common::sanitizeUtf8(response.lastApplyFailure));
+        out->set_last_apply_failure_age_ms(response.lastApplyFailureAgeMs);
+        out->set_publish_skipped_cycles(response.publishSkippedCycles);
+        out->set_publish_failed_cycles(response.publishFailedCycles);
+        out->set_quarantined_writers(response.quarantinedWriters);
+        out->set_outbound_sessions(response.outboundSessions);
+        out->set_outbound_failures(response.outboundFailures);
+        out->set_last_outbound_failure(yams::common::sanitizeUtf8(response.lastOutboundFailure));
+        out->set_last_outbound_failure_age_ms(response.lastOutboundFailureAgeMs);
     }
     static MemorySyncResponse get(const Envelope& env) {
         const auto& in = env.memory_sync_response();
-        return MemorySyncResponse{in.published(),
-                                  in.started(),
-                                  in.value(),
-                                  in.records(),
-                                  in.quarantined_records(),
-                                  in.auth_failures(),
-                                  in.successful_cycles(),
-                                  in.failed_cycles(),
-                                  in.last_success_age_ms(),
-                                  in.backend(),
-                                  in.node_id(),
-                                  in.corpus_id(),
-                                  in.corpus_epoch(),
-                                  in.mode(),
-                                  in.trust_mode(),
-                                  in.peer_count(),
-                                  in.inbound_sessions(),
-                                  in.inbound_failures(),
-                                  in.last_inbound_failure_stage(),
-                                  in.last_inbound_failure(),
-                                  in.last_inbound_failure_age_ms()};
+        MemorySyncResponse response;
+        response.published = in.published();
+        response.started = in.started();
+        response.value = in.value();
+        response.records = in.records();
+        response.quarantinedRecords = in.quarantined_records();
+        response.authFailures = in.auth_failures();
+        response.successfulCycles = in.successful_cycles();
+        response.failedCycles = in.failed_cycles();
+        response.lastSuccessAgeMs = in.last_success_age_ms();
+        response.backend = in.backend();
+        response.nodeId = in.node_id();
+        response.corpusId = in.corpus_id();
+        response.corpusEpoch = in.corpus_epoch();
+        response.mode = in.mode();
+        response.trustMode = in.trust_mode();
+        response.peerCount = in.peer_count();
+        response.inboundSessions = in.inbound_sessions();
+        response.inboundFailures = in.inbound_failures();
+        response.lastInboundFailureStage = in.last_inbound_failure_stage();
+        response.lastInboundFailure = in.last_inbound_failure();
+        response.lastInboundFailureAgeMs = in.last_inbound_failure_age_ms();
+        response.applyCycles = in.apply_cycles();
+        response.applyFailedCycles = in.apply_failed_cycles();
+        response.deferredContent = in.deferred_content();
+        response.deferredMetadata = in.deferred_metadata();
+        response.deferredVector = in.deferred_vector();
+        response.deferredTopology = in.deferred_topology();
+        response.oldestDeferralAgeMs = in.oldest_deferral_age_ms();
+        response.applyFailuresContent = in.apply_failures_content();
+        response.applyFailuresMetadata = in.apply_failures_metadata();
+        response.applyFailuresVector = in.apply_failures_vector();
+        response.applyFailuresTopology = in.apply_failures_topology();
+        response.lastApplyFailureStage = in.last_apply_failure_stage();
+        response.lastApplyFailure = in.last_apply_failure();
+        response.lastApplyFailureAgeMs = in.last_apply_failure_age_ms();
+        response.publishSkippedCycles = in.publish_skipped_cycles();
+        response.publishFailedCycles = in.publish_failed_cycles();
+        response.quarantinedWriters = in.quarantined_writers();
+        response.outboundSessions = in.outbound_sessions();
+        response.outboundFailures = in.outbound_failures();
+        response.lastOutboundFailure = in.last_outbound_failure();
+        response.lastOutboundFailureAgeMs = in.last_outbound_failure_age_ms();
+        return response;
     }
 };
 

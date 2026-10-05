@@ -91,6 +91,38 @@ if get_option('build-plugins') and get_option('plugin-s3')
   )
 endif
 
+# Plugin export surface: only the yams_plugin_* C ABI may be visible.
+plugin_export_args = []
+plugin_export_deps = []
+if get_option('build-plugins') and get_option('plugin-s3')
+  if host_machine.system() == 'windows'
+    s3_plugin_filename = 'yams_object_storage_s3' + plugin_ext
+  else
+    s3_plugin_filename = 'libyams_object_storage_s3' + plugin_ext
+  endif
+  plugin_export_args += ['-DYAMS_S3_PLUGIN_PATH="' + join_paths(plugin_build_dir, 'plugins/object_storage_s3', s3_plugin_filename) + '"']
+  plugin_export_deps += [yams_object_storage_s3]
+endif
+if is_variable('zyp_plugin')
+  plugin_export_args += ['-DYAMS_ZYP_PLUGIN_PATH="' + join_paths(plugin_build_dir, 'plugins/zyp/yams_zyp' + plugin_ext) + '"']
+  plugin_export_deps += [zyp_plugin]
+endif
+if plugin_export_deps.length() > 0 and host_machine.system() != 'windows'
+  plugin_export_surface_exe = executable('yams_plugin_export_surface_tests',
+    files('plugin_export_surface_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: plugin_export_args,
+    install: false,
+  )
+  test('plugin_export_surface', plugin_export_surface_exe,
+    suite: ['plugins', 'catch2'],
+    env: {'LD_LIBRARY_PATH': plugin_test_ld_library_path},
+    depends: plugin_export_deps,
+    timeout: 30,
+  )
+endif
+
 # zyp (Zig YAMS PDF) plugin tests
 zyp_plugin_runtime_deps = []
 if is_variable('zyp_plugin')

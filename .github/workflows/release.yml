@@ -117,9 +117,61 @@ jobs:
                 run.head_sha === sourceSha)
               .sort((left, right) => right.id - left.id);
             if (successful.length === 0) {
-              core.setFailed(
-                `No successful completed Tests workflow run has exact head_sha ${sourceSha}`,
-              );
+              // Name the red streak instead of refusing silently: the newest failing Tests run
+              // on experimental, its SHA and failing jobs, and when experimental was last green.
+              // Diagnostics only; the refusal below stands whatever they find.
+              const lines = [
+                `No successful completed Tests workflow run has exact head_sha ${sourceSha}.`,
+              ];
+              try {
+                const sameSha = runs.filter((run) => run.head_sha === sourceSha);
+                if (sameSha.length > 0) {
+                  const latest = sameSha.sort((left, right) => right.id - left.id)[0];
+                  lines.push(`Tests on this SHA concluded ${latest.conclusion}: ${latest.html_url}`);
+                }
+                const recent = (await github.rest.actions.listWorkflowRuns({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id: 'tests.yml',
+                  branch: 'experimental',
+                  event: 'push',
+                  status: 'completed',
+                  per_page: 50,
+                })).data.workflow_runs.filter((run) => run.conclusion !== 'cancelled');
+                const failing = recent.find((run) => run.conclusion !== 'success');
+                const lastGreen = recent.find((run) => run.conclusion === 'success');
+                if (failing) {
+                  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: failing.id,
+                    per_page: 100,
+                  });
+                  const failedJobs = jobs
+                    .filter((job) => job.conclusion === 'failure' || job.conclusion === 'timed_out')
+                    .map((job) => job.name);
+                  lines.push(
+                    `Newest failing Tests run on experimental: ${failing.html_url} ` +
+                    `(sha ${failing.head_sha.slice(0, 12)}, ${failing.created_at}, ${failing.conclusion}).`,
+                    `Failing jobs: ${failedJobs.length > 0 ? failedJobs.join(', ') : '(none reported)'}.`,
+                  );
+                }
+                const streak = lastGreen ? recent.indexOf(lastGreen) : recent.length;
+                lines.push(lastGreen
+                  ? `Last green Tests run on experimental: ${lastGreen.html_url} ` +
+                    `(${lastGreen.created_at}); ${streak} completed push run(s) since are red.`
+                  : `No green Tests run among the last ${recent.length} completed experimental push runs.`);
+              } catch (error) {
+                lines.push(`Could not summarize recent Tests runs: ${error.message}`);
+              }
+              for (const line of lines.slice(1)) {
+                core.error(line);
+              }
+              await core.summary
+                .addHeading('Nightly refused: experimental Tests are not green', 3)
+                .addList(lines)
+                .write();
+              core.setFailed(lines[0]);
               return;
             }
 
@@ -500,6 +552,7 @@ jobs:
         env:
           ARCH_DOCKER_PLATFORM: ${{ matrix.docker_platform }}
           ARCH_BASE_IMAGE: ${{ matrix.arch_base_image }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           : "${ARCH_PKG_PATH:?ARCH_PKG_PATH not set}"
@@ -525,8 +578,19 @@ jobs:
           printf '%s\n' "$package_info" | grep -F 'pkgname = yams' >/dev/null
           echo "Validated package metadata architecture: ${metadata_arch}"
 
+          # Publish gate: install, layout, service, CLI, reboot, removal and the
+          # upgrade from the latest published release (when it has an Arch package).
+          upgrade_args=()
+          prev_dir="$(mktemp -d)"
+          prev_tag="$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
+          if [ -n "$prev_tag" ] && gh release download "$prev_tag" -R "$GITHUB_REPOSITORY" -D "$prev_dir" -p "yams-*-${expected_arch}.pkg.tar.zst" 2>/dev/null; then
+            prev_pkg="$(find "$prev_dir" -name 'yams-*.pkg.tar.zst' -print -quit)"
+            if [ -n "$prev_pkg" ]; then upgrade_args=(--upgrade-from-arch "$prev_pkg"); fi
+          fi
+          echo "Upgrade source: ${prev_tag:-none} ${upgrade_args[*]:-}"
+
           chmod +x scripts/local-ci/package-validate.sh
-          bash scripts/local-ci/package-validate.sh --only arch --arch "$ARCH_PKG_PATH"
+          bash scripts/local-ci/package-validate.sh --only arch --arch "$ARCH_PKG_PATH" "${upgrade_args[@]}"
 
       - name: Skip remaining steps for Arch container builds
         if: matrix.arch_container == true
@@ -1155,7 +1219,7 @@ jobs:
           fi
           echo "STAGE_DIR=$BD/stage" >> "$GITHUB_ENV"
 
-      - name: Prune staged runtime payload (Linux/macOS)
+      - name: Split debug symbols from staged payload (Linux/macOS)
         if: runner.os != 'Windows' && matrix.arch_container != true
         shell: bash
         run: |
@@ -1177,7 +1241,9 @@ jobs:
             exit 1
           fi
 
-          bash scripts/prune-runtime-install.sh "$INSTALL_ROOT"
+          # Release builds keep -g; ship stripped binaries and keep the symbols as
+          # a separate workflow artifact (ELF .debug + .build-id links, macOS dSYM).
+          bash scripts/split-debug-symbols.sh "$INSTALL_ROOT" "$BUILD_DIR/debug-symbols"
 
       - name: Verify staged runtime assets (Linux/macOS)
         if: runner.os != 'Windows' && matrix.arch_container != true
@@ -1219,6 +1285,35 @@ jobs:
             exit 1
           fi
 
+      - name: Check install surface (Linux/macOS)
+        if: runner.os != 'Windows' && matrix.arch_container != true
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${STAGE_DIR:?STAGE_DIR not set}"
+          PREFIX="${YAMS_INSTALL_PREFIX:-}"
+          if [ -z "$PREFIX" ]; then
+            if [ "$RUNNER_OS" = "Linux" ]; then PREFIX="/usr"; else PREFIX="/usr/local"; fi
+          fi
+          # Paths, size/export budgets, forbidden third-party exports, RUNPATH,
+          # hardening and strip state of the exact payload that gets packaged.
+          rc=0
+          python3 scripts/ci/check_install_surface.py \
+            --stage "$STAGE_DIR" --prefix "$PREFIX" --libdir lib \
+            --json "$BUILD_DIR/install-surface.json" > "$BUILD_DIR/install-surface.txt" || rc=$?
+          cat "$BUILD_DIR/install-surface.txt"
+          { echo '```'; cat "$BUILD_DIR/install-surface.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Upload debug symbols (Linux/macOS)
+        if: runner.os != 'Windows' && matrix.arch_container != true && github.actor != 'nektos/act'
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-symbols-${{ matrix.suffix }}${{ github.run_attempt > 1 && format('-a{0}', github.run_attempt) || '' }}
+          path: ${{ env.BUILD_DIR }}/debug-symbols
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: Install and Package MSI (Windows)
         if: runner.os == 'Windows' && inputs.fast_mode != 'true'
         shell: pwsh
@@ -1256,6 +1351,28 @@ jobs:
               Write-Error "Meson install failed"
               exit 1
           }
+
+          # Smoke-test the staged CLI before packaging. A missing load-time DLL
+          # (STATUS_DLL_NOT_FOUND, 0xC0000135, or 0xC00004BC) fails here
+          # instead of shipping an MSI whose yams.exe cannot start (v0.20.3).
+          $yamsExe = Get-ChildItem -Path $stageDir -Recurse -Filter "yams.exe" | Select-Object -First 1
+          if (-not $yamsExe) {
+              Write-Error "Staged yams.exe not found under $stageDir"
+              exit 1
+          }
+          $proc = Start-Process -FilePath $yamsExe.FullName -ArgumentList "--version" `
+              -NoNewWindow -PassThru -RedirectStandardOutput "$buildDir\yams-version.txt"
+          $null = $proc.Handle  # cache the handle so ExitCode is populated
+          if (-not $proc.WaitForExit(60000)) {
+              $proc.Kill()
+              Write-Error "Staged yams.exe --version did not exit within 60s"
+              exit 1
+          }
+          if ($proc.ExitCode -ne 0) {
+              Write-Error ("Staged yams.exe --version exited 0x{0:X8}" -f $proc.ExitCode)
+              exit 1
+          }
+          Write-Host "Staged CLI: $(Get-Content "$buildDir\yams-version.txt" -Raw)"
 
           # Build MSI using the packaging script
           $msiScript = "packaging\windows\build-msi.ps1"
@@ -1388,7 +1505,9 @@ jobs:
           OUTDIR="$GITHUB_WORKSPACE"
           if [ "${{ matrix.packaging }}" = "zip" ]; then
             ASSET="yams-${VERSION}-${SUFFIX}.zip"
-            zip -r "$OUTDIR/$ASSET" .
+            # -y stores symlinks (bin/yams -> yams-cli, versioned dylib links) as links
+            # instead of a second full copy of the target.
+            zip -ry "$OUTDIR/$ASSET" .
           else
             ASSET="yams-${VERSION}-${SUFFIX}.tar.gz"
             tar czf "$OUTDIR/$ASSET" .
@@ -1493,6 +1612,8 @@ jobs:
       - name: Validate Linux package install (systemd lanes)
         if: ${{ matrix.build_packages == true && runner.os == 'Linux' && github.actor != 'nektos/act' && inputs.fast_mode != 'true' && matrix.arch_container != true }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           case "${{ matrix.suffix }}" in
@@ -1518,6 +1639,21 @@ jobs:
             exit 1
           fi
 
+          # Upgrade path: the same lanes first install the latest published
+          # release's packages, store a document, then upgrade to these.
+          prev_dir="$(mktemp -d)"
+          prev_tag="$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
+          if [ -n "$prev_tag" ]; then
+            gh release download "$prev_tag" -R "$GITHUB_REPOSITORY" -D "$prev_dir" \
+              -p "yams-*linux-${expected_arch}.deb" -p "yams-*linux-${expected_arch}.rpm" 2>/dev/null || true
+            prev_deb="$(find "$prev_dir" -name 'yams-*.deb' -print -quit)"
+            prev_rpm="$(find "$prev_dir" -name 'yams-*.rpm' -print -quit)"
+            if [ -n "${prev_deb}" ] && [ -n "${deb}" ]; then args+=(--upgrade-from-deb "${prev_deb}"); fi
+            if [ -n "${prev_rpm}" ] && [ -n "${rpm}" ]; then args+=(--upgrade-from-rpm "${prev_rpm}"); fi
+          fi
+          echo "Upgrade source: ${prev_tag:-none}"
+
+          # Publish gate: Debian, Ubuntu and Fedora lanes (see the script header).
           chmod +x scripts/local-ci/package-validate.sh
           bash scripts/local-ci/package-validate.sh --only linux "${args[@]}"
 
@@ -1535,7 +1671,6 @@ jobs:
             ${{ env.BUILD_DIR }}/bench_results/*.json
             yams-*.deb
             yams-*.rpm
-            yams-*.AppImage
             yams-*.pkg
             yams-*.pkg.tar.zst
             winget-manifests/**
@@ -1624,7 +1759,7 @@ jobs:
               [ -f "$file" ] && copy_unique_asset "$file"
             done
             # Packages
-            for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.AppImage "$dir"/*.pkg.tar.zst "$dir"/*.msi; do
+            for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.pkg.tar.zst "$dir"/*.msi; do
               [ -f "$file" ] && copy_unique_asset "$file"
             done
             # Arch repo metadata
@@ -1657,7 +1792,7 @@ jobs:
             distributables+=("$f")
           done < <(find . -maxdepth 1 -type f \( \
             -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o \
-            -name '*.AppImage' -o -name '*.pkg' -o -name '*.msi' -o -name '*.pkg.tar.zst' \
+            -name '*.pkg' -o -name '*.msi' -o -name '*.pkg.tar.zst' \
           \) -printf '%f\n' | sort)
           if [ ${#distributables[@]} -gt 0 ]; then
             : > SHA256SUMS
@@ -2653,7 +2788,7 @@ jobs:
                 mv "$file" assets/ 2>/dev/null || true
               done
               # Move Linux packages
-              for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.AppImage "$dir"/*.pkg; do
+              for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.pkg; do
                 mv "$file" assets/ 2>/dev/null || true
               done
               # Collect benchmark results

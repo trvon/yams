@@ -2,10 +2,7 @@
 #
 # Used by scripts/local-ci/package-validate.sh to boot an Arch container under
 # /usr/lib/systemd/systemd, install the built .pkg.tar.zst package, and
-# smoke-test the yams-daemon service end-to-end.
-#
-# Pattern: mirrors packaging/systemd/debian-lane.Dockerfile and
-# packaging/systemd/fedora-lane.Dockerfile.
+# validate the yams-daemon service end-to-end (see that script).
 
 # archlinux/archlinux is amd64-only; aarch64 lanes pass an Arch Linux ARM
 # image (ghcr.io/menci/archlinuxarm, built from the official ALARM rootfs).
@@ -26,11 +23,11 @@ RUN set -eux; \
         procps-ng \
         iproute2 \
         shadow \
+        util-linux \
+        binutils \
         findutils \
         ca-certificates; \
     yes | pacman -Scc 2>/dev/null || true
-
-RUN useradd -m -s /bin/bash tester
 
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/lib/systemd/systemd"]

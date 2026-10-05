@@ -21,21 +21,13 @@ YAMS is pre-1.0. The roadmap describes direction, not a compatibility promise.
 
 ## Peer-to-peer corpus sharing
 
-The long-term goal is direct, selective sharing between YAMS corpora without a
-central service becoming the owner of either corpus.
+Goal: direct, selective sharing between corpora, with no central service
+owning either one. Whole-corpus sync between daemons shipped in 0.20.0
+([p2p.md](p2p.md)). Still open:
 
-The first usable slice should provide:
-
-1. Content-addressed exchange so existing blobs are never transferred twice.
-2. Explicit peer identity and confirmation before any corpus is shared.
-3. Collection-, tag-, and path-scoped manifests with a dry-run preview.
-4. Authenticated and encrypted transport.
-5. Resumable synchronization with integrity verification.
-6. Conflict-preserving metadata and graph merge semantics.
-7. Revocation and local deletion that do not depend on a remote account.
-
-Peer discovery, transport, and conflict policy remain design work. Until those
-contracts are tested, YAMS will not claim cross-device synchronization.
+- Collection-, tag- and path-scoped manifests with a dry-run preview.
+- Peer discovery. Peers are added by hand with `yams p2p enroll`.
+- Conflict-preserving metadata and graph merge. Sync is last-writer-wins.
 
 ## Before 1.0
 
@@ -47,7 +39,7 @@ contracts are tested, YAMS will not claim cross-device synchronization.
 
 ## Later
 
-- Peer-to-peer corpus replication and selective team sharing
+- Scoped peer-to-peer sharing between teams
 - Cross-repository retrieval federation
 - Offline mobile corpus import, inspection, search, export, and deletion
 - User-controlled context exchange between agents and applications

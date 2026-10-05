@@ -105,6 +105,7 @@ TEST_CASE("clean shutdown stamp has only one consumer",
 
         const auto first = firstFuture.get();
         const auto second = secondFuture.get();
+        CAPTURE(iteration, first.reason, second.reason);
         CHECK((first.trustedCleanShutdown != second.trustedCleanShutdown));
         CHECK(first.invalidationPersisted);
         CHECK(second.invalidationPersisted);

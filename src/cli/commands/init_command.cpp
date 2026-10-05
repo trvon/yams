@@ -4,6 +4,7 @@
 #include <yams/cli/init_assets.hpp>
 #include <yams/cli/prompt_util.h>
 #include <yams/cli/ui_helpers.hpp>
+#include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/common/fs_utils.h>
 #include <yams/common/string_utils.h>
@@ -13,6 +14,7 @@
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/storage/storage_runtime_resolver.h>
+#include <yams/vector/dim_resolver.h>
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
@@ -59,6 +61,21 @@ std::string formatInitSummary(const fs::path& configPath, const fs::path& dataPa
     out += ui::key_value("Data", dataPath.string()) + "\n";
     out += ui::key_value("Next", "yams list | yams doctor") + "\n";
     return out;
+}
+
+size_t resolveModelDimension(std::string_view modelName) {
+    if (modelName.empty() || modelName == "simeon-default" || modelName == "simeon") {
+        return 1024;
+    }
+    for (const auto& model : init_assets::embeddingModels()) {
+        if (model.name == modelName) {
+            return static_cast<size_t>(model.dimensions);
+        }
+    }
+    if (auto d = vector::dimres::dim_from_model_name(std::string(modelName))) {
+        return *d;
+    }
+    return 1024;
 }
 
 class InitCommand : public ICommand {
@@ -163,7 +180,9 @@ public:
                     noKeygen_ = !prompt_yes_no("Generate auth keys? [Y/n]: ",
                                                YesNoOptions{.defaultYes = true});
                 }
-                tuningProfile_ = promptForTuningProfile();
+                // The tuning profile is collected after the idempotency check: the
+                // already-initialized path prompts for it in handleAlreadyInitialized(),
+                // so prompting here too produced a duplicate prompt.
             }
 
             // Ensure we use the resolved dataPath in CLI
@@ -182,6 +201,11 @@ public:
 
             if (alreadyInitialized && !force_) {
                 return handleAlreadyInitialized(dataPath, configPath);
+            }
+
+            // Fresh setup (including --force re-init): collect the tuning profile once here.
+            if (!nonInteractive_) {
+                tuningProfile_ = promptForTuningProfile();
             }
 
             // 4) Initialize storage (database + content store)
@@ -231,6 +255,9 @@ public:
                     std::cout << "No embedding model download is required.\n";
                     colbertSelected = isColbertModelName(selectedModel);
                 }
+            } else {
+                enableVectorDB = true;
+                selectedModel = "simeon-default";
             }
 
             // 6a) S3 Storage Setup
@@ -338,16 +365,12 @@ public:
             if (enableVectorDB) {
                 spdlog::info("Initializing vector database...");
 
-                vector::VectorDatabaseConfig vdbConfig;
-                vdbConfig.database_path = (dataPath / "vectors.db").string();
+                const fs::path vectorsDbPath = dataPath / "vectors.db";
+                const bool vectorsDbExisted = fs::exists(vectorsDbPath);
 
-                // Set embedding dimension based on selected model
-                for (const auto& model : init_assets::embeddingModels()) {
-                    if (model.name == selectedModel) {
-                        vdbConfig.embedding_dim = model.dimensions;
-                        break;
-                    }
-                }
+                vector::VectorDatabaseConfig vdbConfig;
+                vdbConfig.database_path = vectorsDbPath.string();
+                vdbConfig.embedding_dim = resolveModelDimension(selectedModel);
 
                 auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
                 if (!vectorDb->initialize()) {
@@ -359,6 +382,13 @@ public:
                     // Test that tables exist
                     if (vectorDb->tableExists()) {
                         spdlog::debug("Vector database tables created successfully");
+                    }
+                    // Only stamp the sentinel when this init created vectors.db on disk (an
+                    // in-memory store writes none). Re-initializing over an existing database
+                    // must not overwrite the recorded dimension with a freshly resolved
+                    // default and mask a stored-dimension mismatch from `yams doctor`.
+                    if (!vectorsDbExisted && fs::exists(vectorsDbPath)) {
+                        vecutil::writeVectorSentinel(dataPath, vectorDb->getEmbeddingDim());
                     }
                 }
             }
@@ -618,59 +648,61 @@ private:
                 }
             }
 
-            // Update vector database settings
-            if (enableVectorDB && !selectedModel.empty()) {
-                pos = content.find("[vector_database]");
-                if (pos != std::string::npos) {
-                    // Find the enabled line
-                    size_t enabledPos = content.find("enabled = ", pos);
-                    if (enabledPos != std::string::npos) {
-                        size_t endPos = content.find("\n", enabledPos);
-                        if (endPos != std::string::npos) {
-                            content.replace(enabledPos, endPos - enabledPos, "enabled = true");
-                        }
-                    }
+            auto updateSectionKey = [](std::string& toml, std::string_view section,
+                                       std::string_view key, std::string_view value,
+                                       bool isNumericOrBool = false) {
+                const std::string header = "[" + std::string(section) + "]";
+                size_t sectionPos = toml.find(header);
+                if (sectionPos == std::string::npos) {
+                    return;
+                }
+                size_t nextSection = toml.find("\n[", sectionPos + header.size());
+                size_t sectionEnd =
+                    (nextSection == std::string::npos) ? toml.size() : nextSection + 1;
 
-                    // Update model
-                    size_t modelPos = content.find("model = ", pos);
-                    if (modelPos != std::string::npos) {
-                        size_t endPos = content.find("\n", modelPos);
-                        if (endPos != std::string::npos) {
-                            content.replace(modelPos, endPos - modelPos,
-                                            "model = \"" + escapeTomlString(selectedModel) + "\"");
-                        }
-                    }
+                const std::string prefix = std::string(key) + " = ";
+                size_t keyPos = toml.find(prefix, sectionPos);
+                const std::string formattedVal =
+                    isNumericOrBool ? std::string(value)
+                                    : ("\"" + escapeTomlString(std::string(value)) + "\"");
+                const std::string newLine = prefix + formattedVal;
 
-                    // Update model_path
-                    size_t pathPos = content.find("model_path = ", pos);
-                    if (pathPos != std::string::npos) {
-                        size_t endPos = content.find("\n", pathPos);
-                        if (endPos != std::string::npos) {
-                            content.replace(pathPos, endPos - pathPos,
-                                            "model_path = \"" +
-                                                escapeTomlString((dataDir / "models" /
-                                                                  selectedModel / "model.onnx")
-                                                                     .string()) +
-                                                "\"");
-                        }
+                if (keyPos != std::string::npos && keyPos < sectionEnd) {
+                    size_t lineEnd = toml.find("\n", keyPos);
+                    size_t replaceEnd = (lineEnd == std::string::npos) ? toml.size() : lineEnd;
+                    toml.replace(keyPos, replaceEnd - keyPos, newLine);
+                } else {
+                    if (sectionEnd > 0 && toml[sectionEnd - 1] != '\n') {
+                        toml.insert(sectionEnd, "\n" + newLine + "\n");
+                    } else {
+                        toml.insert(sectionEnd, newLine + "\n");
                     }
                 }
-            }
+            };
 
-            // Update embeddings settings
-            if (enableVectorDB && !selectedModel.empty()) {
-                pos = content.find("[embeddings]");
-                if (pos != std::string::npos) {
-                    size_t preferredPos = content.find("preferred_model = ", pos);
-                    if (preferredPos != std::string::npos) {
-                        size_t endPos = content.find("\n", preferredPos);
-                        if (endPos != std::string::npos) {
-                            content.replace(preferredPos, endPos - preferredPos,
-                                            "preferred_model = \"" +
-                                                escapeTomlString(selectedModel) + "\"");
-                        }
+            // Update vector database and embeddings settings
+            if (enableVectorDB) {
+                const size_t dim = resolveModelDimension(selectedModel);
+                const std::string dimStr = std::to_string(dim);
+
+                updateSectionKey(content, "vector_database", "enable", "true", true);
+                updateSectionKey(content, "vector_database", "embedding_dim", dimStr, true);
+
+                updateSectionKey(content, "embeddings", "enable", "true", true);
+                if (!selectedModel.empty()) {
+                    updateSectionKey(content, "embeddings", "preferred_model", selectedModel);
+                    if (selectedModel == "simeon-default" || selectedModel == "simeon") {
+                        updateSectionKey(content, "embeddings", "backend", "simeon");
+                    } else {
+                        updateSectionKey(content, "embeddings", "backend", "onnxruntime");
                     }
                 }
+                updateSectionKey(content, "embeddings", "embedding_dim", dimStr, true);
+
+                updateSectionKey(content, "vector_index", "dimension", dimStr, true);
+            } else {
+                updateSectionKey(content, "vector_database", "enable", "false", true);
+                updateSectionKey(content, "embeddings", "enable", "false", true);
             }
 
             if (useS3) {

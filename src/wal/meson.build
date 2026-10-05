@@ -11,14 +11,7 @@ yams_wal = static_library('yams_wal',
   ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, threads_dep, yams_core],
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_wal,
-  name: 'yams-wal',
-  description: 'YAMS write-ahead log',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_wal_dep = declare_dependency(
@@ -26,4 +19,3 @@ yams_wal_dep = declare_dependency(
   include_directories: include_directories('../../include'),
 )
 meson.override_dependency('yams_wal', yams_wal_dep)
-

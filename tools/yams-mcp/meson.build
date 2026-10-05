@@ -40,6 +40,6 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
   foreach dll_info : windows_runtime_dlls
     dll_name = dll_info[0]
     dll_src = dll_info[1]
-    fs.copyfile(dll_src, dll_name, install: true, install_dir: get_option('bindir'))
+    fs.copyfile(dll_src, dll_name, install: true, install_dir: get_option('bindir'), install_tag: 'runtime')
   endforeach
 endif

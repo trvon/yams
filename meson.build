@@ -1,7 +1,8 @@
 project('yams', ['cpp', 'c'],
-  version: '0.20.3', # x-release-please-version
+  version: '0.20.5', # x-release-please-version
   default_options: [
-    'buildtype=debugoptimized',
+    'buildtype=release',
+    'b_pie=true',
     'b_ndebug=if-release',
     'warning_level=3',
     'cpp_std=c++20',
@@ -94,18 +95,24 @@ if libcxx_hardening != 'none'
   endif
 endif
 
-# --- ThreadSanitizer for race detection ---
-enable_tsan = get_option('enable-tsan')
-enable_asan = get_option('enable-asan')
-enable_ubsan = get_option('enable-ubsan')
+# --- Sanitizers ---
+# Meson's b_sanitize is the single switch (e.g. -Db_sanitize=thread,
+# -Db_sanitize=address,undefined). These derived flags add the extra codegen
+# options each sanitizer lane wants and are reused by subdirs.
+_b_sanitize_str = '@0@'.format(get_option('b_sanitize'))
+yams_sanitize_thread = _b_sanitize_str.contains('thread')
+yams_sanitize_address = _b_sanitize_str.contains('address')
+yams_sanitize_undefined = _b_sanitize_str.contains('undefined')
+enable_tsan = yams_sanitize_thread
+enable_asan = yams_sanitize_address
+# Standalone UBSan lanes abort on the first report; with ASan it stays recoverable.
+enable_ubsan = yams_sanitize_undefined and not enable_asan and not enable_tsan
 enable_dcheck = get_option('enable-dcheck')
-
-if enable_tsan and enable_asan
-  error('TSAN and ASAN cannot be enabled in the same build. Configure separate build directories.')
-endif
-if (enable_tsan and enable_ubsan) or (enable_asan and enable_ubsan)
-  error('UBSan cannot be combined with TSan or ASan. Configure a separate build directory.')
-endif
+foreach _alias : [['enable-tsan', yams_sanitize_thread, 'thread'], ['enable-asan', yams_sanitize_address, 'address'], ['enable-ubsan', yams_sanitize_undefined, 'undefined']]
+  if get_option(_alias[0]) and not _alias[1]
+    warning('-D@0@=true does not enable a sanitizer; configure -Db_sanitize=@1@'.format(_alias[0], _alias[2]))
+  endif
+endforeach
 
 if enable_tsan
   buildtype = get_option('buildtype')
@@ -116,7 +123,7 @@ if enable_tsan
 
   # Check if compiler supports TSan
   if cpp.has_argument('-fsanitize=thread')
-    # Use additional flags for better stack traces (sanitizer is set via b_sanitize option)
+    # Use additional flags for better stack traces
     tsan_extra_flags = ['-fno-omit-frame-pointer']
     add_project_arguments(tsan_extra_flags, language: 'cpp')
     add_project_arguments(tsan_extra_flags, language: 'c')
@@ -165,21 +172,18 @@ if enable_ubsan
   endif
 endif
 
+# Profiling builds are optimized; keep frame pointers so Tracy call stacks and
+# perf/Instruments unwinding stay accurate.
+if get_option('enable-profiling') and cpp.get_id() not in ['msvc', 'clang-cl']
+  _profiling_frame_args = cpp.get_supported_arguments('-fno-omit-frame-pointer', '-mno-omit-leaf-frame-pointer')
+  add_project_arguments(_profiling_frame_args, language: ['cpp', 'c'])
+endif
+
 if enable_dcheck
   add_project_arguments('-DYAMS_ENABLE_DCHECK=1', language: 'cpp')
   message('YAMS_DCHECK enabled in this build (overrides NDEBUG for debug-only checks)')
 endif
 
-split_debug = get_option('split-debug')
-if split_debug
-  if cpp.has_argument('-gsplit-dwarf')
-    add_project_arguments('-gsplit-dwarf', language: 'cpp')
-    add_project_arguments('-gsplit-dwarf', language: 'c')
-    message('split-dwarf enabled: debug info emitted to .dwo files (reduced .o size)')
-  else
-    warning('split-debug requested but compiler does not support -gsplit-dwarf')
-  endif
-endif
 
 
 # --- General Hardening Flags ---
@@ -209,12 +213,30 @@ else
     hardening_c_args += '-fstack-protector-strong'
   endif
 
-  # Fortify source (only for optimized builds)
-  if get_option('optimization') != '0'
-    if cpp.has_argument('-D_FORTIFY_SOURCE=2')
-      hardening_cpp_args += '-D_FORTIFY_SOURCE=2'
-      hardening_c_args += '-D_FORTIFY_SOURCE=2'
+  # Stack clash protection (probes large stack allocations), and on Linux the
+  # architecture's control-flow protection: CET IBT/SHSTK notes on x86_64, BTI/PAC
+  # on AArch64. get_supported_arguments() drops whatever the target rejects.
+  _hardening_codegen = cpp.get_supported_arguments('-fstack-clash-protection')
+  if host_machine.system() == 'linux'
+    if host_machine.cpu_family() == 'x86_64'
+      _hardening_codegen += cpp.get_supported_arguments('-fcf-protection=full')
+    elif host_machine.cpu_family() == 'aarch64'
+      _hardening_codegen += cpp.get_supported_arguments('-mbranch-protection=standard')
     endif
+  endif
+  hardening_cpp_args += _hardening_codegen
+  hardening_c_args += _hardening_codegen
+
+  # Fortify source (optimized builds only). Level 3 uses
+  # __builtin_dynamic_object_size, so more calls with runtime-sized buffers
+  # become __*_chk calls; glibc < 2.34 treats it as level 2. Undefine first so a
+  # toolchain default (e.g. Ubuntu's) does not produce a redefinition warning.
+  # FORTIFY only rewrites YAMS's own call sites: most libc calls in the binaries
+  # come from the Conan static archives, which are built without it, so the
+  # count of __*_chk imports stays small by construction.
+  if get_option('optimization') not in ['0', 'g']
+    hardening_cpp_args += ['-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=3']
+    hardening_c_args += ['-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=3']
   endif
 endif
 
@@ -231,6 +253,39 @@ endif
 add_project_arguments(hardening_cpp_args, language: 'cpp')
 add_project_arguments(hardening_c_args, language: 'c')
 add_project_link_arguments(hardening_link_args, language: ['cpp', 'c'])
+
+# --- Release size: dead-section GC and packed relative relocations ---
+# Optimized builds put every function/object in its own section so the linker
+# can drop what nothing references (each executable links the full static
+# core, so most of it is unreachable from any one of them). DT_RELR packs the
+# relative relocations of the PIE binaries (~0.9 MiB .rela.dyn each); it needs
+# glibc >= 2.36 at runtime, below the GLIBC_2.38 floor the binaries already
+# carry, and the link probe drops it on toolchains that cannot emit it.
+# Debug/-O0 and coverage builds are left alone.
+yams_size_cflags = []
+yams_size_ldflags = []
+if get_option('optimization') not in ['0', 'g'] and not get_option('b_coverage') and cpp.get_id() not in ['msvc', 'clang-cl']
+  if host_machine.system() == 'darwin'
+    yams_size_ldflags += cpp.get_supported_link_arguments('-Wl,-dead_strip')
+  elif host_machine.system() != 'windows'
+    yams_size_cflags += cpp.get_supported_arguments('-ffunction-sections', '-fdata-sections')
+    yams_size_ldflags += cpp.get_supported_link_arguments('-Wl,--gc-sections', '-Wl,--build-id')
+    if cpp.get_linker_id() == 'ld.lld'
+      yams_size_ldflags += cpp.get_supported_link_arguments('-Wl,--icf=safe')
+    endif
+    if host_machine.system() == 'linux'
+      yams_size_ldflags += cpp.get_supported_link_arguments('-Wl,-z,pack-relative-relocs')
+      # Keep statically linked third-party code (Conan zstd, zlib, ...) out of
+      # the dynamic symbol table. Otherwise an executable that also links a
+      # system shared library depending on the same library (Arch: libmagic ->
+      # libzstd/libz) exports its private copy and interposes it into that
+      # library: ~600 exported ZSTD_/deflate/inflate symbols per binary.
+      yams_size_ldflags += cpp.get_supported_link_arguments('-Wl,--exclude-libs,ALL')
+    endif
+  endif
+endif
+add_project_arguments(yams_size_cflags, language: ['cpp', 'c'])
+add_project_link_arguments(yams_size_ldflags, language: ['cpp', 'c'])
 
 # --- Fuzzing engine selection ---
 # AFL++ wrappers (afl-clang-fast++) instrument every object themselves, so an AFL build keeps
@@ -300,10 +355,6 @@ message('YAMS install prefix: ' + install_prefix)
 
 # --- Shared Conan/CMake discovery paths ---
 conan_candidate_dirs = []
-conan_gen_opt = get_option('conan-generators-dir')
-if conan_gen_opt != ''
-  conan_candidate_dirs += [join_paths(meson.project_source_root(), conan_gen_opt)]
-endif
 
 base_build = meson.project_build_root()
 default_candidates = [
@@ -344,11 +395,6 @@ foreach base : conan_candidate_dirs
   endif
 endforeach
 
-cli11_opt = get_option('cli11-cmake-path')
-if cli11_opt != ''
-  cli11_cmake_paths += cli11_opt
-endif
-
 onnx_cmake_paths = []
 foreach base : conan_candidate_dirs
   if fs.exists(base)
@@ -361,11 +407,6 @@ foreach base : conan_candidate_dirs
     endforeach
   endif
 endforeach
-
-onnx_opt_path = get_option('onnxruntime-cmake-path')
-if onnx_opt_path != ''
-  onnx_cmake_paths += onnx_opt_path
-endif
 
 # --- Shared dependency resolution ---
 cli11_resolved_dep = dependency('cli11', required: false, method: 'pkg-config')
@@ -398,6 +439,13 @@ if not get_option('enable-onnx').disabled()
   endif
 endif
 
+# Directories that hold the ONNX Runtime shared library used for this build; the
+# runtime install (tools/yams-cli) bundles it privately from the first that does.
+# Only the dependency's own libdir counts (Conan/pkg-config/CMake): a Homebrew
+# onnxruntime links other Homebrew dylibs by absolute path and is not relocatable,
+# and the Homebrew formula uses Homebrew's onnxruntime directly anyway.
+onnxruntime_bundle_dirs = []
+
 # Normalize ONNX Runtime linkage to the current library location instead of any stale
 # Homebrew copies that may remain under /opt/homebrew/lib after upgrades.
 if onnxruntime_resolved_dep.found()
@@ -420,6 +468,11 @@ if onnxruntime_resolved_dep.found()
     endforeach
   endif
 
+  foreach _d : onnxruntime_link_dirs
+    if not (_d.startswith('/opt/homebrew') or _d.startswith('/usr/local/opt') or _d.startswith('/usr/local/Cellar'))
+      onnxruntime_bundle_dirs += [_d]
+    endif
+  endforeach
   onnxruntime_compile_dep = onnxruntime_resolved_dep.partial_dependency(compile_args: true, includes: true)
   onnxruntime_cpp = meson.get_compiler('cpp')
   onnxruntime_link_dep = onnxruntime_cpp.find_library('onnxruntime', dirs: onnxruntime_link_dirs, required: false)
@@ -580,7 +633,6 @@ endif
 if not wasi_enabled
   # Database backend selection (libsql or sqlite)
   db_backend = get_option('database-backend')
-  require_fts5 = get_option('require-fts5')
 
   # Try to find the selected database backend
   using_libsql = false
@@ -635,12 +687,7 @@ if not wasi_enabled
   else
     fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
     if fts5_prog.returncode() != 0
-      msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").'
-      if require_fts5
-        error(msg)
-      else
-        warning(msg)
-      endif
+      error('SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").')
     endif
   endif
 endif
@@ -738,8 +785,6 @@ version_header = custom_target(
   ],
   build_always_stale: true,
   build_by_default: true,
-  install: true,
-  install_dir: get_option('includedir') / 'yams',
 )
 
 # Make builddir available as include path for generated headers
@@ -753,9 +798,12 @@ version_generated_dep = declare_dependency(
 yams_build_cli = get_option('build-cli') and not wasi_enabled
 yams_build_mcp = get_option('build-mcp-server')
 
-# Install public headers under the compiler's include prefix without duplicating
-# the top-level 'include' directory (was producing prefix/include/include/...).
-install_subdir('include', install_dir: get_option('includedir'), strip_directory: true)
+# Install surface: the runtime set is executables, plugins, the private
+# lib/yams/ runtime libraries, share/yams data and the systemd unit. The C++
+# libraries under src/ are internal static archives linked into those
+# executables, so neither they nor their headers or pkg-config files are
+# installed. The only devel payload is the mobile C ABI (src/mobile), tagged
+# 'devel'. scripts/ci/check_install_surface.py enforces this.
 
 # --- tl-expected global resolution ---
 # tl-expected is a header-only library. Homebrew installs it without pkgconfig.
@@ -896,21 +944,13 @@ if get_option('build-fuzzers') and not wasi_enabled
 endif
 
 sql_install_dir = join_paths(get_option('datadir'), 'yams', 'sql')
-install_data('sql/reference_schema.sql', install_dir: sql_install_dir)
+install_data('sql/reference_schema.sql', install_dir: sql_install_dir, install_tag: 'runtime')
 
-if not wasi_enabled
-  yams_pc_config = configuration_data()
-  yams_pc_config.set('PREFIX', get_option('prefix'))
-  yams_pc_config.set('LIBDIR', get_option('libdir'))
-  yams_pc_config.set('INCLUDEDIR', get_option('includedir'))
-  yams_pc_config.set('VERSION', _effective_version)
-  configure_file(
-    input: files('packaging/yams.pc.in'),
-    output: 'yams.pc',
-    configuration: yams_pc_config,
-    install: true,
-    install_dir: join_paths(get_option('libdir'), 'pkgconfig'),
-  )
+# macOS: Meson installs dylibs with absolute install names; keep the private
+# libyams_onnx_resource @rpath-relative so staged/unzipped trees run in place.
+if host_machine.system() == 'darwin' and not wasi_enabled
+  meson.add_install_script(files('scripts/macos-rpath-install-names.sh'), get_option('libdir'),
+    install_tag: 'runtime')
 endif
 
 summary({

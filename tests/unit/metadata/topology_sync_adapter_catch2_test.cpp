@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -265,4 +266,141 @@ TEST_CASE("topology sync adapter rejects incomplete stable identities",
     CHECK_FALSE(adapter.publishNode(KGNode{}).has_value());
     const KGEdge edge{.relation = "CALLS"};
     CHECK_FALSE(adapter.publishEdge("", edge, "target").has_value());
+}
+
+TEST_CASE("topology sync adapter defers an edge whose endpoint has not replicated yet",
+          "[metadata][topology][memory-sync][prerequisite][defer]") {
+    TempDirGuard temp;
+    KGFixture graphA("topology_sync_defer_a_");
+    KGFixture graphB("topology_sync_defer_b_");
+    MemorySyncService syncA{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    MemorySyncService syncB{makeBackend(temp.path / "sync"), MemorySyncConfig{"B", 50}};
+    TopologySyncAdapter adapterA{*graphA.store, syncA};
+
+    const KGNode source{.nodeKey = "entity:source", .label = "source", .type = "alpha"};
+    const KGNode present{.nodeKey = "entity:present", .label = "present", .type = "alpha"};
+    const KGNode late{.nodeKey = "entity:late", .label = "late", .type = "omega"};
+    const auto sourceId = graphA.store->upsertNode(source);
+    const auto presentId = graphA.store->upsertNode(present);
+    const auto lateId = graphA.store->upsertNode(late);
+    REQUIRE(sourceId.has_value());
+    REQUIRE(presentId.has_value());
+    REQUIRE(lateId.has_value());
+    const KGEdge toPresent{
+        .srcNodeId = sourceId.value(), .dstNodeId = presentId.value(), .relation = "LINKS"};
+    const KGEdge toLate{
+        .srcNodeId = sourceId.value(), .dstNodeId = lateId.value(), .relation = "LINKS"};
+
+    // The edge to `late` is replicated before its target node: a publication-order race.
+    REQUIRE(adapterA.publishNode(source).has_value());
+    REQUIRE(adapterA.publishNode(present).has_value());
+    REQUIRE(adapterA.publishEdge(source.nodeKey, toPresent, present.nodeKey).has_value());
+    REQUIRE(adapterA.publishEdge(source.nodeKey, toLate, late.nodeKey).has_value());
+
+    const auto edgeTargets = [&](std::string_view targetKey) {
+        const auto sourceB = graphB.store->getNodeByKey(source.nodeKey);
+        const auto targetB = graphB.store->getNodeByKey(targetKey);
+        REQUIRE(sourceB.has_value());
+        REQUIRE(targetB.has_value());
+        if (!sourceB.value() || !targetB.value()) {
+            return false;
+        }
+        const auto edges = graphB.store->getEdgesFrom(sourceB.value()->id, "LINKS");
+        REQUIRE(edges.has_value());
+        return std::any_of(edges.value().begin(), edges.value().end(), [&](const KGEdge& edge) {
+            return edge.dstNodeId == targetB.value()->id;
+        });
+    };
+
+    TopologySyncAdapter consumer{*graphB.store, syncB};
+    const auto first = consumer.apply();
+    REQUIRE(first.has_value());
+    CHECK(first.value().nodesApplied == 2);
+    CHECK(first.value().edgesApplied == 1);
+    CHECK(edgeTargets(present.nodeKey));
+    CHECK_FALSE(edgeTargets(late.nodeKey));
+    REQUIRE(consumer.deferredKeys().size() == 1);
+    CHECK(consumer.deferredKeys().front() == "topology-edge/entity%3Asource/LINKS/entity%3Alate");
+
+    // The deferred edge stays pending and lands once its target node replicates.
+    REQUIRE(adapterA.publishNode(late).has_value());
+    TopologySyncAdapter retry{*graphB.store, syncB};
+    const auto second = retry.apply();
+    REQUIRE(second.has_value());
+    CHECK(second.value().nodesApplied == 1);
+    CHECK(second.value().edgesApplied == 1);
+    CHECK(edgeTargets(late.nodeKey));
+    CHECK(retry.deferredKeys().empty());
+}
+
+TEST_CASE("topology sync adapter drops an edge whose endpoint node was deleted",
+          "[metadata][topology][memory-sync][prerequisite][tombstone]") {
+    TempDirGuard temp;
+    KGFixture graphA("topology_sync_tombstoned_a_");
+    KGFixture graphB("topology_sync_tombstoned_b_");
+    MemorySyncService syncA{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    MemorySyncService syncB{makeBackend(temp.path / "sync"), MemorySyncConfig{"B", 50}};
+    TopologySyncAdapter adapterA{*graphA.store, syncA};
+
+    const KGNode member{.nodeKey = "doc:member", .label = "member", .type = "document"};
+    const KGNode cluster{
+        .nodeKey = "topology:cluster:gone", .label = "gone", .type = "topology_cluster"};
+    const auto memberId = graphA.store->upsertNode(member);
+    const auto clusterId = graphA.store->upsertNode(cluster);
+    REQUIRE(memberId.has_value());
+    REQUIRE(clusterId.has_value());
+    const KGEdge memberOf{
+        .srcNodeId = memberId.value(), .dstNodeId = clusterId.value(), .relation = "member_of"};
+
+    // A's edge reached the store, then a rebuild deleted the cluster node and A retracted the
+    // node; the edge's own retraction is still in flight.
+    REQUIRE(adapterA.publishNode(member).has_value());
+    REQUIRE(adapterA.publishEdge(member.nodeKey, memberOf, cluster.nodeKey).has_value());
+    REQUIRE(adapterA.publishDeleteNode(cluster.nodeKey).has_value());
+
+    TopologySyncAdapter consumer{*graphB.store, syncB};
+    const auto applied = consumer.apply();
+    REQUIRE(applied.has_value());
+    CHECK(applied.value().nodesApplied == 1);
+    CHECK(applied.value().edgesApplied == 0);
+    // The endpoint is known to be gone, so the edge cannot become applicable by waiting.
+    CHECK(consumer.deferredKeys().empty());
+    const auto clusterB = graphB.store->getNodeByKey(cluster.nodeKey);
+    REQUIRE(clusterB.has_value());
+    CHECK_FALSE(clusterB.value().has_value());
+}
+
+TEST_CASE("topology sync adapter leaves the writer's own records to its local graph",
+          "[metadata][topology][memory-sync][retraction]") {
+    TempDirGuard temp;
+    KGFixture graphA("topology_sync_own_a_");
+    MemorySyncService syncA{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    TopologySyncAdapter adapterA{*graphA.store, syncA};
+
+    const KGNode member{.nodeKey = "doc:own-member", .label = "member", .type = "document"};
+    const KGNode cluster{
+        .nodeKey = "topology:cluster:own", .label = "own", .type = "topology_cluster"};
+    const auto memberId = graphA.store->upsertNode(member);
+    const auto clusterId = graphA.store->upsertNode(cluster);
+    REQUIRE(memberId.has_value());
+    REQUIRE(clusterId.has_value());
+    const KGEdge memberOf{
+        .srcNodeId = memberId.value(), .dstNodeId = clusterId.value(), .relation = "member_of"};
+    REQUIRE(graphA.store->addEdge(memberOf).has_value());
+    REQUIRE(adapterA.publishNode(member).has_value());
+    REQUIRE(adapterA.publishNode(cluster).has_value());
+    REQUIRE(adapterA.publishEdge(member.nodeKey, memberOf, cluster.nodeKey).has_value());
+
+    // A topology rebuild on A deletes the cluster node; the cascade takes the edge with it.
+    REQUIRE(graphA.store->deleteNodeById(clusterId.value()).has_value());
+
+    // Applying A's own winners must not resurrect what A's rebuild deleted.
+    const auto applied = adapterA.apply();
+    REQUIRE(applied.has_value());
+    CHECK(applied.value().nodesApplied == 0);
+    CHECK(applied.value().edgesApplied == 0);
+    const auto clusterA = graphA.store->getNodeByKey(cluster.nodeKey);
+    REQUIRE(clusterA.has_value());
+    CHECK_FALSE(clusterA.value().has_value());
+    CHECK(adapterA.deferredKeys().empty());
 }

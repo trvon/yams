@@ -39,7 +39,7 @@ elif host_machine.system() != 'windows'
   mobile_link_depends += mobile_version_script
 endif
 
-if get_option('enable-tsan')
+if yams_sanitize_thread
   # When TSAN is enabled, we must ensure libtsan is linked
   # The -fsanitize=thread flag should do this, but for shared libraries
   # we need to be explicit to avoid undefined references
@@ -69,6 +69,14 @@ if get_option('enable-mobile-bindings')
     link_args: mobile_link_args,
     link_depends: mobile_link_depends,
     install: true,
+    install_tag: 'runtime',
+  )
+
+  # The mobile C ABI is the one installable SDK surface: its header and
+  # pkg-config file ship only under the 'devel' install tag. install_headers()
+  # takes no install_tag; Meson always tags headers 'devel'.
+  install_headers('../../include/yams/api/mobile_bindings.h',
+    subdir: 'yams' / 'api',
   )
 
   yams_mobile_dep = declare_dependency(
@@ -78,6 +86,7 @@ if get_option('enable-mobile-bindings')
 
   meson.override_dependency('yams_mobile', yams_mobile_dep)
 
+  pkg = import('pkgconfig')
   pkg.generate(yams_mobile_lib,
     name: 'yams_mobile',
     description: 'YAMS mobile C ABI',

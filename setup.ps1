@@ -490,7 +490,7 @@ if ($env:PATH -notlike "*$UserBin*") {
 
 # Map BuildType to build directories similar to setup.sh
 switch ($BuildType) {
-    'Debug'     { $buildDir = 'builddir'; $conanSubdir = 'build-debug' }
+    'Debug'     { $buildDir = 'build/debug'; $conanSubdir = 'build-debug' }
     'Profiling' { $buildDir = 'build/profiling'; $conanSubdir = 'build-profiling' }
     'Fuzzing'   { $buildDir = 'build/fuzzing'; $conanSubdir = 'build-fuzzing' }
     Default     { $buildDir = "build/$($BuildType.ToLower())"; $conanSubdir = "build-$($BuildType.ToLower())" }
@@ -950,7 +950,7 @@ if ($env:YAMS_ENABLE_MOBILE_BINDINGS -eq 'true') {
 
 if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     Write-Host 'Configuring Meson builddir...'
-    $buildTypeLower = if ($BuildType -eq 'Release') { 'debugoptimized' } else { $BuildType.ToLower() }
+    $buildTypeLower = if ($BuildType -eq 'Release') { 'release' } else { $BuildType.ToLower() }
     
     # Parse extra Meson flags from environment variable
     # PowerShell can expand environment variables character-by-character in some contexts
@@ -1085,7 +1085,7 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     if ($env:YAMS_BUILD_PKG_CONFIG_PATH) { $mesonArgs += @('--build.pkg-config-path', $env:YAMS_BUILD_PKG_CONFIG_PATH) }
     if ($env:YAMS_CMAKE_PREFIX_PATH) { $mesonArgs += @('--cmake-prefix-path', $env:YAMS_CMAKE_PREFIX_PATH) }
     if ($env:YAMS_BUILD_CMAKE_PREFIX_PATH) { $mesonArgs += @('--build.cmake-prefix-path', $env:YAMS_BUILD_CMAKE_PREFIX_PATH) }
-    if ($buildTypeLower -eq 'debugoptimized') { $mesonArgs += '-Db_ndebug=true' } else { $mesonArgs += '-Db_ndebug=false' }
+    if ($buildTypeLower -eq 'release') { $mesonArgs += '-Db_ndebug=true' } else { $mesonArgs += '-Db_ndebug=false' }
     if ($env:YAMS_DISABLE_RE2 -eq 'true') { $mesonArgs += '-Denable-re2=disabled' }
     
     # Enable vector tests for Debug/Profiling/Fuzzing builds (parity with setup.sh)
@@ -1101,7 +1101,7 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
 } else {
     Write-Host 'Meson builddir already configured, reconfiguring...'
     Write-Host "Ensuring prefix is set to: $InstallPrefix"
-    $buildTypeLower = if ($BuildType -eq 'Release') { 'debugoptimized' } else { $BuildType.ToLower() }
+    $buildTypeLower = if ($BuildType -eq 'Release') { 'release' } else { $BuildType.ToLower() }
     # Auto-detect libSQL backend for reconfigure as well
     $dbBackend = if ($env:YAMS_DATABASE_BACKEND) { $env:YAMS_DATABASE_BACKEND } else { 'libsql' }
     $dbBackend = $dbBackend.ToLowerInvariant()
@@ -1187,7 +1187,7 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     if ($env:YAMS_BUILD_PKG_CONFIG_PATH) { $reconfigureArgs += @('--build.pkg-config-path', $env:YAMS_BUILD_PKG_CONFIG_PATH) }
     if ($env:YAMS_CMAKE_PREFIX_PATH) { $reconfigureArgs += @('--cmake-prefix-path', $env:YAMS_CMAKE_PREFIX_PATH) }
     if ($env:YAMS_BUILD_CMAKE_PREFIX_PATH) { $reconfigureArgs += @('--build.cmake-prefix-path', $env:YAMS_BUILD_CMAKE_PREFIX_PATH) }
-    if ($buildTypeLower -eq 'debugoptimized') { $reconfigureArgs += '-Db_ndebug=true' } else { $reconfigureArgs += '-Db_ndebug=false' }
+    if ($buildTypeLower -eq 'release') { $reconfigureArgs += '-Db_ndebug=true' } else { $reconfigureArgs += '-Db_ndebug=false' }
     if ($env:YAMS_DISABLE_RE2 -eq 'true') { $reconfigureArgs += '-Denable-re2=disabled' }
     
     # Ensure vector tests are enabled for Debug/Profiling/Fuzzing builds (parity with setup.sh)

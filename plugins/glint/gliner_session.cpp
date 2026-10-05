@@ -13,9 +13,11 @@
 #include <mutex>
 #include <unordered_map>
 
-// Conditionally include ONNX Runtime
+// ONNX Runtime is not linked: the shared loader dlopen()s a compatible copy and
+// initializes the C++ API (ORT_API_MANUAL_INIT) before any Ort:: object is made.
 #ifdef YAMS_USE_ONNX_RUNTIME
-#include <onnxruntime_cxx_api.h>
+#include "ort_cxx_api_wrapper.h"
+#include "ort_runtime_loader.h"
 #endif
 
 namespace yams::glint {
@@ -565,6 +567,15 @@ public:
 
 #ifdef YAMS_USE_ONNX_RUNTIME
         if (!config_.model_path.empty() && fs::exists(config_.model_path)) {
+            const auto& runtime = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
+            if (!runtime.available) {
+                last_error_ = "ONNX Runtime unavailable: " + runtime.errorMessage;
+                spdlog::warn("[Glint] {}; entity extraction disabled", last_error_);
+                runtime_unavailable_ = true;
+                mock_mode_ = true;
+                ready_ = true;
+                return true;
+            }
             try {
                 Ort::SessionOptions session_options;
                 session_options.SetIntraOpNumThreads(config_.num_threads);
@@ -900,6 +911,7 @@ private:
     std::string last_error_;
     bool ready_ = false;
     bool mock_mode_ = false;
+    bool runtime_unavailable_ = false;
 
 #ifdef YAMS_USE_ONNX_RUNTIME
     std::unique_ptr<Ort::Env> env_;

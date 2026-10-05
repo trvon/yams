@@ -8,11 +8,12 @@ yams_memory_sync = static_library('yams_memory_sync',
   include_directories: include_directories('../../include'),
   dependencies: [
     dependency('nlohmann_json'),
+    dependency('spdlog'),
     dependency('yams_core'),
     dependency('yams_crypto'),
     dependency('yams_storage_engine'),
   ],
-  install: true,
+  install: false,
 )
 
 yams_memory_sync_dep = declare_dependency(
@@ -20,6 +21,7 @@ yams_memory_sync_dep = declare_dependency(
   include_directories: include_directories('../../include'),
   dependencies: [
     dependency('nlohmann_json'),
+    dependency('spdlog'),
     dependency('yams_core'),
     dependency('yams_crypto'),
     dependency('yams_storage_engine'),

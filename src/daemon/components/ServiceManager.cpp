@@ -2339,9 +2339,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                                                                    /*keepHot=*/true,
                                                                    /*warmup=*/true);
                     });
-                embeddingService->setTopologyRebuildRequester(
+                embeddingService->setEmbeddingsCommittedCallback(
                     [weakSelf](const std::vector<std::string>& hashes) {
                         if (auto self = weakSelf.lock()) {
+                            // The job's vectors are committed: queue them for memory sync too.
+                            self->notifyMemorySyncEmbeddingsCommitted(hashes);
                             self->requestTopologyRebuild("embedding_batch_complete", hashes);
                         }
                     });

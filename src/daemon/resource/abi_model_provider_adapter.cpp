@@ -7,6 +7,7 @@
 #include <sstream>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
+#include <yams/daemon/resource/onnx_registry_spdlog_sink.h>
 #include <yams/vector/embedding_generator.h>
 
 namespace yams::daemon {
@@ -75,7 +76,10 @@ private:
 AbiModelProviderAdapter::AbiModelProviderAdapter(yams_model_provider_v1* table,
                                                  std::shared_ptr<void> pluginKeepalive)
     : table_(table), pluginKeepalive_(std::move(pluginKeepalive)),
-      abiVersion_(table ? table->abi_version : 0) {}
+      abiVersion_(table ? table->abi_version : 0) {
+    // Model providers acquire ONNX slots (also from the CLI without a daemon).
+    installOnnxRegistrySpdlogSink();
+}
 
 void AbiModelProviderAdapter::setProgressCallback(std::function<void(const ModelLoadEvent&)> cb) {
     progress_ = std::move(cb);

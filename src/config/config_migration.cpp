@@ -31,6 +31,43 @@ void mergeMissingValues(ConfigMap& target, const ConfigMap& source,
         }
     }
 }
+
+// Keep the compatibility dimension keys aligned whenever a migration or additive
+// update fills in defaults. An older install (for example a 384-d ONNX corpus) must
+// not receive a 1024-d default for a missing sibling key: the mixed config emits
+// dimension-conflict warnings and misreports the stored vector dimension.
+// `reference` is the pre-migration config; the first present key wins, matching the
+// embeddings > vector_database > vector_index precedence used by ConfigResolver.
+void alignDimensionKeys(ConfigMap& merged, const ConfigMap& reference) {
+    struct KeyRef {
+        const char* section;
+        const char* key;
+    };
+    static constexpr KeyRef kDimensionKeys[] = {
+        {"embeddings", "embedding_dim"},
+        {"vector_database", "embedding_dim"},
+        {"vector_index", "dimension"},
+    };
+
+    std::string existing;
+    for (const auto& ref : kDimensionKeys) {
+        const auto sectionIt = reference.find(ref.section);
+        if (sectionIt == reference.end()) {
+            continue;
+        }
+        const auto keyIt = sectionIt->second.find(ref.key);
+        if (keyIt != sectionIt->second.end() && !keyIt->second.empty()) {
+            existing = keyIt->second;
+            break;
+        }
+    }
+    if (existing.empty()) {
+        return;
+    }
+    for (const auto& ref : kDimensionKeys) {
+        merged[ref.section][ref.key] = existing;
+    }
+}
 } // namespace
 
 Result<bool> ConfigMigrator::needsMigration(const fs::path& configPath) {
@@ -126,6 +163,10 @@ Result<void> ConfigMigrator::migrateToLatest(const fs::path& configPath, bool cr
         mergeMissingValues(mergedConfig, getLatestConfigDefaults());
         mergeMissingValues(mergedConfig, getLatestAdditiveDefaults());
     }
+
+    // Preserve an existing install's embedding dimension when defaults fill in a
+    // missing sibling key, so the migrated config cannot disagree with its vectors.
+    alignDimensionKeys(mergedConfig, oldConfig);
 
     // Update version metadata to latest
     auto now = std::chrono::system_clock::now();
@@ -341,7 +382,7 @@ ConfigMigrator::getLatestConfigDefaults() {
              {{"enable", "true"},
               {"database_path", "vectors.db"},
               {"table_name", "document_embeddings"},
-              {"embedding_dim", "384"},
+              {"embedding_dim", "1024"},
               {"enable_checkpoints", "true"},
               {"checkpoint_frequency", "1000"},
               {"max_batch_size", "1000"},
@@ -384,7 +425,7 @@ ConfigMigrator::getLatestConfigDefaults() {
 
             {"vector_index",
              {{"type", "HNSW"},
-              {"dimension", "384"},
+              {"dimension", "1024"},
               {"distance_metric", "COSINE"},
               {"hnsw_m", "16"},
               {"hnsw_ef_construction", "200"},
@@ -456,8 +497,11 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"use_legacy_tuner", "false"},
               {"auto_repair_batch_size", "16"},
               {"auto_rebuild_on_dim_mismatch", "false"},
-              {"socket_path", "/tmp/yams-daemon.sock"},
-              {"pid_file", "/tmp/yams-daemon.pid"},
+              // Empty = the per-user defaults ($XDG_RUNTIME_DIR/yams-daemon.sock and its
+              // PID file). A fixed /tmp path here was shared by every user on the host, so
+              // two users' daemons (e.g. the packaged systemd user unit) fought for it.
+              {"socket_path", ""},
+              {"pid_file", ""},
               {"worker_threads", "0"},
               {"max_memory_gb", "0"},
               {"connect_timeout_ms", "1000"},
@@ -1016,6 +1060,9 @@ ConfigMigrator::updateLatestSchemaAdditive(const fs::path& configPath, bool make
     if (addedKeys.empty()) {
         return addedKeys; // No changes needed
     }
+
+    // Keep dimension keys aligned with whatever the install already stored.
+    alignDimensionKeys(config, parseResult.value());
 
     if (dryRun) {
         return addedKeys;

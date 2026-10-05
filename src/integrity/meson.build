@@ -16,14 +16,7 @@ yams_integrity = static_library('yams_integrity',
   ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, threads_dep, yams_core, yams_storage_engine, yams_crypto, yams_manifest, yams_chunking, yams_metadata_dep],
-  install: true,
-)
-
-pkg = import('pkgconfig')
-pkg.generate(yams_integrity,
-  name: 'yams-integrity',
-  description: 'YAMS integrity verification',
-  subdirs: ['yams'],
+  install: false,
 )
 
 yams_integrity_dep = declare_dependency(
@@ -31,4 +24,3 @@ yams_integrity_dep = declare_dependency(
   include_directories: include_directories('../../include'),
 )
 meson.override_dependency('yams_integrity', yams_integrity_dep)
-

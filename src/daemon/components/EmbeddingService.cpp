@@ -328,9 +328,9 @@ void EmbeddingService::setProviders(
     ensureModelReady_ = std::move(ensureModelReady);
 }
 
-void EmbeddingService::setTopologyRebuildRequester(
+void EmbeddingService::setEmbeddingsCommittedCallback(
     std::function<void(const std::vector<std::string>&)> cb) {
-    topologyRebuildRequester_ = std::move(cb);
+    embeddingsCommittedCallback_ = std::move(cb);
 }
 
 std::size_t EmbeddingService::queuedJobs() const {
@@ -3102,8 +3102,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         mon.detail = "completed docs=" + std::to_string(successCount);
     });
 
-    if (topologyRebuildRequester_ && !successHashes.empty()) {
-        topologyRebuildRequester_(successHashes);
+    if (embeddingsCommittedCallback_ && !successHashes.empty()) {
+        embeddingsCommittedCallback_(successHashes);
     }
 
     // Publish readiness only for tokens still current: a document whose content changed

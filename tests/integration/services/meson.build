@@ -2,15 +2,14 @@
 
 # Explicit file list keeps configuration deterministic and fast
 dbg = (get_option('buildtype') == 'debug')
-services_stress_iters = get_option('stress-iters').to_string()
-if get_option('enable-tsan')
-  services_stress_iters = '20'
-endif
+services_stress_iters = yams_sanitize_thread ? '20' : '100'
+services_timeout = 600
+services_ui_timeout = 1200
 
 # integration_services is now Catch2-only; legacy GTest suite removed.
 
 # Catch2 migration: Retrieval and Ingestion service tests (uses DaemonHarness)
-if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
+if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_dep.found()
   catch2_retrieval_ingestion_exe = executable('catch2_retrieval_ingestion',
     files('retrieval_and_ingestion_catch2_test.cpp'),
     include_directories: incs,
@@ -28,14 +27,14 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
       'TSAN_OPTIONS': _test_tsan_options,
     },
     is_parallel: false,
-    timeout: get_option('integration-timeout'),
+    timeout: services_timeout,
     # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
     args: ['--allow-running-no-tests'],
   )
 endif
 
 # Catch2 migration: Sync Indexing tests
-if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
+if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_dep.found()
   catch2_sync_indexing_exe = executable('catch2_sync_indexing',
     files('sync_indexing_catch2_test.cpp'),
     include_directories: incs,
@@ -58,7 +57,7 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
 endif
 
 # Catch2 migration: UI/CLI expectations service tests
-if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
+if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_dep.found()
   catch2_ui_cli_expectations_exe = executable('catch2_ui_cli_expectations',
     files('ui_cli_expectations_catch2_test.cpp'),
     include_directories: incs,
@@ -77,14 +76,14 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
         'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
-      timeout: get_option('integration-ui-timeout'),
+      timeout: services_ui_timeout,
       args: ['[ui-cli][' + ui_batch + ']', '--allow-running-no-tests'],
     )
   endforeach
 endif
 
 # Catch2 migration: grep service expectations
-if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
+if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_dep.found()
   catch2_grep_service_expectations_exe = executable('catch2_grep_service_expectations',
     files('grep_service_expectations_catch2_test.cpp'),
     include_directories: incs,
@@ -103,13 +102,13 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
       'TSAN_OPTIONS': _test_tsan_options,
     },
     is_parallel: false,
-    timeout: get_option('integration-ui-timeout'),
+    timeout: services_ui_timeout,
     args: ['--allow-running-no-tests'],
   )
 endif
 
 # Catch2 migration: content extraction service tests
-if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
+if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_dep.found()
   catch2_content_extraction_exe = executable('catch2_content_extraction',
     files('content_extraction_catch2_test.cpp'),
     include_directories: incs,
@@ -127,13 +126,13 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
       'TSAN_OPTIONS': _test_tsan_options,
     },
     is_parallel: false,
-    timeout: get_option('integration-ui-timeout'),
+    timeout: services_ui_timeout,
     args: ['--allow-running-no-tests'],
   )
 endif
 
 # Catch2 migration: IPC conformance service tests
-if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
+if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_dep.found()
   catch2_ipc_conformance_exe = executable('catch2_ipc_conformance',
     files('ipc_conformance_catch2_test.cpp'),
     include_directories: incs,
@@ -151,7 +150,7 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
       'TSAN_OPTIONS': _test_tsan_options,
     },
     is_parallel: false,
-    timeout: get_option('integration-ui-timeout'),
+    timeout: services_ui_timeout,
     args: ['--allow-running-no-tests'],
   )
 endif
