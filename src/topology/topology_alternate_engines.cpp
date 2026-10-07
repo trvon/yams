@@ -116,6 +116,7 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
     batch.snapshotId = makeSnapshotId(ts.unixMillis);
     batch.algorithm = std::move(algorithm);
     batch.inputKind = config.inputKind;
+    batch.representativeRule = config.representativeRule;
     batch.embeddingSpaceIdentity = config.embeddingSpaceIdentity;
     batch.protectedRelationIdentity = protectedRelationConstructionIdentity(documents, config);
     batch.generatedAtUnixSeconds = ts.unixSeconds;
@@ -204,6 +205,9 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                 medoidScore = candidate;
             }
         }
+        medoidIdx =
+            applyRepresentativeRule(config.representativeRule, documents, members, medoidIdx);
+        medoidScore = weightedDegree[medoidIdx];
 
         ClusterArtifact cluster;
         cluster.clusterId = clusterId;
@@ -230,7 +234,10 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
             detail::normalizeVector(cluster.centroidEmbedding);
         }
         cluster.routingRepresentatives = selectDiverseRoutingRepresentatives(
-            documents, members, cluster.centroidEmbedding, config.routingRepresentativeCount);
+            documents, members, cluster.centroidEmbedding, config.routingRepresentativeCount,
+            config.representativeRule == RepresentativeRule::Medoid
+                ? std::span<const float>(documents[medoidIdx].embedding)
+                : std::span<const float>(cluster.centroidEmbedding));
         cluster.memberDocumentHashes.reserve(members.size());
         for (std::size_t idx : members) {
             cluster.memberDocumentHashes.push_back(documents[idx].documentHash);

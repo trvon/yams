@@ -2296,3 +2296,46 @@ TEST_CASE("ConfigResolver reports out-of-range values for the ranged [tuning] se
     sections["tuning"] = {};
     (void)ConfigResolver::applyRuntimeTuning(sections, base);
 }
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyEnginePolicy reads the representative rule",
+                 "[daemon][components][config][topology][catch2]") {
+    SECTION("medoid is resolved") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+representative_rule = "medoid"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        REQUIRE(policy.representativeRule.has_value());
+        CHECK((*policy.representativeRule == yams::topology::RepresentativeRule::Medoid));
+    }
+    SECTION("degree is resolved case-insensitively") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+representative_rule = "Degree"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        REQUIRE(policy.representativeRule.has_value());
+        CHECK((*policy.representativeRule == yams::topology::RepresentativeRule::Degree));
+    }
+    SECTION("an unrecognized rule is ignored") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+representative_rule = "centroid"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        CHECK_FALSE(policy.representativeRule.has_value());
+    }
+    SECTION("absent keeps the engine default") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+engine = "connected"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        CHECK_FALSE(policy.representativeRule.has_value());
+    }
+}

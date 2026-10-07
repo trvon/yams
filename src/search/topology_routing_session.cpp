@@ -432,6 +432,7 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
     result.artifactsFresh = request.expectedTopologyEpoch == 0 ||
                             snapshot->artifacts->topologyEpoch == request.expectedTopologyEpoch;
     result.topologyEpoch = snapshot->artifacts->topologyEpoch;
+    result.representativeRule = snapshot->artifacts->representativeRule;
     result.certificate.constructionFingerprint = snapshot->constructionFingerprint;
     result.certificate.routingPolicyFingerprint =
         topologyRoutingPolicyFingerprint(snapshot->representationFingerprint, request.options);
@@ -1484,6 +1485,10 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
     fingerprintIntegral(hash, static_cast<std::uint8_t>(batch.inputKind));
     fingerprintString(hash, batch.embeddingSpaceIdentity);
     fingerprintString(hash, batch.protectedRelationIdentity);
+    // Only non-default rules extend the digest so existing Degree calibrations stay valid.
+    if (batch.representativeRule != yams::topology::RepresentativeRule::Degree) {
+        fingerprintString(hash, yams::topology::representativeRuleName(batch.representativeRule));
+    }
 
     std::vector<const yams::topology::ClusterArtifact*> clusters;
     clusters.reserve(batch.clusters.size());

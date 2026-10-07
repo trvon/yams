@@ -69,6 +69,8 @@ constexpr std::string_view kTopologyRouteRepresentativeCountMax =
     "topology_route_representative_count_max";
 constexpr std::string_view kTopologyRouteAnnUsed = "topology_route_ann_used";
 constexpr std::string_view kTopologyRouteBqUsed = "topology_route_bq_used";
+/// Representative rule recorded in the routed topology snapshot (degree|medoid).
+constexpr std::string_view kTopologyRepresentativeRule = "topology_representative_rule";
 constexpr std::string_view kTopologyRouteBqCandidates = "topology_route_bq_candidates";
 constexpr std::string_view kTopologyRouteAnnCandidates = "topology_route_ann_candidates";
 constexpr std::string_view kTopologyRouteAnnDistanceEvaluations =

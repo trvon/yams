@@ -162,6 +162,12 @@ public:
     [[nodiscard]] std::size_t routingRepresentativeCount() const noexcept {
         return routingRepresentativeCount_.load(std::memory_order_acquire);
     }
+    void setRepresentativeRule(topology::RepresentativeRule rule) noexcept {
+        representativeRule_.store(rule, std::memory_order_release);
+    }
+    [[nodiscard]] topology::RepresentativeRule representativeRule() const noexcept {
+        return representativeRule_.load(std::memory_order_acquire);
+    }
     /// SGC smoothing before clustering. Hops are capped: repeated propagation over-smooths
     /// features toward the graph's stationary distribution.
     static constexpr std::size_t kMaxSgcHops = 4;
@@ -240,6 +246,8 @@ private:
     std::atomic<std::int64_t> lastRebuildEndSteadyMillis_{0};
     std::atomic<std::int64_t> rebuildMinIntervalMs_{0};
     std::atomic<std::size_t> routingRepresentativeCount_{1};
+    std::atomic<topology::RepresentativeRule> representativeRule_{
+        topology::TopologyBuildConfig{}.representativeRule};
     std::atomic<std::size_t> sgcHops_{0};
     std::atomic<topology::DirtyRegionExpansionMode> dirtyRegionExpansion_{
         topology::TopologyBuildConfig{}.dirtyRegionExpansion};

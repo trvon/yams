@@ -295,6 +295,9 @@ struct TopologyRoutingSessionResult {
     bool artifactsFresh = false;
     bool snapshotCacheHit = false;
     std::uint64_t topologyEpoch = 0;
+    /// Representative rule recorded in the loaded snapshot (Degree when nothing loaded).
+    yams::topology::RepresentativeRule representativeRule =
+        yams::topology::RepresentativeRule::Degree;
     std::string skipReason;
     std::size_t routedClusters = 0;
     std::size_t availableRoutes = 0;

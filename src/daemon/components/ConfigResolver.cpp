@@ -1047,6 +1047,15 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         if (auto it = kv.find("topology.routing_representatives"); it != kv.end()) {
             policy.routingRepresentativeCount = parseSize(it->second);
         }
+        if (auto it = kv.find("topology.representative_rule"); it != kv.end()) {
+            policy.representativeRule =
+                topology::parseRepresentativeRule(std::string(trimView(it->second)));
+            if (!policy.representativeRule) {
+                spdlog::warn("Ignoring topology.representative_rule='{}': expected degree or "
+                             "medoid",
+                             it->second);
+            }
+        }
         if (auto it = kv.find("topology.sgc_hops"); it != kv.end()) {
             policy.sgcHops = parseSize(it->second);
         }

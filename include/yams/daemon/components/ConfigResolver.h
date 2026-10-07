@@ -153,6 +153,8 @@ public:
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
         std::optional<std::size_t> routingRepresentativeCount;
+        /// `topology.representative_rule` = degree|medoid. Unset keeps Degree.
+        std::optional<topology::RepresentativeRule> representativeRule;
         /// SGC feature-smoothing hops before clustering (0 disables).
         std::optional<std::size_t> sgcHops;
         std::optional<bool> sgcNormalize;
@@ -541,6 +543,7 @@ public:
      * Config keys:
      * - topology.engine = connected|louvain|kmeans
      * - topology.routing_representatives = int
+     * - topology.representative_rule = degree|medoid
      * - topology.boundary_spill = bool
      * - topology.boundary_spill_limit = int
      * - topology.boundary_spill_distance_ratio = float
