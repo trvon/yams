@@ -316,7 +316,7 @@ else
       suite: ['integration', 'daemon', 'catch2', 'harness'],
       env: _daemon_test_env,
       is_parallel: false,
-      timeout: get_option('integration-daemon-timeout'),
+      timeout: daemon_integration_timeout,
       args: [
         'DaemonHarness full isolation ignores ambient developer config and data',
         '--allow-running-no-tests',
