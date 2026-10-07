@@ -1216,6 +1216,7 @@ representative_limit = 2
 ann_candidate_limit = 16
 bq_candidate_limit = 12
 bq_prefix_dim = 64
+bq_rotation = fwht
 graph_community_source = topology_snapshot
 adaptive_probe_score_gap = 0.07
 narrow_min_boundary_margin = 0.03
@@ -1260,6 +1261,8 @@ rrf_k = 33
     CHECK((*policy.bqCandidateLimit == 12U));
     REQUIRE(policy.bqPrefixDimension.has_value());
     CHECK((*policy.bqPrefixDimension == 64U));
+    REQUIRE(policy.bqRotation.has_value());
+    CHECK((*policy.bqRotation == "fwht"));
     REQUIRE(policy.graphCommunitySource.has_value());
     CHECK((*policy.graphCommunitySource == "topology_snapshot"));
     REQUIRE(policy.adaptiveProbeScoreGap.has_value());

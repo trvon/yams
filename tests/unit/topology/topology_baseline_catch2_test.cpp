@@ -1832,3 +1832,53 @@ TEST_CASE("Topology extractor keeps a hub's own neighbours despite many incoming
     CHECK(hubNeighbors[0].documentHash == "target");
     CHECK_FALSE(hubNeighbors[0].reciprocal);
 }
+
+TEST_CASE("Sparse-guided topology routing can rotate the BQ centroid shortlist",
+          "[unit][topology][routing][bq][rotation]") {
+    TopologyArtifactBatch batch;
+    constexpr std::size_t clusterCount = 96;
+    for (std::size_t index = 0; index < clusterCount; ++index) {
+        const auto angle = static_cast<float>(index) * 2.0F * std::numbers::pi_v<float> /
+                           static_cast<float>(clusterCount);
+        // Anisotropic centroids: two dominant coordinates plus a weak constant tail.
+        std::vector<float> centroid(24, 0.02F);
+        centroid[0] = std::cos(angle);
+        centroid[1] = std::sin(angle);
+        batch.clusters.push_back(ClusterArtifact{
+            .clusterId = "cluster-" + std::to_string(index),
+            .memberCount = 1,
+            .memberDocumentHashes = {"doc-" + std::to_string(index)},
+            .centroidEmbedding = std::move(centroid),
+        });
+    }
+    const auto plainIndex = SparseGuidedClusterRouter::buildRouteIndex(batch, false, true);
+    const auto rotatedIndex = SparseGuidedClusterRouter::buildRouteIndex(
+        batch, false, true, 0, yams::vector::BinaryRotation::Fwht);
+    REQUIRE(plainIndex.centroidBqIndex != nullptr);
+    REQUIRE(rotatedIndex.centroidBqIndex != nullptr);
+    CHECK(plainIndex.centroidBqIndex->rotation() == yams::vector::BinaryRotation::None);
+    CHECK(rotatedIndex.centroidBqIndex->rotation() == yams::vector::BinaryRotation::Fwht);
+    CHECK(rotatedIndex.centroidBqIndex->rotationSeed() == yams::vector::kDefaultBinaryRotationSeed);
+    CHECK(rotatedIndex.centroidBqIndex->dimension() == 32U);
+
+    SparseGuidedClusterRouter router;
+    TopologyRouteRequest request;
+    request.limit = 1;
+    request.queryEmbedding = batch.clusters.front().centroidEmbedding;
+    request.sparseDenseAlpha = 0.0F;
+    request.bqCandidateLimit = 8;
+    SparseRouteWork work;
+    auto routed = router.route(request, batch, rotatedIndex, &work);
+    REQUIRE(routed.has_value());
+    REQUIRE(routed.value().size() == 1U);
+    CHECK(routed.value().front().clusterId == "cluster-0");
+    CHECK(work.bqUsed);
+    CHECK(work.bqCandidates <= 8U);
+
+    // The convenience overload builds its index from the request's rotation.
+    request.bqRotation = yams::vector::BinaryRotation::Fwht;
+    auto convenience = router.route(request, batch);
+    REQUIRE(convenience.has_value());
+    REQUIRE(convenience.value().size() == 1U);
+    CHECK(convenience.value().front().clusterId == "cluster-0");
+}

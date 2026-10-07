@@ -10,6 +10,7 @@
 #include <yams/vector/binary_quantization.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace yams;
@@ -186,4 +187,74 @@ TEST_CASE("topologyCommunitySupport scores candidates that share a snapshot clus
         const auto relative = yams::search::topologyCommunitySupport(snapshot, candidates, 0.0F);
         CHECK(relative[0] == Catch::Approx(2.0F / 5.0F));
     }
+}
+
+TEST_CASE("TopologyRoutingSnapshotCache keys the BQ index on its rotation",
+          "[unit][search][topology][cache][bq]") {
+    TopologyArtifactBatch batch;
+    batch.topologyEpoch = 7;
+    for (std::size_t i = 0; i < 4; ++i) {
+        ClusterArtifact cluster;
+        cluster.clusterId = "cluster-" + std::to_string(i);
+        cluster.memberCount = 1;
+        cluster.memberDocumentHashes = {"doc-" + std::to_string(i)};
+        cluster.centroidEmbedding = {1.0F, static_cast<float>(i), 0.5F};
+        batch.clusters.push_back(std::move(cluster));
+        DocumentClusterMembership membership;
+        membership.documentHash = "doc-" + std::to_string(i);
+        membership.clusterId = "cluster-" + std::to_string(i);
+        batch.memberships.push_back(std::move(membership));
+    }
+    TopologyRoutingSnapshotCache cache(
+        [batch]() { return Result<std::optional<TopologyArtifactBatch>>{std::optional{batch}}; });
+
+    auto plain = cache.get(7, false);
+    REQUIRE(plain.has_value());
+    REQUIRE(plain.value().snapshot->sparseRouteIndex.centroidBqIndex);
+    CHECK(plain.value().snapshot->bqRotation == yams::vector::BinaryRotation::None);
+    CHECK(plain.value().snapshot->sparseRouteIndex.centroidBqIndex->rotation() ==
+          yams::vector::BinaryRotation::None);
+
+    auto rotated = cache.get(7, false, 0, yams::vector::BinaryRotation::Fwht);
+    REQUIRE(rotated.has_value());
+    const auto& snapshot = *rotated.value().snapshot;
+    CHECK(snapshot.bqRotation == yams::vector::BinaryRotation::Fwht);
+    CHECK(snapshot.bqRotationSeed == yams::vector::kDefaultBinaryRotationSeed);
+    REQUIRE(snapshot.sparseRouteIndex.centroidBqIndex);
+    CHECK(snapshot.sparseRouteIndex.centroidBqIndex->rotation() ==
+          yams::vector::BinaryRotation::Fwht);
+    CHECK(snapshot.sparseRouteIndex.centroidBqIndex->rotationSeed() == snapshot.bqRotationSeed);
+    CHECK(snapshot.artifacts.get() == plain.value().snapshot->artifacts.get());
+
+    auto repeated = cache.get(7, false, 0, yams::vector::BinaryRotation::Fwht);
+    REQUIRE(repeated.has_value());
+    CHECK(repeated.value().snapshot.get() == rotated.value().snapshot.get());
+
+    auto back = cache.get(7, false);
+    REQUIRE(back.has_value());
+    CHECK(back.value().snapshot->sparseRouteIndex.centroidBqIndex->rotation() ==
+          yams::vector::BinaryRotation::None);
+}
+
+TEST_CASE("Topology routing options carry the BQ rotation and fingerprint it only when set",
+          "[unit][search][topology][bq]") {
+    SearchEngineConfig config;
+    CHECK(config.topologyRoutingBqRotation == SearchEngineConfig::TopologyBqRotation::None);
+    const auto plainOptions = makeTopologyRoutingOptions(
+        config, SearchEngineConfig::TopologyRoutingMode::HybridAssist, false);
+    CHECK(plainOptions.bqRotation == SearchEngineConfig::TopologyBqRotation::None);
+
+    auto rotatedConfig = config;
+    rotatedConfig.topologyRoutingBqRotation = SearchEngineConfig::TopologyBqRotation::Fwht;
+    const auto rotatedOptions = makeTopologyRoutingOptions(
+        rotatedConfig, SearchEngineConfig::TopologyRoutingMode::HybridAssist, false);
+    CHECK(rotatedOptions.bqRotation == SearchEngineConfig::TopologyBqRotation::Fwht);
+    CHECK(topologyRoutingPolicyFingerprint("repr", plainOptions) !=
+          topologyRoutingPolicyFingerprint("repr", rotatedOptions));
+
+    SearchEngineConfig copy;
+    copy.applyTopologyPolicyFrom(rotatedConfig);
+    CHECK(copy.topologyRoutingBqRotation == SearchEngineConfig::TopologyBqRotation::Fwht);
+    CHECK(std::string_view{SearchEngineConfig::topologyBqRotationToString(
+              SearchEngineConfig::TopologyBqRotation::Fwht)} == "fwht");
 }

@@ -877,6 +877,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.bq_prefix_dim"); it != kv.end()) {
                 policy.bqPrefixDimension = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.bq_rotation"); it != kv.end()) {
+                policy.bqRotation = std::string(trimView(it->second));
+            }
             if (auto it = kv.find("search.topology.graph_community_source");
                 it != kv.end() && !it->second.empty()) {
                 policy.graphCommunitySource = it->second;

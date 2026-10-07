@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/core/types.h>
+#include <yams/vector/binary_quantization.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -326,6 +327,9 @@ struct TopologyRouteRequest {
     /// Learning). Zero uses the full vector dimension; values like 64 fit within a single 64-bit
     /// word.
     std::size_t bqPrefixDimension{0};
+    /// Rotation applied before taking BQ sign bits. Used only when route() builds its own index;
+    /// a prebuilt SparseRouteIndex carries the rotation chosen at build time.
+    yams::vector::BinaryRotation bqRotation{yams::vector::BinaryRotation::None};
 };
 
 struct ClusterRoute {

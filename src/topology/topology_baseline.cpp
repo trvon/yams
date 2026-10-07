@@ -758,14 +758,13 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
     const auto index =
         buildRouteIndex(artifacts, request.denseAnnCandidateLimit > 0,
                         request.bqCandidateLimit > 0 || request.denseAnnCandidateLimit > 0,
-                        request.bqPrefixDimension);
+                        request.bqPrefixDimension, request.bqRotation);
     return route(request, artifacts, index);
 }
 
-SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifacts,
-                                                            bool buildDenseAnnIndex,
-                                                            bool buildBqIndex,
-                                                            std::size_t bqPrefixDimension) {
+SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(
+    const TopologyArtifactBatch& artifacts, bool buildDenseAnnIndex, bool buildBqIndex,
+    std::size_t bqPrefixDimension, yams::vector::BinaryRotation bqRotation) {
     YAMS_ZONE_SCOPED_N("topology::route::buildIndex");
     SparseRouteIndex index;
     index.centroidNorms.reserve(artifacts.clusters.size());
@@ -804,8 +803,9 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifa
         }
     }
     if (buildBqIndex && !centroids.empty()) {
-        auto bqIndex =
-            yams::vector::BinaryQuantizedIndex::build(centroidIds, centroids, bqPrefixDimension);
+        auto bqIndex = yams::vector::BinaryQuantizedIndex::build(
+            centroidIds, centroids, bqPrefixDimension, bqRotation,
+            yams::vector::kDefaultBinaryRotationSeed);
         if (bqIndex) {
             index.centroidBqIndex = std::move(bqIndex).value();
             YAMS_PLOT("topology::bq_index_bytes",

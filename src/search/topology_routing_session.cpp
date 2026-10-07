@@ -392,6 +392,12 @@ void collectGraphNeighborStageTrace(
                  trace.eligibleUnresolvedCount);
 }
 
+yams::vector::BinaryRotation toBinaryRotation(SearchEngineConfig::TopologyBqRotation rotation) {
+    return rotation == SearchEngineConfig::TopologyBqRotation::Fwht
+               ? yams::vector::BinaryRotation::Fwht
+               : yams::vector::BinaryRotation::None;
+}
+
 std::shared_ptr<TopologyRoutingSnapshotCache>
 makeSnapshotCache(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
                   const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore) {
@@ -406,9 +412,9 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
                          TopologyRoutingSessionResult& result,
                          std::shared_ptr<const TopologyRoutingSnapshot>& snapshot) {
     const auto loadStart = std::chrono::steady_clock::now();
-    auto lookup = snapshotCache->get(request.expectedTopologyEpoch,
-                                     request.options.denseAnnCandidateLimit > 0,
-                                     request.options.bqPrefixDimension);
+    auto lookup = snapshotCache->get(
+        request.expectedTopologyEpoch, request.options.denseAnnCandidateLimit > 0,
+        request.options.bqPrefixDimension, toBinaryRotation(request.options.bqRotation));
     result.timings.loadMicros += microsSince(loadStart);
     if (!lookup) {
         const auto& message = lookup.error().message;
@@ -494,6 +500,7 @@ tryMedoidGraphExpansion(const TopologyRoutingSessionRequest& request,
     routeRequest.denseAnnCandidateLimit = request.options.denseAnnCandidateLimit;
     routeRequest.bqCandidateLimit = request.options.bqCandidateLimit;
     routeRequest.bqPrefixDimension = request.options.bqPrefixDimension;
+    routeRequest.bqRotation = toBinaryRotation(request.options.bqRotation);
     if (request.queryEmbedding.has_value()) {
         routeRequest.queryEmbedding = request.queryEmbedding.value();
     }
@@ -993,6 +1000,7 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
     routeRequest.denseAnnCandidateLimit = request.options.denseAnnCandidateLimit;
     routeRequest.bqCandidateLimit = request.options.bqCandidateLimit;
     routeRequest.bqPrefixDimension = request.options.bqPrefixDimension;
+    routeRequest.bqRotation = toBinaryRotation(request.options.bqRotation);
     if (request.queryEmbedding.has_value()) {
         routeRequest.queryEmbedding = request.queryEmbedding.value();
     }
@@ -1312,6 +1320,7 @@ makeTopologyRoutingOptions(const SearchEngineConfig& config,
         .denseAnnCandidateLimit = config.topologyRoutingAnnCandidateLimit,
         .bqCandidateLimit = config.topologyRoutingBqCandidateLimit,
         .bqPrefixDimension = config.topologyRoutingBqPrefixDimension,
+        .bqRotation = config.topologyRoutingBqRotation,
         .adaptiveProbeScoreGap = config.topologyAdaptiveProbeScoreGap,
         .narrowMinBoundaryMargin = config.topologyNarrowMinBoundaryMargin,
         .maxDocs = config.topologyMaxDocs,
@@ -1600,6 +1609,10 @@ std::string topologyRoutingPolicyFingerprint(std::string_view representationFing
     fingerprintIntegral(hash, options.denseAnnCandidateLimit);
     fingerprintIntegral(hash, options.bqCandidateLimit);
     fingerprintIntegral(hash, options.bqPrefixDimension);
+    // Only a non-default rotation extends the digest so existing calibrations stay valid.
+    if (options.bqRotation != SearchEngineConfig::TopologyBqRotation::None) {
+        fingerprintString(hash, SearchEngineConfig::topologyBqRotationToString(options.bqRotation));
+    }
     fingerprintIntegral(hash, options.maxDocs);
     fingerprintFloat(hash, options.adaptiveProbeScoreGap);
     fingerprintFloat(hash, options.narrowMinBoundaryMargin);
@@ -1635,19 +1648,27 @@ TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(
 
 Result<TopologyRoutingSnapshotLookup>
 TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch, bool requireDenseAnnIndex,
-                                  std::size_t bqPrefixDimension) {
+                                  std::size_t bqPrefixDimension,
+                                  yams::vector::BinaryRotation bqRotation) {
+    const std::uint64_t bqRotationSeed = bqRotation == yams::vector::BinaryRotation::None
+                                             ? 0
+                                             : yams::vector::kDefaultBinaryRotationSeed;
     YAMS_ZONE_SCOPED_N("search::topology::snapshotCacheGet");
     // The lock is held through a build on purpose: concurrent misses wait for one build instead
     // of each constructing the route index.
     std::lock_guard lock(mutex_);
     if (cached_ && (expectedEpoch == 0 || cached_->artifacts->topologyEpoch == expectedEpoch)) {
         const bool needsDenseAnn = requireDenseAnnIndex && !cached_->denseAnnBuildAttempted;
-        if (needsDenseAnn || cached_->bqPrefixDimension != bqPrefixDimension) {
+        if (needsDenseAnn || cached_->bqPrefixDimension != bqPrefixDimension ||
+            cached_->bqRotation != bqRotation || cached_->bqRotationSeed != bqRotationSeed) {
             auto upgraded = std::make_shared<TopologyRoutingSnapshot>(*cached_);
             upgraded->denseAnnBuildAttempted = cached_->denseAnnBuildAttempted || needsDenseAnn;
             upgraded->bqPrefixDimension = bqPrefixDimension;
+            upgraded->bqRotation = bqRotation;
+            upgraded->bqRotationSeed = bqRotationSeed;
             upgraded->sparseRouteIndex = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
-                *upgraded->artifacts, upgraded->denseAnnBuildAttempted, true, bqPrefixDimension);
+                *upgraded->artifacts, upgraded->denseAnnBuildAttempted, true, bqPrefixDimension,
+                bqRotation);
             cached_ = std::move(upgraded);
         }
         return TopologyRoutingSnapshotLookup{.snapshot = cached_, .cacheHit = true};
@@ -1682,9 +1703,11 @@ TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch, bool requireDense
     snapshot->representationFingerprint =
         topologyRoutingRepresentationFingerprint(*snapshot->artifacts);
     snapshot->sparseRouteIndex = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
-        *snapshot->artifacts, requireDenseAnnIndex, true, bqPrefixDimension);
+        *snapshot->artifacts, requireDenseAnnIndex, true, bqPrefixDimension, bqRotation);
     snapshot->denseAnnBuildAttempted = requireDenseAnnIndex;
     snapshot->bqPrefixDimension = bqPrefixDimension;
+    snapshot->bqRotation = bqRotation;
+    snapshot->bqRotationSeed = bqRotationSeed;
     snapshot->clustersById.reserve(snapshot->artifacts->clusters.size());
     for (std::size_t index = 0; index < snapshot->artifacts->clusters.size(); ++index) {
         snapshot->clustersById.emplace(snapshot->artifacts->clusters[index].clusterId, index);

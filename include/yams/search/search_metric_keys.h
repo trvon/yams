@@ -71,6 +71,8 @@ constexpr std::string_view kTopologyRouteAnnUsed = "topology_route_ann_used";
 constexpr std::string_view kTopologyRouteBqUsed = "topology_route_bq_used";
 /// Representative rule recorded in the routed topology snapshot (degree|medoid).
 constexpr std::string_view kTopologyRepresentativeRule = "topology_representative_rule";
+/// Rotation applied before BQ centroid sign bits (none|fwht).
+constexpr std::string_view kTopologyRouteBqRotation = "topology_route_bq_rotation";
 constexpr std::string_view kTopologyRouteBqCandidates = "topology_route_bq_candidates";
 constexpr std::string_view kTopologyRouteAnnCandidates = "topology_route_ann_candidates";
 constexpr std::string_view kTopologyRouteAnnDistanceEvaluations =

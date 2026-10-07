@@ -114,6 +114,8 @@ public:
         std::optional<std::size_t> annCandidateLimit;
         std::optional<std::size_t> bqCandidateLimit;
         std::optional<std::size_t> bqPrefixDimension;
+        /// none | fwht
+        std::optional<std::string> bqRotation;
         // reciprocal_edges | topology_snapshot: source of the graph-rerank community signal.
         std::optional<std::string> graphCommunitySource;
         std::optional<float> adaptiveProbeScoreGap;
@@ -501,6 +503,9 @@ public:
      * - search.topology.max_seed_documents = int
      * - search.topology.representative_limit = int
      * - search.topology.ann_candidate_limit = int
+     * - search.topology.bq_candidate_limit = int
+     * - search.topology.bq_prefix_dim = int
+     * - search.topology.bq_rotation = none|fwht
      * - search.topology.adaptive_probe_score_gap = float
      * - search.topology.narrow_min_boundary_margin = float
      * - search.topology.max_docs = int
