@@ -1999,6 +1999,15 @@ if catch2_dep.found()
     )
   endif
 
+  catch2_vector_vec0_cosine_order_exe = executable('catch2_vector_vec0_cosine_order',
+    files('unit/vector/vec0_cosine_order_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_vector_sync_adapter_exe = executable('catch2_vector_sync_adapter',
     files('unit/vector/vector_sync_adapter_catch2_test.cpp'),
     include_directories: incs,
@@ -4321,6 +4330,12 @@ if catch2_dep.found()
       timeout: heavy_submodule_timeout
     )
   endif
+
+  test('vector_vec0_cosine_order', catch2_vector_vec0_cosine_order_exe,
+    suite: ['catch2', 'unit', 'vector'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
 
   test('vector_sync_adapter', catch2_vector_sync_adapter_exe,
     suite: ['catch2', 'unit', 'vector', 'memory-sync'],
