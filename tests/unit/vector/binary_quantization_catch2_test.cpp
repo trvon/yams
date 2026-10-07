@@ -6,7 +6,11 @@
 
 #include <yams/vector/binary_quantization.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <numbers>
+#include <utility>
 #include <vector>
 
 using yams::vector::BinaryQuantizedIndex;
@@ -158,5 +162,75 @@ TEST_CASE("BinaryQuantizedIndex: build and search", "[vector][bq][index][catch2]
         CHECK(hits[0].hammingDistance == 0);
         CHECK(hits[1].id == 2);
         CHECK(hits[1].hammingDistance == 64);
+    }
+}
+
+namespace {
+
+// Deterministic, platform-independent pseudo-random floats in [-1, 1).
+struct SplitMixFloats {
+    std::uint64_t state;
+    float next() {
+        std::uint64_t z = (state += 0x9E3779B97F4A7C15ULL);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z ^= z >> 31;
+        return static_cast<float>(static_cast<double>(z >> 11) * 0x1.0p-53 * 2.0 - 1.0);
+    }
+};
+
+// Reference raw-coordinate sign-bit shortlist: the behaviour of the unrotated index.
+std::vector<std::pair<std::size_t, std::size_t>>
+rawSignShortlist(const std::vector<std::vector<float>>& vectors, const std::vector<float>& query,
+                 std::size_t prefix, std::size_t topK) {
+    std::vector<std::pair<std::size_t, std::size_t>> ranked; // (hamming, id)
+    for (std::size_t id = 0; id < vectors.size(); ++id) {
+        std::size_t hamming = 0;
+        for (std::size_t i = 0; i < prefix; ++i) {
+            hamming += ((vectors[id][i] >= 0.0F) != (query[i] >= 0.0F)) ? 1U : 0U;
+        }
+        ranked.emplace_back(hamming, id);
+    }
+    std::ranges::sort(ranked);
+    ranked.resize(std::min(topK, ranked.size()));
+    return ranked;
+}
+
+} // namespace
+
+TEST_CASE("BinaryQuantizedIndex without rotation keeps raw-coordinate sign bits",
+          "[vector][bq][index][characterization][catch2]") {
+    constexpr std::size_t kVectors = 48;
+    constexpr std::size_t kDimension = 96;
+    SplitMixFloats rng{42};
+    std::vector<std::size_t> ids(kVectors);
+    std::vector<std::vector<float>> vectors(kVectors, std::vector<float>(kDimension));
+    for (std::size_t id = 0; id < kVectors; ++id) {
+        ids[id] = id;
+        for (auto& value : vectors[id]) {
+            value = rng.next();
+        }
+    }
+    std::vector<float> query(kDimension);
+    for (auto& value : query) {
+        value = rng.next();
+    }
+
+    for (const std::size_t prefix : {std::size_t{0}, std::size_t{16}}) {
+        auto index = BinaryQuantizedIndex::build(ids, vectors, prefix);
+        REQUIRE(index.has_value());
+        const auto effective = prefix == 0 ? kDimension : prefix;
+        CHECK(index.value()->dimension() == effective);
+        const auto hits = index.value()->search(query, 10);
+        const auto expected = rawSignShortlist(vectors, query, effective, 10);
+        REQUIRE(hits.size() == expected.size());
+        for (std::size_t i = 0; i < hits.size(); ++i) {
+            CHECK(hits[i].hammingDistance == expected[i].first);
+            CHECK(hits[i].id == expected[i].second);
+            CHECK(hits[i].estimatedSimilarity ==
+                  Catch::Approx(
+                      std::cos(std::numbers::pi_v<float> * static_cast<float>(expected[i].first) /
+                               static_cast<float>(effective))));
+        }
     }
 }
