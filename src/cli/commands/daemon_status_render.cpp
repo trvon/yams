@@ -171,12 +171,6 @@ std::string paintStatus(Severity sev, std::string text) {
     return yams::cli::ui::severity_text(sev, text, true);
 }
 
-// Shared helper: neutral text (no severity icon)
-std::string neutralText(const std::string& text) {
-    using namespace yams::cli::ui;
-    return colorize(text, Ansi::WHITE);
-}
-
 /// "Host Load" row: Calm/Busy plus the host signal and any deferred background work.
 std::optional<yams::cli::ui::Row> hostLoadRow(const yams::daemon::StatusResponse& s) {
     if (s.hostPressureSource.empty() || s.hostPressureSource == "unavailable") {

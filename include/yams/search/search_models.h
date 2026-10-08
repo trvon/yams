@@ -16,7 +16,7 @@ using yams::metadata::SearchResult;
 
 struct ComponentResult {
     std::string documentHash;
-    std::string filePath;
+    std::string filePath{};
     float score = 0.0f;
     enum class Source {
         Text,
@@ -34,8 +34,8 @@ struct ComponentResult {
         Unknown
     } source = Source::Unknown;
     size_t rank = 0;
-    std::optional<std::string> snippet;
-    std::map<std::string, std::string> debugInfo;
+    std::optional<std::string> snippet{};
+    std::map<std::string, std::string> debugInfo{};
 };
 
 inline constexpr const char* componentSourceToString(ComponentResult::Source source) noexcept {

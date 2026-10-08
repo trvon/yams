@@ -918,7 +918,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     // The background loop may have already recovered the document, so
     // succeeded==0 is legitimate (the repair is a no-op on already-recovered docs).
     // Regardless of who recovered it, assert the document is no longer in Failed state.
-    CHECK((op->succeeded >= 0));
+    static_cast<void>(op->succeeded);
     {
         // Give the WriteCoordinator time to process the MetadataWriteFacade flush.
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

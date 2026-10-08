@@ -16,7 +16,7 @@ class MetadataRepository;
 /// preserves the current version, even if version metadata is malformed.
 struct VersionRetentionPolicy {
     std::size_t keepLatest{1};
-    std::optional<std::string> seriesKey;
+    std::optional<std::string> seriesKey{};
 };
 
 struct VersionRetentionCandidate {

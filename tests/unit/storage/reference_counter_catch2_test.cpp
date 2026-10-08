@@ -1484,7 +1484,7 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector get last stats",
 
     // Get updated stats
     stats = gc->getLastStats();
-    CHECK(stats.blocksScanned >= 0u);
+    static_cast<void>(stats.blocksScanned);
     CHECK(stats.duration.count() >= 0); // Duration can be 0 for very fast operations
 }
 

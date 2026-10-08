@@ -735,11 +735,11 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 }
 
                 // Handle platform-specific errors
-                static int einval_streak = 0;
                 bool need_delay = false;
                 auto backoff_ms = config_.acceptBackoffMs;
 
 #if defined(__APPLE__)
+                static int einval_streak = 0;
                 if (ec.value() == EINVAL) {
                     ++einval_streak;
                     spdlog::debug("Accept error (EINVAL): {} (streak={})", ec.message(),
@@ -804,7 +804,9 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 } else
 #endif
                 {
+#if defined(__APPLE__)
                     einval_streak = 0;
+#endif
                     spdlog::warn("Accept error: {} ({})", ec.message(), ec.value());
                     need_delay = true;
                 }

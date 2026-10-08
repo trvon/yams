@@ -150,7 +150,7 @@ public:
         std::size_t maxConcurrentSessions{16};
         /// Called on the session thread when a connection is refused before the handler runs
         /// (TLS failure, pin not allowed, capacity). Must not block; exceptions are contained.
-        std::function<void(const Error&)> onRejected;
+        std::function<void(const Error&)> onRejected{};
     };
 
     using SessionHandler = std::function<void(P2pConnection channel)>;

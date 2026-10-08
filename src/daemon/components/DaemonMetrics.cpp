@@ -155,6 +155,7 @@ bool mallocStackLoggingEnabled() {
 #endif
 }
 
+#if defined(__APPLE__)
 bool mallocStackLoggingNoCompactEnabled() {
 #ifdef YAMS_TESTING
     return envFlagEnabled("MallocStackLoggingNoCompact");
@@ -163,6 +164,7 @@ bool mallocStackLoggingNoCompactEnabled() {
     return enabled;
 #endif
 }
+#endif
 
 #if defined(__APPLE__)
 std::pair<std::uint64_t, std::uint64_t> sampleMallocStackLogFootprint() {

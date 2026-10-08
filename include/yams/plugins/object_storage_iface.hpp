@@ -58,8 +58,8 @@ struct PutResult {
 struct ObjectSummary {
     std::string key;
     std::uint64_t size{0};
-    std::optional<std::string> etag;
-    std::optional<std::string> lastModified;
+    std::optional<std::string> etag{};
+    std::optional<std::string> lastModified{};
 };
 
 template <typename T> struct Page {

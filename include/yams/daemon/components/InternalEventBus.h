@@ -390,9 +390,9 @@ public:
         std::string hash;
         std::string mime;
         int64_t documentId{-1};
-        std::string filePath;
-        std::string fileName;
-        std::string extension;
+        std::string filePath{};
+        std::string fileName{};
+        std::string extension{};
         bool noEmbeddings{false};
     };
     struct KgJob {

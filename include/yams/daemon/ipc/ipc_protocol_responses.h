@@ -77,14 +77,14 @@ struct ListEntry {
     // Basic file information
     std::string hash;
     std::string path;
-    std::string name;
+    std::string name{};
     std::string fileName;
     uint64_t size = 0;
 
     // File type and format information
-    std::string mimeType;
-    std::string fileType; // "text" | "binary" | "image" | "document" | etc.
-    std::string extension;
+    std::string mimeType{};
+    std::string fileType{}; // "text" | "binary" | "image" | "document" | etc.
+    std::string extension{};
 
     // Timestamps (Unix epoch seconds)
     int64_t created = 0;
@@ -92,19 +92,19 @@ struct ListEntry {
     int64_t indexed = 0;
 
     // Content and metadata
-    std::string snippet;  // content preview
-    std::string language; // detected language
-    std::string extractionMethod;
-    std::vector<std::string> tags;
-    std::map<std::string, std::string> metadata;
+    std::string snippet{};  // content preview
+    std::string language{}; // detected language
+    std::string extractionMethod{};
+    std::vector<std::string> tags{};
+    std::map<std::string, std::string> metadata{};
 
     // Change tracking info
-    std::string changeType; // "added" | "modified" | "deleted" | ""
-    int64_t changeTime = 0; // when the change was detected
+    std::string changeType{}; // "added" | "modified" | "deleted" | ""
+    int64_t changeTime = 0;   // when the change was detected
 
     // Display helpers
     double relevanceScore = 0.0;
-    std::string matchReason; // why this document matched
+    std::string matchReason{}; // why this document matched
 
     // Extraction status: "pending", "success", "failed", "skipped"
     std::string extractionStatus = "pending";
@@ -257,10 +257,10 @@ struct ListEntry {
 };
 
 struct ListResponse {
-    std::vector<ListEntry> items;
+    std::vector<ListEntry> items{};
     uint64_t totalCount = 0;
     std::string queryInfo;
-    std::map<std::string, std::string> listStats;
+    std::map<std::string, std::string> listStats{};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -300,10 +300,10 @@ struct ListResponse {
 struct SearchResult {
     std::string id;
     std::string path;
-    std::string title;
-    std::string snippet;
+    std::string title{};
+    std::string snippet{};
     double score;
-    std::map<std::string, std::string> metadata;
+    std::map<std::string, std::string> metadata{};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -1008,8 +1008,8 @@ struct StatusResponse {
         std::string error; // if degraded
         uint32_t modelsLoaded{0};
         bool isProvider{false};                // true if this plugin is the adopted model provider
-        std::vector<std::string> interfaces;   // plugin interfaces (e.g., content_extractor_v1)
-        std::vector<std::string> capabilities; // capability categories (e.g., content_extraction)
+        std::vector<std::string> interfaces{}; // plugin interfaces (e.g., content_extractor_v1)
+        std::vector<std::string> capabilities{}; // capability categories (e.g., content_extraction)
 
         template <typename Serializer>
         requires IsSerializer<Serializer>
@@ -3648,10 +3648,10 @@ struct GraphExploreSnippet {
 
 struct GraphExploreResponse {
     std::string query;
-    std::vector<GraphExploreSymbol> entrySymbols;
-    std::vector<GraphExploreSnippet> files;
-    std::vector<GraphExploreRelation> relationships;
-    std::vector<std::string> warnings;
+    std::vector<GraphExploreSymbol> entrySymbols{};
+    std::vector<GraphExploreSnippet> files{};
+    std::vector<GraphExploreRelation> relationships{};
+    std::vector<std::string> warnings{};
     uint64_t totalSymbolsConsidered{0};
     uint64_t totalFilesConsidered{0};
     uint64_t emittedChars{0};

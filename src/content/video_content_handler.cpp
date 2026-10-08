@@ -149,7 +149,8 @@ std::optional<ExtendedVideoMetadata> analyzeAVIHeader(const std::filesystem::pat
 }
 
 // Command-line fallback using system tools
-std::optional<ExtendedVideoMetadata> extractUsingFFProbe(const std::filesystem::path& path) {
+std::optional<ExtendedVideoMetadata>
+extractUsingFFProbe([[maybe_unused]] const std::filesystem::path& path) {
 #ifdef YAMS_HAVE_FFPROBE
     std::string cmd = yams::fmt_format(
         "ffprobe -v quiet -show_format -show_streams -of json \"{}\"", path.string());

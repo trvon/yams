@@ -91,9 +91,9 @@ TEST_CASE("OnnxConcurrencyRegistry lane metrics are observable", "[daemon][gover
     auto rerankerMetrics = reg.laneMetrics(OnnxLane::Reranker);
 
     // Default reserved slots
-    CHECK(glinerMetrics.reserved >= 0);
-    CHECK(embedMetrics.reserved >= 0);
-    CHECK(rerankerMetrics.reserved >= 0);
+    static_cast<void>(glinerMetrics.reserved);
+    static_cast<void>(embedMetrics.reserved);
+    static_cast<void>(rerankerMetrics.reserved);
 }
 
 namespace {
@@ -396,7 +396,7 @@ TEST_CASE("ResourceGovernor snapshot contains valid metrics", "[daemon][governan
 
     // RSS should be positive (we're running)
     // Note: May be 0 if RSS reading failed on this platform
-    CHECK(snapshot.rssBytes >= 0);
+    static_cast<void>(snapshot.rssBytes);
 
     // Timestamp should be valid
     CHECK(snapshot.timestamp.time_since_epoch().count() >= 0);
@@ -552,9 +552,9 @@ TEST_CASE("TuneAdvisor ONNX settings are profile-aware", "[daemon][governance][c
         auto rerankerReserved = TuneAdvisor::onnxRerankerReserved();
 
         // Defaults: 1, 1, 1
-        CHECK(glinerReserved >= 0);
-        CHECK(embedReserved >= 0);
-        CHECK(rerankerReserved >= 0);
+        static_cast<void>(glinerReserved);
+        static_cast<void>(embedReserved);
+        static_cast<void>(rerankerReserved);
     }
 
     SECTION("Profile scale affects computed max slots") {

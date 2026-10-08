@@ -31,7 +31,7 @@
 namespace yams::memory_sync {
 
 struct MemorySyncControl {
-    std::function<bool()> isCancelled;
+    std::function<bool()> isCancelled{};
     std::function<bool()> canAdmitRemoteWork;
 };
 
@@ -64,7 +64,7 @@ struct MemoryDelta {
     std::string logicalKey;
     MemoryIndexRecord record;
     // pi-lens-ignore: no-bit-fields
-    std::vector<std::byte> payload; // NOLINT(no-bit-fields) -- empty for tombstones
+    std::vector<std::byte> payload{}; // NOLINT(no-bit-fields) -- empty for tombstones
 };
 
 struct MemoryDeltaBatch {
@@ -76,7 +76,7 @@ struct DeltaApplyResult {
     std::size_t received{0};
     std::size_t merged{0};
     std::size_t replayed{0};
-    std::map<std::string, std::string> quarantined;
+    std::map<std::string, std::string> quarantined{};
     VersionVector version;
 };
 
@@ -118,7 +118,7 @@ struct ReplicationState {
     VersionVector version;
     // pi-lens-ignore: no-bit-fields
     std::map<NodeId, WriterHistoryCommitment> commitments; // NOLINT(no-bit-fields)
-    std::set<NodeId> quarantinedWriters;
+    std::set<NodeId> quarantinedWriters{};
 };
 
 /// Authenticated direct-P2P zero-state snapshot. The serving peer is a witness for the exact
@@ -127,9 +127,9 @@ struct ColdBootstrapSnapshot {
     VersionVector frontier;
     // pi-lens-ignore: no-bit-fields
     std::map<NodeId, WriterHistoryCommitment> commitments; // NOLINT(no-bit-fields)
-    std::vector<MemoryDelta> winners;
-    std::string rootDigest;
-    DetachedWriterSignature witnessSignature;
+    std::vector<MemoryDelta> winners{};
+    std::string rootDigest{};
+    DetachedWriterSignature witnessSignature{};
 };
 
 /// Backend-agnostic memory sync loop. Memory records are published as
@@ -399,15 +399,15 @@ private:
         std::uint64_t counter{0};
         std::string logicalKey;
         std::string recordHash;
-        std::string prefixDigest;
+        std::string prefixDigest{};
     };
 
     struct HistoryMigrationState {
         std::string phase{"scan"};
-        std::string cursor;
+        std::string cursor{};
         std::uint64_t targetCounter{0};
         std::uint64_t nextCounter{1};
-        std::string prefixDigest;
+        std::string prefixDigest{};
     };
 
     struct EraseIntentState {

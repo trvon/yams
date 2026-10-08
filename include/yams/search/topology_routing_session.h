@@ -160,7 +160,7 @@ struct TopologyRoutingSessionRequest {
 /// Query-to-cover evidence retained before the router scalarizes it into routeScore.
 struct TopologyRouteEvidence {
     std::string clusterId;
-    std::optional<float> semanticCost;
+    std::optional<float> semanticCost{};
     std::optional<float> sparseCost;
     float persistencePenalty{1.0F};
     float cohesionPenalty{1.0F};

@@ -1417,8 +1417,8 @@ TEST_CASE("Daemon client graph maintenance request execution",
     auto graphValidateResult = yams::cli::run_sync(client.graphValidate(validateReq), 30s);
 
     REQUIRE(graphValidateResult.has_value());
-    CHECK(graphValidateResult.value().totalNodes >= 0);
-    CHECK(graphValidateResult.value().totalEdges >= 0);
+    static_cast<void>(graphValidateResult.value().totalNodes);
+    static_cast<void>(graphValidateResult.value().totalEdges);
     CHECK(graphValidateResult.value().issues.empty());
 
     AddDocumentRequest addReq;

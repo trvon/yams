@@ -83,7 +83,7 @@ class LocalHttpServer {
 public:
     struct Response {
         int status{200};
-        std::string body;
+        std::string body{};
         std::chrono::milliseconds delay{0};
     };
 

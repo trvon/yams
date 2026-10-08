@@ -59,7 +59,7 @@ struct DaemonHarnessOptions {
     // the lifetime of the daemon. Everything is restored when the daemon stops. An explicit
     // `configPath` still wins over the generated minimal config.
     bool isolateEnvironment = false;
-    std::string isolatedConfigContents;
+    std::string isolatedConfigContents{};
     bool requireReadyLifecycle = false;
     bool skipSocketVerificationOnReady = false;
     bool configureModelPool = false;
@@ -90,7 +90,7 @@ struct DaemonHarnessOptions {
     // Additional trusted plugin search paths (appended to DaemonConfig::trustedPluginPaths)
     std::vector<std::filesystem::path> trustedPluginPaths = {};
     // Optional test hook to mutate the daemon config before construction.
-    std::function<void(yams::daemon::DaemonConfig&)> configureDaemon;
+    std::function<void(yams::daemon::DaemonConfig&)> configureDaemon{};
 };
 
 class DaemonHarness {

@@ -111,18 +111,18 @@ struct BenchmarkTopologySignal {
 struct BenchmarkTopologyNeighborObservation {
     std::string sourceHash;
     std::string targetHash;
-    std::string sourceSegmentId;
-    std::string targetSegmentId;
+    std::string sourceSegmentId{};
+    std::string targetSegmentId{};
     float score = 0.0F;
 };
 
 struct BenchmarkTopologyEdgeWitness {
     std::string sourceHash;
     std::string targetHash;
-    std::string sourceSegmentId;
-    std::string targetSegmentId;
+    std::string sourceSegmentId{};
+    std::string targetSegmentId{};
     float score = 0.0F;
-    std::string featureId;
+    std::string featureId{};
     BenchmarkTopologySignalKind kind = BenchmarkTopologySignalKind::LexicalCohesion;
     float sourceWeight = 0.0F;
     float targetWeight = 0.0F;
