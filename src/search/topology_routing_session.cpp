@@ -806,7 +806,8 @@ evaluateProtectedRelationFiberSaturation(const TopologyRoutingSnapshot& snapshot
 void materializeAllowedRouteMembers(
     const std::unordered_map<std::string, RoutedMemberAccumulator>& routedMembers,
     const TopologyRoutingSnapshot& snapshot, std::size_t maxDocs, std::uint64_t selectedScaleMask,
-    std::size_t acceptedRoutes, TopologyRoutingSessionResult& result) {
+    std::size_t acceptedRoutes, const std::unordered_set<std::string>* existingCandidates,
+    TopologyRoutingSessionResult& result) {
     using Entry = std::pair<const std::string, RoutedMemberAccumulator>;
     auto fiberClosedMembers = routedMembers;
     result.certificate.selectedProtectedRelationFiberIds.reserve(
@@ -876,6 +877,14 @@ void materializeAllowedRouteMembers(
     result.candidateStructureEvidence.reserve(take);
     for (const auto* entry : ranked | std::views::take(take)) {
         result.certificate.allowedDocumentHashes.insert(entry->first);
+        if (existingCandidates != nullptr) {
+            if (existingCandidates->contains(entry->first)) {
+                ++result.duplicateCandidates;
+            } else {
+                ++result.addedCandidates;
+                result.addedCandidateHashes.push_back(entry->first);
+            }
+        }
         if (entry->second.medoid) {
             result.routedCandidateHashes.insert(entry->first);
         }
@@ -1186,8 +1195,11 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
             static_cast<float>(acceptedRouteScoreSum / static_cast<double>(result.acceptedRoutes));
     }
     if (request.options.collectRouteMembership && mayExpand) {
-        materializeAllowedRouteMembers(routedMembers, *snapshot, request.options.maxDocs,
-                                       selectedScaleMask, result.acceptedRoutes, result);
+        materializeAllowedRouteMembers(
+            routedMembers, *snapshot, request.options.maxDocs, selectedScaleMask,
+            result.acceptedRoutes,
+            request.options.countRouteMemberAdditions ? &request.existingCandidateHashes : nullptr,
+            result);
     }
     produceTopologyRouteAdmission(selection.routes, *snapshot, request.options, result);
     result.applied = (mayExpand && (request.options.collectRouteMembership
@@ -1307,6 +1319,9 @@ makeTopologyRoutingOptions(const SearchEngineConfig& config,
         .routeRiskCalibration = config.topologyRouteRiskCalibration,
         .routeWorkBudget = config.topologyRouteWorkBudget,
         .collectRouteMembership = collectRouteMembership,
+        .countRouteMemberAdditions =
+            collectRouteMembership &&
+            config.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Augment,
         .graphNeighborMinScore = config.topologyGraphNeighborMinScore,
         .graphNeighborReciprocalOnly = config.topologyGraphNeighborReciprocalOnly,
         .graphWeightedSeedRanking = config.topologyGraphWeightedSeedRanking,

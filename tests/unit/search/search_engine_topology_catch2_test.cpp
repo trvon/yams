@@ -1741,6 +1741,20 @@ TEST_CASE("Topology routing options preserve the typed product configuration",
     CHECK(options.graphNeighborMinScore == Catch::Approx(0.31F));
     CHECK_FALSE(options.graphNeighborReciprocalOnly);
     CHECK(options.graphWeightedSeedRanking);
+
+    // Default (shadow) policy reports no additions; only augment counts route members.
+    CHECK_FALSE(options.countRouteMemberAdditions);
+    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
+    CHECK_FALSE(makeTopologyRoutingOptions(config, options.routingMode, true, true)
+                    .countRouteMemberAdditions);
+    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Augment;
+    const auto augment = makeTopologyRoutingOptions(config, options.routingMode, true, true);
+    CHECK(augment.countRouteMemberAdditions);
+    CHECK_FALSE(makeTopologyRoutingOptions(config, options.routingMode, true, false)
+                    .countRouteMemberAdditions);
+    // Accounting does not change the allowed-set policy identity used by route calibration.
+    CHECK(topologyRoutingPolicyFingerprint("representation", augment) ==
+          topologyRoutingPolicyFingerprint("representation", options));
 }
 
 TEST_CASE("Topology route admission requires the protected-relation proof obligations",
