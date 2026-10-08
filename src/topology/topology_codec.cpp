@@ -175,6 +175,9 @@ Result<TopologyArtifactBatch> legacyBatchFromJson(const json& j) {
     batch.snapshotId = j.value("snapshot_id", "");
     batch.algorithm = j.value("algorithm", "");
     batch.inputKind = inputKindFromString(j.value("input_kind", std::string{"hybrid"}));
+    batch.representativeRule =
+        parseRepresentativeRule(j.value("representative_rule", std::string{"degree"}))
+            .value_or(RepresentativeRule::Degree);
     batch.embeddingSpaceIdentity = j.value("embedding_space_identity", "");
     batch.protectedRelationIdentity = j.value("protected_relation_identity", "");
     batch.generatedAtUnixSeconds = j.value("generated_at_unix_seconds", uint64_t{0});
@@ -442,8 +445,10 @@ Result<std::vector<std::byte>> serializeTopologyBatchBinary(const TopologyArtifa
     writer.writeU32(kTopologyBinaryMagic);
     writer.writeU32(kTopologyBinaryVersion);
     writer.writeU8(static_cast<uint8_t>(batch.inputKind));
+    // Formerly reserved padding (always 0); 0 still decodes as RepresentativeRule::Degree, so
+    // snapshots written before the field existed keep their meaning.
+    writer.writeU8(static_cast<uint8_t>(batch.representativeRule));
     writer.writeU8(0); // Reserved padding
-    writer.writeU8(0);
     writer.writeU8(0);
     writer.writeU64(batch.generatedAtUnixSeconds);
     writer.writeU64(batch.topologyEpoch);
@@ -612,6 +617,10 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
     if (!pad0 || !pad1 || !pad2) {
         return Error{ErrorCode::InvalidData, "Truncated header padding"};
     }
+    if (pad0.value() > static_cast<uint8_t>(RepresentativeRule::Medoid)) {
+        return Error{ErrorCode::InvalidData,
+                     "Unknown topology representative rule: " + std::to_string(pad0.value())};
+    }
 
     auto genAt = reader.readU64();
     if (!genAt) {
@@ -624,6 +633,7 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
 
     TopologyArtifactBatch batch;
     batch.inputKind = static_cast<TopologyInputKind>(inputKindRaw.value());
+    batch.representativeRule = static_cast<RepresentativeRule>(pad0.value());
     batch.generatedAtUnixSeconds = genAt.value();
     batch.topologyEpoch = epoch.value();
 

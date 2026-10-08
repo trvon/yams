@@ -114,6 +114,8 @@ public:
         std::optional<std::size_t> annCandidateLimit;
         std::optional<std::size_t> bqCandidateLimit;
         std::optional<std::size_t> bqPrefixDimension;
+        /// none | fwht
+        std::optional<std::string> bqRotation;
         // reciprocal_edges | topology_snapshot: source of the graph-rerank community signal.
         std::optional<std::string> graphCommunitySource;
         std::optional<float> adaptiveProbeScoreGap;
@@ -153,6 +155,8 @@ public:
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
         std::optional<std::size_t> routingRepresentativeCount;
+        /// `topology.representative_rule` = degree|medoid. Unset keeps Degree.
+        std::optional<topology::RepresentativeRule> representativeRule;
         /// SGC feature-smoothing hops before clustering (0 disables).
         std::optional<std::size_t> sgcHops;
         std::optional<bool> sgcNormalize;
@@ -499,6 +503,9 @@ public:
      * - search.topology.max_seed_documents = int
      * - search.topology.representative_limit = int
      * - search.topology.ann_candidate_limit = int
+     * - search.topology.bq_candidate_limit = int
+     * - search.topology.bq_prefix_dim = int
+     * - search.topology.bq_rotation = none|fwht
      * - search.topology.adaptive_probe_score_gap = float
      * - search.topology.narrow_min_boundary_margin = float
      * - search.topology.max_docs = int
@@ -541,6 +548,7 @@ public:
      * Config keys:
      * - topology.engine = connected|louvain|kmeans
      * - topology.routing_representatives = int
+     * - topology.representative_rule = degree|medoid
      * - topology.boundary_spill = bool
      * - topology.boundary_spill_limit = int
      * - topology.boundary_spill_distance_ratio = float

@@ -225,7 +225,11 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebug(debug, metrics::kTopologyRouteAnnDistanceEvaluations,
              std::to_string(session.routeAnnDistanceEvaluations));
     setDebugBool(debug, metrics::kTopologyRouteBqUsed, session.routeBqUsed);
+    setDebug(debug, metrics::kTopologyRepresentativeRule,
+             std::string{yams::topology::representativeRuleName(session.representativeRule)});
     setDebug(debug, metrics::kTopologyRouteBqCandidates, std::to_string(session.routeBqCandidates));
+    setDebug(debug, metrics::kTopologyRouteBqRotation,
+             SearchEngineConfig::topologyBqRotationToString(config.topologyRoutingBqRotation));
     setDebug(debug, metrics::kTopologyRouteExactRepresentativeDistanceEvaluations,
              std::to_string(session.routeExactRepresentativeDistanceEvaluations));
     setDebug(debug, metrics::kTopologyRouteEvidenceCount,

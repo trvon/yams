@@ -96,6 +96,18 @@ parseTopologyVectorPolicy(std::string raw) {
     }
     return std::nullopt;
 }
+std::optional<yams::search::SearchEngineConfig::TopologyBqRotation>
+parseTopologyBqRotation(std::string raw) {
+    raw = normalizeTopologyToken(std::move(raw));
+    using Rotation = yams::search::SearchEngineConfig::TopologyBqRotation;
+    if (raw == "none") {
+        return Rotation::None;
+    }
+    if (raw == "fwht") {
+        return Rotation::Fwht;
+    }
+    return std::nullopt;
+}
 } // namespace
 
 struct SearchEngineManager::RuntimePolicy {
@@ -494,6 +506,15 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
         if (tp.bqPrefixDimension) {
             opts.config.topologyRoutingBqPrefixDimension = *tp.bqPrefixDimension;
+        }
+        if (tp.bqRotation) {
+            if (auto rotation = parseTopologyBqRotation(*tp.bqRotation); rotation.has_value()) {
+                opts.config.topologyRoutingBqRotation = *rotation;
+            } else {
+                spdlog::warn("Ignoring unknown search.topology.bq_rotation='{}': expected none or "
+                             "fwht",
+                             *tp.bqRotation);
+            }
         }
         if (tp.graphCommunitySource) {
             if (*tp.graphCommunitySource == "topology_snapshot" ||

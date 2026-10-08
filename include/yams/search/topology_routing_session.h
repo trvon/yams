@@ -48,6 +48,10 @@ struct TopologyRoutingSnapshot {
     bool denseAnnBuildAttempted = false;
     /// Coordinate prefix the centroid BQ index was built over (0 = full dimension).
     std::size_t bqPrefixDimension = 0;
+    /// Rotation and seed the centroid BQ index was built with; queries reuse the index's own
+    /// rotation, so both sides always share this seed. Part of the cache key.
+    yams::vector::BinaryRotation bqRotation = yams::vector::BinaryRotation::None;
+    std::uint64_t bqRotationSeed = 0;
 };
 
 struct TopologyRoutingSnapshotLookup {
@@ -67,9 +71,10 @@ public:
     explicit TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader);
     explicit TopologyRoutingSnapshotCache(TopologyRoutingSharedSnapshotLoader loader);
 
-    [[nodiscard]] Result<TopologyRoutingSnapshotLookup> get(std::uint64_t expectedEpoch = 0,
-                                                            bool requireDenseAnnIndex = true,
-                                                            std::size_t bqPrefixDimension = 0);
+    [[nodiscard]] Result<TopologyRoutingSnapshotLookup>
+    get(std::uint64_t expectedEpoch = 0, bool requireDenseAnnIndex = true,
+        std::size_t bqPrefixDimension = 0,
+        yams::vector::BinaryRotation bqRotation = yams::vector::BinaryRotation::None);
 
 private:
     TopologyRoutingSharedSnapshotLoader loader_;
@@ -108,6 +113,8 @@ struct TopologyRoutingOptions {
     /// Leading coordinate prefix for the BQ index; only meaningful for Matryoshka-trained
     /// embeddings. Zero uses the full dimension.
     std::size_t bqPrefixDimension = 0;
+    SearchEngineConfig::TopologyBqRotation bqRotation =
+        SearchEngineConfig::TopologyBqRotation::None;
     float adaptiveProbeScoreGap = 0.0F;
     float narrowMinBoundaryMargin = 0.0F;
     /// Maximum documents in a materialized route allowed set or expansion result.
@@ -295,6 +302,9 @@ struct TopologyRoutingSessionResult {
     bool artifactsFresh = false;
     bool snapshotCacheHit = false;
     std::uint64_t topologyEpoch = 0;
+    /// Representative rule recorded in the loaded snapshot (Degree when nothing loaded).
+    yams::topology::RepresentativeRule representativeRule =
+        yams::topology::RepresentativeRule::Degree;
     std::string skipReason;
     std::size_t routedClusters = 0;
     std::size_t availableRoutes = 0;

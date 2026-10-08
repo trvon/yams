@@ -551,6 +551,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     buildConfig.reciprocalOnly = true;
     buildConfig.maxNeighborsPerDocument = extractionConfig.maxNeighborsPerDocument;
     buildConfig.routingRepresentativeCount = routingRepresentativeCount();
+    buildConfig.representativeRule = representativeRule();
     buildConfig.sgcHops = sgcHops();
     buildConfig.sgcNormalize = sgcNormalize();
     buildConfig.dirtyRegionExpansion = dirtyRegionExpansion();

@@ -33,6 +33,11 @@ void ServiceManager::configureTopologyRuntime() {
             spdlog::info("Topology routing representatives applied via config: {}",
                          topologyManager_.routingRepresentativeCount());
         }
+        if (enginePolicy.representativeRule) {
+            topologyManager_.setRepresentativeRule(*enginePolicy.representativeRule);
+            spdlog::info("Topology representative rule applied via config: {}",
+                         topology::representativeRuleName(topologyManager_.representativeRule()));
+        }
         if (enginePolicy.sgcHops || enginePolicy.sgcNormalize) {
             topologyManager_.setSgcPolicy(
                 enginePolicy.sgcHops.value_or(topologyManager_.sgcHops()),

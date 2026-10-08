@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/core/types.h>
+#include <yams/vector/binary_quantization.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -66,6 +67,48 @@ parseDirtyRegionExpansionMode(std::string_view name) noexcept {
           DirtyRegionExpansionMode::PriorClusterAndNeighbors, DirtyRegionExpansionMode::Adaptive}) {
         if (equalsIgnoreCase(name, dirtyRegionExpansionModeName(mode))) {
             return mode;
+        }
+    }
+    return std::nullopt;
+}
+
+/// How a cluster's representative ("medoid") document is chosen.
+/// - Degree: the member with the largest within-cluster weighted degree (graph hub).
+/// - Medoid: the member minimising the sum of chordal distances sqrt(2(1-cos)) to the other
+///   members (a metric medoid on unit vectors). Falls back to Degree when fewer than two
+///   members carry a usable embedding.
+enum class RepresentativeRule : uint8_t {
+    Degree = 0,
+    Medoid = 1,
+};
+
+/// Config spelling of a RepresentativeRule (TOML `topology.representative_rule`).
+[[nodiscard]] constexpr std::string_view representativeRuleName(RepresentativeRule rule) noexcept {
+    switch (rule) {
+        case RepresentativeRule::Degree:
+            return "degree";
+        case RepresentativeRule::Medoid:
+            return "medoid";
+    }
+    return "degree";
+}
+
+/// Parse a config spelling (case-insensitive); nullopt for anything unrecognized.
+[[nodiscard]] inline std::optional<RepresentativeRule>
+parseRepresentativeRule(std::string_view name) noexcept {
+    for (const auto rule : {RepresentativeRule::Degree, RepresentativeRule::Medoid}) {
+        const auto expected = representativeRuleName(rule);
+        if (name.size() != expected.size()) {
+            continue;
+        }
+        bool equal = true;
+        for (std::size_t i = 0; i < name.size() && equal; ++i) {
+            const char c =
+                name[i] >= 'A' && name[i] <= 'Z' ? static_cast<char>(name[i] - 'A' + 'a') : name[i];
+            equal = c == expected[i];
+        }
+        if (equal) {
+            return rule;
         }
     }
     return std::nullopt;
@@ -137,6 +180,10 @@ struct TopologyBuildConfig {
     // Total dense route representatives per cluster, including the centroid. Values above one
     // add deterministic diverse member embeddings. The default preserves centroid-only routing.
     std::size_t routingRepresentativeCount{1};
+    // Cluster representative selection. Degree preserves the historical graph-hub choice.
+    // Medoid also seeds the farthest-first extra routing representatives from the chosen
+    // medoid instead of the centroid.
+    RepresentativeRule representativeRule{RepresentativeRule::Degree};
     // SGC smoothing hops applied to input embeddings before clustering (Lean SGC.lean).
     // 0 = disabled (legacy default), 1-2 = linear feature smoothing over reciprocal graph edges.
     std::size_t sgcHops{0};
@@ -220,6 +267,9 @@ struct TopologyArtifactBatch {
     // Distinct from snapshotId (which is a timestamp) so query-side code can detect
     // topology drift against the artifacts that seeded the route.
     uint64_t topologyEpoch{0};
+    /// Representative rule the builder applied. Persisted in the binary header so query-side
+    /// tracing can report which rule produced the snapshot; legacy snapshots decode as Degree.
+    RepresentativeRule representativeRule{RepresentativeRule::Degree};
     std::vector<ClusterArtifact> clusters;
     std::vector<DocumentClusterMembership> memberships;
 };
@@ -277,6 +327,9 @@ struct TopologyRouteRequest {
     /// Learning). Zero uses the full vector dimension; values like 64 fit within a single 64-bit
     /// word.
     std::size_t bqPrefixDimension{0};
+    /// Rotation applied before taking BQ sign bits. Used only when route() builds its own index;
+    /// a prebuilt SparseRouteIndex carries the rotation chosen at build time.
+    yams::vector::BinaryRotation bqRotation{yams::vector::BinaryRotation::None};
 };
 
 struct ClusterRoute {

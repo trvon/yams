@@ -22,6 +22,10 @@
                                           Cluster partition vs pure semantic_neighbor expansion
     YAMS_BENCH_TOPOLOGY_ENGINE=connected|louvain|kmeans
                                           Write topology engine into isolated config
+    YAMS_BENCH_TOPOLOGY_REPRESENTATIVE_RULE=degree|medoid
+                                          Write topology.representative_rule into isolated config
+    YAMS_BENCH_TOPOLOGY_BQ_ROTATION=none|fwht
+                                          Write search.topology.bq_rotation into isolated config
     YAMS_BENCH_TOPOLOGY_ROUTE_SCORING=current|size_weighted|seed_coverage
                                           Topology route scoring policy
     YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA=0..1
@@ -5857,6 +5861,14 @@ struct BenchFixture {
                      std::getenv("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS")
                          ? std::getenv("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS")
                          : "0"},
+                    // Requested arm values; per-query search_stats carry the effective
+                    // topology_representative_rule / topology_route_bq_rotation.
+                    {"topology_representative_rule",
+                     yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_REPRESENTATIVE_RULE")
+                         .value_or("degree")},
+                    {"topology_bq_rotation",
+                     yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_BQ_ROTATION")
+                         .value_or("none")},
                 };
                 debugLogWriteJsonLine(startEntry);
             } else {
@@ -6251,6 +6263,10 @@ struct BenchFixture {
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT");
             const auto topologyBqPrefixDimEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_PREFIX_DIM");
+            const auto topologyBqRotationEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_BQ_ROTATION");
+            const auto topologyRepresentativeRuleEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_REPRESENTATIVE_RULE");
             const auto topologySgcHopsEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_SGC_HOPS");
             const auto simeonOuterMaxSimEnv =
@@ -6283,7 +6299,7 @@ struct BenchFixture {
                 (topologyEngineEnv && *topologyEngineEnv) ||
                 (topologyRepresentativesEnv && *topologyRepresentativesEnv) ||
                 (topologyBoundarySpillEnv && *topologyBoundarySpillEnv) ||
-                envSet(topologySgcHopsEnv);
+                envSet(topologySgcHopsEnv) || envSet(topologyRepresentativeRuleEnv);
             const bool writeTopologyRouteConfig =
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA") != nullptr) ||
@@ -6294,7 +6310,7 @@ struct BenchFixture {
                 (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) ||
                 (topologyAnnCandidateLimitEnv && *topologyAnnCandidateLimitEnv) ||
                 envSet(topologyBqCandidateLimitEnv) || envSet(topologyBqPrefixDimEnv) ||
-                envSet(graphCommunitySourceEnv) ||
+                envSet(topologyBqRotationEnv) || envSet(graphCommunitySourceEnv) ||
                 (topologyExpansionOutputLimitEnv && *topologyExpansionOutputLimitEnv) ||
                 (topologyGraphWeightedSeedRankingEnv && *topologyGraphWeightedSeedRankingEnv) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP") != nullptr) ||
@@ -6653,6 +6669,9 @@ struct BenchFixture {
                                              "YAMS_BENCH_TOPOLOGY_ROUTE_BQ_PREFIX_DIM", 0)
                                       << "\n";
                         }
+                        if (envSet(topologyBqRotationEnv)) {
+                            configOut << "bq_rotation = \"" << *topologyBqRotationEnv << "\"\n";
+                        }
                         configOut << "adaptive_probe_score_gap = "
                                   << parseFloatEnvOrDefault(
                                          "YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP", 0.0F)
@@ -6766,6 +6785,10 @@ struct BenchFixture {
                                       << parseSizeEnvOrDefault(
                                              "YAMS_BENCH_TOPOLOGY_ROUTING_REPRESENTATIVES", 1)
                                       << "\n";
+                        }
+                        if (envSet(topologyRepresentativeRuleEnv)) {
+                            configOut << "representative_rule = \""
+                                      << *topologyRepresentativeRuleEnv << "\"\n";
                         }
                         if (envSet(topologySgcHopsEnv)) {
                             configOut << "sgc_hops = "

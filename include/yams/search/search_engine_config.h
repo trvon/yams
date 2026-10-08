@@ -217,6 +217,24 @@ struct SearchEngineConfig {
     /// Leading coordinate prefix for the centroid BQ index. Only meaningful for
     /// Matryoshka-trained embeddings; zero uses the full dimension.
     size_t topologyRoutingBqPrefixDimension = 0;
+    /// Rotation applied to centroids and queries before taking BQ sign bits. Fwht applies a
+    /// fixed-seed randomized Hadamard rotation (rotate first, then take the prefix); None keeps
+    /// raw-coordinate sign bits.
+    enum class TopologyBqRotation {
+        None,
+        Fwht,
+    } topologyRoutingBqRotation = TopologyBqRotation::None;
+
+    [[nodiscard]] static constexpr const char*
+    topologyBqRotationToString(TopologyBqRotation rotation) noexcept {
+        switch (rotation) {
+            case TopologyBqRotation::None:
+                return "none";
+            case TopologyBqRotation::Fwht:
+                return "fwht";
+        }
+        return "none";
+    }
     /// Include another cluster while its score remains this close to the best route.
     float topologyAdaptiveProbeScoreGap = 0.0f;
     /// Abstain from hard narrowing when the selected/excluded boundary is closer
@@ -548,6 +566,7 @@ struct SearchEngineConfig {
         topologyRoutingAnnCandidateLimit = source.topologyRoutingAnnCandidateLimit;
         topologyRoutingBqCandidateLimit = source.topologyRoutingBqCandidateLimit;
         topologyRoutingBqPrefixDimension = source.topologyRoutingBqPrefixDimension;
+        topologyRoutingBqRotation = source.topologyRoutingBqRotation;
         topologyAdaptiveProbeScoreGap = source.topologyAdaptiveProbeScoreGap;
         topologyNarrowMinBoundaryMargin = source.topologyNarrowMinBoundaryMargin;
         topologyMaxDocs = source.topologyMaxDocs;
