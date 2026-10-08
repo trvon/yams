@@ -1015,6 +1015,184 @@ TEST_CASE("SearchEngine topology final-window rescue promotes a topology-scored 
     CHECK(debug.at("topology_final_rescue_displaced_doc_ids").find("x1") == std::string::npos);
 }
 
+namespace {
+
+// CI runs the unit lane with vectors disabled and in-memory overlays; the routed-only fixture
+// needs a real vector leg, so pin every vector switch for the duration of the case.
+struct TopologyVectorEnvPin {
+    yams::test::ScopedEnvVar disable{"YAMS_DISABLE_VECTORS", std::optional<std::string>("0")};
+    yams::test::ScopedEnvVar disableSingular{"YAMS_DISABLE_VECTOR", std::nullopt};
+    yams::test::ScopedEnvVar disableDb{"YAMS_DISABLE_VECTOR_DB", std::nullopt};
+    yams::test::ScopedEnvVar skipVecInit{"YAMS_SQLITE_VEC_SKIP_INIT",
+                                         std::optional<std::string>("0")};
+    yams::test::ScopedEnvVar inMemory{"YAMS_VDB_IN_MEMORY", std::nullopt};
+};
+
+// x2 shares a topology route with the lexical seed x1, but lexical Tier-1 keeps only x1
+// (textMaxResults=1) and the global vector top-1 is y1 (query embedding {0,1}). x2 is therefore
+// reachable only through topology routing.
+SearchEngineConfig routedOnlyCandidateConfig(SearchEngineConfig::TopologyVectorPolicy policy) {
+    auto config = topologyRoutingTestConfig(true);
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    config.topologyVectorPolicy = policy;
+    config.topologySparseDenseAlpha = 1.0F;
+    config.topologyNarrowMinBoundaryMargin = 0.0F;
+    config.textMaxResults = 1;
+    config.vectorMaxResults = 1;
+    config.enableWeakQueryFanoutBoost = false;
+    config.topologyMaxDocs = 2;
+    config.topologyExpansionOutputLimit = 2;
+    config.similarityThreshold = -1.0F;
+    return config;
+}
+
+TopologyAssistStageResult
+runRoutedOnlyAssistStage(TopologySearchFixture& fix,
+                         SearchEngineConfig::TopologyVectorPolicy policy) {
+    TopologyAssistStageRequest request;
+    request.query = "alpha one";
+    request.config = routedOnlyCandidateConfig(policy);
+    request.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.weakTier1Query = true;
+    request.tier1SeedHashes = {"x1"};
+    request.tier1SeedEvidence = {{.documentHash = "x1", .weight = 1.0F}};
+    request.existingCandidateHashes = {"x1"};
+    request.queryEmbedding = std::vector<float>{0.0F, 1.0F};
+    request.queryEmbeddingSpaceIdentity = "test-space-v1";
+    request.metadataRepo = fix.repo;
+    request.kgStore = fix.kgStore;
+    return runTopologyAssistStage(request);
+}
+
+std::vector<std::string> resultHashes(const SearchResponse& response) {
+    std::vector<std::string> hashes;
+    hashes.reserve(response.results.size());
+    for (const auto& result : response.results) {
+        hashes.push_back(result.document.sha256Hash);
+    }
+    return hashes;
+}
+
+} // namespace
+
+TEST_CASE("Topology assist stage reports routed members added under augment only",
+          "[search][topology][augment][catch2]") {
+    const TopologyVectorEnvPin vectorEnv;
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+
+    SECTION("augment counts allowed members that are new to the candidate pool") {
+        const auto stage =
+            runRoutedOnlyAssistStage(fix, SearchEngineConfig::TopologyVectorPolicy::Augment);
+        const auto& session = stage.session;
+        REQUIRE(session.applied);
+        CHECK(stage.skipReason.empty());
+        CHECK(session.certificate.allowedDocumentHashes ==
+              std::unordered_set<std::string>{"x1", "x2"});
+        CHECK(session.routedDocs == 2U);
+        CHECK(session.addedCandidates == 1U);
+        CHECK(session.duplicateCandidates == 1U);
+        CHECK(session.addedCandidateHashes == std::vector<std::string>{"x2"});
+    }
+
+    for (const auto policy : {SearchEngineConfig::TopologyVectorPolicy::Narrow,
+                              SearchEngineConfig::TopologyVectorPolicy::Shadow}) {
+        DYNAMIC_SECTION("policy " << SearchEngineConfig::topologyVectorPolicyToString(policy)
+                                  << " keeps the allowed set without claiming additions") {
+            const auto stage = runRoutedOnlyAssistStage(fix, policy);
+            const auto& session = stage.session;
+            REQUIRE(session.applied);
+            CHECK(session.certificate.allowedDocumentHashes ==
+                  std::unordered_set<std::string>{"x1", "x2"});
+            CHECK(session.routedDocs == 2U);
+            CHECK(session.addedCandidates == 0U);
+            CHECK(session.duplicateCandidates == 0U);
+            CHECK(session.addedCandidateHashes.empty());
+        }
+    }
+}
+
+TEST_CASE("SearchEngine topology augment adds a routed-only document to the fused results",
+          "[search][topology][augment][catch2]") {
+    const TopologyVectorEnvPin vectorEnv;
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    REQUIRE(fix.vectorDb->buildIndex());
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    auto disabledConfig =
+        routedOnlyCandidateConfig(SearchEngineConfig::TopologyVectorPolicy::Shadow);
+    disabledConfig.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::Disabled;
+    auto disabled = runTopologySearch(fix, generator, disabledConfig, 4, "alpha one");
+    REQUIRE(disabled.has_value());
+    const auto disabledHashes = resultHashes(disabled.value());
+    // Precondition: without topology the routed-only document is unreachable.
+    REQUIRE(std::ranges::find(disabledHashes, "x2") == disabledHashes.end());
+
+    SECTION("augment") {
+        auto response = runTopologySearch(
+            fix, generator,
+            routedOnlyCandidateConfig(SearchEngineConfig::TopologyVectorPolicy::Augment), 4,
+            "alpha one");
+        REQUIRE(response.has_value());
+        const auto routed = std::ranges::find_if(
+            response.value().results, [](const auto& r) { return r.document.sha256Hash == "x2"; });
+        REQUIRE(routed != response.value().results.end());
+        CHECK(routed->score > 0.0);
+
+        const auto& debug = response.value().debugStats;
+        CHECK(debug.at("topology_vector_policy") == "augment");
+        CHECK(debug.at("topology_weak_query_applied") == "1");
+        CHECK(debug.at("topology_weak_query_skip_reason").empty());
+        CHECK(debug.at("topology_weak_query_added_candidates") == "1");
+        CHECK(debug.at("topology_weak_query_duplicate_candidates") == "1");
+        CHECK(debug.at("topology_weak_query_total_candidates") == "2");
+        CHECK(debug.at("topology_candidate_rescue_applied") == "1");
+        CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+    }
+
+    SECTION("shadow matches topology-disabled results") {
+        auto response = runTopologySearch(
+            fix, generator,
+            routedOnlyCandidateConfig(SearchEngineConfig::TopologyVectorPolicy::Shadow), 4,
+            "alpha one");
+        REQUIRE(response.has_value());
+        REQUIRE(response.value().results.size() == disabled.value().results.size());
+        for (std::size_t i = 0; i < response.value().results.size(); ++i) {
+            CHECK(response.value().results[i].document.sha256Hash ==
+                  disabled.value().results[i].document.sha256Hash);
+            CHECK(response.value().results[i].score == disabled.value().results[i].score);
+        }
+        const auto& debug = response.value().debugStats;
+        CHECK(debug.at("topology_shadow_evaluated") == "1");
+        CHECK(debug.at("topology_weak_query_applied") == "0");
+        CHECK(debug.at("topology_weak_query_added_candidates") == "0");
+        CHECK(debug.at("topology_weak_query_duplicate_candidates") == "0");
+        CHECK(debug.at("topology_weak_query_total_candidates") == "1");
+    }
+
+    SECTION("narrow without a certificate stays global") {
+        auto response = runTopologySearch(
+            fix, generator,
+            routedOnlyCandidateConfig(SearchEngineConfig::TopologyVectorPolicy::Narrow), 4,
+            "alpha one");
+        REQUIRE(response.has_value());
+        const auto hashes = resultHashes(response.value());
+        CHECK(std::ranges::find(hashes, "x2") == hashes.end());
+        const auto& debug = response.value().debugStats;
+        CHECK(debug.at("topology_vector_policy") == "narrow");
+        CHECK(debug.at("topology_weak_query_applied") == "1");
+        CHECK(debug.at("topology_route_admission_eligible") == "0");
+        CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+        CHECK(debug.at("topology_weak_query_added_candidates") == "0");
+        CHECK(debug.at("topology_weak_query_duplicate_candidates") == "0");
+        CHECK(debug.at("topology_weak_query_total_candidates") == "1");
+        CHECK(debug.at("topology_candidate_rescue_attempted") == "0");
+    }
+}
+
 TEST_CASE("Evidence pipeline receives no topology adjustments under a shadow policy",
           "[search][topology][evidence_pipeline][catch2]") {
     TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
@@ -1563,6 +1741,20 @@ TEST_CASE("Topology routing options preserve the typed product configuration",
     CHECK(options.graphNeighborMinScore == Catch::Approx(0.31F));
     CHECK_FALSE(options.graphNeighborReciprocalOnly);
     CHECK(options.graphWeightedSeedRanking);
+
+    // Default (shadow) policy reports no additions; only augment counts route members.
+    CHECK_FALSE(options.countRouteMemberAdditions);
+    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
+    CHECK_FALSE(makeTopologyRoutingOptions(config, options.routingMode, true, true)
+                    .countRouteMemberAdditions);
+    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Augment;
+    const auto augment = makeTopologyRoutingOptions(config, options.routingMode, true, true);
+    CHECK(augment.countRouteMemberAdditions);
+    CHECK_FALSE(makeTopologyRoutingOptions(config, options.routingMode, true, false)
+                    .countRouteMemberAdditions);
+    // Accounting does not change the allowed-set policy identity used by route calibration.
+    CHECK(topologyRoutingPolicyFingerprint("representation", augment) ==
+          topologyRoutingPolicyFingerprint("representation", options));
 }
 
 TEST_CASE("Topology route admission requires the protected-relation proof obligations",

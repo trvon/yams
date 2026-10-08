@@ -120,6 +120,10 @@ struct TopologyRoutingOptions {
     /// Materialize full membership for confidently selected clusters so callers can gate an
     /// existing candidate stream without query-scoring every member.
     bool collectRouteMembership = false;
+    /// Augment policy: report materialized route members absent from the request's existing
+    /// candidates as added candidates (present ones as duplicates). Accounting only; the allowed
+    /// set and the routing policy fingerprint are unchanged. Narrow and Shadow leave this off.
+    bool countRouteMemberAdditions = false;
     float graphNeighborMinScore = 0.25F;
     bool graphNeighborReciprocalOnly = true;
     bool graphWeightedSeedRanking = false;
