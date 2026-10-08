@@ -1,7 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
+#include <yams/common/crc32.h>
 #include <yams/wal/wal_entry.h>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <sstream>
+#include <string>
+#include <vector>
 
 using namespace yams::wal;
 
@@ -271,6 +277,173 @@ TEST_CASE("WALEntry::deserialize rejects corrupted checksum (flip a byte)",
 
     auto out = WALEntry::deserialize(std::span<const std::byte>(buf.data(), buf.size()));
     CHECK_FALSE(out.has_value());
+}
+
+namespace {
+
+// tests/fixtures/wal/store_block_entry_clang_v1.bin: one StoreBlock entry serialized by the
+// pre-fix wal_entry.cpp built with Clang 21 (which zero-fills header padding). Its logical
+// content is reproduced by makeFixtureEntry().
+std::vector<std::byte> readWalFixture(const char* name) {
+    const std::filesystem::path path = std::filesystem::path(YAMS_WAL_FIXTURE_DIR) / name;
+    std::ifstream in(path, std::ios::binary);
+    REQUIRE(in.good());
+    std::vector<char> raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::vector<std::byte> bytes(raw.size());
+    std::memcpy(bytes.data(), raw.data(), raw.size());
+    return bytes;
+}
+
+constexpr uint32_t kFixtureChecksum = 0x032B862E;
+
+WALEntry makeFixtureEntry() {
+    auto payload = WALEntry::StoreBlockData::encode("0123456789abcdef0123456789abcdef", 4096, 1);
+    WALEntry e(WALEntry::OpType::StoreBlock, 0x1122334455667788ULL, 0x99,
+               std::span<const std::byte>(payload.data(), payload.size()));
+    e.header.timestamp = 1700000000000000ULL;
+    e.updateChecksum();
+    return e;
+}
+
+} // namespace
+
+TEST_CASE("WALEntry decodes and verifies a Clang-written v1 entry fixture",
+          "[wal][serde][compat][catch2]") {
+    const auto buf = readWalFixture("store_block_entry_clang_v1.bin");
+    REQUIRE(buf.size() == WALEntry::Header::size() + sizeof(WALEntry::StoreBlockData));
+
+    auto out = WALEntry::deserialize(std::span<const std::byte>(buf.data(), buf.size()));
+    REQUIRE(out.has_value());
+    CHECK(out->header.magic == 0x57414C31);
+    CHECK(out->header.version == 1);
+    CHECK(out->header.sequenceNum == 0x1122334455667788ULL);
+    CHECK(out->header.timestamp == 1700000000000000ULL);
+    CHECK(out->header.transactionId == 0x99);
+    CHECK(out->header.operation == WALEntry::OpType::StoreBlock);
+    CHECK(out->header.flags == 0);
+    CHECK(out->header.reserved == 0);
+    CHECK(out->header.dataSize == sizeof(WALEntry::StoreBlockData));
+    CHECK(out->header.checksum == kFixtureChecksum);
+    CHECK(out->verifyChecksum());
+
+    auto block = WALEntry::StoreBlockData::decode(
+        std::span<const std::byte>(out->data.data(), out->data.size()));
+    REQUIRE(block.has_value());
+    CHECK(std::string(block->hash, sizeof(block->hash)) == "0123456789abcdef0123456789abcdef");
+    CHECK(block->size == 4096);
+    CHECK(block->refCount == 1);
+}
+
+TEST_CASE("WALEntry serialize reproduces the Clang-written v1 fixture byte for byte",
+          "[wal][serde][compat][catch2]") {
+    const auto expected = readWalFixture("store_block_entry_clang_v1.bin");
+
+    // Repeat so that differing stack contents between calls cannot hide nondeterminism.
+    for (int i = 0; i < 4; ++i) {
+        auto e = makeFixtureEntry();
+        CHECK(e.header.checksum == kFixtureChecksum);
+        CHECK(e.verifyChecksum());
+
+        const auto buf = e.serialize();
+        REQUIRE(buf.size() == expected.size());
+        // Bytes 44..47 are the Header's trailing alignment padding: always zero on disk.
+        for (size_t off = 44; off < WALEntry::Header::size(); ++off) {
+            INFO("header byte " << off);
+            CHECK(buf[off] == std::byte{0});
+        }
+        CHECK(buf == expected);
+    }
+}
+
+TEST_CASE("WALEntry fresh entries survive serialize/deserialize/verifyChecksum",
+          "[wal][serde][checksum][catch2]") {
+    for (uint64_t seq = 1; seq <= 64; ++seq) {
+        std::vector<std::byte> payload(seq % 17, std::byte{static_cast<unsigned char>(seq)});
+        WALEntry e(static_cast<WALEntry::OpType>(1 + seq % 8), seq, seq * 3,
+                   std::span<const std::byte>(payload.data(), payload.size()));
+        INFO("seq " << seq);
+        REQUIRE(e.verifyChecksum());
+
+        const auto buf = e.serialize();
+        auto out = WALEntry::deserialize(std::span<const std::byte>(buf.data(), buf.size()));
+        REQUIRE(out.has_value());
+        CHECK(out->header.checksum == e.header.checksum);
+        CHECK(out->verifyChecksum());
+        CHECK(out->serialize() == buf);
+    }
+}
+
+TEST_CASE("WALEntry::deserialize accepts legacy entries with nonzero header padding",
+          "[wal][serde][compat][catch2]") {
+    // Older GCC builds left Header padding uninitialized, wrote it to disk and included it in
+    // the CRC. Such an entry must still recover; it is normalized to the canonical checksum.
+    auto buf = readWalFixture("store_block_entry_clang_v1.bin");
+    for (size_t off = 44; off < WALEntry::Header::size(); ++off) {
+        buf[off] = std::byte{static_cast<unsigned char>(0x40 + off)};
+    }
+    std::memset(buf.data() + 40, 0, sizeof(uint32_t));
+    const uint32_t legacyCrc = yams::common::crc32(std::span<const std::byte>(buf));
+    std::memcpy(buf.data() + 40, &legacyCrc, sizeof(legacyCrc));
+    REQUIRE(legacyCrc != kFixtureChecksum);
+
+    auto out = WALEntry::deserialize(std::span<const std::byte>(buf.data(), buf.size()));
+    REQUIRE(out.has_value());
+    CHECK(out->header.sequenceNum == 0x1122334455667788ULL);
+    CHECK(out->header.checksum == kFixtureChecksum);
+    CHECK(out->verifyChecksum());
+    CHECK(out->serialize() == readWalFixture("store_block_entry_clang_v1.bin"));
+}
+
+TEST_CASE("WALEntry::deserialize rejects corrupted header fields under both checksum forms",
+          "[wal][serde][error][catch2]") {
+    // Offsets 16 (timestamp), 24 (transactionId), 33 (flags), 34 (reserved).
+    for (size_t off : {size_t{16}, size_t{24}, size_t{33}, size_t{34}}) {
+        auto buf = readWalFixture("store_block_entry_clang_v1.bin");
+        buf[off] ^= std::byte{0x01};
+        INFO("header byte " << off);
+        auto out = WALEntry::deserialize(std::span<const std::byte>(buf.data(), buf.size()));
+        CHECK_FALSE(out.has_value());
+    }
+}
+
+TEST_CASE("WALEntry checksum ignores header padding contents", "[wal][serde][catch2]") {
+    // Padding carries no data; the canonical checksum treats it as zero.
+    auto buf = readWalFixture("store_block_entry_clang_v1.bin");
+    buf[45] = std::byte{0x01};
+    auto out = WALEntry::deserialize(std::span<const std::byte>(buf.data(), buf.size()));
+    REQUIRE(out.has_value());
+    CHECK(out->header.checksum == kFixtureChecksum);
+    CHECK(out->serialize() == readWalFixture("store_block_entry_clang_v1.bin"));
+}
+
+TEST_CASE("WALEntry::decodeHeader reads the fixed on-disk layout", "[wal][header][catch2]") {
+    const auto buf = readWalFixture("store_block_entry_clang_v1.bin");
+    CHECK_FALSE(WALEntry::decodeHeader(std::span<const std::byte>(buf.data(), 47)).has_value());
+
+    auto h = WALEntry::decodeHeader(std::span<const std::byte>(buf.data(), buf.size()));
+    REQUIRE(h.has_value());
+    CHECK(h->isValid());
+    CHECK(h->sequenceNum == 0x1122334455667788ULL);
+    CHECK(h->timestamp == 1700000000000000ULL);
+    CHECK(h->transactionId == 0x99);
+    CHECK(h->operation == WALEntry::OpType::StoreBlock);
+    CHECK(h->dataSize == sizeof(WALEntry::StoreBlockData));
+    CHECK(h->checksum == kFixtureChecksum);
+}
+
+TEST_CASE("TransactionData encodes 16 bytes with zeroed padding", "[wal][txn][catch2]") {
+    const auto enc = WALEntry::TransactionData::encode(0x0102030405060708ULL, 0x0A0B0C0DU);
+    REQUIRE(enc.size() == 16);
+    uint64_t id = 0;
+    uint32_t count = 0;
+    std::memcpy(&id, enc.data(), sizeof(id));
+    std::memcpy(&count, enc.data() + 8, sizeof(count));
+    CHECK(id == 0x0102030405060708ULL);
+    CHECK(count == 0x0A0B0C0DU);
+    for (size_t off = 12; off < enc.size(); ++off) {
+        INFO("byte " << off);
+        CHECK(enc[off] == std::byte{0});
+    }
 }
 
 TEST_CASE("StoreBlockData encode/decode round-trip", "[wal][store][catch2]") {
