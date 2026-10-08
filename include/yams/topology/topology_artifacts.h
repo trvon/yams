@@ -197,8 +197,10 @@ struct ClusterArtifact {
     std::optional<ClusterRepresentative> medoid;
     std::vector<std::string> memberDocumentHashes;
     std::vector<std::string> overlapClusterIds;
-    // Phase S: optional running-mean centroid for online KMeans engine.
-    // Empty for engines that don't compute it (Connected/Louvain).
+    // Cluster centroid; empty when no member has an embedding. Spherical k-means stores the
+    // unit mean direction it clusters against; the connected-component and Louvain engines
+    // store the arithmetic member mean. Routing compares it by cosine, so only SOAR boundary
+    // spill (Euclidean residuals) depends on its magnitude.
     std::vector<float> centroidEmbedding;
     // Additional bounded representatives; centroidEmbedding is always the implicit first one.
     std::vector<ClusterRoutingRepresentative> routingRepresentatives;

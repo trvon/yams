@@ -214,6 +214,15 @@ inline bool normalizeEmbeddingInPlace(std::vector<float>& embedding) {
     return true;
 }
 
+inline bool isUnitNormEmbedding(const std::vector<float>& embedding) {
+    constexpr double kUnitNormTolerance = 1e-4;
+    double norm_sq = 0.0;
+    for (float val : embedding) {
+        norm_sq += static_cast<double>(val) * static_cast<double>(val);
+    }
+    return std::abs(norm_sq - 1.0) < kUnitNormTolerance;
+}
+
 inline bool isFiniteEmbedding(const std::vector<float>& embedding) {
     for (float val : embedding) {
         if (!std::isfinite(val)) {
@@ -3403,6 +3412,11 @@ private:
         return true;
     }
 
+    // The vec0 table is a derived ranking index over `vectors.embedding`. vec0 ranks by L2
+    // distance, and L2 order equals cosine order only for unit vectors, so it holds the unit
+    // direction of each stored row. The source blob keeps its original magnitude for
+    // export/sync and exact cosine scoring. Zero rows have no direction: they are left out and
+    // never match, as in the exact scan and the Simeon PQ index.
     Result<void> rebuildVec0DimUnlocked(size_t dim) {
         auto table_result = ensureVec0TableUnlocked(dim);
         if (!table_result) {
@@ -3451,6 +3465,10 @@ private:
             }
 
             auto& [rowid, embedding] = *decoded;
+            if (isZeroNormEmbedding(embedding) || !normalizeEmbeddingInPlace(embedding)) {
+                continue;
+            }
+            YAMS_DCHECK(isUnitNormEmbedding(embedding), "vec0 rows must be unit length");
             sqlite3_bind_int64(insert_stmt, 1, static_cast<sqlite3_int64>(rowid));
             sqlite3_bind_blob(insert_stmt, 2, embedding.data(),
                               static_cast<int>(embedding.size() * sizeof(float)), SQLITE_TRANSIENT);
@@ -4512,6 +4530,16 @@ ORDER BY rowid
         if (candidateRowids != nullptr && candidateRowids->empty()) {
             return std::vector<VectorRecord>{};
         }
+        // Rows in the vec0 table are unit length (see rebuildVec0DimUnlocked); rank the unit
+        // query against them so L2 order is cosine order. A zero query has no direction and is
+        // rejected, as the exact scan rejects it.
+        std::vector<float> unit_query = query_embedding;
+        if (!isFiniteEmbedding(unit_query) || isZeroNormEmbedding(unit_query) ||
+            !normalizeEmbeddingInPlace(unit_query)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "vec0 vector search requires a finite, non-zero query embedding"};
+        }
+        YAMS_DCHECK(isUnitNormEmbedding(unit_query), "vec0 query must be unit length");
 
         const size_t query_dim = query_embedding.size();
 
@@ -4534,9 +4562,8 @@ ORDER BY rowid
                                                        std::string(sqlite3_errmsg(db_))};
         }
 
-        sqlite3_bind_blob(stmt, 1, query_embedding.data(),
-                          static_cast<int>(query_embedding.size() * sizeof(float)),
-                          SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, unit_query.data(),
+                          static_cast<int>(unit_query.size() * sizeof(float)), SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(k));
         if (config_.vec0_phss_enabled) {
             sqlite3_bind_int(stmt, 3, 1);
@@ -4581,6 +4608,14 @@ ORDER BY rowid
                              std::string(sqlite3_errmsg(db_))};
         }
 
+        // Unit L2 order and cosine order agree up to float rounding in vec0's distance; order
+        // the returned rows by the cosine score they report, with the PQ path's tie-break.
+        std::stable_sort(records.begin(), records.end(), [](const auto& a, const auto& b) {
+            if (a.relevance_score != b.relevance_score) {
+                return a.relevance_score > b.relevance_score;
+            }
+            return a.chunk_id < b.chunk_id;
+        });
         return records;
     }
 
