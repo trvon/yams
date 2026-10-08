@@ -44,21 +44,29 @@ std::string normalizeGraphScopePath(const std::filesystem::path& path,
 }
 
 std::vector<metadata::KGPathRange>
-buildGraphCodeScopePathRanges(const std::filesystem::path& scopeRoot) {
+buildGraphCwdScopePathRanges(const std::filesystem::path& scopeRoot) {
     std::vector<metadata::KGPathRange> ranges;
-    ranges.reserve(4);
-    for (const auto* directory : {"src", "include"}) {
-        const auto lexicalPath = (scopeRoot / directory).lexically_normal().generic_string();
-        const auto canonicalPath = normalizeGraphScopePath(scopeRoot / directory, scopeRoot);
-        for (const auto& path : {lexicalPath, canonicalPath}) {
-            auto range = directoryRange(path);
-            const auto duplicate = std::ranges::any_of(ranges, [&](const auto& existing) {
-                return existing.lower == range.lower && existing.upper == range.upper;
-            });
-            if (!duplicate) {
-                ranges.push_back(std::move(range));
-            }
+    auto add = [&](const std::filesystem::path& root) {
+        auto normalized = normalizeGraphScopePath(root, scopeRoot);
+        while (normalized.size() > 1 && normalized.ends_with('/')) {
+            normalized.pop_back();
         }
+        if (normalized.empty()) {
+            return;
+        }
+        auto range = directoryRange(std::move(normalized));
+        const auto duplicate = std::ranges::any_of(ranges, [&](const auto& existing) {
+            return existing.lower == range.lower && existing.upper == range.upper;
+        });
+        if (!duplicate) {
+            ranges.push_back(std::move(range));
+        }
+    };
+    add(scopeRoot);
+    // Stored paths are resolved; a cwd reached through a symlink must still match them.
+    std::error_code ec;
+    if (auto canonical = std::filesystem::weakly_canonical(scopeRoot, ec); !ec) {
+        add(canonical);
     }
     return ranges;
 }

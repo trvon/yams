@@ -2173,12 +2173,21 @@ public:
             if (ctx_.graphQueryService) {
                 GraphQueryRequest graphReq;
                 graphReq.documentHash = foundDoc->sha256Hash;
+                // Start from the document node, as `yams graph --node-key doc:<hash>` does:
+                // document-to-document edges hang off it, not off the blob node.
+                if (ctx_.kgStore) {
+                    auto docNode = ctx_.kgStore->getNodeByKey("doc:" + foundDoc->sha256Hash);
+                    if (docNode && docNode.value().has_value()) {
+                        graphReq.nodeId = docNode.value()->id;
+                    }
+                }
                 graphReq.maxDepth = maxDepth;
                 graphReq.limit = 100;
                 graphReq.hydrateFully = true;
                 graphReq.relationFilters = {
                     GraphRelationType::SameContent, GraphRelationType::RenamedFrom,
-                    GraphRelationType::RenamedTo, GraphRelationType::PathVersion};
+                    GraphRelationType::RenamedTo, GraphRelationType::PathVersion,
+                    GraphRelationType::SemanticNeighbor};
 
                 auto graphResult = ctx_.graphQueryService->query(graphReq);
                 if (graphResult && !graphResult.value().allConnectedNodes.empty()) {

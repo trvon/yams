@@ -10,6 +10,9 @@ const std::string_view kGraphScopeToCwdDescription =
     "Scoped to src/** and include/** via path tree (excluding tests/, benchmarks/, "
     "third_party/, node_modules/, build*)";
 
+const std::string_view kGraphListScopeToCwdDescription =
+    "Scoped to paths under the current directory";
+
 std::string normalizeGraphScopePath(const std::filesystem::path& path,
                                     const std::filesystem::path& cwd) {
     return app::services::normalizeGraphScopePath(path, cwd);

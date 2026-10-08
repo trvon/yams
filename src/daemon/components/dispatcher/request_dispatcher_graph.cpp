@@ -461,7 +461,7 @@ RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
     resp.kgAvailable = true;
     const auto scopedRanges = req.scopePathPrefix.empty()
                                   ? std::vector<metadata::KGPathRange>{}
-                                  : app::services::buildGraphCodeScopePathRanges(
+                                  : app::services::buildGraphCwdScopePathRanges(
                                         std::filesystem::path(req.scopePathPrefix));
     auto totalCount = scopedRanges.empty()
                           ? kgStore->countNodesByType(req.nodeType)

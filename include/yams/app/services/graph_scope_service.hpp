@@ -17,8 +17,10 @@ namespace yams::app::services {
 std::string normalizeGraphScopePath(const std::filesystem::path& path,
                                     const std::filesystem::path& scopeRoot);
 
+// Path ranges covering everything under scopeRoot (lexical and symlink-resolved forms), for
+// `yams graph --list-type ... --scope-cwd`.
 std::vector<metadata::KGPathRange>
-buildGraphCodeScopePathRanges(const std::filesystem::path& scopeRoot);
+buildGraphCwdScopePathRanges(const std::filesystem::path& scopeRoot);
 
 Result<std::unordered_set<std::string>>
 buildGraphCodeScopePathSet(const std::filesystem::path& scopeRoot,

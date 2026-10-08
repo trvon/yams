@@ -316,6 +316,17 @@ template <> struct ProtoBinding<GetResponse> {
         if (r.hasContent)
             o->set_content(r.content);
         to_kv_pairs(r.metadata, o->mutable_metadata());
+        o->set_file_name(yams::common::sanitizeUtf8(r.fileName));
+        o->set_graph_enabled(r.graphEnabled);
+        for (const auto& rel : r.related) {
+            auto* e = o->add_related();
+            e->set_hash(yams::common::sanitizeUtf8(rel.hash));
+            e->set_path(yams::common::sanitizeUtf8(rel.path));
+            e->set_name(yams::common::sanitizeUtf8(rel.name));
+            e->set_relationship(yams::common::sanitizeUtf8(rel.relationship));
+            e->set_distance(rel.distance);
+            e->set_relevance_score(rel.relevanceScore);
+        }
     }
     static GetResponse get(const Envelope& env) {
         const auto& i = env.get_response();
@@ -347,6 +358,19 @@ template <> struct ProtoBinding<GetResponse> {
         r.content = i.content();
         r.hasContent = i.has_content(); // Use explicit protobuf field
         r.metadata = from_kv_pairs(i.metadata());
+        r.fileName = i.file_name();
+        r.graphEnabled = i.graph_enabled();
+        r.related.reserve(static_cast<std::size_t>(i.related_size()));
+        for (const auto& e : i.related()) {
+            RelatedDocumentEntry rel;
+            rel.hash = e.hash();
+            rel.path = e.path();
+            rel.name = e.name();
+            rel.relationship = e.relationship();
+            rel.distance = e.distance();
+            rel.relevanceScore = e.relevance_score();
+            r.related.push_back(std::move(rel));
+        }
         return r;
     }
 };
