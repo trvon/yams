@@ -44,6 +44,8 @@ struct DocumentGraphLookupOptions {
     std::string name;
     int depth{1};
     bool verbose{false};
+    // Base for a relative name; relative names are sent as the absolute stored path first.
+    std::filesystem::path cwd;
 };
 
 boost::asio::awaitable<Result<yams::daemon::GraphQueryResponse>>
@@ -63,11 +65,6 @@ boost::asio::awaitable<Result<yams::daemon::GraphQueryResponse>>
 executeGraphTraversalByNode(yams::daemon::DaemonClient& client,
                             const GraphTraversalQueryOptions& options, const std::string& nodeKey,
                             std::optional<std::int64_t> nodeId = std::nullopt);
-
-boost::asio::awaitable<Result<std::optional<yams::daemon::GraphQueryResponse>>>
-executeGraphTraversalByNameCandidates(yams::daemon::DaemonClient& client,
-                                      const GraphTraversalQueryOptions& options,
-                                      const std::string& name, const std::filesystem::path& cwd);
 
 boost::asio::awaitable<Result<yams::daemon::GetResponse>>
 executeDocumentGraphLookup(yams::daemon::DaemonClient& client,

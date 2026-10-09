@@ -862,21 +862,14 @@ private:
             co_return printGraphQueryResponse(r.value());
         }
 
-        if (!name_.empty()) {
-            auto graphResp = co_await executeGraphTraversalByNameCandidates(
-                client, traversalOptions, name_, invocationCwd_);
-            if (!graphResp) {
-                std::cerr << "Graph query error: " << graphResp.error().message << "\n";
-                co_return graphResp.error();
-            }
-            if (graphResp.value().has_value()) {
-                co_return printGraphQueryResponse(*graphResp.value());
-            }
-        }
-
+        // --name and <hash> resolve the document and list its related documents, starting from
+        // doc:<hash>. Path nodes (path:logical:, path:<snapshot>:) only chain to blob versions.
         auto r = co_await executeDocumentGraphLookup(
-            client, DocumentGraphLookupOptions{
-                        .hash = hash_, .name = name_, .depth = depth_, .verbose = verbose_});
+            client, DocumentGraphLookupOptions{.hash = hash_,
+                                               .name = name_,
+                                               .depth = depth_,
+                                               .verbose = verbose_,
+                                               .cwd = invocationCwd_});
         if (!r) {
             std::cerr << "Graph error: " << r.error().message << "\n";
             if (!name_.empty() &&

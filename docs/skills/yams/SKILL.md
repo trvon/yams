@@ -36,7 +36,7 @@ yams get --hash <hash> -o <path> # Export only when a file copy is needed
 
 # Graph
 yams graph --explore <query>   # Agent context: related files, relationships, snippets
-yams graph --name <file>       # Raw file relationships
+yams graph --name <file>       # Related documents of a file
 yams graph --list-types        # List node types with counts
 yams graph --relations         # List relation types with counts
 yams graph --search "pattern"  # Search nodes by label
@@ -321,7 +321,8 @@ Code-symbol nodes (functions, classes) and their `calls`/`defined_in`/`includes`
 removed in v0.20. For callers or blast radius, use `yams grep "<symbol>" --cwd .`.
 
 ```bash
-# Related documents (semantic neighbours, versions, renames) by path or hash
+# Related documents (semantic neighbours, versions, renames) by path or hash.
+# A relative --name resolves against the current directory.
 yams graph --name src/auth/login.ts --depth 2 --json
 yams graph <hash> --json
 

@@ -12,8 +12,11 @@ struct GraphNode;
 
 namespace yams::cli {
 
-std::vector<std::string> build_graph_file_node_candidates(
-    const std::string& name, const std::filesystem::path& cwd = std::filesystem::current_path());
+// Names to try, in order, for `yams graph --name <name>`: the path as ingestion stores it
+// (absolute, resolved against cwd), then the name as given for file-name and suffix matches.
+// A bare file name with no such file under cwd is only tried as given.
+std::vector<std::string> buildGraphDocumentNameCandidates(const std::string& name,
+                                                          const std::filesystem::path& cwd);
 
 struct CliFilePresentation {
     std::string rawPath;
