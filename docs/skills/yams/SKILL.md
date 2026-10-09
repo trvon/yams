@@ -322,8 +322,8 @@ removed in v0.20. For callers or blast radius, use `yams grep "<symbol>" --cwd .
 
 ```bash
 # Related documents (semantic neighbours, versions, renames) by path or hash.
-# A relative --name resolves against the current directory.
-yams graph --name src/auth/login.ts --depth 2 --json
+# A relative --name resolves against the current directory; --limit caps the list.
+yams graph --name src/auth/login.ts --depth 2 --limit 20 --json
 yams graph <hash> --json
 
 # Raw nodes and edges of the same document; DOT output needs this form

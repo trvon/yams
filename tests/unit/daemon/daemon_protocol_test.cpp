@@ -1573,6 +1573,38 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
     }
 }
 
+TEST_CASE("GetRequest: graph depth and limit survive the wire", "[daemon][protocol][graph]") {
+    // #280 follow-up: `yams graph --limit` needs a GetRequest field (graph_limit = 27).
+    GetRequest req;
+    req.name = "/corpus/simeon/include/simeon/bm25.hpp";
+    req.byName = true;
+    req.metadataOnly = true;
+    req.showGraph = true;
+    req.graphDepth = 2;
+    req.graphLimit = 3;
+
+    auto encoded = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 26));
+    REQUIRE(encoded);
+    auto decoded = ProtoSerializer::decode_payload(encoded.value());
+    REQUIRE(decoded);
+
+    auto* out = std::get_if<GetRequest>(&std::get<Request>(decoded.value().payload));
+    REQUIRE(out != nullptr);
+    CHECK(out->showGraph);
+    CHECK(out->graphDepth == 2);
+    CHECK(out->graphLimit == 3);
+
+    GetRequest unset;
+    unset.hash = "12be4dc5";
+    auto unsetEncoded = ProtoSerializer::encode_payload(makeMessageWith(Request{unset}, 27));
+    REQUIRE(unsetEncoded);
+    auto unsetDecoded = ProtoSerializer::decode_payload(unsetEncoded.value());
+    REQUIRE(unsetDecoded);
+    auto* unsetOut = std::get_if<GetRequest>(&std::get<Request>(unsetDecoded.value().payload));
+    REQUIRE(unsetOut != nullptr);
+    CHECK(unsetOut->graphLimit == 0);
+}
+
 TEST_CASE("GetResponse: document graph fields survive the wire", "[daemon][protocol][graph]") {
     // Issue #280: `yams graph <hash>` / `--name` reported graphEnabled=false with no related
     // documents because the proto binding dropped the graph fields and the file name.

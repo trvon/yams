@@ -153,7 +153,8 @@ public:
                         "Filter edges by relation (e.g., calls, contains, imports)");
 
         // Output options
-        cmd->add_option("--limit,-l", limit_, "Maximum results to return")->default_val(100);
+        limitOption_ =
+            cmd->add_option("--limit,-l", limit_, "Maximum results to return")->default_val(100);
         cmd->add_option("--offset", offset_, "Pagination offset")->default_val(0);
         cmd->add_flag("-v,--verbose", verbose_, "Verbose output with properties");
         cmd->add_flag("--json", jsonOutput_, "Output as JSON");
@@ -868,6 +869,7 @@ private:
             client, DocumentGraphLookupOptions{.hash = hash_,
                                                .name = name_,
                                                .depth = depth_,
+                                               .limit = limitGiven() ? limit_ : 0,
                                                .verbose = verbose_,
                                                .cwd = invocationCwd_});
         if (!r) {
@@ -891,6 +893,9 @@ private:
                                     .outputFormat = outputFormat_,
                                     .cwd = invocationCwd_});
     }
+
+    // --limit has a default for listings; the document lookup only caps when it is given.
+    bool limitGiven() const { return limitOption_ != nullptr && limitOption_->count() > 0; }
 
     Result<void> printDocumentGraphResponse(const yams::daemon::GetResponse& resp) const {
         return yams::cli::renderDocumentGraphResponse(
@@ -1082,6 +1087,7 @@ private:
     std::size_t exploreMaxFiles_{8};
     int depth_{1};
     size_t limit_{100};
+    CLI::Option* limitOption_{nullptr};
     size_t offset_{0};
     bool verbose_{false};
     bool jsonOutput_{false};

@@ -43,6 +43,8 @@ struct DocumentGraphLookupOptions {
     std::string hash;
     std::string name;
     int depth{1};
+    // Max related documents; 0 keeps the daemon's default caps.
+    std::size_t limit{0};
     bool verbose{false};
     // Base for a relative name; relative names are sent as the absolute stored path first.
     std::filesystem::path cwd;

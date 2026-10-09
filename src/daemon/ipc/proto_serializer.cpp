@@ -503,6 +503,7 @@ template <> struct ProtoBinding<GetRequest> {
         o->set_extract(r.extract);
         o->set_show_graph(r.showGraph);
         o->set_graph_depth(r.graphDepth);
+        o->set_graph_limit(r.graphLimit);
         o->set_verbose(r.verbose);
     }
     static GetRequest get(const Envelope& env) {
@@ -533,6 +534,7 @@ template <> struct ProtoBinding<GetRequest> {
         r.extract = i.extract();
         r.showGraph = i.show_graph();
         r.graphDepth = i.graph_depth();
+        r.graphLimit = i.graph_limit();
         r.verbose = i.verbose();
         r.acceptCompressed = i.accept_compressed();
         return r;

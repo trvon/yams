@@ -4,6 +4,9 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/metadata/kg_relation_summary.h>
 
+#include <algorithm>
+#include <limits>
+
 namespace yams::cli {
 
 namespace {
@@ -93,6 +96,8 @@ executeDocumentGraphLookup(yams::daemon::DaemonClient& client,
     req.metadataOnly = true;
     req.showGraph = true;
     req.graphDepth = options.depth;
+    req.graphLimit = static_cast<std::uint32_t>(
+        std::min<std::size_t>(options.limit, std::numeric_limits<std::uint32_t>::max()));
     req.verbose = options.verbose;
     if (options.name.empty()) {
         co_return co_await client.get(req);
