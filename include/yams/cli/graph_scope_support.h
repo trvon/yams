@@ -15,10 +15,7 @@ class IMetadataRepository;
 
 namespace yams::cli {
 
-class YamsCLI;
-
 extern const std::string_view kGraphScopeToCwdDescription;
-extern const std::string_view kGraphListScopeToCwdDescription;
 
 std::string normalizeGraphScopePath(const std::filesystem::path& path,
                                     const std::filesystem::path& cwd);
@@ -26,9 +23,6 @@ std::string normalizeGraphScopePath(const std::filesystem::path& path,
 Result<std::unordered_set<std::string>>
 buildGraphScopedPathSet(const std::filesystem::path& cwd,
                         const std::shared_ptr<metadata::IMetadataRepository>& repo);
-
-Result<std::unordered_set<std::string>>
-buildGraphCurrentScopePathSet(YamsCLI* cli, const std::filesystem::path& cwd);
 
 } // namespace yams::cli
 

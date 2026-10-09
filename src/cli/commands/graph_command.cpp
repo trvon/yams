@@ -787,8 +787,7 @@ private:
                                   " node" + (resp.totalNodesFound != 1 ? "s" : "");
             std::cout << yams::cli::ui::status_info(summary) << "\n";
             if (scopeToCwd_) {
-                std::cout << yams::cli::ui::status_info(
-                                 std::string{kGraphListScopeToCwdDescription})
+                std::cout << yams::cli::ui::status_info(std::string{kGraphScopeToCwdDescription})
                           << "\n";
             }
             std::cout << "Showing: " << nodes.size() << " (offset " << offset_ << ", limit "

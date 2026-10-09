@@ -1,17 +1,11 @@
 #include <yams/cli/graph_scope_support.h>
 
 #include <yams/app/services/graph_scope_service.hpp>
-#include <yams/cli/yams_cli.h>
 #include <yams/metadata/metadata_repository.h>
 
 namespace yams::cli {
 
-const std::string_view kGraphScopeToCwdDescription =
-    "Scoped to src/** and include/** via path tree (excluding tests/, benchmarks/, "
-    "third_party/, node_modules/, build*)";
-
-const std::string_view kGraphListScopeToCwdDescription =
-    "Scoped to paths under the current directory";
+const std::string_view kGraphScopeToCwdDescription = "Scoped to paths under the current directory";
 
 std::string normalizeGraphScopePath(const std::filesystem::path& path,
                                     const std::filesystem::path& cwd) {
@@ -24,17 +18,7 @@ buildGraphScopedPathSet(const std::filesystem::path& cwd,
     if (!repo) {
         return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
     }
-    return app::services::buildGraphCodeScopePathSet(cwd, *repo);
-}
-
-Result<std::unordered_set<std::string>>
-buildGraphCurrentScopePathSet(YamsCLI* cli, const std::filesystem::path& cwd) {
-    auto appCtx = cli ? cli->getAppContext() : nullptr;
-    if (!appCtx || !appCtx->metadataRepo) {
-        return Error{ErrorCode::NotInitialized,
-                     "Path tree scoping unavailable (metadata repo not ready)"};
-    }
-    return buildGraphScopedPathSet(cwd, appCtx->metadataRepo);
+    return app::services::buildGraphCwdScopePathSet(cwd, *repo);
 }
 
 } // namespace yams::cli
