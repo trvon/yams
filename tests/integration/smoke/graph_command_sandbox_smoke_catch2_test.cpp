@@ -347,12 +347,12 @@ void createGraphExploreFixture(const fs::path& root) {
 
 // Content hashes of the document graph fixture's files.
 struct DocumentGraphFixture {
-    std::string xa, ya, n1, n2, xb, yb, nb;
+    std::string xa, ya, n1, n2, xb, yb, nb, lone;
 };
 
 // Two checkouts that share relative paths, with semantic-neighbour edges between document
 // nodes as v0.20 ingestion writes them. root/a/include/x.hpp also has the path:file: node that
-// `yams doctor repair --graph` adds.
+// `yams doctor repair --graph` adds. root/a/src/lone.cpp has no graph edges.
 DocumentGraphFixture createDocumentGraphFixture(const fs::path& root) {
     using namespace yams::metadata;
 
@@ -412,6 +412,7 @@ DocumentGraphFixture createDocumentGraphFixture(const fs::path& root) {
     const auto ya = addDoc("a/include/y.hpp", hashes.ya, false).first;
     const auto n1 = addDoc("a/src/n1.cpp", hashes.n1, false).first;
     const auto n2 = addDoc("a/src/n2.cpp", hashes.n2, false).first;
+    addDoc("a/src/lone.cpp", hashes.lone, false);
     neighbour(xa, n1);
     neighbour(xa, n2);
     neighbour(ya, n1);
@@ -656,5 +657,25 @@ TEST_CASE("IntegrationSmoke.GraphNameResolvesRelativePathAgainstCwd", "[smoke][i
     SECTION("a bare file name still resolves by name") {
         const auto payload = lookup({"--name", "n2.cpp"});
         CHECK((payload.value("hash", "") == hashes.n2));
+    }
+
+    SECTION("--limit caps the related documents; without it the defaults apply") {
+        // #280 follow-up: the lookup ignored --limit (fixed at 100 graph nodes and 20
+        // same-directory fallbacks).
+        const auto full = lookup({"--name", "include/x.hpp"});
+        CHECK((relatedHashes(full) == std::set<std::string>{hashes.n1, hashes.n2}));
+
+        const auto limited = lookup({"--name", "include/x.hpp", "--limit", "1"});
+        CHECK((limited.at("related").size() == 1));
+        CHECK((full.at("related").front() == limited.at("related").front()));
+
+        const auto byHash = lookup({hashes.xa, "--limit", "1"});
+        CHECK((byHash.at("related").size() == 1));
+
+        // The same-directory fallback for a document without graph edges.
+        const auto fallback = lookup({"--name", "src/lone.cpp"});
+        CHECK((relatedHashes(fallback) == std::set<std::string>{hashes.n1, hashes.n2}));
+        const auto fallbackLimited = lookup({"--name", "src/lone.cpp", "--limit", "1"});
+        CHECK((fallbackLimited.at("related").size() == 1));
     }
 }
