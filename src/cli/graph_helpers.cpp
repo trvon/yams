@@ -12,38 +12,35 @@
 
 namespace yams::cli {
 
-std::vector<std::string> build_graph_file_node_candidates(const std::string& name,
+std::vector<std::string> buildGraphDocumentNameCandidates(const std::string& name,
                                                           const std::filesystem::path& cwd) {
     std::vector<std::string> candidates;
-    std::unordered_set<std::string> seen;
-
-    auto push_unique = [&](const std::string& value) {
-        if (!value.empty() && seen.insert(value).second) {
-            candidates.push_back(value);
-        }
-    };
-
-    push_unique(name);
+    if (name.empty()) {
+        return candidates;
+    }
 
     try {
-        std::filesystem::path input(name);
-        if (!input.empty()) {
-            if (input.is_relative()) {
-                input = cwd / input;
-            }
-            auto absolute = std::filesystem::absolute(input).lexically_normal();
-            push_unique(absolute.string());
-            std::error_code ec;
-            auto canonical = std::filesystem::weakly_canonical(input, ec);
-            if (!ec) {
-                push_unique(canonical.lexically_normal().string());
+        const std::filesystem::path input(name);
+        const auto resolved = input.is_relative() ? cwd / input : input;
+        std::error_code ec;
+        const bool pathLike = !input.is_relative() || input.has_parent_path() ||
+                              std::filesystem::exists(resolved, ec);
+        if (pathLike) {
+            // Same normalization ingestion applies to stored paths (lexical + symlinks resolved).
+            auto stored = yams::metadata::computePathDerivedValues(
+                              resolved.lexically_normal().generic_string())
+                              .normalizedPath;
+            if (!stored.empty()) {
+                candidates.push_back(std::move(stored));
             }
         }
     } catch (const std::exception& e) {
-        // Best-effort normalization only - path operations can fail on invalid inputs
-        spdlog::trace("Path normalization failed for '{}': {}", name, e.what());
+        spdlog::trace("graph: path normalization failed for '{}': {}", name, e.what());
     }
 
+    if (std::ranges::find(candidates, name) == candidates.end()) {
+        candidates.push_back(name);
+    }
     return candidates;
 }
 

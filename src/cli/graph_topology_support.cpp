@@ -157,7 +157,14 @@ std::string GraphTopologySupport::resolveDocumentPathByHash(const std::string& h
 
 Result<std::unordered_set<std::string>>
 GraphTopologySupport::buildCurrentScopePathSet(const std::filesystem::path& cwd) const {
-    return buildGraphCurrentScopePathSet(cli_, cwd);
+    if (auto ctxRes = ensureReadContext(); !ctxRes) {
+        return ctxRes.error();
+    }
+    if (!metadataRepoCache_) {
+        return Error{ErrorCode::NotInitialized,
+                     "Path scoping unavailable (metadata repo not ready)"};
+    }
+    return buildGraphScopedPathSet(cwd, metadataRepoCache_);
 }
 
 std::unordered_map<std::string, TopologyClusterStats> GraphTopologySupport::buildClusterStatsById(

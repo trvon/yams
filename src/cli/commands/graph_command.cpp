@@ -153,7 +153,8 @@ public:
                         "Filter edges by relation (e.g., calls, contains, imports)");
 
         // Output options
-        cmd->add_option("--limit,-l", limit_, "Maximum results to return")->default_val(100);
+        limitOption_ =
+            cmd->add_option("--limit,-l", limit_, "Maximum results to return")->default_val(100);
         cmd->add_option("--offset", offset_, "Pagination offset")->default_val(0);
         cmd->add_flag("-v,--verbose", verbose_, "Verbose output with properties");
         cmd->add_flag("--json", jsonOutput_, "Output as JSON");
@@ -787,8 +788,7 @@ private:
                                   " node" + (resp.totalNodesFound != 1 ? "s" : "");
             std::cout << yams::cli::ui::status_info(summary) << "\n";
             if (scopeToCwd_) {
-                std::cout << yams::cli::ui::status_info(
-                                 std::string{kGraphListScopeToCwdDescription})
+                std::cout << yams::cli::ui::status_info(std::string{kGraphScopeToCwdDescription})
                           << "\n";
             }
             std::cout << "Showing: " << nodes.size() << " (offset " << offset_ << ", limit "
@@ -863,21 +863,15 @@ private:
             co_return printGraphQueryResponse(r.value());
         }
 
-        if (!name_.empty()) {
-            auto graphResp = co_await executeGraphTraversalByNameCandidates(
-                client, traversalOptions, name_, invocationCwd_);
-            if (!graphResp) {
-                std::cerr << "Graph query error: " << graphResp.error().message << "\n";
-                co_return graphResp.error();
-            }
-            if (graphResp.value().has_value()) {
-                co_return printGraphQueryResponse(*graphResp.value());
-            }
-        }
-
+        // --name and <hash> resolve the document and list its related documents, starting from
+        // doc:<hash>. Path nodes (path:logical:, path:<snapshot>:) only chain to blob versions.
         auto r = co_await executeDocumentGraphLookup(
-            client, DocumentGraphLookupOptions{
-                        .hash = hash_, .name = name_, .depth = depth_, .verbose = verbose_});
+            client, DocumentGraphLookupOptions{.hash = hash_,
+                                               .name = name_,
+                                               .depth = depth_,
+                                               .limit = limitGiven() ? limit_ : 0,
+                                               .verbose = verbose_,
+                                               .cwd = invocationCwd_});
         if (!r) {
             std::cerr << "Graph error: " << r.error().message << "\n";
             if (!name_.empty() &&
@@ -899,6 +893,9 @@ private:
                                     .outputFormat = outputFormat_,
                                     .cwd = invocationCwd_});
     }
+
+    // --limit has a default for listings; the document lookup only caps when it is given.
+    bool limitGiven() const { return limitOption_ != nullptr && limitOption_->count() > 0; }
 
     Result<void> printDocumentGraphResponse(const yams::daemon::GetResponse& resp) const {
         return yams::cli::renderDocumentGraphResponse(
@@ -1090,6 +1087,7 @@ private:
     std::size_t exploreMaxFiles_{8};
     int depth_{1};
     size_t limit_{100};
+    CLI::Option* limitOption_{nullptr};
     size_t offset_{0};
     bool verbose_{false};
     bool jsonOutput_{false};

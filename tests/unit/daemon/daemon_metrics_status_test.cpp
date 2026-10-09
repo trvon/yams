@@ -2521,6 +2521,47 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(getResp.related.front().relationship == "same_content");
     }
 
+    SECTION("get request caps related documents at graphLimit") {
+        // #280 follow-up: GetRequest.graphLimit must reach DocumentService.
+        auto repoPath = makeTempMetadataDbPath("yams_get_graph_limit_repo_");
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = makeReadyMetadataRepo(pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto graphQuery = std::make_shared<StubGraphQueryService>();
+        auto mainDoc = makeDoc(72, "/tmp/get-graph-limit/main.txt", std::string(64, 'e'));
+        REQUIRE(repo->insertDocument(mainDoc).has_value());
+        for (int i = 0; i < 3; ++i) {
+            auto related =
+                makeDoc(73 + i, "/tmp/get-graph-limit/related" + std::to_string(i) + ".txt",
+                        std::string(64, static_cast<char>('a' + i)));
+            REQUIRE(repo->insertDocument(related).has_value());
+            graphQuery->addConnectedDocument(related.sha256Hash, "semantic_neighbor", 1, 0.5);
+        }
+        store->setBlob(mainDoc.sha256Hash, "main content");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+        svc.__test_setGraphQueryService(graphQuery);
+
+        auto relatedCount = [&](std::uint32_t graphLimit) {
+            GetRequest req;
+            req.hash = mainDoc.sha256Hash;
+            req.metadataOnly = true;
+            req.showGraph = true;
+            req.graphDepth = 1;
+            req.graphLimit = graphLimit;
+            auto resp = dispatchRequest(dispatcher, Request{req});
+            REQUIRE(std::holds_alternative<GetResponse>(resp));
+            return std::get<GetResponse>(resp).related.size();
+        };
+
+        CHECK(relatedCount(0) == 3);
+        CHECK(relatedCount(2) == 2);
+        CHECK(relatedCount(10) == 3);
+    }
+
     SECTION("get request still succeeds without query trace env") {
         auto repoPath = makeTempMetadataDbPath("yams_get_query_trace_repo_");
         metadata::ConnectionPoolConfig poolCfg{};

@@ -1009,6 +1009,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
             serviceReq.acceptCompressed = req.acceptCompressed;
             serviceReq.graph = req.showGraph;
             serviceReq.depth = req.graphDepth;
+            serviceReq.graphLimit = req.graphLimit;
             spdlog::debug("RequestDispatcher: Mapping GetRequest to DocumentService (hash='{}', "
                           "name='{}', metadataOnly={})",
                           req.hash, req.name, req.metadataOnly);

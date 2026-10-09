@@ -82,6 +82,7 @@ message GetRequest {
   bool verbose = 25;
   bool include_content = 26;
   bool accept_compressed = 40;
+  uint32 graph_limit = 27; // max related documents for show_graph (0 = default caps)
 }
 
 message GetInitRequest {

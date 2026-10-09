@@ -904,6 +904,81 @@ TEST_CASE("DocumentService graph lookup matches doc node traversal",
     }
 }
 
+TEST_CASE("DocumentService graph lookup caps related documents at graphLimit",
+          "[document][service][retrieval][graph]") {
+    // #280 follow-up: `yams graph --limit` did not reach the lookup, which kept up to 100 graph
+    // nodes and 20 same-directory documents.
+    DocumentFixture fixture;
+
+    auto lookup = [&](std::size_t graphLimit) {
+        RetrieveDocumentRequest request;
+        request.hash = fixture.testHash1_;
+        request.metadataOnly = true;
+        request.graph = true;
+        request.depth = 1;
+        request.graphLimit = graphLimit;
+        auto result = fixture.documentService_->retrieve(request);
+        REQUIRE(result);
+        return result.value().related;
+    };
+
+    SECTION("same-directory fallback") {
+        // test2.md and libsample.so share test1.txt's directory and no graph edges exist.
+        auto all = lookup(0);
+        REQUIRE(all.size() == 2);
+        for (const auto& rel : all) {
+            CHECK(rel.relationship.value_or("") == "same_directory");
+        }
+        auto capped = lookup(1);
+        REQUIRE(capped.size() == 1);
+        CHECK(capped.front().relationship.value_or("") == "same_directory");
+    }
+
+    SECTION("graph neighbours") {
+        auto kgStoreRes = yams::metadata::makeSqliteKnowledgeGraphStore(*fixture.pool_);
+        REQUIRE(kgStoreRes);
+        std::shared_ptr<KnowledgeGraphStore> kgStore = std::move(kgStoreRes.value());
+
+        metadata::DocumentQueryOptions binaryQuery;
+        binaryQuery.fileName = "libsample.so";
+        auto binaryDocs = fixture.metadataRepo_->queryDocuments(binaryQuery);
+        REQUIRE(binaryDocs);
+        REQUIRE(binaryDocs.value().size() == 1);
+        const auto hash3 = binaryDocs.value().front().sha256Hash;
+
+        auto upsertDoc = [&](const std::string& hash) {
+            KGNode node;
+            node.nodeKey = "doc:" + hash;
+            node.label = hash;
+            node.type = "document";
+            auto id = kgStore->upsertNode(node);
+            REQUIRE(id);
+            return id.value();
+        };
+        const auto doc1 = upsertDoc(fixture.testHash1_);
+        for (const auto& hash : {fixture.testHash2_, hash3}) {
+            KGEdge edge;
+            edge.srcNodeId = doc1;
+            edge.dstNodeId = upsertDoc(hash);
+            edge.relation = "semantic_neighbor";
+            REQUIRE(kgStore->addEdge(edge));
+        }
+
+        fixture.appContext_.kgStore = kgStore;
+        fixture.appContext_.graphQueryService =
+            makeGraphQueryService(kgStore, fixture.metadataRepo_);
+        fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+        auto all = lookup(0);
+        REQUIRE(all.size() == 2);
+        auto capped = lookup(1);
+        REQUIRE(capped.size() == 1);
+        CHECK(capped.front().relationship.value_or("") == "semantic_neighbor");
+        CHECK(capped.front().hash == all.front().hash);
+        CHECK(lookup(5).size() == 2);
+    }
+}
+
 TEST_CASE("DocumentService - Name Resolution", "[document][service][resolve]") {
     DocumentFixture fixture;
 

@@ -2169,6 +2169,12 @@ public:
             seenHashes.insert(foundDoc->sha256Hash);
 
             int maxDepth = std::clamp(req.depth, 1, 5);
+            // Without a limit: up to 100 graph nodes and 20 same-directory documents.
+            constexpr std::size_t kDefaultGraphNodeLimit = 100;
+            constexpr std::size_t kDefaultSameDirectoryLimit = 20;
+            const std::size_t relatedLimit =
+                req.graphLimit > 0 ? req.graphLimit : std::numeric_limits<std::size_t>::max();
+            auto relatedFull = [&] { return resp.related.size() >= relatedLimit; };
 
             if (ctx_.graphQueryService) {
                 GraphQueryRequest graphReq;
@@ -2182,7 +2188,9 @@ public:
                     }
                 }
                 graphReq.maxDepth = maxDepth;
-                graphReq.limit = 100;
+                // Path and blob nodes count toward the node limit, so never ask for fewer
+                // nodes than the default; the related list is capped below.
+                graphReq.limit = std::max(kDefaultGraphNodeLimit, req.graphLimit);
                 graphReq.hydrateFully = true;
                 graphReq.relationFilters = {
                     GraphRelationType::SameContent, GraphRelationType::RenamedFrom,
@@ -2192,6 +2200,9 @@ public:
                 auto graphResult = ctx_.graphQueryService->query(graphReq);
                 if (graphResult && !graphResult.value().allConnectedNodes.empty()) {
                     for (const auto& connNode : graphResult.value().allConnectedNodes) {
+                        if (relatedFull()) {
+                            break;
+                        }
                         if (!connNode.nodeMetadata.documentHash.has_value() ||
                             seenHashes.count(connNode.nodeMetadata.documentHash.value()) > 0) {
                             continue;
@@ -2232,6 +2243,9 @@ public:
                     auto historyRes = ctx_.kgStore->fetchPathHistory(foundDoc->filePath, 100);
                     if (historyRes) {
                         for (const auto& record : historyRes.value()) {
+                            if (relatedFull()) {
+                                break;
+                            }
                             if (record.path != foundDoc->filePath &&
                                 seenHashes.count(record.blobHash) == 0) {
                                 auto docRes = ctx_.metadataRepo->getDocumentByHash(record.blobHash);
@@ -2257,14 +2271,18 @@ public:
                     std::filesystem::path(foundDoc->filePath).parent_path();
                 // Query only documents in the same directory using path prefix
                 std::string dirPattern = baseDir.string() + "/%";
-                auto docsRes =
-                    metadata::queryDocumentsByPattern(*ctx_.metadataRepo, dirPattern, 21);
+                const std::size_t sameDirectoryLimit =
+                    req.graphLimit > 0 ? req.graphLimit : kDefaultSameDirectoryLimit;
+                auto docsRes = metadata::queryDocumentsByPattern(
+                    *ctx_.metadataRepo, dirPattern,
+                    static_cast<int>(std::min<std::size_t>(sameDirectoryLimit + 1,
+                                                           std::numeric_limits<int>::max())));
                 if (docsRes) {
-                    int count = 0;
+                    std::size_t count = 0;
                     for (const auto& other : docsRes.value()) {
                         if (other.sha256Hash == foundDoc->sha256Hash)
                             continue;
-                        if (seenHashes.count(other.sha256Hash) == 0 && count < 20) {
+                        if (seenHashes.count(other.sha256Hash) == 0 && count < sameDirectoryLimit) {
                             RelatedDocument rd;
                             rd.hash = other.sha256Hash;
                             rd.path = other.filePath;
