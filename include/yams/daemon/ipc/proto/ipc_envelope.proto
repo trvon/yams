@@ -399,6 +399,18 @@ message GetResponse {
   bytes content = 4; // for small responses
   repeated KvPair metadata = 5;
   bool has_content = 6; // indicates if content field is populated
+  string file_name = 20;
+  bool graph_enabled = 21; // knowledge graph results (show_graph requests)
+  repeated RelatedDocumentEntry related = 22;
+}
+
+message RelatedDocumentEntry {
+  string hash = 1;
+  string path = 2;
+  string name = 3;
+  string relationship = 4;
+  int32 distance = 5;
+  double relevance_score = 6;
 }
 
 message GetInitResponse {

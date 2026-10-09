@@ -18,6 +18,7 @@ namespace yams::cli {
 class YamsCLI;
 
 extern const std::string_view kGraphScopeToCwdDescription;
+extern const std::string_view kGraphListScopeToCwdDescription;
 
 std::string normalizeGraphScopePath(const std::filesystem::path& path,
                                     const std::filesystem::path& cwd);

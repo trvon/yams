@@ -231,6 +231,9 @@ std::string buildKgPathRangePredicate(std::size_t rangeCount) {
                                "THEN json_extract(properties, '$.file_path') END";
     constexpr auto kSourceFile = "CASE WHEN properties IS NOT NULL AND json_valid(properties) "
                                  "THEN json_extract(properties, '$.source_file') END";
+    // Path nodes keyed by snapshot id (path:<snapshot>:<path>) carry the path in $.path.
+    constexpr auto kPath = "CASE WHEN properties IS NOT NULL AND json_valid(properties) "
+                           "THEN json_extract(properties, '$.path') END";
 
     std::string predicate{"("};
     const char* separator = "";
@@ -245,7 +248,12 @@ std::string buildKgPathRangePredicate(std::size_t rangeCount) {
         predicate += kSourceFile;
         predicate += " >= ? AND ";
         predicate += kSourceFile;
-        predicate += " < ?) OR (node_key >= ? AND node_key < ?) OR "
+        predicate += " < ?) OR (";
+        predicate += kPath;
+        predicate += " >= ? AND ";
+        predicate += kPath;
+        // Document nodes (doc:<hash>) carry their path only as the label.
+        predicate += " < ?) OR (label >= ? AND label < ?) OR (node_key >= ? AND node_key < ?) OR "
                      "(node_key >= ? AND node_key < ?) OR (node_key >= ? AND node_key < ?) OR "
                      "(instr(node_key, '@' || ?) > 0)";
     }
@@ -258,9 +266,10 @@ Result<int> bindKgPathRanges(Statement& stmt, int firstIndex,
     auto index = firstIndex;
     for (const auto& range : ranges) {
         for (const auto& value :
-             {range.lower, range.upper, range.lower, range.upper, "path:file:" + range.lower,
-              "path:file:" + range.upper, "path:dir:" + range.lower, "path:dir:" + range.upper,
-              "path:logical:" + range.lower, "path:logical:" + range.upper, range.lower}) {
+             {range.lower, range.upper, range.lower, range.upper, range.lower, range.upper,
+              range.lower, range.upper, "path:file:" + range.lower, "path:file:" + range.upper,
+              "path:dir:" + range.lower, "path:dir:" + range.upper, "path:logical:" + range.lower,
+              "path:logical:" + range.upper, range.lower}) {
             auto bindResult = stmt.bind(index++, value);
             if (!bindResult) {
                 return bindResult.error();

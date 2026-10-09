@@ -6,10 +6,12 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <set>
 #include <span>
 #include <thread>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store_builder.h>
+#include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/compat/unistd.h>
@@ -812,6 +814,93 @@ TEST_CASE("DocumentService - Retrieval", "[document][service][retrieval]") {
         auto result = fixture.documentService_->retrieve(request);
 
         CHECK_FALSE(result);
+    }
+}
+
+TEST_CASE("DocumentService graph lookup matches doc node traversal",
+          "[document][service][retrieval][graph]") {
+    // Issue #280: `yams graph <hash>` and `--name` resolved the document but reported no graph,
+    // while `--node-key doc:<hash>` listed its semantic neighbours.
+    DocumentFixture fixture;
+
+    auto kgStoreRes = yams::metadata::makeSqliteKnowledgeGraphStore(*fixture.pool_);
+    REQUIRE(kgStoreRes);
+    std::shared_ptr<KnowledgeGraphStore> kgStore = std::move(kgStoreRes.value());
+
+    auto doc1 = fixture.metadataRepo_->getDocumentByHash(fixture.testHash1_);
+    REQUIRE(doc1);
+    REQUIRE(doc1.value().has_value());
+    const auto path1 = doc1.value()->filePath;
+
+    auto upsert = [&](const std::string& key, const std::string& label, const std::string& type) {
+        KGNode node;
+        node.nodeKey = key;
+        node.label = label;
+        node.type = type;
+        auto id = kgStore->upsertNode(node);
+        REQUIRE(id);
+        return id.value();
+    };
+    auto addEdge = [&](std::int64_t src, std::int64_t dst, const std::string& relation) {
+        KGEdge edge;
+        edge.srcNodeId = src;
+        edge.dstNodeId = dst;
+        edge.relation = relation;
+        REQUIRE(kgStore->addEdge(edge));
+    };
+
+    // Shape the ingest pipeline writes: blob -has_version-> doc, doc -semantic_neighbor-> doc.
+    const auto blob1 = upsert("blob:" + fixture.testHash1_, fixture.testHash1_, "blob");
+    const auto docNode1 = upsert("doc:" + fixture.testHash1_, path1, "document");
+    const auto docNode2 = upsert("doc:" + fixture.testHash2_, "test2.md", "document");
+    addEdge(blob1, docNode1, "has_version");
+    addEdge(docNode1, docNode2, "semantic_neighbor");
+
+    fixture.appContext_.kgStore = kgStore;
+    fixture.appContext_.graphQueryService = makeGraphQueryService(kgStore, fixture.metadataRepo_);
+    REQUIRE(fixture.appContext_.graphQueryService);
+    auto service = makeDocumentService(fixture.appContext_);
+
+    // Control: traverse the doc node directly, as `yams graph --node-key doc:<hash>` does.
+    GraphQueryRequest traversal;
+    traversal.nodeId = docNode1;
+    traversal.maxDepth = 1;
+    auto traversed = fixture.appContext_.graphQueryService->query(traversal);
+    REQUIRE(traversed);
+    std::set<std::string> traversedHashes;
+    for (const auto& node : traversed.value().allConnectedNodes) {
+        if (node.nodeMetadata.node.nodeKey.starts_with("doc:")) {
+            traversedHashes.insert(node.nodeMetadata.node.nodeKey.substr(4));
+        }
+    }
+    REQUIRE(traversedHashes == std::set<std::string>{fixture.testHash2_});
+
+    auto checkLookup = [&](RetrieveDocumentRequest request) {
+        request.metadataOnly = true;
+        request.graph = true;
+        request.depth = 1;
+        auto result = service->retrieve(request);
+        REQUIRE(result);
+        CHECK(result.value().graphEnabled);
+        std::set<std::string> relatedHashes;
+        for (const auto& rel : result.value().related) {
+            relatedHashes.insert(rel.hash);
+            CHECK(rel.relationship.value_or("") == "semantic_neighbor");
+            CHECK(rel.distance == 1);
+        }
+        CHECK(relatedHashes == traversedHashes);
+    };
+
+    SECTION("by hash") {
+        RetrieveDocumentRequest request;
+        request.hash = fixture.testHash1_;
+        checkLookup(request);
+    }
+
+    SECTION("by name") {
+        RetrieveDocumentRequest request;
+        request.name = path1;
+        checkLookup(request);
     }
 }
 

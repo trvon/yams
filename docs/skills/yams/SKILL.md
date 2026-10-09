@@ -311,7 +311,7 @@ yams graph --search "*Controller*"
 yams graph --search "auth*"
 yams graph --search "handle?Request"
 
-# List scoped node types
+# List document nodes whose paths are under the current directory
 yams graph --list-type document --scope-cwd --limit 50
 ```
 
@@ -321,12 +321,12 @@ Code-symbol nodes (functions, classes) and their `calls`/`defined_in`/`includes`
 removed in v0.20. For callers or blast radius, use `yams grep "<symbol>" --cwd .`.
 
 ```bash
-# Show a file's document-level relationships
-yams graph --name src/auth/login.ts --depth 2 --limit 50
+# Related documents (semantic neighbours, versions, renames) by path or hash
+yams graph --name src/auth/login.ts --depth 2 --json
+yams graph <hash> --json
 
-# Output as JSON or DOT
-yams graph --name src/auth/login.ts --format json
-yams graph --name src/auth/login.ts --format dot > graph.dot
+# Raw nodes and edges of the same document; DOT output needs this form
+yams graph --node-key doc:<hash> --depth 1 --limit 50 --format dot > graph.dot
 ```
 
 Common relations: `contains`, `has_version`, `semantic_neighbor`, plus extracted entity relations.

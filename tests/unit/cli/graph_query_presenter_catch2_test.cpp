@@ -1,6 +1,7 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/cli/graph_query_presenter.h>
@@ -93,4 +94,21 @@ TEST_CASE("Graph query presenter renders document graph fallbacks and related do
     REQUIRE(relatedResult.has_value());
     CHECK(relatedOut.str().find("Related Documents (depth 2)") != std::string::npos);
     CHECK(relatedOut.str().find("src/helper.cpp") != std::string::npos);
+}
+
+TEST_CASE("Document graph JSON names the document when only name is set", "[cli][graph]") {
+    // Issue #280: the daemon fills GetResponse.name, not fileName, so "document" came back "".
+    yams::daemon::GetResponse resp;
+    resp.name = "bm25.hpp";
+    resp.path = "/corpus/simeon/include/simeon/bm25.hpp";
+    resp.hash = "12be4dc5f2d4a975";
+    resp.graphEnabled = true;
+
+    std::ostringstream out;
+    auto result = yams::cli::renderDocumentGraphResponse(
+        out, resp, yams::cli::DocumentGraphRenderOptions{.jsonOutput = true, .cwd = "/corpus"});
+    REQUIRE(result.has_value());
+    const auto payload = nlohmann::json::parse(out.str());
+    CHECK(payload.at("document") == "bm25.hpp");
+    CHECK(payload.at("graphEnabled") == true);
 }
