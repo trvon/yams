@@ -58,6 +58,9 @@ private:
         std::size_t totalCount{0};
         std::size_t pos{0};
         std::chrono::milliseconds elapsed{0};
+        std::string traceId;
+        std::string queryInfo;
+        std::map<std::string, std::string> searchStats;
     };
 
     struct ListState {
