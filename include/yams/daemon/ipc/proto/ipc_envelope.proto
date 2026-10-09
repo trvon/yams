@@ -402,6 +402,14 @@ message GetResponse {
   string file_name = 20;
   bool graph_enabled = 21; // knowledge graph results (show_graph requests)
   repeated RelatedDocumentEntry related = 22;
+  uint64 size = 23;
+  string mime_type = 24;
+  string file_type = 25;
+  int64 created = 26;  // unix epoch seconds
+  int64 modified = 27; // unix epoch seconds
+  int64 indexed = 28;  // unix epoch seconds
+  uint64 total_bytes = 29;
+  bool output_written = 30;
 }
 
 message RelatedDocumentEntry {
