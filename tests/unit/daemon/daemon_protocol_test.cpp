@@ -1617,6 +1617,41 @@ TEST_CASE("GetResponse: document graph fields survive the wire", "[daemon][proto
     }
 }
 
+TEST_CASE("GetResponse: size, type, timestamps and output status survive the wire",
+          "[daemon][protocol][get]") {
+    // Follow-up to #280: `yams get` printed "Size: 0" and an empty type over the daemon socket
+    // because the proto binding dropped these fields.
+    GetResponse resp;
+    resp.hash = "12be4dc5f2d4a975852a09acce9f1ab303ee8138c47c13283f094001840ca86c";
+    resp.name = "bm25.hpp";
+    resp.fileName = "bm25.hpp";
+    resp.path = "/corpus/simeon/include/simeon/bm25.hpp";
+    resp.size = 4398046511104ULL + 123; // exceeds 32 bits
+    resp.mimeType = "text/x-c++hdr";
+    resp.fileType = "text";
+    resp.created = 1700000000;
+    resp.modified = 1700000100;
+    resp.indexed = 1700000200;
+    resp.totalBytes = 987654;
+    resp.outputWritten = true;
+
+    auto encoded = ProtoSerializer::encode_payload(makeMessageWith(Response{resp}, 26));
+    REQUIRE(encoded);
+    auto decoded = ProtoSerializer::decode_payload(encoded.value());
+    REQUIRE(decoded);
+
+    auto* out = std::get_if<GetResponse>(&std::get<Response>(decoded.value().payload));
+    REQUIRE(out != nullptr);
+    CHECK(out->size == resp.size);
+    CHECK(out->mimeType == resp.mimeType);
+    CHECK(out->fileType == resp.fileType);
+    CHECK(out->created == resp.created);
+    CHECK(out->modified == resp.modified);
+    CHECK(out->indexed == resp.indexed);
+    CHECK(out->totalBytes == resp.totalBytes);
+    CHECK(out->outputWritten);
+}
+
 TEST_CASE("GrepResponse: Serialization edge cases", "[daemon][protocol][grep]") {
     SECTION("Paths-only mode (file only, no line)") {
         GrepResponse in{};
