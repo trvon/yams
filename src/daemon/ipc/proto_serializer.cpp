@@ -317,6 +317,14 @@ template <> struct ProtoBinding<GetResponse> {
             o->set_content(r.content);
         to_kv_pairs(r.metadata, o->mutable_metadata());
         o->set_file_name(yams::common::sanitizeUtf8(r.fileName));
+        o->set_size(r.size);
+        o->set_mime_type(yams::common::sanitizeUtf8(r.mimeType));
+        o->set_file_type(yams::common::sanitizeUtf8(r.fileType));
+        o->set_created(r.created);
+        o->set_modified(r.modified);
+        o->set_indexed(r.indexed);
+        o->set_total_bytes(r.totalBytes);
+        o->set_output_written(r.outputWritten);
         o->set_graph_enabled(r.graphEnabled);
         for (const auto& rel : r.related) {
             auto* e = o->add_related();
@@ -359,6 +367,14 @@ template <> struct ProtoBinding<GetResponse> {
         r.hasContent = i.has_content(); // Use explicit protobuf field
         r.metadata = from_kv_pairs(i.metadata());
         r.fileName = i.file_name();
+        r.size = i.size();
+        r.mimeType = i.mime_type();
+        r.fileType = i.file_type();
+        r.created = i.created();
+        r.modified = i.modified();
+        r.indexed = i.indexed();
+        r.totalBytes = i.total_bytes();
+        r.outputWritten = i.output_written();
         r.graphEnabled = i.graph_enabled();
         r.related.reserve(static_cast<std::size_t>(i.related_size()));
         for (const auto& e : i.related()) {
