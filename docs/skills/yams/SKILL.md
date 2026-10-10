@@ -36,7 +36,7 @@ yams get --hash <hash> -o <path> # Export only when a file copy is needed
 
 # Graph
 yams graph --explore <query>   # Agent context: related files, relationships, snippets
-yams graph --name <file>       # Raw file relationships
+yams graph --name <file>       # Related documents of a file
 yams graph --list-types        # List node types with counts
 yams graph --relations         # List relation types with counts
 yams graph --search "pattern"  # Search nodes by label
@@ -311,7 +311,7 @@ yams graph --search "*Controller*"
 yams graph --search "auth*"
 yams graph --search "handle?Request"
 
-# List scoped node types
+# List document nodes whose paths are under the current directory
 yams graph --list-type document --scope-cwd --limit 50
 ```
 
@@ -321,12 +321,13 @@ Code-symbol nodes (functions, classes) and their `calls`/`defined_in`/`includes`
 removed in v0.20. For callers or blast radius, use `yams grep "<symbol>" --cwd .`.
 
 ```bash
-# Show a file's document-level relationships
-yams graph --name src/auth/login.ts --depth 2 --limit 50
+# Related documents (semantic neighbours, versions, renames) by path or hash.
+# A relative --name resolves against the current directory; --limit caps the list.
+yams graph --name src/auth/login.ts --depth 2 --limit 20 --json
+yams graph <hash> --json
 
-# Output as JSON or DOT
-yams graph --name src/auth/login.ts --format json
-yams graph --name src/auth/login.ts --format dot > graph.dot
+# Raw nodes and edges of the same document; DOT output needs this form
+yams graph --node-key doc:<hash> --depth 1 --limit 50 --format dot > graph.dot
 ```
 
 Common relations: `contains`, `has_version`, `semantic_neighbor`, plus extracted entity relations.

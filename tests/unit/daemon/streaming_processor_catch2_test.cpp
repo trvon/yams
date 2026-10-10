@@ -3,8 +3,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <map>
+#include <string>
+#include <utility>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <yams/daemon/ipc/request_handler.h>
 #include <yams/daemon/ipc/streaming_processor.h>
@@ -35,6 +39,17 @@ public:
             co_return Response{std::move(resp)};
         }
         co_return Response{SuccessResponse{"ok"}};
+    }
+};
+
+class SearchProcessor : public RequestProcessor {
+public:
+    SearchResponse response;
+    std::size_t calls{0};
+
+    boost::asio::awaitable<Response> process(const Request&) override {
+        ++calls;
+        co_return Response{response};
     }
 };
 
@@ -130,6 +145,136 @@ TEST_CASE("StreamingProcessor batch embedding streams working and final", "[daem
 
     // Cleanup - all coroutine frames already destroyed since io.run() completed
     sp.reset();
+}
+
+TEST_CASE("StreamingProcessor preserves search metadata across response sizes",
+          "[daemon][streaming][search_stats]") {
+    boost::asio::io_context io;
+    auto delegate = std::make_shared<SearchProcessor>();
+    RequestHandler::Config cfg;
+    cfg.worker_executor = io.get_executor();
+    cfg.chunk_size = 512 * 1024;
+    std::size_t resultCount = 12;
+    std::size_t snippetSize = 8;
+    bool expectStreaming = false;
+    bool expectMultiplePages = false;
+
+    SECTION("small response uses the one-shot path") {}
+    SECTION("response larger than the default chunk retains metadata") {
+        snippetSize = 64 * 1024;
+        expectStreaming = true;
+    }
+    SECTION("metadata survives multiple result pages") {
+        cfg.chunk_size = 512;
+        expectStreaming = true;
+        expectMultiplePages = true;
+    }
+    SECTION("oversized stats survive an empty result page") {
+        resultCount = 0;
+        expectStreaming = true;
+        delegate->response.searchStats["large_debug_trace"] = std::string(600 * 1024, 'x');
+    }
+
+    auto& expected = delegate->response;
+    expected.totalCount = resultCount + 7;
+    expected.elapsed = std::chrono::milliseconds(123);
+    expected.traceId = "trace-search-stats";
+    expected.queryInfo = "hybrid search";
+    expected.searchStats["topology_policy"] = "shadow";
+    expected.searchStats["vector_exact_distance_evaluations"] = "137";
+    for (std::size_t i = 0; i < resultCount; ++i) {
+        SearchResult result{};
+        result.id = "doc-" + std::to_string(i);
+        result.path = "/corpus/" + result.id;
+        result.score = 1.0 / (1.0 + i);
+        result.snippet = std::string(snippetSize, 's');
+        expected.results.push_back(std::move(result));
+    }
+
+    StreamingRequestProcessor processor(delegate, cfg);
+    // Reuse the same processor to ensure metadata from the first request cannot leak.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        CAPTURE(attempt);
+        if (attempt == 1) {
+            expected.traceId = "trace-second-search";
+            expected.queryInfo = "second query";
+            expected.searchStats.clear();
+            expected.searchStats["second_request"] = "only";
+            if (resultCount == 0) {
+                expected.searchStats["large_debug_trace"] = std::string(600 * 1024, 'y');
+            }
+        }
+        Request request{SearchRequest{}};
+        auto pending = boost::asio::co_spawn(io, processor.process_streaming(request),
+                                             boost::asio::use_future);
+        io.run();
+        io.restart();
+        auto immediate = pending.get();
+        REQUIRE(immediate.has_value() == !expectStreaming);
+
+        SearchResponse received;
+        std::size_t dataPages = 0;
+        if (immediate) {
+            received = get_as<SearchResponse>(*immediate);
+        } else {
+            auto starter =
+                boost::asio::co_spawn(io, processor.next_chunk(), boost::asio::use_future);
+            io.run();
+            io.restart();
+            auto heartbeat = starter.get();
+            REQUIRE_FALSE(heartbeat.is_last_chunk);
+            REQUIRE(get_as<SearchResponse>(heartbeat.data).results.empty());
+
+            bool finished = false;
+            // Bounded by the item count, with one final page even for empty results.
+            for (std::size_t page = 0; page <= resultCount && !finished; ++page) {
+                auto next =
+                    boost::asio::co_spawn(io, processor.next_chunk(), boost::asio::use_future);
+                io.run();
+                io.restart();
+                auto chunk = next.get();
+                auto response = get_as<SearchResponse>(chunk.data);
+                REQUIRE(response.totalCount == expected.totalCount);
+                REQUIRE(response.elapsed == expected.elapsed);
+                if (page == 0) {
+                    CHECK(response.traceId == expected.traceId);
+                    CHECK(response.queryInfo == expected.queryInfo);
+                    CHECK(response.searchStats == expected.searchStats);
+                } else {
+                    CHECK(response.traceId.empty());
+                    CHECK(response.queryInfo.empty());
+                    CHECK(response.searchStats.empty());
+                }
+                received.results.insert(received.results.end(), response.results.begin(),
+                                        response.results.end());
+                received.searchStats.insert(response.searchStats.begin(),
+                                            response.searchStats.end());
+                if (!response.traceId.empty())
+                    received.traceId = response.traceId;
+                if (!response.queryInfo.empty())
+                    received.queryInfo = response.queryInfo;
+                received.totalCount = response.totalCount;
+                received.elapsed = response.elapsed;
+                ++dataPages;
+                finished = chunk.is_last_chunk;
+            }
+            REQUIRE(finished);
+            if (expectMultiplePages)
+                REQUIRE(dataPages > 1);
+        }
+        CHECK(received.searchStats == expected.searchStats);
+        CHECK(received.queryInfo == expected.queryInfo);
+        CHECK(received.traceId == expected.traceId);
+        CHECK(received.totalCount == expected.totalCount);
+        CHECK(received.elapsed == expected.elapsed);
+        REQUIRE(received.results.size() == expected.results.size());
+        for (std::size_t i = 0; i < resultCount; ++i) {
+            CHECK(received.results[i].id == expected.results[i].id);
+            CHECK(received.results[i].snippet == expected.results[i].snippet);
+            CHECK(received.results[i].score == expected.results[i].score);
+        }
+        REQUIRE(delegate->calls == static_cast<std::size_t>(attempt + 1));
+    }
 }
 
 TEST_CASE("StreamingProcessor embed documents streams working and final", "[daemon][streaming]") {

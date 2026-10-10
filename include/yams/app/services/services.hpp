@@ -541,8 +541,9 @@ struct RetrieveDocumentRequest {
     bool acceptCompressed{false}; // opt in only where the receiver decodes (DaemonClient)
 
     // Knowledge graph options
-    bool graph{false}; // show related documents
-    int depth{1};      // graph traversal depth (1-5)
+    bool graph{false};         // show related documents
+    int depth{1};              // graph traversal depth (1-5)
+    std::size_t graphLimit{0}; // max related documents (0 = default caps)
 
     // Selection criteria (for pattern/multiple selection)
     bool latest{false}; // get most recent matching doc

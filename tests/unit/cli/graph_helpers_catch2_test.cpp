@@ -7,27 +7,63 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
-TEST_CASE("Graph helpers: candidate list includes absolute path", "[cli][graph]") {
-    std::string input = "src/cli/commands/graph_command.cpp";
-    auto candidates = yams::cli::build_graph_file_node_candidates(input);
+TEST_CASE("Graph helpers: --name tries the stored path under the cwd first", "[cli][graph]") {
+    // #280 follow-up: a relative --name must name the document under the client cwd, as
+    // ingestion stored it, before the daemon falls back to a suffix match.
+    const auto cwd = std::filesystem::weakly_canonical(std::filesystem::temp_directory_path()) /
+                     "yams_graph_name_candidates";
+    std::filesystem::create_directories(cwd / "include");
+    {
+        std::ofstream(cwd / "include" / "x.hpp") << "x\n";
+    }
+    {
+        std::ofstream(cwd / "notes.md") << "n\n";
+    }
+    const auto stored = [&](const std::string& rel) { return (cwd / rel).generic_string(); };
 
-    REQUIRE_FALSE(candidates.empty());
-    CHECK(candidates.front() == input);
+    CHECK(yams::cli::buildGraphDocumentNameCandidates("include/x.hpp", cwd) ==
+          std::vector<std::string>{stored("include/x.hpp"), "include/x.hpp"});
+    CHECK(yams::cli::buildGraphDocumentNameCandidates("./include/../include/x.hpp", cwd) ==
+          std::vector<std::string>{stored("include/x.hpp"), "./include/../include/x.hpp"});
+    // A deleted file is still indexed under its path.
+    CHECK(yams::cli::buildGraphDocumentNameCandidates("src/gone.cpp", cwd) ==
+          std::vector<std::string>{stored("src/gone.cpp"), "src/gone.cpp"});
+    // A bare name that is a file under the cwd is a path too.
+    CHECK(yams::cli::buildGraphDocumentNameCandidates("notes.md", cwd) ==
+          std::vector<std::string>{stored("notes.md"), "notes.md"});
+    // Otherwise a bare name is only a file-name match.
+    CHECK(yams::cli::buildGraphDocumentNameCandidates("bm25.hpp", cwd) ==
+          std::vector<std::string>{"bm25.hpp"});
+    // An absolute stored path is tried once.
+    CHECK(yams::cli::buildGraphDocumentNameCandidates(stored("include/x.hpp"), cwd) ==
+          std::vector<std::string>{stored("include/x.hpp")});
+    CHECK(yams::cli::buildGraphDocumentNameCandidates("", cwd).empty());
 
-    auto abs = std::filesystem::absolute(input).lexically_normal().string();
-    auto has_abs = std::find(candidates.begin(), candidates.end(), abs) != candidates.end();
-    CHECK(has_abs);
+    std::error_code ec;
+    std::filesystem::remove_all(cwd, ec);
 }
 
-TEST_CASE("Graph helpers: absolute path is preserved", "[cli][graph]") {
-    auto abs = std::filesystem::absolute("src").lexically_normal().string();
-    auto candidates = yams::cli::build_graph_file_node_candidates(abs);
-
-    REQUIRE_FALSE(candidates.empty());
-    CHECK(candidates.front() == abs);
+#ifndef _WIN32
+TEST_CASE("Graph helpers: --name resolves a symlinked cwd like ingestion", "[cli][graph]") {
+    const auto base = std::filesystem::weakly_canonical(std::filesystem::temp_directory_path()) /
+                      "yams_graph_name_symlink";
+    std::filesystem::create_directories(base / "real" / "include");
+    {
+        std::ofstream(base / "real" / "include" / "x.hpp") << "x\n";
+    }
+    std::error_code ec;
+    std::filesystem::create_directory_symlink(base / "real", base / "link", ec);
+    if (!ec) {
+        CHECK(yams::cli::buildGraphDocumentNameCandidates("include/x.hpp", base / "link").front() ==
+              (base / "real" / "include" / "x.hpp").generic_string());
+    }
+    std::filesystem::remove_all(base, ec);
 }
+#endif
 
 TEST_CASE("Graph helpers: explore hints use agent-oriented graph explore", "[cli][graph]") {
     const std::string path = "src/cli/commands/search_command.cpp";

@@ -2521,6 +2521,47 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(getResp.related.front().relationship == "same_content");
     }
 
+    SECTION("get request caps related documents at graphLimit") {
+        // #280 follow-up: GetRequest.graphLimit must reach DocumentService.
+        auto repoPath = makeTempMetadataDbPath("yams_get_graph_limit_repo_");
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = makeReadyMetadataRepo(pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto graphQuery = std::make_shared<StubGraphQueryService>();
+        auto mainDoc = makeDoc(72, "/tmp/get-graph-limit/main.txt", std::string(64, 'e'));
+        REQUIRE(repo->insertDocument(mainDoc).has_value());
+        for (int i = 0; i < 3; ++i) {
+            auto related =
+                makeDoc(73 + i, "/tmp/get-graph-limit/related" + std::to_string(i) + ".txt",
+                        std::string(64, static_cast<char>('a' + i)));
+            REQUIRE(repo->insertDocument(related).has_value());
+            graphQuery->addConnectedDocument(related.sha256Hash, "semantic_neighbor", 1, 0.5);
+        }
+        store->setBlob(mainDoc.sha256Hash, "main content");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+        svc.__test_setGraphQueryService(graphQuery);
+
+        auto relatedCount = [&](std::uint32_t graphLimit) {
+            GetRequest req;
+            req.hash = mainDoc.sha256Hash;
+            req.metadataOnly = true;
+            req.showGraph = true;
+            req.graphDepth = 1;
+            req.graphLimit = graphLimit;
+            auto resp = dispatchRequest(dispatcher, Request{req});
+            REQUIRE(std::holds_alternative<GetResponse>(resp));
+            return std::get<GetResponse>(resp).related.size();
+        };
+
+        CHECK(relatedCount(0) == 3);
+        CHECK(relatedCount(2) == 2);
+        CHECK(relatedCount(10) == 3);
+    }
+
     SECTION("get request still succeeds without query trace env") {
         auto repoPath = makeTempMetadataDbPath("yams_get_query_trace_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
@@ -5254,12 +5295,13 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK_FALSE(graphResp.connectedNodes[0].properties.empty());
     }
 
-    SECTION("graph query list by type scopes and paginates within current code roots") {
+    SECTION("graph query list by type scopes and paginates within the client cwd") {
         fixture.initMetadata();
 
-        const auto sourcePath = fixture.testDir / "src" / "inside.cpp";
-        const auto includePath = fixture.testDir / "include" / "inside.hpp";
-        const auto testPath = fixture.testDir / "tests" / "outside.cpp";
+        const auto scopeRoot = fixture.testDir / "repo";
+        const auto sourcePath = scopeRoot / "src" / "inside.cpp";
+        const auto includePath = scopeRoot / "include" / "inside.hpp";
+        const auto testPath = fixture.testDir / "elsewhere" / "outside.cpp";
         for (const auto& path : {sourcePath, includePath, testPath}) {
             std::filesystem::create_directories(path.parent_path());
             std::ofstream out(path);
@@ -5285,7 +5327,7 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         GraphQueryRequest firstPage;
         firstPage.listByType = true;
         firstPage.nodeType = "function";
-        firstPage.scopePathPrefix = fixture.testDir.string();
+        firstPage.scopePathPrefix = scopeRoot.string();
         firstPage.limit = 1;
 
         auto firstRaw = dispatchRequest(*fixture.dispatcher, Request{firstPage});
@@ -5305,6 +5347,76 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         REQUIRE(second.connectedNodes.size() == 1);
         CHECK(second.connectedNodes.front().label != "outsideTest");
         CHECK(second.connectedNodes.front().nodeId != first.connectedNodes.front().nodeId);
+    }
+
+    SECTION("graph query list by type scopes document and path nodes under the client cwd") {
+        // Issue #280: --scope-cwd returned nothing for a corpus outside src/ and include/,
+        // because document nodes carry their path only in the label and snapshot path nodes
+        // only in $.path.
+        fixture.initMetadata();
+
+        const auto realRoot = fixture.testDir / "corpus";
+        const auto insideHeader = realRoot / "simeon" / "include" / "simeon" / "bm25.hpp";
+        const auto insideSource = realRoot / "simeon" / "src" / "bm25.cpp";
+        const auto outside = fixture.testDir / "other" / "outside.hpp";
+        for (const auto& path : {insideHeader, insideSource, outside}) {
+            std::filesystem::create_directories(path.parent_path());
+            std::ofstream out(path);
+            REQUIRE(out.good());
+            out << "int value;\n";
+        }
+
+        const std::string snapshot = "2026-10-08T22:06:30.518048Z";
+        for (const auto& path : {insideHeader, insideSource, outside}) {
+            const auto p = path.generic_string();
+            fixture.upsertNode("doc:hash-" + path.filename().string(), p, "document");
+            fixture.upsertNode("path:" + snapshot + ":" + p, p, "path",
+                               R"({"snapshot_id":")" + snapshot + R"(","path":")" + p + R"("})");
+            fixture.upsertNode("path:logical:" + p, p, "path",
+                               R"({"path":")" + p + R"(","logical":true})");
+        }
+
+        auto listScoped = [&](const std::string& nodeType, const std::filesystem::path& scope) {
+            GraphQueryRequest req;
+            req.listByType = true;
+            req.nodeType = nodeType;
+            req.scopePathPrefix = scope.generic_string();
+            req.limit = 50;
+            auto raw = dispatchRequest(*fixture.dispatcher, Request{req});
+            REQUIRE(std::holds_alternative<GraphQueryResponse>(raw));
+            return std::get<GraphQueryResponse>(raw);
+        };
+
+        auto checkScoped = [&](const std::filesystem::path& scope) {
+            const auto docs = listScoped("document", scope);
+            CHECK(docs.totalNodesFound == 2);
+            REQUIRE(docs.connectedNodes.size() == 2);
+            for (const auto& node : docs.connectedNodes) {
+                CHECK(node.label.starts_with(realRoot.generic_string() + "/"));
+            }
+
+            const auto paths = listScoped("path", scope);
+            CHECK(paths.totalNodesFound == 4);
+            REQUIRE(paths.connectedNodes.size() == 4);
+            for (const auto& node : paths.connectedNodes) {
+                CHECK(node.label.starts_with(realRoot.generic_string() + "/"));
+            }
+        };
+
+        checkScoped(realRoot);
+
+        // A cwd reached through a symlink still matches the real stored paths.
+        const auto linkRoot = fixture.testDir / "corpus-link";
+        std::error_code linkEc;
+        std::filesystem::create_directory_symlink(realRoot, linkRoot, linkEc);
+        if (!linkEc) {
+            checkScoped(linkRoot);
+        }
+
+        // A sibling directory sharing the prefix is not in scope.
+        const auto siblingDocs = listScoped("document", fixture.testDir / "corp");
+        CHECK(siblingDocs.totalNodesFound == 0);
+        CHECK(siblingDocs.connectedNodes.empty());
     }
 
     SECTION("graph query list by type reports store errors") {
