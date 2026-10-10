@@ -179,6 +179,9 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
                 search_->results = std::move(s->results);
                 search_->totalCount = s->totalCount;
                 search_->elapsed = s->elapsed;
+                search_->traceId = std::move(s->traceId);
+                search_->queryInfo = std::move(s->queryInfo);
+                search_->searchStats = std::move(s->searchStats);
                 search_->pos = 0;
             }
             pending_request_.emplace(std::make_unique<Request>(std::move(request)));
@@ -446,6 +449,9 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     search_->results = std::move(s->results);
                     search_->totalCount = s->totalCount;
                     search_->elapsed = s->elapsed;
+                    search_->traceId = std::move(s->traceId);
+                    search_->queryInfo = std::move(s->queryInfo);
+                    search_->searchStats = std::move(s->searchStats);
                     search_->pos = 0;
                 } else {
                     reset_state();
@@ -508,6 +514,13 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             SearchResponse chunk;
             chunk.totalCount = st.totalCount;
             chunk.elapsed = st.elapsed;
+            // Emit metadata once, before a client can stop after reaching its result limit.
+            // Repeating searchStats on every page can duplicate large stage traces.
+            if (start == 0) {
+                chunk.traceId = std::move(st.traceId);
+                chunk.queryInfo = std::move(st.queryInfo);
+                chunk.searchStats = std::move(st.searchStats);
+            }
             chunk.results.reserve(end - start);
             for (std::size_t i = start; i < end; ++i) {
                 chunk.results.push_back(std::move(st.results[i]));
