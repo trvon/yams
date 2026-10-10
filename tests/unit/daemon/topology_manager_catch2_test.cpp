@@ -1,7 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -189,7 +191,8 @@ struct RebuildFixture {
         REQUIRE(vectors->initialize());
     }
 
-    std::int64_t addDocument(const std::string& hash) {
+    std::int64_t addDocument(const std::string& hash,
+                             std::vector<float> embedding = {1.0F, 0.0F, 0.0F, 0.0F}) {
         yams::metadata::DocumentInfo document;
         document.fileName = hash + ".md";
         document.filePath = (directory.path() / document.fileName).string();
@@ -209,11 +212,27 @@ struct RebuildFixture {
         yams::vector::VectorRecord vector;
         vector.chunk_id = "doc-" + hash;
         vector.document_hash = hash;
-        vector.embedding = {1.0F, 0.0F, 0.0F, 0.0F};
+        vector.embedding = std::move(embedding);
         vector.model_id = "test-space-v1";
         vector.level = yams::vector::EmbeddingLevel::DOCUMENT;
         REQUIRE(vectors->insertVector(vector));
         return inserted.value();
+    }
+
+    void linkNeighbors(const std::string& lhs, const std::string& rhs) {
+        auto lhsNode = kg->getNodeByKey("doc:" + lhs);
+        auto rhsNode = kg->getNodeByKey("doc:" + rhs);
+        REQUIRE(lhsNode.has_value());
+        REQUIRE(lhsNode.value().has_value());
+        REQUIRE(rhsNode.has_value());
+        REQUIRE(rhsNode.value().has_value());
+        yams::metadata::KGEdge forward;
+        forward.srcNodeId = lhsNode.value()->id;
+        forward.dstNodeId = rhsNode.value()->id;
+        forward.relation = "semantic_neighbor";
+        auto reverse = forward;
+        std::swap(reverse.srcNodeId, reverse.dstNodeId);
+        REQUIRE(kg->addEdgesUnique(std::vector{forward, reverse}).has_value());
     }
 
     TopologyManager::Dependencies dependencies() {
@@ -447,4 +466,142 @@ TEST_CASE("Topology publication rejects deletion after a successful membership c
     REQUIRE(liveSnapshot.has_value());
     REQUIRE(liveSnapshot.value().has_value());
     CHECK(liveSnapshot.value()->asString() == previous.snapshotId);
+}
+
+namespace {
+
+// Two well-separated groups: the aaa* documents share one embedding direction and are mutual
+// semantic neighbors, as are the bbb* documents.
+std::map<std::string, std::int64_t> addTwoGroupCorpus(RebuildFixture& fixture) {
+    const std::vector<std::string> groupA{"aaa1", "aaa2", "aaa3"};
+    const std::vector<std::string> groupB{"bbb1", "bbb2", "bbb3"};
+    std::map<std::string, std::int64_t> ids;
+    for (const auto& hash : groupA) {
+        ids[hash] = fixture.addDocument(hash, {1.0F, 0.0F, 0.0F, 0.0F});
+    }
+    for (const auto& hash : groupB) {
+        ids[hash] = fixture.addDocument(hash, {0.0F, 1.0F, 0.0F, 0.0F});
+    }
+    for (const auto* group : {&groupA, &groupB}) {
+        for (std::size_t i = 0; i < group->size(); ++i) {
+            for (std::size_t j = i + 1; j < group->size(); ++j) {
+                fixture.linkNeighbors((*group)[i], (*group)[j]);
+            }
+        }
+    }
+    return ids;
+}
+
+std::map<std::string, std::string>
+membershipClusters(const yams::topology::TopologyArtifactBatch& batch) {
+    std::map<std::string, std::string> clusters;
+    for (const auto& membership : batch.memberships) {
+        clusters[membership.documentHash] = membership.clusterId;
+    }
+    return clusters;
+}
+
+std::map<std::string, std::vector<std::string>>
+clusterMembers(const yams::topology::TopologyArtifactBatch& batch) {
+    std::map<std::string, std::vector<std::string>> members;
+    for (const auto& cluster : batch.clusters) {
+        auto hashes = cluster.memberDocumentHashes;
+        std::sort(hashes.begin(), hashes.end());
+        members[cluster.clusterId] = std::move(hashes);
+    }
+    return members;
+}
+
+bool hasIssue(const TopologyManager::RebuildStats& stats, const std::string& issue) {
+    return std::find(stats.issues.begin(), stats.issues.end(), issue) != stats.issues.end();
+}
+
+} // namespace
+
+TEST_CASE("TopologyManager incremental rebuild keeps the whole corpus for engines without an "
+          "incremental path",
+          "[daemon][topology-manager][incremental]") {
+    // Louvain and KMeans have no incremental update: their dirty region is the seed set alone
+    // and requests a wider rebuild. Publishing a batch built from the seeds would replace the
+    // snapshot with one covering only the dirty documents and strip the topology keys of every
+    // untouched document.
+    const std::string algorithm = GENERATE(std::string{"louvain"}, std::string{"kmeans"});
+    INFO("algorithm=" << algorithm);
+
+    RebuildFixture fixture;
+    const auto ids = addTwoGroupCorpus(fixture);
+    TopologyManager manager(fixture.dependencies());
+    auto initial = manager.rebuildArtifacts("initial", false, {}, algorithm);
+    INFO((initial ? "initial rebuild succeeded" : initial.error().message));
+    REQUIRE(initial.has_value());
+    REQUIRE(initial.value().stored);
+    const auto previous = fixture.latest();
+    REQUIRE(previous.memberships.size() == ids.size());
+    const auto previousClusters = membershipClusters(previous);
+    const auto previousMembers = clusterMembers(previous);
+    REQUIRE(previousClusters.at("aaa1") != previousClusters.at("bbb1"));
+
+    auto result = manager.rebuildArtifacts("post_ingest_drain", false, {"aaa1"}, algorithm);
+    INFO((result ? "incremental rebuild succeeded" : result.error().message));
+    REQUIRE(result.has_value());
+    CHECK_FALSE(result.value().skipped);
+    CHECK(result.value().stored);
+    CHECK(result.value().fullRebuild);
+    CHECK(result.value().fallbackFullRebuilds >= 1);
+    CHECK(result.value().membershipsBuilt == ids.size());
+
+    const auto current = fixture.latest();
+    CHECK(current.topologyEpoch == previous.topologyEpoch + 1);
+    const auto currentClusters = membershipClusters(current);
+    CHECK(currentClusters.size() == ids.size());
+    for (const auto& [hash, id] : ids) {
+        INFO("document=" << hash);
+        auto clusterKey = fixture.repository->getMetadata(id, "topology.cluster_id");
+        REQUIRE(clusterKey.has_value());
+        CHECK(clusterKey.value().has_value());
+        CHECK(currentClusters.contains(hash));
+        if (clusterKey.value().has_value() && currentClusters.contains(hash)) {
+            CHECK(clusterKey.value()->asString() == currentClusters.at(hash));
+        }
+    }
+
+    // Clusters that do not contain the dirty document are unchanged.
+    const auto& dirtyCluster = previousClusters.at("aaa1");
+    const auto currentMembers = clusterMembers(current);
+    for (const auto& [clusterId, members] : previousMembers) {
+        if (clusterId == dirtyCluster) {
+            continue;
+        }
+        INFO("cluster=" << clusterId);
+        CHECK(currentMembers.contains(clusterId));
+        if (currentMembers.contains(clusterId)) {
+            CHECK(currentMembers.at(clusterId) == members);
+        }
+    }
+}
+
+TEST_CASE("TopologyManager connected engine keeps its incremental rebuild path",
+          "[daemon][topology-manager][incremental]") {
+    RebuildFixture fixture;
+    const auto ids = addTwoGroupCorpus(fixture);
+    TopologyManager manager(fixture.dependencies());
+    REQUIRE(manager.rebuildArtifacts("initial", false, {}, "connected").has_value());
+    const auto previous = fixture.latest();
+    REQUIRE(previous.memberships.size() == ids.size());
+    const auto previousMembers = clusterMembers(previous);
+
+    auto result = manager.rebuildArtifacts("post_ingest_drain", false, {"aaa1"}, "connected");
+    INFO((result ? "incremental rebuild succeeded" : result.error().message));
+    REQUIRE(result.has_value());
+    CHECK(result.value().stored);
+    CHECK_FALSE(result.value().fullRebuild);
+    CHECK(result.value().fallbackFullRebuilds == 0);
+    // Only the seed's prior cluster is re-extracted, not the whole corpus.
+    CHECK(result.value().documentsProcessed == 3);
+    CHECK(hasIssue(result.value(), "incremental topology rebuild expanded 1 seed docs to 3 docs"));
+    CHECK_FALSE(hasIssue(result.value(), "dirty-region requested wider rebuild fallback"));
+
+    const auto current = fixture.latest();
+    CHECK(current.memberships.size() == ids.size());
+    CHECK(clusterMembers(current) == previousMembers);
 }

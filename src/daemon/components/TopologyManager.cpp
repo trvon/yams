@@ -494,6 +494,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     std::vector<std::string> rebuildHashes =
         replacingStaleSnapshot ? std::vector<std::string>{} : documentHashes;
     topology::TopologyDirtyRegion dirtyRegion;
+    bool widerRebuild = false;
     topology::TopologyExtractionStats seedExtractionStats;
     topology::TopologyUpdateStats updateStats;
     if (!rebuildHashes.empty()) {
@@ -525,7 +526,13 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
                 return Result<RebuildStats>(dirtyRegionResult.error());
             }
             dirtyRegion = std::move(dirtyRegionResult.value());
-            if (!dirtyRegion.expandedDocumentHashes.empty()) {
+            if (dirtyRegion.requiresWiderRebuild) {
+                // The engine cannot update this region in place: it has no incremental path,
+                // or the region exceeded its budget. Its update would cover only the region,
+                // and publishing that would drop every document outside it. Rebuild the corpus.
+                widerRebuild = true;
+                rebuildHashes.clear();
+            } else if (!dirtyRegion.expandedDocumentHashes.empty()) {
                 rebuildHashes = dirtyRegion.expandedDocumentHashes;
             }
         }
@@ -574,7 +581,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         RebuildStats skipped;
         skipped.skipped = true;
         skipped.dryRun = dryRun;
-        skipped.fullRebuild = false;
+        skipped.fullRebuild = widerRebuild;
         skipped.reason = reason;
         skipped.documentsRequested = extractionStats.documentsRequested;
         skipped.documentsProcessed = 0;
@@ -608,7 +615,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     RebuildStats stats;
     stats.reason = reason;
     stats.dryRun = dryRun;
-    stats.fullRebuild = documentHashes.empty() || replacingStaleSnapshot;
+    stats.fullRebuild = documentHashes.empty() || replacingStaleSnapshot || widerRebuild;
     stats.snapshotId = artifacts.snapshotId;
     stats.algorithm = artifacts.algorithm;
     stats.documentsRequested = extractionStats.documentsRequested;
@@ -625,7 +632,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
                                                             : extractionStats.regionDocuments;
     stats.coalescedDirtySets = updateStats.coalescedDirtySets;
     stats.fallbackFullRebuilds =
-        updateStats.fallbackFullRebuilds + (replacingStaleSnapshot ? 1 : 0);
+        updateStats.fallbackFullRebuilds + ((replacingStaleSnapshot || widerRebuild) ? 1 : 0);
     if (replacingStaleSnapshot) {
         stats.dirtySeedCount = documentHashes.size();
     }
@@ -747,9 +754,15 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         stats.issues.push_back("prior topology members are missing from metadata; rebuilding from "
                                "the current corpus");
     } else if (!documentHashes.empty()) {
-        stats.issues.push_back("incremental topology rebuild expanded " +
-                               std::to_string(documentHashes.size()) + " seed docs to " +
-                               std::to_string(rebuildHashes.size()) + " docs");
+        if (widerRebuild) {
+            stats.issues.push_back("incremental topology rebuild of " +
+                                   std::to_string(documentHashes.size()) +
+                                   " seed docs fell back to a full rebuild");
+        } else {
+            stats.issues.push_back("incremental topology rebuild expanded " +
+                                   std::to_string(documentHashes.size()) + " seed docs to " +
+                                   std::to_string(rebuildHashes.size()) + " docs");
+        }
         stats.issues.push_back(
             std::string{"dirty-region expansion="} +
             (dirtyRegion.includedPriorClusterMembers ? "prior_cluster+" : "") +
