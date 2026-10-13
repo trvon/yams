@@ -87,6 +87,69 @@ struct ScratchDirGuard {
 
 } // namespace
 
+TEST_CASE("SocketServer actual acceptance publishes and drains connection occupancy",
+          "[daemon][socket_server][activity][acceptor-control][catch2]") {
+    ScratchDirGuard scratch{makeScratchDir()};
+    WorkCoordinator work;
+    StateComponent state;
+    IOCoordinator::Config ioConfig;
+    ioConfig.num_threads = 1;
+    auto io = std::make_unique<IOCoordinator>(ioConfig);
+    SocketServer::Config config;
+    config.socketPath = scratch.dir / "a.sock";
+    auto server = std::make_unique<SocketServer>(config, io.get(), &work, nullptr, &state);
+    struct TeardownGuard {
+        std::unique_ptr<SocketServer>& server;
+        std::unique_ptr<IOCoordinator>& io;
+        WorkCoordinator& work;
+        ~TeardownGuard() {
+            teardownSocketServer(server, io);
+            work.stop();
+            work.join();
+        }
+    } teardown{server, io, work};
+
+    work.start(2);
+    REQUIRE(server->start());
+    io->start();
+    struct ClientGuard {
+        int fd;
+        ~ClientGuard() {
+            if (fd >= 0)
+                ::close(fd);
+        }
+        void close() {
+            if (fd >= 0) {
+                ::close(fd);
+                fd = -1;
+            }
+        }
+    } client{connectRawUnixSocket(config.socketPath)};
+    REQUIRE(client.fd >= 0);
+
+    // Public atomics expose no acceptance callback. Bounded 10ms observation uses the existing
+    // helper; unlike seeded occupancy, this requires the real private-path accept loop to run.
+    REQUIRE(waitFor(1s, [&] {
+        return server->totalConnections() == 1 && server->activeConnections() == 1 &&
+               state.stats.activeConnections.load(std::memory_order_relaxed) == 1;
+    }));
+    CHECK(state.stats.healthCheckConnections.load(std::memory_order_relaxed) == 0);
+    CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 0);
+
+    client.close();
+    REQUIRE(waitFor(1s, [&] {
+        return server->activeConnections() == 0 &&
+               state.stats.activeConnections.load(std::memory_order_relaxed) == 0 &&
+               state.stats.ipcTasksPending.load(std::memory_order_relaxed) == 0 &&
+               state.stats.ipcTasksActive.load(std::memory_order_relaxed) == 0;
+    }));
+    CHECK(server->totalConnections() == 1);
+    // No request was sent: this is an acceptance/cleanup control, not evidence that the server
+    // wired executing-request counters or delivered a tuning notification.
+    CHECK(state.stats.healthCheckConnections.load(std::memory_order_relaxed) == 0);
+    CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 0);
+}
+
 TEST_CASE("SocketServer teardown outlives connections still draining on the IO threads",
           "[daemon][socket_server][shutdown][catch2]") {
     ScratchDirGuard scratch{makeScratchDir()};
