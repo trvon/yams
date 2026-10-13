@@ -8,53 +8,6 @@ yams_onnx_resource_dep = dependency('yams_onnx_resource')
 yams_plugin_runtime_dep = dependency('yams_plugin_runtime')
 yams_write_coordinator_dep = dependency('yams_write_coordinator')
 
-#Tracy profiling support(optional, controlled by - Denable - profiling = true)
-enable_profiling = get_option('enable-profiling')
-enable_rocprofiler_tracy = get_option('enable-rocprofiler-tracy')
-tracy_args = []
-tracy_deps = []
-tracy_enabled = false
-if enable_profiling
-  tracy_dep = dependency('tracy', modules: ['Tracy::TracyClient'], required: true, static: true)
-  tracy_enabled = tracy_dep.found()
-  tracy_args += ['-DTRACY_ENABLE']
-  tracy_deps += tracy_dep
-  rocm_hint = '/opt/rocm'
-  rocm_present = fs.exists(rocm_hint)
-  want_rocprofiler = (not enable_rocprofiler_tracy.disabled()) and (enable_rocprofiler_tracy.enabled() or (enable_rocprofiler_tracy.auto() and rocm_present))
-  if want_rocprofiler
-    rocprofiler_dep = dependency(
-      'rocprofiler-sdk',
-      method: 'cmake',
-      cmake_module_path: [join_paths(rocm_hint, 'lib', 'cmake'), join_paths(rocm_hint, 'lib64', 'cmake')],
-      required: enable_rocprofiler_tracy.enabled(),
-    )
-    if rocprofiler_dep.found()
-      tracy_deps += rocprofiler_dep
-    elif enable_rocprofiler_tracy.enabled()
-      error('enable-rocprofiler-tracy=enabled but rocprofiler-sdk was not found')
-    else
-      warning('Tracy present but rocprofiler-sdk missing; disabling Tracy ROCm hooks to avoid link errors')
-      tracy_enabled = false
-      tracy_deps = []
-      tracy_args = []
-    endif
-  endif
-endif
-if tracy_enabled and tracy_deps.length() > 0
-  cpp = meson.get_compiler('cpp')
-  tracy_link_ok = cpp.links('int main(){ return 0; }', dependencies: tracy_deps, name: 'tracy-link-check', required: false)
-  if not tracy_link_ok
-    warning('Tracy dependency failed to link (likely missing rocprofiler-sdk); disabling Tracy for this build')
-    tracy_enabled = false
-    tracy_deps = []
-    tracy_args = []
-  endif
-endif
-if tracy_enabled
-  message('Tracy profiling enabled for daemon')
-endif
-
 daemon_platform_deps = []
 if host_machine.system() == 'windows'
   daemon_platform_deps += cpp.find_library('advapi32', required: true)
@@ -194,8 +147,8 @@ yams_daemon_lib = static_library('yams_daemon',
     nlohmann_json_dep,
     protobuf_dep,
     version_generated_dep,
-  ] + tracy_deps + daemon_platform_deps,
-  cpp_args: tracy_args + daemon_testing_cpp_args + (cpp.get_id() == 'msvc' ? ['/wd4100'] : ['-Wno-unused-parameter']),
+  ] + yams_tracy_deps + daemon_platform_deps,
+  cpp_args: yams_tracy_args + daemon_testing_cpp_args + (cpp.get_id() == 'msvc' ? ['/wd4100'] : ['-Wno-unused-parameter']),
   include_directories: [
     include_directories('../../include'),
     include_directories('.'),
@@ -225,8 +178,9 @@ yams_daemon_client_embedded_lib = static_library('yams_daemon_client_embedded',
     yams_daemon_dep,
     boost_dep,
     dependency('spdlog'),
-  ],
+  ] + yams_tracy_deps,
   include_directories: [include_directories('../../include'), include_directories('.')],
+  cpp_args: yams_tracy_args,
   install: false,
 )
 
@@ -247,7 +201,7 @@ else
 endif
 
 yams_daemon_exe = executable('yams-daemon',
-  ['daemon_main.cpp'] + (tracy_enabled ? ['tracy_memory_hooks.cpp'] : []),
+  ['daemon_main.cpp'] + (yams_tracy_enabled ? ['tracy_memory_hooks.cpp'] : []),
   dependencies: [
     yams_daemon_dep,
     cli11_dep,
@@ -260,8 +214,8 @@ yams_daemon_exe = executable('yams-daemon',
     dependency('yams_config'),
     protobuf_dep,
     dependency('libcurl', required: false),
-  ] + tracy_deps,
-  cpp_args: tracy_args,
+  ] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: true,
   install_dir: get_option('bindir'),
   install_rpath: daemon_install_rpath,

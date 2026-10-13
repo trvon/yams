@@ -6,8 +6,9 @@ yams_ingest_lib = static_library('yams_ingest',
     dependency('yams_vector'),
     dependency('yams_extraction'),
     dependency('spdlog'),
-  ],
+  ] + yams_tracy_deps,
   include_directories: include_directories('../../include'),
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

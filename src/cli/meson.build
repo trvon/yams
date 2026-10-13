@@ -121,8 +121,8 @@ cli_inc_dirs = [include_directories('../../include'), generated_inc]
 yams_cli_lib = static_library('yams_cli',
   yams_cli_sources,
   include_directories: cli_inc_dirs,
-  dependencies: cli_deps,
-  cpp_args: cli_cppargs,
+  dependencies: cli_deps + yams_tracy_deps,
+  cpp_args: cli_cppargs + yams_tracy_args,
   install: false,
 )
 
@@ -217,8 +217,8 @@ if yams_modules_enabled and yams_modules_supported
       dependency('yams_core'),
       dependency('nlohmann_json'),
       dependency('spdlog'),
-    ],
-    cpp_args: yams_module_cpp_args + cli_cppargs,
+    ] + yams_tracy_deps,
+    cpp_args: yams_module_cpp_args + cli_cppargs + yams_tracy_args,
     install: false,
   )
 

@@ -2490,8 +2490,9 @@ private:
         auto keywordResults = runFullTextSearch(keywordReq, false);
         auto fuzzyResults = runFuzzySearch(req);
         YAMS_PLOT("search_service::keyword_results",
-                  keywordResults ? keywordResults->results.size() : 0);
-        YAMS_PLOT("search_service::fuzzy_results", fuzzyResults ? fuzzyResults->results.size() : 0);
+                  keywordResults ? keywordResults.value().results.size() : 0);
+        YAMS_PLOT("search_service::fuzzy_results",
+                  fuzzyResults ? fuzzyResults.value().results.size() : 0);
 
         if (!keywordResults && !fuzzyResults) {
             return fuzzyResults.error();

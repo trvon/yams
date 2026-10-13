@@ -50,8 +50,8 @@ yams_mcp_inc_dirs = [include_directories('../../include'), generated_inc]
 yams_mcp_lib = static_library('yams_mcp',
   yams_mcp_sources,
   include_directories: yams_mcp_inc_dirs,
-  dependencies: yams_mcp_deps,
-  cpp_args: wasi_cpp_args,
+  dependencies: yams_mcp_deps + yams_tracy_deps,
+  cpp_args: wasi_cpp_args + yams_tracy_args,
   install: false,
 )
 
