@@ -17,9 +17,11 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <source_location>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -381,6 +383,10 @@ public:
                 static_cast<std::int64_t>(aliasCount_.load(std::memory_order_relaxed))};
     }
 
+    std::uint64_t changeGeneration() const noexcept override {
+        return changeGeneration_.load(std::memory_order_acquire);
+    }
+
     void updateEnqueueCounts(std::int64_t entities, std::int64_t edges,
                              std::int64_t aliases) override {
         entityCount_.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(entities, 0)),
@@ -396,7 +402,7 @@ public:
     // Nodes
     Result<std::int64_t> upsertNode(const KGNode& node) override {
         // Perform an INSERT ... ON CONFLICT(node_key) DO UPDATE to ensure presence
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             auto trx = db.transaction([&]() -> Result<void> {
                 auto stmtResult = db.prepare(kKgNodeUpsertSql);
                 if (!stmtResult) {
@@ -742,7 +748,7 @@ public:
     }
 
     Result<void> deleteNodeById(std::int64_t nodeId) override {
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             auto stmtR = db.prepare("DELETE FROM kg_nodes WHERE id = ?");
             if (!stmtR)
                 return stmtR.error();
@@ -756,7 +762,7 @@ public:
 
     // Aliases
     Result<std::int64_t> addAlias(const KGAlias& alias) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             auto stmtResult = db.prepare(kKgAliasUpsertSql);
             if (!stmtResult) {
                 return stmtResult.error();
@@ -780,7 +786,7 @@ public:
     Result<void> addAliases(const std::vector<KGAlias>& aliases) override {
         if (aliases.empty())
             return Result<void>();
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             return db.transaction([&]() -> Result<void> {
                 auto stmtResult = db.prepare(kKgAliasUpsertSql);
                 if (!stmtResult) {
@@ -939,7 +945,7 @@ public:
     }
 
     Result<void> removeAliasById(std::int64_t aliasId) override {
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             auto stmtR = db.prepare("DELETE FROM kg_aliases WHERE id = ?");
             if (!stmtR)
                 return stmtR.error();
@@ -952,7 +958,7 @@ public:
     }
 
     Result<void> removeAliasesForNode(std::int64_t nodeId) override {
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             auto stmtR = db.prepare("DELETE FROM kg_aliases WHERE node_id = ?");
             if (!stmtR)
                 return stmtR.error();
@@ -966,7 +972,7 @@ public:
 
     // Edges (minimal neighbor support)
     Result<std::int64_t> addEdge(const KGEdge& edge) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             auto stmtR = db.prepare("INSERT INTO kg_edges (src_node_id, dst_node_id, relation, "
                                     "weight, created_time, properties) "
                                     "VALUES (?, ?, ?, ?, ?, ?)");
@@ -1011,7 +1017,7 @@ public:
     Result<void> addEdges(const std::vector<KGEdge>& edges) override {
         if (edges.empty())
             return Result<void>();
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             return db.transaction([&]() -> Result<void> {
                 auto stmtR = db.prepare("INSERT INTO kg_edges (src_node_id, dst_node_id, relation, "
                                         "weight, created_time, properties) "
@@ -1066,7 +1072,7 @@ public:
     Result<void> addEdgesUnique(const std::vector<KGEdge>& edges) override {
         if (edges.empty())
             return Result<void>();
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             return db.transaction([&]() -> Result<void> {
                 // Rely on the unique index `idx_kg_edges_uq` over
                 // (src_node_id, dst_node_id, relation) for dedup, but refresh
@@ -1512,7 +1518,7 @@ public:
         if (!visitor) {
             return Error{ErrorCode::InvalidArgument, "edge visitor callback is required"};
         }
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             auto stmtR = limit > 0 ? db.prepare("SELECT id, src_node_id, dst_node_id, weight "
                                                 "FROM kg_edges WHERE relation = ? ORDER BY id "
                                                 "LIMIT ?")
@@ -1577,7 +1583,7 @@ public:
     }
 
     Result<void> removeEdgeById(std::int64_t edgeId) override {
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             auto stmtR = db.prepare("DELETE FROM kg_edges WHERE id = ?");
             if (!stmtR)
                 return stmtR.error();
@@ -1606,7 +1612,7 @@ public:
     Result<void> addDocEntities(const std::vector<DocEntity>& entities) override {
         if (entities.empty())
             return Result<void>();
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             return db.transaction([&]() -> Result<void> {
                 auto stmtR = db.prepare("INSERT INTO kg_doc_entities (document_id, entity_text, "
                                         "node_id, start_offset, end_offset, confidence, extractor) "
@@ -1797,7 +1803,7 @@ public:
     }
 
     Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) override {
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             auto priorCounts = queryDocumentEntityCounts(db, documentId);
             if (!priorCounts) {
                 return priorCounts.error();
@@ -1822,7 +1828,7 @@ public:
 
     // Document/File Cleanup
     Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             std::int64_t totalDeleted = 0;
 
             // Delete the doc:<hash> node
@@ -1882,7 +1888,7 @@ public:
     }
 
     Result<std::int64_t> deleteNodesForSourceFile(std::string_view filePath) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             // Canonical symbol nodes (kind:qualName@file) carry file_path; unresolved
             // reference nodes carry source_file. Neither has a document_hash, so they are not
             // covered by deleteNodesForDocumentHash. Their edges cascade via FK once removed.
@@ -1910,7 +1916,7 @@ public:
     }
 
     Result<std::int64_t> deleteOrphanedNodes() override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             // NOT IN subqueries exclude NULLs explicitly (SQL NULL semantics would otherwise
             // make the predicate never match). Edges of deleted nodes cascade via FK.
             static constexpr const char* kSql = R"SQL(
@@ -1948,7 +1954,7 @@ public:
     }
 
     Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             auto stmtR = db.prepare(R"(
                 DELETE FROM kg_edges
                 WHERE CASE WHEN json_valid(properties)
@@ -1971,7 +1977,7 @@ public:
     }
 
     Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             auto stmtR = db.prepare("DELETE FROM kg_edges WHERE relation = ?");
             if (!stmtR)
                 return stmtR.error();
@@ -1993,7 +1999,7 @@ public:
         constexpr std::int64_t kBatchSize = 1000;
         std::int64_t totalDeleted = 0;
         while (true) {
-            auto batchRes = pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            auto batchRes = withWriteConnection([&](Database& db) -> Result<std::int64_t> {
                 auto stmtR = db.prepare(R"(
                     DELETE FROM kg_edges WHERE rowid IN (
                         SELECT rowid FROM kg_edges
@@ -2031,7 +2037,7 @@ public:
         constexpr std::int64_t kBatchSize = 1000;
         std::int64_t totalDeleted = 0;
         while (true) {
-            auto batchRes = pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            auto batchRes = withWriteConnection([&](Database& db) -> Result<std::int64_t> {
                 auto stmtR = db.prepare(R"(
                     DELETE FROM kg_doc_entities WHERE rowid IN (
                         SELECT rowid FROM kg_doc_entities
@@ -2315,7 +2321,7 @@ public:
 
     // Tree diff helpers (KG integration for PBI-043)
     Result<std::int64_t> ensureBlobNode(std::string_view sha256) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             // Check if blob node exists
             auto selectStmt =
                 db.prepareCached("SELECT id FROM kg_nodes WHERE node_key = ? AND type = 'blob'");
@@ -2360,7 +2366,7 @@ public:
 
     Result<std::int64_t> ensureDocumentNode(std::string_view sha256,
                                             std::string_view label = std::string_view{}) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             auto selectStmt = db.prepareCached(
                 "SELECT id, label FROM kg_nodes WHERE node_key = ? AND type = 'document'");
             if (!selectStmt)
@@ -2417,7 +2423,7 @@ public:
     }
 
     Result<std::int64_t> ensurePathNode(const PathNodeDescriptor& descriptor) override {
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             // Node key: path:<snapshot_id>:<normalized_path>
             std::string nodeKey = "path:" + descriptor.snapshotId + ":" + descriptor.path;
 
@@ -2540,7 +2546,7 @@ public:
 
     Result<void> linkPathVersion(std::int64_t pathNodeId, std::int64_t blobNodeId,
                                  std::int64_t diffId) override {
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             // Create edge: path --[has_version]--> blob
             auto insertStmt = db.prepare("INSERT INTO kg_edges (src_node_id, dst_node_id, "
                                          "relation, created_time, properties) "
@@ -2565,7 +2571,7 @@ public:
 
     Result<void> recordRenameEdge(std::int64_t fromPathNodeId, std::int64_t toPathNodeId,
                                   std::int64_t diffId) override {
-        return pool_->withConnection([&](Database& db) -> Result<void> {
+        return withWriteConnection([&](Database& db) -> Result<void> {
             // Create edge: old_path --[renamed_to]--> new_path
             auto insertStmt = db.prepare("INSERT INTO kg_edges (src_node_id, dst_node_id, "
                                          "relation, created_time, properties) "
@@ -2686,7 +2692,7 @@ public:
         if (cfg.keepLatestPerCanonical == 0) {
             return 0;
         }
-        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+        return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             auto stmtR = db.prepare(R"(
                 WITH ranked AS (
                     SELECT id,
@@ -2715,7 +2721,7 @@ public:
     }
 
     Result<void> optimize() override {
-        auto res = pool_->withConnection(
+        auto res = withWriteConnection(
             [](Database& db) -> Result<void> { return db.execute("PRAGMA optimize"); });
         if (!res) {
             spdlog::warn("KG store optimize failed: {}", res.error().message);
@@ -2882,6 +2888,22 @@ private:
 
     ConnectionPool* readPool() const noexcept { return readPool_ ? readPool_ : pool_; }
 
+    // Every write goes to the write pool through here, so one successful call is one step of
+    // the change generation; write batches step it on commit (see SqliteWriteBatch).
+    template <typename Func>
+    auto withWriteConnection(Func&& func,
+                             std::source_location callerLocation = std::source_location::current())
+        -> std::invoke_result_t<Func, Database&> {
+        auto result = pool_->withConnection(std::forward<Func>(func), ConnectionPriority::Normal,
+                                            {}, callerLocation);
+        if (result) {
+            noteWrite();
+        }
+        return result;
+    }
+
+    void noteWrite() noexcept { changeGeneration_.fetch_add(1, std::memory_order_acq_rel); }
+
     KnowledgeGraphStoreConfig cfg_{};
     ConnectionPool* pool_{nullptr};                       // Non-owning
     ConnectionPool* readPool_{nullptr};                   // Non-owning; falls back to pool_
@@ -2891,6 +2913,7 @@ private:
     std::atomic<std::uint64_t> nerEntityCount_{0};
     std::atomic<std::uint64_t> edgeCount_{0};
     std::atomic<std::uint64_t> aliasCount_{0};
+    std::atomic<std::uint64_t> changeGeneration_{0};
 };
 
 // -----------------------------------------------------------------------------
@@ -3570,6 +3593,7 @@ public:
                     owner_->applyEntityCountDelta(entityCountDelta_, nativeEntityCountDelta_,
                                                   nerEntityCountDelta_, edgeCountDelta_,
                                                   aliasCountDelta_);
+                    owner_->noteWrite();
                 }
                 committed_ = true;
                 return result;

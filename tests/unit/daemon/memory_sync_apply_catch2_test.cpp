@@ -759,8 +759,9 @@ TEST_CASE("Memory sync topology backfill keeps progressing while the vector swee
         nodes.push_back(origin.addNode("doc:fair-" + std::to_string(i), "document").nodeKey);
     }
 
-    // A wrapping vector sweep always has work. These cycles are fewer than the two sweeps need
-    // back to back, but enough for each to publish its share when neither can take every item.
+    // The vector sweep has more items than these cycles can serve. They are fewer than the two
+    // sweeps need back to back, but enough for each to publish its share when neither can take
+    // every item.
     origin.backfill(2 * kNodes + 2);
 
     view.refresh();
