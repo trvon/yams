@@ -182,7 +182,9 @@ aggregateChunkVectorScores(const std::vector<vector::VectorRecord>& vectorRecord
         if (vr.document_hash.empty()) {
             continue;
         }
-        scoresByHash[vr.document_hash].push_back(vr.relevance_score);
+        if (aggStrategy != Agg::MAX) {
+            scoresByHash[vr.document_hash].push_back(vr.relevance_score);
+        }
         auto it = bestByHash.find(vr.document_hash);
         if (it == bestByHash.end()) {
             bestByHash[vr.document_hash] = vr;
