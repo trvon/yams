@@ -163,6 +163,57 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with Simeon 
     CHECK(results[0].chunk_id == "spq_hash_001");
 }
 
+TEST_CASE_METHOD(VectorSmokeFixture,
+                 "VectorDatabase change generation moves on writes and not on reads",
+                 "[vector][smoke][generation][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.create_if_missing = true;
+    config.use_in_memory = true;
+    VectorDatabase db(config);
+    REQUIRE(db.initializeChecked().has_value());
+    const auto initial = db.changeGeneration();
+
+    auto makeRecord = [](std::string chunkId, std::string documentHash) {
+        VectorRecord record;
+        record.chunk_id = std::move(chunkId);
+        record.document_hash = std::move(documentHash);
+        record.embedding = {1.0f, 0.0f, 0.0f, 0.0f};
+        record.embedding_dim = 4;
+        record.content = "generation";
+        return record;
+    };
+    REQUIRE(db.insertVectorChecked(makeRecord("gen-a", std::string(64, '1'))).has_value());
+    const auto afterInsert = db.changeGeneration();
+    CHECK(afterInsert > initial);
+
+    // Reads leave the generation where it is.
+    REQUIRE(db.getVector("gen-a").has_value());
+    REQUIRE(db.getVectorsPage("", "", 16).has_value());
+    CHECK(db.changeGeneration() == afterInsert);
+
+    REQUIRE(db.insertVectorsBatchChecked({makeRecord("gen-b", std::string(64, '2')),
+                                          makeRecord("gen-c", std::string(64, '2'))})
+                .has_value());
+    const auto afterBatch = db.changeGeneration();
+    CHECK(afterBatch > afterInsert);
+
+    auto updated = makeRecord("gen-a", std::string(64, '1'));
+    updated.embedding = {0.0f, 1.0f, 0.0f, 0.0f};
+    REQUIRE(db.updateVectorChecked("gen-a", updated).has_value());
+    const auto afterUpdate = db.changeGeneration();
+    CHECK(afterUpdate > afterBatch);
+
+    REQUIRE(db.deleteVectorChecked("gen-b").has_value());
+    const auto afterDelete = db.changeGeneration();
+    CHECK(afterDelete > afterUpdate);
+    REQUIRE(db.deleteVectorsByDocumentChecked(std::string(64, '2')).has_value());
+    CHECK(db.changeGeneration() > afterDelete);
+}
+
 TEST_CASE("Vector search engine names and compatibility aliases are stable",
           "[vector][contract][engine]") {
     CHECK(std::string_view(vectorSearchEngineName(VectorSearchEngine::SimeonPqAdc)) ==
