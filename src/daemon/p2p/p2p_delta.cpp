@@ -3,6 +3,7 @@
 
 // pi-lens-ignore: fatal error
 #include <yams/daemon/p2p/p2p_delta.h>
+#include <yams/profiling.h>
 
 #include "p2p_fuzz.h"
 #include "p2p_json.h"
@@ -447,6 +448,7 @@ Result<BootstrapPhaseResult> sendBootstrapPhase(FrameSource& frames, const std::
                                                 memory_sync::MemorySyncService& service,
                                                 const PeerHandshakeResult& handshake,
                                                 const DeltaExchangeOptions& options) {
+    YAMS_ZONE_SCOPED_N("p2p.delta.bootstrap_send");
     BootstrapPhaseResult result{.peerVersion = handshake.peerVersion};
     const bool hasForeignWriter =
         std::ranges::any_of(handshake.localVersion.counters(), [&](const auto& entry) {
@@ -537,6 +539,7 @@ Result<BootstrapPhaseResult> receiveBootstrapPhase(FrameSource& frames,
                                                    memory_sync::MemorySyncService& service,
                                                    const PeerHandshakeResult& handshake,
                                                    const DeltaExchangeOptions& options) {
+    YAMS_ZONE_SCOPED_N("p2p.delta.bootstrap_recv");
     BootstrapPhaseResult result{.peerVersion = handshake.localVersion};
     auto mode = readJson(frames, options.timeout);
     if (!mode) {
@@ -637,6 +640,7 @@ Result<DeltaExchangeStats> sendAll(FrameSource& frames, const std::string& local
                                    memory_sync::VersionVector peerVersion,
                                    std::uint64_t maxWriterCounter,
                                    const DeltaExchangeOptions& options) {
+    YAMS_ZONE_SCOPED_N("p2p.delta.send");
     DeltaExchangeStats stats;
     std::size_t sessionBytes = 0;
     for (std::size_t batchIndex = 0; batchIndex < options.maxBatches; ++batchIndex) {
@@ -680,6 +684,7 @@ Result<DeltaExchangeStats> receiveAll(FrameSource& frames, const std::string& lo
                                       memory_sync::MemorySyncService& service,
                                       const PeerHandshakeResult& handshake,
                                       const DeltaExchangeOptions& options) {
+    YAMS_ZONE_SCOPED_N("p2p.delta.apply");
     DeltaExchangeStats stats;
     std::size_t sessionBytes = 0;
     std::vector<memory_sync::MemoryDelta> staged;
@@ -797,6 +802,7 @@ Result<DeltaExchangeStats> runDeltaExchange(FrameSource& frames, const std::stri
                                             const PeerHandshakeResult& handshake,
                                             const DeltaExchangeOptions& options,
                                             ExchangeRole role) {
+    YAMS_ZONE_SCOPED_N("p2p.delta.exchange");
     const auto fail = [&](Error error) -> Result<DeltaExchangeStats> {
         frames.close();
         return error;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Bodies of MemorySyncLoop, moved out of the header (see memory_sync.h for the contract).
 #include <yams/memory_sync/memory_sync.h>
+#include <yams/profiling.h>
 
 #include <spdlog/spdlog.h>
 
@@ -8,6 +9,7 @@ namespace yams::memory_sync {
 
 Result<void> MemorySyncLoop::publish(std::string_view logicalKey,
                                      std::span<const std::byte> content) {
+    YAMS_ZONE_SCOPED_N("memory_sync.publish");
     if (auto valid = validateLogicalKey(logicalKey); !valid) {
         return valid.error();
     }
@@ -258,6 +260,7 @@ Result<std::vector<PendingEraseIntent>> MemorySyncLoop::pendingErases() {
 
 Result<void> MemorySyncLoop::publishStagedErase(std::string_view logicalKey,
                                                 EraseReadyValidator validator) {
+    YAMS_ZONE_SCOPED_N("memory_sync.publish_erase");
     auto loaded = loadEraseIntent(logicalKey);
     if (!loaded) {
         return loaded.error();
@@ -386,6 +389,7 @@ Result<std::size_t> MemorySyncLoop::replayReadyErases() {
 }
 
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
+    YAMS_ZONE_SCOPED_N("memory_sync.sync");
     if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
         return loaded.error();
     }
@@ -681,6 +685,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncFully() {
 Result<MemoryDeltaBatch> MemorySyncLoop::exportLocalDeltasAfter(const VersionVector& peerVersion,
                                                                 std::size_t maxDeltas,
                                                                 std::uint64_t maxWriterCounter) {
+    YAMS_ZONE_SCOPED_N("memory_sync.export_deltas");
     if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
         return loaded.error();
     }
@@ -794,6 +799,7 @@ Result<DeltaApplyResult> MemorySyncLoop::applyColdBootstrap(const ColdBootstrapS
                                                             std::string_view authenticatedWitness,
                                                             std::size_t maxRecords,
                                                             std::size_t maxPayloadBytes) {
+    YAMS_ZONE_SCOPED_N("memory_sync.apply_bootstrap");
     if (authenticatedWitness.empty()) {
         return Error{ErrorCode::Unauthorized, "cold bootstrap witness is empty"};
     }
@@ -880,6 +886,7 @@ Result<DeltaApplyResult> MemorySyncLoop::applyColdBootstrap(const ColdBootstrapS
 }
 
 Result<DeltaApplyResult> MemorySyncLoop::applyDeltas(std::span<const MemoryDelta> deltas) {
+    YAMS_ZONE_SCOPED_N("memory_sync.apply_deltas");
     if (auto admitted = beforeDirectIngress(); !admitted) {
         return admitted.error();
     }
@@ -2245,6 +2252,7 @@ Result<void> MemorySyncLoop::replayReadyErasesAfterReconcile() {
 }
 
 Result<void> MemorySyncLoop::reconcileBeforeWrite(bool allowDeferredPreparedErase) {
+    YAMS_ZONE_SCOPED_N("memory_sync.reconcile");
     Result<std::map<std::string, MemoryIndexRecord>> reconciled =
         backend_->isRemote() ? sync() : syncFully();
     if (!reconciled) {
