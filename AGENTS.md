@@ -283,6 +283,32 @@ mode/expansion). Harness-only: `YAMS_BENCH_*`. Do not grow product `YAMS_*` for 
 - `profiling.h`: `YAMS_*` macros, no-op without Tracy.
 - Daemon async paths: Boost.Asio coroutines (`boost::asio::awaitable<…>`).
 
+## Background Work & Resource Governor
+
+YAMS must run on memory-constrained, non-Apple hosts. In October 2026 the
+daemon pinned a weak machine's CPU with p2p and topology work.
+
+- Daemon code that starts a thread, posts a job, spawns a coroutine or arms a
+  periodic timer checks `ResourceGovernor` first: `canAdmitWork()`,
+  `admitDeferrable(DeferrableWork::…)` or its cap in `ScalingCaps`. Admission
+  is not enough for long jobs: a rebuild or scan that runs for seconds re-checks
+  pressure between batches and yields. No free-running loops.
+- Worker counts come from `TuneAdvisor` or the governor, not
+  `hardware_concurrency()`.
+- Idle means no active non-health requests and empty queues. An open
+  connection is not activity.
+- Background work stops through a bounded, checked drain. A `void stop()` that
+  returns while work is still running is not a shutdown.
+- A new or changed background path needs a KPI on the constrained lane
+  (`setup.sh Profiling`, Linux x86, pinned cores and RAM): idle CPU and RSS
+  over time with the feature on. Profile before and after. Code reading is not
+  evidence of a fix.
+- Gaps as of 2026-10: `BackgroundTaskManager`, `p2p_transport` (accept thread,
+  one thread per session, 5 s reconnect loop) and `WriteCoordinator` do not
+  consult the governor. Topology rebuilds and semantic maintenance are admitted
+  through `admitDeferrable` but then run to completion with no pressure check
+  inside `TopologyManager::runRebuild`. Fix these before adding background work.
+
 ## Bug-Bounty (Repo Use)
 
 Scoped targets only; read-only/low-impact validation first; no persistence,
