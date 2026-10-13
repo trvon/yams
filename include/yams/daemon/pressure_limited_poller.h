@@ -272,8 +272,8 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
 
             if (cfg.pauseFlag->load(std::memory_order_acquire) || maxConcurrent == 0 ||
                 (cfg.admissionPausedFn && cfg.admissionPausedFn())) {
-                timer.expires_after(detail::pollerMaxIdleDelay());
-                co_await timer.async_wait(boost::asio::use_awaitable);
+                co_await detail::awaitPressureLimitedPollerWake(cfg, detail::pollerMaxIdleDelay(),
+                                                                "paused or admission blocked");
                 continue;
             }
 
