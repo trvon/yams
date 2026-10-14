@@ -416,6 +416,47 @@ TEST_CASE("KG Store: getNodesByKeys batches stable node-key lookup", "[unit][met
     CHECK((byKey.at("doc:b") == ids.value()[1]));
 }
 
+TEST_CASE_METHOD(KGStoreFixture, "KG Store change generation moves on writes and not on reads",
+                 "[unit][metadata][kg][generation]") {
+    const auto initial = store_->changeGeneration();
+
+    KGNode node{.nodeKey = "generation:a", .type = "document"};
+    auto id = store_->upsertNode(node);
+    REQUIRE(id.has_value());
+    node.id = id.value();
+    const auto afterNode = store_->changeGeneration();
+    CHECK(afterNode > initial);
+
+    // Reads leave the generation where it is.
+    REQUIRE(store_->getNodeById(node.id).has_value());
+    REQUIRE(store_->getNodesAfterId(0, 16).has_value());
+    REQUIRE(store_->getEdgesAfterId(0, 16).has_value());
+    CHECK(store_->changeGeneration() == afterNode);
+
+    KGNode other{.nodeKey = "generation:b", .type = "document"};
+    auto otherId = store_->upsertNode(other);
+    REQUIRE(otherId.has_value());
+    const auto afterOther = store_->changeGeneration();
+    CHECK(afterOther > afterNode);
+    REQUIRE(store_->addEdge({.srcNodeId = node.id, .dstNodeId = otherId.value(), .relation = "r"})
+                .has_value());
+    const auto afterEdge = store_->changeGeneration();
+    CHECK(afterEdge > afterOther);
+
+    // A write batch moves it once, on commit.
+    auto batch = store_->beginWriteBatch();
+    REQUIRE(batch.has_value());
+    REQUIRE(batch.value()->upsertNode({.nodeKey = "generation:c", .type = "document"}).has_value());
+    CHECK(store_->changeGeneration() == afterEdge);
+    REQUIRE(batch.value()->commit().has_value());
+    const auto afterBatch = store_->changeGeneration();
+    CHECK(afterBatch > afterEdge);
+
+    // Deletes move it too: a sweep that retracts deleted records depends on this.
+    REQUIRE(store_->deleteNodeById(otherId.value()).has_value());
+    CHECK(store_->changeGeneration() > afterBatch);
+}
+
 TEST_CASE("KG Store: addEdgesUnique deduplicates edges", "[unit][metadata][kg]") {
     KGStoreFixture fix;
 

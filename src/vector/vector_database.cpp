@@ -250,6 +250,10 @@ public:
         return cachedVectorCount_.load(std::memory_order_relaxed);
     }
 
+    std::uint64_t changeGeneration() const noexcept {
+        return changeGeneration_.load(std::memory_order_acquire);
+    }
+
     size_t getEmbeddingDim() const { return config_.embedding_dim; }
 
     void initializeCounter() {
@@ -289,6 +293,7 @@ public:
             cachedVectorCount_.fetch_add(1, std::memory_order_relaxed);
 
             clearError();
+            noteWrite();
             return true;
 
         } catch (const std::exception& e) {
@@ -379,6 +384,7 @@ public:
 
             std::unique_lock<std::shared_mutex> lock(mutex_);
             clearError();
+            noteWrite();
             return true;
 
         } catch (const std::exception& e) {
@@ -409,6 +415,7 @@ public:
             }
 
             clearError();
+            noteWrite();
             return true;
 
         } catch (const std::exception& e) {
@@ -436,6 +443,7 @@ public:
             core::decrement_if_positive(cachedVectorCount_);
 
             clearError();
+            noteWrite();
             return true;
 
         } catch (const std::exception& e) {
@@ -471,6 +479,7 @@ public:
             }
 
             clearError();
+            noteWrite();
             return true;
 
         } catch (const std::exception& e) {
@@ -1231,6 +1240,9 @@ private:
     // Component-owned metrics (updated on insert/delete, read by DaemonMetrics)
     mutable std::atomic<size_t> cachedVectorCount_{0};
     mutable std::atomic<bool> counterInitialized_{false};
+    std::atomic<std::uint64_t> changeGeneration_{0};
+
+    void noteWrite() noexcept { changeGeneration_.fetch_add(1, std::memory_order_acq_rel); }
 };
 
 // VectorDatabase implementation
@@ -1298,6 +1310,10 @@ size_t VectorDatabase::getVectorCount() const {
 
 size_t VectorDatabase::getEmbeddingDim() const {
     return pImpl->getEmbeddingDim();
+}
+
+std::uint64_t VectorDatabase::changeGeneration() const noexcept {
+    return pImpl->changeGeneration();
 }
 
 bool VectorDatabase::insertVector(const VectorRecord& record) {

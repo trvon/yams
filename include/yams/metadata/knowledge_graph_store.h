@@ -227,6 +227,11 @@ public:
     // fresh counts without a full document-table reconcile.
     virtual void initializeEntityCountSnapshot() {}
 
+    // Count of write transactions this store has committed (single writes and write batches).
+    // Two equal readings mean no write landed through this store in between, so a scan that
+    // completed at one reading has nothing new to find at the other. Reads never move it.
+    virtual std::uint64_t changeGeneration() const noexcept = 0;
+
     // -----------------------------------------------------------------------------
     // Nodes
     // -----------------------------------------------------------------------------

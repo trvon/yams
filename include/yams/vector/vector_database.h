@@ -37,6 +37,9 @@ public:
     void dropTable();
     size_t getVectorCount() const;
     size_t getEmbeddingDim() const;
+    /// Count of writes (insert, batch insert, update, delete) this database has applied. Two
+    /// equal readings mean no vector changed through this instance in between.
+    std::uint64_t changeGeneration() const noexcept;
 
     bool insertVector(const VectorRecord& record);
     bool insertVectorsBatch(const std::vector<VectorRecord>& records);

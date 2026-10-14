@@ -960,7 +960,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     };
 
     const auto publishVector = [&]() -> bool {
-        if (!vectorDatabase) {
+        if (!vectorDatabase || !state.vectorSweep.begin(vectorDatabase->changeGeneration())) {
             return false;
         }
         auto records = vectorDatabase->getVectorsPage(state.vectorDocumentHashCursor,
@@ -969,13 +969,14 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
             throw std::runtime_error(records.error().message);
         }
         if (records.value().empty()) {
-            // Pass complete. The next one starts from the beginning, so vectors added or
-            // re-embedded behind the cursor are published by it, as topology passes repeat.
+            // Pass complete. The next one starts from the beginning once the store has changed,
+            // so vectors added or re-embedded behind the cursor are published by it.
             if (!state.vectorDocumentHashCursor.empty()) {
                 ++state.vectorSweepPasses;
             }
             state.vectorDocumentHashCursor.clear();
             state.vectorChunkIdCursor.clear();
+            state.vectorSweep.complete();
             return false;
         }
         const auto& record = records.value().front();
@@ -986,7 +987,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     };
 
     const auto publishTopology = [&]() -> bool {
-        if (!kgStore) {
+        if (!kgStore || !state.topologySweep.begin(kgStore->changeGeneration())) {
             return false;
         }
         using Phase = MemorySyncBackfillState::TopologyPhase;
@@ -1051,12 +1052,14 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                     auto winners = memorySync_->committedWinnersAfter(
                         "topology-", state.topologyRetractionKeyCursor, 1);
                     if (winners.empty()) {
-                        // Pass complete. The next one starts from the beginning, so records
-                        // created or changed behind the cursors are published by it.
+                        // Pass complete. The next one starts from the beginning once the graph
+                        // has changed, so records created, changed, or deleted behind the
+                        // cursors are published or retracted by it.
                         state.topologyPhase = Phase::Nodes;
                         state.topologyNodeIdCursor = 0;
                         state.topologyEdgeIdCursor = 0;
                         state.topologyRetractionKeyCursor.clear();
+                        state.topologySweep.complete();
                         return false;
                     }
                     const auto& [key, winner] = winners.front();
@@ -1085,8 +1088,9 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     // arrives. A publish costs a large share of the per-cycle time budget, so a fair rotation let
     // derived records delay the documents every peer is waiting for. Committed vectors are new
     // work announced by embedding jobs, bounded by what was embedded, so they come next. The two
-    // catch-up sweeps repeat forever and so always have work: they alternate, item by item and
-    // across cycles, and a sweep that is done for this cycle leaves its turns to the other.
+    // catch-up sweeps run a pass whenever their store changed, and an idle store costs them
+    // nothing: while both have work they alternate, item by item and across cycles, and a sweep
+    // that is done for this cycle leaves its turns to the other.
     using Domain = MemorySyncBackfillState::Domain;
     constexpr std::size_t kDomainCount = 4;
     std::array<bool, kDomainCount> domainDone{};

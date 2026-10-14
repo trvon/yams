@@ -35,6 +35,7 @@
 #include <yams/daemon/daemon.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/records.h>
+#include <yams/metadata/connection_pool.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/topology_sync_adapter.h>
 #include <yams/storage/storage_backend.h>
@@ -92,7 +93,12 @@ struct TempRoot {
 
 /// One daemon-shaped replica: real ServiceManager apply/backfill code over local stores.
 struct MeshNode {
-    MeshNode(const fs::path& root, const std::string& nodeId, const fs::path& sharedStore)
+    /// Counted: the graph store runs over a connection pool this node owns, so a test can count
+    /// every connection the store takes (one per query).
+    enum class KgReads { Uncounted, Counted };
+
+    MeshNode(const fs::path& root, const std::string& nodeId, const fs::path& sharedStore,
+             KgReads kgReads = KgReads::Uncounted)
         : name(nodeId) {
         const auto home = root / nodeId;
         fs::create_directories(home / "data");
@@ -112,8 +118,18 @@ struct MeshNode {
         manager->__test_setContentStore(
             std::shared_ptr<api::IContentStore>(std::move(content.value())));
 
-        auto graph = metadata::makeSqliteKnowledgeGraphStore((home / "kg.db").string());
+        const auto graphPath = (home / "kg.db").string();
+        auto graph = metadata::makeSqliteKnowledgeGraphStore(graphPath);
         REQUIRE(graph.has_value());
+        if (kgReads == KgReads::Counted) {
+            // The path factory migrated the schema; reopen the store over a pool of our own.
+            graph.value().reset();
+            kgPool_ = std::make_unique<metadata::ConnectionPool>(graphPath);
+            REQUIRE(kgPool_->initialize().has_value());
+            graph = metadata::makeSqliteKnowledgeGraphStore(*kgPool_,
+                                                            metadata::KnowledgeGraphStoreConfig{});
+            REQUIRE(graph.has_value());
+        }
         kgStore = std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(graph.value()));
         manager->__test_setKgStore(kgStore);
 
@@ -228,11 +244,18 @@ struct MeshNode {
         return status.value().apply.deferredIn(memory_sync::ApplyStage::Topology);
     }
 
+    /// Connections the graph store has taken so far (KgReads::Counted only).
+    std::size_t kgStoreAcquisitions() const {
+        REQUIRE(kgPool_ != nullptr);
+        return kgPool_->getStats().totalAcquired;
+    }
+
     std::string name;
     yams::test::ScopedEnvVar disableWatcher{"YAMS_DISABLE_SESSION_WATCHER", std::string("1")};
     DaemonConfig config;
     StateComponent state;
     DaemonLifecycleFsm lifecycleFsm;
+    std::unique_ptr<metadata::ConnectionPool> kgPool_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;
     memory_sync::MemorySyncService* sync_{nullptr};
     std::unique_ptr<ServiceManager> manager;
@@ -736,8 +759,9 @@ TEST_CASE("Memory sync topology backfill keeps progressing while the vector swee
         nodes.push_back(origin.addNode("doc:fair-" + std::to_string(i), "document").nodeKey);
     }
 
-    // A wrapping vector sweep always has work. These cycles are fewer than the two sweeps need
-    // back to back, but enough for each to publish its share when neither can take every item.
+    // The vector sweep has more items than these cycles can serve. They are fewer than the two
+    // sweeps need back to back, but enough for each to publish its share when neither can take
+    // every item.
     origin.backfill(2 * kNodes + 2);
 
     view.refresh();
@@ -750,4 +774,141 @@ TEST_CASE("Memory sync topology backfill keeps progressing while the vector swee
         vectorsPublished += view.published(embeddingKey("sweep-" + std::to_string(i))) ? 1 : 0;
     }
     CHECK(vectorsPublished >= kNodes);
+}
+
+namespace {
+
+/// Counts the items the outbound catch-up sweeps serve: one stage notification per node, edge,
+/// vector, or retraction the sweeps publish or re-check.
+struct SweepItemCounter {
+    explicit SweepItemCounter(MeshNode& node) {
+        node.manager->testingSetMemorySyncStageObserver([this](std::string_view stage) {
+            if (stage == "backfill.after_node" || stage == "backfill.after_edge" ||
+                stage == "backfill.after_vector" || stage == "backfill.after_retraction") {
+                ++count;
+            }
+        });
+    }
+    std::size_t count{0};
+};
+
+/// The operation identity of the committed winner for `key`: it changes only when the record
+/// is published again.
+std::string winnerOperation(const SharedStoreView& view, const std::string& key) {
+    const auto winners = view.sync.committedWinnersAfter(key, "", 1);
+    REQUIRE(winners.size() == 1);
+    REQUIRE(winners.front().first == key);
+    return winners.front().second.operationId;
+}
+
+/// A small corpus whose first sweep pass completes within a few cycles: two documents, an edge
+/// between them, and one vector.
+struct IdleCorpus {
+    explicit IdleCorpus(MeshNode& node, vector::VectorDatabase& vectors)
+        : first(node.addNode("doc:idle-first", "document")),
+          second(node.addNode("doc:idle-second", "document")) {
+        node.addEdge(first, second);
+        REQUIRE(vectors.insertVectorChecked(makeVector("idle-chunk", '4', "model")).has_value());
+    }
+
+    /// Enough cycles for both sweeps to finish a full pass over this corpus.
+    void publishFirstPass(MeshNode& node, SharedStoreView& view) const {
+        node.backfill(8);
+        view.refresh();
+        REQUIRE(view.published(topologyNodeKey(first.nodeKey)));
+        REQUIRE(view.published(topologyNodeKey(second.nodeKey)));
+        REQUIRE(view.published(topologyEdgeKey(first.nodeKey, second.nodeKey)));
+        REQUIRE(view.published(embeddingKey("idle-chunk")));
+    }
+
+    /// Finish the first pass, then verify further cycles serve nothing.
+    void settle(MeshNode& node, SharedStoreView& view, SweepItemCounter& items) const {
+        publishFirstPass(node, view);
+        REQUIRE(items.count > 0);
+        const auto served = items.count;
+        node.backfill(2);
+        REQUIRE(items.count == served);
+    }
+
+    metadata::KGNode first;
+    metadata::KGNode second;
+};
+
+} // namespace
+
+TEST_CASE("Memory sync catch-up sweeps stop once a pass finds the stores unchanged",
+          "[daemon][memory-sync][backfill][idle]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore, MeshNode::KgReads::Counted};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    SweepItemCounter items{origin};
+    const IdleCorpus corpus{origin, *vectors};
+    corpus.publishFirstPass(origin, view);
+    const auto itemsAfterPass = items.count;
+    const auto readsAfterPass = origin.kgStoreAcquisitions();
+    REQUIRE(itemsAfterPass > 0);
+
+    // Nothing changed: later cycles serve no sweep item and never touch the graph store.
+    origin.backfill(5);
+    CHECK(items.count == itemsAfterPass);
+    CHECK(origin.kgStoreAcquisitions() == readsAfterPass);
+}
+
+TEST_CASE("Memory sync catch-up sweeps resume for records written after a completed pass",
+          "[daemon][memory-sync][backfill][idle]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    SweepItemCounter items{origin};
+    const IdleCorpus corpus{origin, *vectors};
+    corpus.settle(origin, view, items);
+    const auto firstOperation = winnerOperation(view, topologyNodeKey(corpus.first.nodeKey));
+    const auto chunkOperation = winnerOperation(view, embeddingKey("idle-chunk"));
+
+    // A node, an edge to it, and a vector land behind the idle cursors.
+    const auto third = origin.addNode("doc:idle-third", "document");
+    origin.addEdge(corpus.first, third);
+    REQUIRE(vectors->insertVectorChecked(makeVector("added-later", '2', "model")).has_value());
+    origin.backfill(8);
+
+    view.refresh();
+    CHECK(view.published(topologyNodeKey(third.nodeKey)));
+    CHECK(view.published(topologyEdgeKey(corpus.first.nodeKey, third.nodeKey)));
+    CHECK(view.published(embeddingKey("added-later")));
+    // Records that did not change are not published again.
+    CHECK(winnerOperation(view, topologyNodeKey(corpus.first.nodeKey)) == firstOperation);
+    CHECK(winnerOperation(view, embeddingKey("idle-chunk")) == chunkOperation);
+}
+
+TEST_CASE("Memory sync retracts records deleted after the sweeps went idle",
+          "[daemon][memory-sync][backfill][idle][retraction]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    SweepItemCounter items{origin};
+    const IdleCorpus corpus{origin, *vectors};
+    corpus.settle(origin, view, items);
+
+    // Deleting the second node cascades the edge; both must be retracted by a new pass.
+    origin.deleteNode(corpus.second);
+    for (int round = 0; round < 3; ++round) {
+        origin.runCycle();
+    }
+
+    view.refresh();
+    CHECK(view.tombstoned(topologyNodeKey(corpus.second.nodeKey)));
+    CHECK(view.tombstoned(topologyEdgeKey(corpus.first.nodeKey, corpus.second.nodeKey)));
+    CHECK(view.published(topologyNodeKey(corpus.first.nodeKey)));
 }

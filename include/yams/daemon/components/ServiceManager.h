@@ -1041,28 +1041,56 @@ private:
         // Topology are the catch-up sweeps.
         enum class Domain { Documents, CommittedVectors, Vectors, Topology };
 
+        // A sweep pass runs only while its store's change generation differs from the one the
+        // last completed pass began at. Writes behind a running pass's cursor move the
+        // generation past the pass's own reading, so the pass after it runs too; with no
+        // writes, the sweep costs nothing per cycle.
+        struct SweepGeneration {
+            std::optional<std::uint64_t> running; // generation the pass in progress began at
+            std::optional<std::uint64_t> swept;   // generation the last completed pass began at
+
+            // Start or continue a pass; false when the store is unchanged since the last pass.
+            bool begin(std::uint64_t current) {
+                if (running) {
+                    return true;
+                }
+                if (swept == current) {
+                    return false;
+                }
+                running = current;
+                return true;
+            }
+            void complete() {
+                swept = running;
+                running.reset();
+            }
+        };
+
         std::int64_t documentIdCursor{0};
         // The committed document being published and the last of its chunks already published.
         std::string committedVectorDocument;
         std::string committedVectorChunkCursor;
-        // Vectors are swept in repeating passes in (document_hash, chunk_id) order, so vectors
-        // added or re-embedded behind the cursor are published on a later pass.
+        // Vectors are swept in passes in (document_hash, chunk_id) order, so vectors added or
+        // re-embedded behind the cursor are published on the pass after the store changed.
         std::string vectorDocumentHashCursor;
         std::string vectorChunkIdCursor;
         std::uint64_t vectorSweepPasses{0};
-        // The two sweeps always have work once they repeat, so they take turns at the items
-        // documents and committed vectors leave: neither can take every item of a cycle.
+        SweepGeneration vectorSweep;
+        // While both sweeps have work they take turns at the items documents and committed
+        // vectors leave: neither can take every item of a cycle.
         Domain nextSweep{Domain::Vectors};
-        // Topology is swept in repeating passes: every node, then every edge (each with its
-        // endpoints), then this writer's committed topology records, so edges and nodes created
-        // or changed after a pass went by are published, and records the local graph dropped
-        // are retracted, on a later pass. The cursors are keyset positions (AUTOINCREMENT ids,
-        // logical keys), so inserts and deletes between items never shift them.
+        // Topology is swept in passes: every node, then every edge (each with its endpoints),
+        // then this writer's committed topology records, so edges and nodes created or changed
+        // after a pass went by are published, and records the local graph dropped are
+        // retracted, on the pass after the graph changed. The cursors are keyset positions
+        // (AUTOINCREMENT ids, logical keys), so inserts and deletes between items never shift
+        // them.
         enum class TopologyPhase { Nodes, Edges, Retractions };
         TopologyPhase topologyPhase{TopologyPhase::Nodes};
         std::int64_t topologyNodeIdCursor{0};
         std::int64_t topologyEdgeIdCursor{0};
         std::string topologyRetractionKeyCursor;
+        SweepGeneration topologySweep;
         std::size_t itemBudgetPerCycle{256};
         std::chrono::milliseconds timeBudgetPerCycle{100};
     } memorySyncBackfillState_;
