@@ -98,62 +98,10 @@ namespace {
 
 using json = nlohmann::json;
 
+using detail::allocateBalancedRouteQuotas;
+using detail::evaluateTopologyRouteWork;
+using detail::observeTopologyRouteWork;
 using detail::postWork;
-
-TopologyProofObligationStatus
-evaluateTopologyRouteWork(const vector::VectorSearchDiagnostics& diagnostics,
-                          const SearchEngineConfig::TopologyRouteWorkBudget& budget) noexcept {
-    using Status = TopologyProofObligationStatus;
-    const bool budgetDeclared = budget.maxRowsVisited > 0 &&
-                                budget.maxExactDistanceEvaluations > 0 &&
-                                budget.maxAnnCandidates > 0;
-    const bool workObserved = diagnostics.rowsVisitedObserved &&
-                              diagnostics.exactDistanceEvaluationsObserved &&
-                              diagnostics.annCandidateBudgetObserved;
-    if (!budgetDeclared || !workObserved) {
-        return Status::Unavailable;
-    }
-    if (diagnostics.rowsVisited > budget.maxRowsVisited ||
-        diagnostics.exactDistanceEvaluations > budget.maxExactDistanceEvaluations ||
-        diagnostics.annCandidateBudget > budget.maxAnnCandidates) {
-        return Status::Violated;
-    }
-    return Status::Satisfied;
-}
-
-TopologyRouteWorkObservation
-observeTopologyRouteWork(const vector::VectorSearchDiagnostics& diagnostics) noexcept {
-    return TopologyRouteWorkObservation{
-        .observed = diagnostics.rowsVisitedObserved &&
-                    diagnostics.exactDistanceEvaluationsObserved &&
-                    diagnostics.annCandidateBudgetObserved,
-        .rowsVisited = diagnostics.rowsVisited,
-        .exactDistanceEvaluations = diagnostics.exactDistanceEvaluations,
-        .annCandidateBudget = diagnostics.annCandidateBudget,
-    };
-}
-
-std::vector<std::size_t>
-allocateBalancedRouteQuotas(const std::vector<std::unordered_set<std::string>>& routeGroups,
-                            std::size_t limit) {
-    std::vector<std::size_t> quotas(routeGroups.size(), 0);
-    std::size_t remaining = limit;
-    while (remaining > 0) {
-        bool allocated = false;
-        for (std::size_t route = 0; route < routeGroups.size() && remaining > 0; ++route) {
-            if (quotas[route] >= routeGroups[route].size()) {
-                continue;
-            }
-            ++quotas[route];
-            --remaining;
-            allocated = true;
-        }
-        if (!allocated) {
-            break;
-        }
-    }
-    return quotas;
-}
 
 std::vector<std::string>
 resolveDocumentIdsForTrace(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
