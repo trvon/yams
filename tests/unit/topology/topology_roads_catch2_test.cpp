@@ -350,4 +350,42 @@ TEST_CASE("Routing construction fingerprint is road-free",
     edited.roads.front().weight += 10.0;
     edited.roads.push_back(ClusterRoad{.fromClusterId = kB, .toClusterId = kC, .weight = 1.0});
     CHECK(yams::search::topologyRoutingConstructionFingerprint(edited) == offIdentity);
+
+    // The road fingerprint is the identity that does follow roads.
+    const auto roadsOff = yams::search::topologyRoadFingerprint(off.value());
+    const auto roadsOn = yams::search::topologyRoadFingerprint(on.value());
+    CHECK(roadsOff != roadsOn);
+    CHECK(yams::search::topologyRoadFingerprint(edited) != roadsOn);
+
+    SECTION("the persisted path preserves both identities") {
+        // Main payload (road-free v1 codec) plus the road sidecar, as the store writes them.
+        auto mainPayload = yams::topology::serializeTopologyBatchCompressed(on.value());
+        REQUIRE(mainPayload.has_value());
+        auto reloaded = yams::topology::deserializeTopologyBatchCompressed(mainPayload.value());
+        REQUIRE(reloaded.has_value());
+        REQUIRE(reloaded.value().roads.empty());
+        CHECK(yams::search::topologyRoutingConstructionFingerprint(reloaded.value()) ==
+              offIdentity);
+        CHECK(yams::search::topologyRoadFingerprint(reloaded.value()) == roadsOff);
+
+        yams::topology::TopologyRoadSidecar sidecar;
+        sidecar.snapshotId = on.value().snapshotId;
+        sidecar.maxPerCluster = on.value().roadMaxPerCluster;
+        sidecar.roads = on.value().roads;
+        CHECK(sidecar.maxPerCluster == 8);
+        auto sidecarPayload = yams::topology::serializeTopologyRoadSidecarCompressed(sidecar);
+        REQUIRE(sidecarPayload.has_value());
+        auto decodedSidecar =
+            yams::topology::deserializeTopologyRoadSidecarCompressed(sidecarPayload.value());
+        REQUIRE(decodedSidecar.has_value());
+        CHECK_FALSE(
+            yams::topology::validateTopologyRoadSidecar(reloaded.value(), decodedSidecar.value())
+                .has_value());
+        reloaded.value().roads = std::move(decodedSidecar.value().roads);
+        reloaded.value().roadMaxPerCluster = decodedSidecar.value().maxPerCluster;
+        CHECK(reloaded.value().roads == on.value().roads);
+        CHECK(yams::search::topologyRoutingConstructionFingerprint(reloaded.value()) ==
+              offIdentity);
+        CHECK(yams::search::topologyRoadFingerprint(reloaded.value()) == roadsOn);
+    }
 }

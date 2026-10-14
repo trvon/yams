@@ -285,6 +285,7 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
     // the cross-cluster evidence a road is made of.
     batch.roads = detail::accumulateClusterRoads(documents, detail::primaryClusterByHash(batch),
                                                  config.roadMaxPerCluster);
+    batch.roadMaxPerCluster = batch.roads.empty() ? 0 : config.roadMaxPerCluster;
 
     (void)applyOrthogonalBoundarySpill(documents, config, batch);
 

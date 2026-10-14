@@ -398,6 +398,7 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
     // edges where an oversized component was split, so it cannot be the road source.
     batch.roads = detail::accumulateClusterRoads(
         effectiveDocuments, detail::primaryClusterByHash(batch), config.roadMaxPerCluster);
+    batch.roadMaxPerCluster = batch.roads.empty() ? 0 : config.roadMaxPerCluster;
     (void)applyOrthogonalBoundarySpill(effectiveDocuments, config, batch);
 
     return batch;
@@ -582,6 +583,8 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
     // only sees its own documents. Drop them until the next full rebuild (incremental road
     // maintenance is a separate change).
     merged.roads.clear();
+    merged.roadMaxPerCluster = 0;
+    merged.roadUnavailableReason.clear();
     merged.generatedAtUnixSeconds = rebuilt.value().generatedAtUnixSeconds;
     merged.topologyEpoch = existing.topologyEpoch + 1;
 
