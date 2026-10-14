@@ -5199,6 +5199,12 @@ struct BenchFixture {
                                                       "YAMS_GRAPH_SEMANTIC_THRESHOLD", 0.30f);
         const float semanticWeightFloor =
             parseFloatEnv("YAMS_BENCH_SEED_SEMANTIC_WEIGHT_FLOOR", nullptr, 0.10f);
+        // Off: mutual pairs only (the historical seeding). On: also one-way kNN edges, as the
+        // daemon writes them; the connected engine's roads need those (see
+        // buildSemanticNeighborSeedEdges).
+        const auto seedingMode = parseBoolEnv("YAMS_BENCH_SEED_SEMANTIC_DIRECTED", false)
+                                     ? yams::bench::SemanticNeighborSeeding::DirectedKnn
+                                     : yams::bench::SemanticNeighborSeeding::MutualPairs;
         const bool seedQrelCommunities = parseBoolEnv("YAMS_BENCH_SEED_QREL_COMMUNITIES", false) &&
                                          useBEIR && static_cast<bool>(beirCorpus);
         const std::size_t qrelTopK = parseSizeEnv("YAMS_BENCH_SEED_QREL_TOPK", nullptr, 4);
@@ -5691,44 +5697,24 @@ struct BenchFixture {
         }
 
         std::vector<metadata::KGEdge> edges;
-        std::size_t reciprocalPairs = 0;
-        for (const auto& [srcHash, neighbors] : neighborScores) {
-            for (const auto& [dstHash, forwardScore] : neighbors) {
-                if (srcHash >= dstHash) {
-                    continue;
-                }
-                const auto reverseIt = neighborScores.find(dstHash);
-                if (reverseIt == neighborScores.end()) {
-                    continue;
-                }
-                const auto reverseScoreIt = reverseIt->second.find(srcHash);
-                if (reverseScoreIt == reverseIt->second.end()) {
-                    continue;
-                }
-                const auto srcNodeIt = nodeIdByHash.find(srcHash);
-                const auto dstNodeIt = nodeIdByHash.find(dstHash);
-                if (srcNodeIt == nodeIdByHash.end() || dstNodeIt == nodeIdByHash.end()) {
-                    continue;
-                }
-
-                const float weight =
-                    std::max(semanticWeightFloor, (forwardScore + reverseScoreIt->second) * 0.5f);
-                metadata::KGEdge forward;
-                forward.srcNodeId = srcNodeIt->second;
-                forward.dstNodeId = dstNodeIt->second;
-                forward.relation = "semantic_neighbor";
-                forward.weight = weight;
-                edges.push_back(forward);
-
-                metadata::KGEdge reverse;
-                reverse.srcNodeId = dstNodeIt->second;
-                reverse.dstNodeId = srcNodeIt->second;
-                reverse.relation = "semantic_neighbor";
-                reverse.weight = weight;
-                edges.push_back(reverse);
-                reciprocalPairs += 1;
+        std::size_t mutualEdges = 0;
+        std::size_t oneWayEdges = 0;
+        for (const auto& seed : yams::bench::buildSemanticNeighborSeedEdges(
+                 neighborScores, semanticWeightFloor, seedingMode)) {
+            const auto srcNodeIt = nodeIdByHash.find(seed.sourceHash);
+            const auto dstNodeIt = nodeIdByHash.find(seed.targetHash);
+            if (srcNodeIt == nodeIdByHash.end() || dstNodeIt == nodeIdByHash.end()) {
+                continue;
             }
+            metadata::KGEdge edge;
+            edge.srcNodeId = srcNodeIt->second;
+            edge.dstNodeId = dstNodeIt->second;
+            edge.relation = "semantic_neighbor";
+            edge.weight = seed.weight;
+            edges.push_back(edge);
+            (seed.mutual ? mutualEdges : oneWayEdges) += 1;
         }
+        const std::size_t reciprocalPairs = mutualEdges / 2;
 
         std::size_t qrelPairs = 0;
         if (seedQrelCommunities) {
@@ -5832,9 +5818,10 @@ struct BenchFixture {
                                      addEdgesResult.error().message);
         }
 
-        spdlog::info("Seeded {} {} topology-source neighbor pairs and {} qrel-neighbor pairs ({} "
-                     "directed edges) for benchmark corpus after clearing {} prior semantic edges",
-                     reciprocalPairs, topologySource, qrelPairs, edges.size(),
+        spdlog::info("Seeded {} {} topology-source neighbor pairs, {} one-way kNN edges and {} "
+                     "qrel-neighbor pairs ({} directed edges) for benchmark corpus after clearing "
+                     "{} prior semantic edges",
+                     reciprocalPairs, topologySource, oneWayEdges, qrelPairs, edges.size(),
                      deleteExistingResult.value());
         return true;
     }
