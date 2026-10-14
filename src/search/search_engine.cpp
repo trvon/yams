@@ -102,6 +102,86 @@ using json = nlohmann::json;
 using detail::allocateBalancedRouteQuotas;
 using detail::postWork;
 
+/// Relaxed-threshold retry bookkeeping for one sequence of vector queries.
+struct RelaxedVectorRetryStats {
+    bool applied = false;
+    bool attempted = false;
+    int primaryHitCount = 0;
+    int retryThresholdMilli = 0;
+};
+
+/// Everything the posted vector work reads and writes besides its request. Captured by shared_ptr,
+/// so a completion after `componentTimeout` lands here and not in the search frame, which has
+/// moved on (or returned). The frame adopts it only once the component has finished.
+struct VectorStageState {
+    SearchEngineConfig config;
+    bool relaxedRetryEnabled = false;
+    RelaxedVectorRetryStats relaxedRetry;
+    detail::VectorStageOutcome outcome;
+};
+
+/// Vector query with the relaxed-threshold retry. `config` and `stats` must outlive the returned
+/// callable; the repository and vector database are held by value so the callable does not depend
+/// on the engine.
+auto makeQueryVectorWithRelaxedRetry(
+    std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
+    std::shared_ptr<vector::VectorDatabase> vectorDb, const SearchEngineConfig& config,
+    bool relaxedRetryEnabled, RelaxedVectorRetryStats& stats) {
+    return [metadataRepo = std::move(metadataRepo), vectorDb = std::move(vectorDb), &config,
+            relaxedRetryEnabled,
+            &stats](const std::vector<float>& embedding, size_t limit,
+                    const std::unordered_set<std::string>* candidates = nullptr,
+                    vector::VectorSearchDiagnostics* diagnostics = nullptr,
+                    vector::CandidateFilterMode candidateFilterMode =
+                        vector::CandidateFilterMode::BackendDefault)
+               -> Result<std::vector<ComponentResult>> {
+        const auto runVectorQuery = [&](const SearchEngineConfig& queryConfig) {
+            vector::VectorSearchDiagnostics sample;
+            sample.collectVisitedDocumentHashes =
+                diagnostics != nullptr && diagnostics->collectVisitedDocumentHashes;
+            auto result = candidates != nullptr
+                              ? detail::queryVectorIndexPipeline(metadataRepo, vectorDb, embedding,
+                                                                 queryConfig, limit, *candidates,
+                                                                 candidateFilterMode, &sample)
+                              : detail::queryVectorIndexPipeline(metadataRepo, vectorDb, embedding,
+                                                                 queryConfig, limit, &sample);
+            if (diagnostics != nullptr) {
+                detail::mergeVectorSearchDiagnostics(*diagnostics, sample);
+            }
+            return result;
+        };
+
+        auto primary = runVectorQuery(config);
+        if (primary) {
+            stats.primaryHitCount = static_cast<int>(primary.value().size());
+        }
+        if (!relaxedRetryEnabled || !primary || !primary.value().empty()) {
+            return primary;
+        }
+
+        SearchEngineConfig relaxedConfig = config;
+        const float relaxedThreshold = std::min(config.similarityThreshold, 0.20f);
+        if (!(relaxedThreshold + 1e-6f < config.similarityThreshold)) {
+            return primary;
+        }
+
+        stats.attempted = true;
+        relaxedConfig.similarityThreshold = relaxedThreshold;
+        auto retried = runVectorQuery(relaxedConfig);
+        if (retried && !retried.value().empty()) {
+            stats.applied = true;
+            stats.retryThresholdMilli =
+                static_cast<int>(std::lround(static_cast<double>(relaxedThreshold) * 1000.0));
+            spdlog::debug(
+                "Vector search retry: relaxed threshold {:.3f} -> {:.3f} yielded {} results",
+                config.similarityThreshold, relaxedThreshold, retried.value().size());
+            return retried;
+        }
+
+        return primary;
+    };
+}
+
 std::vector<std::string>
 resolveDocumentIdsForTrace(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
                            const std::vector<std::string>& documentHashes) {
@@ -1310,10 +1390,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     size_t graphVectorBlockedMissingTextAnchorCount = 0;
     size_t graphVectorBlockedMissingBaselineTextAnchorCount = 0;
     bool relaxedVectorRetryEnabled = false;
-    std::atomic<bool> relaxedVectorRetryApplied{false};
-    std::atomic<bool> relaxedVectorRetryAttempted{false};
-    std::atomic<int> relaxedVectorPrimaryHitCount{0};
-    std::atomic<int> relaxedVectorRetryThresholdMilli{0};
+    // Written by the sequential vector path directly, or adopted from the parallel stage's own
+    // state once that component has finished.
+    RelaxedVectorRetryStats relaxedVectorRetryStats;
     vector::VectorSearchDiagnostics vectorSearchDiagnostics;
     TopologyEvidenceByCandidate topologyCandidateEvidence;
     bool weakQueryFanoutBoostApplied = false;
@@ -1502,61 +1581,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     relaxedVectorRetryEnabled = intent == QueryIntent::Prose && queryTokenCount >= 6 &&
                                 workingConfig.similarityThreshold > 0.20f;
 
+    // Frame-bound variant for the sequential vector path; the parallel vector stage builds its own
+    // from VectorStageState so a late completion never touches this frame.
     const auto queryVectorWithRelaxedRetry =
-        [this, &workingConfig, relaxedVectorRetryEnabled, &relaxedVectorRetryApplied,
-         &relaxedVectorRetryAttempted, &relaxedVectorPrimaryHitCount,
-         &relaxedVectorRetryThresholdMilli](const std::vector<float>& embedding, size_t limit,
-                                            const std::unordered_set<std::string>* candidates =
-                                                nullptr,
-                                            vector::VectorSearchDiagnostics* diagnostics = nullptr,
-                                            vector::CandidateFilterMode candidateFilterMode =
-                                                vector::CandidateFilterMode::BackendDefault)
-        -> Result<std::vector<ComponentResult>> {
-        const auto runVectorQuery = [&](const SearchEngineConfig& config) {
-            vector::VectorSearchDiagnostics sample;
-            sample.collectVisitedDocumentHashes =
-                diagnostics != nullptr && diagnostics->collectVisitedDocumentHashes;
-            auto result = candidates != nullptr
-                              ? queryVectorIndex(embedding, config, limit, *candidates,
-                                                 candidateFilterMode, &sample)
-                              : queryVectorIndex(embedding, config, limit, &sample);
-            if (diagnostics != nullptr) {
-                detail::mergeVectorSearchDiagnostics(*diagnostics, sample);
-            }
-            return result;
-        };
-
-        auto primary = runVectorQuery(workingConfig);
-        if (primary) {
-            relaxedVectorPrimaryHitCount.store(static_cast<int>(primary.value().size()),
-                                               std::memory_order_relaxed);
-        }
-        if (!relaxedVectorRetryEnabled || !primary || !primary.value().empty()) {
-            return primary;
-        }
-
-        SearchEngineConfig relaxedConfig = workingConfig;
-        const float relaxedThreshold = std::min(workingConfig.similarityThreshold, 0.20f);
-        if (!(relaxedThreshold + 1e-6f < workingConfig.similarityThreshold)) {
-            return primary;
-        }
-
-        relaxedVectorRetryAttempted.store(true, std::memory_order_relaxed);
-        relaxedConfig.similarityThreshold = relaxedThreshold;
-        auto retried = runVectorQuery(relaxedConfig);
-        if (retried && !retried.value().empty()) {
-            relaxedVectorRetryApplied.store(true, std::memory_order_relaxed);
-            relaxedVectorRetryThresholdMilli.store(
-                static_cast<int>(std::lround(static_cast<double>(relaxedThreshold) * 1000.0)),
-                std::memory_order_relaxed);
-            spdlog::debug(
-                "Vector search retry: relaxed threshold {:.3f} -> {:.3f} yielded {} results",
-                workingConfig.similarityThreshold, relaxedThreshold, retried.value().size());
-            return retried;
-        }
-
-        return primary;
-    };
+        makeQueryVectorWithRelaxedRetry(metadataRepo_, vectorDb_, workingConfig,
+                                        relaxedVectorRetryEnabled, relaxedVectorRetryStats);
 
     spdlog::debug("Query intent: {}, retrieval={}, zoom={} ({})", queryIntentToString(intent),
                   queryRetrievalModeToString(retrievalMode),
@@ -1947,7 +1976,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         auto collectIf = [&](std::future<Result<std::vector<ComponentResult>>>& future,
                              const char* name, std::atomic<uint64_t>& queryCount,
                              std::atomic<uint64_t>& avgTime) {
-            fanoutCollector.collectAndRecord(future, name, queryCount, avgTime);
+            return fanoutCollector.collectAndRecord(future, name, queryCount, avgTime);
         };
         auto waitForFanout = [&]() {
             for (auto* future : {&fanout.text, &fanout.path, &fanout.tag, &fanout.metadata,
@@ -2302,14 +2331,20 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     std::llround(static_cast<double>(tier1TopTextScore) * 1000.0)));
 
             std::size_t topologyVectorGlobalFillCount = 0;
-            // Owned by the posted vector work and adopted into `vectorStage` after collection, so
-            // the work never writes into this frame.
-            std::shared_ptr<detail::VectorStageOutcome> vectorStageOutcome;
+            // Owned by the posted vector work and adopted into `vectorStage` only once the
+            // component has finished, so the work never writes into this frame: the request is
+            // moved into the lambda, and the query wrapper, its config and its relaxed-retry stats
+            // live in the shared state rather than in frame locals or the engine.
+            std::shared_ptr<VectorStageState> vectorStageState;
             if (queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()) {
-                vectorStageOutcome = std::make_shared<detail::VectorStageOutcome>();
+                vectorStageState = std::make_shared<VectorStageState>();
+                vectorStageState->config = workingConfig;
+                vectorStageState->relaxedRetryEnabled = relaxedVectorRetryEnabled;
                 detail::VectorStageRequest vectorStageRequest;
                 vectorStageRequest.queryEmbedding = queryEmbedding.value();
-                vectorStageRequest.queryVector = queryVectorWithRelaxedRetry;
+                vectorStageRequest.queryVector = makeQueryVectorWithRelaxedRetry(
+                    metadataRepo_, vectorDb_, vectorStageState->config,
+                    vectorStageState->relaxedRetryEnabled, vectorStageState->relaxedRetry);
                 vectorStageRequest.baselineCandidates = baselineTier2Candidates;
                 vectorStageRequest.shadow = topologyVectorShadow;
                 vectorStageRequest.augment = topologyVectorAugment;
@@ -2328,14 +2363,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 vectorStageRequest.certificate = topologyRouteCertificate;
                 vectorStageRequest.allowedDocuments = topologyRouteAllowedDocuments;
                 vectorStageRequest.allowedDocumentGroups = topologyRouteAllowedDocumentGroups;
-                fanout.vector = schedule(
-                    "vector", workingConfig.vectorWeight, stats_.vectorQueries,
-                    stats_.avgVectorTimeMicros,
-                    [request = std::move(vectorStageRequest), outcome = vectorStageOutcome]() {
-                        YAMS_ZONE_SCOPED_N("component::vector");
-                        *outcome = detail::runVectorCandidateStage(request);
-                        return std::move(outcome->results);
-                    });
+                fanout.vector =
+                    schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
+                             stats_.avgVectorTimeMicros,
+                             [request = std::move(vectorStageRequest), state = vectorStageState]() {
+                                 YAMS_ZONE_SCOPED_N("component::vector");
+                                 state->outcome = detail::runVectorCandidateStage(request);
+                                 return std::move(state->outcome.results);
+                             });
 
                 fanout.entityVector = schedule(
                     "entity_vector", workingConfig.entityVectorWeight, stats_.entityVectorQueries,
@@ -2362,10 +2397,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
 
             // Collect Tier 2 results (always collect, never skip)
-            collectIf(fanout.vector, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
-            // Adopt the stage outcome now that the component has been collected.
-            if (vectorStageOutcome) {
-                vectorStage = std::move(*vectorStageOutcome);
+            const auto vectorStatus = collectIf(fanout.vector, "vector", stats_.vectorQueries,
+                                                stats_.avgVectorTimeMicros);
+            // Adopt the stage state only when the posted work has finished (its future was ready,
+            // with a result or an error). After a timeout or cancellation the work may still be
+            // running and keeps writing into its own state, which is dropped with the shared_ptr;
+            // `vectorStage` then stays default-valued, so the diagnostics merge and the route-work
+            // application below are no-ops.
+            if (vectorStageState && (vectorStatus == detail::ComponentStatus::Success ||
+                                     vectorStatus == detail::ComponentStatus::Failed)) {
+                vectorStage = std::move(vectorStageState->outcome);
+                relaxedVectorRetryStats = vectorStageState->relaxedRetry;
             }
             // vector_search_* reports the global queries plus committed (Narrow) or unioned
             // (Augment) routed queries. Shadow's routed query is counterfactual: it feeds the
@@ -4095,12 +4137,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats["strong_vector_only_penalty"] =
         fmt::format("{:.3f}", workingConfig.strongVectorOnlyPenalty);
     response.debugStats["relaxed_vector_retry_enabled"] = relaxedVectorRetryEnabled ? "1" : "0";
-    const bool relaxedRetryAttemptedFinal =
-        relaxedVectorRetryAttempted.load(std::memory_order_relaxed);
-    const bool relaxedRetryAppliedFinal = relaxedVectorRetryApplied.load(std::memory_order_relaxed);
-    const int relaxedPrimaryHitFinal = relaxedVectorPrimaryHitCount.load(std::memory_order_relaxed);
-    const int relaxedRetryThresholdMilliFinal =
-        relaxedVectorRetryThresholdMilli.load(std::memory_order_relaxed);
+    const bool relaxedRetryAttemptedFinal = relaxedVectorRetryStats.attempted;
+    const bool relaxedRetryAppliedFinal = relaxedVectorRetryStats.applied;
+    const int relaxedPrimaryHitFinal = relaxedVectorRetryStats.primaryHitCount;
+    const int relaxedRetryThresholdMilliFinal = relaxedVectorRetryStats.retryThresholdMilli;
     response.debugStats["relaxed_vector_retry_attempted"] = relaxedRetryAttemptedFinal ? "1" : "0";
     response.debugStats["relaxed_vector_retry_applied"] = relaxedRetryAppliedFinal ? "1" : "0";
     response.debugStats["relaxed_vector_primary_hit_count"] =
