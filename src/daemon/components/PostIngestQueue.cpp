@@ -513,6 +513,7 @@ void PostIngestQueue::resumeStage(Stage stage) {
     YAMS_PRECONDITION(idx < kStageCount, "resumeStage requires a valid PostIngestQueue::Stage");
     stagePaused_[idx].store(false, std::memory_order_release);
     refreshStageAvailability();
+    signalWakeTimer(stage);
     spdlog::info("[PostIngestQueue] Resumed {} stage", kStageNames[idx]);
 }
 
@@ -524,18 +525,22 @@ bool PostIngestQueue::isStagePaused(Stage stage) const {
 
 void PostIngestQueue::setKnowledgeGraphEnabled(bool enabled) {
     std::size_t cancelled = 0;
+    bool wasEnabled = false;
     {
         // Serialize enablement changes with KG admission so that no producer can publish a job
         // after disablement returns. Explicit disablement is outside the pipeline and therefore
         // clears deferred jobs without recording pipeline drops.
         std::lock_guard<std::mutex> lock(pendingKgMutex_);
-        knowledgeGraphEnabled_.store(enabled, std::memory_order_release);
+        wasEnabled = knowledgeGraphEnabled_.exchange(enabled, std::memory_order_acq_rel);
         if (!enabled) {
             cancelled = pendingKgJobs_.size();
             pendingKgJobs_.clear();
         }
     }
     refreshStageAvailability();
+    if (enabled && !wasEnabled) {
+        signalWakeTimer(Stage::KnowledgeGraph);
+    }
     if (cancelled > 0) {
         spdlog::info(
             "[PostIngestQueue] KnowledgeGraph dispatch disabled (cancelled {} deferred jobs)",
@@ -563,6 +568,7 @@ void PostIngestQueue::resumeAll() {
         stagePaused_[i].store(false, std::memory_order_release);
     }
     refreshStageAvailability();
+    signalAllWakeTimers();
     spdlog::info("[PostIngestQueue] All stages resumed (normal operation)");
 }
 
@@ -577,6 +583,9 @@ void PostIngestQueue::setEntityProviders(
         hasProviders = !entityProviders_.empty();
     }
     refreshStageAvailability();
+    if (!hadProviders && hasProviders) {
+        signalWakeTimer(Stage::Entity);
+    }
 
     if (!hadProviders && hasProviders && processed_.load(std::memory_order_relaxed) > 0) {
         requeueMissedEntityExtractions();
@@ -584,11 +593,18 @@ void PostIngestQueue::setEntityProviders(
 }
 
 void PostIngestQueue::setTitleExtractor(search::EntityExtractionFunc extractor) {
+    bool hadExtractor = false;
+    bool hasExtractor = false;
     {
         std::lock_guard<std::mutex> lock(titleExtractorMutex_);
+        hadExtractor = static_cast<bool>(titleExtractor_);
         titleExtractor_ = std::move(extractor);
+        hasExtractor = static_cast<bool>(titleExtractor_);
     }
     refreshStageAvailability();
+    if (!hadExtractor && hasExtractor) {
+        signalWakeTimer(Stage::Title);
+    }
 }
 
 search::EntityExtractionFunc PostIngestQueue::getTitleExtractor() const {
