@@ -84,8 +84,12 @@ public:
     ComponentStatus collect(Future& future, const char* name, std::atomic<uint64_t>& queryCount,
                             std::atomic<uint64_t>& avgTime);
 
-    void collectAndRecord(Future& future, const char* name, std::atomic<uint64_t>& queryCount,
-                          std::atomic<uint64_t>& avgTime);
+    /// `collect` plus bookkeeping of failed/timed-out component names. Returns the status so the
+    /// caller knows whether the posted work has finished (Success/Failed) or may still be running
+    /// (TimedOut/Canceled) and must not be read from.
+    ComponentStatus collectAndRecord(Future& future, const char* name,
+                                     std::atomic<uint64_t>& queryCount,
+                                     std::atomic<uint64_t>& avgTime);
 
 private:
     [[nodiscard]] bool cancellable() const noexcept {

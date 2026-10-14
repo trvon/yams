@@ -93,15 +93,16 @@ ComponentStatus ComponentFanoutCollector::collect(Future& future, const char* na
     }
 }
 
-void ComponentFanoutCollector::collectAndRecord(Future& future, const char* name,
-                                                std::atomic<uint64_t>& queryCount,
-                                                std::atomic<uint64_t>& avgTime) {
+ComponentStatus ComponentFanoutCollector::collectAndRecord(Future& future, const char* name,
+                                                           std::atomic<uint64_t>& queryCount,
+                                                           std::atomic<uint64_t>& avgTime) {
     const auto status = collect(future, name, queryCount, avgTime);
     if (status == ComponentStatus::Failed) {
         sinks_.failed.push_back(name);
     } else if (status == ComponentStatus::TimedOut) {
         sinks_.timedOut.push_back(name);
     }
+    return status;
 }
 
 } // namespace yams::search::detail
