@@ -123,9 +123,10 @@ public:
         boost::asio::any_io_executor cli_executor{};
         std::function<void(bool)> worker_job_signal{};
 
-        // Optional counter for health-check/ping connections (excluded from idle detection).
-        // Incremented when a PingRequest or StatusRequest is identified, decremented on completion.
+        // Optional counters for executing requests. Each is incremented only after the socket is
+        // validated and decremented when request processing, streaming, or error handling ends.
         std::atomic<uint64_t>* health_check_counter = nullptr;
+        std::atomic<uint64_t>* active_non_health_request_counter = nullptr;
 
         // Optional request-admission hook for protocol-level backpressure on persistent
         // connections. When set, rejected requests receive an immediate unary ErrorResponse and

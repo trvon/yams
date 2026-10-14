@@ -1291,6 +1291,26 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Real-service registry controls have process-global publication and bootstrap costs.
+  catch2_tuning_registry_activity_exe = executable('catch2_tuning_registry_activity',
+    files('unit/daemon/tuning_registry_activity_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Real proxy request wiring owns service executors and a separate socket I/O context.
+  catch2_socket_proxy_request_activity_exe = executable('catch2_socket_proxy_request_activity',
+    files('unit/daemon/socket_proxy_request_activity_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_tuning_reconciliation_exe = executable('catch2_tuning_reconciliation',
     files('unit/daemon/tuning_reconciliation_catch2_test.cpp'),
     include_directories: incs,
@@ -4028,6 +4048,30 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'tune', 'allocation'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
+  )
+
+  test('tuning_registry_activity', catch2_tuning_registry_activity_exe,
+    suite: ['catch2', 'slow', 'daemon', 'tune', 'registry', 'activity'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+      'YAMS_TESTING': '1',
+    },
+    timeout: 120,
+    is_parallel: false
+  )
+
+  test('socket_proxy_request_activity', catch2_socket_proxy_request_activity_exe,
+    suite: ['catch2', 'slow', 'daemon', 'socket', 'proxy', 'activity'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+      'YAMS_TESTING': '1',
+    },
+    timeout: 120,
+    is_parallel: false
   )
 
   test('tuning_reconciliation', catch2_tuning_reconciliation_exe,

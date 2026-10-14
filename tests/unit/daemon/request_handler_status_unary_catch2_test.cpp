@@ -3,7 +3,9 @@
 // pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/ipc/message_framing.h>
+#include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/daemon/ipc/request_handler.h>
 
 #include <boost/asio.hpp>
@@ -11,10 +13,15 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <functional>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -91,6 +98,291 @@ private:
         };
         return Response{std::in_place_type<SearchResponse>, std::move(response)};
     }
+};
+
+class EntrySignal {
+public:
+    void notify() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++count_;
+        cv_.notify_all();
+    }
+
+    bool waitFor(std::size_t count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [&] { return count_ >= count; });
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::size_t count_{0};
+};
+
+class AsyncGate {
+public:
+    boost::asio::awaitable<void> wait() {
+        auto executor = co_await boost::asio::this_coro::executor;
+        auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+        timer->expires_at(boost::asio::steady_timer::time_point::max());
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++entered_;
+            cv_.notify_all();
+            if (released_) {
+                co_return;
+            }
+            waiters_.push_back(timer);
+        }
+
+        // This gate is used only by the harness's single io_context runner. A posted release
+        // cannot cancel this timer before async_wait is initiated on that same executor.
+        boost::system::error_code error;
+        co_await timer->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, error));
+    }
+
+    bool waitForEntrants(std::size_t count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [&] { return entered_ >= count; });
+    }
+
+    void release() {
+        std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            released_ = true;
+            waiters.swap(waiters_);
+        }
+        for (const auto& timer : waiters) {
+            boost::asio::post(timer->get_executor(), [timer] {
+                boost::system::error_code ignored;
+                timer->cancel(ignored);
+            });
+        }
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool released_{false};
+    std::size_t entered_{0};
+    std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters_;
+};
+
+class RequestLifecycleSignal {
+public:
+    void onJob(bool started) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (started) {
+            ++started_;
+        } else {
+            ++finished_;
+        }
+        cv_.notify_all();
+    }
+
+    bool waitForStarted(std::size_t count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [&] { return started_ >= count; });
+    }
+
+    bool waitForFinished(std::size_t count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [&] { return finished_ >= count; });
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::size_t started_{0};
+    std::size_t finished_{0};
+};
+
+class BlockingActivityProcessor final : public RequestProcessor {
+public:
+    boost::asio::awaitable<Response> process(const Request& request) override {
+        if (std::holds_alternative<StatusRequest>(request)) {
+            co_await healthGate_.wait();
+            StatusResponse response{};
+            response.running = true;
+            response.ready = true;
+            response.version = "test";
+            response.overallStatus = "ready";
+            co_return Response{std::in_place_type<StatusResponse>, std::move(response)};
+        }
+
+        unaryEntered_.fetch_add(1, std::memory_order_release);
+        co_await queryGate_.wait();
+        co_return makeSearchResponse();
+    }
+
+    boost::asio::awaitable<std::optional<Response>>
+    process_streaming(const Request& request) override {
+        if (std::holds_alternative<SearchRequest>(request)) {
+            streamingEntered_.fetch_add(1, std::memory_order_release);
+            co_await queryGate_.wait();
+            co_return makeSearchResponse();
+        }
+        co_return co_await RequestProcessor::process_streaming(request);
+    }
+
+    bool supports_streaming(const Request& request) const override {
+        return std::holds_alternative<SearchRequest>(request);
+    }
+
+    [[nodiscard]] int unaryEntered() const { return unaryEntered_.load(std::memory_order_acquire); }
+    [[nodiscard]] int streamingEntered() const {
+        return streamingEntered_.load(std::memory_order_acquire);
+    }
+    AsyncGate& queryGate() { return queryGate_; }
+    AsyncGate& healthGate() { return healthGate_; }
+    void releaseAll() {
+        healthGate_.release();
+        queryGate_.release();
+    }
+
+private:
+    static Response makeSearchResponse() {
+        SearchResponse response;
+        response.totalCount = 0;
+        return Response{std::in_place_type<SearchResponse>, std::move(response)};
+    }
+
+    AsyncGate queryGate_;
+    AsyncGate healthGate_;
+    std::atomic<int> unaryEntered_{0};
+    std::atomic<int> streamingEntered_{0};
+};
+
+class CancelableSearchProcessor final : public RequestProcessor {
+public:
+    boost::asio::awaitable<Response> process(const Request& request) override {
+        const auto* search = std::get_if<SearchRequest>(&request);
+        cancellationSignalPresent_.store(search && search->cancellationSignal,
+                                         std::memory_order_release);
+        cancellationSignal_ = search ? search->cancellationSignal : nullptr;
+        co_await gate_.wait();
+        if (cancellationSignal_ && cancellationSignal_->load(std::memory_order_acquire)) {
+            cancellationObserved_.notify();
+        }
+        SearchResponse response;
+        co_return Response{std::in_place_type<SearchResponse>, std::move(response)};
+    }
+
+    bool supports_streaming(const Request&) const override { return false; }
+    AsyncGate& gate() { return gate_; }
+    bool waitForCancellation(std::chrono::milliseconds timeout) {
+        return cancellationObserved_.waitFor(1, timeout);
+    }
+    [[nodiscard]] bool cancellationSignalPresent() const {
+        return cancellationSignalPresent_.load(std::memory_order_acquire);
+    }
+    void releaseAll() { gate_.release(); }
+
+private:
+    AsyncGate gate_;
+    EntrySignal cancellationObserved_;
+    std::shared_ptr<const std::atomic<bool>> cancellationSignal_;
+    std::atomic<bool> cancellationSignalPresent_{false};
+};
+
+class ThrowingProcessor final : public RequestProcessor {
+public:
+    boost::asio::awaitable<Response> process(const Request&) override {
+        entered_.notify();
+        throw std::runtime_error("processor failure");
+        co_return SuccessResponse{"unreachable"};
+    }
+
+    bool waitForEntry(std::chrono::milliseconds timeout) { return entered_.waitFor(1, timeout); }
+
+private:
+    EntrySignal entered_;
+};
+
+class RequestHandlerHarness {
+public:
+    RequestHandlerHarness(std::shared_ptr<RequestProcessor> processor,
+                          RequestHandler::Config config, std::function<void()> releaseBlocked)
+        : client_(io_), server_(io_), work_(boost::asio::make_work_guard(io_)),
+          releaseBlocked_(std::move(releaseBlocked)) {
+        boost::asio::local::connect_pair(client_, server_);
+        handler_ = std::make_shared<RequestHandler>(std::move(processor), std::move(config));
+        auto serverSocket =
+            std::make_shared<boost::asio::local::stream_protocol::socket>(std::move(server_));
+        auto finished = std::make_shared<std::promise<void>>();
+        finished_ = finished->get_future();
+        boost::asio::co_spawn(
+            io_,
+            [handler = handler_, serverSocket, token = stopSource_.get_token(),
+             finished]() -> boost::asio::awaitable<void> {
+                co_await handler->handle_connection(serverSocket, token, 1);
+                finished->set_value();
+            },
+            boost::asio::detached);
+        ioThread_ = std::thread([this] { io_.run(); });
+    }
+
+    ~RequestHandlerHarness() { (void)shutdownAndJoin(std::chrono::milliseconds(250)); }
+
+    bool send(uint64_t requestId, Request request, bool expectsStreaming = false) {
+        Message message;
+        message.version = 1;
+        message.requestId = requestId;
+        message.expectsStreamingResponse = expectsStreaming;
+        message.payload = std::move(request);
+        std::vector<uint8_t> frame;
+        if (!framer_.frame_message_into(message, frame)) {
+            return false;
+        }
+        boost::system::error_code error;
+        boost::asio::write(client_, boost::asio::buffer(frame), error);
+        return !error;
+    }
+
+    void closeClient() {
+        boost::system::error_code ignored;
+        client_.close(ignored);
+    }
+
+    bool waitForHandlerExit(std::chrono::milliseconds timeout) {
+        return finished_.wait_for(timeout) == std::future_status::ready;
+    }
+
+    bool shutdownAndJoin(std::chrono::milliseconds timeout) {
+        if (joined_) {
+            return handlerExited_;
+        }
+        stopSource_.request_stop();
+        closeClient();
+        if (releaseBlocked_) {
+            releaseBlocked_();
+        }
+        handlerExited_ = waitForHandlerExit(timeout);
+        work_.reset();
+        if (!handlerExited_) {
+            io_.stop();
+        }
+        if (ioThread_.joinable()) {
+            ioThread_.join();
+        }
+        joined_ = true;
+        return handlerExited_;
+    }
+
+private:
+    boost::asio::io_context io_;
+    boost::asio::local::stream_protocol::socket client_;
+    boost::asio::local::stream_protocol::socket server_;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_;
+    std::shared_ptr<RequestHandler> handler_;
+    yams::compat::stop_source stopSource_;
+    MessageFramer framer_{1024 * 1024};
+    std::future<void> finished_;
+    std::thread ioThread_;
+    std::function<void()> releaseBlocked_;
+    bool joined_{false};
+    bool handlerExited_{false};
 };
 
 } // namespace
@@ -253,6 +545,191 @@ TEST_CASE("RequestHandler: one-shot list header does not repeat final entries",
     }
     work.reset();
     ioThread.join();
+}
+
+TEST_CASE("RequestHandler: multiplexed request activity tracks executing non-health work",
+          "[daemon][ipc][activity][multiplex]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    StateComponent state;
+    state.stats.activeConnections.store(1, std::memory_order_relaxed);
+    RequestLifecycleSignal lifecycle;
+
+    RequestHandler::Config config;
+    config.enable_multiplexing = true;
+    config.enable_streaming = true;
+    config.health_check_counter = &state.stats.healthCheckConnections;
+    config.active_non_health_request_counter = &state.stats.activeNonHealthRequests;
+    config.worker_job_signal = [&](bool started) { lifecycle.onJob(started); };
+
+    auto processor = std::make_shared<BlockingActivityProcessor>();
+    RequestHandlerHarness harness(processor, config, [processor] { processor->releaseAll(); });
+
+    REQUIRE(harness.send(
+        101, Request{std::in_place_type<SearchRequest>, SearchRequest{.query = "unary"}}, false));
+    REQUIRE(harness.send(
+        102, Request{std::in_place_type<SearchRequest>, SearchRequest{.query = "streaming"}},
+        true));
+    REQUIRE(processor->queryGate().waitForEntrants(2, std::chrono::seconds(2)));
+    REQUIRE(lifecycle.waitForStarted(2, std::chrono::seconds(2)));
+    CHECK(processor->unaryEntered() == 1);
+    CHECK(processor->streamingEntered() == 1);
+    CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 2);
+    CHECK(state.stats.activeConnections.load(std::memory_order_relaxed) == 1);
+
+    REQUIRE(harness.send(103, Request{std::in_place_type<StatusRequest>, StatusRequest{}}, true));
+    REQUIRE(processor->healthGate().waitForEntrants(1, std::chrono::seconds(2)));
+    REQUIRE(lifecycle.waitForStarted(3, std::chrono::seconds(2)));
+    CHECK(state.stats.healthCheckConnections.load(std::memory_order_relaxed) == 1);
+    CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 2);
+
+    processor->healthGate().release();
+    REQUIRE(lifecycle.waitForFinished(1, std::chrono::seconds(2)));
+    CHECK(state.stats.healthCheckConnections.load(std::memory_order_relaxed) == 0);
+    CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 2);
+
+    processor->queryGate().release();
+    REQUIRE(lifecycle.waitForFinished(3, std::chrono::seconds(2)));
+    CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 0);
+    CHECK(state.stats.activeConnections.load(std::memory_order_relaxed) == 1);
+    CHECK(harness.shutdownAndJoin(std::chrono::seconds(2)));
+}
+
+TEST_CASE("RequestHandler: unopened socket skips processing and preserves activity counters",
+          "[daemon][ipc][activity][early-error]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    StateComponent state;
+    state.stats.healthCheckConnections.store(13, std::memory_order_relaxed);
+    state.stats.activeNonHealthRequests.store(17, std::memory_order_relaxed);
+    std::atomic<int> workerSignals{0};
+    auto processor = std::make_shared<CountingProcessor>();
+    RequestHandler::Config config;
+    config.health_check_counter = &state.stats.healthCheckConnections;
+    config.active_non_health_request_counter = &state.stats.activeNonHealthRequests;
+    config.worker_job_signal = [&](bool) { workerSignals.fetch_add(1); };
+    auto handler = std::make_shared<RequestHandler>(processor, config);
+    const std::array<Request, 2> requests{
+        Request{std::in_place_type<SearchRequest>, SearchRequest{.query = "closed"}},
+        Request{std::in_place_type<StatusRequest>, StatusRequest{}}};
+
+    // Handler, requests and borrowed counter/signal storage outlive each io_context, including
+    // failed REQUIRE cleanup. No thread, private flag or processor policy emulates the error.
+    for (const auto& request : requests) {
+        boost::asio::io_context io;
+        boost::asio::local::stream_protocol::socket unopened(io);
+        REQUIRE_FALSE(unopened.is_open());
+        auto result = boost::asio::co_spawn(io, handler->handle_request(unopened, request, 1),
+                                            boost::asio::use_future);
+        io.run_for(std::chrono::milliseconds(250));
+        REQUIRE(result.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready);
+        const auto outcome = result.get();
+        REQUIRE_FALSE(outcome.has_value());
+        CHECK(outcome.error().code == yams::ErrorCode::NetworkError);
+        CHECK(outcome.error().message == "Socket closed");
+        CHECK(workerSignals.load() == 0);
+        CHECK(processor->unary_calls() == 0);
+        CHECK(processor->streaming_calls() == 0);
+        CHECK(state.stats.healthCheckConnections.load(std::memory_order_relaxed) == 13);
+        CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 17);
+    }
+}
+
+TEST_CASE("RequestHandler: processor exception releases non-health request activity",
+          "[daemon][ipc][activity][exception]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    StateComponent state;
+    state.stats.activeConnections.store(1, std::memory_order_relaxed);
+    RequestLifecycleSignal lifecycle;
+    RequestHandler::Config config;
+    config.enable_multiplexing = true;
+    config.enable_streaming = false;
+    config.active_non_health_request_counter = &state.stats.activeNonHealthRequests;
+    config.worker_job_signal = [&](bool started) { lifecycle.onJob(started); };
+
+    auto processor = std::make_shared<ThrowingProcessor>();
+    RequestHandlerHarness harness(processor, config, [] {});
+    REQUIRE(harness.send(
+        201, Request{std::in_place_type<SearchRequest>, SearchRequest{.query = "throw"}}));
+    REQUIRE(processor->waitForEntry(std::chrono::seconds(2)));
+    REQUIRE(lifecycle.waitForStarted(1, std::chrono::seconds(2)));
+    REQUIRE(lifecycle.waitForFinished(1, std::chrono::seconds(2)));
+    CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 0);
+    CHECK(state.stats.activeConnections.load(std::memory_order_relaxed) == 1);
+    CHECK(harness.shutdownAndJoin(std::chrono::seconds(2)));
+}
+
+TEST_CASE("RequestHandler: explicit cancellation releases non-health request activity",
+          "[daemon][ipc][activity][cancel]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    constexpr uint64_t kRequestId = 301;
+    StateComponent state;
+    state.stats.activeConnections.store(1, std::memory_order_relaxed);
+    RequestLifecycleSignal lifecycle;
+    RequestHandler::Config config;
+    config.enable_multiplexing = true;
+    config.enable_streaming = false;
+    config.active_non_health_request_counter = &state.stats.activeNonHealthRequests;
+    config.worker_job_signal = [&](bool started) { lifecycle.onJob(started); };
+
+    auto processor = std::make_shared<CancelableSearchProcessor>();
+    RequestHandlerHarness harness(processor, config, [processor] { processor->releaseAll(); });
+    REQUIRE(harness.send(
+        kRequestId, Request{std::in_place_type<SearchRequest>, SearchRequest{.query = "cancel"}}));
+    REQUIRE(processor->gate().waitForEntrants(1, std::chrono::seconds(2)));
+    REQUIRE(lifecycle.waitForStarted(1, std::chrono::seconds(2)));
+    REQUIRE(processor->cancellationSignalPresent());
+    CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 1);
+    REQUIRE(RequestContextRegistry::instance().cancel(kRequestId));
+
+    processor->gate().release();
+    REQUIRE(processor->waitForCancellation(std::chrono::seconds(2)));
+    REQUIRE(lifecycle.waitForFinished(1, std::chrono::seconds(2)));
+    CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 0);
+    CHECK(state.stats.activeConnections.load(std::memory_order_relaxed) == 1);
+    CHECK(harness.shutdownAndJoin(std::chrono::seconds(2)));
+}
+
+TEST_CASE("RequestHandler: disconnect releases non-health request activity",
+          "[daemon][ipc][activity][disconnect]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    StateComponent state;
+    state.stats.activeConnections.store(1, std::memory_order_relaxed);
+    RequestLifecycleSignal lifecycle;
+    RequestHandler::Config config;
+    config.enable_multiplexing = true;
+    config.enable_streaming = false;
+    config.active_non_health_request_counter = &state.stats.activeNonHealthRequests;
+    config.worker_job_signal = [&](bool started) { lifecycle.onJob(started); };
+
+    auto processor = std::make_shared<CancelableSearchProcessor>();
+    RequestHandlerHarness harness(processor, config, [processor] { processor->releaseAll(); });
+    REQUIRE(harness.send(
+        401, Request{std::in_place_type<SearchRequest>, SearchRequest{.query = "disconnect"}}));
+    REQUIRE(processor->gate().waitForEntrants(1, std::chrono::seconds(2)));
+    REQUIRE(lifecycle.waitForStarted(1, std::chrono::seconds(2)));
+    CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 1);
+
+    harness.closeClient();
+    REQUIRE(harness.waitForHandlerExit(std::chrono::seconds(2)));
+    processor->gate().release();
+    REQUIRE(processor->waitForCancellation(std::chrono::seconds(2)));
+    REQUIRE(lifecycle.waitForFinished(1, std::chrono::seconds(2)));
+    CHECK(state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 0);
+    CHECK(harness.shutdownAndJoin(std::chrono::seconds(2)));
 }
 
 TEST_CASE("RequestHandler: one-shot search header does not repeat final results",

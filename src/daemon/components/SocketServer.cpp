@@ -290,6 +290,7 @@ RequestHandler::Config SocketServer::makeHandlerConfig(bool isProxy,
 
     if (state_) {
         handlerConfig.health_check_counter = &state_->stats.healthCheckConnections;
+        handlerConfig.active_non_health_request_counter = &state_->stats.activeNonHealthRequests;
     }
     return handlerConfig;
 }
