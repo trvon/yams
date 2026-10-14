@@ -186,7 +186,10 @@ class Mesh:
         log(f"payload: {', '.join(p.name for p in found.values())} + {len(libs)} bundled libs")
         return payload.parent
 
-    def write_compose(self, nodes: list[dict], image: str, log_level: str) -> None:
+    def write_compose(self, nodes: list[dict], image: str, log_level: str,
+                      cpus: float = 0.0, memory: str = "") -> None:
+        # cpus/memory are per-node cgroup limits (docker `cpus:` / `mem_limit:`). They model a
+        # small host; 0 / "" means unlimited.
         env = {
             "HOME": "/node/home",
             "XDG_CONFIG_HOME": "/node/xdg/config",
@@ -209,6 +212,8 @@ class Mesh:
                 "    init: true",
                 "    cap_add: [NET_ADMIN]",
                 "    stop_grace_period: 20s",
+                *([f"    cpus: {cpus}"] if cpus > 0 else []),
+                *([f"    mem_limit: {memory}"] if memory else []),
                 "    networks: [mesh]",
                 "    environment:",
                 *[f"      {k}: \"{v}\"" for k, v in env.items()],
@@ -259,8 +264,10 @@ class Mesh:
             "nodes": nodes,
             "docs": [],
             "extra_config": a.config or [],
+            "cpus": a.cpus,
+            "memory": a.memory,
         }
-        self.write_compose(nodes, image, a.log_level)
+        self.write_compose(nodes, image, a.log_level, a.cpus, a.memory)
         self.save()
         self.compose("up", "-d", "--no-build", capture=False)
 
@@ -425,6 +432,77 @@ class Mesh:
                 print(f"      apply: cycles={ap.get('cycles')} failed={ap.get('failed_cycles')} "
                       f"deferred={ap.get('deferred')} publish_skipped={ap.get('publish_skipped_cycles')}")
         return summary
+
+    # -- idle -----------------------------------------------------------
+    def cmd_idle(self, a) -> int:
+        """Sample per-node CPU% and RSS while no client talks to the mesh.
+
+        Writes idle.csv (one row per sample per node) and idle.json (mean/max per node) to
+        the artifacts dir. Exit 5 when a node's mean CPU% is above --max-cpu. The daemon is
+        the only process of note in a node, so `docker stats` is the node's daemon.
+        """
+        self.need_state()
+        if a.seconds < a.interval or a.interval < 1:
+            die("--seconds must be >= --interval >= 1")
+        out = Path(a.out) if a.out else self.work / "artifacts" / time.strftime("%Y%m%d-%H%M%S")
+        out.mkdir(parents=True, exist_ok=True)
+        names = {self.ctr(n): n["name"] for n in self.nodes}
+        rows: list[dict] = []
+        hottest: dict[str, tuple[float, str]] = {}
+        deadline = time.monotonic() + a.seconds
+        fmt = "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+        log(f"sampling {len(names)} nodes for {a.seconds}s every {a.interval}s"
+            + (f" (limits: cpus={self.state.get('cpus')} memory={self.state.get('memory')})"
+               if self.state.get("cpus") or self.state.get("memory") else ""))
+        while time.monotonic() < deadline:
+            t0 = time.monotonic()
+            res = run(["docker", "stats", "--no-stream", "--format", fmt, *names], check=False)
+            stamp = time.time()
+            for line in (res.stdout or "").splitlines():
+                parts = line.split("\t")
+                if len(parts) != 3 or parts[0] not in names:
+                    continue
+                cpu = float(parts[1].rstrip("%") or 0.0)
+                mem = parts[2].split("/")[0].strip()
+                rows.append({"t": stamp, "node": names[parts[0]], "cpu_pct": cpu, "mem": mem})
+                prev = hottest.get(names[parts[0]], (-1.0, ""))
+                if cpu > prev[0]:
+                    hottest[names[parts[0]]] = (cpu, parts[0])
+            time.sleep(max(0.0, a.interval - (time.monotonic() - t0)))
+        with (out / "idle.csv").open("w") as f:
+            f.write("t,node,cpu_pct,mem\n")
+            for r in rows:
+                f.write(f"{r['t']:.0f},{r['node']},{r['cpu_pct']:.2f},{r['mem']}\n")
+        summary: dict[str, dict] = {}
+        for n in self.nodes:
+            cpus = [r["cpu_pct"] for r in rows if r["node"] == n["name"]]
+            if not cpus:
+                continue
+            summary[n["name"]] = {
+                "samples": len(cpus),
+                "cpu_mean": round(sum(cpus) / len(cpus), 2),
+                "cpu_max": round(max(cpus), 2),
+                "mem_last": next(r["mem"] for r in reversed(rows) if r["node"] == n["name"]),
+            }
+        # Per-thread view of the hottest node so the pinning thread is named, not guessed.
+        if a.threads and hottest:
+            node = max(hottest, key=lambda k: hottest[k][0])
+            n = next(x for x in self.nodes if x["name"] == node)
+            top = self.exec(n, "sh", "-c", "top -H -b -n 1 -o %CPU 2>/dev/null | head -40",
+                            check=False).stdout or ""
+            (out / f"{node}-threads.txt").write_text(top)
+            summary[node]["threads_file"] = f"{node}-threads.txt"
+        (out / "idle.json").write_text(json.dumps(summary, indent=2))
+        rc = 0
+        for name, s in summary.items():
+            flag = ""
+            if a.max_cpu is not None and s["cpu_mean"] > a.max_cpu:
+                flag = f"  OVER --max-cpu {a.max_cpu}"
+                rc = 5
+            print(f"  {name}: cpu mean {s['cpu_mean']}% max {s['cpu_max']}% "
+                  f"mem {s['mem_last']} ({s['samples']} samples){flag}")
+        log(f"artifacts: {out}")
+        return rc
 
     # -- seed -----------------------------------------------------------
     def cmd_seed(self, a) -> None:
@@ -715,6 +793,10 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--log-level", default="info")
     up.add_argument("--force", action="store_true")
     up.add_argument("--project", help="compose project name (default: unique per run)")
+    up.add_argument("--cpus", type=float, default=0.0,
+                    help="per-node CPU limit, e.g. 2 (default: unlimited)")
+    up.add_argument("--memory", default="",
+                    help="per-node memory limit, e.g. 2g (default: unlimited)")
 
     seed = sub.add_parser("seed", help="add documents on every node")
     seed.add_argument("--docs-per-node", type=int, default=16)
@@ -752,6 +834,8 @@ def build_parser() -> argparse.ArgumentParser:
     rn.add_argument("--log-level", default="info")
     rn.add_argument("--force", action="store_true")
     rn.add_argument("--project", help="compose project name (default: unique per run)")
+    rn.add_argument("--cpus", type=float, default=0.0)
+    rn.add_argument("--memory", default="")
     rn.add_argument("--docs-per-node", type=int, default=40)
     rn.add_argument("--topics", type=int, default=8)
     rn.add_argument("--words", type=int, default=40)
@@ -764,6 +848,15 @@ def build_parser() -> argparse.ArgumentParser:
     rn.add_argument("--label")
     rn.add_argument("--out")
     rn.add_argument("--keep", action="store_true", help="leave the mesh up afterwards")
+
+    idl = sub.add_parser("idle", help="sample idle CPU and RSS per node; exit 5 over --max-cpu")
+    idl.add_argument("--seconds", type=int, default=300)
+    idl.add_argument("--interval", type=int, default=5)
+    idl.add_argument("--max-cpu", type=float, default=None,
+                     help="fail when a node's mean CPU%% exceeds this (percent of one core)")
+    idl.add_argument("--threads", action="store_true",
+                     help="also capture `top -H` of the hottest node")
+    idl.add_argument("--out")
 
     dn = sub.add_parser("down", help="remove containers, network, volumes")
     dn.add_argument("--keep-image", action="store_true", help="keep the built image")
@@ -786,6 +879,8 @@ def main() -> int:
         mesh.cmd_chaos(args)
     elif args.cmd == "run":
         return mesh.cmd_run(args)
+    elif args.cmd == "idle":
+        return mesh.cmd_idle(args)
     elif args.cmd == "down":
         mesh.cmd_down(args)
     return 0
