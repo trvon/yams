@@ -902,6 +902,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.road_beam_width"); it != kv.end()) {
                 policy.roadBeamWidth = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.road_walk_window"); it != kv.end()) {
+                policy.roadWalkWindow = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.expansion_output_limit"); it != kv.end()) {
                 policy.expansionOutputLimit = parseSize(it->second);
             }

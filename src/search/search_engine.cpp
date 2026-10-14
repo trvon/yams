@@ -2390,6 +2390,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 vectorStageRequest.roadDocumentGroups = topologyRoadDocumentGroups;
                 vectorStageRequest.roadQuotas = std::move(topologyRoadQuotas);
                 vectorStageRequest.roadResultLimit = topologyVectorResultLimit;
+                if (topologyVectorRouteOnly || topologyVectorAugment) {
+                    vectorStageRequest.roadWalkWindow = topologySession.roadWalkWindowRequested;
+                    vectorStageRequest.roadWalkIndex = topologySession.roadWalkIndex;
+                }
                 fanout.vector =
                     schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
                              stats_.avgVectorTimeMicros,
@@ -2488,6 +2492,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             if (topologySession.roadHopsRequested > 0) {
                 setDebug(response.debugStats, metrics::kTopologyRoadCandidatesAdded,
                          std::to_string(vectorStage.roadResultsAdded));
+            }
+            if (topologySession.roadWalkWindowRequested > 0) {
+                setDebug(response.debugStats, metrics::kTopologyRoadWalkWindowApplied,
+                         std::to_string(vectorStage.roadWalkWindowApplied));
+                setDebug(response.debugStats, metrics::kTopologyRoadWalkAnchors,
+                         std::to_string(vectorStage.roadWalkAnchors));
+                setDebug(response.debugStats, metrics::kTopologyRoadWalkCandidatesAdded,
+                         std::to_string(vectorStage.roadWalkResultsAdded));
             }
             setDebugBool(response.debugStats, metrics::kTopologyCandidateRescueAttempted,
                          vectorStage.rescueAttempted);

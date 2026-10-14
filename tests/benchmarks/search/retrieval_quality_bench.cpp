@@ -39,6 +39,12 @@
                                           Cap ranked lexical routing evidence
     YAMS_BENCH_TOPOLOGY_ROAD_HOPS=N        Road beam hops for route_only/augment (0 = off)
     YAMS_BENCH_TOPOLOGY_ROAD_BEAM_WIDTH=N  Clusters kept per road hop
+    YAMS_BENCH_TOPOLOGY_ROAD_WALK_WINDOW=N Positions walked around each routed hit along the
+                                          cluster walk order (route_only/augment; 0 = off)
+    YAMS_BENCH_TOPOLOGY_ROAD_MAX_PER_CLUSTER=N
+                                          Roads kept per cluster at topology build (0 = none)
+    YAMS_BENCH_TOPOLOGY_ROAD_ORDER=none|time|session|similarity_chain
+                                          Cluster walk order stored at topology build
     YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP=N.N
                                           Grow route prefix while scores remain near the best
     YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN=N.N
@@ -6266,6 +6272,12 @@ struct BenchFixture {
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_HOPS");
             const auto topologyRoadBeamWidthEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_BEAM_WIDTH");
+            const auto topologyRoadWalkWindowEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_WALK_WINDOW");
+            const auto topologyRoadMaxPerClusterEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_MAX_PER_CLUSTER");
+            const auto topologyRoadOrderEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_ORDER");
             const auto topologyBqCandidateLimitEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT");
             const auto topologyBqPrefixDimEnv =
@@ -6306,7 +6318,8 @@ struct BenchFixture {
                 (topologyEngineEnv && *topologyEngineEnv) ||
                 (topologyRepresentativesEnv && *topologyRepresentativesEnv) ||
                 (topologyBoundarySpillEnv && *topologyBoundarySpillEnv) ||
-                envSet(topologySgcHopsEnv) || envSet(topologyRepresentativeRuleEnv);
+                envSet(topologySgcHopsEnv) || envSet(topologyRepresentativeRuleEnv) ||
+                envSet(topologyRoadMaxPerClusterEnv) || envSet(topologyRoadOrderEnv);
             const bool writeTopologyRouteConfig =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_VECTOR_POLICY").has_value() ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING") != nullptr) ||
@@ -6316,6 +6329,7 @@ struct BenchFixture {
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS") != nullptr) ||
                 envSet(topologyRoadHopsEnv) || envSet(topologyRoadBeamWidthEnv) ||
+                envSet(topologyRoadWalkWindowEnv) ||
                 (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) ||
                 (topologyAnnCandidateLimitEnv && *topologyAnnCandidateLimitEnv) ||
                 envSet(topologyBqCandidateLimitEnv) || envSet(topologyBqPrefixDimEnv) ||
@@ -6663,6 +6677,14 @@ struct BenchFixture {
                                 << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_ROAD_BEAM_WIDTH", 4)
                                 << "\n";
                         }
+                        // Road walk arm (route_only / augment); unset keeps the product default
+                        // of no walk.
+                        if (envSet(topologyRoadWalkWindowEnv)) {
+                            configOut
+                                << "road_walk_window = "
+                                << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_ROAD_WALK_WINDOW", 0)
+                                << "\n";
+                        }
                         if (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) {
                             configOut << "representative_limit = "
                                       << parseSizeEnvOrDefault(
@@ -6833,6 +6855,17 @@ struct BenchFixture {
                             configOut << "sgc_hops = "
                                       << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_SGC_HOPS", 0)
                                       << "\n";
+                        }
+                        // Road network arms: roads per cluster and the walk order kind the build
+                        // stores (Eval 3 sets the order per arm).
+                        if (envSet(topologyRoadMaxPerClusterEnv)) {
+                            configOut << "road_max_per_cluster = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_ROAD_MAX_PER_CLUSTER", 0)
+                                      << "\n";
+                        }
+                        if (envSet(topologyRoadOrderEnv)) {
+                            configOut << "road_order = \"" << *topologyRoadOrderEnv << "\"\n";
                         }
                         if (topologyBoundarySpillEnv && *topologyBoundarySpillEnv) {
                             configOut << "boundary_spill = "

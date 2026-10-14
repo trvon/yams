@@ -79,6 +79,14 @@ struct VectorStageRequest {
     std::shared_ptr<const std::vector<std::unordered_set<std::string>>> roadDocumentGroups;
     std::vector<std::size_t> roadQuotas;
     std::size_t roadResultLimit{0};
+
+    // Road walk (TopologyRoutingSessionResult::roadWalkIndex). After the certified and road
+    // groups, RouteOnly and Augment expand every routed hit by `roadWalkWindow` positions along
+    // its cluster's walk order and score the walked documents as one more routed query, so their
+    // rows and distance evaluations land in the routed work like road candidates. Off when the
+    // window is 0 or the index is null. Never a Narrow filter and never part of the Shadow control.
+    std::size_t roadWalkWindow{0};
+    std::shared_ptr<const TopologyRoadWalkIndex> roadWalkIndex;
 };
 
 /// Where the stage's result set came from (vector_candidate_source_effective).
@@ -132,6 +140,11 @@ struct VectorStageOutcome {
     VectorCandidateSource candidateSource{VectorCandidateSource::Ann};
     /// Road-expanded documents appended to the routed result set (RouteOnly, Augment).
     std::size_t roadResultsAdded{0};
+    /// Road walk: the window walked with (0 when nothing was walkable), the routed hits that
+    /// anchored a window and the walked documents appended to the routed result set.
+    std::size_t roadWalkWindowApplied{0};
+    std::size_t roadWalkAnchors{0};
+    std::size_t roadWalkResultsAdded{0};
 
     // Narrow.
     bool filterApplied{false};

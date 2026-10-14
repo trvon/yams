@@ -558,6 +558,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.roadBeamWidth) {
             opts.config.topologyRoadBeamWidth = std::max<std::size_t>(1, *tp.roadBeamWidth);
         }
+        if (tp.roadWalkWindow) {
+            opts.config.topologyRoadWalkWindow = *tp.roadWalkWindow;
+        }
         if (tp.expansionOutputLimit) {
             opts.config.topologyExpansionOutputLimit = *tp.expansionOutputLimit;
         }
