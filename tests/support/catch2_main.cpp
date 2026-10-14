@@ -6,12 +6,20 @@
 #include "test_rusage.hpp"
 
 #include <algorithm>
+#include <filesystem>
+#include <system_error>
 #include <cstdio>
 #include <cstdlib>
 
 #include <string>
 #include <string_view>
 #include <vector>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 #if defined(_MSC_VER)
 #include <crtdbg.h>
@@ -134,10 +142,55 @@ CATCH_REGISTER_LISTENER(ResourceAccountingListener)
 
 } // namespace
 
+// Every test process gets its own session-state directory. SessionService reads the current
+// session (and its watch directories) from XDG_STATE_HOME, so without this a developer's or
+// build host's live session leaks into any test that boots a ServiceManager: the session watcher
+// then walks the pinned trees during init and the test times out. A caller that already set
+// XDG_STATE_HOME keeps it.
+class IsolatedStateHome {
+public:
+    IsolatedStateHome() {
+        if (const char* existing = std::getenv("XDG_STATE_HOME"); existing && existing[0] != '\0') {
+            return;
+        }
+        std::error_code ec;
+        auto base = std::filesystem::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+#if defined(_WIN32)
+        const auto pid = static_cast<unsigned long long>(::_getpid());
+#else
+        const auto pid = static_cast<unsigned long long>(::getpid());
+#endif
+        dir_ = base / ("yams-test-state-" + std::to_string(pid));
+        std::filesystem::create_directories(dir_, ec);
+        if (ec) {
+            dir_.clear();
+            return;
+        }
+#if defined(_WIN32)
+        _putenv_s("XDG_STATE_HOME", dir_.string().c_str());
+#else
+        ::setenv("XDG_STATE_HOME", dir_.c_str(), 1);
+#endif
+    }
+    ~IsolatedStateHome() {
+        if (!dir_.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(dir_, ec);
+        }
+    }
+
+private:
+    std::filesystem::path dir_;
+};
+
 int main(int argc, char* argv[]) {
 #if defined(_MSC_VER)
     reportCrtFailuresToStderr();
 #endif
+    IsolatedStateHome isolatedState;
     auto args = normalizeArgs(argc, argv);
     std::vector<char*> normalizedArgv;
     normalizedArgv.reserve(args.size());
