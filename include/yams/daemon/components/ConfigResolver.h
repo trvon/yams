@@ -173,6 +173,9 @@ public:
         /// `topology.road_max_per_cluster`: cluster roads kept per cluster at build time. Unset
         /// or 0 computes no roads.
         std::optional<std::size_t> roadMaxPerCluster;
+        /// `topology.road_order` = none|time|session|similarity_chain: walk order stored on every
+        /// cluster at build time. Unset keeps None (no order).
+        std::optional<topology::RoadOrderKind> roadOrder;
         std::optional<bool> featureEntityFusion;
         std::optional<std::size_t> featureEntitySignatureK;
         std::optional<float> featureEntityFusionAlpha;

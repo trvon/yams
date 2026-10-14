@@ -1,6 +1,7 @@
 #include <yams/profiling.h>
 #include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_baseline.h>
+#include <yams/topology/topology_member_order.h>
 #include <yams/topology/topology_representatives.h>
 #include <yams/topology/topology_sgc.h>
 #include <yams/vector/binary_quantization.h>
@@ -400,6 +401,8 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
         effectiveDocuments, detail::primaryClusterByHash(batch), config.roadMaxPerCluster);
     batch.roadMaxPerCluster = batch.roads.empty() ? 0 : config.roadMaxPerCluster;
     (void)applyOrthogonalBoundarySpill(effectiveDocuments, config, batch);
+    // After spill: the order is a permutation over the final member list, replicas included.
+    applyClusterMemberOrders(batch, effectiveDocuments, config.roadOrder);
 
     return batch;
 }
@@ -732,6 +735,17 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
                                          ? existing.topologyEpoch
                                          : existing.roadsFullBuildEpoch;
         merged.roadsIncrementalPasses = existing.roadsIncrementalPasses + 1;
+    }
+
+    // Member orders: the rebuilt clusters carry the order the region build computed over their
+    // final members; untouched clusters keep the order they had, like the representative rule a
+    // kind change only reaches them on the next full rebuild. None clears every order.
+    merged.orderUnavailableReason.clear();
+    if (config.roadOrder == RoadOrderKind::None) {
+        for (auto& cluster : merged.clusters) {
+            cluster.orderKind = RoadOrderKind::None;
+            cluster.orderedMembers.clear();
+        }
     }
 
     if (stats != nullptr) {

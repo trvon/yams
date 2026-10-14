@@ -1097,6 +1097,14 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         if (auto it = kv.find("topology.road_max_per_cluster"); it != kv.end()) {
             policy.roadMaxPerCluster = parseSize(it->second);
         }
+        if (auto it = kv.find("topology.road_order"); it != kv.end()) {
+            policy.roadOrder = topology::parseRoadOrderKind(std::string(trimView(it->second)));
+            if (!policy.roadOrder) {
+                spdlog::warn("Ignoring topology.road_order='{}': expected none, time, session or "
+                             "similarity_chain",
+                             it->second);
+            }
+        }
         if (auto it = kv.find("topology.features.entity_fusion"); it != kv.end()) {
             policy.featureEntityFusion = parseBoolValue(it->second);
         }

@@ -1,5 +1,6 @@
 #include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_alternate_engines.h>
+#include <yams/topology/topology_member_order.h>
 #include <yams/topology/topology_representatives.h>
 #include <yams/topology/topology_sgc.h>
 
@@ -288,6 +289,8 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
     batch.roadMaxPerCluster = batch.roads.empty() ? 0 : config.roadMaxPerCluster;
 
     (void)applyOrthogonalBoundarySpill(documents, config, batch);
+    // After spill: the order is a permutation over the final member list, replicas included.
+    applyClusterMemberOrders(batch, documents, config.roadOrder);
 
     return batch;
 }
