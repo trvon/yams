@@ -2178,10 +2178,21 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 vectorBackendSupportsAllowedSetAnn ||
                 (vectorDb_ &&
                  vectorDb_->getConfig().search_engine == vector::VectorSearchEngine::ExactScan);
+            // RouteOnly serves uncertified routes, so it runs only behind the evaluation gate;
+            // without it the policy downgrades to Shadow and the debug stats say so.
+            const bool topologyVectorPolicyDowngraded =
+                workingConfig.topologyVectorPolicy ==
+                    SearchEngineConfig::TopologyVectorPolicy::RouteOnly &&
+                !workingConfig.allowUncertifiedRouteOnly;
+            const auto topologyVectorPolicy = topologyVectorPolicyDowngraded
+                                                  ? SearchEngineConfig::TopologyVectorPolicy::Shadow
+                                                  : workingConfig.topologyVectorPolicy;
+            const bool topologyVectorRouteOnly =
+                topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::RouteOnly;
             const bool deferTopologyMemberLimitToVectorRanker =
                 vectorBackendSupportsAllowedSetAnn &&
-                workingConfig.topologyVectorPolicy ==
-                    SearchEngineConfig::TopologyVectorPolicy::Narrow;
+                (topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Narrow ||
+                 topologyVectorRouteOnly);
             if (deferTopologyMemberLimitToVectorRanker) {
                 topologyAssistReq.config.topologyMaxDocs = 0;
             }
@@ -2203,10 +2214,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             topologySkipReason =
                 topologyFreshnessGatePassed ? topologyAssist.skipReason : "artifacts_not_fresh";
             topologyWeakQueryAddedCandidateHashes = topologySession.addedCandidateHashes;
-            const bool topologyVectorShadow = workingConfig.topologyVectorPolicy ==
-                                              SearchEngineConfig::TopologyVectorPolicy::Shadow;
-            const bool topologyVectorAugment = workingConfig.topologyVectorPolicy ==
-                                               SearchEngineConfig::TopologyVectorPolicy::Augment;
+            const bool topologyVectorShadow =
+                topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Shadow;
+            const bool topologyVectorAugment =
+                topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Augment;
             if (!topologyVectorShadow) {
                 topologyCandidateEvidence = deriveTopologyCandidateEvidence(
                     topologySession, workingConfig.topologyEvidenceWeight);
@@ -2214,8 +2225,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
             const bool topologyVectorFilterEligible =
                 !topologyVectorShadow && topologySession.certificate.eligibleForTrialNarrowing() &&
-                workingConfig.topologyVectorPolicy ==
-                    SearchEngineConfig::TopologyVectorPolicy::Narrow &&
+                topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Narrow &&
                 topologySession.certificate.hasUsefulRoute();
             const bool topologyVectorAllowedSetAnnEligible =
                 topologyVectorFilterEligible && vectorBackendSupportsAllowedSetAnn;
@@ -2229,6 +2239,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             setDebug(response.debugStats, metrics::kTopologyVectorPolicy,
                      SearchEngineConfig::topologyVectorPolicyToString(
                          workingConfig.topologyVectorPolicy));
+            if (topologyVectorPolicyDowngraded) {
+                setDebug(response.debugStats, metrics::kTopologyVectorPolicyDowngraded,
+                         "uncertified");
+            }
             setDebug(response.debugStats, metrics::kTopologyExpansionOutputBudget,
                      std::to_string(topologyVectorResultLimit));
             response.debugStats["topology_vector_seed_probe"] =
@@ -2348,6 +2362,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 vectorStageRequest.baselineCandidates = baselineTier2Candidates;
                 vectorStageRequest.shadow = topologyVectorShadow;
                 vectorStageRequest.augment = topologyVectorAugment;
+                vectorStageRequest.routeOnly = topologyVectorRouteOnly;
                 vectorStageRequest.filterEligible = topologyVectorFilterEligible;
                 vectorStageRequest.allowedSetAnnEligible = topologyVectorAllowedSetAnnEligible;
                 vectorStageRequest.narrowToBaseline = shouldNarrow;
@@ -2434,6 +2449,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
             topologyWeakQueryNarrowApplied = vectorStage.filterApplied;
             recordTopologyRouteAdmissionDebug(response, topologySession);
+            // Certification is read after the observed route work has been applied above. The
+            // candidate source is the stage's own report; "none" means no vector leg was scheduled.
+            setDebugBool(response.debugStats, metrics::kTopologyRouteCertified,
+                         topologySession.certificate.action() == TopologyRouteAction::Narrow);
+            setDebug(response.debugStats, metrics::kVectorCandidateSourceEffective,
+                     queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()
+                         ? detail::vectorCandidateSourceToString(vectorStage.candidateSource)
+                         : "none");
             setDebugBool(response.debugStats, metrics::kTopologyWeakQueryNarrowApplied,
                          topologyWeakQueryNarrowApplied);
             setDebugBool(response.debugStats, metrics::kTopologyVectorFilterApplied,
@@ -2663,6 +2686,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             } else if (hasVectorTierDimMismatch()) {
                 markVectorTierDimMismatch();
             }
+            // The sequential path runs the plain global vector query; topology routing never
+            // narrows or replaces it here.
+            setDebugBool(response.debugStats, metrics::kTopologyRouteCertified, false);
+            setDebug(response.debugStats, metrics::kVectorCandidateSourceEffective,
+                     queryEmbedding.has_value() && vectorDb_ && !hasVectorTierDimMismatch()
+                         ? "ann"
+                         : "none");
         }
     }
 

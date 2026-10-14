@@ -6301,6 +6301,7 @@ struct BenchFixture {
                 (topologyBoundarySpillEnv && *topologyBoundarySpillEnv) ||
                 envSet(topologySgcHopsEnv) || envSet(topologyRepresentativeRuleEnv);
             const bool writeTopologyRouteConfig =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_VECTOR_POLICY").has_value() ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE") != nullptr) ||
@@ -6773,6 +6774,23 @@ struct BenchFixture {
                                       << (envTruthy(topologyGraphWeightedSeedRankingEnv) ? "true"
                                                                                          : "false")
                                       << "\n";
+                        }
+                    }
+                    // route_only is an evaluation arm: it serves uncertified routes, so the daemon
+                    // only runs it behind the explicit gate. The bench opts in whenever the arm is
+                    // selected; without this the policy downgrades to Shadow.
+                    if (const auto policy =
+                            yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_VECTOR_POLICY");
+                        policy && !policy->empty()) {
+                        std::string normalizedPolicy(*policy);
+                        std::transform(normalizedPolicy.begin(), normalizedPolicy.end(),
+                                       normalizedPolicy.begin(), [](unsigned char c) {
+                                           return c == '-' ? '_'
+                                                           : static_cast<char>(std::tolower(c));
+                                       });
+                        if (normalizedPolicy == "route_only") {
+                            configOut << "\n[search.evaluation]\n";
+                            configOut << "allow_uncertified_routes = true\n";
                         }
                     }
                     if (writeTopologyEngineConfig) {

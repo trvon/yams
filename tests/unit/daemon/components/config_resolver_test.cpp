@@ -1295,6 +1295,49 @@ rrf_k = 33
     CHECK((*policy.rrfK == 33.0f));
 }
 
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyRoutingPolicy reads the RouteOnly evaluation gate",
+                 "[daemon][components][config][topology_routing][route-only][catch2]") {
+    SECTION("both keys populated") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+vector_policy = "route_only"
+
+[search.evaluation]
+allow_uncertified_routes = true
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+        REQUIRE(policy.vectorPolicy.has_value());
+        CHECK((*policy.vectorPolicy == "route_only"));
+        REQUIRE(policy.allowUncertifiedRouteOnly.has_value());
+        CHECK(*policy.allowUncertifiedRouteOnly);
+    }
+
+    SECTION("gate explicitly closed") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[search.evaluation]
+allow_uncertified_routes = false
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+        CHECK_FALSE(policy.vectorPolicy.has_value());
+        REQUIRE(policy.allowUncertifiedRouteOnly.has_value());
+        CHECK_FALSE(*policy.allowUncertifiedRouteOnly);
+    }
+
+    SECTION("absent keys stay unset") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+max_clusters = 2
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+        CHECK_FALSE(policy.vectorPolicy.has_value());
+        CHECK_FALSE(policy.allowUncertifiedRouteOnly.has_value());
+    }
+}
+
 TEST_CASE("Generated config keeps topology-assisted hybrid search as the product default",
           "[config][search][topology][catch2]") {
     const auto defaults = yams::config::ConfigMigrator::getLatestConfigDefaults();
