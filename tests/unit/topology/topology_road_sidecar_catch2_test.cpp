@@ -22,6 +22,8 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -223,6 +225,125 @@ TEST_CASE("Road sidecar binary codec round trips roads, snapshot id and top-K",
         CHECK(back.value().roads.empty());
         CHECK(back.value().snapshotId == "snap-empty");
     }
+}
+
+TEST_CASE("Road sidecar v2 carries road provenance and still decodes v1 sidecars",
+          "[unit][topology][roads][sidecar][codec][incremental][catch2]") {
+    auto sidecar = sidecarFor(makeBatchWithRoads("snap-prov", 9));
+    sidecar.roadsFullBuildEpoch = 7;
+    sidecar.roadsIncrementalPasses = 2;
+
+    SECTION("binary and envelope round trips keep the provenance") {
+        auto bytes = serializeTopologyRoadSidecarBinary(sidecar);
+        REQUIRE(bytes.has_value());
+        auto decoded = deserializeTopologyRoadSidecarBinary(bytes.value());
+        REQUIRE(decoded.has_value());
+        CHECK(decoded.value().roads == sidecar.roads);
+        CHECK(decoded.value().maxPerCluster == 2);
+        CHECK(decoded.value().roadsFullBuildEpoch == 7);
+        CHECK(decoded.value().roadsIncrementalPasses == 2);
+
+        auto payload = encodedSidecar(sidecar);
+        auto fromEnvelope = deserializeTopologyRoadSidecarCompressed(payload);
+        REQUIRE(fromEnvelope.has_value());
+        CHECK(fromEnvelope.value().roadsFullBuildEpoch == 7);
+        CHECK(fromEnvelope.value().roadsIncrementalPasses == 2);
+        // Inspectable without decompressing, like the other header statistics.
+        auto envelope = nlohmann::json::parse(payload);
+        CHECK(envelope.at("roads_full_build_epoch").get<uint64_t>() == 7);
+        CHECK(envelope.at("roads_incremental_passes").get<uint32_t>() == 2);
+    }
+
+    SECTION("a version 1 sidecar decodes as full roads") {
+        // Hand-built v1 layout: u32 magic, u32 version = 1, u32 maxPerCluster, u32 reserved,
+        // string snapshotId, u32 table count + strings, u32 road count, per road (u32, u32, f64).
+        std::vector<std::byte> v1;
+        auto putU32 = [&](uint32_t v) {
+            for (int i = 0; i < 4; ++i) {
+                v1.push_back(static_cast<std::byte>((v >> (i * 8)) & 0xFF));
+            }
+        };
+        auto putU64 = [&](uint64_t v) {
+            for (int i = 0; i < 8; ++i) {
+                v1.push_back(static_cast<std::byte>((v >> (i * 8)) & 0xFF));
+            }
+        };
+        auto putString = [&](const std::string& s) {
+            putU32(static_cast<uint32_t>(s.size()));
+            for (const char c : s) {
+                v1.push_back(static_cast<std::byte>(c));
+            }
+        };
+        auto putDouble = [&](double d) {
+            uint64_t raw = 0;
+            std::memcpy(&raw, &d, sizeof raw);
+            putU64(raw);
+        };
+        putU32(0x524D4159U); // 'Y','A','M','R'
+        putU32(1U);
+        putU32(2U);
+        putU32(0U);
+        putString("snap-v1");
+        putU32(2U);
+        putString("cluster-hash_a");
+        putString("cluster-hash_b");
+        putU32(2U);
+        putU32(0U);
+        putU32(1U);
+        putDouble(0.75);
+        putU32(1U);
+        putU32(0U);
+        putDouble(0.75);
+
+        auto decoded = deserializeTopologyRoadSidecarBinary(v1);
+        REQUIRE(decoded.has_value());
+        CHECK(decoded.value().snapshotId == "snap-v1");
+        CHECK(decoded.value().maxPerCluster == 2);
+        REQUIRE(decoded.value().roads.size() == 2);
+        CHECK(decoded.value().roads[0] == ClusterRoad{"cluster-hash_a", "cluster-hash_b", 0.75});
+        CHECK(decoded.value().roads[1] == ClusterRoad{"cluster-hash_b", "cluster-hash_a", 0.75});
+        CHECK(decoded.value().roadsFullBuildEpoch == 0);
+        CHECK(decoded.value().roadsIncrementalPasses == 0);
+    }
+
+    SECTION("an unknown future version is rejected") {
+        auto bytes = serializeTopologyRoadSidecarBinary(sidecar);
+        REQUIRE(bytes.has_value());
+        auto future = bytes.value();
+        future[4] = static_cast<std::byte>(99);
+        CHECK_FALSE(deserializeTopologyRoadSidecarBinary(future).has_value());
+    }
+}
+
+TEST_CASE("MetadataKgTopologyArtifactStore persists road provenance with the sidecar",
+          "[unit][topology][roads][sidecar][store][incremental][catch2]") {
+    StoreFixture fixture;
+    auto batch = makeBatchWithRoads("snap-derived", 12);
+    batch.roadsFullBuildEpoch = 10;
+    batch.roadsIncrementalPasses = 2;
+    {
+        MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+        REQUIRE(store.storeBatch(batch).has_value());
+        auto resident = store.loadLatestShared();
+        REQUIRE(resident.has_value());
+        REQUIRE(resident.value());
+        CHECK(resident.value()->roadsFullBuildEpoch == 10);
+        CHECK(resident.value()->roadsIncrementalPasses == 2);
+    }
+    MetadataKgTopologyArtifactStore reopened(fixture.repository, fixture.kgStore);
+    auto loaded = reopened.loadLatestShared();
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded.value());
+    CHECK(loaded.value()->roads == batch.roads);
+    CHECK(loaded.value()->roadsFullBuildEpoch == 10);
+    CHECK(loaded.value()->roadsIncrementalPasses == 2);
+
+    // The main payload stays a plain v1 payload that knows nothing of provenance.
+    auto main =
+        deserializeTopologyBatchCompressed(fixture.nodeProperties(snapshotNodeKey("snap-derived")));
+    REQUIRE(main.has_value());
+    CHECK(main.value().roadsFullBuildEpoch == 0);
+    CHECK(main.value().roadsIncrementalPasses == 0);
 }
 
 TEST_CASE("Road sidecar decoders reject foreign and truncated payloads without throwing",

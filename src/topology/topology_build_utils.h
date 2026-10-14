@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -92,34 +93,33 @@ primaryClusterByHash(const TopologyArtifactBatch& batch) {
     return primary;
 }
 
-/// Accumulate cluster roads from the RAW `TopologyDocumentInput::neighbors`, before any
-/// reciprocal / minEdgeScore construction filter. Every finite, non-negative neighbor score whose
-/// endpoints sit in two different primary clusters adds to that undirected pair's weight, so a
-/// reciprocal pair contributes from both sides and the weight is symmetric. Each cluster keeps
-/// its `maxPerCluster` heaviest roads; ties break on the target cluster id. The result is sorted
-/// by (from asc, weight desc, to asc); cluster ids are hash-anchored, so the output does not
-/// depend on input order beyond floating-point summation order. `maxPerCluster == 0` returns no
-/// roads.
-inline std::vector<ClusterRoad>
-accumulateClusterRoads(std::span<const TopologyDocumentInput> documents,
-                       const std::unordered_map<std::string_view, std::string_view>& primaryByHash,
-                       std::size_t maxPerCluster) {
-    std::vector<ClusterRoad> roads;
-    if (maxPerCluster == 0 || documents.empty() || primaryByHash.empty()) {
-        return roads;
+/// Undirected cluster pair weights keyed by the ordered (lo, hi) cluster ids. The views point
+/// into the memberships the `primaryByHash` map was built from.
+using ClusterPair = std::pair<std::string_view, std::string_view>;
+struct ClusterPairHash {
+    std::size_t operator()(const ClusterPair& key) const noexcept {
+        const std::size_t lhs = std::hash<std::string_view>{}(key.first);
+        const std::size_t rhs = std::hash<std::string_view>{}(key.second);
+        return PairKeyHash{}(PairKey{lhs, rhs});
     }
+};
+using ClusterPairWeights = std::unordered_map<ClusterPair, double, ClusterPairHash>;
 
-    // Undirected pair weights keyed by the ordered (lo, hi) cluster ids.
-    using ClusterPair = std::pair<std::string_view, std::string_view>;
-    struct ClusterPairHash {
-        std::size_t operator()(const ClusterPair& key) const noexcept {
-            const std::size_t lhs = std::hash<std::string_view>{}(key.first);
-            const std::size_t rhs = std::hash<std::string_view>{}(key.second);
-            return PairKeyHash{}(PairKey{lhs, rhs});
-        }
-    };
-    std::unordered_map<ClusterPair, double, ClusterPairHash> pairWeights;
-
+/// Add every raw neighbor observation in `documents` to `pairWeights`: each finite, non-negative
+/// score whose endpoints sit in two different primary clusters adds to that undirected pair.
+///
+/// `observedDocuments` names the documents whose neighbor lists `documents` contains. Null means
+/// all of them (a full build): a reciprocal pair is then observed from both sides and the weight
+/// is symmetric on its own. During an incremental update only the dirty region's lists are
+/// available, so a target outside `observedDocuments` is also credited with the mirror
+/// observation its own list would have contributed. That is exact on a symmetric neighbor graph
+/// and the stated approximation otherwise; a batch records it through
+/// `TopologyArtifactBatch::roadsIncrementalPasses`.
+inline void accumulateClusterPairWeights(
+    std::span<const TopologyDocumentInput> documents,
+    const std::unordered_map<std::string_view, std::string_view>& primaryByHash,
+    const std::unordered_set<std::string_view>* observedDocuments,
+    ClusterPairWeights& pairWeights) {
     for (const auto& document : documents) {
         const auto fromIt = primaryByHash.find(document.documentHash);
         if (fromIt == primaryByHash.end()) {
@@ -135,16 +135,19 @@ accumulateClusterRoads(std::span<const TopologyDocumentInput> documents,
             if (toIt == primaryByHash.end() || toIt->second == fromCluster) {
                 continue;
             }
+            const bool mirrored = observedDocuments != nullptr &&
+                                  !observedDocuments->contains(std::string_view{toIt->first});
             const auto [lo, hi] = std::minmax(fromCluster, toIt->second);
-            pairWeights[ClusterPair{lo, hi}] += static_cast<double>(neighbor.score);
+            pairWeights[ClusterPair{lo, hi}] +=
+                static_cast<double>(neighbor.score) * (mirrored ? 2.0 : 1.0);
         }
     }
-    if (pairWeights.empty()) {
-        return roads;
-    }
+}
 
-    // Both orientations, then per-source top-K.
-    roads.reserve(pairWeights.size() * 2);
+/// Append both orientations of every pair weight.
+inline void appendClusterRoadOrientations(const ClusterPairWeights& pairWeights,
+                                          std::vector<ClusterRoad>& roads) {
+    roads.reserve(roads.size() + pairWeights.size() * 2);
     for (const auto& [pair, weight] : pairWeights) {
         roads.push_back(ClusterRoad{.fromClusterId = std::string(pair.first),
                                     .toClusterId = std::string(pair.second),
@@ -152,6 +155,15 @@ accumulateClusterRoads(std::span<const TopologyDocumentInput> documents,
         roads.push_back(ClusterRoad{.fromClusterId = std::string(pair.second),
                                     .toClusterId = std::string(pair.first),
                                     .weight = weight});
+    }
+}
+
+/// Order roads by (from asc, weight desc, to asc) and keep each source's `maxPerCluster`
+/// heaviest; ties break on the target cluster id. `maxPerCluster == 0` keeps nothing.
+inline std::vector<ClusterRoad> rankClusterRoads(std::vector<ClusterRoad> roads,
+                                                 std::size_t maxPerCluster) {
+    if (maxPerCluster == 0) {
+        return {};
     }
     std::sort(roads.begin(), roads.end(), [](const ClusterRoad& lhs, const ClusterRoad& rhs) {
         if (lhs.fromClusterId != rhs.fromClusterId) {
@@ -178,6 +190,79 @@ accumulateClusterRoads(std::span<const TopologyDocumentInput> documents,
         ++runLength;
     }
     return kept;
+}
+
+/// Accumulate cluster roads from the RAW `TopologyDocumentInput::neighbors`, before any
+/// reciprocal / minEdgeScore construction filter. Every finite, non-negative neighbor score whose
+/// endpoints sit in two different primary clusters adds to that undirected pair's weight, so a
+/// reciprocal pair contributes from both sides and the weight is symmetric. Each cluster keeps
+/// its `maxPerCluster` heaviest roads; ties break on the target cluster id. The result is sorted
+/// by (from asc, weight desc, to asc); cluster ids are hash-anchored, so the output does not
+/// depend on input order beyond floating-point summation order. `maxPerCluster == 0` returns no
+/// roads.
+inline std::vector<ClusterRoad>
+accumulateClusterRoads(std::span<const TopologyDocumentInput> documents,
+                       const std::unordered_map<std::string_view, std::string_view>& primaryByHash,
+                       std::size_t maxPerCluster) {
+    if (maxPerCluster == 0 || documents.empty() || primaryByHash.empty()) {
+        return {};
+    }
+    ClusterPairWeights pairWeights;
+    accumulateClusterPairWeights(documents, primaryByHash, nullptr, pairWeights);
+    if (pairWeights.empty()) {
+        return {};
+    }
+    std::vector<ClusterRoad> roads;
+    appendClusterRoadOrientations(pairWeights, roads);
+    return rankClusterRoads(std::move(roads), maxPerCluster);
+}
+
+/// Roads of an incrementally merged batch. A road between two clusters the update did not touch
+/// is kept from `previousRoads`; every road with an endpoint in `retiredClusterIds` (the removed
+/// clusters and the rebuilt ones, including reused ids) is dropped and the rebuilt clusters' roads
+/// are recomputed from `regionDocuments`' raw neighbor lists against `merged`'s memberships,
+/// mirroring out-of-region targets (see accumulateClusterPairWeights). Each source then re-ranks
+/// its top-K over the union, so a kept road competes with the recomputed ones under the current
+/// bound. An untouched source cannot recover a road its previous top-K dropped; that is what makes
+/// the result derived rather than full.
+inline std::vector<ClusterRoad>
+deriveIncrementalRoads(std::span<const ClusterRoad> previousRoads,
+                       const std::unordered_set<std::string>& retiredClusterIds,
+                       std::span<const TopologyDocumentInput> regionDocuments,
+                       const TopologyArtifactBatch& merged, std::size_t maxPerCluster) {
+    if (maxPerCluster == 0) {
+        return {};
+    }
+    std::unordered_set<std::string_view> finalClusterIds;
+    finalClusterIds.reserve(merged.clusters.size());
+    for (const auto& cluster : merged.clusters) {
+        finalClusterIds.insert(cluster.clusterId);
+    }
+
+    std::vector<ClusterRoad> roads;
+    roads.reserve(previousRoads.size());
+    for (const auto& road : previousRoads) {
+        if (retiredClusterIds.contains(road.fromClusterId) ||
+            retiredClusterIds.contains(road.toClusterId) ||
+            !finalClusterIds.contains(road.fromClusterId) ||
+            !finalClusterIds.contains(road.toClusterId)) {
+            continue;
+        }
+        roads.push_back(road);
+    }
+
+    std::unordered_set<std::string_view> observed;
+    observed.reserve(regionDocuments.size());
+    for (const auto& document : regionDocuments) {
+        if (!document.documentHash.empty()) {
+            observed.insert(document.documentHash);
+        }
+    }
+    const auto primaryByHash = primaryClusterByHash(merged);
+    ClusterPairWeights pairWeights;
+    accumulateClusterPairWeights(regionDocuments, primaryByHash, &observed, pairWeights);
+    appendClusterRoadOrientations(pairWeights, roads);
+    return rankClusterRoads(std::move(roads), maxPerCluster);
 }
 
 } // namespace yams::topology::detail

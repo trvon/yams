@@ -52,12 +52,16 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchCompressed(std::string_vie
  * with roads on or off and a decoder that predates roads never sees road bytes. The binary form
  * has its own magic ('Y','A','M','R') and version; the header records the snapshot the roads
  * belong to and the per-source top-K bound the builder applied, which load-time validation
- * checks against the stored road list.
+ * checks against the stored road list. Version 2 adds the road provenance
+ * (`TopologyArtifactBatch::roadsFullBuildEpoch`, `roadsIncrementalPasses`) after the snapshot
+ * id; a version 1 sidecar decodes with both at 0, i.e. as full roads.
  */
 struct TopologyRoadSidecar {
     std::string snapshotId;
     std::size_t maxPerCluster{0};
     std::vector<ClusterRoad> roads;
+    uint64_t roadsFullBuildEpoch{0};
+    uint32_t roadsIncrementalPasses{0};
 };
 
 /// Binary road sidecar (magic, version, top-K, snapshot id, cluster-id table, roads).
