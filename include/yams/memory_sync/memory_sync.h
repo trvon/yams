@@ -150,7 +150,8 @@ public:
                    MemorySyncControl control = {}, TombstoneGcPolicy tombstoneGc = {},
                    std::shared_ptr<const WriterAuthenticator> writerAuth = {},
                    std::string controlScope = {})
-        : countedBackend_(std::make_unique<WriteCountingBackend>(backend)),
+        : countedBackend_(
+              std::make_unique<WriteCountingBackend>(backend, control.exclusiveBackend)),
           backend_(countedBackend_.get()), nodeId_(std::move(nodeId)),
           corpusId_(std::move(corpusId)), corpusEpoch_(corpusEpoch),
           allowLegacyUnbound_(allowLegacyUnbound), limits_(limits), control_(std::move(control)),
@@ -571,9 +572,12 @@ private:
 
     /// Forwards to the injected backend and counts every mutation the loop makes, so an
     /// exclusive backend's complete scan can be reused without enumerating write paths.
+    /// On an exclusive backend it also keeps listing pages until the next mutation: a
+    /// filesystem listing walks every shard directory whatever the prefix.
     class WriteCountingBackend final : public storage::IStorageBackend {
     public:
-        explicit WriteCountingBackend(storage::IStorageBackend& inner) : inner_(inner) {}
+        WriteCountingBackend(storage::IStorageBackend& inner, bool exclusive)
+            : inner_(inner), exclusive_(exclusive) {}
 
         [[nodiscard]] std::uint64_t writes() const noexcept { return writes_; }
 
@@ -581,7 +585,7 @@ private:
             return inner_.initialize(config);
         }
         Result<void> store(std::string_view key, std::span<const std::byte> data) override {
-            ++writes_;
+            mutated();
             return inner_.store(key, data);
         }
         Result<std::vector<std::byte>> retrieve(std::string_view key) const override {
@@ -589,7 +593,7 @@ private:
         }
         Result<bool> exists(std::string_view key) const override { return inner_.exists(key); }
         Result<void> remove(std::string_view key) override {
-            ++writes_;
+            mutated();
             return inner_.remove(key);
         }
         Result<std::vector<std::string>> list(std::string_view prefix = "") const override {
@@ -598,12 +602,33 @@ private:
         Result<storage::ObjectListPage> listPage(std::string_view prefix,
                                                  std::optional<std::string_view> cursor,
                                                  std::size_t limit) const override {
-            return inner_.listPage(prefix, cursor, limit);
+            if (!exclusive_) {
+                return inner_.listPage(prefix, cursor, limit);
+            }
+            std::string key(prefix);
+            key.push_back('\0');
+            if (cursor) {
+                key.push_back('c');
+                key.append(*cursor);
+            }
+            key.push_back('\0');
+            key.append(std::to_string(limit));
+            if (const auto it = pages_.find(key); it != pages_.end()) {
+                return it->second;
+            }
+            auto page = inner_.listPage(prefix, cursor, limit);
+            if (page) {
+                if (pages_.size() >= kMaxCachedPages) {
+                    pages_.clear();
+                }
+                pages_.emplace(std::move(key), page.value());
+            }
+            return page;
         }
         Result<::yams::StorageStats> getStats() const override { return inner_.getStats(); }
         std::future<Result<void>> storeAsync(std::string_view key,
                                              std::span<const std::byte> data) override {
-            ++writes_;
+            mutated();
             return inner_.storeAsync(key, data);
         }
         std::future<Result<std::vector<std::byte>>>
@@ -614,15 +639,24 @@ private:
         bool isRemote() const override { return inner_.isRemote(); }
         Result<void> flush() override { return inner_.flush(); }
         Result<void> clear() override {
-            ++writes_;
+            mutated();
             return inner_.clear();
         }
         void requestCancel() noexcept override { inner_.requestCancel(); }
         void resetCancel() noexcept override { inner_.resetCancel(); }
 
     private:
+        static constexpr std::size_t kMaxCachedPages = 64;
+
+        void mutated() {
+            ++writes_;
+            pages_.clear();
+        }
+
         storage::IStorageBackend& inner_;
+        bool exclusive_{false};
         std::uint64_t writes_{0};
+        mutable std::map<std::string, storage::ObjectListPage> pages_;
     };
 
     /// Mutation count and quarantine generation observed when the last complete scan ended.

@@ -1175,6 +1175,39 @@ TEST_CASE("MemorySyncLoop rescans an exclusive backend only after it writes",
     CHECK(text(value.value()) == "three");
 }
 
+TEST_CASE("MemorySyncLoop reuses exclusive-backend listings until it writes",
+          "[memory-sync][sync-loop][bounds]") {
+    CountingBackendFixture fixture{"exclusive-listings"};
+    MemorySyncLoop loop{fixture.backend,
+                        "reader",
+                        "local-test-corpus",
+                        1,
+                        false,
+                        {},
+                        MemorySyncControl{.exclusiveBackend = true}};
+    REQUIRE(loop.publish("slot", bytes("value")).has_value());
+    REQUIRE(loop.sync().has_value());
+    REQUIRE(loop.replayReadyErases().has_value());
+    REQUIRE(loop.pendingErases().has_value());
+    fixture.backend.resetListCalls();
+
+    // One idle worker cycle per iteration: reconcile, replay ready erases, inspect the outbox.
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        REQUIRE(loop.sync().has_value());
+        REQUIRE(loop.replayReadyErases().has_value());
+        auto pending = loop.pendingErases();
+        REQUIRE(pending.has_value());
+        CHECK(pending.value().empty());
+    }
+    CHECK(fixture.backend.listPageCalls() == 0);
+
+    REQUIRE(loop.stageErase("slot", "gone").has_value());
+    auto pending = loop.pendingErases();
+    REQUIRE(pending.has_value());
+    REQUIRE(pending.value().size() == 1);
+    CHECK(pending.value().front().logicalKey == "slot");
+}
+
 TEST_CASE("MemorySyncLoop rescans a shared backend every cycle",
           "[memory-sync][sync-loop][bounds]") {
     CountingBackendFixture fixture{"shared-rescan"};
