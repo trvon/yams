@@ -334,6 +334,8 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
             sidecar.snapshotId = batch.snapshotId;
             sidecar.maxPerCluster = batch.roadMaxPerCluster;
             sidecar.roads = batch.roads;
+            sidecar.roadsFullBuildEpoch = batch.roadsFullBuildEpoch;
+            sidecar.roadsIncrementalPasses = batch.roadsIncrementalPasses;
             auto sidecarPayload = serializeTopologyRoadSidecarCompressed(sidecar);
             if (!sidecarPayload) {
                 return sidecarPayload.error();
@@ -494,6 +496,8 @@ MetadataKgTopologyArtifactStore::attachRoadSidecar(TopologyArtifactBatch& batch)
     YAMS_ZONE_SCOPED_N("topology::store::attachRoadSidecar");
     batch.roads.clear();
     batch.roadMaxPerCluster = 0;
+    batch.roadsFullBuildEpoch = 0;
+    batch.roadsIncrementalPasses = 0;
     batch.roadUnavailableReason.clear();
     if (!kgStore_) {
         return {};
@@ -523,6 +527,8 @@ MetadataKgTopologyArtifactStore::attachRoadSidecar(TopologyArtifactBatch& batch)
     }
     batch.roads = std::move(sidecar.value().roads);
     batch.roadMaxPerCluster = sidecar.value().maxPerCluster;
+    batch.roadsFullBuildEpoch = sidecar.value().roadsFullBuildEpoch;
+    batch.roadsIncrementalPasses = sidecar.value().roadsIncrementalPasses;
     return {};
 }
 

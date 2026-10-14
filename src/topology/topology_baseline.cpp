@@ -579,12 +579,6 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
     // A partial update cannot reconstruct the full-corpus relation digest. Fail closed until a
     // full rebuild provides relation-bound calibration evidence.
     merged.protectedRelationIdentity.clear();
-    // Roads carried over from `existing` would reference removed clusters; the region rebuild
-    // only sees its own documents. Drop them until the next full rebuild (incremental road
-    // maintenance is a separate change).
-    merged.roads.clear();
-    merged.roadMaxPerCluster = 0;
-    merged.roadUnavailableReason.clear();
     merged.generatedAtUnixSeconds = rebuilt.value().generatedAtUnixSeconds;
     merged.topologyEpoch = existing.topologyEpoch + 1;
 
@@ -713,6 +707,32 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
               [](const DocumentClusterMembership& lhs, const DocumentClusterMembership& rhs) {
                   return lhs.documentHash < rhs.documentHash;
               });
+
+    // Roads: the region rebuild above saw only its own documents, so its roads are discarded and
+    // recomputed here against the merged memberships. Untouched pairs keep the previous snapshot's
+    // road; every road with an endpoint in a removed or rebuilt cluster (reused ids included) is
+    // recomputed from the region's raw neighbor lists, mirroring out-of-region targets; each
+    // source re-ranks its top-K over the union. The result is derived, not full: provenance
+    // records the epoch of the last full accumulation and how many passes sit on top of it.
+    merged.roadUnavailableReason.clear();
+    if (config.roadMaxPerCluster == 0) {
+        merged.roads.clear();
+        merged.roadMaxPerCluster = 0;
+        merged.roadsFullBuildEpoch = 0;
+        merged.roadsIncrementalPasses = 0;
+    } else {
+        std::unordered_set<std::string> retiredClusterIds = removedClusterIds;
+        for (const auto& cluster : rebuilt.value().clusters) {
+            retiredClusterIds.insert(cluster.clusterId);
+        }
+        merged.roads = detail::deriveIncrementalRoads(
+            existing.roads, retiredClusterIds, changedDocuments, merged, config.roadMaxPerCluster);
+        merged.roadMaxPerCluster = merged.roads.empty() ? 0 : config.roadMaxPerCluster;
+        merged.roadsFullBuildEpoch = existing.roadsIncrementalPasses == 0
+                                         ? existing.topologyEpoch
+                                         : existing.roadsFullBuildEpoch;
+        merged.roadsIncrementalPasses = existing.roadsIncrementalPasses + 1;
+    }
 
     if (stats != nullptr) {
         stats->documentsProcessed = changedDocuments.size();

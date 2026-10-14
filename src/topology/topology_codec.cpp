@@ -1162,7 +1162,13 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchCompressed(std::string_vie
 namespace {
 
 constexpr uint32_t kTopologyRoadMagic = 0x524D4159; // 'Y','A','M','R'
-constexpr uint32_t kTopologyRoadVersion = 1;
+// v1: magic, version, maxPerCluster, reserved, snapshotId, cluster-id table, roads.
+// v2: inserts the road provenance (u64 roadsFullBuildEpoch, u32 roadsIncrementalPasses) after
+// snapshotId. v1 sidecars still decode, with both at 0 (full roads). The envelope format is
+// unchanged; the version inside the binary is what moved.
+constexpr uint32_t kTopologyRoadVersion = 2;
+constexpr uint32_t kTopologyRoadVersionProvenance = 2;
+constexpr uint32_t kTopologyRoadMinVersion = 1;
 constexpr std::string_view kTopologyRoadEnvelopeFormat = "topology_roads_zstd_v1";
 constexpr size_t kMinRoadBytes = 4 + 4 + 8; // from index + to index + weight
 
@@ -1180,6 +1186,8 @@ serializeTopologyRoadSidecarBinary(const TopologyRoadSidecar& sidecar) {
     writer.writeU32(toU32(sidecar.maxPerCluster));
     writer.writeU32(0); // Reserved
     writer.writeString(sidecar.snapshotId);
+    writer.writeU64(sidecar.roadsFullBuildEpoch);
+    writer.writeU32(sidecar.roadsIncrementalPasses);
 
     // 2. Cluster-id table
     std::unordered_map<std::string_view, uint32_t> stringToId;
@@ -1227,7 +1235,7 @@ Result<TopologyRoadSidecar> deserializeTopologyRoadSidecarBinary(std::span<const
     if (!version) {
         return version.error();
     }
-    if (version.value() != kTopologyRoadVersion) {
+    if (version.value() < kTopologyRoadMinVersion || version.value() > kTopologyRoadVersion) {
         return Error{ErrorCode::InvalidData, "Unsupported topology road sidecar version: " +
                                                  std::to_string(version.value())};
     }
@@ -1247,6 +1255,18 @@ Result<TopologyRoadSidecar> deserializeTopologyRoadSidecarBinary(std::span<const
         return snapshotId.error();
     }
     sidecar.snapshotId = std::move(snapshotId.value());
+    if (version.value() >= kTopologyRoadVersionProvenance) {
+        auto fullBuildEpoch = reader.readU64();
+        if (!fullBuildEpoch) {
+            return fullBuildEpoch.error();
+        }
+        auto incrementalPasses = reader.readU32();
+        if (!incrementalPasses) {
+            return incrementalPasses.error();
+        }
+        sidecar.roadsFullBuildEpoch = fullBuildEpoch.value();
+        sidecar.roadsIncrementalPasses = incrementalPasses.value();
+    }
 
     auto stringCount = reader.readCount(kMinStringBytes, "road cluster-id table");
     if (!stringCount) {
@@ -1320,6 +1340,8 @@ Result<std::string> serializeTopologyRoadSidecarCompressed(const TopologyRoadSid
     envelope.value()["snapshot_id"] = sidecar.snapshotId;
     envelope.value()["road_count"] = sidecar.roads.size();
     envelope.value()["max_per_cluster"] = sidecar.maxPerCluster;
+    envelope.value()["roads_full_build_epoch"] = sidecar.roadsFullBuildEpoch;
+    envelope.value()["roads_incremental_passes"] = sidecar.roadsIncrementalPasses;
     return envelope.value().dump();
 }
 

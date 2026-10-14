@@ -297,6 +297,17 @@ struct TopologyArtifactBatch {
     /// Per-source bound the builder applied to `roads` (`TopologyBuildConfig::roadMaxPerCluster`).
     /// Stored in the sidecar header so a reloaded sidecar can be checked against it.
     std::size_t roadMaxPerCluster{0};
+    /// Road provenance. A full build accumulates roads over every document and leaves both at 0.
+    /// An incremental update derives roads instead (untouched pairs keep the previous snapshot's
+    /// road, every road with an endpoint in a removed or rebuilt cluster is recomputed from the
+    /// region's raw neighbor lists, then each source re-ranks its top-K) and counts one pass in
+    /// `roadsIncrementalPasses`; `roadsFullBuildEpoch` is the `topologyEpoch` of the snapshot
+    /// whose full accumulation the derived roads descend from. Derived roads are exact for the
+    /// rebuilt clusters when the neighbor graph is symmetric; an untouched source can only
+    /// re-rank the roads its last full build kept. Carried in the sidecar header (v2), never in
+    /// the main payload or the routing construction fingerprint.
+    uint64_t roadsFullBuildEpoch{0};
+    uint32_t roadsIncrementalPasses{0};
     /// Load-time diagnostic, never persisted or fingerprinted: why `roads` is empty although a
     /// sidecar existed (undecodable, failed validation). Empty when roads loaded or were never
     /// written. A set reason never disables routing.
