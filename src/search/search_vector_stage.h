@@ -71,6 +71,14 @@ struct VectorStageRequest {
     std::shared_ptr<const TopologyRouteCertificate> certificate;
     std::shared_ptr<const std::unordered_set<std::string>> allowedDocuments;
     std::shared_ptr<const std::vector<std::unordered_set<std::string>>> allowedDocumentGroups;
+
+    // Road beam (TopologyRoutingSessionResult::roadExpandedDocumentHashGroups). RouteOnly and
+    // Augment query these groups after the certified groups as extra routes with their own quotas
+    // (`roadQuotas`, aligned) and their own cap on appended results (`roadResultLimit`). Null or
+    // empty when road_hops is 0. Never a Narrow filter and never part of the Shadow control.
+    std::shared_ptr<const std::vector<std::unordered_set<std::string>>> roadDocumentGroups;
+    std::vector<std::size_t> roadQuotas;
+    std::size_t roadResultLimit{0};
 };
 
 /// Where the stage's result set came from (vector_candidate_source_effective).
@@ -122,6 +130,8 @@ struct VectorStageOutcome {
     /// allowed-set ANN (routed query) or Narrow filter (global query).
     std::optional<VectorStageRouteWork> routeWork;
     VectorCandidateSource candidateSource{VectorCandidateSource::Ann};
+    /// Road-expanded documents appended to the routed result set (RouteOnly, Augment).
+    std::size_t roadResultsAdded{0};
 
     // Narrow.
     bool filterApplied{false};

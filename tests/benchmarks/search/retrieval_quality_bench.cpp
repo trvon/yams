@@ -37,6 +37,8 @@
     YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS=N     Minimum adaptive routed-cluster prefix
     YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS=N
                                           Cap ranked lexical routing evidence
+    YAMS_BENCH_TOPOLOGY_ROAD_HOPS=N        Road beam hops for route_only/augment (0 = off)
+    YAMS_BENCH_TOPOLOGY_ROAD_BEAM_WIDTH=N  Clusters kept per road hop
     YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP=N.N
                                           Grow route prefix while scores remain near the best
     YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN=N.N
@@ -6259,6 +6261,10 @@ struct BenchFixture {
             const auto envSet = [](const std::optional<std::string>& value) {
                 return value.has_value() && !value->empty();
             };
+            const auto topologyRoadHopsEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_HOPS");
+            const auto topologyRoadBeamWidthEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_BEAM_WIDTH");
             const auto topologyBqCandidateLimitEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT");
             const auto topologyBqPrefixDimEnv =
@@ -6308,6 +6314,7 @@ struct BenchFixture {
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS") != nullptr) ||
+                envSet(topologyRoadHopsEnv) || envSet(topologyRoadBeamWidthEnv) ||
                 (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) ||
                 (topologyAnnCandidateLimitEnv && *topologyAnnCandidateLimitEnv) ||
                 envSet(topologyBqCandidateLimitEnv) || envSet(topologyBqPrefixDimEnv) ||
@@ -6642,6 +6649,19 @@ struct BenchFixture {
                                   << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS",
                                                            32)
                                   << "\n";
+                        // Road beam arms (route_only / augment); unset keeps the product default
+                        // of no road hops.
+                        if (envSet(topologyRoadHopsEnv)) {
+                            configOut << "road_hops = "
+                                      << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_ROAD_HOPS", 0)
+                                      << "\n";
+                        }
+                        if (envSet(topologyRoadBeamWidthEnv)) {
+                            configOut
+                                << "road_beam_width = "
+                                << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_ROAD_BEAM_WIDTH", 4)
+                                << "\n";
+                        }
                         if (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) {
                             configOut << "representative_limit = "
                                       << parseSizeEnvOrDefault(

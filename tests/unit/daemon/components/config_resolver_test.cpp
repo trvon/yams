@@ -1343,6 +1343,35 @@ max_clusters = 2
     }
 }
 
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyRoutingPolicy reads the road beam keys",
+                 "[daemon][components][config][topology_routing][road-beam][catch2]") {
+    SECTION("both keys populated") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+road_hops = 2
+road_beam_width = 3
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+        REQUIRE(policy.roadHops.has_value());
+        CHECK((*policy.roadHops == 2U));
+        REQUIRE(policy.roadBeamWidth.has_value());
+        CHECK((*policy.roadBeamWidth == 3U));
+    }
+
+    SECTION("absent keys stay unset") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+max_clusters = 2
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+        CHECK_FALSE(policy.roadHops.has_value());
+        CHECK_FALSE(policy.roadBeamWidth.has_value());
+    }
+}
+
 TEST_CASE("Generated config keeps topology-assisted hybrid search as the product default",
           "[config][search][topology][catch2]") {
     const auto defaults = yams::config::ConfigMigrator::getLatestConfigDefaults();

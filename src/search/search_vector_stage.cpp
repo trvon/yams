@@ -36,16 +36,25 @@ VectorStageOutcome runVectorCandidateStage(const VectorStageRequest& request) {
     const auto& allowedDocuments = *request.allowedDocuments;
     const auto& allowedDocumentGroups = *request.allowedDocumentGroups;
 
+    const auto* roadDocumentGroups = request.roadDocumentGroups.get();
+    const bool roadGroupsAvailable = roadDocumentGroups != nullptr &&
+                                     !roadDocumentGroups->empty() &&
+                                     request.roadQuotas.size() == roadDocumentGroups->size();
+
+    // `includeRoads` appends the road-expanded groups after the certified groups under their own
+    // cap; the certified part of the result is identical with roads on or off.
     const auto queryRoutedVectors = [&](vector::VectorSearchDiagnostics& diagnostics,
                                         vector::CandidateFilterMode candidateFilterMode =
-                                            vector::CandidateFilterMode::BackendDefault) {
+                                            vector::CandidateFilterMode::BackendDefault,
+                                        bool includeRoads = false) {
         std::vector<ComponentResult> routedResults;
         routedResults.reserve(request.routedResultLimit);
         std::unordered_set<std::string> seenDocuments;
         seenDocuments.reserve(request.routedResultLimit * 2);
-        const auto appendUnique = [&](std::vector<ComponentResult> incoming) {
+        const auto appendUnique = [&](std::vector<ComponentResult> incoming, std::size_t cap) {
+            std::size_t appended = 0;
             for (auto& candidate : incoming) {
-                if (routedResults.size() >= request.routedResultLimit) {
+                if (routedResults.size() >= cap) {
                     break;
                 }
                 if (candidate.documentHash.empty() ||
@@ -53,7 +62,9 @@ VectorStageOutcome runVectorCandidateStage(const VectorStageRequest& request) {
                     continue;
                 }
                 routedResults.push_back(std::move(candidate));
+                ++appended;
             }
+            return appended;
         };
 
         if (!allowedDocumentGroups.empty()) {
@@ -65,14 +76,28 @@ VectorStageOutcome runVectorCandidateStage(const VectorStageRequest& request) {
                 auto routed = request.queryVector(embedding, quota, &allowedDocumentGroups[route],
                                                   &diagnostics, candidateFilterMode);
                 if (routed) {
-                    appendUnique(std::move(routed.value()));
+                    appendUnique(std::move(routed.value()), request.routedResultLimit);
                 }
             }
         } else {
             auto routed = request.queryVector(embedding, request.routedResultLimit,
                                               &allowedDocuments, &diagnostics, candidateFilterMode);
             if (routed) {
-                appendUnique(std::move(routed.value()));
+                appendUnique(std::move(routed.value()), request.routedResultLimit);
+            }
+        }
+        if (includeRoads && roadGroupsAvailable) {
+            const std::size_t roadCap = routedResults.size() + request.roadResultLimit;
+            for (std::size_t road = 0; road < roadDocumentGroups->size(); ++road) {
+                const auto quota = request.roadQuotas[road];
+                if (quota == 0 || (*roadDocumentGroups)[road].empty()) {
+                    continue;
+                }
+                auto routed = request.queryVector(embedding, quota, &(*roadDocumentGroups)[road],
+                                                  &diagnostics, candidateFilterMode);
+                if (routed) {
+                    outcome.roadResultsAdded += appendUnique(std::move(routed.value()), roadCap);
+                }
             }
         }
         return routedResults;
@@ -131,7 +156,8 @@ VectorStageOutcome runVectorCandidateStage(const VectorStageRequest& request) {
                 request.backendSupportsAllowedSetAnn
                     ? vector::CandidateFilterMode::DocumentTopK
                     : vector::CandidateFilterMode::ExactDocumentComplete;
-            auto routedResults = queryRoutedVectors(outcome.routedDiag, candidateFilterMode);
+            auto routedResults =
+                queryRoutedVectors(outcome.routedDiag, candidateFilterMode, /*includeRoads=*/true);
             recordRouteWork(outcome.routedDiag);
             rankByScore(routedResults);
             outcome.candidateSource = VectorCandidateSource::RouteOnly;
@@ -147,7 +173,8 @@ VectorStageOutcome runVectorCandidateStage(const VectorStageRequest& request) {
             const auto candidateFilterMode = request.backendSupportsAllowedSetAnn
                                                  ? vector::CandidateFilterMode::DocumentTopK
                                                  : vector::CandidateFilterMode::BackendDefault;
-            auto expansion = queryRoutedVectors(outcome.routedDiag, candidateFilterMode);
+            auto expansion =
+                queryRoutedVectors(outcome.routedDiag, candidateFilterMode, /*includeRoads=*/true);
             outcome.rescueScoredDocIds = collectUniqueComponentDocIds(expansion);
             auto merged = mergeVectorCandidateRescues(std::move(global.value()),
                                                       std::move(expansion), baselineCandidates);

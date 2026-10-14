@@ -230,6 +230,22 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     if (!session.roadUnavailableReason.empty()) {
         setDebug(debug, metrics::kTopologyRoadUnavailableReason, session.roadUnavailableReason);
     }
+    // Road beam keys appear only when the beam was requested, so road_hops = 0 leaves the debug
+    // surface unchanged. The stage adds topology_road_candidates_added after the vector leg.
+    if (session.roadHopsRequested > 0) {
+        setDebug(debug, metrics::kTopologyRoadHopsApplied, std::to_string(session.roadHopsApplied));
+        setDebug(debug, metrics::kTopologyRoadClustersAdded,
+                 std::to_string(session.roadExpandedClusterIds.size()));
+        setDebug(debug, metrics::kTopologyRoadWorkCentroidEvaluations,
+                 std::to_string(session.roadWorkCentroidEvaluations));
+        if (!session.roadSkipReason.empty()) {
+            setDebug(debug, metrics::kTopologyRoadSkipReason, session.roadSkipReason);
+        }
+        if (options.includeDetailedTrace) {
+            setDebug(debug, metrics::kTopologyRoadExpandedClusterIds,
+                     joinWithTab(session.roadExpandedClusterIds));
+        }
+    }
     setDebug(debug, metrics::kTopologyRouteBqCandidates, std::to_string(session.routeBqCandidates));
     setDebug(debug, metrics::kTopologyRouteBqRotation,
              SearchEngineConfig::topologyBqRotationToString(config.topologyRoutingBqRotation));

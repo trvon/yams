@@ -1692,6 +1692,17 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Road beam (search.topology.road_hops) in RouteOnly / Augment; kept apart from the RouteOnly
+  # cells so their goldens stay byte-identical.
+  catch2_search_vector_stage_road_beam_exe = executable('catch2_search_vector_stage_road_beam',
+    files('unit/search/search_vector_stage_road_beam_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_symspell_search_exe = executable('catch2_symspell_search',
     files('unit/search/symspell_search_catch2_test.cpp'),
     include_directories: incs,
@@ -4337,6 +4348,12 @@ if catch2_dep.found()
   )
 
   test('search_vector_stage_route_only', catch2_search_vector_stage_route_only_exe,
+    suite: ['catch2', 'unit', 'search', 'vector_stage'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 180
+  )
+
+  test('search_vector_stage_road_beam', catch2_search_vector_stage_road_beam_exe,
     suite: ['catch2', 'unit', 'search', 'vector_stage'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
