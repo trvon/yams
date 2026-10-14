@@ -47,6 +47,28 @@ std::string clusterNodeKey(std::string_view clusterId) {
     return std::string(kClusterNodePrefix) + std::string(clusterId);
 }
 
+std::string roadSidecarNodeKey(std::string_view snapshotId) {
+    return std::string(MetadataKgTopologyArtifactStore::kRoadSidecarNodePrefix) +
+           std::string(snapshotId);
+}
+
+/// Delete the road sidecar of `snapshotId` if one exists. Used when a snapshot is pruned and
+/// when a snapshot id is re-stored without roads.
+Result<void> deleteRoadSidecar(metadata::KnowledgeGraphStore& kgStore,
+                               std::string_view snapshotId) {
+    auto node = kgStore.getNodeByKey(roadSidecarNodeKey(snapshotId));
+    if (!node) {
+        return node.error();
+    }
+    if (!node.value().has_value()) {
+        return {};
+    }
+    if (auto removed = kgStore.deleteNodeById(node.value()->id); !removed) {
+        return removed.error();
+    }
+    return {};
+}
+
 float unitWeight(double value) {
     return static_cast<float>(std::clamp(value, 0.0, 1.0));
 }
@@ -179,7 +201,8 @@ Result<void> materializeClusterGraph(metadata::KnowledgeGraphStore& kgStore,
 }
 
 /// Keep the newest kRetainedSnapshots snapshot nodes (by insertion order) plus the one the
-/// latest pointer names; older compressed snapshots are removed.
+/// latest pointer names; older compressed snapshots are removed together with their road
+/// sidecars.
 Result<void> pruneSnapshotNodes(metadata::KnowledgeGraphStore& kgStore, std::size_t retain,
                                 std::string_view latestSnapshotId) {
     YAMS_ZONE_SCOPED_N("topology::store::pruneSnapshotNodes");
@@ -209,6 +232,15 @@ Result<void> pruneSnapshotNodes(metadata::KnowledgeGraphStore& kgStore, std::siz
         }
         if (auto removed = kgStore.deleteNodeById(snapshots[i].first); !removed) {
             return removed.error();
+        }
+        // The sidecar goes with its snapshot; an orphaned one would only be wasted space, but a
+        // snapshot id reused later would otherwise find stale roads.
+        const std::string_view key = snapshots[i].second;
+        if (key.starts_with(kSnapshotNodePrefix)) {
+            if (auto removed = deleteRoadSidecar(kgStore, key.substr(kSnapshotNodePrefix.size()));
+                !removed) {
+                return removed.error();
+            }
         }
     }
     return {};
@@ -289,6 +321,36 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         if (!snapshotResult) {
             return snapshotResult.error();
         }
+
+        // Roads ride in their own node so the snapshot payload above stays a plain v1 payload.
+        // Written here, before the pointer, so a visible snapshot never lacks a sidecar that was
+        // meant to accompany it; a snapshot id re-stored without roads sheds its old sidecar.
+        if (batch.roads.empty()) {
+            if (auto removed = deleteRoadSidecar(*kgStore_, batch.snapshotId); !removed) {
+                return removed.error();
+            }
+        } else {
+            TopologyRoadSidecar sidecar;
+            sidecar.snapshotId = batch.snapshotId;
+            sidecar.maxPerCluster = batch.roadMaxPerCluster;
+            sidecar.roads = batch.roads;
+            auto sidecarPayload = serializeTopologyRoadSidecarCompressed(sidecar);
+            if (!sidecarPayload) {
+                return sidecarPayload.error();
+            }
+            YAMS_PLOT("topology::road_sidecar_payload_bytes",
+                      static_cast<int64_t>(sidecarPayload.value().size()));
+            metadata::KGNode roadNode;
+            roadNode.nodeKey = roadSidecarNodeKey(batch.snapshotId);
+            roadNode.label = batch.snapshotId;
+            roadNode.type = std::string{kRoadSidecarNodeType};
+            roadNode.createdTime = nowSecs;
+            roadNode.updatedTime = nowSecs;
+            roadNode.properties = std::move(sidecarPayload.value());
+            if (auto roadResult = kgStore_->upsertNode(roadNode); !roadResult) {
+                return roadResult.error();
+            }
+        }
     }
 
     std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> metadataEntries;
@@ -366,7 +428,10 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         }
     }
 
-    auto nextResident = makeResident(batch);
+    // The resident copy is what was just written: no load-time road diagnostic applies to it.
+    TopologyArtifactBatch residentBatch = batch;
+    residentBatch.roadUnavailableReason.clear();
+    auto nextResident = makeResident(std::move(residentBatch));
     {
         std::lock_guard lock(residentMutex_);
         resident_ = std::move(nextResident);
@@ -418,7 +483,47 @@ MetadataKgTopologyArtifactStore::loadSnapshotById(std::string_view snapshotId) c
     if (!batchResult) {
         return batchResult.error();
     }
+    if (auto roads = attachRoadSidecar(batchResult.value()); !roads) {
+        return roads.error();
+    }
     return std::optional<TopologyArtifactBatch>{std::move(batchResult.value())};
+}
+
+Result<void>
+MetadataKgTopologyArtifactStore::attachRoadSidecar(TopologyArtifactBatch& batch) const {
+    YAMS_ZONE_SCOPED_N("topology::store::attachRoadSidecar");
+    batch.roads.clear();
+    batch.roadMaxPerCluster = 0;
+    batch.roadUnavailableReason.clear();
+    if (!kgStore_) {
+        return {};
+    }
+    auto node = kgStore_->getNodeByKey(roadSidecarNodeKey(batch.snapshotId));
+    if (!node) {
+        return node.error();
+    }
+    if (!node.value().has_value() || !node.value()->properties.has_value()) {
+        return {}; // roads were never written for this snapshot
+    }
+
+    auto sidecar = deserializeTopologyRoadSidecarCompressed(*node.value()->properties);
+    if (!sidecar) {
+        batch.roadUnavailableReason = "road_sidecar_undecodable:" + sidecar.error().message;
+        spdlog::warn("[TopologyStore] road sidecar for snapshot {} is undecodable ({}); routing "
+                     "continues without roads",
+                     batch.snapshotId, sidecar.error().message);
+        return {};
+    }
+    if (auto invalid = validateTopologyRoadSidecar(batch, sidecar.value()); invalid.has_value()) {
+        batch.roadUnavailableReason = *invalid;
+        spdlog::warn("[TopologyStore] road sidecar for snapshot {} rejected ({}); routing "
+                     "continues without roads",
+                     batch.snapshotId, *invalid);
+        return {};
+    }
+    batch.roads = std::move(sidecar.value().roads);
+    batch.roadMaxPerCluster = sidecar.value().maxPerCluster;
+    return {};
 }
 
 Result<std::shared_ptr<const MetadataKgTopologyArtifactStore::ResidentSnapshot>>

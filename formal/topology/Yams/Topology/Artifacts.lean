@@ -120,6 +120,15 @@ structure ClusterArtifact where
   centroidEmbedding : Embedding := []
   deriving Repr, BEq
 
+/-- Mirrors `ClusterRoad`: one cluster's view of an undirected cluster-to-cluster link whose
+weight sums the raw neighbor observations between members of the two clusters. Persisted in a
+sidecar beside the snapshot, never inside the construction payload. -/
+structure ClusterRoad where
+  fromClusterId : ClusterId
+  toClusterId : ClusterId
+  weight : Rat := 0
+  deriving Repr, BEq
+
 structure TopologyArtifactBatch where
   snapshotId : String := ""
   algorithm : String := ""
@@ -128,6 +137,10 @@ structure TopologyArtifactBatch where
   topologyEpoch : Nat := 0
   clusters : List ClusterArtifact := []
   memberships : List DocumentClusterMembership := []
+  /-- Roads attached to the batch; empty when roads are off or the sidecar was dropped. -/
+  roads : List ClusterRoad := []
+  /-- Per-source bound the builder applied to `roads` (sidecar header `maxPerCluster`). -/
+  roadMaxPerCluster : Nat := 0
   deriving Repr, BEq
 
 structure TopologyUpdateStats where
@@ -184,5 +197,93 @@ def WellFormedBatch (batch : TopologyArtifactBatch) : Prop :=
   (∀ c ∈ batch.clusters, c.memberCountMatches) ∧
   membershipsReferenceClusters batch ∧
   clusterMembersHaveMemberships batch
+
+/-! ### Roads
+
+Roads are retrieval hints layered over the certified cover. Their well-formedness mirrors the
+soft validation `validateTopologyRoadSidecar` applies when a sidecar is loaded; a sidecar that
+fails it is dropped, and the batch below keeps its construction identity unchanged. -/
+
+/-- A cluster id names a cluster of the batch. -/
+def namesCluster (batch : TopologyArtifactBatch) (id : ClusterId) : Prop :=
+  ∃ c ∈ batch.clusters, c.clusterId = id
+
+/-- Both road endpoints are clusters of the batch (`road_endpoint_not_cluster`). -/
+def roadEndpointsAreClusters (batch : TopologyArtifactBatch) : Prop :=
+  ∀ r ∈ batch.roads, namesCluster batch r.fromClusterId ∧ namesCluster batch r.toClusterId
+
+/-- No road links a cluster to itself (`road_self_loop`). -/
+def roadsHaveNoSelfLoop (batch : TopologyArtifactBatch) : Prop :=
+  ∀ r ∈ batch.roads, r.fromClusterId ≠ r.toClusterId
+
+/-- Road weights are non-negative (`road_weight_invalid`; finiteness is implicit over ℚ). -/
+def roadWeightsNonNegative (batch : TopologyArtifactBatch) : Prop :=
+  ∀ r ∈ batch.roads, 0 ≤ r.weight
+
+/-- Roads leaving one source cluster. -/
+def roadsFrom (batch : TopologyArtifactBatch) (source : ClusterId) : List ClusterRoad :=
+  batch.roads.filter (fun r => r.fromClusterId == source)
+
+/-- Every source keeps at most `roadMaxPerCluster` roads
+(`road_count_exceeds_max_per_cluster`). -/
+def roadsBoundedPerSource (batch : TopologyArtifactBatch) : Prop :=
+  ∀ source : ClusterId, (roadsFrom batch source).length ≤ batch.roadMaxPerCluster
+
+/-- Well-formedness of the road layer; `WellFormedBatch` does not depend on it. -/
+def WellFormedRoads (batch : TopologyArtifactBatch) : Prop :=
+  roadEndpointsAreClusters batch ∧
+  roadsHaveNoSelfLoop batch ∧
+  roadWeightsNonNegative batch ∧
+  roadsBoundedPerSource batch
+
+/-- A batch with roads removed, as the store yields when the sidecar is missing or rejected. -/
+def TopologyArtifactBatch.withoutRoads (batch : TopologyArtifactBatch) : TopologyArtifactBatch :=
+  { batch with roads := [], roadMaxPerCluster := 0 }
+
+/-- A batch with a road layer attached, as the store yields when the sidecar loads. -/
+def TopologyArtifactBatch.withRoads (batch : TopologyArtifactBatch)
+    (roads : List ClusterRoad) (k : Nat) : TopologyArtifactBatch :=
+  { batch with roads := roads, roadMaxPerCluster := k }
+
+/-- The construction content a routing construction fingerprint is computed from: algorithm,
+input kind, clusters and memberships. Roads are deliberately absent. -/
+def constructionIdentity (batch : TopologyArtifactBatch) :
+    String × TopologyInputKind × List ClusterArtifact × List DocumentClusterMembership :=
+  (batch.algorithm, batch.inputKind, batch.clusters, batch.memberships)
+
+/-- Attaching or replacing roads does not move the construction identity. -/
+theorem constructionIdentity_withRoads (batch : TopologyArtifactBatch)
+    (roads : List ClusterRoad) (k : Nat) :
+    constructionIdentity (batch.withRoads roads k) = constructionIdentity batch := rfl
+
+/-- Dropping roads does not move the construction identity. -/
+theorem constructionIdentity_withoutRoads (batch : TopologyArtifactBatch) :
+    constructionIdentity batch.withoutRoads = constructionIdentity batch := rfl
+
+/-- The certified cover (cluster/membership well-formedness) is independent of roads: a batch is
+well-formed with any road layer exactly when it is well-formed without one. -/
+theorem wellFormedBatch_withRoads_iff (batch : TopologyArtifactBatch)
+    (roads : List ClusterRoad) (k : Nat) :
+    WellFormedBatch (batch.withRoads roads k) ↔ WellFormedBatch batch := Iff.rfl
+
+/-- Dropping a rejected sidecar never breaks a well-formed cover. -/
+theorem wellFormedBatch_withoutRoads (batch : TopologyArtifactBatch)
+    (h : WellFormedBatch batch) : WellFormedBatch batch.withoutRoads := h
+
+/-- The empty road layer is always well-formed, so a dropped sidecar leaves a valid batch. -/
+theorem wellFormedRoads_withoutRoads (batch : TopologyArtifactBatch) :
+    WellFormedRoads batch.withoutRoads := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro r hr; simp [TopologyArtifactBatch.withoutRoads] at hr
+  · intro r hr; simp [TopologyArtifactBatch.withoutRoads] at hr
+  · intro r hr; simp [TopologyArtifactBatch.withoutRoads] at hr
+  · intro source; simp [roadsFrom, TopologyArtifactBatch.withoutRoads]
+
+/-- A well-formed road only ever leads to a cluster of the batch, so following it stays inside
+the certified cover. -/
+theorem wellFormedRoads_target_isCluster {batch : TopologyArtifactBatch}
+    (h : WellFormedRoads batch) {r : ClusterRoad} (hr : r ∈ batch.roads) :
+    namesCluster batch r.toClusterId :=
+  (h.1 r hr).2
 
 end Yams.Topology

@@ -289,9 +289,18 @@ struct TopologyArtifactBatch {
     std::vector<ClusterArtifact> clusters;
     std::vector<DocumentClusterMembership> memberships;
     /// Cluster roads, sorted by (fromClusterId asc, weight desc, toClusterId asc) with at most
-    /// `TopologyBuildConfig::roadMaxPerCluster` entries per source cluster. Empty when roads are
-    /// off. In memory only: the binary codec and the routing construction fingerprint ignore it.
+    /// `roadMaxPerCluster` entries per source cluster. Empty when roads are off. The main snapshot
+    /// codec and the routing construction fingerprint ignore roads; they persist in a separate
+    /// sidecar node (see topology_codec.h `TopologyRoadSidecar`) with their own identity,
+    /// `topologyRoadFingerprint`.
     std::vector<ClusterRoad> roads;
+    /// Per-source bound the builder applied to `roads` (`TopologyBuildConfig::roadMaxPerCluster`).
+    /// Stored in the sidecar header so a reloaded sidecar can be checked against it.
+    std::size_t roadMaxPerCluster{0};
+    /// Load-time diagnostic, never persisted or fingerprinted: why `roads` is empty although a
+    /// sidecar existed (undecodable, failed validation). Empty when roads loaded or were never
+    /// written. A set reason never disables routing.
+    std::string roadUnavailableReason;
 };
 
 struct TopologyUpdateStats {

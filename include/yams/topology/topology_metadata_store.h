@@ -14,8 +14,13 @@ namespace yams::topology {
 
 class MetadataKgTopologyArtifactStore final : public ITopologyArtifactStore {
 public:
-    /// Snapshot nodes kept in the knowledge graph; older compressed snapshots are removed.
+    /// Snapshot nodes kept in the knowledge graph; older compressed snapshots are removed, each
+    /// together with its road sidecar.
     static constexpr std::size_t kRetainedSnapshots = 3;
+    /// Road sidecar node: `topology:roads:<snapshotId>`, written only when the batch has roads
+    /// and always before the latest pointer. Optional on load; see `attachRoadSidecar`.
+    static constexpr std::string_view kRoadSidecarNodePrefix = "topology:roads:";
+    static constexpr std::string_view kRoadSidecarNodeType = "topology_road_snapshot";
 
     MetadataKgTopologyArtifactStore(
         std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
@@ -48,6 +53,10 @@ private:
     Result<std::shared_ptr<const ResidentSnapshot>> loadResidentLatest() const;
     Result<std::optional<TopologyArtifactBatch>>
     loadSnapshotById(std::string_view snapshotId) const;
+    /// Fill `batch.roads` from the sidecar node of `batch.snapshotId`. A missing sidecar leaves
+    /// roads empty with no error; an undecodable or invalid one leaves roads empty and sets
+    /// `batch.roadUnavailableReason`. Only storage errors propagate.
+    Result<void> attachRoadSidecar(TopologyArtifactBatch& batch) const;
 
     std::shared_ptr<metadata::IMetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;

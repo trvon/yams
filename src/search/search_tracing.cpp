@@ -227,6 +227,9 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebugBool(debug, metrics::kTopologyRouteBqUsed, session.routeBqUsed);
     setDebug(debug, metrics::kTopologyRepresentativeRule,
              std::string{yams::topology::representativeRuleName(session.representativeRule)});
+    if (!session.roadUnavailableReason.empty()) {
+        setDebug(debug, metrics::kTopologyRoadUnavailableReason, session.roadUnavailableReason);
+    }
     setDebug(debug, metrics::kTopologyRouteBqCandidates, std::to_string(session.routeBqCandidates));
     setDebug(debug, metrics::kTopologyRouteBqRotation,
              SearchEngineConfig::topologyBqRotationToString(config.topologyRoutingBqRotation));

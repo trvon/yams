@@ -439,6 +439,7 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
                             snapshot->artifacts->topologyEpoch == request.expectedTopologyEpoch;
     result.topologyEpoch = snapshot->artifacts->topologyEpoch;
     result.representativeRule = snapshot->artifacts->representativeRule;
+    result.roadUnavailableReason = snapshot->artifacts->roadUnavailableReason;
     result.certificate.constructionFingerprint = snapshot->constructionFingerprint;
     result.certificate.routingPolicyFingerprint =
         topologyRoutingPolicyFingerprint(snapshot->representationFingerprint, request.options);
@@ -1593,6 +1594,33 @@ topologyRoutingRepresentationFingerprint(const yams::topology::TopologyArtifactB
     return fingerprintHex(hash);
 }
 
+std::string topologyRoadFingerprint(const yams::topology::TopologyArtifactBatch& batch) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    fingerprintString(hash, "topology-roads-v1");
+    std::vector<const yams::topology::ClusterRoad*> roads;
+    roads.reserve(batch.roads.size());
+    for (const auto& road : batch.roads) {
+        roads.push_back(&road);
+    }
+    std::ranges::sort(roads, [](const auto* lhs, const auto* rhs) {
+        if (lhs->fromClusterId != rhs->fromClusterId) {
+            return lhs->fromClusterId < rhs->fromClusterId;
+        }
+        if (lhs->toClusterId != rhs->toClusterId) {
+            return lhs->toClusterId < rhs->toClusterId;
+        }
+        return std::bit_cast<std::uint64_t>(lhs->weight) <
+               std::bit_cast<std::uint64_t>(rhs->weight);
+    });
+    fingerprintIntegral(hash, roads.size());
+    for (const auto* road : roads) {
+        fingerprintString(hash, road->fromClusterId);
+        fingerprintString(hash, road->toClusterId);
+        fingerprintDouble(hash, road->weight);
+    }
+    return fingerprintHex(hash);
+}
+
 std::string topologyRoutingPolicyFingerprint(std::string_view representationFingerprint,
                                              const TopologyRoutingOptions& options) {
     std::uint64_t hash = 14695981039346656037ULL;
@@ -1702,6 +1730,7 @@ TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch, bool requireDense
         topologyRoutingConstructionFingerprint(*snapshot->artifacts);
     snapshot->representationFingerprint =
         topologyRoutingRepresentationFingerprint(*snapshot->artifacts);
+    snapshot->roadFingerprint = topologyRoadFingerprint(*snapshot->artifacts);
     snapshot->sparseRouteIndex = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
         *snapshot->artifacts, requireDenseAnnIndex, true, bqPrefixDimension, bqRotation);
     snapshot->denseAnnBuildAttempted = requireDenseAnnIndex;

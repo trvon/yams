@@ -10,12 +10,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace yams::topology {
@@ -953,15 +956,12 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchBinary(std::span<const std
     return batch;
 }
 
-Result<std::string> serializeTopologyBatchCompressed(const TopologyArtifactBatch& batch,
-                                                     int compressionLevel) {
-    YAMS_ZONE_SCOPED_N("topology::codec::serializeCompressed");
-    auto binaryRes = serializeTopologyBatchBinary(batch);
-    if (!binaryRes) {
-        return binaryRes.error();
-    }
-    const auto& binaryBytes = binaryRes.value();
+namespace {
 
+/// Zstd-compress `binaryBytes` into a JSON envelope carrying `format`, the compression used,
+/// the sizes and the base64 payload. Callers add their own inspection fields.
+Result<json> compressToEnvelope(std::span<const std::byte> binaryBytes, int compressionLevel,
+                                std::string_view format) {
     auto compressor = compression::CompressionRegistry::instance().createCompressor(
         compression::CompressionAlgorithm::Zstandard);
     if (!compressor) {
@@ -974,22 +974,36 @@ Result<std::string> serializeTopologyBatchCompressed(const TopologyArtifactBatch
     }
     const auto& compResult = compRes.value();
     const bool isZstd = (compResult.algorithm == compression::CompressionAlgorithm::Zstandard);
-    std::string b64 = encodeBase64(compResult.data);
 
     json envelope;
-    envelope["format"] = "zstd_binary_v1";
+    envelope["format"] = std::string(format);
     envelope["compression"] = isZstd ? "zstd" : "none";
-    envelope["snapshot_id"] = batch.snapshotId;
-    envelope["algorithm"] = batch.algorithm;
-    envelope["topology_epoch"] = batch.topologyEpoch;
-    envelope["cluster_count"] = batch.clusters.size();
-    envelope["membership_count"] = batch.memberships.size();
     envelope["uncompressed_bytes"] = binaryBytes.size();
     envelope["compressed_bytes"] = compResult.data.size();
-    envelope["generated_at_unix_seconds"] = batch.generatedAtUnixSeconds;
-    envelope["data_b64"] = std::move(b64);
+    envelope["data_b64"] = encodeBase64(compResult.data);
+    return envelope;
+}
 
-    return envelope.dump();
+} // namespace
+
+Result<std::string> serializeTopologyBatchCompressed(const TopologyArtifactBatch& batch,
+                                                     int compressionLevel) {
+    YAMS_ZONE_SCOPED_N("topology::codec::serializeCompressed");
+    auto binaryRes = serializeTopologyBatchBinary(batch);
+    if (!binaryRes) {
+        return binaryRes.error();
+    }
+    auto envelope = compressToEnvelope(binaryRes.value(), compressionLevel, "zstd_binary_v1");
+    if (!envelope) {
+        return envelope.error();
+    }
+    envelope.value()["snapshot_id"] = batch.snapshotId;
+    envelope.value()["algorithm"] = batch.algorithm;
+    envelope.value()["topology_epoch"] = batch.topologyEpoch;
+    envelope.value()["cluster_count"] = batch.clusters.size();
+    envelope.value()["membership_count"] = batch.memberships.size();
+    envelope.value()["generated_at_unix_seconds"] = batch.generatedAtUnixSeconds;
+    return envelope.value().dump();
 }
 
 namespace {
@@ -1024,7 +1038,7 @@ Result<size_t> envelopeUnsigned(const json& envelope, const char* key) {
     return static_cast<size_t>(value);
 }
 
-bool startsWithTopologyMagic(std::span<const std::byte> bytes) {
+bool startsWithMagic(std::span<const std::byte> bytes, uint32_t expectedMagic) {
     if (bytes.size() < 4) {
         return false;
     }
@@ -1032,10 +1046,13 @@ bool startsWithTopologyMagic(std::span<const std::byte> bytes) {
     for (int i = 0; i < 4; ++i) {
         magic |= static_cast<uint32_t>(static_cast<uint8_t>(bytes[i])) << (i * 8);
     }
-    return magic == kTopologyBinaryMagic;
+    return magic == expectedMagic;
 }
 
-Result<TopologyArtifactBatch> deserializeCompressedEnvelope(const json& envelope) {
+/// Recover the binary payload of a compressed envelope: base64-decode `data_b64`, then either
+/// return it as-is (stored uncompressed, or already starting with `magic`) or Zstd-decompress it
+/// under the size bounds.
+Result<std::vector<std::byte>> decompressEnvelopeBytes(const json& envelope, uint32_t magic) {
     auto b64 = envelopeString(envelope, "data_b64", "");
     if (!b64) {
         return b64.error();
@@ -1056,12 +1073,12 @@ Result<TopologyArtifactBatch> deserializeCompressedEnvelope(const json& envelope
     if (!decodedBytes) {
         return decodedBytes.error();
     }
-    const auto& compressed = decodedBytes.value();
+    auto& compressed = decodedBytes.value();
 
     // Data stored uncompressed (tiny batch where the compressor opted out of a zstd frame) is
-    // deserialized directly.
-    if (compAlgo.value() == "none" || startsWithTopologyMagic(compressed)) {
-        return deserializeTopologyBatchBinary(compressed);
+    // returned directly.
+    if (compAlgo.value() == "none" || startsWithMagic(compressed, magic)) {
+        return std::move(compressed);
     }
     if (compAlgo.value() != "zstd") {
         return Error{ErrorCode::InvalidData,
@@ -1091,7 +1108,15 @@ Result<TopologyArtifactBatch> deserializeCompressedEnvelope(const json& envelope
         return Error{ErrorCode::InvalidData,
                      "Topology snapshot decompressed size does not match uncompressed_bytes"};
     }
-    return deserializeTopologyBatchBinary(decompressed.value());
+    return std::move(decompressed.value());
+}
+
+Result<TopologyArtifactBatch> deserializeCompressedEnvelope(const json& envelope) {
+    auto bytes = decompressEnvelopeBytes(envelope, kTopologyBinaryMagic);
+    if (!bytes) {
+        return bytes.error();
+    }
+    return deserializeTopologyBatchBinary(bytes.value());
 }
 
 } // namespace
@@ -1115,6 +1140,10 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchCompressed(std::string_vie
         if (format.value() == "zstd_binary_v1") {
             return deserializeCompressedEnvelope(parsed);
         }
+        // Legacy raw JSON never carried a format field, so any other value is a foreign envelope
+        // (for example a road sidecar), not a snapshot.
+        return Error{ErrorCode::InvalidData,
+                     "Unsupported topology snapshot format: " + format.value()};
     }
 
     // Fallback: legacy uncompressed JSON. Its field accessors throw on wrong-typed values.
@@ -1124,6 +1153,230 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchCompressed(std::string_vie
         return Error{ErrorCode::InvalidData,
                      std::string("Malformed legacy topology snapshot JSON: ") + e.what()};
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Road sidecar
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr uint32_t kTopologyRoadMagic = 0x524D4159; // 'Y','A','M','R'
+constexpr uint32_t kTopologyRoadVersion = 1;
+constexpr std::string_view kTopologyRoadEnvelopeFormat = "topology_roads_zstd_v1";
+constexpr size_t kMinRoadBytes = 4 + 4 + 8; // from index + to index + weight
+
+} // namespace
+
+Result<std::vector<std::byte>>
+serializeTopologyRoadSidecarBinary(const TopologyRoadSidecar& sidecar) {
+    YAMS_ZONE_SCOPED_N("topology::codec::serializeRoadSidecarBinary");
+    ByteWriter writer;
+    writer.reserve(64 + sidecar.snapshotId.size() + sidecar.roads.size() * 48);
+
+    // 1. Header
+    writer.writeU32(kTopologyRoadMagic);
+    writer.writeU32(kTopologyRoadVersion);
+    writer.writeU32(toU32(sidecar.maxPerCluster));
+    writer.writeU32(0); // Reserved
+    writer.writeString(sidecar.snapshotId);
+
+    // 2. Cluster-id table
+    std::unordered_map<std::string_view, uint32_t> stringToId;
+    std::vector<std::string_view> idToString;
+    auto internString = [&](const std::string& s) -> uint32_t {
+        if (auto it = stringToId.find(s); it != stringToId.end()) {
+            return it->second;
+        }
+        const uint32_t id = toU32(idToString.size());
+        stringToId.emplace(s, id);
+        idToString.push_back(s);
+        return id;
+    };
+    for (const auto& road : sidecar.roads) {
+        internString(road.fromClusterId);
+        internString(road.toClusterId);
+    }
+    writer.writeU32(toU32(idToString.size()));
+    for (const auto s : idToString) {
+        writer.writeString(s);
+    }
+
+    // 3. Roads
+    writer.writeU32(toU32(sidecar.roads.size()));
+    for (const auto& road : sidecar.roads) {
+        writer.writeU32(internString(road.fromClusterId));
+        writer.writeU32(internString(road.toClusterId));
+        writer.writeDouble(road.weight);
+    }
+    return writer.take();
+}
+
+Result<TopologyRoadSidecar> deserializeTopologyRoadSidecarBinary(std::span<const std::byte> bytes) {
+    YAMS_ZONE_SCOPED_N("topology::codec::deserializeRoadSidecarBinary");
+    ByteReader reader(bytes);
+
+    auto magic = reader.readU32();
+    if (!magic) {
+        return magic.error();
+    }
+    if (magic.value() != kTopologyRoadMagic) {
+        return Error{ErrorCode::InvalidData, "Invalid magic in topology road sidecar"};
+    }
+    auto version = reader.readU32();
+    if (!version) {
+        return version.error();
+    }
+    if (version.value() != kTopologyRoadVersion) {
+        return Error{ErrorCode::InvalidData, "Unsupported topology road sidecar version: " +
+                                                 std::to_string(version.value())};
+    }
+    auto maxPerCluster = reader.readU32();
+    if (!maxPerCluster) {
+        return maxPerCluster.error();
+    }
+    auto reserved = reader.readU32();
+    if (!reserved) {
+        return reserved.error();
+    }
+
+    TopologyRoadSidecar sidecar;
+    sidecar.maxPerCluster = maxPerCluster.value();
+    auto snapshotId = reader.readString();
+    if (!snapshotId) {
+        return snapshotId.error();
+    }
+    sidecar.snapshotId = std::move(snapshotId.value());
+
+    auto stringCount = reader.readCount(kMinStringBytes, "road cluster-id table");
+    if (!stringCount) {
+        return stringCount.error();
+    }
+    std::vector<std::string> stringTable;
+    stringTable.reserve(stringCount.value());
+    for (uint32_t i = 0; i < stringCount.value(); ++i) {
+        auto s = reader.readString();
+        if (!s) {
+            return s.error();
+        }
+        stringTable.push_back(std::move(s.value()));
+    }
+    auto resolve = [&](uint32_t idx) -> Result<const std::string*> {
+        if (idx >= stringTable.size()) {
+            return Error{ErrorCode::InvalidData,
+                         "Road cluster-id index out of bounds: " + std::to_string(idx)};
+        }
+        return &stringTable[idx];
+    };
+
+    auto roadCount = reader.readCount(kMinRoadBytes, "road");
+    if (!roadCount) {
+        return roadCount.error();
+    }
+    sidecar.roads.reserve(roadCount.value());
+    for (uint32_t i = 0; i < roadCount.value(); ++i) {
+        auto fromIdx = reader.readU32();
+        if (!fromIdx) {
+            return fromIdx.error();
+        }
+        auto from = resolve(fromIdx.value());
+        if (!from) {
+            return from.error();
+        }
+        auto toIdx = reader.readU32();
+        if (!toIdx) {
+            return toIdx.error();
+        }
+        auto to = resolve(toIdx.value());
+        if (!to) {
+            return to.error();
+        }
+        auto weight = reader.readDouble();
+        if (!weight) {
+            return weight.error();
+        }
+        sidecar.roads.push_back(ClusterRoad{
+            .fromClusterId = *from.value(), .toClusterId = *to.value(), .weight = weight.value()});
+    }
+
+    if (!reader.atEnd()) {
+        return Error{ErrorCode::InvalidData, "Trailing bytes after topology road sidecar"};
+    }
+    return sidecar;
+}
+
+Result<std::string> serializeTopologyRoadSidecarCompressed(const TopologyRoadSidecar& sidecar,
+                                                           int compressionLevel) {
+    YAMS_ZONE_SCOPED_N("topology::codec::serializeRoadSidecarCompressed");
+    auto binary = serializeTopologyRoadSidecarBinary(sidecar);
+    if (!binary) {
+        return binary.error();
+    }
+    auto envelope =
+        compressToEnvelope(binary.value(), compressionLevel, kTopologyRoadEnvelopeFormat);
+    if (!envelope) {
+        return envelope.error();
+    }
+    envelope.value()["snapshot_id"] = sidecar.snapshotId;
+    envelope.value()["road_count"] = sidecar.roads.size();
+    envelope.value()["max_per_cluster"] = sidecar.maxPerCluster;
+    return envelope.value().dump();
+}
+
+Result<TopologyRoadSidecar> deserializeTopologyRoadSidecarCompressed(std::string_view payload) {
+    YAMS_ZONE_SCOPED_N("topology::codec::deserializeRoadSidecarCompressed");
+    if (payload.empty()) {
+        return Error{ErrorCode::InvalidArgument, "Empty topology road sidecar payload"};
+    }
+    auto parsed = json::parse(payload, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object()) {
+        return Error{ErrorCode::SerializationError, "Failed to parse topology road sidecar JSON"};
+    }
+    auto format = envelopeString(parsed, "format", "");
+    if (!format) {
+        return format.error();
+    }
+    if (format.value() != kTopologyRoadEnvelopeFormat) {
+        return Error{ErrorCode::InvalidData,
+                     "Unsupported topology road sidecar format: " + format.value()};
+    }
+    auto bytes = decompressEnvelopeBytes(parsed, kTopologyRoadMagic);
+    if (!bytes) {
+        return bytes.error();
+    }
+    return deserializeTopologyRoadSidecarBinary(bytes.value());
+}
+
+std::optional<std::string> validateTopologyRoadSidecar(const TopologyArtifactBatch& batch,
+                                                       const TopologyRoadSidecar& sidecar) {
+    if (sidecar.roads.empty()) {
+        return std::nullopt;
+    }
+    if (sidecar.snapshotId != batch.snapshotId) {
+        return "road_snapshot_mismatch";
+    }
+    std::unordered_set<std::string_view> clusterIds;
+    clusterIds.reserve(batch.clusters.size());
+    for (const auto& cluster : batch.clusters) {
+        clusterIds.insert(cluster.clusterId);
+    }
+    std::unordered_map<std::string_view, size_t> perSource;
+    perSource.reserve(batch.clusters.size());
+    for (const auto& road : sidecar.roads) {
+        if (!clusterIds.contains(road.fromClusterId) || !clusterIds.contains(road.toClusterId)) {
+            return "road_endpoint_not_cluster";
+        }
+        if (road.fromClusterId == road.toClusterId) {
+            return "road_self_loop";
+        }
+        if (!std::isfinite(road.weight) || road.weight < 0.0) {
+            return "road_weight_invalid";
+        }
+        if (++perSource[road.fromClusterId] > sidecar.maxPerCluster) {
+            return "road_count_exceeds_max_per_cluster";
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace yams::topology

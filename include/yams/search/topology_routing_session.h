@@ -41,6 +41,9 @@ struct TopologyRoutingSnapshot {
     std::shared_ptr<const yams::topology::TopologyArtifactBatch> artifacts;
     std::string constructionFingerprint;
     std::string representationFingerprint;
+    /// Identity of the loaded road set (`topologyRoadFingerprint`). Provenance and cache
+    /// identity for road consumers only; not part of the construction or policy fingerprints.
+    std::string roadFingerprint;
     std::unordered_map<std::string_view, std::size_t> clustersById;
     std::unordered_map<std::string_view, std::size_t> membershipsByDocumentHash;
     yams::topology::ProtectedRelationCoverIndex protectedRelationCover;
@@ -306,6 +309,10 @@ struct TopologyRoutingSessionResult {
     yams::topology::RepresentativeRule representativeRule =
         yams::topology::RepresentativeRule::Degree;
     std::string skipReason;
+    /// Why the loaded snapshot carries no roads although a sidecar existed (store diagnostic,
+    /// `TopologyArtifactBatch::roadUnavailableReason`). Empty when roads loaded or were never
+    /// written. Informational: a set reason never changes routing.
+    std::string roadUnavailableReason;
     std::size_t routedClusters = 0;
     std::size_t availableRoutes = 0;
     std::size_t routedDocs = 0;
@@ -381,6 +388,12 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
 /// Cached per snapshot; includes ordered representative vectors as well as construction.
 [[nodiscard]] std::string
 topologyRoutingRepresentationFingerprint(const yams::topology::TopologyArtifactBatch& batch);
+
+/// Identity of `batch.roads` alone (order-independent). Separate from the construction
+/// fingerprint, which stays road-free so road changes never invalidate construction-bound
+/// calibrations; an empty road set has a fixed, non-empty fingerprint.
+[[nodiscard]] std::string
+topologyRoadFingerprint(const yams::topology::TopologyArtifactBatch& batch);
 
 /// Identity of the allowed-set selection policy; excludes query values and diagnostics.
 [[nodiscard]] std::string
