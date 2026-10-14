@@ -562,6 +562,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     buildConfig.overlapResidualPenalty =
         boundarySpillResidualPenalty_.load(std::memory_order_acquire);
     buildConfig.roadMaxPerCluster = roadMaxPerCluster();
+    buildConfig.roadOrder = roadOrder();
     applyConstructionPurityDefaults(buildConfig);
 
     topology::TopologyExtractionStats extractionStats;

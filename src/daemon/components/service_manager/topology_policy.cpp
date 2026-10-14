@@ -64,6 +64,11 @@ void ServiceManager::configureTopologyRuntime() {
             spdlog::info("Topology cluster roads applied via config: max_per_cluster={}",
                          topologyManager_.roadMaxPerCluster());
         }
+        if (enginePolicy.roadOrder) {
+            topologyManager_.setRoadOrder(*enginePolicy.roadOrder);
+            spdlog::info("Topology road order applied via config: {}",
+                         topology::roadOrderKindName(topologyManager_.roadOrder()));
+        }
         topology::FeatureComposition featureComposition;
         featureComposition.enableEntityFusion =
             enginePolicy.featureEntityFusion.value_or(featureComposition.enableEntityFusion);

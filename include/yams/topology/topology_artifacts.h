@@ -114,6 +114,76 @@ parseRepresentativeRule(std::string_view name) noexcept {
     return std::nullopt;
 }
 
+/// Walk order of a cluster's members (TOML `topology.road_order`). None stores no order.
+/// - Time: ascending `TopologyDocumentInput::eventTime`; ties by hash; members without a time
+///   last, by hash.
+/// - Session: grouped by `sessionId`. Groups are ordered by their earliest event time (groups
+///   without any time after those with one), then by session id; inside a group by time then
+///   hash. Members without a session come last, by time then hash.
+/// - SimilarityChain: greedy nearest-neighbor tour over the members' embeddings (cosine) starting
+///   from the cluster representative (`ClusterArtifact::medoid`, else the smallest-hash usable
+///   member); ties go to the smaller hash. Members without a usable embedding come last, by hash.
+enum class RoadOrderKind : uint8_t {
+    None = 0,
+    Time = 1,
+    Session = 2,
+    SimilarityChain = 3,
+};
+
+/// Config spelling of a RoadOrderKind.
+[[nodiscard]] constexpr std::string_view roadOrderKindName(RoadOrderKind kind) noexcept {
+    switch (kind) {
+        case RoadOrderKind::None:
+            return "none";
+        case RoadOrderKind::Time:
+            return "time";
+        case RoadOrderKind::Session:
+            return "session";
+        case RoadOrderKind::SimilarityChain:
+            return "similarity_chain";
+    }
+    return "none";
+}
+
+/// Parse a config spelling (case-insensitive); nullopt for anything unrecognized.
+[[nodiscard]] inline std::optional<RoadOrderKind>
+parseRoadOrderKind(std::string_view name) noexcept {
+    for (const auto kind : {RoadOrderKind::None, RoadOrderKind::Time, RoadOrderKind::Session,
+                            RoadOrderKind::SimilarityChain}) {
+        const auto expected = roadOrderKindName(kind);
+        if (name.size() != expected.size()) {
+            continue;
+        }
+        bool equal = true;
+        for (std::size_t i = 0; i < name.size() && equal; ++i) {
+            const char c =
+                name[i] >= 'A' && name[i] <= 'Z' ? static_cast<char>(name[i] - 'A' + 'a') : name[i];
+            equal = c == expected[i];
+        }
+        if (equal) {
+            return kind;
+        }
+    }
+    return std::nullopt;
+}
+
+/// Wire value of a RoadOrderKind (road sidecar v3); nullopt for an unknown value.
+[[nodiscard]] constexpr std::optional<RoadOrderKind>
+roadOrderKindFromWire(uint32_t value) noexcept {
+    switch (value) {
+        case 0:
+            return RoadOrderKind::None;
+        case 1:
+            return RoadOrderKind::Time;
+        case 2:
+            return RoadOrderKind::Session;
+        case 3:
+            return RoadOrderKind::SimilarityChain;
+        default:
+            return std::nullopt;
+    }
+}
+
 enum class DocumentTopologyRole : uint8_t {
     Core,
     Bridge,
@@ -204,6 +274,11 @@ struct TopologyBuildConfig {
     /// construction filter, so cross-cluster evidence the filter dropped still links clusters.
     /// 0 (default) computes no roads and leaves every other artifact unchanged.
     std::size_t roadMaxPerCluster{0};
+    /// Walk order stored on every cluster with at least two members (TOML `topology.road_order`,
+    /// see RoadOrderKind). Computed at full build and for the rebuilt clusters of an incremental
+    /// update; independent of `roadMaxPerCluster`. None (default) stores no order and leaves the
+    /// main snapshot payload, the road sidecar and every fingerprint unchanged.
+    RoadOrderKind roadOrder{RoadOrderKind::None};
 };
 
 struct TopologyDirtyRegion {
@@ -266,6 +341,12 @@ struct ClusterArtifact {
     std::vector<float> centroidEmbedding{};
     // Additional bounded representatives; centroidEmbedding is always the implicit first one.
     std::vector<ClusterRoutingRepresentative> routingRepresentatives{};
+    /// Walk order over the hash-sorted `memberDocumentHashes`: `orderedMembers[i]` is the index
+    /// of the i-th member along the walk, each index exactly once. Empty, with `orderKind` None,
+    /// when no order was requested or the cluster has fewer than two members. Persisted in the
+    /// road sidecar (v3), never in the main snapshot payload or any routing fingerprint.
+    RoadOrderKind orderKind{RoadOrderKind::None};
+    std::vector<uint32_t> orderedMembers{};
 };
 
 /// One cluster's view of an undirected cluster-to-cluster link. `weight` is the sum of every raw
@@ -322,6 +403,11 @@ struct TopologyArtifactBatch {
     /// sidecar existed (undecodable, failed validation). Empty when roads loaded or were never
     /// written. A set reason never disables routing.
     std::string roadUnavailableReason;
+    /// Load-time diagnostic for the clusters' walk orders, never persisted or fingerprinted:
+    /// `;`-joined `<token>[:<clusterId>]` entries naming each order the sidecar carried that was
+    /// dropped (see attachTopologyMemberOrders). Only the offending cluster loses its order; the
+    /// roads and the other orders stay.
+    std::string orderUnavailableReason;
 };
 
 struct TopologyUpdateStats {

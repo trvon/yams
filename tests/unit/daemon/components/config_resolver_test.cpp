@@ -23,6 +23,7 @@
 #include <fstream>
 #include <string>
 #include <tuple>
+#include <utility>
 
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
@@ -1124,6 +1125,7 @@ boundary_spill_limit = 1
 boundary_spill_distance_ratio = +1.2
 boundary_spill_residual_penalty = 1.5e0
 road_max_per_cluster = 3
+road_order = "session"
 
 [topology.features]
 entity_fusion = true
@@ -1158,6 +1160,8 @@ minhash_alpha = 0.15
     CHECK((*policy.boundarySpillResidualPenalty == Catch::Approx(1.5)));
     REQUIRE(policy.roadMaxPerCluster.has_value());
     CHECK((*policy.roadMaxPerCluster == 3));
+    REQUIRE(policy.roadOrder.has_value());
+    CHECK((*policy.roadOrder == yams::topology::RoadOrderKind::Session));
     CHECK(*policy.featureEntityFusion);
     CHECK((*policy.featureEntitySignatureK == 12));
     CHECK((*policy.featureEntityFusionAlpha == Catch::Approx(0.2F)));
@@ -1202,8 +1206,37 @@ engine = "connected"
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
         auto policy = ConfigResolver::resolveTopologyEnginePolicy();
         CHECK_FALSE(policy.dirtyRegionExpansion.has_value());
-        // Roads stay off unless the key is present.
+        // Roads and the road order stay off unless the keys are present.
         CHECK_FALSE(policy.roadMaxPerCluster.has_value());
+        CHECK_FALSE(policy.roadOrder.has_value());
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyEnginePolicy reads the road order",
+                 "[daemon][components][config][topology][roads][catch2]") {
+    SECTION("every spelling resolves") {
+        for (const auto [spelling, expected] :
+             {std::pair{"none", yams::topology::RoadOrderKind::None},
+              std::pair{"time", yams::topology::RoadOrderKind::Time},
+              std::pair{"Session", yams::topology::RoadOrderKind::Session},
+              std::pair{"similarity_chain", yams::topology::RoadOrderKind::SimilarityChain}}) {
+            auto configPath = writeToml("config.toml", std::string("[topology]\nroad_order = \"") +
+                                                           spelling + "\"\n");
+            EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+            auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+            REQUIRE(policy.roadOrder.has_value());
+            CHECK((*policy.roadOrder == expected));
+        }
+    }
+    SECTION("an unrecognized order is ignored, not guessed") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+road_order = "alphabetical"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        CHECK_FALSE(policy.roadOrder.has_value());
     }
 }
 

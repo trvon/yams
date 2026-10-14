@@ -322,10 +322,12 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
             return snapshotResult.error();
         }
 
-        // Roads ride in their own node so the snapshot payload above stays a plain v1 payload.
-        // Written here, before the pointer, so a visible snapshot never lacks a sidecar that was
-        // meant to accompany it; a snapshot id re-stored without roads sheds its old sidecar.
-        if (batch.roads.empty()) {
+        // Roads and member orders ride in their own node so the snapshot payload above stays a
+        // plain v1 payload. Written here, before the pointer, so a visible snapshot never lacks a
+        // sidecar that was meant to accompany it; a snapshot id re-stored without either layer
+        // sheds its old sidecar.
+        auto memberOrders = collectTopologyMemberOrders(batch);
+        if (batch.roads.empty() && memberOrders.empty()) {
             if (auto removed = deleteRoadSidecar(*kgStore_, batch.snapshotId); !removed) {
                 return removed.error();
             }
@@ -336,6 +338,7 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
             sidecar.roads = batch.roads;
             sidecar.roadsFullBuildEpoch = batch.roadsFullBuildEpoch;
             sidecar.roadsIncrementalPasses = batch.roadsIncrementalPasses;
+            sidecar.memberOrders = std::move(memberOrders);
             auto sidecarPayload = serializeTopologyRoadSidecarCompressed(sidecar);
             if (!sidecarPayload) {
                 return sidecarPayload.error();
@@ -433,6 +436,7 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
     // The resident copy is what was just written: no load-time road diagnostic applies to it.
     TopologyArtifactBatch residentBatch = batch;
     residentBatch.roadUnavailableReason.clear();
+    residentBatch.orderUnavailableReason.clear();
     auto nextResident = makeResident(std::move(residentBatch));
     {
         std::lock_guard lock(residentMutex_);
@@ -499,6 +503,11 @@ MetadataKgTopologyArtifactStore::attachRoadSidecar(TopologyArtifactBatch& batch)
     batch.roadsFullBuildEpoch = 0;
     batch.roadsIncrementalPasses = 0;
     batch.roadUnavailableReason.clear();
+    batch.orderUnavailableReason.clear();
+    for (auto& cluster : batch.clusters) {
+        cluster.orderKind = RoadOrderKind::None;
+        cluster.orderedMembers.clear();
+    }
     if (!kgStore_) {
         return {};
     }
@@ -507,16 +516,24 @@ MetadataKgTopologyArtifactStore::attachRoadSidecar(TopologyArtifactBatch& batch)
         return node.error();
     }
     if (!node.value().has_value() || !node.value()->properties.has_value()) {
-        return {}; // roads were never written for this snapshot
+        return {}; // neither roads nor orders were written for this snapshot
     }
 
     auto sidecar = deserializeTopologyRoadSidecarCompressed(*node.value()->properties);
     if (!sidecar) {
         batch.roadUnavailableReason = "road_sidecar_undecodable:" + sidecar.error().message;
+        batch.orderUnavailableReason = batch.roadUnavailableReason;
         spdlog::warn("[TopologyStore] road sidecar for snapshot {} is undecodable ({}); routing "
-                     "continues without roads",
+                     "continues without roads or member orders",
                      batch.snapshotId, sidecar.error().message);
         return {};
+    }
+    // The two layers are validated on their own: a bad road never costs an order and vice versa.
+    const auto attachedOrders = attachTopologyMemberOrders(batch, sidecar.value());
+    if (!batch.orderUnavailableReason.empty()) {
+        spdlog::warn("[TopologyStore] road sidecar for snapshot {} carried {} usable member "
+                     "orders; dropped: {}",
+                     batch.snapshotId, attachedOrders, batch.orderUnavailableReason);
     }
     if (auto invalid = validateTopologyRoadSidecar(batch, sidecar.value()); invalid.has_value()) {
         batch.roadUnavailableReason = *invalid;

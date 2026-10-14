@@ -206,6 +206,13 @@ public:
     [[nodiscard]] std::size_t roadMaxPerCluster() const noexcept {
         return roadMaxPerCluster_.load(std::memory_order_acquire);
     }
+    /// Walk order stored on every cluster at build time; None (default) stores none.
+    void setRoadOrder(topology::RoadOrderKind order) noexcept {
+        roadOrder_.store(order, std::memory_order_release);
+    }
+    [[nodiscard]] topology::RoadOrderKind roadOrder() const noexcept {
+        return roadOrder_.load(std::memory_order_acquire);
+    }
     void setFeatureComposition(topology::FeatureComposition composition) {
         std::lock_guard lock(featureCompositionMutex_);
         featureComposition_ = std::move(composition);
@@ -264,6 +271,7 @@ private:
     std::atomic<double> boundarySpillDistanceRatio_{1.05};
     std::atomic<double> boundarySpillResidualPenalty_{1.0};
     std::atomic<std::size_t> roadMaxPerCluster_{topology::TopologyBuildConfig{}.roadMaxPerCluster};
+    std::atomic<topology::RoadOrderKind> roadOrder_{topology::TopologyBuildConfig{}.roadOrder};
     mutable std::mutex featureCompositionMutex_;
     topology::FeatureComposition featureComposition_;
     std::atomic<bool> autoRebuildEnabled_{true};

@@ -109,6 +109,11 @@ TEST_CASE("TopologyManager roads are off until configured", "[daemon][topology-m
     CHECK(mgr.roadMaxPerCluster() == 4);
     mgr.setRoadMaxPerCluster(0);
     CHECK(mgr.roadMaxPerCluster() == 0);
+    CHECK(mgr.roadOrder() == yams::topology::RoadOrderKind::None);
+    mgr.setRoadOrder(yams::topology::RoadOrderKind::SimilarityChain);
+    CHECK(mgr.roadOrder() == yams::topology::RoadOrderKind::SimilarityChain);
+    mgr.setRoadOrder(yams::topology::RoadOrderKind::None);
+    CHECK(mgr.roadOrder() == yams::topology::RoadOrderKind::None);
 }
 
 TEST_CASE("TopologyManager telemetry tracks dirty count", "[daemon][topology-manager][catch2]") {
