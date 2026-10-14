@@ -162,8 +162,8 @@ src/search/search_lexical_pipeline.cpp:601:portability/env-read # reviewed raw e
 src/storage/compressed_storage_engine.cpp:636:portability/env-read # reviewed raw environment read
 src/storage/object_storage_plugin_loader.cpp:126:portability/env-read # reviewed raw environment read
 src/storage/object_storage_plugin_loader.cpp:130:portability/env-read # reviewed raw environment read
-src/storage/reference_counter.cpp:170:portability/env-read # reviewed raw environment read
-src/storage/reference_counter.cpp:227:portability/env-read # reviewed raw environment read
+src/storage/reference_counter.cpp:215:portability/env-read # reviewed raw environment read
+src/storage/reference_counter.cpp:272:portability/env-read # reviewed raw environment read
 src/storage/reference_db.cpp:43:portability/env-read # reviewed raw environment read
 src/storage/reference_db.cpp:231:portability/env-read # reviewed raw environment read
 src/storage/reference_db.cpp:372:portability/path-cstr # std::string filename, not filesystem::path

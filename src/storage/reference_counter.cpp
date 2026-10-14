@@ -118,6 +118,51 @@ struct ReferenceCounter::Impl {
     std::unique_ptr<Database> db;
     std::unique_ptr<StatementCache> stmtCache;
     mutable std::shared_mutex dbMutex;
+
+    struct StatsGeneration {
+        int64_t totalChanges;
+        int64_t dataVersion;
+        bool operator==(const StatsGeneration&) const = default;
+    };
+    struct CachedStats {
+        StatsGeneration generation;
+        RefCountStats value;
+    };
+    // Only a reconciled returned snapshot is cached; all access is under dbMutex.
+    std::optional<CachedStats> statsCache;
+
+    std::optional<StatsGeneration> readStatsGeneration() const {
+        if (!db) {
+            return std::nullopt;
+        }
+        try {
+            // Each local statement is finalized before the next probe/query. SQL probes
+            // avoid exposing a raw handle or using changes() (only the last statement).
+            const auto readScalar = [&](const char* sql) -> std::optional<int64_t> {
+                auto stmt = db->prepare(sql);
+                if (!stmt.step() || stmt.columnCount() != 1 || stmt.isNull(0)) {
+                    return std::nullopt;
+                }
+                const auto value = stmt.getInt64(0);
+                if (value < 0) {
+                    return std::nullopt;
+                }
+                return value;
+            };
+            const auto changes = readScalar("SELECT total_changes()");
+            if (!changes) {
+                return std::nullopt;
+            }
+            const auto version = readScalar("PRAGMA data_version");
+            if (!version) {
+                return std::nullopt;
+            }
+            return StatsGeneration{*changes, *version};
+        } catch (const std::exception&) {
+            // A failed probe disables reuse, not the authoritative aggregate fallback.
+            return std::nullopt;
+        }
+    }
     // Transaction IDs now managed by database AUTOINCREMENT
 
     // Prepared statement keys
@@ -595,6 +640,8 @@ bool isTransientInitLock(const std::string& message) {
 
 // Initialize database
 Result<void> ReferenceCounter::initializeDatabase() {
+    // Constructor-only or called with dbMutex held by restore; generations are connection-local.
+    pImpl->statsCache.reset();
     // A concurrent writer (e.g. a prior add command's async batch commit on a slow
     // host) can hold the reference database long enough to exhaust ReferenceDB's
     // short retry budget, failing CLI/daemon startup with "database is locked".
@@ -760,8 +807,22 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
     try {
         // Serialize reads with writes to avoid SQLite handle reuse races on Windows
         std::unique_lock lock(pImpl->dbMutex);
+        if (!pImpl->db) {
+            pImpl->statsCache.reset();
+            return Result<RefCountStats>(ErrorCode::DatabaseError);
+        }
 
+        const auto before = pImpl->readStatsGeneration();
+        if (before && pImpl->statsCache && pImpl->statsCache->generation == *before) {
+            const auto after = pImpl->readStatsGeneration();
+            if (after && *before == *after) {
+                return pImpl->statsCache->value;
+            }
+        }
+        // Never retain stale/uncertain success through a failed refresh.
+        pImpl->statsCache.reset();
         RefCountStats stats{};
+        bool reconciled = false;
 
         // Read materialized counters from ref_statistics (single-row result via scalar subselects)
         // Create statement in local scope - destructor will properly finalize
@@ -806,6 +867,7 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
             )");
 
             if (recalcStmt.step()) {
+                reconciled = true;
                 const auto tableBlocks = static_cast<uint64_t>(recalcStmt.getInt64(0));
                 const auto tableRefs = static_cast<uint64_t>(recalcStmt.getInt64(1));
                 const auto tableBytes = static_cast<uint64_t>(recalcStmt.getInt64(2));
@@ -829,6 +891,13 @@ Result<RefCountStats> ReferenceCounter::getStats() const {
             // recalcStmt destructor called here, finalizes sqlite3_stmt
         }
 
+        if (reconciled && before) {
+            const auto after = pImpl->readStatsGeneration();
+            if (after && *before == *after) {
+                // Do not stamp a raced aggregate with a newer generation.
+                pImpl->statsCache = Impl::CachedStats{*before, stats};
+            }
+        }
         return stats;
     } catch (const std::exception& e) {
         spdlog::error("Failed to get statistics: {}", e.what());
@@ -1318,6 +1387,8 @@ Result<void> ReferenceCounter::restore(const std::filesystem::path& srcPath) {
     try {
         std::unique_lock lock(pImpl->dbMutex);
 
+        // Invalidate before close/copy, including the copy_file failure path.
+        pImpl->statsCache.reset();
         // Close current database
         pImpl->stmtCache.reset();
         pImpl->db.reset();
