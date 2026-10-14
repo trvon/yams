@@ -1,4 +1,5 @@
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/profiling.h>
 
 #include <algorithm>
 #include <chrono>
@@ -176,6 +177,7 @@ using yams::ErrorCode;
 using yams::Result;
 
 Result<void> ServiceManager::publishMemorySync(const std::string& key, const std::string& value) {
+    YAMS_ZONE_SCOPED_N("memory_sync.publish_key");
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
@@ -452,6 +454,7 @@ std::optional<std::string> ServiceManager::takeMemorySyncCommittedVectorDocument
 }
 
 Result<memory_sync::ApplyStagePass> ServiceManager::applyMemorySyncContentBlobs() {
+    YAMS_ZONE_SCOPED_N("memory_sync.apply_blobs");
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
@@ -539,6 +542,7 @@ ServiceManager::memorySyncDeleteLocallyAbsent(std::string_view contentHash,
 }
 
 bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
+    YAMS_ZONE_SCOPED_N("memory_sync.drain_deletes");
     try {
         notifyMemorySyncDeleteOutboxStage("delete_drain_waiting");
         std::lock_guard<std::mutex> deleteLock(memorySyncDeleteOutboxMutex_);
@@ -553,6 +557,7 @@ bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
         const std::string blobPrefix =
             std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::ContentBlob)) + "/";
         auto pending = std::move(intents.value());
+        YAMS_PLOT("memory_sync.pending_erases", static_cast<int64_t>(pending.size()));
         std::ranges::sort(pending, [](const auto& lhs, const auto& rhs) {
             const auto lhsCounter =
                 lhs.prepared ? lhs.preparedCounter : std::numeric_limits<std::uint64_t>::max();
@@ -613,6 +618,7 @@ bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
 }
 
 void ServiceManager::applyMemorySyncWinners() noexcept {
+    YAMS_ZONE_SCOPED_N("memory_sync.cycle");
     memorySyncApplyAttempts_.fetch_add(1, std::memory_order_acq_rel);
     std::lock_guard<std::mutex> applyLock(memorySyncApplyMutex_);
     if (!memorySync_ || memorySync_->stopRequested()) {
@@ -791,6 +797,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
 }
 
 void ServiceManager::publishMemorySyncBackfill() noexcept try {
+    YAMS_ZONE_SCOPED_N("memory_sync.backfill");
     memorySyncBackfillAttempts_.fetch_add(1, std::memory_order_acq_rel);
     std::lock_guard<std::mutex> backfillLock(memorySyncBackfillMutex_);
     if (!memorySync_) {

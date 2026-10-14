@@ -545,3 +545,4 @@ tests/benchmarks/search/retrieval_quality_bench.cpp:9122:portability/env-read # 
 tests/benchmarks/search/retrieval_quality_bench.cpp:9125:portability/env-read # reviewed raw environment read
 tests/benchmarks/search/retrieval_quality_bench.cpp:9251:portability/env-read # reviewed raw environment read
 tests/benchmarks/search/retrieval_quality_bench.cpp:9373:portability/env-read # reviewed raw environment read
+tests/support/catch2_main.cpp:95:portability/env-read # reviewed raw environment read (test-only YAMS_TEST_RUSAGE; main lib links no yams config)

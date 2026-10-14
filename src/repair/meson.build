@@ -8,8 +8,9 @@ yams_repair_lib = static_library('yams_repair',
     dependency('yams_tune_advisor'),
     boost_dep,
     dependency('spdlog'),
-  ],
+  ] + yams_tracy_deps,
   include_directories: include_directories('../../include'),
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

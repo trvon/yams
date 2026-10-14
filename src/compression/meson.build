@@ -21,7 +21,8 @@ compression_src = files(
 yams_compression = static_library('yams_compression',
   compression_src,
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, openssl_dep, zstd_dep, threads_dep, yams_core],
+  dependencies: [spdlog_dep, openssl_dep, zstd_dep, threads_dep, yams_core] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

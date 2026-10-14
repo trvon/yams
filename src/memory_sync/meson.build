@@ -12,7 +12,8 @@ yams_memory_sync = static_library('yams_memory_sync',
     dependency('yams_core'),
     dependency('yams_crypto'),
     dependency('yams_storage_engine'),
-  ],
+  ] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

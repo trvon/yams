@@ -18,7 +18,8 @@ yams_extraction = static_library('yams_extraction',
     'external_plugin_extractor.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, yams_core, nlohmann_json_dep, yams_metadata_dep],
+  dependencies: [spdlog_dep, yams_core, nlohmann_json_dep, yams_metadata_dep] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

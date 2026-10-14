@@ -63,9 +63,9 @@ endif
 if get_option('enable-mobile-bindings')
   yams_mobile_lib = shared_library('yams_mobile',
     mobile_sources,
-    dependencies: mobile_deps,
+    dependencies: mobile_deps + yams_tracy_deps,
     include_directories: include_directories('../../include'),
-    cpp_args: mobile_cpp_args,
+    cpp_args: mobile_cpp_args + yams_tracy_args,
     link_args: mobile_link_args,
     link_depends: mobile_link_depends,
     install: true,

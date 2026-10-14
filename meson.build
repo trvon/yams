@@ -179,6 +179,44 @@ if get_option('enable-profiling') and cpp.get_id() not in ['msvc', 'clang-cl']
   add_project_arguments(_profiling_frame_args, language: ['cpp', 'c'])
 endif
 
+# Tracy for every yams library (optional, -Denable-profiling=true). Each library appends
+# yams_tracy_args to cpp_args and yams_tracy_deps to dependencies; both are empty when profiling
+# is off or Tracy is unavailable, and include/yams/profiling.h then compiles to nothing.
+yams_tracy_args = []
+yams_tracy_deps = []
+yams_tracy_enabled = false
+if get_option('enable-profiling')
+  _tracy_dep = dependency('tracy', modules: ['Tracy::TracyClient'], required: false, static: true)
+  if _tracy_dep.found()
+    yams_tracy_deps = [_tracy_dep]
+    _rocprof_opt = get_option('enable-rocprofiler-tracy')
+    _want_rocprof = (not _rocprof_opt.disabled()) and (_rocprof_opt.enabled() or (_rocprof_opt.auto() and fs.exists('/opt/rocm')))
+    if _want_rocprof
+      _rocprof_dep = dependency(
+        'rocprofiler-sdk',
+        method: 'cmake',
+        cmake_module_path: ['/opt/rocm/lib/cmake', '/opt/rocm/lib64/cmake'],
+        required: _rocprof_opt.enabled(),
+      )
+      if _rocprof_dep.found()
+        yams_tracy_deps += _rocprof_dep
+      else
+        warning('Tracy present but rocprofiler-sdk missing; ROCm hooks unavailable')
+      endif
+    endif
+    if cpp.links('int main(){ return 0; }', dependencies: yams_tracy_deps, name: 'tracy-link-check', required: false)
+      yams_tracy_args = ['-DTRACY_ENABLE', '-DTRACY_ON_DEMAND']
+      yams_tracy_enabled = true
+      message('Tracy profiling enabled for all yams libraries')
+    else
+      warning('Tracy dependency failed to link (likely missing rocprofiler-sdk); disabling Tracy for this build')
+      yams_tracy_deps = []
+    endif
+  else
+    warning('enable-profiling set but Tracy was not found; zones will not emit')
+  endif
+endif
+
 if enable_dcheck
   add_project_arguments('-DYAMS_ENABLE_DCHECK=1', language: 'cpp')
   message('YAMS_DCHECK enabled in this build (overrides NDEBUG for debug-only checks)')

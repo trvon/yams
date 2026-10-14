@@ -39,7 +39,8 @@ yams_metadata = static_library('yams_metadata',
     'versioning_util.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, sqlite_dep, openssl_dep, json_dep, yams_core, yams_config_dep, yams_storage_engine_dep],
+  dependencies: [spdlog_dep, sqlite_dep, openssl_dep, json_dep, yams_core, yams_config_dep, yams_storage_engine_dep] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

@@ -41,8 +41,8 @@ yams_storage_engine = static_library('yams_storage_engine',
     yams_compression,
     yams_config,
     dl_dep,
-  ] + apple_security_deps,
-  cpp_args: storage_testing_cpp_args,
+  ] + apple_security_deps + yams_tracy_deps,
+  cpp_args: storage_testing_cpp_args + yams_tracy_args,
   install: false,
 )
 
@@ -54,7 +54,8 @@ yams_reference_counter = static_library('yams_reference_counter',
     'garbage_collector.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, threads_dep, yams_core, sqlite_dep, declare_dependency(link_with: yams_storage_engine)],
+  dependencies: [spdlog_dep, threads_dep, yams_core, sqlite_dep, declare_dependency(link_with: yams_storage_engine)] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

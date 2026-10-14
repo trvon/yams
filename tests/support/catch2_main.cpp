@@ -1,4 +1,13 @@
 #include <catch2/catch_session.hpp>
+#include <catch2/catch_test_case_info.hpp>
+#include <catch2/reporters/catch_reporter_event_listener.hpp>
+#include <catch2/reporters/catch_reporter_registrars.hpp>
+
+#include "test_rusage.hpp"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 
 #include <string>
 #include <string_view>
@@ -74,6 +83,54 @@ std::vector<std::string> normalizeArgs(int argc, char* argv[]) {
     args.push_back(std::move(testSpec));
     return args;
 }
+
+// Per-test-case CPU and run-peak RSS accounting for every Catch2 binary. Lives in this TU so the
+// static-library linker cannot drop the registrar. Summary goes to stderr; YAMS_TEST_RUSAGE=1 adds
+// one line per case (test-only knob).
+class ResourceAccountingListener final : public Catch::EventListenerBase {
+public:
+    using Catch::EventListenerBase::EventListenerBase;
+
+    void testRunStarting(const Catch::TestRunInfo&) override {
+        const char* env = std::getenv("YAMS_TEST_RUSAGE");
+        perCase_ = env && env[0] == '1';
+        cases_.clear();
+    }
+
+    void testCaseStarting(const Catch::TestCaseInfo&) override {
+        start_ = yams::test::rusage::sampleSelf();
+    }
+
+    void testCaseEnded(const Catch::TestCaseStats& stats) override {
+        const auto end = yams::test::rusage::sampleSelf();
+        const auto cpu = yams::test::rusage::cpuDeltaMicros(start_, end);
+        cases_.push_back({stats.testInfo->name, cpu});
+        if (perCase_) {
+            std::fprintf(stderr, "[rusage] case: %s cpu=%llums peak_rss=%lluMB\n",
+                         yams::test::rusage::clampName(stats.testInfo->name).c_str(),
+                         static_cast<unsigned long long>(cpu / 1000ULL),
+                         static_cast<unsigned long long>(end.peakRssBytes / (1024ULL * 1024ULL)));
+        }
+    }
+
+    void testRunEnded(const Catch::TestRunStats&) override {
+        if (cases_.empty()) {
+            return;
+        }
+        const auto top = yams::test::rusage::topByCpu(cases_, 5);
+        std::fprintf(
+            stderr, "%s\n%s\n", yams::test::rusage::formatTopCpu(top).c_str(),
+            yams::test::rusage::formatPeakRss(yams::test::rusage::sampleSelf().peakRssBytes)
+                .c_str());
+    }
+
+private:
+    bool perCase_{false};
+    yams::test::rusage::Sample start_{};
+    std::vector<yams::test::rusage::CaseCost> cases_;
+};
+
+CATCH_REGISTER_LISTENER(ResourceAccountingListener)
 
 } // namespace
 

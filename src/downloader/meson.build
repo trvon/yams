@@ -15,7 +15,8 @@ yams_downloader = static_library('yams_downloader',
     'download_manager.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, json_dep, threads_dep, curl_dep, openssl_dep, yams_core],
+  dependencies: [spdlog_dep, json_dep, threads_dep, curl_dep, openssl_dep, yams_core] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

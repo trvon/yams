@@ -11,6 +11,20 @@
 #ifdef TRACY_ENABLE
 #include <tracy/Tracy.hpp>
 
+#include <cstdint>
+#include <type_traits>
+
+namespace yams::profiling_detail {
+// Tracy's PlotData is overloaded on int64_t/float/double only; an int, size_t or bool argument is
+// ambiguous. Normalize arithmetic values so YAMS_PLOT accepts any numeric type.
+template <typename T> constexpr auto plotValue(T v) {
+    if constexpr (std::is_floating_point_v<T>)
+        return static_cast<double>(v);
+    else
+        return static_cast<int64_t>(v);
+}
+} // namespace yams::profiling_detail
+
 // Zone macros. Use a line-unique zone variable so multiple zones can live in
 // the same scope — Tracy's ZoneScoped* all reuse one fixed variable name
 // (___tracy_scoped_zone), which is a redefinition error when two appear in one
@@ -45,7 +59,7 @@
 #define YAMS_MESSAGE_L(txt) TracyMessageL(txt)
 
 // Plot values
-#define YAMS_PLOT(name, val) TracyPlot(name, val)
+#define YAMS_PLOT(name, val) TracyPlot(name, ::yams::profiling_detail::plotValue(val))
 #define YAMS_PLOT_F(name, val) TracyPlot(name, static_cast<float>(val))
 
 // Locks

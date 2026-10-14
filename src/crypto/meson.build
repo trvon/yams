@@ -11,7 +11,8 @@ crypto_src = files(
 yams_crypto = static_library('yams_crypto',
   crypto_src,
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, openssl_dep, json_dep, yams_core],
+  dependencies: [spdlog_dep, openssl_dep, json_dep, yams_core] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 
