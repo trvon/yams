@@ -853,6 +853,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.vector_policy"); it != kv.end()) {
                 policy.vectorPolicy = std::string(trimView(it->second));
             }
+            if (auto it = kv.find("search.evaluation.allow_uncertified_routes"); it != kv.end()) {
+                policy.allowUncertifiedRouteOnly = parseBoolValue(it->second);
+            }
             if (auto it = kv.find("search.topology.enable_weak_query_routing"); it != kv.end()) {
                 policy.enableWeakQueryRouting = parseBoolValue(it->second);
             }

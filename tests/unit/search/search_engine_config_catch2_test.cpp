@@ -403,6 +403,41 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
     CHECK(tuned.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Narrow);
 }
 
+TEST_CASE("SearchEngineConfig RouteOnly policy is operator-selected and gated",
+          "[search][config][topology][route-only][catch2]") {
+    SECTION("defaults never select RouteOnly or open the evaluation gate") {
+        SearchEngineConfig cfg;
+        CHECK(cfg.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Shadow);
+        CHECK_FALSE(cfg.allowUncertifiedRouteOnly);
+        CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(
+                  SearchEngineConfig::TopologyVectorPolicy::RouteOnly)) == "route_only");
+    }
+
+    SECTION("tuning replaces weights but keeps the policy and the gate") {
+        SearchEngineConfig tuned;
+        tuned.textWeight = 0.25F;
+
+        SearchEngineConfig configured;
+        configured.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::RouteOnly;
+        configured.allowUncertifiedRouteOnly = true;
+
+        tuned.applyExecutionPolicyFrom(configured);
+
+        CHECK(tuned.textWeight == Approx(0.25F));
+        CHECK(tuned.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::RouteOnly);
+        CHECK(tuned.allowUncertifiedRouteOnly);
+    }
+
+    SECTION("a closed gate survives tuning too") {
+        SearchEngineConfig tuned;
+        tuned.allowUncertifiedRouteOnly = true;
+        SearchEngineConfig configured;
+        tuned.applyExecutionPolicyFrom(configured);
+        CHECK_FALSE(tuned.allowUncertifiedRouteOnly);
+        CHECK(tuned.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Shadow);
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────────
 // SearchResponse helpers
 // ────────────────────────────────────────────────────────────────────────────────

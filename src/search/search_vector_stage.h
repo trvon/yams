@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Vector candidate stage of the tiered search fanout: global ANN plus the topology Shadow /
-// Augment / Narrow policies, routed candidate queries, rescue merging and route-work accounting.
+// Augment / Narrow / RouteOnly policies, routed candidate queries, rescue merging and route-work
+// accounting.
 // The stage is a pure function of its request; SearchEngine owns scheduling, the relaxed-retry
 // query wrapper, the certificate it applies route work to, and every debug-stat write.
 
@@ -40,8 +41,13 @@ struct VectorStageRequest {
     std::shared_ptr<const std::unordered_set<std::string>> baselineCandidates;
 
     // Policy (mutually exclusive topology policies; all false = plain global ANN).
-    bool shadow{false};                ///< TopologyVectorPolicy::Shadow
-    bool augment{false};               ///< TopologyVectorPolicy::Augment
+    bool shadow{false};  ///< TopologyVectorPolicy::Shadow
+    bool augment{false}; ///< TopologyVectorPolicy::Augment
+    /// TopologyVectorPolicy::RouteOnly with the evaluation gate open: only the routed candidate
+    /// queries run (DocumentTopK on allowed-set ANN backends, ExactDocumentComplete otherwise),
+    /// with no global fill and no admission check. The caller downgrades a gated-off RouteOnly to
+    /// `shadow` before building the request.
+    bool routeOnly{false};
     bool filterEligible{false};        ///< Narrow with a route eligible for trial narrowing
     bool allowedSetAnnEligible{false}; ///< filterEligible and the backend ranks the allowed set
     bool narrowToBaseline{false};      ///< tieredNarrowVectorSearch with enough Tier-1 candidates
@@ -67,6 +73,32 @@ struct VectorStageRequest {
     std::shared_ptr<const std::vector<std::unordered_set<std::string>>> allowedDocumentGroups;
 };
 
+/// Where the stage's result set came from (vector_candidate_source_effective).
+enum class VectorCandidateSource {
+    Ann,         ///< global ANN, possibly narrowed to the Tier-1 baseline
+    RouteOnly,   ///< routed candidate queries only, no global fill
+    Augment,     ///< global ANN unioned with the routed expansion
+    Narrow,      ///< committed Narrow: allowed-set ANN or the admitted route filter
+    Unavailable, ///< RouteOnly requested but the backend has no routed candidates (Vec0): the
+                 ///< global leg is returned unchanged
+};
+
+[[nodiscard]] constexpr const char* vectorCandidateSourceToString(VectorCandidateSource source) {
+    switch (source) {
+        case VectorCandidateSource::Ann:
+            return "ann";
+        case VectorCandidateSource::RouteOnly:
+            return "route_only";
+        case VectorCandidateSource::Augment:
+            return "augment";
+        case VectorCandidateSource::Narrow:
+            return "narrow";
+        case VectorCandidateSource::Unavailable:
+            return "unavailable";
+    }
+    return "ann";
+}
+
 /// Routed-vector work the stage observed. The caller applies it to the certificate.
 struct VectorStageRouteWork {
     TopologyRouteWorkObservation work;
@@ -81,13 +113,15 @@ struct VectorStageOutcome {
 
     /// Diagnostics of every global query (including a narrowed-to-baseline query).
     vector::VectorSearchDiagnostics globalDiag;
-    /// Diagnostics of every routed query: the Augment expansion, the Narrow allowed-set query and
-    /// the Shadow counterfactual. Shadow's routed work feeds `routeWork` only and is not reported
-    /// as vector search cost; the caller decides what to merge.
+    /// Diagnostics of every routed query: the Augment expansion, the RouteOnly result set, the
+    /// Narrow allowed-set query and the Shadow counterfactual. Shadow's routed work feeds
+    /// `routeWork` only and is not reported as vector search cost; the caller decides what to
+    /// merge.
     vector::VectorSearchDiagnostics routedDiag;
-    /// Set at most once per run: Shadow (counterfactual), Narrow allowed-set ANN (routed query) or
-    /// Narrow filter (global query).
+    /// Set at most once per run: Shadow (counterfactual), RouteOnly (routed query), Narrow
+    /// allowed-set ANN (routed query) or Narrow filter (global query).
     std::optional<VectorStageRouteWork> routeWork;
+    VectorCandidateSource candidateSource{VectorCandidateSource::Ann};
 
     // Narrow.
     bool filterApplied{false};

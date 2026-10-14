@@ -46,6 +46,14 @@ constexpr std::string_view kTopologyConstructionFingerprint = "topology_construc
 
 constexpr std::string_view kTopologyRoutingMode = "topology_routing_mode";
 constexpr std::string_view kTopologyVectorPolicy = "topology_vector_policy";
+/// Present only when the configured policy could not run as configured (route_only without the
+/// evaluation gate: "uncertified").
+constexpr std::string_view kTopologyVectorPolicyDowngraded = "topology_vector_policy_downgraded";
+/// Whether the route certificate admits a hard route once the observed vector work is applied.
+constexpr std::string_view kTopologyRouteCertified = "topology_route_certified";
+/// Where the vector leg's candidates came from: ann | route_only | augment | narrow | unavailable
+/// (route_only requested on a backend without routed candidates) | none (no vector leg).
+constexpr std::string_view kVectorCandidateSourceEffective = "vector_candidate_source_effective";
 constexpr std::string_view kTopologyRouteScoringMode = "topology_route_scoring_mode";
 constexpr std::string_view kTopologySparseDenseAlpha = "topology_sparse_dense_alpha";
 constexpr std::string_view kTopologyMinRouteScore = "topology_min_route_score";

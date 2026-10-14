@@ -104,8 +104,10 @@ public:
 
     struct TopologyRoutingPolicy {
         std::optional<std::string> mode;
-        // shadow | narrow
+        // augment | narrow | shadow | route_only
         std::optional<std::string> vectorPolicy;
+        /// search.evaluation.allow_uncertified_routes: lets route_only serve uncertified routes.
+        std::optional<bool> allowUncertifiedRouteOnly;
         std::optional<bool> enableWeakQueryRouting;
         std::optional<std::size_t> minClusters;
         std::optional<std::size_t> maxClusters;
@@ -497,7 +499,8 @@ public:
      * Config keys:
      * - search.topology.mode = disabled|weak_query_only|hybrid_assist
      * - search.topology.enable_weak_query_routing = true|false
-     * - search.topology.vector_policy = augment|narrow|shadow
+     * - search.topology.vector_policy = augment|narrow|shadow|route_only
+     * - search.evaluation.allow_uncertified_routes = true|false (route_only evaluation gate)
      * - search.topology.min_clusters = int
      * - search.topology.max_clusters = int
      * - search.topology.max_seed_documents = int

@@ -100,9 +100,45 @@ VectorStageOutcome runVectorCandidateStage(const VectorStageRequest& request) {
                                         request.backendSupportsRoutedCandidates &&
                                         !allowedDocuments.empty();
 
+    // Routed results are served without a global fill, so order them like the global leg would.
+    const auto rankByScore = [](std::vector<ComponentResult>& routedResults) {
+        std::ranges::sort(routedResults, [](const auto& lhs, const auto& rhs) {
+            if (lhs.score != rhs.score) {
+                return lhs.score > rhs.score;
+            }
+            return lhs.documentHash < rhs.documentHash;
+        });
+        for (std::size_t rank = 0; rank < routedResults.size(); ++rank) {
+            routedResults[rank].rank = rank;
+        }
+    };
+
     std::vector<ComponentResult> shadowExpansion;
     Result<std::vector<ComponentResult>> results = [&]() {
+        if (request.routeOnly) {
+            if (!routedQueriesAvailable) {
+                // Nothing to route to. A backend without routed candidates (Vec0) can never serve
+                // this policy; a supporting backend without a useful route is plain ANN.
+                outcome.candidateSource = request.backendSupportsRoutedCandidates
+                                              ? VectorCandidateSource::Ann
+                                              : VectorCandidateSource::Unavailable;
+                return queryGlobal(nullptr);
+            }
+            // Complete document-level scoring of the routed set: one best row per document on
+            // allowed-set ANN backends, every row for exact backends. No admission gate and no
+            // global fill: the route is the candidate set, certified or not.
+            const auto candidateFilterMode =
+                request.backendSupportsAllowedSetAnn
+                    ? vector::CandidateFilterMode::DocumentTopK
+                    : vector::CandidateFilterMode::ExactDocumentComplete;
+            auto routedResults = queryRoutedVectors(outcome.routedDiag, candidateFilterMode);
+            recordRouteWork(outcome.routedDiag);
+            rankByScore(routedResults);
+            outcome.candidateSource = VectorCandidateSource::RouteOnly;
+            return Result<std::vector<ComponentResult>>{std::move(routedResults)};
+        }
         if (request.augment && routedQueriesAvailable) {
+            outcome.candidateSource = VectorCandidateSource::Augment;
             outcome.rescueAttempted = true;
             auto global = queryGlobal(nullptr);
             if (!global) {
@@ -161,15 +197,7 @@ VectorStageOutcome runVectorCandidateStage(const VectorStageRequest& request) {
                 outcome.filterMatched = routedResults.size();
                 // No global fill: an admitted hard route must remain a subset of its completely
                 // materialized cover.
-                std::ranges::sort(routedResults, [](const auto& lhs, const auto& rhs) {
-                    if (lhs.score != rhs.score) {
-                        return lhs.score > rhs.score;
-                    }
-                    return lhs.documentHash < rhs.documentHash;
-                });
-                for (std::size_t rank = 0; rank < routedResults.size(); ++rank) {
-                    routedResults[rank].rank = rank;
-                }
+                rankByScore(routedResults);
                 return Result<std::vector<ComponentResult>>{std::move(routedResults)};
             }
             outcome.allowedSetAnnFallback = true;
@@ -208,6 +236,9 @@ VectorStageOutcome runVectorCandidateStage(const VectorStageRequest& request) {
             outcome.filterRemoved = filtered.removed;
             results = Result<std::vector<ComponentResult>>{std::move(filtered.results)};
         }
+    }
+    if (outcome.filterApplied) {
+        outcome.candidateSource = VectorCandidateSource::Narrow;
     }
     outcome.results = std::move(results);
     return outcome;

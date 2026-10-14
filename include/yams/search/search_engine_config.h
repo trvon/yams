@@ -158,13 +158,19 @@ struct SearchEngineConfig {
 
     /// How routed topology members interact with the global vector retriever.
     /// Augment query-scores routed members and unions novel documents with global vector results.
-    /// Narrow filters Vec0 ANN traversal by certified routed membership; other vector engines
-    /// post-filter their bounded global results. Shadow records counterfactual route evidence while
-    /// returning the unchanged global vector leg.
+    /// Narrow restricts the vector leg to a certified route: Simeon PQ ranks the allowed set
+    /// directly (allowed-set ANN) and other engines post-filter their bounded global results, both
+    /// only once the observed route work is admitted, otherwise the global leg is returned. Vec0
+    /// supports neither routed candidates nor allowed-set ANN and always falls back. Shadow records
+    /// counterfactual route evidence while returning the unchanged global vector leg. RouteOnly
+    /// runs only the routed candidate queries with no global fill and without the admission
+    /// certificate; it is an evaluation arm gated by `allowUncertifiedRouteOnly` and downgrades to
+    /// Shadow when the gate is closed.
     enum class TopologyVectorPolicy {
         Augment,
         Narrow,
         Shadow,
+        RouteOnly,
     } topologyVectorPolicy = TopologyVectorPolicy::Shadow;
 
     [[nodiscard]] static constexpr const char*
@@ -176,9 +182,17 @@ struct SearchEngineConfig {
                 return "narrow";
             case TopologyVectorPolicy::Shadow:
                 return "shadow";
+            case TopologyVectorPolicy::RouteOnly:
+                return "route_only";
         }
         return "shadow";
     }
+
+    /// Evaluation gate for TopologyVectorPolicy::RouteOnly (`search.evaluation.
+    /// allow_uncertified_routes`). RouteOnly serves routed candidates whether or not the route is
+    /// certified, so an operator must opt in explicitly; without the gate the policy downgrades to
+    /// Shadow. Never set by corpus tuning.
+    bool allowUncertifiedRouteOnly = false;
 
     enum class TopologyRouteScoringMode {
         Current,
@@ -558,6 +572,7 @@ struct SearchEngineConfig {
     void applyTopologyPolicyFrom(const SearchEngineConfig& source) {
         topologyRoutingMode = source.topologyRoutingMode;
         topologyVectorPolicy = source.topologyVectorPolicy;
+        allowUncertifiedRouteOnly = source.allowUncertifiedRouteOnly;
         topologyRouteScoringMode = source.topologyRouteScoringMode;
         topologyMinClusters = source.topologyMinClusters;
         topologyMaxClusters = source.topologyMaxClusters;

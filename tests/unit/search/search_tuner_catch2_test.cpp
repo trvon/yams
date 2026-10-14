@@ -102,6 +102,21 @@ TEST_CASE("Runtime telemetry treats malformed trace summaries independently",
     CHECK(telemetry.fusionSources.at("text").rawHitCount == 3);
 }
 
+TEST_CASE("SearchTuner never selects the RouteOnly vector policy",
+          "[unit][search_tuner][topology][route-only]") {
+    CorpusStats stats;
+    for (const auto state :
+         {TuningState::SMALL_CODE, TuningState::LARGE_CODE, TuningState::SMALL_PROSE,
+          TuningState::LARGE_PROSE, TuningState::SCIENTIFIC, TuningState::MIXED,
+          TuningState::MIXED_PRECISION, TuningState::MINIMAL, TuningState::MEDIA}) {
+        SearchTuner tuner(stats, state);
+        const auto config = tuner.getConfig();
+        CAPTURE(static_cast<int>(state));
+        CHECK(config.topologyVectorPolicy != SearchEngineConfig::TopologyVectorPolicy::RouteOnly);
+        CHECK_FALSE(config.allowUncertifiedRouteOnly);
+    }
+}
+
 TEST_CASE("SearchTuner parameter snapshots are safe during observation",
           "[unit][search_tuner][concurrency]") {
     CorpusStats stats;

@@ -94,6 +94,9 @@ parseTopologyVectorPolicy(std::string raw) {
     if (raw == "shadow" || raw == "observe" || raw == "calibrate") {
         return Policy::Shadow;
     }
+    if (raw == "route_only" || raw == "routed_only" || raw == "routeonly") {
+        return Policy::RouteOnly;
+    }
     return std::nullopt;
 }
 std::optional<yams::search::SearchEngineConfig::TopologyBqRotation>
@@ -481,6 +484,15 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                 spdlog::warn("Ignoring unknown search.topology.vector_policy='{}'",
                              *tp.vectorPolicy);
             }
+        }
+        if (tp.allowUncertifiedRouteOnly) {
+            opts.config.allowUncertifiedRouteOnly = *tp.allowUncertifiedRouteOnly;
+        }
+        if (opts.config.topologyVectorPolicy ==
+                yams::search::SearchEngineConfig::TopologyVectorPolicy::RouteOnly &&
+            !opts.config.allowUncertifiedRouteOnly) {
+            spdlog::warn("search.topology.vector_policy=route_only without "
+                         "search.evaluation.allow_uncertified_routes=true runs as shadow");
         }
         if (tp.enableWeakQueryRouting && !tp.mode) {
             opts.config.topologyRoutingMode =
