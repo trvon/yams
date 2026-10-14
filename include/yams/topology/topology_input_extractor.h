@@ -4,13 +4,27 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/topology/topology_artifacts.h>
 
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <string_view>
 
 namespace yams::vector {
 class VectorDatabase;
 }
 
 namespace yams::topology {
+
+/// Document metadata keys the extractor lifts into typed `TopologyDocumentInput` fields.
+inline constexpr std::string_view kTopologyEventTimeMetadataKey = "event_time";
+inline constexpr std::string_view kTopologySessionIdMetadataKey = "session_id";
+
+/// Parse an `event_time` metadata value to epoch seconds (UTC). Accepts, after trimming
+/// whitespace, an optionally signed integer (epoch seconds), an ISO-8601 date `YYYY-MM-DD`
+/// (midnight UTC), or an ISO-8601 datetime `YYYY-MM-DD[T ]HH:MM[:SS[.frac]]` followed by an
+/// optional `Z` or `±HH[:]MM` offset; a datetime without a zone is UTC. Calendar fields are
+/// range-checked (leap days included). Anything else yields nullopt.
+[[nodiscard]] std::optional<std::int64_t> parseTopologyEventTime(std::string_view value) noexcept;
 
 // Phase V: per-doc feature composition for clustering input.
 // Composer concatenates: w_dense * dense_view + w_entity * entity_signature + w_minhash *
@@ -66,6 +80,11 @@ struct TopologyExtractionStats {
     std::size_t composedDocsWithMinHashSketch{0}; // docs that produced a non-zero minhash sketch
     std::size_t composedFilteredLowConfidenceCount{0};
     std::size_t composedTopKEntityTypeCount{0}; // size of the corpus top-K entity-type cache
+    // Typed event time / session provenance (see TopologyDocumentInput::eventTime).
+    std::size_t eventTimesFromMetadata{0};    // `event_time` parsed from metadata
+    std::size_t eventTimesFromCreatedTime{0}; // fell back to the document createdTime
+    std::size_t eventTimesInvalid{0};         // `event_time` present but unparsable (ignored)
+    std::size_t sessionIdsLoaded{0};          // non-empty `session_id` metadata
 };
 
 class TopologyInputExtractor {
