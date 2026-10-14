@@ -365,9 +365,9 @@ tests/unit/search/graph_expansion_catch2_test.cpp:18:portability/env-read # revi
 tests/unit/search/hybrid_search_comprehensive_test.cpp:272:portability/env-read # reviewed raw environment read
 tests/unit/search/kg_scorer_simple_catch2_test.cpp:35:portability/env-read # reviewed raw environment read
 tests/unit/search/search_engine_simeon_lexical_catch2_test.cpp:25:portability/env-read # reviewed raw environment read
-tests/unit/search/search_engine_topology_catch2_test.cpp:44:portability/env-read # reviewed raw environment read
 tests/unit/search/simeon_bandit_backend_catch2_test.cpp:30:portability/env-read # reviewed raw environment read
 tests/unit/search/simeon_lexical_backend_catch2_test.cpp:29:portability/env-read # reviewed raw environment read
+tests/unit/search/topology_search_test_support.h:40:portability/env-read # reviewed raw environment read
 tests/unit/topology/topology_baseline_catch2_test.cpp:65:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:42:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:48:portability/env-read # reviewed raw environment read
