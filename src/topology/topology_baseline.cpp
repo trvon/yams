@@ -394,6 +394,10 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
 
     std::ranges::sort(batch.clusters, {}, &ClusterArtifact::clusterId);
     std::ranges::sort(batch.memberships, {}, &DocumentClusterMembership::documentHash);
+    // Roads read the raw neighbor lists. The filtered `adjacency` only carries cross-cluster
+    // edges where an oversized component was split, so it cannot be the road source.
+    batch.roads = detail::accumulateClusterRoads(
+        effectiveDocuments, detail::primaryClusterByHash(batch), config.roadMaxPerCluster);
     (void)applyOrthogonalBoundarySpill(effectiveDocuments, config, batch);
 
     return batch;
@@ -574,6 +578,10 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
     // A partial update cannot reconstruct the full-corpus relation digest. Fail closed until a
     // full rebuild provides relation-bound calibration evidence.
     merged.protectedRelationIdentity.clear();
+    // Roads carried over from `existing` would reference removed clusters; the region rebuild
+    // only sees its own documents. Drop them until the next full rebuild (incremental road
+    // maintenance is a separate change).
+    merged.roads.clear();
     merged.generatedAtUnixSeconds = rebuilt.value().generatedAtUnixSeconds;
     merged.topologyEpoch = existing.topologyEpoch + 1;
 

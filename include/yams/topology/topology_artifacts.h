@@ -189,6 +189,11 @@ struct TopologyBuildConfig {
     std::size_t sgcHops{0};
     // Re-normalize smoothed feature vectors to unit L2 length to preserve cosine distance.
     bool sgcNormalize{true};
+    /// Cluster roads kept per cluster, heaviest first (TOML `topology.road_max_per_cluster`).
+    /// Roads are accumulated from the raw neighbor lists, before the reciprocal / minEdgeScore
+    /// construction filter, so cross-cluster evidence the filter dropped still links clusters.
+    /// 0 (default) computes no roads and leaves every other artifact unchanged.
+    std::size_t roadMaxPerCluster{0};
 };
 
 struct TopologyDirtyRegion {
@@ -253,6 +258,17 @@ struct ClusterArtifact {
     std::vector<ClusterRoutingRepresentative> routingRepresentatives{};
 };
 
+/// One cluster's view of an undirected cluster-to-cluster link. `weight` is the sum of every raw
+/// neighbor observation between members of the two clusters, so it is the same from both sides;
+/// each endpoint keeps only its own top-K, so a link may appear with one or both orientations.
+struct ClusterRoad {
+    std::string fromClusterId;
+    std::string toClusterId;
+    double weight{0.0};
+
+    friend bool operator==(const ClusterRoad&, const ClusterRoad&) = default;
+};
+
 struct TopologyArtifactBatch {
     std::string snapshotId;
     std::string algorithm;
@@ -272,6 +288,10 @@ struct TopologyArtifactBatch {
     RepresentativeRule representativeRule{RepresentativeRule::Degree};
     std::vector<ClusterArtifact> clusters;
     std::vector<DocumentClusterMembership> memberships;
+    /// Cluster roads, sorted by (fromClusterId asc, weight desc, toClusterId asc) with at most
+    /// `TopologyBuildConfig::roadMaxPerCluster` entries per source cluster. Empty when roads are
+    /// off. In memory only: the binary codec and the routing construction fingerprint ignore it.
+    std::vector<ClusterRoad> roads;
 };
 
 struct TopologyUpdateStats {

@@ -199,6 +199,13 @@ public:
     [[nodiscard]] bool boundarySpillEnabled() const noexcept {
         return boundarySpillEnabled_.load(std::memory_order_acquire);
     }
+    /// Cluster roads kept per cluster at build time; 0 (default) computes none.
+    void setRoadMaxPerCluster(std::size_t maxPerCluster) noexcept {
+        roadMaxPerCluster_.store(maxPerCluster, std::memory_order_release);
+    }
+    [[nodiscard]] std::size_t roadMaxPerCluster() const noexcept {
+        return roadMaxPerCluster_.load(std::memory_order_acquire);
+    }
     void setFeatureComposition(topology::FeatureComposition composition) {
         std::lock_guard lock(featureCompositionMutex_);
         featureComposition_ = std::move(composition);
@@ -256,6 +263,7 @@ private:
     std::atomic<std::size_t> boundarySpillLimit_{1};
     std::atomic<double> boundarySpillDistanceRatio_{1.05};
     std::atomic<double> boundarySpillResidualPenalty_{1.0};
+    std::atomic<std::size_t> roadMaxPerCluster_{topology::TopologyBuildConfig{}.roadMaxPerCluster};
     mutable std::mutex featureCompositionMutex_;
     topology::FeatureComposition featureComposition_;
     std::atomic<bool> autoRebuildEnabled_{true};
