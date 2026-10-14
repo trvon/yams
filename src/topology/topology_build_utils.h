@@ -2,9 +2,14 @@
 
 #include <yams/topology/topology_engine.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -71,6 +76,108 @@ inline void normalizeVector(std::vector<float>& vec) {
             v *= invNorm;
         }
     }
+}
+
+/// Primary cluster of every document in `batch`, from its memberships. Overlap (boundary-spill)
+/// clusters are not primary and do not participate in roads.
+inline std::unordered_map<std::string_view, std::string_view>
+primaryClusterByHash(const TopologyArtifactBatch& batch) {
+    std::unordered_map<std::string_view, std::string_view> primary;
+    primary.reserve(batch.memberships.size());
+    for (const auto& membership : batch.memberships) {
+        if (!membership.documentHash.empty() && !membership.clusterId.empty()) {
+            primary.emplace(membership.documentHash, membership.clusterId);
+        }
+    }
+    return primary;
+}
+
+/// Accumulate cluster roads from the RAW `TopologyDocumentInput::neighbors`, before any
+/// reciprocal / minEdgeScore construction filter. Every finite, non-negative neighbor score whose
+/// endpoints sit in two different primary clusters adds to that undirected pair's weight, so a
+/// reciprocal pair contributes from both sides and the weight is symmetric. Each cluster keeps
+/// its `maxPerCluster` heaviest roads; ties break on the target cluster id. The result is sorted
+/// by (from asc, weight desc, to asc); cluster ids are hash-anchored, so the output does not
+/// depend on input order beyond floating-point summation order. `maxPerCluster == 0` returns no
+/// roads.
+inline std::vector<ClusterRoad>
+accumulateClusterRoads(std::span<const TopologyDocumentInput> documents,
+                       const std::unordered_map<std::string_view, std::string_view>& primaryByHash,
+                       std::size_t maxPerCluster) {
+    std::vector<ClusterRoad> roads;
+    if (maxPerCluster == 0 || documents.empty() || primaryByHash.empty()) {
+        return roads;
+    }
+
+    // Undirected pair weights keyed by the ordered (lo, hi) cluster ids.
+    using ClusterPair = std::pair<std::string_view, std::string_view>;
+    struct ClusterPairHash {
+        std::size_t operator()(const ClusterPair& key) const noexcept {
+            const std::size_t lhs = std::hash<std::string_view>{}(key.first);
+            const std::size_t rhs = std::hash<std::string_view>{}(key.second);
+            return PairKeyHash{}(PairKey{lhs, rhs});
+        }
+    };
+    std::unordered_map<ClusterPair, double, ClusterPairHash> pairWeights;
+
+    for (const auto& document : documents) {
+        const auto fromIt = primaryByHash.find(document.documentHash);
+        if (fromIt == primaryByHash.end()) {
+            continue;
+        }
+        const std::string_view fromCluster = fromIt->second;
+        for (const auto& neighbor : document.neighbors) {
+            if (neighbor.documentHash.empty() || !std::isfinite(neighbor.score) ||
+                neighbor.score < 0.0F) {
+                continue;
+            }
+            const auto toIt = primaryByHash.find(neighbor.documentHash);
+            if (toIt == primaryByHash.end() || toIt->second == fromCluster) {
+                continue;
+            }
+            const auto [lo, hi] = std::minmax(fromCluster, toIt->second);
+            pairWeights[ClusterPair{lo, hi}] += static_cast<double>(neighbor.score);
+        }
+    }
+    if (pairWeights.empty()) {
+        return roads;
+    }
+
+    // Both orientations, then per-source top-K.
+    roads.reserve(pairWeights.size() * 2);
+    for (const auto& [pair, weight] : pairWeights) {
+        roads.push_back(ClusterRoad{.fromClusterId = std::string(pair.first),
+                                    .toClusterId = std::string(pair.second),
+                                    .weight = weight});
+        roads.push_back(ClusterRoad{.fromClusterId = std::string(pair.second),
+                                    .toClusterId = std::string(pair.first),
+                                    .weight = weight});
+    }
+    std::sort(roads.begin(), roads.end(), [](const ClusterRoad& lhs, const ClusterRoad& rhs) {
+        if (lhs.fromClusterId != rhs.fromClusterId) {
+            return lhs.fromClusterId < rhs.fromClusterId;
+        }
+        if (lhs.weight != rhs.weight) {
+            return lhs.weight > rhs.weight;
+        }
+        return lhs.toClusterId < rhs.toClusterId;
+    });
+
+    std::vector<ClusterRoad> kept;
+    kept.reserve(roads.size());
+    std::size_t runLength = 0;
+    for (auto& road : roads) {
+        if (!kept.empty() && kept.back().fromClusterId == road.fromClusterId) {
+            if (runLength >= maxPerCluster) {
+                continue;
+            }
+        } else {
+            runLength = 0;
+        }
+        kept.push_back(std::move(road));
+        ++runLength;
+    }
+    return kept;
 }
 
 } // namespace yams::topology::detail

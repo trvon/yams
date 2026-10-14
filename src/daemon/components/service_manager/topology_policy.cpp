@@ -59,6 +59,11 @@ void ServiceManager::configureTopologyRuntime() {
             spdlog::info("Topology SOAR boundary spill applied via config: enabled={}",
                          topologyManager_.boundarySpillEnabled());
         }
+        if (enginePolicy.roadMaxPerCluster) {
+            topologyManager_.setRoadMaxPerCluster(*enginePolicy.roadMaxPerCluster);
+            spdlog::info("Topology cluster roads applied via config: max_per_cluster={}",
+                         topologyManager_.roadMaxPerCluster());
+        }
         topology::FeatureComposition featureComposition;
         featureComposition.enableEntityFusion =
             enginePolicy.featureEntityFusion.value_or(featureComposition.enableEntityFusion);

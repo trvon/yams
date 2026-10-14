@@ -102,6 +102,15 @@ TEST_CASE("TopologyManager initial state", "[daemon][topology-manager][catch2]")
     CHECK(telemetry.dirtyDocumentCount == 0);
 }
 
+TEST_CASE("TopologyManager roads are off until configured", "[daemon][topology-manager][catch2]") {
+    TopologyManager mgr(nullDeps());
+    CHECK(mgr.roadMaxPerCluster() == 0);
+    mgr.setRoadMaxPerCluster(4);
+    CHECK(mgr.roadMaxPerCluster() == 4);
+    mgr.setRoadMaxPerCluster(0);
+    CHECK(mgr.roadMaxPerCluster() == 0);
+}
+
 TEST_CASE("TopologyManager telemetry tracks dirty count", "[daemon][topology-manager][catch2]") {
     TopologyManager mgr(nullDeps());
 

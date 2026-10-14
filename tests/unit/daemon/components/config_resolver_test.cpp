@@ -1123,6 +1123,7 @@ boundary_spill = true
 boundary_spill_limit = 1
 boundary_spill_distance_ratio = +1.2
 boundary_spill_residual_penalty = 1.5e0
+road_max_per_cluster = 3
 
 [topology.features]
 entity_fusion = true
@@ -1155,6 +1156,8 @@ minhash_alpha = 0.15
     CHECK((*policy.boundarySpillDistanceRatio == Catch::Approx(1.2)));
     REQUIRE(policy.boundarySpillResidualPenalty.has_value());
     CHECK((*policy.boundarySpillResidualPenalty == Catch::Approx(1.5)));
+    REQUIRE(policy.roadMaxPerCluster.has_value());
+    CHECK((*policy.roadMaxPerCluster == 3));
     CHECK(*policy.featureEntityFusion);
     CHECK((*policy.featureEntitySignatureK == 12));
     CHECK((*policy.featureEntityFusionAlpha == Catch::Approx(0.2F)));
@@ -1199,6 +1202,8 @@ engine = "connected"
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
         auto policy = ConfigResolver::resolveTopologyEnginePolicy();
         CHECK_FALSE(policy.dirtyRegionExpansion.has_value());
+        // Roads stay off unless the key is present.
+        CHECK_FALSE(policy.roadMaxPerCluster.has_value());
     }
 }
 

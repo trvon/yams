@@ -1088,6 +1088,9 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         if (auto it = kv.find("topology.boundary_spill_residual_penalty"); it != kv.end()) {
             policy.boundarySpillResidualPenalty = parseDouble(it->second);
         }
+        if (auto it = kv.find("topology.road_max_per_cluster"); it != kv.end()) {
+            policy.roadMaxPerCluster = parseSize(it->second);
+        }
         if (auto it = kv.find("topology.features.entity_fusion"); it != kv.end()) {
             policy.featureEntityFusion = parseBoolValue(it->second);
         }

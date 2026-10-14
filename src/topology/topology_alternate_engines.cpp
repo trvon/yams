@@ -280,6 +280,12 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                   return lhs.documentHash < rhs.documentHash;
               });
 
+    // Roads read the raw neighbor lists, not `pairWeights`: k-means never consults the graph for
+    // assignment and Louvain only sees filtered edges, so the construction graph has no record of
+    // the cross-cluster evidence a road is made of.
+    batch.roads = detail::accumulateClusterRoads(documents, detail::primaryClusterByHash(batch),
+                                                 config.roadMaxPerCluster);
+
     (void)applyOrthogonalBoundarySpill(documents, config, batch);
 
     return batch;
