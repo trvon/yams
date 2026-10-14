@@ -91,6 +91,11 @@ makeAdjacency(std::size_t n, const PairWeightMap& pairWeights) {
         adjacency[key.first].emplace_back(key.second, weight);
         adjacency[key.second].emplace_back(key.first, weight);
     }
+    // pairWeights iterates in hash order, which differs between standard libraries; sort so
+    // weight sums and community moves are the same on every platform.
+    for (auto& neighbors : adjacency) {
+        std::ranges::sort(neighbors, {}, &std::pair<std::size_t, float>::first);
+    }
     return adjacency;
 }
 
@@ -595,7 +600,9 @@ runLouvain(std::span<const TopologyDocumentInput> documents,
                 }
                 const double gain = computeDeltaQ(i, candComm, weightToCand) -
                                     (-computeDeltaQ(i, fromComm, weightToFrom));
-                if (gain > bestGain) {
+                // weightToComm is unordered, so break equal gains on the community id;
+                // otherwise the move depends on the standard library's hash order.
+                if (gain > bestGain || (gain > 0.0 && gain == bestGain && candComm < bestComm)) {
                     bestGain = gain;
                     bestComm = candComm;
                 }

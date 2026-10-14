@@ -152,8 +152,9 @@ TEST_CASE("Degree representative selection is characterized for every engine",
 
     CHECK(buildAndDescribe("connected", config, docs) ==
           "h@4.2000[h,l4,]n=15;|c0:bridge,c1:bridge,c2:bridge,c3:bridge,h:medoid,");
+    // Same on libc++ and libstdc++: Louvain no longer depends on hash iteration order.
     CHECK(buildAndDescribe("louvain", config, docs) ==
-          "h@4.2000[h,l4,]n=15;|c0:bridge,c1:bridge,c2:bridge,c3:bridge,h:medoid,");
+          "c0@1.8000[c0,c2,]n=3;h@3.3000[h,l4,]n=12;|c0:medoid,h:medoid,");
     CHECK(buildAndDescribe("kmeans", config, docs) ==
           "c0@2.7000[l4,l5,]n=14;h@0.0000[h,]n=1;|c0:medoid,c1:bridge,c2:bridge,c3:bridge,h:"
           "outlier,");
