@@ -2,6 +2,7 @@
 
 #include "tests/benchmarks/beir_loader.h"
 
+#include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_types.h>
 
 #include <cstddef>
@@ -188,7 +189,18 @@ struct BEIRCorpusLoader {
     void writeDocumentsAsFiles();
     std::vector<TestQuery> generateTestQueries();
     std::vector<std::string> getDocumentPaths() const;
+    /// File path `writeDocumentsAsFiles` uses for a corpus document id.
+    std::filesystem::path documentPath(const std::string& docId) const;
 };
+
+/// Directory ingestion cannot carry per-file metadata, so after the corpus files are ingested
+/// copy each `BEIRDocument::metadata` onto the stored document matched by exact file path
+/// (`BEIRCorpusLoader::documentPath`). Documents without metadata are skipped. Returns the
+/// number of documents updated; `missingDocuments`, when given, counts documents with metadata
+/// that are not in `repo`. Re-running overwrites the same keys, so warm caches may repeat it.
+std::size_t applyBenchmarkDocumentMetadata(yams::metadata::IMetadataRepository& repo,
+                                           const BEIRCorpusLoader& loader,
+                                           std::size_t* missingDocuments = nullptr);
 
 yams::Result<BEIRDataset> loadBenchmarkManifestDataset(const std::string& datasetName,
                                                        const std::filesystem::path& manifestRoot);

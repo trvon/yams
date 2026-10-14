@@ -641,6 +641,7 @@ static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
                 doc.id = j.value("id", "");
             doc.title = j.value("title", "");
             doc.text = j.value("text", "");
+            yams::bench::readBEIRDocumentMetadata(j, doc);
             if (!doc.id.empty() && !doc.text.empty()) {
                 dataset.documents[doc.id] = doc;
             }
@@ -7411,6 +7412,25 @@ struct BenchFixture {
                                  repairResult.value().totalSucceeded,
                                  repairResult.value().totalFailed,
                                  repairResult.value().totalSkipped);
+                }
+            }
+
+            // Directory ingest carries no per-file metadata; copy the corpus metadata
+            // (event_time, session_id, round_index, ...) onto the stored documents so the
+            // topology extractor sees it. Idempotent, so warm caches repeat it.
+            if (useBEIR && beirCorpus) {
+                auto* daemon = harness ? harness->daemon() : nullptr;
+                auto* serviceManager = daemon ? daemon->getServiceManager() : nullptr;
+                auto metadataRepo = serviceManager ? serviceManager->getMetadataRepo() : nullptr;
+                if (metadataRepo) {
+                    std::size_t missing = 0;
+                    const auto applied = yams::bench::applyBenchmarkDocumentMetadata(
+                        *metadataRepo, *beirCorpus, &missing);
+                    if (applied > 0 || missing > 0) {
+                        spdlog::info("[Bench] Applied corpus metadata to {} documents ({} not "
+                                     "found)",
+                                     applied, missing);
+                    }
                 }
             }
 

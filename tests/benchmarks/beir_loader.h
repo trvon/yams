@@ -16,7 +16,28 @@ struct BEIRDocument {
     std::string id;
     std::string title;
     std::string text;
+    /// Per-document metadata from the corpus line's `metadata` object (scalars stringified).
+    /// Applied to the ingested document after ingest so extractors see keys such as
+    /// `event_time`, `session_id` and `round_index`.
+    std::map<std::string, std::string> metadata;
 };
+
+/// Copy the `metadata` object of a BEIR corpus line into `doc.metadata`. Strings are kept as
+/// is, numbers and booleans are stringified, other value kinds are dropped. A missing or
+/// non-object `metadata` leaves the map empty.
+inline void readBEIRDocumentMetadata(const nlohmann::json& line, BEIRDocument& doc) {
+    const auto it = line.find("metadata");
+    if (it == line.end() || !it->is_object()) {
+        return;
+    }
+    for (const auto& [key, value] : it->items()) {
+        if (value.is_string()) {
+            doc.metadata[key] = value.get<std::string>();
+        } else if (value.is_number() || value.is_boolean()) {
+            doc.metadata[key] = value.dump();
+        }
+    }
+}
 
 struct BEIRQuery {
     std::string id;
@@ -114,6 +135,7 @@ inline yams::Result<BEIRDataset> loadBEIRDataset(const std::string& datasetName,
                 doc.id = j.value("id", "");
             doc.title = j.value("title", "");
             doc.text = j.value("text", "");
+            readBEIRDocumentMetadata(j, doc);
             if (!doc.id.empty() && !doc.text.empty()) {
                 dataset.documents[doc.id] = doc;
             }
