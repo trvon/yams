@@ -100,6 +100,30 @@ VectorStageOutcome runVectorCandidateStage(const VectorStageRequest& request) {
                 }
             }
         }
+        // Road walk: every routed hit so far (certified and road) anchors +-window positions along
+        // its cluster's order. The walked set is one extra routed query whose quota is its own
+        // size: the walk rescues ordinal neighbours, so ranking them by similarity and truncating
+        // would reintroduce the semantic filter it exists to bypass. Work is counted through the
+        // same diagnostics as the road candidates.
+        if (includeRoads && request.roadWalkWindow > 0 && request.roadWalkIndex) {
+            std::vector<std::string> anchors;
+            anchors.reserve(routedResults.size());
+            for (const auto& hit : routedResults) {
+                anchors.push_back(hit.documentHash);
+            }
+            outcome.roadWalkWindowApplied = request.roadWalkWindow;
+            const auto walked =
+                walkTopologyRoadOrders(*request.roadWalkIndex, anchors, request.roadWalkWindow,
+                                       seenDocuments, &outcome.roadWalkAnchors);
+            if (!walked.empty()) {
+                auto routed = request.queryVector(embedding, walked.size(), &walked, &diagnostics,
+                                                  candidateFilterMode);
+                if (routed) {
+                    outcome.roadWalkResultsAdded += appendUnique(
+                        std::move(routed.value()), routedResults.size() + walked.size());
+                }
+            }
+        }
         return routedResults;
     };
 

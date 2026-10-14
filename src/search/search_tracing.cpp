@@ -230,6 +230,15 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     if (!session.roadUnavailableReason.empty()) {
         setDebug(debug, metrics::kTopologyRoadUnavailableReason, session.roadUnavailableReason);
     }
+    if (!session.orderUnavailableReason.empty()) {
+        setDebug(debug, metrics::kTopologyOrderUnavailableReason, session.orderUnavailableReason);
+    }
+    // Road walk keys appear only when a window was requested; the stage adds the anchors, the
+    // applied window and topology_road_walk_candidates_added after the vector leg.
+    if (session.roadWalkWindowRequested > 0) {
+        setDebug(debug, metrics::kTopologyRoadWalkClustersUnordered,
+                 std::to_string(session.roadWalkClustersUnordered));
+    }
     // Road beam keys appear only when the beam was requested, so road_hops = 0 leaves the debug
     // surface unchanged. The stage adds topology_road_candidates_added after the vector leg.
     if (session.roadHopsRequested > 0) {

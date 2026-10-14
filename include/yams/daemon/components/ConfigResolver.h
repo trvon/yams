@@ -127,6 +127,9 @@ public:
         /// Unset or 0 hops is off; the width is read only when hops > 0.
         std::optional<std::size_t> roadHops;
         std::optional<std::size_t> roadBeamWidth;
+        /// `search.topology.road_walk_window`: positions walked on each side of a routed hit along
+        /// its cluster's walk order (route_only and augment). Unset or 0 is off.
+        std::optional<std::size_t> roadWalkWindow;
         std::optional<std::size_t> expansionOutputLimit;
         std::optional<float> medoidBoost;
         std::optional<float> evidenceWeight;
@@ -524,6 +527,8 @@ public:
      * - search.topology.max_docs = int
      * - search.topology.road_hops = int (0 = off; route_only and augment only)
      * - search.topology.road_beam_width = int (clusters kept per hop; read when road_hops > 0)
+     * - search.topology.road_walk_window = int (0 = off; positions walked on each side of a
+     *   routed hit along the cluster walk order; route_only and augment only)
      * - search.topology.expansion_output_limit = int (0 inherits global vector output)
      * - search.topology.medoid_boost = float
      * - search.topology.evidence_weight = float in [0,1]

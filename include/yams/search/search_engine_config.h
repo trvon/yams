@@ -263,6 +263,14 @@ struct SearchEngineConfig {
     /// is off and leaves every stage byte-identical; the width is read only when hops > 0.
     size_t topologyRoadHops = 0;
     size_t topologyRoadBeamWidth = 4;
+    /// Road walk for RouteOnly and Augment (`search.topology.road_walk_window`): around every
+    /// routed hit (certified route hits and road-beam hits) take the members within this many
+    /// positions along the hit's cluster walk order (`ClusterArtifact::orderedMembers`), bounded to
+    /// the cluster, and score them as one extra routed query. Clusters without an order are counted
+    /// and never walked. The walked documents never widen the certified allowed set, Narrow
+    /// admission or the routing policy fingerprint. 0 (default) is off and leaves every stage
+    /// byte-identical.
+    size_t topologyRoadWalkWindow = 0;
     /// Maximum independently scored topology-expansion results returned to shadow/augment.
     /// Zero inherits the global vector result limit for backward-compatible product behavior.
     size_t topologyExpansionOutputLimit = 0;
@@ -595,6 +603,7 @@ struct SearchEngineConfig {
         topologyMaxDocs = source.topologyMaxDocs;
         topologyRoadHops = source.topologyRoadHops;
         topologyRoadBeamWidth = source.topologyRoadBeamWidth;
+        topologyRoadWalkWindow = source.topologyRoadWalkWindow;
         topologyExpansionOutputLimit = source.topologyExpansionOutputLimit;
         topologyMedoidBoost = source.topologyMedoidBoost;
         topologyEvidenceWeight = source.topologyEvidenceWeight;

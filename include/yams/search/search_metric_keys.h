@@ -91,6 +91,19 @@ constexpr std::string_view kTopologyRoadWorkCentroidEvaluations =
 constexpr std::string_view kTopologyRoadSkipReason = "topology_road_skip_reason";
 /// Trace only: beam-ordered ids of the road-expanded clusters.
 constexpr std::string_view kTopologyRoadExpandedClusterIds = "topology_road_expanded_cluster_ids";
+/// Why one or more cluster walk orders were dropped on load
+/// (`TopologyArtifactBatch::orderUnavailableReason`); emitted only when set.
+constexpr std::string_view kTopologyOrderUnavailableReason = "topology_order_unavailable_reason";
+/// Road walk (search.topology.road_walk_window > 0 under RouteOnly / Augment); absent when off.
+/// `window_applied` is the window the stage walked with (0 when no walkable order existed).
+constexpr std::string_view kTopologyRoadWalkWindowApplied = "topology_road_walk_window_applied";
+/// Routed hits that anchored a window (hits inside a cluster with an order).
+constexpr std::string_view kTopologyRoadWalkAnchors = "topology_road_walk_anchors";
+/// Walked documents the vector stage appended to the routed candidate set.
+constexpr std::string_view kTopologyRoadWalkCandidatesAdded = "topology_road_walk_candidates_added";
+/// Walkable clusters (selected routes and road-expanded clusters) that carry no order.
+constexpr std::string_view kTopologyRoadWalkClustersUnordered =
+    "topology_road_walk_clusters_unordered";
 /// Rotation applied before BQ centroid sign bits (none|fwht).
 constexpr std::string_view kTopologyRouteBqRotation = "topology_route_bq_rotation";
 constexpr std::string_view kTopologyRouteBqCandidates = "topology_route_bq_candidates";

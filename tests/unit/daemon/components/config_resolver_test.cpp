@@ -1402,7 +1402,24 @@ max_clusters = 2
         auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
         CHECK_FALSE(policy.roadHops.has_value());
         CHECK_FALSE(policy.roadBeamWidth.has_value());
+        CHECK_FALSE(policy.roadWalkWindow.has_value());
     }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyRoutingPolicy reads the road walk window",
+                 "[daemon][components][config][topology_routing][road-walk][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+road_walk_window = 4
+)TOML");
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+    REQUIRE(policy.roadWalkWindow.has_value());
+    CHECK((*policy.roadWalkWindow == 4U));
+    // The walk window travels alone: the beam keys stay unset.
+    CHECK_FALSE(policy.roadHops.has_value());
+    CHECK_FALSE(policy.roadBeamWidth.has_value());
 }
 
 TEST_CASE("Generated config keeps topology-assisted hybrid search as the product default",
