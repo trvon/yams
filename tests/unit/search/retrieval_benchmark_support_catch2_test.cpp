@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "tests/benchmarks/search/retrieval_benchmark_support.h"
@@ -12,6 +13,8 @@
 #include <fstream>
 #include <set>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 
@@ -454,4 +457,46 @@ TEST_CASE("Hard lexical synthetic corpus produces graded retrieval queries", "[b
     REQUIRE((first.relevanceGrades.at("auth_password_reset_primary.txt") == 3));
     REQUIRE((first.relevanceGrades.at("auth_password_reset_secondary.txt") == 2));
     REQUIRE((first.relevanceGrades.at("auth_session_revocation_distractor.txt") == 1));
+}
+
+TEST_CASE("Semantic neighbor seeding keeps mutual pairs and, when directed, one-way kNN edges",
+          "[bench][retrieval][topology][seeding]") {
+    using yams::bench::buildSemanticNeighborSeedEdges;
+    using yams::bench::SemanticNeighborSeeding;
+    // a<->b mutual (0.8 / 0.6), a->c one-way 0.4, c->c self entry, d->a one-way 0.05 (floor).
+    std::unordered_map<std::string, std::unordered_map<std::string, float>> scores;
+    scores["a"]["b"] = 0.8F;
+    scores["b"]["a"] = 0.6F;
+    scores["a"]["c"] = 0.4F;
+    scores["c"]["c"] = 0.9F;
+    scores["d"]["a"] = 0.05F;
+
+    const auto mutual =
+        buildSemanticNeighborSeedEdges(scores, 0.10F, SemanticNeighborSeeding::MutualPairs);
+    REQUIRE(mutual.size() == 2);
+    CHECK(mutual[0].sourceHash == "a");
+    CHECK(mutual[0].targetHash == "b");
+    CHECK(mutual[1].sourceHash == "b");
+    CHECK(mutual[1].targetHash == "a");
+    for (const auto& edge : mutual) {
+        CHECK(edge.mutual);
+        CHECK(edge.weight == Catch::Approx(0.7F));
+    }
+
+    const auto directed =
+        buildSemanticNeighborSeedEdges(scores, 0.10F, SemanticNeighborSeeding::DirectedKnn);
+    REQUIRE(directed.size() == 4);
+    CHECK(directed[0].sourceHash == "a");
+    CHECK(directed[0].targetHash == "b");
+    CHECK(directed[0].mutual);
+    CHECK(directed[1].sourceHash == "a");
+    CHECK(directed[1].targetHash == "c");
+    CHECK_FALSE(directed[1].mutual);
+    CHECK(directed[1].weight == Catch::Approx(0.4F));
+    CHECK(directed[2].sourceHash == "b");
+    CHECK(directed[2].targetHash == "a");
+    CHECK(directed[3].sourceHash == "d");
+    CHECK(directed[3].targetHash == "a");
+    CHECK_FALSE(directed[3].mutual);
+    CHECK(directed[3].weight == Catch::Approx(0.10F));
 }

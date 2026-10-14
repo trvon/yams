@@ -190,6 +190,33 @@ TEST_CASE("Connected engine accumulates roads from raw neighbors the constructio
     }
 }
 
+TEST_CASE("Connected engine has no road source when every raw neighbor joins its component",
+          "[unit][topology][roads][connected][catch2]") {
+    // Mutual-only seeding (every edge reciprocal and above minEdgeScore) puts each raw neighbor
+    // inside its own component, so nothing crosses a cluster boundary and no road can form. A
+    // one-way kNN edge, as the daemon writes, is the road source.
+    auto docs = threeGraphClusters();
+    for (auto& doc : docs) {
+        std::erase_if(doc.neighbors, [&](const TopologyNeighbor& n) {
+            return n.documentHash.front() != doc.documentHash.front();
+        });
+    }
+    ConnectedComponentTopologyEngine engine;
+    auto mutualOnly = engine.buildArtifacts(docs, graphConfig(8));
+    REQUIRE(mutualOnly.has_value());
+    REQUIRE(mutualOnly.value().clusters.size() == 3);
+    CHECK(mutualOnly.value().roads.empty());
+    CHECK(mutualOnly.value().roadMaxPerCluster == 0);
+
+    link(*find(docs, "a1"), "b0", 0.9F, false);
+    auto withOneWay = engine.buildArtifacts(docs, graphConfig(8));
+    REQUIRE(withOneWay.has_value());
+    REQUIRE(withOneWay.value().clusters.size() == 3);
+    const auto fromA = roadsFrom(withOneWay.value(), kA);
+    REQUIRE(fromA.size() == 1);
+    CHECK(fromA[0].toClusterId == kB);
+}
+
 TEST_CASE("Roads keep the top-K per cluster with a deterministic tie-break",
           "[unit][topology][roads][catch2]") {
     ConnectedComponentTopologyEngine engine;

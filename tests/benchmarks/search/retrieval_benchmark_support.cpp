@@ -1800,4 +1800,41 @@ stageRetrievalMetricsToJson(const std::map<std::string, StageMetricAccumulator>&
     return out;
 }
 
+std::vector<SemanticNeighborSeedEdge> buildSemanticNeighborSeedEdges(
+    const std::unordered_map<std::string, std::unordered_map<std::string, float>>& neighborScores,
+    float weightFloor, SemanticNeighborSeeding mode) {
+    std::vector<SemanticNeighborSeedEdge> edges;
+    for (const auto& [sourceHash, neighbors] : neighborScores) {
+        for (const auto& [targetHash, forwardScore] : neighbors) {
+            if (sourceHash == targetHash) {
+                continue;
+            }
+            const auto reverseIt = neighborScores.find(targetHash);
+            const bool mutual =
+                reverseIt != neighborScores.end() && reverseIt->second.contains(sourceHash);
+            if (mutual) {
+                const float reverseScore = reverseIt->second.at(sourceHash);
+                edges.push_back(
+                    {.sourceHash = sourceHash,
+                     .targetHash = targetHash,
+                     .weight = std::max(weightFloor, (forwardScore + reverseScore) * 0.5F),
+                     .mutual = true});
+            } else if (mode == SemanticNeighborSeeding::DirectedKnn) {
+                edges.push_back({.sourceHash = sourceHash,
+                                 .targetHash = targetHash,
+                                 .weight = std::max(weightFloor, forwardScore),
+                                 .mutual = false});
+            }
+        }
+    }
+    std::ranges::sort(edges,
+                      [](const SemanticNeighborSeedEdge& lhs, const SemanticNeighborSeedEdge& rhs) {
+                          if (lhs.sourceHash != rhs.sourceHash) {
+                              return lhs.sourceHash < rhs.sourceHash;
+                          }
+                          return lhs.targetHash < rhs.targetHash;
+                      });
+    return edges;
+}
+
 } // namespace yams::bench

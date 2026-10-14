@@ -14,6 +14,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -178,6 +179,29 @@ std::vector<LexicalTopologyNeighbor> buildSegmentKeyphraseTopologyNeighbors(
     std::size_t maxFeaturesPerSegment = 12, std::size_t maxFeatureDocumentFrequency = 64,
     std::size_t maxComponentDocs = 64, std::size_t maxEdgesPerFeature = 64,
     bool reciprocalOnly = true, BenchmarkTopologyConstructionCertificate* certificate = nullptr);
+
+/// How benchmark seeding turns per-document neighbor lists into `semantic_neighbor` KG edges.
+/// MutualPairs writes both directions of every mutual pair and drops one-way neighbors.
+/// DirectedKnn also writes each one-way neighbor as a single directed edge, as the daemon does
+/// (`GraphComponent` treats a one-way edge as an ordinary non-mutual kNN edge). The connected
+/// topology engine keeps only reciprocal edges in its components, so one-way edges are its
+/// only source of cross-cluster roads.
+enum class SemanticNeighborSeeding { MutualPairs, DirectedKnn };
+
+struct SemanticNeighborSeedEdge {
+    std::string sourceHash;
+    std::string targetHash;
+    float weight{0.0F};
+    bool mutual{false};
+};
+
+/// `neighborScores[src][dst]` is dst's score in src's neighbor list. A mutual pair gets weight
+/// max(weightFloor, mean of both scores) in both directions; a one-way edge (DirectedKnn only)
+/// gets max(weightFloor, its score). Self entries are skipped. Output is sorted by
+/// (sourceHash, targetHash).
+std::vector<SemanticNeighborSeedEdge> buildSemanticNeighborSeedEdges(
+    const std::unordered_map<std::string, std::unordered_map<std::string, float>>& neighborScores,
+    float weightFloor, SemanticNeighborSeeding mode);
 
 struct BEIRCorpusLoader {
     BEIRDataset dataset;
