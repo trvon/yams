@@ -399,6 +399,13 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
     if (auto ready = beforeRemoteWork(); !ready) {
         return ready.error();
     }
+    // An exclusive backend changes only through this loop, so the last complete scan is
+    // still the store's merge until the loop writes again or a writer is quarantined.
+    if (control_.exclusiveBackend && scanCursor_.empty() && completeScan_ &&
+        completeScan_->writes == countedBackend_->writes() &&
+        completeScan_->quarantineGeneration == durableQuarantineGeneration_) {
+        return merged_;
+    }
     auto listed = backend_->listPage(
         "index/", scanCursor_.empty() ? std::nullopt : std::optional<std::string_view>{scanCursor_},
         limits_.maxIndexObjectsPerSync);
@@ -670,6 +677,9 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
             ++it;
         }
     }
+    // Stamp after the scan's own writes (acknowledgements, legacy upgrades) so they do
+    // not force another pass over the same store.
+    completeScan_ = CompleteScanStamp{countedBackend_->writes(), durableQuarantineGeneration_};
     return merged_;
 }
 

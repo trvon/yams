@@ -72,6 +72,7 @@ struct MemorySyncDaemonConfig {
     bool writerAuthRequired{false};         /// require schema-v4 Ed25519 envelopes
     std::string writerAuthManifestPath;     /// ACL-protected corpus/epoch key manifest
     std::string controlScope;               /// authenticated local-store generation
+    bool exclusiveBackend{false};           /// daemon-owned store: direct transport op store
 
     /// Parse `memory_sync.*` keys from a flat `section.key -> value` map.
     static MemorySyncDaemonConfig fromToml(const std::map<std::string, std::string>& flat) {
@@ -455,13 +456,20 @@ createMemorySyncService(const MemorySyncDaemonConfig& config,
         sessionLeaseKey = ".session-leases/" + config.sessionId;
     }
 
+    MemorySyncConfig serviceConfig{config.nodeId,
+                                   config.syncIntervalMs,
+                                   config.corpusId,
+                                   config.corpusEpoch,
+                                   config.limits,
+                                   temporary,
+                                   std::move(writerAuth.value()),
+                                   config.controlScope};
+    // A temporary namespace is cleared outside the loop on stop, so its scans are not reused.
+    serviceConfig.exclusiveBackend = config.exclusiveBackend && !temporary;
     return std::make_unique<MemorySyncService>(
-        std::move(backend),
-        MemorySyncConfig{config.nodeId, config.syncIntervalMs, config.corpusId, config.corpusEpoch,
-                         config.limits, temporary, std::move(writerAuth.value()),
-                         config.controlScope},
-        std::move(canAdmitRemoteWork), config.allowLegacyUnbound,
-        std::move(sessionMaintenanceBackend), std::move(sessionLeaseKey));
+        std::move(backend), std::move(serviceConfig), std::move(canAdmitRemoteWork),
+        config.allowLegacyUnbound, std::move(sessionMaintenanceBackend),
+        std::move(sessionLeaseKey));
 }
 
 } // namespace yams::memory_sync
