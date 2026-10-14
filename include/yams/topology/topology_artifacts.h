@@ -133,6 +133,16 @@ struct TopologyDocumentInput {
     std::vector<float> embedding{};
     std::vector<TopologyNeighbor> neighbors{};
     std::unordered_map<std::string, std::string> metadata{};
+    /// Event time in epoch seconds (UTC), when known. The extractor reads the `event_time`
+    /// metadata key first (integer epoch seconds, or ISO-8601 `YYYY-MM-DD` /
+    /// `YYYY-MM-DD[T ]HH:MM[:SS[.frac]][Z|±HH:MM]`; a datetime without a zone is UTC; see
+    /// `parseTopologyEventTime`), then falls back to the document's createdTime. An unparsable
+    /// value is ignored with a debug log, and a zero createdTime leaves the field unset.
+    /// Metadata keys are only consulted when the extraction loads metadata.
+    std::optional<std::int64_t> eventTime{};
+    /// Session grouping key from the `session_id` metadata key; empty when absent.
+    /// Neither typed field enters artifacts, codecs or fingerprints (ordered roads consume them).
+    std::string sessionId{};
 };
 
 struct TopologyBuildConfig {
