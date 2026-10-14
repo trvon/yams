@@ -896,6 +896,12 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {
                 policy.maxDocs = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.road_hops"); it != kv.end()) {
+                policy.roadHops = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.road_beam_width"); it != kv.end()) {
+                policy.roadBeamWidth = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.expansion_output_limit"); it != kv.end()) {
                 policy.expansionOutputLimit = parseSize(it->second);
             }

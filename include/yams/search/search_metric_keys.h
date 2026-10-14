@@ -81,6 +81,16 @@ constexpr std::string_view kTopologyRouteBqUsed = "topology_route_bq_used";
 constexpr std::string_view kTopologyRepresentativeRule = "topology_representative_rule";
 /// Why the routed snapshot carries no roads although a sidecar existed; emitted only when set.
 constexpr std::string_view kTopologyRoadUnavailableReason = "topology_road_unavailable_reason";
+/// Road beam (search.topology.road_hops > 0 under RouteOnly / Augment); absent when roads are off.
+constexpr std::string_view kTopologyRoadHopsApplied = "topology_road_hops_applied";
+constexpr std::string_view kTopologyRoadClustersAdded = "topology_road_clusters_added";
+/// Road-expanded documents the vector stage appended to the routed candidate set.
+constexpr std::string_view kTopologyRoadCandidatesAdded = "topology_road_candidates_added";
+constexpr std::string_view kTopologyRoadWorkCentroidEvaluations =
+    "topology_road_work_centroid_evaluations";
+constexpr std::string_view kTopologyRoadSkipReason = "topology_road_skip_reason";
+/// Trace only: beam-ordered ids of the road-expanded clusters.
+constexpr std::string_view kTopologyRoadExpandedClusterIds = "topology_road_expanded_cluster_ids";
 /// Rotation applied before BQ centroid sign bits (none|fwht).
 constexpr std::string_view kTopologyRouteBqRotation = "topology_route_bq_rotation";
 constexpr std::string_view kTopologyRouteBqCandidates = "topology_route_bq_candidates";

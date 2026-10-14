@@ -2269,6 +2269,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     topologyRouteCertificate, &topologyRouteCertificate->allowedDocumentHashGroups);
             auto topologyRouteQuotas = allocateBalancedRouteQuotas(
                 *topologyRouteAllowedDocumentGroups, topologyVectorResultLimit);
+            // Road-expanded groups ride beside the certificate, never inside it: RouteOnly and
+            // Augment query them as extra routes with their own quota share and cap.
+            auto topologyRoadDocumentGroups =
+                std::make_shared<const std::vector<std::unordered_set<std::string>>>(
+                    topologyVectorRouteOnly || topologyVectorAugment
+                        ? topologySession.roadExpandedDocumentHashGroups
+                        : std::vector<std::unordered_set<std::string>>{});
+            auto topologyRoadQuotas =
+                allocateBalancedRouteQuotas(*topologyRoadDocumentGroups, topologyVectorResultLimit);
 
             // Decide whether to narrow vector search to Tier 1 candidates
             // Narrow if: config enabled AND Tier 1 has enough candidates
@@ -2378,6 +2387,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 vectorStageRequest.certificate = topologyRouteCertificate;
                 vectorStageRequest.allowedDocuments = topologyRouteAllowedDocuments;
                 vectorStageRequest.allowedDocumentGroups = topologyRouteAllowedDocumentGroups;
+                vectorStageRequest.roadDocumentGroups = topologyRoadDocumentGroups;
+                vectorStageRequest.roadQuotas = std::move(topologyRoadQuotas);
+                vectorStageRequest.roadResultLimit = topologyVectorResultLimit;
                 fanout.vector =
                     schedule("vector", workingConfig.vectorWeight, stats_.vectorQueries,
                              stats_.avgVectorTimeMicros,
@@ -2473,6 +2485,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                          vectorStage.allowedSetAnnFallback);
             setDebug(response.debugStats, metrics::kTopologyVectorGlobalFillCount,
                      std::to_string(topologyVectorGlobalFillCount));
+            if (topologySession.roadHopsRequested > 0) {
+                setDebug(response.debugStats, metrics::kTopologyRoadCandidatesAdded,
+                         std::to_string(vectorStage.roadResultsAdded));
+            }
             setDebugBool(response.debugStats, metrics::kTopologyCandidateRescueAttempted,
                          vectorStage.rescueAttempted);
             setDebugBool(response.debugStats, metrics::kTopologyCandidateRescueApplied,

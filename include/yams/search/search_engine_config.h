@@ -255,6 +255,14 @@ struct SearchEngineConfig {
     /// than this margin. Mixed-corpus calibration favors 0.20; zero disables abstention.
     float topologyNarrowMinBoundaryMargin = 0.20f;
     size_t topologyMaxDocs = 64;
+    /// Road beam for RouteOnly and Augment (`search.topology.road_hops`): expand the selected
+    /// route clusters this many hops along cluster roads, scoring each next cluster by road weight
+    /// times centroid similarity to the query and keeping `topologyRoadBeamWidth` per hop. The
+    /// road-expanded members are queried as extra routes beside the certificate; they never widen
+    /// the certified allowed set, Narrow admission or the routing policy fingerprint. 0 (default)
+    /// is off and leaves every stage byte-identical; the width is read only when hops > 0.
+    size_t topologyRoadHops = 0;
+    size_t topologyRoadBeamWidth = 4;
     /// Maximum independently scored topology-expansion results returned to shadow/augment.
     /// Zero inherits the global vector result limit for backward-compatible product behavior.
     size_t topologyExpansionOutputLimit = 0;
@@ -585,6 +593,8 @@ struct SearchEngineConfig {
         topologyAdaptiveProbeScoreGap = source.topologyAdaptiveProbeScoreGap;
         topologyNarrowMinBoundaryMargin = source.topologyNarrowMinBoundaryMargin;
         topologyMaxDocs = source.topologyMaxDocs;
+        topologyRoadHops = source.topologyRoadHops;
+        topologyRoadBeamWidth = source.topologyRoadBeamWidth;
         topologyExpansionOutputLimit = source.topologyExpansionOutputLimit;
         topologyMedoidBoost = source.topologyMedoidBoost;
         topologyEvidenceWeight = source.topologyEvidenceWeight;

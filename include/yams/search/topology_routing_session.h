@@ -37,6 +37,15 @@ struct TopologyCandidateStructureEvidence {
     float densitySupport{0.0F};
 };
 
+/// One undirected road step: the neighbouring cluster (index into `artifacts->clusters`) and the
+/// road weight shared by both endpoints.
+struct TopologyRoadNeighbor {
+    std::size_t clusterIndex{0};
+    double weight{0.0};
+
+    friend bool operator==(const TopologyRoadNeighbor&, const TopologyRoadNeighbor&) = default;
+};
+
 struct TopologyRoutingSnapshot {
     std::shared_ptr<const yams::topology::TopologyArtifactBatch> artifacts;
     std::string constructionFingerprint;
@@ -44,6 +53,10 @@ struct TopologyRoutingSnapshot {
     /// Identity of the loaded road set (`topologyRoadFingerprint`). Provenance and cache
     /// identity for road consumers only; not part of the construction or policy fingerprints.
     std::string roadFingerprint;
+    /// Road adjacency by cluster index (`buildTopologyRoadAdjacency`): the union of both stored
+    /// orientations, each source sorted by weight desc then target cluster id asc. Empty when the
+    /// batch carries no roads (never built, or dropped with `roadUnavailableReason`).
+    std::vector<std::vector<TopologyRoadNeighbor>> roadAdjacency;
     std::unordered_map<std::string_view, std::size_t> clustersById;
     std::unordered_map<std::string_view, std::size_t> membershipsByDocumentHash;
     yams::topology::ProtectedRelationCoverIndex protectedRelationCover;
@@ -123,6 +136,12 @@ struct TopologyRoutingOptions {
     /// Maximum documents in a materialized route allowed set or expansion result.
     /// Zero explicitly means unbounded full membership.
     std::size_t maxDocs = 0;
+    /// Road beam: hops along cluster roads from the selected routes and the clusters kept per
+    /// hop (`search.topology.road_hops`, `road_beam_width`). Zero hops is off. The expansion is
+    /// reported beside the certificate (`TopologyRoutingSessionResult::roadExpanded*`), so both
+    /// knobs are excluded from `topologyRoutingPolicyFingerprint` and never touch admission.
+    std::size_t roadHops = 0;
+    std::size_t roadBeamWidth = 4;
     float sparseDenseAlpha = 0.5F;
     float minRouteScore = 0.0F;
     SearchEngineConfig::TopologyRouteRiskCalibration routeRiskCalibration;
@@ -313,6 +332,21 @@ struct TopologyRoutingSessionResult {
     /// `TopologyArtifactBatch::roadUnavailableReason`). Empty when roads loaded or were never
     /// written. Informational: a set reason never changes routing.
     std::string roadUnavailableReason;
+    /// Road beam (`TopologyRoutingOptions::roadHops`). The clusters reached along roads and their
+    /// members are kept apart from the certificate: they never widen `allowedDocumentHashes`,
+    /// admission or the policy fingerprint. RouteOnly and Augment query the groups as extra routes.
+    /// `roadHopsRequested` echoes the option so consumers can tell "off" from "nothing reached";
+    /// `roadSkipReason` says why hops > 0 expanded nothing (roads_absent, no_selected_routes).
+    std::size_t roadHopsRequested = 0;
+    std::size_t roadHopsApplied = 0;
+    std::vector<std::string> roadExpandedClusterIds;
+    /// One member group per expanded cluster, in beam order, excluding certificate members and
+    /// members already listed by an earlier road group.
+    std::vector<std::unordered_set<std::string>> roadExpandedDocumentHashGroups;
+    /// Centroid evaluations the beam performed; also counted in the representative distance
+    /// evaluations below so routed work stays comparable with the no-road arm.
+    std::size_t roadWorkCentroidEvaluations = 0;
+    std::string roadSkipReason;
     std::size_t routedClusters = 0;
     std::size_t availableRoutes = 0;
     std::size_t routedDocs = 0;
@@ -395,7 +429,16 @@ topologyRoutingRepresentationFingerprint(const yams::topology::TopologyArtifactB
 [[nodiscard]] std::string
 topologyRoadFingerprint(const yams::topology::TopologyArtifactBatch& batch);
 
-/// Identity of the allowed-set selection policy; excludes query values and diagnostics.
+/// Undirected road adjacency by cluster index from `batch.roads`: both orientations of every road
+/// are listed once each, a pair stored twice collapses to its heavier weight, and each source is
+/// sorted by weight desc then target cluster id asc. Roads with an unknown endpoint, a self loop or
+/// a non-finite/negative weight are skipped. Empty when the batch has no roads.
+[[nodiscard]] std::vector<std::vector<TopologyRoadNeighbor>>
+buildTopologyRoadAdjacency(const yams::topology::TopologyArtifactBatch& batch);
+
+/// Identity of the allowed-set selection policy; excludes query values and diagnostics. The road
+/// beam knobs (`roadHops`, `roadBeamWidth`) are deliberately left out: roads expand beside the
+/// certificate, so calibrations bound to this fingerprint stay valid with roads on or off.
 [[nodiscard]] std::string
 topologyRoutingPolicyFingerprint(std::string_view representationFingerprint,
                                  const TopologyRoutingOptions& options);

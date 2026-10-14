@@ -123,6 +123,10 @@ public:
         std::optional<float> adaptiveProbeScoreGap;
         std::optional<float> narrowMinBoundaryMargin;
         std::optional<std::size_t> maxDocs;
+        /// `search.topology.road_hops` / `road_beam_width`: road beam for route_only and augment.
+        /// Unset or 0 hops is off; the width is read only when hops > 0.
+        std::optional<std::size_t> roadHops;
+        std::optional<std::size_t> roadBeamWidth;
         std::optional<std::size_t> expansionOutputLimit;
         std::optional<float> medoidBoost;
         std::optional<float> evidenceWeight;
@@ -515,6 +519,8 @@ public:
      * - search.topology.adaptive_probe_score_gap = float
      * - search.topology.narrow_min_boundary_margin = float
      * - search.topology.max_docs = int
+     * - search.topology.road_hops = int (0 = off; route_only and augment only)
+     * - search.topology.road_beam_width = int (clusters kept per hop; read when road_hops > 0)
      * - search.topology.expansion_output_limit = int (0 inherits global vector output)
      * - search.topology.medoid_boost = float
      * - search.topology.evidence_weight = float in [0,1]
