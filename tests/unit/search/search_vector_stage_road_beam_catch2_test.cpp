@@ -405,9 +405,9 @@ TEST_CASE("Road beam session keeps the certificate and expands along roads",
     }
 
     SECTION("hops beyond the reachable roads stop early") {
-        const auto far = runRoadSession(fix, batch, 5, 1);
-        CHECK(far.roadHopsApplied == 2);
-        CHECK(far.roadExpandedClusterIds ==
+        const auto deep = runRoadSession(fix, batch, 5, 1);
+        CHECK(deep.roadHopsApplied == 2);
+        CHECK(deep.roadExpandedClusterIds ==
               std::vector<std::string>{std::string{kClusterB}, std::string{kClusterC}});
     }
 
