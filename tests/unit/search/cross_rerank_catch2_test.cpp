@@ -9,6 +9,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -323,4 +324,48 @@ TEST_CASE("applyCrossRerank fetches window text as one preview batch", "[search]
     pool.reset();
     std::error_code ec;
     fs::remove_all(dir, ec);
+}
+
+TEST_CASE("applyCrossRerank keeps reranked window above the unreranked tail",
+          "[search][rerank][catch2]") {
+    // Window scores sit just above the tail; the reranker reverses the window order. Later stages
+    // re-sort the whole list by score, so every reranked doc must still outrank every tail doc.
+    for (const bool replace : {true, false}) {
+        CAPTURE(replace);
+        std::vector<SearchResult> results;
+        for (int i = 0; i < 5; ++i) {
+            results.push_back(makeResult("w" + std::to_string(i), 0.205F - 0.001F * i));
+        }
+        for (int i = 0; i < 20; ++i) {
+            results.push_back(makeResult("t" + std::to_string(i), 0.2F - 0.005F * i));
+        }
+        auto cfg = blendConfig();
+        cfg.rerankReplaceScores = replace;
+        cfg.rerankBlendWeight = 0.9F;
+
+        auto outcome = applyCrossRerank(results, "q", cfg, 5,
+                                        fixedScorer({0.1F, 0.2F, 0.3F, 0.4F, 0.9F}), nullptr);
+        REQUIRE(outcome.status == CrossRerankOutcome::Status::Applied);
+
+        std::vector<std::string> rerankedOrder;
+        for (int i = 0; i < 5; ++i) {
+            rerankedOrder.push_back(results[i].document.sha256Hash);
+        }
+        CHECK(rerankedOrder == std::vector<std::string>{"w4", "w3", "w2", "w1", "w0"});
+        for (const auto& trace : outcome.docTraces) {
+            const auto it =
+                std::find_if(results.begin(), results.begin() + 5, [&](const SearchResult& r) {
+                    return r.document.sha256Hash == trace.documentHash;
+                });
+            REQUIRE(it != results.begin() + 5);
+            CHECK(trace.finalScore == it->score);
+        }
+
+        std::stable_sort(
+            results.begin(), results.end(),
+            [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+        for (int i = 0; i < 5; ++i) {
+            CHECK(results[i].document.sha256Hash == rerankedOrder[i]);
+        }
+    }
 }
