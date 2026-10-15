@@ -36,6 +36,9 @@ struct ComponentResult {
     size_t rank = 0;
     std::optional<std::string> snippet{};
     std::map<std::string, std::string> debugInfo{};
+    // Text/SimeonText only: the score on the absolute bm25 scale (-raw / bm25NormDivisor, same
+    // multipliers, clamped to [0, 1]) instead of per-batch min-max, so it compares across queries.
+    std::optional<float> absoluteLexicalScore{};
 };
 
 inline constexpr const char* componentSourceToString(ComponentResult::Source source) noexcept {

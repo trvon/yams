@@ -132,6 +132,8 @@ struct SearchEngineConfig {
     bool tieredNarrowVectorSearch = false;
     size_t tieredMinCandidates = 10;
     size_t weakQueryMinTextHits = 3;
+    // Compared with the top lexical hit on the absolute bm25 scale (-bm25 / bm25NormDivisor), not
+    // the per-batch normalized score. With the default divisor 25, 0.30 means bm25 <= -7.5.
     float weakQueryMinTopTextScore = 0.30f;
     bool enableWeakQueryFanoutBoost = true;
     float weakQueryVectorFanoutMultiplier = 2.0f;
