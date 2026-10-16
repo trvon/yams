@@ -135,6 +135,138 @@ TEST_CASE("Vector pipeline scores every admitted document before exact-control t
     CHECK(averaged.value()[0].score == Catch::Approx((1.0F + secondChunk) / 2.0F));
 }
 
+TEST_CASE("Vector pipeline preserves scores and best-chunk payload in every aggregation mode",
+          "[search][vector][aggregation][catch2]") {
+    yams::test::ScopedEnvVar enableVectors("YAMS_DISABLE_VECTORS", std::string("0"));
+    yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::string("0"));
+
+    yams::vector::VectorDatabaseConfig dbConfig;
+    dbConfig.database_path = ":memory:";
+    dbConfig.embedding_dim = 2;
+    dbConfig.use_in_memory = true;
+    auto vectorDb = std::make_shared<yams::vector::VectorDatabase>(dbConfig);
+    REQUIRE(vectorDb->initialize());
+
+    const std::string bestContent(205, 'a');
+    for (const auto& [chunkId, hash, embedding, content] :
+         std::vector<std::tuple<std::string, std::string, std::vector<float>, std::string>>{
+             {"alpha-best", "alpha", {0.8F, 0.6F}, bestContent},
+             {"alpha-lower", "alpha", {0.6F, 0.8F}, "lower chunk"},
+             {"beta-best", "beta", {0.8F, 0.6F}, "beta chunk"},
+             {"zeta-best", "zeta", {0.8F, 0.6F}, "zeta chunk"}}) {
+        yams::vector::VectorRecord record;
+        record.chunk_id = chunkId;
+        record.document_hash = hash;
+        record.embedding = embedding;
+        record.content = content;
+        record.level = yams::vector::EmbeddingLevel::CHUNK;
+        REQUIRE(vectorDb->insertVector(record));
+    }
+
+    using Agg = SearchEngineConfig::ChunkAggregation;
+    for (const auto mode : {Agg::MAX, Agg::SUM, Agg::TOP_K_AVG, Agg::WEIGHTED_TOP_K_AVG}) {
+        CAPTURE(static_cast<int>(mode));
+        SearchEngineConfig cfg;
+        cfg.similarityThreshold = -1.0F;
+        cfg.chunkAggregation = mode;
+        cfg.chunkAggregationTopK = 2;
+        cfg.chunkAggregationWeightDecay = 0.5F;
+        const std::unordered_set<std::string> allowed{"alpha", "beta", "zeta"};
+        const auto result = yams::search::detail::queryVectorIndexPipeline(
+            nullptr, vectorDb, {1.0F, 0.0F}, cfg, 3, allowed,
+            yams::vector::CandidateFilterMode::ExactDocumentComplete);
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().size() == 3U);
+
+        const bool alphaFirst = mode == Agg::MAX || mode == Agg::SUM;
+        const std::vector<std::string> expectedOrder =
+            alphaFirst ? std::vector<std::string>{"alpha", "beta", "zeta"}
+                       : std::vector<std::string>{"beta", "zeta", "alpha"};
+        const float alphaScore = mode == Agg::MAX         ? 0.8F
+                                 : mode == Agg::SUM       ? 1.0F
+                                 : mode == Agg::TOP_K_AVG ? 0.7F
+                                                          : (0.8F + 0.6F * 0.5F) / 1.5F;
+        for (size_t rank = 0; rank < result.value().size(); ++rank) {
+            const auto& hit = result.value()[rank];
+            CHECK(hit.documentHash == expectedOrder[rank]);
+            CHECK(hit.rank == rank);
+            CHECK(hit.source == yams::search::ComponentResult::Source::Vector);
+            CHECK(hit.filePath.empty()); // No metadata repository was supplied.
+            if (hit.documentHash == "alpha") {
+                CHECK(hit.score == Catch::Approx(alphaScore));
+                CHECK(hit.snippet == std::string(200, 'a') + "...");
+            } else {
+                CHECK(hit.score == Catch::Approx(0.8F));
+                CHECK(hit.snippet == (hit.documentHash == "beta" ? "beta chunk" : "zeta chunk"));
+            }
+        }
+
+        const auto limited = yams::search::detail::queryVectorIndexPipeline(
+            nullptr, vectorDb, {1.0F, 0.0F}, cfg, 1, allowed,
+            yams::vector::CandidateFilterMode::ExactDocumentComplete);
+        REQUIRE(limited.has_value());
+        REQUIRE(limited.value().size() == 1U);
+        CHECK(limited.value()[0].documentHash == expectedOrder.front());
+        CHECK(limited.value()[0].score == Catch::Approx(result.value()[0].score));
+
+        const auto empty =
+            yams::search::detail::queryVectorIndexPipeline(nullptr, vectorDb, {1.0F, 0.0F}, cfg, 0);
+        REQUIRE(empty.has_value());
+        CHECK(empty.value().empty());
+    }
+}
+
+TEST_CASE("Vector MAX aggregation preserves equal-score chunk payload and document tie order",
+          "[search][vector][aggregation][catch2]") {
+    yams::test::ScopedEnvVar enableVectors("YAMS_DISABLE_VECTORS", std::string("0"));
+    yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::string("0"));
+
+    yams::vector::VectorDatabaseConfig dbConfig;
+    dbConfig.database_path = ":memory:";
+    dbConfig.embedding_dim = 2;
+    dbConfig.use_in_memory = true;
+    auto vectorDb = std::make_shared<yams::vector::VectorDatabase>(dbConfig);
+    REQUIRE(vectorDb->initialize());
+    // Insert in reverse chunk order; the exact backend's tie order supplies the best record.
+    for (const auto& [chunkId, hash, content] :
+         std::vector<std::tuple<std::string, std::string, std::string>>{
+             {"equal-z", "alpha", "later equal chunk"},
+             {"equal-a", "alpha", "first equal chunk"},
+             {"beta", "beta", "beta chunk"}}) {
+        yams::vector::VectorRecord record;
+        record.chunk_id = chunkId;
+        record.document_hash = hash;
+        record.embedding = {1.0F, 0.0F};
+        record.content = content;
+        record.level = yams::vector::EmbeddingLevel::CHUNK;
+        REQUIRE(vectorDb->insertVector(record));
+    }
+    SearchEngineConfig cfg;
+    cfg.similarityThreshold = -1.0F;
+    cfg.chunkAggregation = SearchEngineConfig::ChunkAggregation::MAX;
+    const auto exact = yams::search::detail::queryVectorIndexPipeline(
+        nullptr, vectorDb, {1.0F, 0.0F}, cfg, 2, std::unordered_set<std::string>{"alpha", "beta"},
+        yams::vector::CandidateFilterMode::ExactDocumentComplete);
+    REQUIRE(exact.has_value());
+    REQUIRE(exact.value().size() == 2U);
+    CHECK(exact.value()[0].documentHash == "alpha");
+    CHECK(exact.value()[0].snippet == "first equal chunk");
+    CHECK(exact.value()[0].score == Catch::Approx(1.0F));
+    CHECK(exact.value()[1].documentHash == "beta");
+    CHECK(exact.value()[1].rank == 1U);
+
+    const auto global =
+        yams::search::detail::queryVectorIndexPipeline(nullptr, vectorDb, {1.0F, 0.0F}, cfg, 2);
+    REQUIRE(global.has_value());
+    REQUIRE(global.value().size() == exact.value().size());
+    for (size_t i = 0; i < global.value().size(); ++i) {
+        CHECK(global.value()[i].documentHash == exact.value()[i].documentHash);
+        CHECK(global.value()[i].score == Catch::Approx(exact.value()[i].score));
+        CHECK(global.value()[i].snippet == exact.value()[i].snippet);
+        CHECK(global.value()[i].rank == exact.value()[i].rank);
+    }
+}
+
 TEST_CASE("Vector work remains unavailable when any merged sample is unobserved",
           "[search][vector][topology][work][catch2]") {
     using yams::search::detail::mergeVectorSearchDiagnostics;
