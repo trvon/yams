@@ -734,7 +734,9 @@ struct GraphDispatcherFixture {
             return true;
         }();
         (void)kSuppressInfoLogs;
-        testDir = makeTempDir("yams_graph_dispatcher_");
+        // Ingest stores resolved paths (populatePathDerivedFields); keys and labels built from
+        // testDir must match, including where the temp dir is behind a symlink (macOS /var).
+        testDir = std::filesystem::canonical(makeTempDir("yams_graph_dispatcher_"));
         dbPath = makeTempMetadataDbPath("yams_graph_dispatcher_db_");
         cfg.dataDir = testDir;
         state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
