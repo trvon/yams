@@ -261,10 +261,14 @@ TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") 
     // path: full SCIENTIFIC knobs regressed MRR; soft lexical+vector fusion wins).
     CHECK((params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto));
     CHECK((params.rrfK == 45));
-    // After zeroing path/entity/kg/tag/metadata, normalize leaves text+vector.
-    CHECK((params.weights.text.value == Approx(0.40f / 0.65f).epsilon(0.01)));
-    CHECK((params.weights.simeonText.value == Approx(0.00f)));
-    CHECK((params.weights.vector.value == Approx(0.25f / 0.65f).epsilon(0.01)));
+    // The measured 0.40 Simeon weight is relative to normalized text+vector.
+    CHECK((params.weights.text.value == Approx((0.40f / 0.65f) / 1.40f)));
+    CHECK((params.weights.simeonText.value == Approx(0.40f / 1.40f)));
+    CHECK((params.weights.vector.value == Approx((0.25f / 0.65f) / 1.40f)));
+    CHECK((params.weights.sum() == Approx(1.0f)));
+    SearchEngineConfig config;
+    params.applyTo(config);
+    CHECK((config.simeonTextWeight == Approx(0.40f / 1.40f)));
     CHECK((params.weights.entityVector.value == Approx(0.00f)));
     CHECK((params.weights.pathTree.value == Approx(0.00f)));
     CHECK((params.weights.kg.value == Approx(0.00f)));
@@ -1194,7 +1198,7 @@ TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
     const float expectedVector = 0.25f + 0.60f * (sci.weights.vector.value - 0.25f);
     CHECK((params.weights.text.value == Approx(expectedText).epsilon(0.01)));
     CHECK((params.weights.text.source == TuningLayer::Community));
-    CHECK((params.weights.simeonText.value == Approx(0.00f).epsilon(0.01)));
+    CHECK((params.weights.simeonText.value == Approx(0.60f * sci.weights.simeonText.value)));
     CHECK((params.weights.vector.value == Approx(expectedVector).epsilon(0.01)));
 
     // SCIENTIFIC inherits MIXED_PRECISION rescue slots (=1); lerp is a no-op.
@@ -1754,14 +1758,27 @@ TEST_CASE("SearchTuner: 940-doc scientific corpus gets SCIENTIFIC state",
     // Verify SCIENTIFIC params activate (with corpus_state recall push)
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
-    // corpus_state=active raises semanticRescueSlots to 3 for scientific prose
-    CHECK((p.semanticRescueSlots.value == 3));
+    // Corpus recall widening must not displace the profile's lexical results.
+    CHECK((p.semanticRescueSlots.value == 1));
+    CHECK((tuner.getConfig().semanticRescueSlots == 1));
     // Dead-source gates pin structure weights off on flat scientific corpora.
     CHECK((p.weights.pathTree.value == Approx(0.0f)));
     CHECK((p.weights.entityVector.value == Approx(0.0f)));
     CHECK((p.weights.tag.value == Approx(0.0f)));
     CHECK((p.weights.metadata.value == Approx(0.0f)));
     CHECK((p.lexicalFloorTopN == 12));
+}
+
+TEST_CASE("SearchTuner: large prose retains corpus semantic rescue widening",
+          "[unit][search_tuner][scientific]") {
+    CorpusStats stats;
+    stats.docCount = 10000;
+    stats.proseRatio = 0.95f;
+    stats.pathRelativeDepthAvg = 4.0;
+    stats.tagCoverage = 0.30f;
+    stats.embeddingCoverage = 1.0f;
+    SearchTuner tuner(stats, TuningState::LARGE_PROSE);
+    CHECK((tuner.getConfig().semanticRescueSlots == 3));
 }
 
 TEST_CASE("SearchTuner: 50-doc scientific corpus still gets MINIMAL",
@@ -2177,8 +2194,13 @@ TEST_CASE("SearchTuner: SciFact-like corpus with rich edges activates graph full
     CHECK((p.graphEnablePathEnumeration == true));
     CHECK((p.enableGraphQueryExpansion == true));
     // SCIENTIFIC profile characteristics preserved
-    CHECK((p.weights.vector.value > 0.30f));
-    CHECK((p.weights.text.value > 0.35f));
+    const auto preset = getTunedParams(TuningState::SCIENTIFIC);
+    REQUIRE((p.weights.vector.value > 0.0f));
+    CHECK((p.weights.text.value / p.weights.vector.value ==
+           Approx(preset.weights.text.value / preset.weights.vector.value)));
+    CHECK((p.weights.simeonText.value / p.weights.vector.value ==
+           Approx(preset.weights.simeonText.value / preset.weights.vector.value)));
+    CHECK((p.weights.sum() == Approx(1.0f)));
 }
 
 TEST_CASE("SearchTuner: NER-only corpus without edges dams graph activation",

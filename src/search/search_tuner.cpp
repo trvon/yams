@@ -364,9 +364,9 @@ void applyCorpusStateAdjustments(const storage::CorpusStats& stats, TuningState 
             any = true;
         }
 
-        // 2. Boost semantic rescue for vector-only docs.
+        // 2. Keep SCIENTIFIC's measured one-slot preset; extra slots displace gold.
         const size_t prevRescue = params.semanticRescueSlots.value;
-        if (prevRescue < 3) {
+        if (state != TuningState::SCIENTIFIC && prevRescue < 3) {
             params.semanticRescueSlots.set(size_t{3}, TuningLayer::Corpus);
             cs << (any ? ", " : "") << "rescue_slots=" << prevRescue << "->3";
             any = true;
