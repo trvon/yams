@@ -6,6 +6,7 @@
 #include "src/search/final_result_order_internal.h"
 
 #include <cstddef>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -90,6 +91,45 @@ TEST_CASE("final lexical tie-break comparator is a strict weak ordering",
         }
     }
     CHECK(transitivityViolations == 0);
+}
+
+TEST_CASE("final comparator orders non-finite scores and evidence deterministically",
+          "[search][order][catch2]") {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    std::vector<SearchResult> results = {
+        makeResult("nan", std::numeric_limits<float>::quiet_NaN(), 0.0, 0.0),
+        makeResult("low", 0.2F, 0.0, 0.0),
+        makeResult("high", 0.8F, 0.0, 0.0),
+        makeResult("inf", inf, 0.0, 0.0),
+        makeResult("negative_inf", -inf, 0.0, 0.0),
+        makeResult("nan_keyword", 0.2F, nan, 0.0),
+        makeResult("nan_vector", 0.2F, 0.0, nan),
+    };
+    for (bool enabled : {false, true}) {
+        for (float epsilon : {0.0F, 0.01F, inf}) {
+            const auto less = [=](const SearchResult& a, const SearchResult& b) {
+                return finalLexicalAwareLess(a, b, enabled, epsilon);
+            };
+            CAPTURE(enabled, epsilon);
+            CHECK(less(results[1], results[0]));
+            CHECK_FALSE(less(results[0], results[1]));
+            for (const auto& a : results) {
+                CHECK_FALSE(less(a, a));
+                for (const auto& b : results) {
+                    CHECK_FALSE((less(a, b) && less(b, a)));
+                    for (const auto& c : results) {
+                        if (less(a, b) && less(b, c)) {
+                            CHECK(less(a, c));
+                        }
+                        if (!less(a, b) && !less(b, a) && !less(b, c) && !less(c, b)) {
+                            CHECK_FALSE((less(a, c) || less(c, a)));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 TEST_CASE("final comparator without tie-break orders by score then doc id",

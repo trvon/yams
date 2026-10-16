@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace yams::search::detail {
 
@@ -27,37 +28,45 @@ inline double finalLexicalAnchorScore(const SearchResult& r) {
 // desc, then doc id.
 inline bool finalLexicalAwareLess(const SearchResult& a, const SearchResult& b,
                                   bool enableLexicalTieBreak, float lexicalTieBreakEpsilon) {
-    const double tieEpsilon = std::max(0.0, static_cast<double>(lexicalTieBreakEpsilon));
+    const double tieEpsilon = std::isfinite(lexicalTieBreakEpsilon)
+                                  ? std::max(0.0, static_cast<double>(lexicalTieBreakEpsilon))
+                                  : 0.0;
+    // NaN must not compare equivalent to every finite score. Treat missing/invalid
+    // evidence as the lowest key; infinities retain their natural ordering.
+    const auto scoreKey = [](double score) {
+        return std::isnan(score) ? -std::numeric_limits<double>::infinity() : score;
+    };
+    const double scoreA = scoreKey(a.score);
+    const double scoreB = scoreKey(b.score);
 
     if (!enableLexicalTieBreak) {
-        if (a.score != b.score) {
-            return a.score > b.score;
+        if (scoreA != scoreB) {
+            return scoreA > scoreB;
         }
     } else {
-        const auto tieBucket = [tieEpsilon](const SearchResult& r) {
-            const auto score = static_cast<double>(r.score);
+        const auto tieBucket = [tieEpsilon](double score) {
             return tieEpsilon > 0.0 ? std::floor(score / tieEpsilon) : score;
         };
-        const double bucketA = tieBucket(a);
-        const double bucketB = tieBucket(b);
+        const double bucketA = tieBucket(scoreA);
+        const double bucketB = tieBucket(scoreB);
         if (bucketA != bucketB) {
             return bucketA > bucketB;
         }
 
-        const double lexicalA = finalLexicalAnchorScore(a);
-        const double lexicalB = finalLexicalAnchorScore(b);
+        const double lexicalA = scoreKey(finalLexicalAnchorScore(a));
+        const double lexicalB = scoreKey(finalLexicalAnchorScore(b));
         if (lexicalA != lexicalB) {
             return lexicalA > lexicalB;
         }
 
-        const double keywordA = a.keywordScore.value_or(0.0);
-        const double keywordB = b.keywordScore.value_or(0.0);
+        const double keywordA = scoreKey(a.keywordScore.value_or(0.0));
+        const double keywordB = scoreKey(b.keywordScore.value_or(0.0));
         if (keywordA != keywordB) {
             return keywordA > keywordB;
         }
 
-        const double vectorA = a.vectorScore.value_or(0.0);
-        const double vectorB = b.vectorScore.value_or(0.0);
+        const double vectorA = scoreKey(a.vectorScore.value_or(0.0));
+        const double vectorB = scoreKey(b.vectorScore.value_or(0.0));
         if (vectorA != vectorB) {
             return vectorA > vectorB;
         }
