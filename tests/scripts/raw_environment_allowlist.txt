@@ -7,6 +7,8 @@ include/yams/compat/unistd.h:21:raw-env/_putenv_s # Windows POSIX compatibility 
 plugins/onnx/onnx_gpu_provider.h:120:raw-env/_putenv_s # ONNX provider environment default-if-unset compatibility
 plugins/onnx/onnx_gpu_provider.h:122:raw-env/setenv # ONNX provider environment default-if-unset compatibility
 src/extraction/plugin_process.cpp:282:raw-env/setenv # Child plugin process environment construction
+tests/support/catch2_main.cpp:173:raw-env/_putenv_s # Pre-thread per-process XDG_STATE_HOME isolation; main lib links no yams config
+tests/support/catch2_main.cpp:175:raw-env/setenv # Pre-thread per-process XDG_STATE_HOME isolation; main lib links no yams config
 tools/fuzzing/fuzz_plugin_abi_mount.cpp:55:raw-env/setenv # Single-process fuzz harness setup
 tools/fuzzing/fuzz_plugin_abi_negotiation.cpp:51:raw-env/setenv # Single-process fuzz harness setup
 tools/yams-cli/main.cpp:40:raw-env/setenv # Pre-thread one-shot executable marker
