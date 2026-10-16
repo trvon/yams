@@ -1234,6 +1234,7 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
                 return trustedStore.error();
             }
             cfg.controlScope = std::move(trustedStore.value());
+            cfg.exclusiveBackend = true; // peers reach the op store only through this daemon
         }
 
         std::optional<yams::storage::BackendConfig> resolvedS3Config;

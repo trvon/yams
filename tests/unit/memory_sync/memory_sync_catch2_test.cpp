@@ -1127,6 +1127,99 @@ TEST_CASE("MemorySyncLoop checks cancellation and remote admission before listin
     CHECK(backend.listPageCalls() == 1);
 }
 
+TEST_CASE("MemorySyncLoop rescans an exclusive backend only after it writes",
+          "[memory-sync][sync-loop][bounds]") {
+    BackendFixture writerFixture{"exclusive-writer"};
+    CountingBackendFixture readerFixture{"exclusive-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer"};
+    MemorySyncLoop reader{readerFixture.backend,
+                          "reader",
+                          "local-test-corpus",
+                          1,
+                          false,
+                          {},
+                          MemorySyncControl{.exclusiveBackend = true}};
+
+    REQUIRE(reader.publish("local", bytes("one")).has_value());
+    REQUIRE(reader.sync().has_value());
+    readerFixture.backend.resetListCalls();
+    readerFixture.backend.resetBlobCalls();
+
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        auto idle = reader.sync();
+        REQUIRE(idle.has_value());
+        CHECK(idle.value().contains("local"));
+    }
+    CHECK(readerFixture.backend.listPageCalls() == 0);
+    CHECK(readerFixture.backend.blobRetrieveCalls() == 0);
+
+    REQUIRE(writer.publish("remote", bytes("two")).has_value());
+    auto deltas = writer.exportLocalDeltasAfter({});
+    REQUIRE(deltas.has_value());
+    REQUIRE(reader.applyDeltas(deltas.value().deltas).has_value());
+    auto afterIngress = reader.sync();
+    REQUIRE(afterIngress.has_value());
+    CHECK(afterIngress.value().contains("remote"));
+    CHECK(readerFixture.backend.listPageCalls() > 0);
+
+    readerFixture.backend.resetListCalls();
+    REQUIRE(reader.sync().has_value());
+    CHECK(readerFixture.backend.listPageCalls() == 0);
+
+    REQUIRE(reader.publish("local", bytes("three")).has_value());
+    auto afterPublish = reader.sync();
+    REQUIRE(afterPublish.has_value());
+    CHECK(readerFixture.backend.listPageCalls() > 0);
+    const auto value = reader.read("local");
+    REQUIRE(value.has_value());
+    CHECK(text(value.value()) == "three");
+}
+
+TEST_CASE("MemorySyncLoop reuses exclusive-backend listings until it writes",
+          "[memory-sync][sync-loop][bounds]") {
+    CountingBackendFixture fixture{"exclusive-listings"};
+    MemorySyncLoop loop{fixture.backend,
+                        "reader",
+                        "local-test-corpus",
+                        1,
+                        false,
+                        {},
+                        MemorySyncControl{.exclusiveBackend = true}};
+    REQUIRE(loop.publish("slot", bytes("value")).has_value());
+    REQUIRE(loop.sync().has_value());
+    REQUIRE(loop.replayReadyErases().has_value());
+    REQUIRE(loop.pendingErases().has_value());
+    fixture.backend.resetListCalls();
+
+    // One idle worker cycle per iteration: reconcile, replay ready erases, inspect the outbox.
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        REQUIRE(loop.sync().has_value());
+        REQUIRE(loop.replayReadyErases().has_value());
+        auto pending = loop.pendingErases();
+        REQUIRE(pending.has_value());
+        CHECK(pending.value().empty());
+    }
+    CHECK(fixture.backend.listPageCalls() == 0);
+
+    REQUIRE(loop.stageErase("slot", "gone").has_value());
+    auto pending = loop.pendingErases();
+    REQUIRE(pending.has_value());
+    REQUIRE(pending.value().size() == 1);
+    CHECK(pending.value().front().logicalKey == "slot");
+}
+
+TEST_CASE("MemorySyncLoop rescans a shared backend every cycle",
+          "[memory-sync][sync-loop][bounds]") {
+    CountingBackendFixture fixture{"shared-rescan"};
+    MemorySyncLoop loop{fixture.backend, "reader"};
+    REQUIRE(loop.publish("slot", bytes("value")).has_value());
+    REQUIRE(loop.sync().has_value());
+    fixture.backend.resetListCalls();
+    REQUIRE(loop.sync().has_value());
+    REQUIRE(loop.sync().has_value());
+    CHECK(fixture.backend.listPageCalls() == 2);
+}
+
 TEST_CASE("MemorySyncLoop replaces a same-key winner within a tight cache budget",
           "[memory-sync][sync-loop][bounds]") {
     BackendFixture fixture{"cache-replacement"};

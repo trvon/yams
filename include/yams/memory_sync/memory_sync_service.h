@@ -37,6 +37,7 @@ struct MemorySyncConfig {
     bool cleanupOwnedNamespaceOnStop{false};
     std::shared_ptr<const WriterAuthenticator> writerAuth; /// optional schema-v4 signer/verifier
     std::string controlScope;                              /// authenticated local-store generation
+    bool exclusiveBackend{false}; /// only this service writes the backend (direct op store)
 
     MemorySyncConfig() = default;
     explicit MemorySyncConfig(std::string writerId, std::uint32_t intervalMs = 5000,
@@ -66,7 +67,8 @@ public:
                 allowLegacyUnbound, config_.limits,
                 MemorySyncControl{
                     .isCancelled = [this] { return stop_.load(std::memory_order_acquire); },
-                    .canAdmitRemoteWork = std::move(canAdmitRemoteWork)},
+                    .canAdmitRemoteWork = std::move(canAdmitRemoteWork),
+                    .exclusiveBackend = config_.exclusiveBackend},
                 {}, config_.writerAuth, config_.controlScope) {}
 
     ~MemorySyncService() { stop(); }
