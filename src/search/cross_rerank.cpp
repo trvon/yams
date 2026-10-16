@@ -146,7 +146,8 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
     outcome.blendWeight = blend;
 
     // Map the normalized window score back onto the window's original score range, kept strictly
-    // above every tail score, so later whole-list sorts cannot interleave reranked and tail docs.
+    // above every tail score for later raw-score sorts. Lexical tie-breaking can still reorder
+    // results within its configured epsilon bucket.
     double mappedLow = origMin;
     if (results.size() > window) {
         const double tailMax =

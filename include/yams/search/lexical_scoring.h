@@ -64,8 +64,8 @@ struct Tier1TextSignal {
 // Counts Text/SimeonText components and takes their top absoluteLexicalScore (falling back to
 // score when unset). Strong means at least `minTextHits` (and at least one) hits with top score >=
 // `minTopTextScore`. The batch-normalized score cannot be used here: its top is always 1.0.
-// On the absolute scale the threshold is a raw bm25 cut: with bm25NormDivisor 25, 0.30 is
-// bm25 <= -7.5 and 0.45 is bm25 <= -11.25.
+// For FTS5 Text, the absolute threshold is a raw bm25 cut: with bm25NormDivisor 25, 0.30 is
+// bm25 <= -7.5 and 0.45 is bm25 <= -11.25. Simeon uses its own raw lexical scores.
 Tier1TextSignal classifyTier1TextSignal(std::span<const ComponentResult> components,
                                         size_t minTextHits, float minTopTextScore);
 
