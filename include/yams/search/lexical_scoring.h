@@ -53,4 +53,20 @@ struct LexicalScoringOutput {
 
 LexicalScoringOutput scoreLexicalBatch(const LexicalScoringInputs& inputs);
 
+// Tier-1 lexical evidence used to decide whether a query is weak (widens vector fanout and allows
+// weak-query topology expansion).
+struct Tier1TextSignal {
+    size_t textHits = 0;
+    float topTextScore = 0.0f;
+    bool strong = false;
+};
+
+// Counts Text/SimeonText components and takes their top absoluteLexicalScore (falling back to
+// score when unset). Strong means at least `minTextHits` (and at least one) hits with top score >=
+// `minTopTextScore`. The batch-normalized score cannot be used here: its top is always 1.0.
+// For FTS5 Text, the absolute threshold is a raw bm25 cut: with bm25NormDivisor 25, 0.30 is
+// bm25 <= -7.5 and 0.45 is bm25 <= -11.25. Simeon uses its own raw lexical scores.
+Tier1TextSignal classifyTier1TextSignal(std::span<const ComponentResult> components,
+                                        size_t minTextHits, float minTopTextScore);
+
 } // namespace yams::search::detail

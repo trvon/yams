@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 #include "concept_boost_internal.h"
 #include "cross_rerank_internal.h"
+#include "final_result_order_internal.h"
 #include "search_component_fanout_internal.h"
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
@@ -2072,23 +2073,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // leg is available. Narrowing to Tier 1 candidates is still an opt-in knob.
             YAMS_ZONE_SCOPED_N("search_engine::tier2_semantic");
 
-            size_t tier1TextHits = 0;
-            float tier1TopTextScore = 0.0f;
-            for (const auto& componentResult : allComponentResults) {
-                if (componentResult.source == ComponentResult::Source::Text ||
-                    componentResult.source == ComponentResult::Source::SimeonText) {
-                    tier1TextHits++;
-                    tier1TopTextScore = std::max(tier1TopTextScore, componentResult.score);
-                }
-            }
-
-            const bool hasStrongTextSignal =
-                tier1TextHits >= workingConfig.weakQueryMinTextHits &&
-                tier1TopTextScore >= workingConfig.weakQueryMinTopTextScore;
+            const auto tier1TextSignal = detail::classifyTier1TextSignal(
+                allComponentResults, workingConfig.weakQueryMinTextHits,
+                workingConfig.weakQueryMinTopTextScore);
+            const size_t tier1TextHits = tier1TextSignal.textHits;
+            const float tier1TopTextScore = tier1TextSignal.topTextScore;
 
             effectiveVectorMaxResults = workingConfig.vectorMaxResults;
             effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
-            const bool weakTier1Query = !hasStrongTextSignal || tier1TextHits == 0;
+            const bool weakTier1Query = !tier1TextSignal.strong;
             if (workingConfig.enableWeakQueryFanoutBoost && weakTier1Query) {
                 effectiveVectorMaxResults = static_cast<size_t>(
                     std::ceil(static_cast<double>(workingConfig.vectorMaxResults) *
@@ -3821,8 +3814,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
 
     const auto lexicalAnchorScore = [](const SearchResult& r) {
-        return r.keywordScore.value_or(0.0) + r.graphTextScore.value_or(0.0) +
-               r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) + r.symbolScore.value_or(0.0);
+        return detail::finalLexicalAnchorScore(r);
     };
 
     const auto docIdForResult = [](const SearchResult& result) {
@@ -3996,37 +3988,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                                     : std::nullopt;
     };
 
-    const auto finalLexicalAwareLess = [&lexicalAnchorScore, &docIdForResult, &workingConfig](
-                                           const SearchResult& a, const SearchResult& b) {
-        const double scoreDiff = static_cast<double>(a.score) - static_cast<double>(b.score);
-        const double tieEpsilon =
-            std::max(0.0, static_cast<double>(workingConfig.lexicalTieBreakEpsilon));
-
-        if (!workingConfig.enableLexicalTieBreak || std::abs(scoreDiff) > tieEpsilon) {
-            if (a.score != b.score) {
-                return a.score > b.score;
-            }
-        } else {
-            const double lexicalA = lexicalAnchorScore(a);
-            const double lexicalB = lexicalAnchorScore(b);
-            if (lexicalA != lexicalB) {
-                return lexicalA > lexicalB;
-            }
-
-            const double keywordA = a.keywordScore.value_or(0.0);
-            const double keywordB = b.keywordScore.value_or(0.0);
-            if (keywordA != keywordB) {
-                return keywordA > keywordB;
-            }
-
-            const double vectorA = a.vectorScore.value_or(0.0);
-            const double vectorB = b.vectorScore.value_or(0.0);
-            if (vectorA != vectorB) {
-                return vectorA < vectorB;
-            }
-        }
-
-        return docIdForResult(a) < docIdForResult(b);
+    const auto finalLexicalAwareLess = [&workingConfig](const SearchResult& a,
+                                                        const SearchResult& b) {
+        return detail::finalLexicalAwareLess(a, b, workingConfig.enableLexicalTieBreak,
+                                             workingConfig.lexicalTieBreakEpsilon);
     };
 
     if (params.pathPredicate) {

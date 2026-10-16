@@ -277,3 +277,56 @@ TEST_CASE("normalizedBm25Score handles non-positive fallback divisor",
     CHECK(normalizedBm25Score(0.0, 0.0f, -1.0, -1.0) == Approx(0.0f));
     CHECK(normalizedBm25Score(-2.0, -5.0f, -1.0, -1.0) == Approx(1.0f));
 }
+
+TEST_CASE("classifyTier1TextSignal judges strength on the raw bm25 scale",
+          "[search][lexical][weak_query][catch2]") {
+    using yams::search::detail::classifyTier1TextSignal;
+
+    const auto scoreBatch = [](const std::vector<SearchResult>& rows) {
+        LexicalScoringInputs inputs;
+        inputs.candidates = std::span<const SearchResult>{rows};
+        inputs.query = "q";
+        inputs.applyFilenameBoost = false;
+        inputs.bm25NormDivisor = 25.0f;
+        std::vector<ComponentResult> components;
+        for (auto& cr : scoreLexicalBatch(inputs).results) {
+            if (cr) {
+                components.push_back(*cr);
+            }
+        }
+        return components;
+    };
+
+    SECTION("many hits that are all weak in raw terms are weak") {
+        // A common term: every hit near bm25 -1.4. Batch min-max still maps the top to 1.0.
+        std::vector<SearchResult> rows;
+        for (int i = 0; i < 8; ++i) {
+            rows.push_back(
+                makeSearchResult("w" + std::to_string(i), "w.txt", "w.txt", -1.40 + 0.02 * i));
+        }
+        const auto components = scoreBatch(rows);
+        const auto signal = classifyTier1TextSignal(components, 5, 0.45f);
+        CHECK(signal.textHits == 8);
+        CHECK_FALSE(signal.strong);
+    }
+
+    SECTION("a strong raw match stays strong") {
+        // One rare term in content plus title weight: bm25 around -30 at the top.
+        std::vector<SearchResult> rows;
+        for (int i = 0; i < 8; ++i) {
+            rows.push_back(
+                makeSearchResult("s" + std::to_string(i), "s.txt", "s.txt", -30.0 + 3.0 * i));
+        }
+        const auto components = scoreBatch(rows);
+        const auto signal = classifyTier1TextSignal(components, 5, 0.45f);
+        CHECK(signal.textHits == 8);
+        CHECK(signal.strong);
+    }
+
+    SECTION("too few hits is weak even when strong") {
+        std::vector<SearchResult> rows = {makeSearchResult("a", "a.txt", "a.txt", -30.0),
+                                          makeSearchResult("b", "b.txt", "b.txt", -20.0)};
+        const auto components = scoreBatch(rows);
+        CHECK_FALSE(classifyTier1TextSignal(components, 5, 0.45f).strong);
+    }
+}

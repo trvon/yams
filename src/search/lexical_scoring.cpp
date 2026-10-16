@@ -156,11 +156,31 @@ LexicalScoringOutput scoreLexicalBatch(const LexicalScoringInputs& inputs) {
         cr.rank = inputs.startRank + rank;
         cr.snippet = sr.snippet.empty() ? std::nullopt : std::optional<std::string>(sr.snippet);
         cr.debugInfo["score_multiplier"] = fmt::format("{:.3f}", scoreMultiplier);
+        // Absolute scale: the single-hit branch of normalizedBm25Score (no batch range).
+        cr.absoluteLexicalScore = std::clamp(
+            scoreMultiplier * normalizedBm25Score(rawScore, inputs.bm25NormDivisor, 0.0, 0.0), 0.0f,
+            1.0f);
 
         out.results.emplace_back(std::move(cr));
     }
 
     return out;
+}
+
+Tier1TextSignal classifyTier1TextSignal(std::span<const ComponentResult> components,
+                                        size_t minTextHits, float minTopTextScore) {
+    Tier1TextSignal signal;
+    for (const auto& component : components) {
+        if (component.source == ComponentResult::Source::Text ||
+            component.source == ComponentResult::Source::SimeonText) {
+            ++signal.textHits;
+            signal.topTextScore = std::max(
+                signal.topTextScore, component.absoluteLexicalScore.value_or(component.score));
+        }
+    }
+    signal.strong = signal.textHits > 0 && signal.textHits >= minTextHits &&
+                    signal.topTextScore >= minTopTextScore;
+    return signal;
 }
 
 } // namespace yams::search::detail

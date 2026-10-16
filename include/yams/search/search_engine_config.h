@@ -132,6 +132,8 @@ struct SearchEngineConfig {
     bool tieredNarrowVectorSearch = false;
     size_t tieredMinCandidates = 10;
     size_t weakQueryMinTextHits = 3;
+    // Compared with the top lexical hit's single-hit score, not its per-batch normalized score.
+    // For FTS5 Text with divisor 25, 0.30 means bm25 <= -7.5; Simeon has its own raw score scale.
     float weakQueryMinTopTextScore = 0.30f;
     bool enableWeakQueryFanoutBoost = true;
     float weakQueryVectorFanoutMultiplier = 2.0f;

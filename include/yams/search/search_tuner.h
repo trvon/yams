@@ -572,6 +572,10 @@ struct TunedParams {
             params.graphTextWeight = 0.0f;
             params.graphVectorWeight = 0.0f;
             params.weights.normalize();
+            // The measured Simeon 0.40 is relative to normalized text+vector, not
+            // an absolute 40% share. Preserve that ratio before normalizing again.
+            params.weights.simeonText = TuningSlot<float>(0.40f, TuningLayer::Profile);
+            params.weights.normalize();
             params.graphScoringBudgetMs = 30;
             params.graphRerankMinSignal = 0.08F;
             params.graphEntitySignalWeight = 0.50F;
