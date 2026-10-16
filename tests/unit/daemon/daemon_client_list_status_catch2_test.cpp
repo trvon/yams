@@ -205,6 +205,28 @@ void writeAddResponse(boost::asio::local::stream_protocol::socket& sock, uint64_
     }
 }
 
+void writePongResponse(boost::asio::local::stream_protocol::socket& sock, uint64_t requestId) {
+    MessageFramer framer;
+
+    Message responseMsg;
+    responseMsg.version = PROTOCOL_VERSION;
+    responseMsg.requestId = requestId;
+    responseMsg.timestamp = std::chrono::steady_clock::now();
+    responseMsg.payload = PongResponse{.serverTime = std::chrono::steady_clock::now(),
+                                       .roundTrip = std::chrono::milliseconds{0}};
+
+    auto framed = framer.frame_message(responseMsg);
+    if (!framed) {
+        throw std::runtime_error("failed to frame pong response");
+    }
+
+    boost::system::error_code ec;
+    boost::asio::write(sock, boost::asio::buffer(framed.value()), ec);
+    if (ec) {
+        throw std::runtime_error("write pong response failed: " + ec.message());
+    }
+}
+
 } // namespace
 
 TEST_CASE("DaemonClient identifies mismatched IPC response types",
@@ -314,6 +336,68 @@ TEST_CASE("DaemonClient add accepts a successful transport retry without replayi
     REQUIRE(result.has_value());
     CHECK(result.value().hash == "test-hash");
     CHECK(requestCount.load(std::memory_order_relaxed) == 2);
+}
+
+TEST_CASE("DaemonClient ping succeeds when the transport retries after the server closes",
+          "[daemon][client][ping][regression]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    // The daemon reaps a connection that went quiet after one response. A pooled client can
+    // write its next request just as that happens; the transport then retries on a fresh
+    // connection, and the first attempt's EOF must not leak into the caller's result.
+    auto runtimeDir = makeTempRuntimeDir("ping-retry-success-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context serverIo;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        serverIo, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+    std::atomic<int> requestCount{0};
+
+    std::thread serverThread([&] {
+        try {
+            boost::asio::local::stream_protocol::socket first(serverIo);
+            acceptor.accept(first);
+            (void)readFrame(first);
+            requestCount.fetch_add(1, std::memory_order_relaxed);
+            first.close();
+
+            boost::asio::local::stream_protocol::socket retry(serverIo);
+            acceptor.accept(retry);
+            auto frame = readFrame(retry);
+            requestCount.fetch_add(1, std::memory_order_relaxed);
+            MessageFramer framer;
+            auto parsed = framer.parse_frame(frame);
+            if (!parsed) {
+                throw std::runtime_error("failed to parse retried ping frame");
+            }
+            writePongResponse(retry, parsed.value().requestId);
+        } catch (...) {
+        }
+    });
+
+    ClientConfig cfg;
+    cfg.socketPath = socketPath;
+    cfg.requestTimeout = 3s;
+    cfg.headerTimeout = 3s;
+    cfg.bodyTimeout = 3s;
+    cfg.autoStart = false;
+
+    DaemonClient client(cfg);
+    auto result = yams::cli::run_sync(client.ping(), 5s);
+
+    if (serverThread.joinable()) {
+        serverThread.join();
+    }
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+
+    INFO((result ? std::string{} : result.error().message));
+    CHECK(requestCount.load(std::memory_order_relaxed) == 2);
+    REQUIRE(result.has_value());
 }
 
 TEST_CASE("DaemonClient list returns friendly retry error on StatusResponse",

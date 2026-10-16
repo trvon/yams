@@ -616,6 +616,16 @@ boost::asio::awaitable<Result<void>> AsioTransportAdapter::send_request_streamin
                                     std::memory_order_relaxed);
             onHeader(r);
         };
+        // The read loop reports a connection failure through onError before resolving
+        // done_promise. Hold it per attempt: a retried attempt's EOF must not reach the
+        // caller's handler, where it would override the retry's response.
+        auto attempt_error = std::make_shared<std::optional<Error>>();
+        auto onAttemptError = [attempt_error](const Error& e) { *attempt_error = e; };
+        auto forwardAttemptError = [&] {
+            if (*attempt_error && onError) {
+                onError(**attempt_error);
+            }
+        };
 
         co_await boost::asio::dispatch(conn->strand, use_awaitable);
         if (conn->handlers.size() >= conn->opts.maxInflight) {
@@ -624,7 +634,8 @@ boost::asio::awaitable<Result<void>> AsioTransportAdapter::send_request_streamin
         }
         {
             AsioConnection::Handler h;
-            h.streaming.emplace(onHeaderWithActivity, onChunkWithActivity, onError, onComplete);
+            h.streaming.emplace(onHeaderWithActivity, onChunkWithActivity, onAttemptError,
+                                onComplete);
             h.streaming->done_promise = std::move(done_promise);
             conn->handlers.emplace(msg.requestId, std::move(h));
         }
@@ -653,6 +664,7 @@ boost::asio::awaitable<Result<void>> AsioTransportAdapter::send_request_streamin
             } else {
                 retire_connection(conn, wres.error().message.c_str());
             }
+            forwardAttemptError();
             co_return wres.error();
         }
 
@@ -678,6 +690,7 @@ boost::asio::awaitable<Result<void>> AsioTransportAdapter::send_request_streamin
             if (cs.cancelled() != boost::asio::cancellation_type::none) {
                 co_await boost::asio::dispatch(conn->strand, use_awaitable);
                 conn->handlers.erase(msg.requestId);
+                forwardAttemptError();
                 co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
             }
 
@@ -720,6 +733,7 @@ boost::asio::awaitable<Result<void>> AsioTransportAdapter::send_request_streamin
                     }
                 }
 
+                forwardAttemptError();
                 co_return result;
             }
             timer.expires_after(
@@ -747,6 +761,7 @@ boost::asio::awaitable<Result<void>> AsioTransportAdapter::send_request_streamin
                              "elapsed_ms={} req_id={} attempt={} timeout_ms={}",
                              elapsed_ms, msg.requestId, attempt + 1, request_timeout.count());
             }
+            forwardAttemptError();
             co_return Error{ErrorCode::Timeout, "Streaming request timeout"};
         }
     }
