@@ -573,6 +573,25 @@ if catch2_with_main_dep.found()
        })
 
   alias_target('bench_topology_ablation', topology_ablation_bench)
+
+  # Memory-sync listing cost: one scenario per process, driven by
+  # scripts/run_memory_sync_listing_ab.py. Not registered as a Meson test.
+  memory_sync_listing_bench = executable('memory_sync_listing_bench',
+    files('memory_sync_listing_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      dependency('nlohmann_json'),
+      dependency('yams_storage_engine'),
+      dependency('yams_crypto'),
+      dependency('yams_memory_sync'),
+      dependency('yams_core'),
+    ],
+    cpp_args: ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  alias_target('bench_memory_sync_listing', memory_sync_listing_bench)
 else
   message('Catch2 not found, skipping hnsw_entity_search_bench and multi_client_ingestion_bench')
 endif
