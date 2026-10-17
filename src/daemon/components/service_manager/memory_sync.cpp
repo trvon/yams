@@ -914,7 +914,13 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_};
         auto published = adapter.publish(record);
         if (!published) {
-            if (isUnrecoverableBlobFailure(published.error().code)) {
+            const bool exceedsResidentLimit =
+                published.error().code == ErrorCode::InvalidArgument &&
+                !vector::VectorSyncAdapter::checkPublishable(record,
+                                                             memorySync_->maxPublishValueBytes());
+            if (isUnrecoverableBlobFailure(published.error().code) || exceedsResidentLimit) {
+                // Keep the local row, but let this pass reach the following vectors. A changed
+                // value advances the store generation; new limits create a fresh service/sweep.
                 skipVector(published.error());
                 return;
             }

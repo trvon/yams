@@ -168,6 +168,10 @@ public:
 
     bool stopRequested() const noexcept { return stop_.load(std::memory_order_acquire); }
     [[nodiscard]] const std::string& localNodeId() const noexcept { return config_.nodeId; }
+    /// Immutable per-value bound; a single value must also fit the resident cache.
+    [[nodiscard]] std::size_t maxPublishValueBytes() const noexcept {
+        return std::min(config_.limits.maxValueBytes, config_.limits.maxCacheBytes);
+    }
     [[nodiscard]] bool writerAuthenticationReady() const noexcept {
         return config_.writerAuth && config_.writerAuth->required();
     }
