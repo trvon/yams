@@ -56,6 +56,14 @@ public:
         return {};
     }
 
+    /// Serialized size of the record publish() would write. Lets a caller classify a
+    /// resident-limit rejection from the actual bytes instead of backend error text.
+    static std::size_t
+    serializedRecordBytes(const DocumentInfo& info,
+                          const std::vector<std::pair<std::string, MetadataValue>>& tags) {
+        return nlohmann::json(toRecord(info, tags)).dump().size();
+    }
+
     Result<void> publishDelete(std::string_view contentHash) {
         if (!memory_sync::isSha256Digest(contentHash)) {
             return Error{ErrorCode::InvalidArgument,
