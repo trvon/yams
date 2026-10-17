@@ -95,7 +95,16 @@ void observePeakRetainedKeys(std::string_view prefix, std::size_t retainedKeys) 
 
 template <typename Visitor>
 Result<void> visitFilesystemKeys(const std::filesystem::path& basePath, std::string_view prefix,
-                                 Visitor&& visitor) {
+                                 const std::atomic<bool>& cancelled, Visitor&& visitor) {
+    const auto checkCancelled = [&]() -> Result<void> {
+        if (cancelled.load(std::memory_order_relaxed)) {
+            return Error{ErrorCode::OperationCancelled, "filesystem listing cancelled"};
+        }
+        return {};
+    };
+    if (auto ready = checkCancelled(); !ready) {
+        return ready.error();
+    }
 #ifdef YAMS_TESTING
     auto* observed = listingStatsFor(prefix);
     if (observed) {
@@ -105,7 +114,7 @@ Result<void> visitFilesystemKeys(const std::filesystem::path& basePath, std::str
 
     const auto objectsDir = basePath / "objects";
     if (!std::filesystem::exists(longPath(objectsDir))) {
-        return {};
+        return checkCancelled();
     }
 
     try {
@@ -114,8 +123,16 @@ Result<void> visitFilesystemKeys(const std::filesystem::path& basePath, std::str
 #ifdef YAMS_TESTING
             if (observed) {
                 ++observed->entriesVisited;
+                if (observed->onEntry) {
+                    observed->onEntry();
+                }
             }
 #endif
+            // Check even directories and non-matching prefixes. A blocked filesystem
+            // syscall is not interruptible, but traversal stops between entries.
+            if (auto ready = checkCancelled(); !ready) {
+                return ready.error();
+            }
             if (!entry.is_regular_file()) {
                 continue;
             }
@@ -148,7 +165,7 @@ Result<void> visitFilesystemKeys(const std::filesystem::path& basePath, std::str
     } catch (const std::filesystem::filesystem_error& e) {
         return Error{ErrorCode::PermissionDenied, e.what()};
     }
-    return {};
+    return checkCancelled();
 }
 
 } // namespace
@@ -653,7 +670,7 @@ Result<void> FilesystemBackend::clear() {
 
 Result<std::vector<std::string>> FilesystemBackend::list(std::string_view prefix) const {
     std::vector<std::string> results;
-    auto visited = visitFilesystemKeys(basePath_, prefix, [&](std::string key) {
+    auto visited = visitFilesystemKeys(basePath_, prefix, cancelled_, [&](std::string key) {
         results.push_back(std::move(key));
         observePeakRetainedKeys(prefix, results.size());
     });
@@ -678,7 +695,7 @@ Result<ObjectListPage> FilesystemBackend::listPage(std::string_view prefix,
     // directory walk remains complete so traversal failures never return partial success.
     const auto retainedLimit = limit == std::numeric_limits<std::size_t>::max() ? limit : limit + 1;
     std::vector<std::string> keys;
-    auto visited = visitFilesystemKeys(basePath_, prefix, [&](std::string key) {
+    auto visited = visitFilesystemKeys(basePath_, prefix, cancelled_, [&](std::string key) {
         if (cursor && std::string_view{key} <= *cursor) {
             return;
         }

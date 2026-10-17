@@ -725,6 +725,26 @@ bool MemorySyncLoop::verifiedEnvelope(const std::string& envelopeHash,
 
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
     YAMS_ZONE_SCOPED_N("memory_sync.sync");
+    // Any failed/throwing page restarts the entire security decision. Keeping a cursor
+    // with half-observed identities could miss forks or double-charge a retried page.
+    const auto resetScan = [&]() noexcept {
+        scanCursor_.clear();
+        std::vector<ScanCandidate>{}.swap(scanCandidates_);
+        scanBytes_ = 0;
+        operations_.clear();
+        vectorIdentities_.clear();
+        forkedOperations_.clear();
+        completeScan_.reset();
+    };
+    struct ScanGuard {
+        const decltype(resetScan)& reset;
+        bool keep{false};
+        ~ScanGuard() {
+            if (!keep) {
+                reset();
+            }
+        }
+    } guard{resetScan};
     if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
         return loaded.error();
     }
@@ -740,6 +760,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         scanCursor_.empty() && completeScan_ &&
         completeScan_->writes == countedBackend_->writes() &&
         completeScan_->quarantineGeneration == durableQuarantineGeneration_) {
+        guard.keep = true;
         return merged_;
     }
     auto listed = backend_->listPage(
@@ -749,7 +770,9 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         return listed.error();
     }
 
-    std::vector<ScanCandidate> pageCandidates;
+    if (auto ready = beforeRemoteWork(); !ready) {
+        return ready.error();
+    }
     quarantined_.clear();
 
     auto page = std::move(listed.value());
@@ -759,6 +782,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         vectorIdentities_.clear();
         forkedOperations_.clear();
         scanCandidates_.clear();
+        scanBytes_ = 0;
     }
     std::ranges::sort(keys);
 
@@ -798,6 +822,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
             legacyUnauthenticatedHistory_ = true;
         }
         std::string candidateRecordHash = expectedRecordHash;
+        std::size_t envelopeBytes = fetched.value().size();
         if (record.value().schemaVersion < kMemoryIndexSchemaVersion) {
             if (!allowLegacyUnbound_ || (writerAuth_ && writerAuth_->required())) {
                 quarantine(key, "legacy envelope lacks authenticated corpus binding");
@@ -816,6 +841,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
             record.value().operationId = makeOperationId(
                 record.value().origin, record.value().vv.get(record.value().origin));
             const auto upgradedBytes = serialize(record.value());
+            envelopeBytes = std::max(envelopeBytes, upgradedBytes.size());
             candidateRecordHash = hashContent(upgradedBytes);
             const auto upgradedKey = indexKey(logicalKey, candidateRecordHash);
             const auto upgradedExists = backend_->exists(upgradedKey);
@@ -843,13 +869,24 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
             continue;
         }
 
+        // Charge every causally valid observation BEFORE retaining identities, including
+        // misplaced envelopes which will not become candidates. Otherwise oversized index
+        // keys could fill operations_ without ever being charged to the sweep budget.
+        const auto remaining = limits_.maxScanBytes - std::min(scanBytes_, limits_.maxScanBytes);
+        if (key.size() > remaining || envelopeBytes > remaining - key.size() ||
+            scanCandidates_.size() >= limits_.maxTrackedIdentities) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "memory sync complete-sweep candidate budget exhausted"};
+        }
+        scanBytes_ += key.size() + envelopeBytes;
+
         // Operation IDs are writer-global within a corpus epoch. Observe them
         // before validating the index logical key so a copied envelope cannot
         // leave the correctly placed sibling accepted as a valid operation.
         if (!operations_.contains(record.value().operationId) &&
             operations_.size() >= limits_.maxTrackedIdentities) {
-            quarantine(key, "operation identity tracking limit reached");
-            continue;
+            return Error{ErrorCode::ResourceExhausted,
+                         "memory sync complete-sweep operation identity limit reached"};
         }
         const auto [operation, inserted] = operations_.emplace(
             record.value().operationId, std::pair{candidateRecordHash, logicalKey});
@@ -864,8 +901,8 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         const std::string vectorIdentity = nlohmann::json(record.value().vv).dump();
         if (!vectorIdentities_.contains(vectorIdentity) &&
             vectorIdentities_.size() >= limits_.maxTrackedIdentities) {
-            quarantine(key, "vector identity tracking limit reached");
-            continue;
+            return Error{ErrorCode::ResourceExhausted,
+                         "memory sync complete-sweep vector identity limit reached"};
         }
         const auto [vector, vectorInserted] = vectorIdentities_.emplace(
             vectorIdentity, std::pair{candidateRecordHash, record.value().operationId});
@@ -873,21 +910,26 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
             forkedOperations_.insert(vector->second.second);
             forkedOperations_.insert(record.value().operationId);
         }
-        pageCandidates.push_back(
+        scanCandidates_.push_back(
             ScanCandidate{key, logicalKey, candidateRecordHash, std::move(record.value())});
     }
 
-    scanCandidates_.insert(scanCandidates_.end(), std::make_move_iterator(pageCandidates.begin()),
-                           std::make_move_iterator(pageCandidates.end()));
+    // Cancellation may arrive during the last fetch/verification, or on an empty page.
+    // Observe it before entering durable history finalization, never after it as rollback.
+    if (auto ready = beforeRemoteWork(); !ready) {
+        return ready.error();
+    }
     scanCursor_ = page.nextCursor.value_or(std::string{});
     if (!scanCursor_.empty()) {
         // A bounded page is not a complete security decision. Keep the last committed
         // snapshot visible until the sweep has observed every operation/fork identity.
+        guard.keep = true;
         return merged_;
     }
 
     auto candidates = std::move(scanCandidates_);
     scanCandidates_.clear();
+    scanBytes_ = 0;
     for (const auto& candidate : candidates) {
         if (writerQuarantined(candidate.record.origin)) {
             if (auto captured =
@@ -1017,6 +1059,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
     // Stamp after the scan's own writes (acknowledgements, legacy upgrades) so they do
     // not force another pass over the same store.
     completeScan_ = CompleteScanStamp{countedBackend_->writes(), durableQuarantineGeneration_};
+    guard.keep = true;
     return merged_;
 }
 

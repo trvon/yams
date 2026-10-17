@@ -2001,6 +2001,7 @@ TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][m
           {"max_merged_keys", "23"},
           {"max_cache_bytes", "8192"},
           {"max_tracked_identities", "31"},
+          {"max_scan_bytes", "16384"},
           {"mode", "temporary"},
           {"session_id", "run-123"},
           {"writer_auth_required", "true"},
@@ -2023,10 +2024,24 @@ TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][m
     CHECK(config.memorySync.limits.maxMergedKeys == 23);
     CHECK(config.memorySync.limits.maxCacheBytes == 8192);
     CHECK(config.memorySync.limits.maxTrackedIdentities == 31);
+    CHECK(config.memorySync.limits.maxScanBytes == 16384);
     CHECK(config.memorySync.mode == "temporary");
     CHECK(config.memorySync.sessionId == "run-123");
     CHECK(config.memorySync.writerAuthRequired);
     CHECK(config.memorySync.writerAuthManifestPath == "/secure/writers.json");
+}
+
+TEST_CASE("ConfigResolver rejects invalid complete-sweep byte budgets",
+          "[daemon][config][memory-sync][scan-safety]") {
+    for (const auto* value : {"0", "-1", "1.5", "184467440737095516160"}) {
+        CAPTURE(value);
+        ConfigResolver::ConfigSections sections = {
+            {"memory_sync", {{"enabled", "false"}, {"max_scan_bytes", value}}},
+        };
+        DaemonConfig config;
+        CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+        CHECK_FALSE(config.memorySync.enabled);
+    }
 }
 
 TEST_CASE("ConfigResolver requires explicit shared corpus scope for replication",

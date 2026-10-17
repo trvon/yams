@@ -153,6 +153,7 @@ struct MemorySyncDaemonConfig {
         parseLimit("max_merged_keys", cfg.limits.maxMergedKeys);
         parseLimit("max_cache_bytes", cfg.limits.maxCacheBytes);
         parseLimit("max_tracked_identities", cfg.limits.maxTrackedIdentities);
+        parseLimit("max_scan_bytes", cfg.limits.maxScanBytes);
         return cfg;
     }
 

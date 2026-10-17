@@ -67,6 +67,11 @@ struct MemorySyncLimits {
     std::size_t maxHistoryMigrationObjects{8192};
     /// Maximum legacy envelope bytes retained while rebuilding one writer's counter index.
     std::size_t maxHistoryMigrationBytes{std::size_t{64} * 1024 * 1024};
+    /// Aggregate encoded envelope + index-key bytes observed across a complete sweep,
+    /// charged before retaining causal identities (even for misplaced envelopes).
+    /// Together with maxTrackedIdentities (also the candidate-count ceiling), bounds
+    /// decoded scan state in proportion to input. Not an allocator/RSS ceiling.
+    std::size_t maxScanBytes{std::size_t{64} * 1024 * 1024};
 };
 
 struct MemoryDelta {
@@ -323,6 +328,10 @@ public:
     [[nodiscard]] bool hasMergedRecord(std::string_view logicalKey) const {
         return merged_.contains(std::string(logicalKey));
     }
+    [[nodiscard]] std::size_t testingScanCandidateCount() const noexcept {
+        return scanCandidates_.size();
+    }
+    [[nodiscard]] std::size_t testingScanBytes() const noexcept { return scanBytes_; }
     [[nodiscard]] std::size_t testingCachedBlobCount() const noexcept {
         return cachedBlobs_.size();
     }
@@ -739,6 +748,7 @@ private:
     std::map<std::string, std::pair<std::string, std::string>> operations_;
     std::map<std::string, std::pair<std::string, std::string>> vectorIdentities_;
     std::vector<ScanCandidate> scanCandidates_;
+    std::size_t scanBytes_{0};
     std::set<std::string> forkedOperations_;
     std::map<std::string, std::pair<std::string, std::string>> deltaOperations_;
     std::deque<std::string> deltaOperationOrder_;
