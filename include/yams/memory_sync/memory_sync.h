@@ -8,8 +8,8 @@
 #include <cstring>
 #include <deque>
 #include <functional>
-#include <limits>
 #include <future>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -151,13 +151,21 @@ public:
                    std::shared_ptr<const WriterAuthenticator> writerAuth = {},
                    std::string controlScope = {})
         : countedBackend_(
-              std::make_unique<WriteCountingBackend>(backend, control.exclusiveBackend)),
+              std::make_unique<WriteCountingBackend>(backend, control.exclusiveBackend, limits)),
           backend_(countedBackend_.get()), nodeId_(std::move(nodeId)),
           corpusId_(std::move(corpusId)), corpusEpoch_(corpusEpoch),
           allowLegacyUnbound_(allowLegacyUnbound), limits_(limits), control_(std::move(control)),
           tombstoneGc_(std::move(tombstoneGc)), writerAuth_(std::move(writerAuth)),
           controlScope_(controlScope.empty() ? corpusId_ + ":" + std::to_string(corpusEpoch_)
                                              : std::move(controlScope)) {}
+
+#ifdef YAMS_TESTING
+    static std::unique_ptr<storage::IStorageBackend>
+    testing_countedBackend(storage::IStorageBackend& backend, bool exclusive,
+                           MemorySyncLimits limits = {},
+                           std::function<void(std::string_view)> beforeCacheAllocation = {},
+                           bool lexicalTestBackend = false);
+#endif
 
     /// Publish `content` under `logicalKey`. Stores the content-addressed blob and
     /// an index record stamped with this node's version vector and hybrid timestamp.
@@ -572,63 +580,60 @@ private:
 
     /// Forwards to the injected backend and counts every mutation the loop makes, so an
     /// exclusive backend's complete scan can be reused without enumerating write paths.
-    /// On an exclusive backend it also keeps listing pages until the next mutation: a
-    /// filesystem listing walks every shard directory whatever the prefix.
+    /// Exclusive filesystem listings retain one bounded, sorted snapshot per prefix; other
+    /// exclusive backends retain the old exact-page cache. This adapter is not thread-safe:
+    /// MemorySyncService serializes every caller through its loop mutex.
     class WriteCountingBackend final : public storage::IStorageBackend {
     public:
-        WriteCountingBackend(storage::IStorageBackend& inner, bool exclusive)
-            : inner_(inner), exclusive_(exclusive) {}
+        WriteCountingBackend(storage::IStorageBackend& inner, bool exclusive,
+                             const MemorySyncLimits& limits)
+            : inner_(inner), exclusive_(exclusive),
+              maxRetainedKeys_(std::min(limits.maxIndexObjectsPerSync, kMaxKeysPerPage) *
+                               kMaxCachedPages),
+              maxRetainedKeyBytes_(std::min(limits.maxCacheBytes, kMaxRetainedKeyBytes)) {}
 
+        // Keep the layout identical in library and test translation units; only the
+        // YAMS_TESTING factory can install these otherwise-empty test controls.
+        std::function<void(std::string_view)> testing_beforeCacheAllocation;
+        bool testing_lexicalBackend{false};
         [[nodiscard]] std::uint64_t writes() const noexcept { return writes_; }
+        [[nodiscard]] bool completeScanReuseEligible() const noexcept {
+            return exclusive_ && !listingCacheDisabled_;
+        }
 
         Result<void> initialize(const storage::BackendConfig& config) override {
             return inner_.initialize(config);
         }
         Result<void> store(std::string_view key, std::span<const std::byte> data) override {
-            mutated();
-            return inner_.store(key, data);
+            beforeMutation(key);
+            auto stored = inner_.store(key, data);
+            finishStore(key, stored.has_value());
+            return stored;
         }
         Result<std::vector<std::byte>> retrieve(std::string_view key) const override {
             return inner_.retrieve(key);
         }
         Result<bool> exists(std::string_view key) const override { return inner_.exists(key); }
         Result<void> remove(std::string_view key) override {
-            mutated();
-            return inner_.remove(key);
+            beforeMutation(key);
+            auto removed = inner_.remove(key);
+            finishRemove(key, removed.has_value());
+            return removed;
         }
         Result<std::vector<std::string>> list(std::string_view prefix = "") const override {
             return inner_.list(prefix);
         }
         Result<storage::ObjectListPage> listPage(std::string_view prefix,
                                                  std::optional<std::string_view> cursor,
-                                                 std::size_t limit) const override {
-            if (!exclusive_) {
-                return inner_.listPage(prefix, cursor, limit);
-            }
-            std::string key(prefix);
-            key.push_back('\0');
-            if (cursor) {
-                key.push_back('c');
-                key.append(*cursor);
-            }
-            key.push_back('\0');
-            key.append(std::to_string(limit));
-            if (const auto it = pages_.find(key); it != pages_.end()) {
-                return it->second;
-            }
-            auto page = inner_.listPage(prefix, cursor, limit);
-            if (page) {
-                if (pages_.size() >= kMaxCachedPages) {
-                    pages_.clear();
-                }
-                pages_.emplace(std::move(key), page.value());
-            }
-            return page;
-        }
+                                                 std::size_t limit) const override;
         Result<::yams::StorageStats> getStats() const override { return inner_.getStats(); }
         std::future<Result<void>> storeAsync(std::string_view key,
                                              std::span<const std::byte> data) override {
-            mutated();
+            beforeMutation(key);
+            // The future may mutate the backend after this call returns. Never attach a callback
+            // to wrapper state; permanently disable both listing and complete-scan reuse instead.
+            listingCacheDisabled_ = true;
+            clearListingCaches();
             return inner_.storeAsync(key, data);
         }
         std::future<Result<std::vector<std::byte>>>
@@ -639,7 +644,8 @@ private:
         bool isRemote() const override { return inner_.isRemote(); }
         Result<void> flush() override { return inner_.flush(); }
         Result<void> clear() override {
-            mutated();
+            incrementWrites();
+            clearListingCaches();
             return inner_.clear();
         }
         void requestCancel() noexcept override { inner_.requestCancel(); }
@@ -647,16 +653,47 @@ private:
 
     private:
         static constexpr std::size_t kMaxCachedPages = 64;
+        static constexpr std::size_t kMaxPrefixes = 64;
+        static constexpr std::size_t kMaxKeysPerPage = 512;
+        static constexpr std::size_t kMaxRetainedKeyBytes = std::size_t{8} * 1024 * 1024;
 
-        void mutated() {
-            ++writes_;
-            pages_.clear();
-        }
+        struct PrefixListing {
+            std::vector<std::string> keys;
+            std::string expectedCursor;
+            bool complete{false};
+        };
+
+        [[nodiscard]] bool filesystemSnapshotEligible() const;
+        void incrementWrites();
+        void beforeMutation(std::string_view key);
+        void finishStore(std::string_view key, bool success);
+        void finishRemove(std::string_view key, bool success);
+        void clearExactPages() const;
+        void clearListingCaches() const noexcept;
+        void invalidateIncompleteListings(std::string_view key);
+        void invalidateCompleteListings(std::string_view key);
+        void updateCompleteListingsAfterStore(std::string_view key);
+        void updateCompleteListingsAfterRemove(std::string_view key);
+        [[nodiscard]] bool canRetainKeys(const std::vector<std::string>& keys) const;
+        [[nodiscard]] bool canRetainKey(std::string_view key) const;
+        void accountKeys(const std::vector<std::string>& keys) const;
+        void unaccountKeys(const std::vector<std::string>& keys) const;
+        void observeFilesystemPage(std::string_view prefix, std::optional<std::string_view> cursor,
+                                   const storage::ObjectListPage& page) const;
+        [[nodiscard]] storage::ObjectListPage
+        pageFromSnapshot(const PrefixListing& listing, std::optional<std::string_view> cursor,
+                         std::size_t limit) const;
 
         storage::IStorageBackend& inner_;
         bool exclusive_{false};
+        bool listingCacheDisabled_{false};
+        std::size_t maxRetainedKeys_{0};
+        std::size_t maxRetainedKeyBytes_{0};
         std::uint64_t writes_{0};
+        mutable std::size_t retainedKeyCount_{0};
+        mutable std::size_t retainedKeyBytes_{0};
         mutable std::map<std::string, storage::ObjectListPage> pages_;
+        mutable std::map<std::string, PrefixListing, std::less<>> prefixListings_;
     };
 
     /// Mutation count and quarantine generation observed when the last complete scan ended.
@@ -700,5 +737,16 @@ private:
     std::size_t authFailures_{0};
     bool legacyUnauthenticatedHistory_{false};
 };
+
+#ifdef YAMS_TESTING
+inline std::unique_ptr<storage::IStorageBackend> MemorySyncLoop::testing_countedBackend(
+    storage::IStorageBackend& backend, bool exclusive, MemorySyncLimits limits,
+    std::function<void(std::string_view)> beforeCacheAllocation, bool lexicalTestBackend) {
+    auto counted = std::make_unique<WriteCountingBackend>(backend, exclusive, limits);
+    counted->testing_beforeCacheAllocation = std::move(beforeCacheAllocation);
+    counted->testing_lexicalBackend = lexicalTestBackend;
+    return counted;
+}
+#endif
 
 } // namespace yams::memory_sync

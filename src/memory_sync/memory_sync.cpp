@@ -5,7 +5,320 @@
 
 #include <spdlog/spdlog.h>
 
+#include <typeinfo>
+
 namespace yams::memory_sync {
+
+bool MemorySyncLoop::WriteCountingBackend::filesystemSnapshotEligible() const {
+    // getType() is descriptive, not a cursor contract: a decorator may keep that name
+    // while using opaque tokens. Only the built-in backend has known lexical cursors.
+    return exclusive_ && !listingCacheDisabled_ &&
+           (typeid(inner_) == typeid(storage::FilesystemBackend) || testing_lexicalBackend) &&
+           !inner_.isRemote();
+}
+
+void MemorySyncLoop::WriteCountingBackend::incrementWrites() {
+    if (writes_ == std::numeric_limits<std::uint64_t>::max()) {
+        listingCacheDisabled_ = true;
+        clearListingCaches();
+        return;
+    }
+    ++writes_;
+}
+
+void MemorySyncLoop::WriteCountingBackend::clearExactPages() const {
+    for (const auto& [_, page] : pages_) {
+        unaccountKeys(page.keys);
+    }
+    pages_.clear();
+}
+
+void MemorySyncLoop::WriteCountingBackend::clearListingCaches() const noexcept {
+    // Cache construction may have failed between allocation and accounting. Discard
+    // everything without relying on potentially partial bookkeeping.
+    pages_.clear();
+    prefixListings_.clear();
+    retainedKeyCount_ = 0;
+    retainedKeyBytes_ = 0;
+}
+
+bool MemorySyncLoop::WriteCountingBackend::canRetainKeys(
+    const std::vector<std::string>& keys) const {
+    if (retainedKeyCount_ > maxRetainedKeys_ ||
+        keys.size() > maxRetainedKeys_ - retainedKeyCount_) {
+        return false;
+    }
+    auto remainingBytes = maxRetainedKeyBytes_ - std::min(retainedKeyBytes_, maxRetainedKeyBytes_);
+    for (const auto& key : keys) {
+        if (key.size() > remainingBytes) {
+            return false;
+        }
+        remainingBytes -= key.size();
+    }
+    return true;
+}
+
+bool MemorySyncLoop::WriteCountingBackend::canRetainKey(std::string_view key) const {
+    return retainedKeyCount_ < maxRetainedKeys_ && retainedKeyBytes_ <= maxRetainedKeyBytes_ &&
+           key.size() <= maxRetainedKeyBytes_ - retainedKeyBytes_;
+}
+
+void MemorySyncLoop::WriteCountingBackend::accountKeys(const std::vector<std::string>& keys) const {
+    retainedKeyCount_ += keys.size();
+    for (const auto& key : keys) {
+        retainedKeyBytes_ += key.size();
+    }
+}
+
+void MemorySyncLoop::WriteCountingBackend::unaccountKeys(
+    const std::vector<std::string>& keys) const {
+    retainedKeyCount_ -= keys.size();
+    for (const auto& key : keys) {
+        retainedKeyBytes_ -= key.size();
+    }
+}
+
+void MemorySyncLoop::WriteCountingBackend::invalidateIncompleteListings(std::string_view key) {
+    for (auto it = prefixListings_.begin(); it != prefixListings_.end();) {
+        if (!it->second.complete && key.starts_with(it->first)) {
+            unaccountKeys(it->second.keys);
+            it = prefixListings_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void MemorySyncLoop::WriteCountingBackend::invalidateCompleteListings(std::string_view key) {
+    for (auto it = prefixListings_.begin(); it != prefixListings_.end();) {
+        if (it->second.complete && key.starts_with(it->first)) {
+            unaccountKeys(it->second.keys);
+            it = prefixListings_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void MemorySyncLoop::WriteCountingBackend::updateCompleteListingsAfterStore(std::string_view key) {
+    for (auto it = prefixListings_.begin(); it != prefixListings_.end();) {
+        auto& listing = it->second;
+        if (!listing.complete || !key.starts_with(it->first)) {
+            ++it;
+            continue;
+        }
+        const auto position = std::ranges::lower_bound(listing.keys, key);
+        if (position != listing.keys.end() && *position == key) {
+            ++it;
+            continue;
+        }
+        if (!canRetainKey(key)) {
+            unaccountKeys(listing.keys);
+            it = prefixListings_.erase(it);
+            continue;
+        }
+        if (testing_beforeCacheAllocation) {
+            testing_beforeCacheAllocation("store-insert");
+        }
+        listing.keys.insert(position, std::string(key));
+        ++retainedKeyCount_;
+        retainedKeyBytes_ += key.size();
+        ++it;
+    }
+}
+
+void MemorySyncLoop::WriteCountingBackend::updateCompleteListingsAfterRemove(std::string_view key) {
+    for (auto& [prefix, listing] : prefixListings_) {
+        if (!listing.complete || !key.starts_with(prefix)) {
+            continue;
+        }
+        const auto position = std::ranges::lower_bound(listing.keys, key);
+        if (position == listing.keys.end() || *position != key) {
+            continue;
+        }
+        --retainedKeyCount_;
+        retainedKeyBytes_ -= position->size();
+        listing.keys.erase(position);
+    }
+}
+
+void MemorySyncLoop::WriteCountingBackend::beforeMutation(std::string_view key) {
+    incrementWrites();
+    clearExactPages();
+    if (filesystemSnapshotEligible()) {
+        // A partial traversal cannot be certified across any matching mutation, including a
+        // failed call whose backend may have applied a partial side effect.
+        invalidateIncompleteListings(key);
+    }
+}
+
+void MemorySyncLoop::WriteCountingBackend::finishStore(std::string_view key, bool success) {
+    try {
+        if (!filesystemSnapshotEligible()) {
+            return;
+        }
+        if (success) {
+            updateCompleteListingsAfterStore(key);
+        } else {
+            invalidateCompleteListings(key);
+        }
+    } catch (...) {
+        // This optimization must not turn a committed store into a publication failure
+        // or leave overlapping prefixes with different views of the committed key.
+        clearListingCaches();
+    }
+}
+
+void MemorySyncLoop::WriteCountingBackend::finishRemove(std::string_view key, bool success) {
+    try {
+        if (!filesystemSnapshotEligible()) {
+            return;
+        }
+        if (success) {
+            updateCompleteListingsAfterRemove(key);
+        } else {
+            invalidateCompleteListings(key);
+        }
+    } catch (...) {
+        clearListingCaches();
+    }
+}
+
+storage::ObjectListPage MemorySyncLoop::WriteCountingBackend::pageFromSnapshot(
+    const PrefixListing& listing, std::optional<std::string_view> cursor, std::size_t limit) const {
+    const auto begin = cursor ? std::upper_bound(listing.keys.begin(), listing.keys.end(), *cursor,
+                                                 [](std::string_view value,
+                                                    const std::string& key) { return value < key; })
+                              : listing.keys.begin();
+    const auto available = static_cast<std::size_t>(std::distance(begin, listing.keys.end()));
+    const auto count = std::min(limit, available);
+    storage::ObjectListPage page;
+    page.keys.assign(begin, std::next(begin, static_cast<std::ptrdiff_t>(count)));
+    if (count < available) {
+        page.nextCursor = page.keys.back();
+    }
+    return page;
+}
+
+void MemorySyncLoop::WriteCountingBackend::observeFilesystemPage(
+    std::string_view prefix, std::optional<std::string_view> cursor,
+    const storage::ObjectListPage& page) const {
+    auto existing = prefixListings_.find(prefix);
+    if (!cursor) {
+        if (existing != prefixListings_.end()) {
+            unaccountKeys(existing->second.keys);
+            prefixListings_.erase(existing);
+        }
+        if (prefixListings_.size() >= kMaxPrefixes || !canRetainKeys(page.keys)) {
+            return;
+        }
+        PrefixListing listing;
+        listing.keys.insert(listing.keys.end(), page.keys.begin(), page.keys.end());
+        if (page.nextCursor) {
+            listing.expectedCursor = *page.nextCursor;
+        } else {
+            listing.complete = true;
+            std::ranges::sort(listing.keys);
+        }
+        if (testing_beforeCacheAllocation) {
+            testing_beforeCacheAllocation("prefix-insert");
+        }
+        const auto [inserted, retained] =
+            prefixListings_.emplace(std::string(prefix), std::move(listing));
+        if (retained) {
+            accountKeys(inserted->second.keys);
+        }
+        return;
+    }
+
+    if (existing == prefixListings_.end() || existing->second.complete ||
+        std::string_view(existing->second.expectedCursor) != *cursor) {
+        return;
+    }
+    if (!canRetainKeys(page.keys)) {
+        unaccountKeys(existing->second.keys);
+        prefixListings_.erase(existing);
+        return;
+    }
+    if (testing_beforeCacheAllocation) {
+        testing_beforeCacheAllocation("page-append");
+    }
+    existing->second.keys.insert(existing->second.keys.end(), page.keys.begin(), page.keys.end());
+    accountKeys(page.keys);
+    if (page.nextCursor) {
+        existing->second.expectedCursor = *page.nextCursor;
+    } else {
+        existing->second.expectedCursor.clear();
+        existing->second.complete = true;
+        std::ranges::sort(existing->second.keys);
+    }
+}
+
+Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPage(
+    std::string_view prefix, std::optional<std::string_view> cursor, std::size_t limit) const {
+    // Preserve the backend's InvalidArgument result; a cached empty page must not turn a zero
+    // limit into a successful non-progressing pagination loop.
+    if (limit == 0 || !exclusive_ || listingCacheDisabled_) {
+        return inner_.listPage(prefix, cursor, limit);
+    }
+
+    if (filesystemSnapshotEligible()) {
+        if (const auto found = prefixListings_.find(prefix);
+            found != prefixListings_.end() && found->second.complete) {
+            try {
+                return pageFromSnapshot(found->second, cursor, limit);
+            } catch (...) {
+                clearListingCaches();
+            }
+        }
+        auto page = inner_.listPage(prefix, cursor, limit);
+        if (page) {
+            try {
+                observeFilesystemPage(prefix, cursor, page.value());
+            } catch (...) {
+                clearListingCaches();
+            }
+        }
+        return page;
+    }
+
+    std::string cacheKey(prefix);
+    cacheKey.push_back('\0');
+    if (cursor) {
+        cacheKey.push_back('c');
+        cacheKey.append(*cursor);
+    }
+    cacheKey.push_back('\0');
+    cacheKey.append(std::to_string(limit));
+    if (const auto found = pages_.find(cacheKey); found != pages_.end()) {
+        try {
+            if (testing_beforeCacheAllocation) {
+                testing_beforeCacheAllocation("exact-page-copy");
+            }
+            return found->second;
+        } catch (...) {
+            clearListingCaches();
+        }
+    }
+    auto page = inner_.listPage(prefix, cursor, limit);
+    if (!page) {
+        return page;
+    }
+    if (pages_.size() >= kMaxCachedPages) {
+        clearExactPages();
+    }
+    if (canRetainKeys(page.value().keys)) {
+        try {
+            const auto [inserted, retained] = pages_.emplace(std::move(cacheKey), page.value());
+            if (retained) {
+                accountKeys(inserted->second.keys);
+            }
+        } catch (...) {
+            clearListingCaches();
+        }
+    }
+    return page;
+}
 
 Result<void> MemorySyncLoop::publish(std::string_view logicalKey,
                                      std::span<const std::byte> content) {
@@ -401,7 +714,8 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
     }
     // An exclusive backend changes only through this loop, so the last complete scan is
     // still the store's merge until the loop writes again or a writer is quarantined.
-    if (control_.exclusiveBackend && scanCursor_.empty() && completeScan_ &&
+    if (control_.exclusiveBackend && countedBackend_->completeScanReuseEligible() &&
+        scanCursor_.empty() && completeScan_ &&
         completeScan_->writes == countedBackend_->writes() &&
         completeScan_->quarantineGeneration == durableQuarantineGeneration_) {
         return merged_;

@@ -2,11 +2,15 @@
 // Copyright 2026 YAMS Contributors
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <array>
 #include <cstring>
 #include <filesystem>
+#include <future>
 #include <memory>
+#include <new>
+#include <optional>
 #include <set>
 #include <span>
 #include <sstream>
@@ -83,7 +87,12 @@ public:
             failNextStorePrefix_.clear();
             return yams::Error{yams::ErrorCode::IOError, "injected store failure"};
         }
-        return backend_.store(key, data);
+        auto stored = backend_.store(key, data);
+        if (stored && !failAfterStorePrefix_.empty() && key.starts_with(failAfterStorePrefix_)) {
+            failAfterStorePrefix_.clear();
+            return yams::Error{yams::ErrorCode::IOError, "injected error after store committed"};
+        }
+        return stored;
     }
 
     yams::Result<std::vector<std::byte>> retrieve(std::string_view key) const override {
@@ -118,6 +127,10 @@ public:
                                                          std::size_t limit) const override {
         ++listPageCalls_;
         largestPageRequested_ = std::max(largestPageRequested_, limit);
+        if (!failNextListPrefix_.empty() && prefix.starts_with(failNextListPrefix_)) {
+            failNextListPrefix_.clear();
+            return yams::Error{yams::ErrorCode::IOError, "injected listing failure"};
+        }
         return backend_.listPage(prefix, cursor, limit);
     }
 
@@ -125,6 +138,13 @@ public:
 
     std::future<yams::Result<void>> storeAsync(std::string_view key,
                                                std::span<const std::byte> data) override {
+        if (deferNextAsync_) {
+            REQUIRE_FALSE(deferredStore_.has_value());
+            deferNextAsync_ = false;
+            deferredResult_ = std::promise<yams::Result<void>>{};
+            deferredStore_ = DeferredStore{std::string(key), {data.begin(), data.end()}};
+            return deferredResult_.get_future();
+        }
         return backend_.storeAsync(key, data);
     }
 
@@ -154,8 +174,25 @@ public:
     }
     void failNextStore(std::string prefix) { failNextStorePrefix_ = std::move(prefix); }
     void failNextRemove(std::string prefix) { failNextRemovePrefix_ = std::move(prefix); }
+    void failAfterStore(std::string prefix) { failAfterStorePrefix_ = std::move(prefix); }
+    void failNextList(std::string prefix) { failNextListPrefix_ = std::move(prefix); }
+    void deferNextStoreAsync() { deferNextAsync_ = true; }
+    yams::Result<void> completeDeferredStore() {
+        REQUIRE(deferredStore_.has_value());
+        auto stored = backend_.store(deferredStore_->key, deferredStore_->value);
+        deferredResult_.set_value(stored);
+        deferredStore_.reset();
+        return stored;
+    }
 
 private:
+    struct DeferredStore {
+        std::string key;
+        std::vector<std::byte> value;
+    };
+    std::optional<DeferredStore> deferredStore_;
+    std::promise<yams::Result<void>> deferredResult_;
+    bool deferNextAsync_{false};
     yams::storage::FilesystemBackend backend_;
     mutable std::size_t blobRetrieveCalls_{0};
     mutable std::size_t blobExistsCalls_{0};
@@ -165,6 +202,8 @@ private:
     bool remote_{false};
     std::string failNextStorePrefix_;
     std::string failNextRemovePrefix_;
+    std::string failAfterStorePrefix_;
+    mutable std::string failNextListPrefix_;
 };
 
 struct CountingBackendFixture {
@@ -1073,6 +1112,287 @@ TEST_CASE("MemorySyncLoop commits bounded index windows only after a complete sw
     CHECK(reader.testingCachedBlobCount() == 1);
 }
 
+TEST_CASE("Exclusive filesystem listing snapshots follow committed key mutations",
+          "[memory-sync][listing-cache][mutations]") {
+    CountingBackendFixture fixture{"listing-mutations"};
+    auto cached = MemorySyncLoop::testing_countedBackend(fixture.backend, true, {}, {}, true);
+    const auto value = bytes("value");
+    for (const auto* key : {"index/b", "index/d", "index/f"}) {
+        REQUIRE(cached->store(key, value).has_value());
+    }
+    const auto warm = cached->listPage("index/", std::nullopt, 4);
+    REQUIRE(warm.has_value());
+    REQUIRE(warm.value().keys.size() == 3);
+    fixture.backend.resetListCalls();
+
+    SECTION("unrelated writes and ordered insertions preserve complete listings") {
+        REQUIRE(cached->store("blob/unrelated", value).has_value());
+        REQUIRE(cached->store("index/a", value).has_value());
+        REQUIRE(cached->store("index/d", bytes("replacement")).has_value());
+        REQUIRE(cached->remove("index/b").has_value());
+        const auto listed = cached->listPage("index/", std::nullopt, 4);
+        REQUIRE(listed.has_value());
+        CHECK(listed.value().keys == std::vector<std::string>{"index/a", "index/d", "index/f"});
+        const auto afterDeletedCursor = cached->listPage("index/", std::string_view{"index/b"}, 2);
+        REQUIRE(afterDeletedCursor.has_value());
+        CHECK(afterDeletedCursor.value().keys == std::vector<std::string>{"index/d", "index/f"});
+        CHECK_FALSE(afterDeletedCursor.value().nextCursor.has_value());
+        const auto replaced = cached->retrieve("index/d");
+        REQUIRE(replaced.has_value());
+        CHECK(text(replaced.value()) == "replacement");
+        CHECK(fixture.backend.listPageCalls() == 0);
+    }
+    SECTION("a failed store can have committed its key") {
+        fixture.backend.failAfterStore("index/");
+        CHECK_FALSE(cached->store("index/a", value).has_value());
+        const auto listed = cached->listPage("index/", std::nullopt, 4);
+        REQUIRE(listed.has_value());
+        CHECK(listed.value().keys ==
+              std::vector<std::string>{"index/a", "index/b", "index/d", "index/f"});
+        CHECK(fixture.backend.listPageCalls() > 0);
+    }
+    SECTION("failed store or remove must not invent a key-set change") {
+        fixture.backend.failNextStore("index/");
+        CHECK_FALSE(cached->store("index/a", value).has_value());
+        fixture.backend.failNextRemove("index/");
+        CHECK_FALSE(cached->remove("index/b").has_value());
+        const auto listed = cached->listPage("index/", std::nullopt, 4);
+        REQUIRE(listed.has_value());
+        CHECK(listed.value().keys == std::vector<std::string>{"index/b", "index/d", "index/f"});
+        CHECK(fixture.backend.listPageCalls() > 0);
+    }
+    SECTION("clear invalidates snapshots") {
+        REQUIRE(cached->clear().has_value());
+        const auto listed = cached->listPage("index/", std::nullopt, 4);
+        REQUIRE(listed.has_value());
+        CHECK(listed.value().keys.empty());
+        CHECK_FALSE(listed.value().nextCursor.has_value());
+        CHECK(fixture.backend.listPageCalls() > 0);
+    }
+    SECTION("zero limit still fails after a snapshot is complete") {
+        const auto listed = cached->listPage("index/", std::nullopt, 0);
+        REQUIRE_FALSE(listed.has_value());
+        CHECK(listed.error().code == yams::ErrorCode::InvalidArgument);
+    }
+}
+
+TEST_CASE("Exclusive filesystem listing snapshots never certify a cursor gap",
+          "[memory-sync][listing-cache][cursor]") {
+    CountingBackendFixture fixture{"listing-gap"};
+    auto cached = MemorySyncLoop::testing_countedBackend(fixture.backend, true, {}, {}, true);
+    const auto value = bytes("value");
+    for (const auto* key : {"index/b", "index/d", "index/f"}) {
+        REQUIRE(cached->store(key, value).has_value());
+    }
+    auto page = cached->listPage("index/", std::nullopt, 1);
+    REQUIRE(page.has_value());
+    REQUIRE(page.value().nextCursor == "index/b");
+    SECTION("insertion behind a partially collected cursor") {
+        REQUIRE(cached->store("index/a", value).has_value());
+    }
+    SECTION("failed listing followed by a non-contiguous request") {
+        fixture.backend.failNextList("index/");
+        const auto failed = cached->listPage("index/", std::string_view{"index/b"}, 1);
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error().code == yams::ErrorCode::IOError);
+        REQUIRE(cached->store("index/a", value).has_value());
+    }
+    // End a suffix scan, without re-collecting its missing initial keys.
+    page = cached->listPage("index/", std::string_view{"index/d"}, 1);
+    REQUIRE(page.has_value());
+    CHECK(page.value().keys == std::vector<std::string>{"index/f"});
+    CHECK_FALSE(page.value().nextCursor.has_value());
+    const auto full = cached->listPage("index/", std::nullopt, 4);
+    REQUIRE(full.has_value());
+    CHECK(full.value().keys ==
+          std::vector<std::string>{"index/a", "index/b", "index/d", "index/f"});
+}
+
+TEST_CASE("Exclusive filesystem listing snapshots respect key and byte budgets",
+          "[memory-sync][listing-cache][budget]") {
+    CountingBackendFixture fixture{"listing-budget"};
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 1;
+    std::size_t records = 0;
+    bool fits = false;
+    SECTION("key count boundary") {
+        records = GENERATE(std::size_t{64}, std::size_t{65});
+        fits = records == 64;
+    }
+    SECTION("key byte boundary") {
+        records = 4;
+        // Each index/10000-style key has eleven bytes; metadata overhead is separate.
+        limits.maxCacheBytes = GENERATE(std::size_t{43}, std::size_t{44});
+        fits = limits.maxCacheBytes == 44;
+    }
+    auto cached = MemorySyncLoop::testing_countedBackend(fixture.backend, true, limits, {}, true);
+    for (std::size_t i = 0; i < records; ++i) {
+        REQUIRE(cached->store("index/" + std::to_string(10'000 + i), bytes("value")).has_value());
+    }
+    std::optional<std::string> cursor;
+    std::size_t observed = 0;
+    do {
+        auto page = cached->listPage("index/", cursor, 1);
+        REQUIRE(page.has_value());
+        observed += page.value().keys.size();
+        cursor = page.value().nextCursor;
+    } while (cursor);
+    REQUIRE(observed == records);
+    CHECK(fixture.backend.largestPageRequested() == 1);
+    fixture.backend.resetListCalls();
+    const auto first = cached->listPage("index/", std::nullopt, 1);
+    REQUIRE(first.has_value());
+    CHECK(first.value().keys == std::vector<std::string>{"index/10000"});
+    CHECK(fixture.backend.listPageCalls() == (fits ? 0 : 1));
+}
+
+TEST_CASE("Optional listing cache allocation failure cannot fail a committed store",
+          "[memory-sync][listing-cache][allocation]") {
+    CountingBackendFixture fixture{"listing-allocation-store"};
+    bool armed = false;
+    int insertions = 0;
+    auto hook = [&](std::string_view stage) {
+        if (armed && stage == "store-insert" && ++insertions == 2) {
+            throw std::bad_alloc{};
+        }
+    };
+    auto cached = MemorySyncLoop::testing_countedBackend(fixture.backend, true, {}, hook, true);
+    REQUIRE(cached->store("index/b", bytes("one")).has_value());
+    REQUIRE(cached->listPage("", std::nullopt, 4).has_value());
+    REQUIRE(cached->listPage("index/", std::nullopt, 4).has_value());
+    armed = true;
+    REQUIRE(cached->store("index/a", bytes("two")).has_value());
+    CHECK(insertions == 2); // fail after the first of two overlapping snapshots was updated
+    for (const auto* prefix : {"", "index/"}) {
+        const auto listed = cached->listPage(prefix, std::nullopt, 4);
+        REQUIRE(listed.has_value());
+        CHECK(listed.value().keys == std::vector<std::string>{"index/a", "index/b"});
+    }
+}
+
+TEST_CASE("Optional listing cache allocation failure releases its key budget",
+          "[memory-sync][listing-cache][allocation]") {
+    CountingBackendFixture fixture{"listing-allocation-prefix"};
+    MemorySyncLimits limits;
+    limits.maxCacheBytes = 7; // exactly the byte contents of index/b
+    bool fail = true;
+    auto hook = [&](std::string_view stage) {
+        if (fail && stage == "prefix-insert") {
+            fail = false;
+            throw std::bad_alloc{};
+        }
+    };
+    auto cached = MemorySyncLoop::testing_countedBackend(fixture.backend, true, limits, hook, true);
+    REQUIRE(cached->store("index/b", bytes("one")).has_value());
+    const auto uncached = cached->listPage("index/", std::nullopt, 1);
+    REQUIRE(uncached.has_value());
+    CHECK(uncached.value().keys == std::vector<std::string>{"index/b"});
+    REQUIRE(cached->listPage("index/", std::nullopt, 1).has_value());
+    fixture.backend.resetListCalls();
+    REQUIRE(cached->listPage("index/", std::nullopt, 1).has_value());
+    CHECK(fixture.backend.listPageCalls() == 0);
+}
+
+TEST_CASE("Optional listing cache append allocation failure cannot certify a suffix",
+          "[memory-sync][listing-cache][allocation]") {
+    CountingBackendFixture fixture{"listing-allocation-append"};
+    bool fail = true;
+    auto hook = [&](std::string_view stage) {
+        if (fail && stage == "page-append") {
+            fail = false;
+            throw std::bad_alloc{};
+        }
+    };
+    auto cached = MemorySyncLoop::testing_countedBackend(fixture.backend, true, {}, hook, true);
+    for (const auto* key : {"index/b", "index/d", "index/f"}) {
+        REQUIRE(cached->store(key, bytes("value")).has_value());
+    }
+    REQUIRE(cached->listPage("index/", std::nullopt, 1).has_value());
+    REQUIRE(cached->listPage("index/", std::string_view{"index/b"}, 1).has_value());
+    REQUIRE(cached->listPage("index/", std::string_view{"index/d"}, 1).has_value());
+    const auto full = cached->listPage("index/", std::nullopt, 4);
+    REQUIRE(full.has_value());
+    CHECK(full.value().keys == std::vector<std::string>{"index/b", "index/d", "index/f"});
+}
+
+TEST_CASE("Exclusive non-filesystem listings preserve opaque cursors",
+          "[memory-sync][listing-cache][opaque]") {
+    BackendFixture fixture{"opaque-listing"};
+    struct OpaqueBackend final : yams::storage::FilesystemBackend {
+        bool remote{false};
+        bool reportsFilesystem{false};
+        mutable std::size_t calls{0};
+        std::string getType() const override {
+            return reportsFilesystem ? "filesystem" : "native-opaque";
+        }
+        bool isRemote() const override { return remote; }
+        yams::Result<yams::storage::ObjectListPage> listPage(std::string_view,
+                                                             std::optional<std::string_view> cursor,
+                                                             std::size_t limit) const override {
+            CHECK(limit == 1);
+            ++calls;
+            if (!cursor) {
+                return yams::storage::ObjectListPage{{"index/a"}, "opaque-token"};
+            }
+            if (*cursor == "opaque-token") {
+                return yams::storage::ObjectListPage{{"index/z"}, std::nullopt};
+            }
+            return yams::Error{yams::ErrorCode::InvalidArgument, "unexpected cursor"};
+        }
+    } backend;
+    const auto mode = GENERATE(0, 1, 2);
+    backend.remote = mode == 1;
+    backend.reportsFilesystem = mode != 0; // mode 2 is a local filesystem-typed decorator
+    REQUIRE(backend.initialize(fixture.config).has_value());
+    bool failCacheCopy = false;
+    auto hook = [&](std::string_view stage) {
+        if (failCacheCopy && stage == "exact-page-copy") {
+            failCacheCopy = false;
+            throw std::bad_alloc{};
+        }
+    };
+    auto cached = MemorySyncLoop::testing_countedBackend(backend, true, {}, hook);
+    const auto first = cached->listPage("index/", std::nullopt, 1);
+    REQUIRE(first.has_value());
+    REQUIRE(first.value().nextCursor == "opaque-token");
+    const auto last = cached->listPage("index/", first.value().nextCursor, 1);
+    REQUIRE(last.has_value());
+    CHECK(last.value().keys == std::vector<std::string>{"index/z"});
+    CHECK_FALSE(last.value().nextCursor.has_value());
+    const auto repeated = cached->listPage("index/", std::nullopt, 1);
+    REQUIRE(repeated.has_value());
+    CHECK(repeated.value().nextCursor == "opaque-token");
+    CHECK(backend.calls == 2);
+    failCacheCopy = true;
+    const auto afterAllocationFailure = cached->listPage("index/", std::nullopt, 1);
+    REQUIRE(afterAllocationFailure.has_value());
+    CHECK(afterAllocationFailure.value().nextCursor == "opaque-token");
+    CHECK(backend.calls == 3); // discard failed cache copy and retry the backend once
+}
+
+TEST_CASE("Asynchronous mutations permanently bypass exclusive listing snapshots",
+          "[memory-sync][listing-cache][async]") {
+    CountingBackendFixture fixture{"listing-async"};
+    auto cached = MemorySyncLoop::testing_countedBackend(fixture.backend, true, {}, {}, true);
+    REQUIRE(cached->store("index/a", bytes("one")).has_value());
+    REQUIRE(cached->listPage("index/", std::nullopt, 4).has_value());
+    fixture.backend.deferNextStoreAsync();
+    const auto payload = bytes("two");
+    auto pending = cached->storeAsync("index/b", payload);
+    const auto beforeCompletion = cached->listPage("index/", std::nullopt, 4);
+    REQUIRE(beforeCompletion.has_value());
+    CHECK(beforeCompletion.value().keys == std::vector<std::string>{"index/a"});
+    REQUIRE(fixture.backend.completeDeferredStore().has_value());
+    REQUIRE(pending.get().has_value());
+    fixture.backend.resetListCalls();
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        const auto afterCompletion = cached->listPage("index/", std::nullopt, 4);
+        REQUIRE(afterCompletion.has_value());
+        CHECK(afterCompletion.value().keys == std::vector<std::string>{"index/a", "index/b"});
+    }
+    CHECK(fixture.backend.listPageCalls() == 2);
+}
+
 TEST_CASE("MemorySyncLoop uses bounded backend pages instead of full listings",
           "[memory-sync][sync-loop][bounds]") {
     BackendFixture fixture{"native-pages"};
@@ -1127,7 +1447,7 @@ TEST_CASE("MemorySyncLoop checks cancellation and remote admission before listin
     CHECK(backend.listPageCalls() == 1);
 }
 
-TEST_CASE("MemorySyncLoop rescans an exclusive backend only after it writes",
+TEST_CASE("MemorySyncLoop reconciles exclusive mutations and reuses settled state",
           "[memory-sync][sync-loop][bounds]") {
     BackendFixture writerFixture{"exclusive-writer"};
     CountingBackendFixture readerFixture{"exclusive-reader"};
@@ -1160,7 +1480,9 @@ TEST_CASE("MemorySyncLoop rescans an exclusive backend only after it writes",
     auto afterIngress = reader.sync();
     REQUIRE(afterIngress.has_value());
     CHECK(afterIngress.value().contains("remote"));
-    CHECK(readerFixture.backend.listPageCalls() > 0);
+    const auto remote = reader.read("remote");
+    REQUIRE(remote.has_value());
+    CHECK(text(remote.value()) == "two");
 
     readerFixture.backend.resetListCalls();
     REQUIRE(reader.sync().has_value());
@@ -1169,7 +1491,7 @@ TEST_CASE("MemorySyncLoop rescans an exclusive backend only after it writes",
     REQUIRE(reader.publish("local", bytes("three")).has_value());
     auto afterPublish = reader.sync();
     REQUIRE(afterPublish.has_value());
-    CHECK(readerFixture.backend.listPageCalls() > 0);
+    CHECK(afterPublish.value().contains("remote"));
     const auto value = reader.read("local");
     REQUIRE(value.has_value());
     CHECK(text(value.value()) == "three");
@@ -1218,6 +1540,97 @@ TEST_CASE("MemorySyncLoop rescans a shared backend every cycle",
     REQUIRE(loop.sync().has_value());
     REQUIRE(loop.sync().has_value());
     CHECK(fixture.backend.listPageCalls() == 2);
+}
+
+TEST_CASE("MemorySyncLoop revisits direct ingress behind an active scan cursor",
+          "[memory-sync][sync-loop][bounds][active-cursor]") {
+    BackendFixture writerFixture{"active-cursor-writer"};
+    BackendFixture readerFixture{"active-cursor-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer"};
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 1;
+    MemorySyncLoop reader{readerFixture.backend,
+                          "reader",
+                          "local-test-corpus",
+                          1,
+                          false,
+                          limits,
+                          MemorySyncControl{.exclusiveBackend = true}};
+    REQUIRE(writer.publish("m", bytes("middle")).has_value());
+    REQUIRE(writer.publish("z", bytes("last")).has_value());
+    auto initial = writer.exportLocalDeltasAfter({});
+    REQUIRE(initial.has_value());
+    REQUIRE(reader.applyDeltas(initial.value().deltas).has_value());
+    REQUIRE(reader.sync().has_value()); // The one-record page leaves its cursor at index/m/....
+
+    REQUIRE(writer.publish("a", bytes("before cursor")).has_value());
+    auto changed = writer.exportLocalDeltasAfter({});
+    REQUIRE(changed.has_value());
+    REQUIRE(reader.applyDeltas(changed.value().deltas).has_value());
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        const auto reconciled = reader.syncFully();
+        REQUIRE(reconciled.has_value());
+        CHECK(reconciled.value().contains("a"));
+        CHECK(reconciled.value().contains("m"));
+        CHECK(reconciled.value().contains("z"));
+    }
+}
+
+TEST_CASE("MemorySyncLoop retains complete exclusive listings during active publication",
+          "[.listing-cost][memory-sync][sync-loop][bounds][slow][active-listing]") {
+    const auto records = GENERATE(std::size_t{511}, std::size_t{513}, std::size_t{1025});
+    BackendFixture fixture{"active-listing"};
+    const auto payload = bytes("seed payload");
+    const auto payloadHash = digest(payload);
+    REQUIRE(fixture.backend.store("blob/" + payloadHash, payload).has_value());
+    // Seed valid bound envelopes before giving the loop exclusive ownership. This avoids
+    // quadratic publication/reconciliation setup in a traversal characterization test.
+    for (std::size_t i = 0; i < records; ++i) {
+        MemoryIndexRecord record;
+        record.entryHash = payloadHash;
+        record.ts = {100, 0};
+        record.origin = "seed";
+        record.vv.observe(record.origin, i + 1);
+        record.corpusId = "local-test-corpus";
+        record.corpusEpoch = 1;
+        record.operationId = makeOperationId(record.origin, i + 1);
+        record.logicalKey = "seed/" + std::to_string(10'000 + i);
+        record.recordKind = std::string(kMemoryValueRecordKind);
+        const auto encoded = jsonBytes(nlohmann::json(record));
+        REQUIRE(fixture.backend.store("index/" + record.logicalKey + "/" + digest(encoded), encoded)
+                    .has_value());
+    }
+    MemorySyncLoop loop{fixture.backend,
+                        "reader",
+                        "local-test-corpus",
+                        1,
+                        false,
+                        {},
+                        MemorySyncControl{.exclusiveBackend = true}};
+    yams::storage::FilesystemListingStats stats;
+    stats.prefix = "index/";
+    struct RestoreObservation {
+        yams::storage::FilesystemListingStats* previous;
+        ~RestoreObservation() { yams::storage::testing_setFilesystemListingStats(previous); }
+    } restore{yams::storage::testing_setFilesystemListingStats(&stats)};
+
+    const auto warm = loop.syncFully();
+    REQUIRE(warm.has_value());
+    REQUIRE(warm.value().size() == records);
+    const auto warmWalks = stats.walks;
+    CHECK(warmWalks == (records + 511) / 512);
+    for (const auto* key : {"active/a", "active/z"}) {
+        REQUIRE(loop.publish(key, bytes("live value")).has_value());
+        const auto reconciled = loop.syncFully();
+        REQUIRE(reconciled.has_value());
+        CHECK(reconciled.value().contains(key));
+        CHECK(reconciled.value().contains("seed/10000"));
+    }
+    CAPTURE(records, warmWalks, stats.walks, stats.entriesVisited);
+    // Initial traversal stays paged. Subsequent key mutations must keep a completed,
+    // bounded listing coherent rather than forcing another whole-store walk per page.
+    CHECK(stats.walks == warmWalks);
+    CHECK(loop.quarantinedRecordCount() == 0);
 }
 
 TEST_CASE("MemorySyncLoop replaces a same-key winner within a tight cache budget",
@@ -1297,6 +1710,7 @@ TEST_CASE("MemorySyncLoop prefers causally-later writes", "[memory-sync][sync-lo
 
 TEST_CASE("authenticated memory sync rejects forged writer IDs before blob hydration",
           "[memory-sync][auth][security]") {
+    const bool exclusive = GENERATE(false, true);
     BackendFixture fixture{"auth-forged-writer"};
     const auto writerKey = generateWriterKey();
     const auto readerKey = generateWriterKey();
@@ -1330,18 +1744,29 @@ TEST_CASE("authenticated memory sync rejects forged writer IDs before blob hydra
 
     CountingFilesystemBackend readerBackend;
     REQUIRE(readerBackend.initialize(fixture.config).has_value());
-    MemorySyncLoop reader{readerBackend,
+    auto& readerStore = exclusive ? static_cast<yams::storage::IStorageBackend&>(fixture.backend)
+                                  : static_cast<yams::storage::IStorageBackend&>(readerBackend);
+    MemorySyncLoop reader{readerStore,
                           readerId,
                           "auth-corpus",
                           1,
                           false,
                           {},
-                          {},
+                          MemorySyncControl{.exclusiveBackend = exclusive},
                           {},
                           writerAuth(readerId, "reader-v1", readerKey, trust)};
     REQUIRE(reader.sync().has_value());
     CHECK(reader.authFailureCount() == 1);
-    CHECK(readerBackend.blobRetrieveCalls() == 1); // only the valid sibling hydrates
+    if (!exclusive) {
+        CHECK(readerBackend.blobRetrieveCalls() == 1); // only the valid sibling hydrates
+    }
+    CHECK(text(reader.readCached("secret").value()) == "authenticated payload");
+    REQUIRE(reader.publish("local/cache-write", bytes("trusted local value")).has_value());
+    const auto afterWrite = reader.syncFully();
+    REQUIRE(afterWrite.has_value());
+    CHECK(afterWrite.value().contains("secret"));
+    CHECK(afterWrite.value().contains("local/cache-write"));
+    CHECK(reader.quarantinedRecordCount() == 1);
     CHECK(text(reader.readCached("secret").value()) == "authenticated payload");
 }
 
@@ -2201,10 +2626,17 @@ TEST_CASE("durable quarantine is not blocked by malformed adapter payload",
 
 TEST_CASE("direct writer quarantine removes winners and survives restart",
           "[memory-sync][direct-delta][quarantine][restart]") {
+    const bool exclusive = GENERATE(false, true);
     BackendFixture writerFixture{"direct-quarantine-writer"};
     BackendFixture readerFixture{"direct-quarantine-reader"};
     MemorySyncLoop writer{writerFixture.backend, "writer", "quarantine-corpus", 1};
-    MemorySyncLoop reader{readerFixture.backend, "reader", "quarantine-corpus", 1};
+    MemorySyncLoop reader{readerFixture.backend,
+                          "reader",
+                          "quarantine-corpus",
+                          1,
+                          false,
+                          {},
+                          MemorySyncControl{.exclusiveBackend = exclusive}};
 
     REQUIRE(writer.publish("user/one", bytes("one")).has_value());
     REQUIRE(writer.publish("user/two", bytes("two")).has_value());
@@ -2213,6 +2645,7 @@ TEST_CASE("direct writer quarantine removes winners and survives restart",
     REQUIRE(reader.applyDeltas(batch.value().deltas).has_value());
     REQUIRE(reader.readCached("user/one").has_value());
     REQUIRE(reader.readCached("user/two").has_value());
+    REQUIRE(reader.syncFully().has_value()); // warm the exclusive key snapshot before quarantine
 
     auto quarantined = reader.quarantineWriter("writer", "reader", "test request");
     REQUIRE(quarantined.has_value());
@@ -2221,7 +2654,17 @@ TEST_CASE("direct writer quarantine removes winners and survives restart",
     CHECK_FALSE(reader.readCached("user/one").has_value());
     CHECK_FALSE(reader.readCached("user/two").has_value());
 
-    MemorySyncLoop restarted{readerFixture.backend, "reader", "quarantine-corpus", 1};
+    const auto filtered = reader.syncFully();
+    REQUIRE(filtered.has_value());
+    CHECK_FALSE(filtered.value().contains("user/one"));
+    CHECK_FALSE(filtered.value().contains("user/two"));
+    MemorySyncLoop restarted{readerFixture.backend,
+                             "reader",
+                             "quarantine-corpus",
+                             1,
+                             false,
+                             {},
+                             MemorySyncControl{.exclusiveBackend = exclusive}};
     REQUIRE(restarted.syncFully().has_value());
     CHECK(restarted.writerQuarantined("writer"));
     CHECK_FALSE(restarted.readCached("user/one").has_value());

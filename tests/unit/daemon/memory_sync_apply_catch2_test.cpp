@@ -10,6 +10,7 @@
 
 // pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -22,6 +23,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "../../common/test_helpers_catch2.h"
@@ -98,7 +100,8 @@ struct MeshNode {
     enum class KgReads { Uncounted, Counted };
 
     MeshNode(const fs::path& root, const std::string& nodeId, const fs::path& sharedStore,
-             KgReads kgReads = KgReads::Uncounted)
+             KgReads kgReads = KgReads::Uncounted, memory_sync::MemorySyncLimits syncLimits = {},
+             std::unique_ptr<storage::IStorageBackend> syncBackend = {})
         : name(nodeId) {
         const auto home = root / nodeId;
         fs::create_directories(home / "data");
@@ -133,9 +136,12 @@ struct MeshNode {
         kgStore = std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(graph.value()));
         manager->__test_setKgStore(kgStore);
 
+        if (!syncBackend) {
+            syncBackend = makeBackend(sharedStore);
+        }
         auto sync = std::make_unique<memory_sync::MemorySyncService>(
-            makeBackend(sharedStore),
-            memory_sync::MemorySyncConfig{nodeId, 60'000, std::string(kCorpus), 1});
+            std::move(syncBackend),
+            memory_sync::MemorySyncConfig{nodeId, 60'000, std::string(kCorpus), 1, syncLimits});
         sync_ = sync.get();
         manager->testingSetMemorySyncService(std::move(sync));
     }
@@ -594,6 +600,95 @@ TEST_CASE("Memory sync vector backfill publishes good vectors past an unpublisha
     const auto status = origin.manager->getMemorySyncStatus();
     REQUIRE(status.has_value());
     CHECK(status.value().apply.publishFailedCycles == 0);
+}
+
+TEST_CASE("Memory sync vector backfill progresses past a resident-limit rejection",
+          "[daemon][memory-sync][backfill][vector][limits]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    memory_sync::MemorySyncLimits limits;
+    const bool cacheBound = GENERATE(false, true);
+    if (cacheBound) {
+        limits.maxCacheBytes = 1024;
+    } else {
+        limits.maxValueBytes = 1024;
+    }
+    CAPTURE(cacheBound);
+    MeshNode origin{root.path, "origin", sharedStore, MeshNode::KgReads::Uncounted, limits};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+
+    auto oversized = makeVector("oversized-chunk", '1', "model");
+    oversized.content.assign(2048, 'x');
+    REQUIRE(vectors->insertVectorChecked(oversized).has_value());
+    REQUIRE(vectors->insertVectorChecked(makeVector("later-chunk", '2', "model")).has_value());
+
+    SECTION("catch-up sweep") {}
+    SECTION("committed vector queue") {
+        origin.manager->notifyMemorySyncEmbeddingsCommitted(
+            {std::string(64, '1'), std::string(64, '2')});
+    }
+
+    // The first value is valid vector data, but cannot fit this service's typed limit.
+    // Retrying it must not keep every later vector behind the sweep cursor.
+    origin.backfill(2);
+    view.refresh();
+    CHECK_FALSE(view.published("embedding/model/oversized-chunk"));
+    CHECK(view.published("embedding/model/later-chunk"));
+    REQUIRE(vectors->getVector("oversized-chunk").has_value());
+
+    // The local record is retained. A corrected value changes the vector generation and
+    // must be reached by a later sweep rather than permanently remembered as skipped.
+    REQUIRE(vectors->deleteVectorsByDocumentChecked(std::string(64, '1')).has_value());
+    REQUIRE(vectors->insertVectorChecked(makeVector("oversized-chunk", '1', "model")).has_value());
+    origin.backfill(4);
+    view.refresh();
+    CHECK(view.published("embedding/model/oversized-chunk"));
+}
+
+TEST_CASE("Memory sync vector backfill retries a backend validation failure without new vectors",
+          "[daemon][memory-sync][backfill][vector][retry]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    struct RejectingBackend final : storage::FilesystemBackend {
+        bool rejectBlobs{true};
+        Result<void> store(std::string_view key, std::span<const std::byte> value) override {
+            if (rejectBlobs && key.starts_with("blob/")) {
+                return Error{ErrorCode::InvalidArgument, "backend rejected the write"};
+            }
+            return FilesystemBackend::store(key, value);
+        }
+    };
+    auto backend = std::make_unique<RejectingBackend>();
+    storage::BackendConfig config;
+    config.localPath = sharedStore;
+    REQUIRE(backend->initialize(config).has_value());
+    auto* rejection = backend.get();
+    MeshNode origin{root.path, "origin",          sharedStore, MeshNode::KgReads::Uncounted,
+                    {},        std::move(backend)};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    REQUIRE(vectors->insertVectorChecked(makeVector("retry-chunk", '1', "model")).has_value());
+    REQUIRE(vectors->insertVectorChecked(makeVector("later-chunk", '2', "model")).has_value());
+
+    origin.backfill(2);
+    view.refresh();
+    CHECK_FALSE(view.published("embedding/model/retry-chunk"));
+    const auto status = origin.manager->getMemorySyncStatus();
+    REQUIRE(status.has_value());
+    CHECK(status.value().apply.publishFailedCycles > 0);
+
+    // The same error code is not enough to classify a row as unpublishable. Once the
+    // backend recovers, the unchanged source generation must still be retried.
+    rejection->rejectBlobs = false;
+    origin.backfill(4);
+    view.refresh();
+    CHECK(view.published("embedding/model/retry-chunk"));
+    CHECK(view.published("embedding/model/later-chunk"));
 }
 
 TEST_CASE("Memory sync vector apply stores good embeddings past a bad one",

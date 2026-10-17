@@ -51,6 +51,19 @@ public:
         return {};
     }
 
+    /// Distinguish a record-local size rejection from an unrelated backend failure.
+    /// Backfill uses this only after a failed publish, so healthy rows serialize once.
+    static Result<void> checkPublishable(const VectorRecord& record, std::size_t maxValueBytes) {
+        if (auto identity = checkPublishable(record); !identity) {
+            return identity.error();
+        }
+        if (nlohmann::json(toRecord(record)).dump().size() > maxValueBytes) {
+            return Error{ErrorCode::InvalidArgument,
+                         "embedding sync value exceeds configured resident limit"};
+        }
+        return {};
+    }
+
     /// Serialize a committed embedding and publish it under `embedding/<model>/<chunkId>`.
     Result<void> publish(const VectorRecord& record) {
         if (auto publishable = checkPublishable(record); !publishable) {
