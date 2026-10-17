@@ -17,6 +17,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 // pi-lens-ignore: fatal error
@@ -59,6 +60,9 @@ struct MemorySyncLimits {
     std::size_t maxMergedKeys{4096};
     std::size_t maxCacheBytes{std::size_t{64} * 1024 * 1024};
     std::size_t maxTrackedIdentities{8192};
+    /// Envelopes whose signature this loop has already checked. The set holds the
+    /// envelope digest, so an entry is roughly 150 bytes at capacity.
+    std::size_t maxVerifiedEnvelopes{65536};
     /// Maximum legacy index objects inspected while building missing counter entries.
     std::size_t maxHistoryMigrationObjects{8192};
     /// Maximum legacy envelope bytes retained while rebuilding one writer's counter index.
@@ -322,6 +326,12 @@ public:
     [[nodiscard]] std::size_t testingCachedBlobCount() const noexcept {
         return cachedBlobs_.size();
     }
+    [[nodiscard]] std::size_t testingVerifiedEnvelopeCount() const noexcept {
+        return verifiedEnvelopes_.size();
+    }
+    [[nodiscard]] std::size_t testingVerifyAttempts() const noexcept {
+        return fixedLayoutVerifyAttempts_;
+    }
 #endif
 
     Result<std::vector<std::byte>> read(std::string_view logicalKey);
@@ -578,6 +588,12 @@ private:
 
     void recordAuthFailure() noexcept;
 
+    /// Verify once per distinct envelope. The key is the digest of the whole serialized
+    /// envelope, signature included, so re-signing the same content cannot reuse an
+    /// entry. Only successful verifications are remembered, and a full or failing cache
+    /// falls back to verifying again.
+    bool verifiedEnvelope(const std::string& envelopeHash, const MemoryIndexRecord& record);
+
     /// Forwards to the injected backend and counts every mutation the loop makes, so an
     /// exclusive backend's complete scan can be reused without enumerating write paths.
     /// Exclusive filesystem listings retain one bounded, sorted snapshot per prefix; other
@@ -736,6 +752,14 @@ private:
     std::uint64_t durableQuarantineGeneration_{0};
     std::size_t authFailures_{0};
     bool legacyUnauthenticatedHistory_{false};
+    /// Positive-only memo of envelopes that already passed signature verification.
+    /// Keyed by the digest of the whole serialized envelope, signature included, so a
+    /// swapped signature cannot reuse an entry. Trust set, corpus, epoch and signature
+    /// policy are immutable for a loop, so rebuilding the loop is the invalidation.
+    std::unordered_set<std::string> verifiedEnvelopes_;
+    /// Verification attempts, cache hits included. Unconditional so the object layout
+    /// stays identical in library and test translation units.
+    std::size_t fixedLayoutVerifyAttempts_{0};
 };
 
 #ifdef YAMS_TESTING

@@ -2794,3 +2794,145 @@ TEST_CASE("authenticated memory sync accepts explicit key rotation and rejects e
     const auto oldRecord = nlohmann::json::parse(text(encoded.value())).get<MemoryIndexRecord>();
     CHECK_FALSE(epochTwoAuth->verify(oldRecord));
 }
+
+TEST_CASE("Signatures are verified once per distinct envelope", "[memory-sync][auth][cache]") {
+    BackendFixture fixture{"auth-cache-hit"};
+    const auto writerKey = generateWriterKey();
+    const auto readerKey = generateWriterKey();
+    const std::string writerId = "123e4567-e89b-42d3-a456-426614174010";
+    const std::string readerId = "123e4567-e89b-42d3-a456-426614174011";
+    const std::vector<TrustedWriterKey> trust = {
+        {writerId, "writer-v1", writerKey.publicPem, false},
+        {readerId, "reader-v1", readerKey.publicPem, false},
+    };
+    MemorySyncLoop writer{fixture.backend,
+                          writerId,
+                          "auth-corpus",
+                          1,
+                          false,
+                          {},
+                          {},
+                          {},
+                          writerAuth(writerId, "writer-v1", writerKey, trust)};
+    for (const auto* logical : {"alpha", "beta", "gamma"}) {
+        REQUIRE(writer.publish(logical, bytes("payload for cache")).has_value());
+    }
+
+    MemorySyncLoop reader{fixture.backend,
+                          readerId,
+                          "auth-corpus",
+                          1,
+                          false,
+                          {},
+                          MemorySyncControl{.exclusiveBackend = false},
+                          {},
+                          writerAuth(readerId, "reader-v1", readerKey, trust)};
+    REQUIRE(reader.syncFully().has_value());
+    const auto firstPass = reader.testingVerifyAttempts();
+    REQUIRE(firstPass == 3);
+    CHECK(reader.testingVerifiedEnvelopeCount() == 3);
+
+    REQUIRE(reader.syncFully().has_value());
+    CHECK(reader.testingVerifyAttempts() == firstPass); // nothing re-verified
+    CHECK(reader.testingVerifiedEnvelopeCount() == 3);
+}
+
+TEST_CASE("A replaced signature cannot reuse a verified envelope",
+          "[memory-sync][auth][cache][security]") {
+    BackendFixture fixture{"auth-cache-forged"};
+    const auto writerKey = generateWriterKey();
+    const auto readerKey = generateWriterKey();
+    const std::string writerId = "123e4567-e89b-42d3-a456-426614174012";
+    const std::string readerId = "123e4567-e89b-42d3-a456-426614174013";
+    const std::vector<TrustedWriterKey> trust = {
+        {writerId, "writer-v1", writerKey.publicPem, false},
+        {readerId, "reader-v1", readerKey.publicPem, false},
+    };
+    MemorySyncLoop writer{fixture.backend,
+                          writerId,
+                          "auth-corpus",
+                          1,
+                          false,
+                          {},
+                          {},
+                          {},
+                          writerAuth(writerId, "writer-v1", writerKey, trust)};
+    REQUIRE(writer.publish("delta", bytes("cache forgery payload")).has_value());
+
+    MemorySyncLoop reader{fixture.backend,
+                          readerId,
+                          "auth-corpus",
+                          1,
+                          false,
+                          {},
+                          MemorySyncControl{.exclusiveBackend = false},
+                          {},
+                          writerAuth(readerId, "reader-v1", readerKey, trust)};
+    REQUIRE(reader.syncFully().has_value());
+    REQUIRE(reader.testingVerifiedEnvelopeCount() == 1);
+
+    auto keys = fixture.backend.list("index/delta/");
+    REQUIRE(keys.has_value());
+    REQUIRE(keys.value().size() == 1);
+    const auto encoded = fixture.backend.retrieve(keys.value().front());
+    REQUIRE(encoded.has_value());
+    auto forged = nlohmann::json::parse(text(encoded.value()));
+    auto signature = forged["signature"].get<std::string>();
+    signature[0] = signature[0] == 'a' ? 'b' : 'a';
+    forged["signature"] = signature;
+    // Remove the original first: otherwise the intact record wins the merge and the
+    // corrupted signature is never examined.
+    REQUIRE(fixture.backend.remove(keys.value().front()).has_value());
+    // The old key is only used to derive the index prefix; the object is already gone.
+    (void)replaceEnvelope(fixture, keys.value().front(), forged);
+
+    REQUIRE(reader.syncFully().has_value());
+    // The envelope digest changed, so this is a new entry and a real verification that fails.
+    CHECK(reader.authFailureCount() == 1);
+    CHECK(reader.testingVerifiedEnvelopeCount() == 1);
+}
+
+TEST_CASE("Verification cache stays bounded and misses verify again",
+          "[memory-sync][auth][cache]") {
+    BackendFixture fixture{"auth-cache-bound"};
+    const auto writerKey = generateWriterKey();
+    const auto readerKey = generateWriterKey();
+    const std::string writerId = "123e4567-e89b-42d3-a456-426614174014";
+    const std::string readerId = "123e4567-e89b-42d3-a456-426614174015";
+    const std::vector<TrustedWriterKey> trust = {
+        {writerId, "writer-v1", writerKey.publicPem, false},
+        {readerId, "reader-v1", readerKey.publicPem, false},
+    };
+    MemorySyncLoop writer{fixture.backend,
+                          writerId,
+                          "auth-corpus",
+                          1,
+                          false,
+                          {},
+                          {},
+                          {},
+                          writerAuth(writerId, "writer-v1", writerKey, trust)};
+    for (const auto* logical : {"one", "two"}) {
+        REQUIRE(writer.publish(logical, bytes("bounded cache payload")).has_value());
+    }
+
+    MemorySyncLimits limits;
+    limits.maxVerifiedEnvelopes = 1;
+    MemorySyncLoop reader{fixture.backend,
+                          readerId,
+                          "auth-corpus",
+                          1,
+                          false,
+                          limits,
+                          MemorySyncControl{.exclusiveBackend = false},
+                          {},
+                          writerAuth(readerId, "reader-v1", readerKey, trust)};
+    REQUIRE(reader.syncFully().has_value());
+    const auto firstPass = reader.testingVerifyAttempts();
+    CHECK(firstPass == 2);
+    CHECK(reader.testingVerifiedEnvelopeCount() <= 1);
+
+    REQUIRE(reader.syncFully().has_value());
+    // Capacity 1 cannot hold both, so the second pass verifies again rather than trusting.
+    CHECK(reader.testingVerifyAttempts() == firstPass + 2);
+}
