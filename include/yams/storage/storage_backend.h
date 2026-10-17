@@ -148,6 +148,22 @@ public:
     virtual void resetCancel() noexcept {}
 };
 
+#ifdef YAMS_TESTING
+/// Observation of the real directory traversal, not calls through a backend wrapper.
+struct FilesystemListingStats {
+    // pi-lens-ignore: no-bit-fields -- ordinary optional field, not a bit-field
+    std::optional<std::string> prefix;
+    std::size_t pageCalls{0};
+    std::size_t walks{0};
+    std::size_t entriesVisited{0};
+    std::size_t matchingKeys{0};
+    std::size_t peakRetainedKeys{0};
+};
+
+/// Thread-local observation; returns the previous sink so tests can restore it with RAII.
+FilesystemListingStats* testing_setFilesystemListingStats(FilesystemListingStats* stats) noexcept;
+#endif
+
 /**
  * Local filesystem backend implementation
  */

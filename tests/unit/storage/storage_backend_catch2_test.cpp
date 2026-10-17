@@ -11,6 +11,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -593,6 +594,106 @@ TEST_CASE("FilesystemBackend - List", "[storage][backend][filesystem][list]") {
         REQUIRE(result);
         CHECK(result.value().empty());
     }
+}
+
+TEST_CASE("FilesystemBackend - Bounded page semantics",
+          "[storage][backend][filesystem][list][pagination]") {
+    TestDirectory testDir;
+    auto backend = createFilesystemBackend(testDir.subdir("storage"));
+    REQUIRE(backend != nullptr);
+
+    const auto zeroLimit = backend->listPage("index/", std::nullopt, 0);
+    REQUIRE_FALSE(zeroLimit.has_value());
+    CHECK(zeroLimit.error().code == ErrorCode::InvalidArgument);
+
+    const auto empty =
+        backend->listPage("index/", std::nullopt, std::numeric_limits<std::size_t>::max());
+    REQUIRE(empty.has_value());
+    CHECK(empty.value().keys.empty());
+    CHECK_FALSE(empty.value().nextCursor.has_value());
+
+    const std::vector<std::byte> value{std::byte{42}};
+    for (const auto* key : {"index/f", "other/ignored", "index/b", "index/h", "index/d"}) {
+        REQUIRE(backend->store(key, value).has_value());
+    }
+
+    const auto first = backend->listPage("index/", std::nullopt, 2);
+    REQUIRE(first.has_value());
+    CHECK(first.value().keys == std::vector<std::string>{"index/b", "index/d"});
+    REQUIRE(first.value().nextCursor == "index/d");
+
+    // Cursors are exclusive lexical boundaries, not required to name a live object.
+    REQUIRE(backend->remove("index/d").has_value());
+    REQUIRE(backend->store("index/c", value).has_value()); // inserted before the cursor
+    REQUIRE(backend->store("index/e", value).has_value()); // inserted after the cursor
+    const auto afterDeletedCursor = backend->listPage("index/", std::string_view{"index/d"}, 2);
+    REQUIRE(afterDeletedCursor.has_value());
+    CHECK(afterDeletedCursor.value().keys == std::vector<std::string>{"index/e", "index/f"});
+    REQUIRE(afterDeletedCursor.value().nextCursor == "index/f");
+
+    const auto exactFinalPage = backend->listPage("index/", std::string_view{"index/f"}, 1);
+    REQUIRE(exactFinalPage.has_value());
+    CHECK(exactFinalPage.value().keys == std::vector<std::string>{"index/h"});
+    CHECK_FALSE(exactFinalPage.value().nextCursor.has_value());
+
+    const auto unbounded =
+        backend->listPage("index/", std::nullopt, std::numeric_limits<std::size_t>::max());
+    REQUIRE(unbounded.has_value());
+    CHECK(unbounded.value().keys ==
+          std::vector<std::string>{"index/b", "index/c", "index/e", "index/f", "index/h"});
+    CHECK_FALSE(unbounded.value().nextCursor.has_value());
+}
+
+TEST_CASE("FilesystemBackend - Page-boundary traversal and retained keys",
+          "[storage][backend][filesystem][list][pagination][bounds]") {
+    const auto records = GENERATE(std::size_t{511}, std::size_t{513}, std::size_t{1025});
+    constexpr std::size_t kPageSize = 512;
+    TestDirectory testDir;
+    auto backend = createFilesystemBackend(testDir.subdir("storage"));
+    REQUIRE(backend != nullptr);
+    const std::vector<std::byte> value{std::byte{42}};
+    std::vector<std::string> expected;
+    expected.reserve(records);
+    for (std::size_t i = 0; i < records; ++i) {
+        expected.push_back("index/" + std::to_string(10'000 + i));
+        REQUIRE(backend->store(expected.back(), value).has_value());
+    }
+    // A prefix filter must not hide unrelated objects from traversal accounting.
+    REQUIRE(backend->store("blob/unrelated", value).has_value());
+    REQUIRE(backend->store("history/unrelated", value).has_value());
+
+    FilesystemListingStats stats;
+    stats.prefix = "index/";
+    struct RestoreObservation {
+        FilesystemListingStats* previous;
+        ~RestoreObservation() { testing_setFilesystemListingStats(previous); }
+    } restore{testing_setFilesystemListingStats(&stats)};
+
+    std::vector<std::string> actual;
+    std::optional<std::string> cursor;
+    std::size_t entriesPerWalk = 0;
+    do {
+        auto page = backend->listPage("index/", cursor, kPageSize);
+        REQUIRE(page.has_value());
+        CHECK(page.value().keys.size() <= kPageSize);
+        actual.insert(actual.end(), page.value().keys.begin(), page.value().keys.end());
+        cursor = page.value().nextCursor;
+        if (entriesPerWalk == 0) {
+            entriesPerWalk = stats.entriesVisited;
+        }
+    } while (cursor);
+
+    CAPTURE(records, stats.walks, stats.entriesVisited, stats.matchingKeys, stats.peakRetainedKeys);
+    CHECK(actual == expected);
+    const auto pages = (records + kPageSize - 1) / kPageSize;
+    CHECK(stats.pageCalls == pages);
+    CHECK(stats.walks == pages);
+    CHECK(entriesPerWalk >= records + 2);
+    CHECK(stats.entriesVisited == entriesPerWalk * pages);
+    CHECK(stats.matchingKeys == records * pages);
+    // One look-ahead key suffices to determine whether a continuation exists;
+    // a page must not retain the full matching namespace.
+    CHECK(stats.peakRetainedKeys <= kPageSize + 1);
 }
 
 // =============================================================================
