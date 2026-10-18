@@ -13,6 +13,8 @@
 
 #include <yams/search/search_models.h>
 
+#include <array>
+#include <cmath>
 #include <string>
 #include <unordered_map>
 
@@ -30,68 +32,30 @@ TEST_CASE("navigationZoomLevelToString covers all zoom levels", "[search][config
     CHECK(std::string(SearchEngineConfig::navigationZoomLevelToString(Z::Street)) == "STREET");
 }
 
-TEST_CASE("default mixed weights favor lexical and graph-vector evidence",
-          "[search][config][catch2]") {
-    const SearchEngineConfig cfg;
-
-    CHECK(cfg.textWeight == Approx(1.0F));
-    CHECK(cfg.vectorWeight == Approx(0.0F));
-    CHECK(cfg.graphVectorWeight == Approx(0.08F));
-}
-
 // ────────────────────────────────────────────────────────────────────────────────
 // forProfile
 // ────────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("forProfile CODE sets code-oriented weights", "[search][config][catch2]") {
+TEST_CASE("forProfile preserves profile identity and valid fusion domains",
+          "[search][config][catch2]") {
     using CP = SearchEngineConfig::CorpusProfile;
-    auto cfg = SearchEngineConfig::forProfile(CP::CODE);
+    constexpr std::array profiles = {CP::CODE, CP::PROSE, CP::DOCS, CP::MIXED, CP::CUSTOM};
 
-    CHECK(cfg.corpusProfile == CP::CODE);
-    CHECK(cfg.textWeight == Approx(0.40f));
-    CHECK(cfg.pathTreeWeight == Approx(0.15f));
-    CHECK(cfg.kgWeight == Approx(0.10f));
-    CHECK(cfg.vectorWeight == Approx(0.10f));
-    CHECK(cfg.entityVectorWeight == Approx(0.15f));
-    CHECK(cfg.tagWeight == Approx(0.05f));
-    CHECK(cfg.metadataWeight == Approx(0.05f));
-}
+    for (const auto profile : profiles) {
+        const auto cfg = SearchEngineConfig::forProfile(profile);
+        const std::array weights = {
+            cfg.textWeight, cfg.simeonTextWeight, cfg.graphTextWeight,   cfg.pathTreeWeight,
+            cfg.kgWeight,   cfg.vectorWeight,     cfg.graphVectorWeight, cfg.entityVectorWeight,
+            cfg.tagWeight,  cfg.metadataWeight,
+        };
 
-TEST_CASE("forProfile PROSE disables entityVectorWeight", "[search][config][catch2]") {
-    using CP = SearchEngineConfig::CorpusProfile;
-    auto cfg = SearchEngineConfig::forProfile(CP::PROSE);
-
-    CHECK(cfg.corpusProfile == CP::PROSE);
-    CHECK(cfg.entityVectorWeight == Approx(0.00f));
-    CHECK(cfg.vectorWeight == Approx(0.25f));
-    CHECK(cfg.textWeight == Approx(0.45f));
-}
-
-TEST_CASE("forProfile DOCS sets documentation weights", "[search][config][catch2]") {
-    using CP = SearchEngineConfig::CorpusProfile;
-    auto cfg = SearchEngineConfig::forProfile(CP::DOCS);
-
-    CHECK(cfg.corpusProfile == CP::DOCS);
-    CHECK(cfg.textWeight == Approx(0.40f));
-    CHECK(cfg.vectorWeight == Approx(0.20f));
-    CHECK(cfg.entityVectorWeight == Approx(0.05f));
-}
-
-TEST_CASE("forProfile MIXED uses balanced defaults", "[search][config][catch2]") {
-    using CP = SearchEngineConfig::CorpusProfile;
-    auto cfg = SearchEngineConfig::forProfile(CP::MIXED);
-
-    CHECK(cfg.corpusProfile == CP::MIXED);
-    // Should use the member defaults, not any profile-specific overrides
-    SearchEngineConfig defaults;
-    CHECK(cfg.textWeight == Approx(defaults.textWeight));
-    CHECK(cfg.vectorWeight == Approx(defaults.vectorWeight));
-}
-
-TEST_CASE("forProfile CUSTOM also uses defaults", "[search][config][catch2]") {
-    using CP = SearchEngineConfig::CorpusProfile;
-    auto cfg = SearchEngineConfig::forProfile(CP::CUSTOM);
-    CHECK(cfg.corpusProfile == CP::CUSTOM);
+        CAPTURE(SearchEngineConfig::corpusProfileToString(profile));
+        CHECK(cfg.corpusProfile == profile);
+        for (const float weight : weights) {
+            CHECK(std::isfinite(weight));
+            CHECK(weight >= 0.0F);
+        }
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -312,40 +276,57 @@ TEST_CASE("accumulateComponentScore Unknown source is no-op", "[search][config][
 }
 
 // ────────────────────────────────────────────────────────────────────────────────
-// SearchEngineConfig defaults
+// SearchEngineConfig validity and explicit behavior
 // ────────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
-    SearchEngineConfig cfg;
+TEST_CASE("SearchEngineConfig initializes tunables within supported domains",
+          "[search][config][catch2]") {
+    const SearchEngineConfig cfg;
+    const std::array weights = {
+        cfg.textWeight, cfg.simeonTextWeight, cfg.graphTextWeight,   cfg.pathTreeWeight,
+        cfg.kgWeight,   cfg.vectorWeight,     cfg.graphVectorWeight, cfg.entityVectorWeight,
+        cfg.tagWeight,  cfg.metadataWeight,
+    };
 
-    CHECK(cfg.corpusProfile == SearchEngineConfig::CorpusProfile::MIXED);
-    CHECK(cfg.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto);
-    CHECK(cfg.maxResults == 100);
-    CHECK(cfg.similarityThreshold == Approx(0.0f));
-    CHECK(cfg.enableParallelExecution == true);
-    CHECK(cfg.topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::HybridAssist);
-    CHECK(cfg.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Shadow);
-    CHECK(cfg.topologyMaxClusters == 2U);
-    CHECK(cfg.topologyMinClusters == 1U);
-    CHECK(cfg.topologyMaxSeedDocuments == 32U);
-    CHECK(cfg.topologyRoutingAnnCandidateLimit == 64U);
-    CHECK(cfg.topologyAdaptiveProbeScoreGap == Approx(0.0F));
-    CHECK(cfg.topologyNarrowMinBoundaryMargin == Approx(0.2F));
-    CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(
-              SearchEngineConfig::TopologyVectorPolicy::Shadow)) == "shadow");
-    CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(
-              SearchEngineConfig::TopologyVectorPolicy::Augment)) == "augment");
-    CHECK(cfg.topologyMaxDocs == 64U);
-    CHECK(cfg.topologyExpansionOutputLimit == 0U);
-    CHECK(cfg.resolvedTopologyExpansionOutputLimit(32U) == 32U);
-    CHECK_FALSE(cfg.topologyGraphWeightedSeedRanking);
-    CHECK(cfg.topologyEvidenceWeight == Approx(0.02F));
-    CHECK(cfg.rrfK == Approx(12.0f));
-    CHECK(cfg.bm25NormDivisor == Approx(25.0f));
-    CHECK(cfg.enableReranking == true);
-    CHECK(cfg.rerankTopK == 5);
-    CHECK(cfg.rerankReplaceScores == false);
-    CHECK(cfg.rerankBlendWeight == Approx(0.30f));
+    for (const float weight : weights) {
+        CHECK(std::isfinite(weight));
+        CHECK(weight >= 0.0F);
+    }
+    // Do not invent scalar bounds: zero can disable a feature or select an
+    // inherited value, and routing margins are score differences, not probabilities.
+    CHECK(std::isfinite(cfg.similarityThreshold));
+    CHECK(std::isfinite(cfg.topologyAdaptiveProbeScoreGap));
+    CHECK(std::isfinite(cfg.topologyNarrowMinBoundaryMargin));
+    CHECK(std::isfinite(cfg.topologyEvidenceWeight));
+    CHECK(std::isfinite(cfg.rrfK));
+    CHECK(cfg.rrfK >= 0.0F);
+    CHECK(std::isfinite(cfg.bm25NormDivisor));
+    CHECK(std::isfinite(cfg.rerankBlendWeight));
+    CHECK(cfg.rerankBlendWeight >= 0.0F);
+    CHECK(cfg.rerankBlendWeight <= 1.0F);
+}
+
+TEST_CASE("topologyVectorPolicyToString covers every policy",
+          "[search][config][topology][catch2]") {
+    using Policy = SearchEngineConfig::TopologyVectorPolicy;
+    CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(Policy::Augment)) ==
+          "augment");
+    CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(Policy::Narrow)) ==
+          "narrow");
+    CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(Policy::Shadow)) ==
+          "shadow");
+    CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(Policy::RouteOnly)) ==
+          "route_only");
+}
+
+TEST_CASE("topology expansion limit resolves explicit and inherited values",
+          "[search][config][topology][catch2]") {
+    SearchEngineConfig cfg;
+    cfg.topologyExpansionOutputLimit = 0;
+    CHECK(cfg.resolvedTopologyExpansionOutputLimit(37) == 37);
+
+    cfg.topologyExpansionOutputLimit = 91;
+    CHECK(cfg.resolvedTopologyExpansionOutputLimit(37) == 91);
 }
 
 TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",

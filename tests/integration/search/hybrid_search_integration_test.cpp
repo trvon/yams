@@ -1,9 +1,25 @@
-// Integration tests for hybrid search functionality requiring full daemon infrastructure
-// Covers semantic search, hybrid search with real embedding provider and vector DB
+// Integration tests for semantic/hybrid daemon request availability and model-free lexical
+// fallback through the public hybrid search request.
 #include "tests/integration/daemon/test_async_helpers.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/daemon.h>
+#include <yams/metadata/metadata_repository.h>
+
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <memory>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
 
 // Windows daemon IPC tests are unstable due to socket shutdown race conditions
 #ifdef _WIN32
@@ -21,8 +37,14 @@ namespace yams::test {
 // Fixture for integration tests requiring full daemon with hybrid search infrastructure
 class HybridSearchIntegrationFixture {
 public:
-    HybridSearchIntegrationFixture() {
-        // Start daemon with full search infrastructure
+    struct SeededDocument {
+        std::string hash;
+        std::string path;
+    };
+
+    explicit HybridSearchIntegrationFixture(bool enableModelProvider = true)
+        : harness_(makeHarnessOptions(enableModelProvider)) {
+        // Start daemon with the requested search infrastructure.
         bool started = harness_.start(std::chrono::seconds(30));
         if (!started) {
             throw std::runtime_error("Failed to start daemon for hybrid search integration tests");
@@ -88,13 +110,96 @@ public:
     DaemonClient* client() { return client_.get(); }
     const std::filesystem::path& dataDir() const { return harness_.dataDir(); }
 
+    std::vector<SeededDocument> seedModelFreeHybridCorpus() {
+        struct FixtureSpec {
+            std::string name;
+            std::string content;
+            std::vector<std::string> tags;
+        };
+
+        const std::array<FixtureSpec, 3> fixtures{{
+            {"hybrid_red_alpha.txt",
+             "hybridfallbacksentinel red alpha alpha alpha document",
+             {"red", "shared"}},
+            {"hybrid_red_beta.txt",
+             "hybridfallbacksentinel red beta beta document",
+             {"red", "shared"}},
+            {"hybrid_blue_gamma.txt",
+             "hybridfallbacksentinel blue gamma document",
+             {"blue", "shared"}},
+        }};
+
+        auto* daemon = harness_.daemon();
+        REQUIRE(daemon != nullptr);
+        auto* serviceManager = daemon->getServiceManager();
+        REQUIRE(serviceManager != nullptr);
+        auto metadataRepo = serviceManager->getMetadataRepo();
+        REQUIRE(metadataRepo != nullptr);
+
+        std::vector<SeededDocument> seeded;
+        seeded.reserve(fixtures.size());
+        for (const auto& fixture : fixtures) {
+            const auto path = harness_.dataDir() / fixture.name;
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            REQUIRE(output.is_open());
+            output << fixture.content;
+            output.close();
+            REQUIRE(output.good());
+
+            AddDocumentRequest request;
+            request.path = path.string();
+            request.name = fixture.name;
+            request.content = fixture.content;
+            request.tags = fixture.tags;
+            request.noEmbeddings = true;
+            request.waitForProcessing = true;
+
+            auto addResult = cli::run_sync(client_->streamingAddDocument(request), 10s);
+            REQUIRE(addResult);
+            REQUIRE_FALSE(addResult.value().hash.empty());
+
+            auto documentResult = metadataRepo->getDocumentByHash(addResult.value().hash);
+            REQUIRE(documentResult);
+            REQUIRE(documentResult.value().has_value());
+            const auto& document = *documentResult.value();
+
+            auto indexResult = metadataRepo->indexDocumentContent(document.id, fixture.name,
+                                                                  fixture.content, "text/plain");
+            REQUIRE(indexResult);
+
+            REQUIRE(document.fileName == fixture.name);
+            REQUIRE(document.sha256Hash == addResult.value().hash);
+            const auto expectedPath = std::filesystem::canonical(path).string();
+            REQUIRE(document.filePath == expectedPath);
+            seeded.push_back({addResult.value().hash, expectedPath});
+        }
+        return seeded;
+    }
+
 private:
+    static DaemonHarness::Options makeHarnessOptions(bool enableModelProvider) {
+        DaemonHarness::Options options;
+        options.enableModelProvider = enableModelProvider;
+        options.useMockModelProvider = enableModelProvider;
+        options.autoLoadPlugins = false;
+        if (!enableModelProvider) {
+            options.isolateEnvironment = true;
+            options.configureDaemon = [](DaemonConfig& config) {
+                config.enableModelProvider = false;
+                config.modelProviderRequired = false;
+                config.autoLoadPlugins = false;
+                config.downloadPolicy.enable = false;
+            };
+        }
+        return options;
+    }
+
     DaemonHarness harness_;
     std::unique_ptr<daemon::DaemonClient> client_;
 };
 
 // =============================================================================
-// Semantic Search Tests (require embedding provider and vector DB)
+// Semantic Search Availability Tests
 // =============================================================================
 
 TEST_CASE("SemanticSearch - Infrastructure availability", "[integration][search][semantic]") {
@@ -124,11 +229,13 @@ TEST_CASE("SemanticSearch - Infrastructure availability", "[integration][search]
     }
 }
 
-TEST_CASE("SemanticSearch - Similarity threshold filtering", "[integration][search][semantic]") {
+TEST_CASE("SemanticSearch - Similarity option availability smoke",
+          "[integration][search][semantic]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     HybridSearchIntegrationFixture fixture;
 
-    // Test semantic search with high similarity threshold
+    // Exercise a semantic request carrying a high similarity option. With no seeded corpus this
+    // checks request handling, not retrieval quality or threshold recall.
     SearchRequest req;
     req.query = "document indexing";
     req.searchType = "semantic";
@@ -142,7 +249,7 @@ TEST_CASE("SemanticSearch - Similarity threshold filtering", "[integration][sear
     if (!result) {
         REQUIRE(result.error().code == ErrorCode::InvalidState);
     } else {
-        // If embeddings available, verify all results meet threshold
+        // Preserve the optional semantic-provider behavior when one is available.
         for (const auto& hit : result.value().results) {
             REQUIRE(hit.score >= 0.9f);
         }
@@ -195,14 +302,14 @@ TEST_CASE("SemanticSearch - Very long query handling", "[integration][search][se
 }
 
 // =============================================================================
-// Hybrid Search Tests (require keyword + semantic fusion)
+// Hybrid Search Tests
 // =============================================================================
 
-TEST_CASE("HybridSearch - RRF fusion with real infrastructure", "[integration][search][hybrid]") {
+TEST_CASE("HybridSearch - Request availability smoke", "[integration][search][hybrid]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     HybridSearchIntegrationFixture fixture;
 
-    // Test Reciprocal Rank Fusion with both keyword and semantic results
+    // Exercise the public hybrid request. The unseeded corpus cannot establish two-leg fusion.
     SearchRequest req;
     req.query = "indexing pipeline";
     req.searchType = "hybrid";
@@ -215,24 +322,21 @@ TEST_CASE("HybridSearch - RRF fusion with real infrastructure", "[integration][s
     if (!result) {
         REQUIRE(result.error().code == ErrorCode::InvalidState);
     } else {
-        // Should return results (keyword fallback or actual hybrid)
+        // If the infrastructure is available, verify only the public response ordering contract.
         REQUIRE(result.value().results.size() <= 10);
-
-        // Results should be ranked by RRF score if hybrid engine available
-        if (result.value().results.size() > 1) {
-            // Verify descending score order
-            for (size_t i = 1; i < result.value().results.size(); ++i) {
-                REQUIRE(result.value().results[i - 1].score >= result.value().results[i].score);
-            }
+        for (size_t i = 1; i < result.value().results.size(); ++i) {
+            REQUIRE(result.value().results[i - 1].score >= result.value().results[i].score);
         }
     }
 }
 
-TEST_CASE("HybridSearch - Keyword-only fallback path", "[integration][search][hybrid][fallback]") {
+TEST_CASE("HybridSearch - Keyword fallback availability smoke",
+          "[integration][search][hybrid][fallback]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     HybridSearchIntegrationFixture fixture;
 
-    // When vector search unavailable, hybrid should fall back to keyword-only
+    // Exercise the request when vector search may be unavailable. With no seeded corpus this is
+    // only an availability smoke for the keyword fallback route.
     SearchRequest req;
     req.query = "pipeline";
     req.searchType = "hybrid";
@@ -241,12 +345,93 @@ TEST_CASE("HybridSearch - Keyword-only fallback path", "[integration][search][hy
 
     auto result = fixture.executeSearch(req);
 
-    // Should succeed with keyword fallback or return InvalidState
+    // Accept either the configured fallback response or an explicit unavailable response.
     if (result) {
         REQUIRE(result.value().results.size() <= 5);
     } else {
         REQUIRE(result.error().code == ErrorCode::InvalidState);
     }
+}
+
+TEST_CASE("HybridSearch - Model-free seeded lexical fallback behavior",
+          "[integration][search][hybrid][fallback]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
+    // This deliberately covers lexical fallback through a hybrid request, not semantic inference
+    // or two-leg RRF fusion.
+    HybridSearchIntegrationFixture fixture(/*enableModelProvider=*/false);
+    const auto seeded = fixture.seedModelFreeHybridCorpus();
+    REQUIRE(seeded.size() == 3);
+
+    // Fusion preserves content hash/path identity, not hydrated database row IDs or titles.
+    // Check the canonical public identity rather than assuming optional fields are hydrated.
+    std::map<std::string, HybridSearchIntegrationFixture::SeededDocument> expectedByHash;
+    for (const auto& document : seeded) {
+        expectedByHash.emplace(document.hash, document);
+    }
+    REQUIRE(expectedByHash.size() == 3);
+    const auto contentHash = [](const SearchResult& hit) -> const std::string& {
+        const auto hash = hit.metadata.find("hash");
+        REQUIRE(hash != hit.metadata.end());
+        return hash->second;
+    };
+
+    SearchRequest request;
+    request.query = "hybridfallbacksentinel";
+    request.searchType = "hybrid";
+    request.globalSearch = true;
+    request.limit = 10;
+
+    auto allResult = fixture.executeSearch(request);
+    REQUIRE(allResult);
+    const auto& allHits = allResult.value().results;
+    REQUIRE(allHits.size() == 3);
+    REQUIRE(allHits.size() >= 2);
+
+    std::set<std::string> actualHashes;
+    for (const auto& hit : allHits) {
+        const auto& hash = contentHash(hit);
+        CAPTURE(hash, hit.path);
+        REQUIRE(std::isfinite(hit.score));
+        const auto expected = expectedByHash.find(hash);
+        REQUIRE(expected != expectedByHash.end());
+        REQUIRE(hit.path == expected->second.path);
+        actualHashes.insert(hash);
+    }
+    std::set<std::string> expectedHashes;
+    for (const auto& document : seeded) {
+        expectedHashes.insert(document.hash);
+    }
+    REQUIRE(actualHashes == expectedHashes);
+    for (std::size_t i = 1; i < allHits.size(); ++i) {
+        REQUIRE(allHits[i - 1].score >= allHits[i].score);
+    }
+
+    request.tags = {"red", "shared"};
+    request.matchAllTags = true;
+    auto redResult = fixture.executeSearch(request);
+    REQUIRE(redResult);
+    REQUIRE(redResult.value().results.size() == 2);
+    const std::set<std::string> expectedRedHashes{seeded[0].hash, seeded[1].hash};
+    std::set<std::string> actualRedHashes;
+    for (const auto& hit : redResult.value().results) {
+        actualRedHashes.insert(contentHash(hit));
+    }
+    REQUIRE(actualRedHashes == expectedRedHashes);
+
+    request.tags = {"absent-hybrid-contract-tag"};
+    auto absentResult = fixture.executeSearch(request);
+    REQUIRE(absentResult);
+    REQUIRE(absentResult.value().results.empty());
+
+    request.tags.clear();
+    request.matchAllTags = false;
+    request.limit = 1;
+    auto limitedResult = fixture.executeSearch(request);
+    REQUIRE(limitedResult);
+    REQUIRE(limitedResult.value().results.size() == 1);
+    const auto& limitedHit = limitedResult.value().results.front();
+    REQUIRE(contentHash(limitedHit) == contentHash(allHits.front()));
+    REQUIRE(limitedHit.path == allHits.front().path);
 }
 
 TEST_CASE("HybridSearch - Engine unavailable detection", "[integration][search][hybrid][error]") {

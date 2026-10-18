@@ -328,6 +328,12 @@ Copyright (c) 2025
                        {"legal"});
     }
 
+    void populatePartiallyTaggedCorpus() {
+        createDocument("alpha.txt", "alpha tagged document", {"alpha", "shared"});
+        createDocument("beta.txt", "beta tagged document", {"shared"});
+        createDocument("gamma.txt", "gamma document without tags");
+    }
+
     void populateStageTimingCorpus(std::size_t docCount) {
         static constexpr const char* kCodeTerms[] = {
             "parser", "tokenizer", "scheduler", "allocator", "mutex",
@@ -599,12 +605,26 @@ TEST_CASE("CorpusStats: tag coverage from real documents", "[corpus_stats][searc
 
     auto stats = result.value();
 
-    // Documents were created with tags
-    // Note: Actual tag coverage depends on how StoreDocumentRequest.tags are stored
-    // This test verifies the metric is computed, not specific values
-    CHECK(stats.tagCount >= 0);
-    CHECK(stats.tagCoverage >= 0.0);
-    CHECK(stats.tagCoverage <= 1.0);
+    // Six code files have two tags each; README has one. These are assignments, not
+    // distinct tag names: repeated "cpp" and "source" tags still count per document.
+    REQUIRE(stats.docCount == 7);
+    CHECK(stats.tagCount == 13);
+    CHECK(stats.docsWithTags == 7);
+    CHECK(stats.tagCoverage == Approx(1.0));
+}
+
+TEST_CASE("CorpusStats: tag coverage includes untagged documents",
+          "[corpus_stats][search][integration]") {
+    CorpusStatsSearchFixture fix;
+    fix.populatePartiallyTaggedCorpus();
+
+    auto result = fix.metadataRepo()->getCorpusStats();
+    REQUIRE(result);
+    const auto& stats = result.value();
+    REQUIRE(stats.docCount == 3);
+    CHECK(stats.tagCount == 3);
+    CHECK(stats.docsWithTags == 2);
+    CHECK(stats.tagCoverage == Approx(2.0 / 3.0));
 }
 
 TEST_CASE("CorpusStats: JSON output for CLI/daemon", "[corpus_stats][search][integration]") {

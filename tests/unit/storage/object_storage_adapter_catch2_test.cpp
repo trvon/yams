@@ -1,7 +1,11 @@
 // Catch2 tests for object storage adapter
 // Migrated from GTest: object_storage_adapter_test.cpp
 
+#include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
+
+#include <algorithm>
+#include <memory>
 
 #include <yams/plugins/object_storage_adapter.hpp>
 #include <yams/plugins/object_storage_iface.hpp>
@@ -47,6 +51,8 @@ struct FakeBackend : public IObjectStorageBackend {
         Page<ObjectSummary> p;
         // Return items under prefix "a/"
         p.items.push_back(ObjectSummary{.key = std::string(prefix) + "b/c.txt", .size = 0});
+        // A second member of the same prefix also exercises JSON string escaping.
+        p.items.push_back(ObjectSummary{.key = std::string(prefix) + "b/sibling\".txt", .size = 0});
         p.items.push_back(ObjectSummary{.key = std::string(prefix) + "d/e.txt", .size = 0});
         p.items.push_back(ObjectSummary{.key = std::string(prefix) + "f.txt", .size = 0});
         return p;
@@ -59,12 +65,25 @@ struct FakeBackend : public IObjectStorageBackend {
     bool removed{false};
 };
 
+struct CAbiOwner {
+    yams_object_storage_v1* table;
+    void* handle;
+
+    ~CAbiOwner() {
+        if (table && handle) {
+            table->destroy(handle);
+        }
+        std::free(table);
+    }
+};
+
 } // namespace
 
 TEST_CASE("ObjectStorageAdapter list produces prefixes when delimiter provided",
           "[storage][object-storage][adapter][catch2]") {
     auto impl = std::make_shared<FakeBackend>();
     auto [table, handle] = expose_as_c_abi_with_state(impl);
+    CAbiOwner owner{table, handle};
     REQUIRE(table != nullptr);
     REQUIRE(handle != nullptr);
 
@@ -79,21 +98,23 @@ TEST_CASE("ObjectStorageAdapter list produces prefixes when delimiter provided",
     REQUIRE(rc == 0);
     REQUIRE(out != nullptr);
 
-    std::string json(out);
-    // Expect prefixes a/b/ and a/d/
-    CHECK(json.find("\"prefixes\":[") != std::string::npos);
-    CHECK(json.find("a/b/") != std::string::npos);
-    CHECK(json.find("a/d/") != std::string::npos);
-
-    std::free(out);
-    table->destroy(handle);
-    std::free(table);
+    std::unique_ptr<char, decltype(&std::free)> ownedOutput(out, &std::free);
+    const auto json = nlohmann::json::parse(ownedOutput.get());
+    auto items = json.at("items").get<std::vector<std::string>>();
+    auto prefixes = json.at("prefixes").get<std::vector<std::string>>();
+    std::sort(items.begin(), items.end());
+    std::sort(prefixes.begin(), prefixes.end());
+    CHECK(items ==
+          std::vector<std::string>{"a/b/c.txt", "a/b/sibling\".txt", "a/d/e.txt", "a/f.txt"});
+    // Exact arrays prove both prefixes exist once; a substring check could accept duplicates.
+    CHECK(prefixes == std::vector<std::string>{"a/b/", "a/d/"});
 }
 
 TEST_CASE("ObjectStorageAdapter forwards C ABI operations and rejects missing state",
           "[storage][object-storage][adapter][catch2]") {
     auto impl = std::make_shared<FakeBackend>();
     auto [table, handle] = expose_as_c_abi_with_state(impl);
+    CAbiOwner owner{table, handle};
     REQUIRE(table != nullptr);
     REQUIRE(handle != nullptr);
 
@@ -108,31 +129,29 @@ TEST_CASE("ObjectStorageAdapter forwards C ABI operations and rejects missing st
     CHECK(table->get(nullptr, "k", &outBuf, &outLen, nullptr) != 0);
     REQUIRE(table->get(handle, "k", &outBuf, &outLen, nullptr) == 0);
     REQUIRE(outBuf != nullptr);
-    CHECK(outLen == sizeof(payload));
+    std::unique_ptr<void, decltype(&std::free)> ownedBuffer(outBuf, &std::free);
+    REQUIRE(outLen == sizeof(payload));
     CHECK(std::memcmp(outBuf, payload, sizeof(payload)) == 0);
-    std::free(outBuf);
 
     char* metadata = nullptr;
     CHECK(table->head(nullptr, "k", &metadata, nullptr) != 0);
     REQUIRE(table->head(handle, "k", &metadata, nullptr) == 0);
     REQUIRE(metadata != nullptr);
-    std::string metadataJson(metadata);
-    CHECK(metadataJson.find("\"size\":4") != std::string::npos);
-    CHECK(metadataJson.find("fake-etag") != std::string::npos);
-    std::free(metadata);
+    std::unique_ptr<char, decltype(&std::free)> ownedMetadata(metadata, &std::free);
+    const auto metadataJson = nlohmann::json::parse(ownedMetadata.get());
+    CHECK(metadataJson.at("size").get<std::size_t>() == sizeof(payload));
+    CHECK(metadataJson.at("etag").get<std::string>() == "fake-etag");
 
     CHECK(table->del(nullptr, "k", nullptr) != 0);
     CHECK(table->del(handle, "k", nullptr) == 0);
     CHECK(impl->removed);
-
-    table->destroy(handle);
-    std::free(table);
 }
 
 TEST_CASE("ObjectStorageAdapter represents an empty object without an allocation",
           "[storage][object-storage][adapter][catch2]") {
     auto impl = std::make_shared<FakeBackend>();
     auto [table, handle] = expose_as_c_abi_with_state(impl);
+    CAbiOwner owner{table, handle};
     REQUIRE(table != nullptr);
     REQUIRE(handle != nullptr);
 
@@ -141,7 +160,4 @@ TEST_CASE("ObjectStorageAdapter represents an empty object without an allocation
     REQUIRE(table->get(handle, "empty", &outBuf, &outLen, nullptr) == 0);
     CHECK(outBuf == nullptr);
     CHECK(outLen == 0);
-
-    table->destroy(handle);
-    std::free(table);
 }

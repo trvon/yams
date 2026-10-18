@@ -43,9 +43,34 @@ void requireEntryPoints(void* handle) {
 }
 
 void requireHidden(void* handle, const std::vector<std::string>& names) {
+#ifndef _WIN32
+    // POSIX dlsym also searches dependencies. A system zlib symbol is not an
+    // export from the plugin's private copy; compare the defining images.
+    auto* entry = dlsym(handle, "yams_plugin_get_abi_version");
+    REQUIRE(entry != nullptr);
+    Dl_info pluginImage{};
+    REQUIRE(dladdr(entry, &pluginImage) != 0);
+#endif
     for (const auto& name : names) {
-        INFO("symbol must not be exported: " << name);
-        CHECK(dlsym(handle, name.c_str()) == nullptr);
+        INFO("symbol must not be exported by the plugin: " << name);
+        auto* symbol = dlsym(handle, name.c_str());
+#ifdef _WIN32
+        // GetProcAddress checks the DLL's export table, not its dependencies.
+        CHECK(symbol == nullptr);
+#else
+        bool definedByPlugin = false;
+        std::string definingImage;
+        if (symbol != nullptr) {
+            Dl_info symbolImage{};
+            REQUIRE(dladdr(symbol, &symbolImage) != 0);
+            definedByPlugin = symbolImage.dli_fbase == pluginImage.dli_fbase;
+            if (symbolImage.dli_fname != nullptr) {
+                definingImage = symbolImage.dli_fname;
+            }
+        }
+        CAPTURE(definingImage);
+        CHECK_FALSE(definedByPlugin);
+#endif
     }
 }
 

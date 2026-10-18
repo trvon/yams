@@ -169,6 +169,12 @@ test('retrieval_contract_unit',
   suite: ['unit', 'policy', 'benchmark'],
   timeout: 30,
 )
+test('meson_failure_reporter_unit',
+  python_exe,
+  args: files('scripts/test_report_meson_failures.py'),
+  suite: ['unit', 'ci'],
+  timeout: 30,
+)
 test('portability_policy_unit',
   python_exe,
   args: [portability_policy_tests],

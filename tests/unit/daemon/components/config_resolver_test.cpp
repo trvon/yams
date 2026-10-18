@@ -108,6 +108,38 @@ std::vector<EnvGuard> unsetEnvironment(std::initializer_list<const char*> names)
     return guards;
 }
 
+TuningConfig makeExplicitTuningBaseline() {
+    TuningConfig baseline;
+    baseline.targetCpuPercent = 173;
+    baseline.postIngestCapacity = 2345;
+    baseline.postIngestThreadsMin = 3;
+    baseline.postIngestThreadsMax = 11;
+    baseline.postIngestCoalesceMs = 7;
+    baseline.ingestStoreBatchSize = 31;
+    baseline.admitWarnThreshold = 1701;
+    baseline.admitStopThreshold = 2201;
+    baseline.controlIntervalMs = 777;
+    baseline.holdMs = 2222;
+    baseline.topologyAlgorithm = "multiscale";
+    baseline.tuneAdvisorOverridesResolved = false;
+    baseline.provenance.clear();
+    return baseline;
+}
+
+class RuntimeTuningResetGuard {
+public:
+    RuntimeTuningResetGuard() = default;
+    ~RuntimeTuningResetGuard() {
+        // Clear fixture overrides rather than publishing its arbitrary baseline
+        // into subsequent cases. Keep the normal coherent publication protocol.
+        const auto update = TuneAdvisor::beginConfiguredOverrideUpdate();
+        TuneAdvisor::resetConfiguredOverrides();
+    }
+
+    RuntimeTuningResetGuard(const RuntimeTuningResetGuard&) = delete;
+    RuntimeTuningResetGuard& operator=(const RuntimeTuningResetGuard&) = delete;
+};
+
 } // namespace
 
 TEST_CASE("TuneAdvisor bounded override readers share env and override behavior",
@@ -162,22 +194,43 @@ TEST_CASE("Fresh typed tuning lifecycle does not inherit prior process overrides
     EnvGuard resourceCompatibility{"YAMS_MEMORY_WARNING_PCT", ""};
     EnvGuard rpcCompatibility{"YAMS_POST_INGEST_RPC_QUEUE_MAX", ""};
     EnvGuard governorCompatibility{"YAMS_ENABLE_RESOURCE_GOVERNOR", ""};
+    const auto baseline = makeExplicitTuningBaseline();
+    const RuntimeTuningResetGuard reset;
 
-    TuneAdvisor::setIpcTimeoutMs(4321);
-    TuneAdvisor::setMemoryWarningThreshold(0.88);
-    TuneAdvisor::setPostIngestRpcQueueMax(333);
-    TuneAdvisor::setEnableResourceGovernor(false);
+    (void)ConfigResolver::applyRuntimeTuning({}, baseline);
+    const auto baselineIpcTimeout = TuneAdvisor::ipcTimeoutMs();
+    const auto baselineMemoryWarning = TuneAdvisor::memoryWarningThreshold();
+    const auto baselineRpcQueueMax = TuneAdvisor::postIngestRpcQueueMax();
+    const auto baselineGovernorEnabled = TuneAdvisor::enableResourceGovernor();
+    const auto overriddenIpcTimeout = baselineIpcTimeout == 4321u ? 4322u : 4321u;
+    const auto overriddenMemoryWarning = baselineMemoryWarning > 0.8 ? 0.61 : 0.91;
+    const auto overriddenRpcQueueMax = baselineRpcQueueMax == 333u ? 334u : 333u;
+
+    TuneAdvisor::setIpcTimeoutMs(overriddenIpcTimeout);
+    TuneAdvisor::setMemoryWarningThreshold(overriddenMemoryWarning);
+    TuneAdvisor::setPostIngestRpcQueueMax(overriddenRpcQueueMax);
+    TuneAdvisor::setEnableResourceGovernor(!baselineGovernorEnabled);
+    REQUIRE(TuneAdvisor::ipcTimeoutMs() == overriddenIpcTimeout);
+    REQUIRE(TuneAdvisor::memoryWarningThreshold() == Catch::Approx(overriddenMemoryWarning));
+    REQUIRE(TuneAdvisor::postIngestRpcQueueMax() == overriddenRpcQueueMax);
+    REQUIRE(TuneAdvisor::enableResourceGovernor() != baselineGovernorEnabled);
     const auto versionBefore = TuneAdvisor::configuredOverridesVersion();
     REQUIRE_FALSE(versionBefore & 1U);
 
-    const auto fresh = ConfigResolver::applyRuntimeTuning({}, TuningConfig{});
+    const auto fresh = ConfigResolver::applyRuntimeTuning({}, baseline);
 
-    CHECK((TuneAdvisor::configuredOverridesVersion() == versionBefore + 2));
+    CHECK(TuneAdvisor::configuredOverridesVersion() == versionBefore + 2);
+    CHECK(fresh.targetCpuPercent == baseline.targetCpuPercent);
+    CHECK(fresh.postIngestCapacity == baseline.postIngestCapacity);
+    CHECK(fresh.ingestStoreBatchSize == baseline.ingestStoreBatchSize);
+    CHECK(fresh.controlIntervalMs == baseline.controlIntervalMs);
+    CHECK(fresh.topologyAlgorithm == baseline.topologyAlgorithm);
+    CHECK(fresh.tuneAdvisorOverridesResolved);
     CHECK(fresh.provenance.empty());
-    CHECK((TuneAdvisor::ipcTimeoutMs() == 15000u));
-    CHECK((TuneAdvisor::memoryWarningThreshold() == Catch::Approx(0.75)));
-    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 256u));
-    CHECK(TuneAdvisor::enableResourceGovernor());
+    CHECK(TuneAdvisor::ipcTimeoutMs() == baselineIpcTimeout);
+    CHECK(TuneAdvisor::memoryWarningThreshold() == Catch::Approx(baselineMemoryWarning));
+    CHECK(TuneAdvisor::postIngestRpcQueueMax() == baselineRpcQueueMax);
+    CHECK(TuneAdvisor::enableResourceGovernor() == baselineGovernorEnabled);
 }
 
 TEST_CASE("Fresh runtime tuning resolution revokes removed configured overrides",
@@ -186,31 +239,52 @@ TEST_CASE("Fresh runtime tuning resolution revokes removed configured overrides"
     EnvGuard admissionCompatibility{"YAMS_ADMISSION_CONTROL", ""};
     EnvGuard memoryCompatibility{"YAMS_MEMORY_WARNING_PCT", ""};
     EnvGuard postIngestCompatibility{"YAMS_POST_INGEST_RPC_QUEUE_MAX", ""};
+    const auto baseline = makeExplicitTuningBaseline();
+    const RuntimeTuningResetGuard reset;
+
+    (void)ConfigResolver::applyRuntimeTuning({}, baseline);
+    const auto baselineIpcTimeout = TuneAdvisor::ipcTimeoutMs();
+    const auto baselineAdmissionControl = TuneAdvisor::enableAdmissionControl();
+    const auto baselineMemoryWarning = TuneAdvisor::memoryWarningThreshold();
+    const auto baselineRpcQueueMax = TuneAdvisor::postIngestRpcQueueMax();
+    const auto overriddenIpcTimeout = baselineIpcTimeout == 4321u ? 4322u : 4321u;
+    const auto overriddenMemoryWarning = baselineMemoryWarning > 0.8 ? 0.61 : 0.91;
+    const auto overriddenRpcQueueMax = baselineRpcQueueMax == 333u ? 334u : 333u;
 
     ConfigResolver::ConfigSections configured;
-    configured["tuning"] = {{"target_cpu_percent", "321"}};
-    configured["tuning.ipc"] = {{"timeout_ms", "4321"}};
-    configured["tuning.resource"] = {{"admission_control", "false"},
-                                     {"memory_warning_threshold", "0.91"}};
-    configured["tuning.post_ingest"] = {{"rpc_queue_max", "333"}};
+    configured["tuning"] = {{"target_cpu_percent", "321"}, {"post_ingest_capacity", "4096"}};
+    configured["tuning.ipc"] = {{"timeout_ms", std::to_string(overriddenIpcTimeout)}};
+    configured["tuning.resource"] = {
+        {"admission_control", baselineAdmissionControl ? "false" : "true"},
+        {"memory_warning_threshold", std::to_string(overriddenMemoryWarning)}};
+    configured["tuning.post_ingest"] = {{"rpc_queue_max", std::to_string(overriddenRpcQueueMax)}};
 
-    const auto applied = ConfigResolver::applyRuntimeTuning(configured, TuningConfig{});
-    REQUIRE((applied.provenance.at("tuning.ipc.timeout_ms") == "config:tuning.ipc.timeout_ms"));
-    CHECK((TuneAdvisor::ipcTimeoutMs() == 4321u));
-    CHECK_FALSE(TuneAdvisor::enableAdmissionControl());
-    CHECK((TuneAdvisor::memoryWarningThreshold() == Catch::Approx(0.91)));
-    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 333u));
+    const auto applied = ConfigResolver::applyRuntimeTuning(configured, baseline);
+    CHECK(applied.targetCpuPercent == 321u);
+    CHECK(applied.postIngestCapacity == 4096u);
+    REQUIRE(applied.provenance.at("tuning.target_cpu_percent") ==
+            "config:tuning.target_cpu_percent");
+    REQUIRE(applied.provenance.at("tuning.ipc.timeout_ms") == "config:tuning.ipc.timeout_ms");
+    CHECK(TuneAdvisor::ipcTimeoutMs() == overriddenIpcTimeout);
+    CHECK(TuneAdvisor::enableAdmissionControl() != baselineAdmissionControl);
+    CHECK(TuneAdvisor::memoryWarningThreshold() == Catch::Approx(overriddenMemoryWarning));
+    CHECK(TuneAdvisor::postIngestRpcQueueMax() == overriddenRpcQueueMax);
 
     const auto versionBeforeRemoval = TuneAdvisor::configuredOverridesVersion();
-    const auto reverted = ConfigResolver::applyRuntimeTuning({}, TuningConfig{});
+    const auto reverted = ConfigResolver::applyRuntimeTuning({}, baseline);
 
-    CHECK((TuneAdvisor::configuredOverridesVersion() == versionBeforeRemoval + 2));
-    CHECK((reverted.targetCpuPercent == 200u));
+    CHECK(TuneAdvisor::configuredOverridesVersion() == versionBeforeRemoval + 2);
+    CHECK(reverted.targetCpuPercent == baseline.targetCpuPercent);
+    CHECK(reverted.postIngestCapacity == baseline.postIngestCapacity);
+    CHECK(reverted.ingestStoreBatchSize == baseline.ingestStoreBatchSize);
+    CHECK(reverted.controlIntervalMs == baseline.controlIntervalMs);
+    CHECK(reverted.topologyAlgorithm == baseline.topologyAlgorithm);
+    CHECK(reverted.tuneAdvisorOverridesResolved);
     CHECK(reverted.provenance.empty());
-    CHECK((TuneAdvisor::ipcTimeoutMs() == 15000u));
-    CHECK(TuneAdvisor::enableAdmissionControl());
-    CHECK((TuneAdvisor::memoryWarningThreshold() == Catch::Approx(0.75)));
-    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 256u));
+    CHECK(TuneAdvisor::ipcTimeoutMs() == baselineIpcTimeout);
+    CHECK(TuneAdvisor::enableAdmissionControl() == baselineAdmissionControl);
+    CHECK(TuneAdvisor::memoryWarningThreshold() == Catch::Approx(baselineMemoryWarning));
+    CHECK(TuneAdvisor::postIngestRpcQueueMax() == baselineRpcQueueMax);
 }
 
 TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and reload",
