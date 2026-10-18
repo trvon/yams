@@ -41,6 +41,15 @@ jobs:
           git submodule update --init --depth 1 third_party/simeon || true
           git submodule update --init --depth 1 third_party/symspell || true
 
+      - name: Test package version and upgrade validation scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/scripts/test_package_upgrade_validation.py -v
+          bash -n scripts/build-deb.sh \
+            scripts/local-ci/package-validate-checks.sh \
+            scripts/local-ci/package-validate.sh
+
       - name: Install static analysis tools
         shell: bash
         run: |
@@ -835,6 +844,8 @@ jobs:
         if: ${{ always() && (steps.meson_tests_unix.outcome == 'failure' || steps.meson_tests_windows.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure') }}
         shell: bash
         run: |
+          python tests/scripts/report_meson_failures.py "${{ env.BUILD_DIR }}" || \
+            echo "Meson failure reporter encountered an error; continuing gate enforcement." >&2
           echo "Meson tests reported failures; enforcing job failure." >&2
           exit 1
 
