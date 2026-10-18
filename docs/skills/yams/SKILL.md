@@ -35,7 +35,7 @@ yams cat --hash <hash>          # Inspect saved content on stdout
 yams get --hash <hash> -o <path> # Export only when a file copy is needed
 
 # Graph
-yams graph --explore <query>   # Agent context: related files, relationships, snippets
+yams graph --explore <file>    # KG-backed current-file snippets and incident edges
 yams graph --name <file>       # Related documents of a file
 yams graph --list-types        # List node types with counts
 yams graph --relations         # List relation types with counts
@@ -94,7 +94,7 @@ yams list --limit 10           # Recent indexed files
 
 1. **Code patterns** → `yams grep` (fast, regex/literal; use `--cwd .` for repo scoping)
 2. **Semantic/concept** → `yams search` (embeddings/hybrid)
-3. **Codebase shape / blast radius** → `yams graph --explore` from a search/grep hit
+3. **Selected-file context** → `yams graph --explore` from a search/grep hit; for callers and related tests, use scoped grep or LSP
 4. **Path/tree/topology inspection** → use `yams graph`, not retired top-level `tree`
 5. **No results from grep** → Try `yams search`, then follow `graph_explore_hint` when present
 6. **Saved memory content** → search/list discovers candidates; `yams cat --hash <hash>` hydrates the selected artifact
@@ -278,26 +278,39 @@ yams session close
 
 ## Graph Queries
 
-Use graph after search/grep finds a likely entry point. Graph answers "what is connected to this?" and should guide local reads, not replace them.
+Use search/grep to select a concrete file before graph exploration. Run from the
+repository root: explore scopes to the current working directory, not a detected
+repository root. Use `--global` only for an intentional cross-project query.
 
 ### Agent Graph Context
 
 ```bash
-# Preferred follow-up after search/grep hints: related files + line-numbered snippets
-yams graph --explore "authenticateUser" --max-files 3
+# Follow a selected file, not a broad concept or ambiguous basename.
+yams graph --explore src/auth/login.ts --max-files 3
 
-# Explore a file path when the result path is more useful than a query term
-yams graph --explore src/auth/login.ts --max-files 8
-
-# JSON for tool consumers
-yams graph --explore "RequestHandler" --json
+# Preserve the absolute result path when projects contain the same relative path.
+yams graph --explore /path/to/repo/src/auth/login.ts --max-files 3 --json
 ```
 
-Notes:
-
-- `yams search` and `yams grep` results may emit `graph_explore_hint`; run that exact command before broad local search.
-- `--explore` is budgeted for agents: entry documents, related files, relationship summaries, and line-numbered snippets.
-- If `--explore` fails or looks stale, fall back to raw traversal plus local reads.
+- Search/grep may emit `graph_explore_hint`. Verify that its target names the
+  selected file; a display-relative path is not proof of project identity.
+  Hints for files outside the current directory include `--global`; execute
+  these only when intentionally following that cross-project result.
+- Explore resolves existing KG labels/aliases, then hydrates bounded spans from
+  current local files. It does not automatically select neighboring files from
+  relationships or provide a complete definition/caller/test analysis.
+- Whole-file path/document versions share one hydration context per local path.
+  Distinct segments and explicit spans retain their identities; relationships
+  from contributing file nodes remain subject to the relationship budget.
+  Candidate lookup is bounded, not an exhaustive inventory of matching nodes.
+- Inspect `warnings`, file modes, and `truncated`. `--max-files` limits snippet
+  files; entry labels and relationship metadata also contribute to output size.
+  A snippet is not a full-file read or an indexed snapshot.
+- An existing file can have no matching KG node. Empty output does not establish
+  that the file, symbol, or caller is absent. Use a targeted local read/grep.
+- Unreadable local source cannot be hydrated by explore. Use `yams cat --hash`
+  when an indexed snapshot is needed, and keep snapshot versus working-tree
+  provenance explicit. Do not repair or reindex just to make a lookup succeed.
 
 ### Raw Graph Structure
 
@@ -317,8 +330,10 @@ yams graph --list-type document --scope-cwd --limit 50
 
 ### File Relationships
 
-Code-symbol nodes (functions, classes) and their `calls`/`defined_in`/`includes` edges were
-removed in v0.20. For callers or blast radius, use `yams grep "<symbol>" --cwd .`.
+Automatic code-symbol extraction was removed in v0.20. Symbolic node/edge types
+can still exist in custom-ingested graphs or surviving records; their presence
+does not prove current automatic extraction or up-to-date references. For callers
+or blast radius, use `yams grep "<symbol>" --cwd .` and verify with local reads/LSP.
 
 ```bash
 # Related documents (semantic neighbours, versions, renames) by path or hash.

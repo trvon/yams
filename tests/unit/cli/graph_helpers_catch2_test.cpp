@@ -89,6 +89,21 @@ TEST_CASE("Graph helpers: file presentation bundles display path and hint", "[cl
           "yams graph --explore \"src/cli/commands/search_command.cpp\"");
 }
 
+TEST_CASE("Graph helpers: explore hints preserve external target identity",
+          "[cli][graph][retrieval-contract]") {
+    const auto cwd = std::filesystem::temp_directory_path() / "graph_hint_local";
+    const auto external =
+        (cwd.parent_path() / "graph_hint_other" / "src" / "shared.cpp").generic_string();
+    const auto presentation = yams::cli::describeFileForCli(external, {}, cwd);
+
+    CHECK(presentation.displayPath == "src/shared.cpp");
+    CHECK(presentation.graphExploreHint == "yams graph --explore \"" + external + "\" --global");
+    CHECK(yams::cli::buildGraphExploreHint("../graph_hint_other/src/shared.cpp", {}, 2, cwd) ==
+          "yams graph --explore \"" + external + "\" --global");
+    CHECK(yams::cli::buildGraphExploreHint((cwd / "src" / "shared.cpp").string(), {}, 2, cwd) ==
+          "yams graph --explore \"src/shared.cpp\"");
+}
+
 TEST_CASE("Graph helpers: label search hint uses filename stem", "[cli][graph]") {
     const auto cwd = std::filesystem::current_path();
     const auto path = (cwd / "src" / "app" / "services" / "grep_service.cpp").string();

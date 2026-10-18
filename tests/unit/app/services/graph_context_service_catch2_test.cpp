@@ -141,11 +141,12 @@ struct GraphContextServiceFixture {
     }
 
     // Mirrors the path node ingestion writes for every indexed file.
-    std::int64_t upsertPathNode(const std::filesystem::path& path) {
+    std::int64_t upsertPathNode(const std::filesystem::path& path, std::string nodeKey = {},
+                                std::string type = "path") {
         KGNode node;
-        node.nodeKey = "path:" + path.string();
+        node.nodeKey = nodeKey.empty() ? "path:" + path.string() : std::move(nodeKey);
         node.label = path.string();
-        node.type = "path";
+        node.type = std::move(type);
         node.properties = nlohmann::json{{"path", path.string()}, {"is_directory", false}}.dump();
         auto nodeId = kgStore->upsertNode(node);
         REQUIRE((nodeId.has_value()));
@@ -430,6 +431,79 @@ TEST_CASE("GraphContextService explore applies snippet budgets and omits code wh
     CHECK((omitted.value().snippetRenderMicros == 0));
 }
 
+TEST_CASE("GraphContextService explore reports line-only clipping as truncated",
+          "[services][graph][context][retrieval-contract]") {
+    GraphContextServiceFixture fixture;
+    const auto path =
+        fixture.writeSource("src/line_budget.cpp",
+                            {"int lineBudget() {", "    int value = 1;", "    return value;", "}"});
+    fixture.upsertSymbols({fixture.symbol(path, "lineBudget", "demo::lineBudget", 1, 4)});
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    GraphExploreRequest req;
+    req.query = "lineBudget";
+    req.budget.maxSnippetLines = 2;
+    const auto result = service->explore(req);
+
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().files.size() == 1);
+    const auto& snippet = result.value().files.front();
+    CHECK(snippet.startLine == 1);
+    CHECK(snippet.endLine == 2);
+    CHECK(snippet.content.find("return value") == std::string::npos);
+    CHECK(snippet.truncated);
+    CHECK(result.value().truncated);
+}
+
+TEST_CASE("GraphContextService explore reports clipped path-node context as truncated",
+          "[services][graph][context][retrieval-contract]") {
+    GraphContextServiceFixture fixture;
+    const auto path = fixture.writeSource("docs/path_budget.md", {"one", "two", "three"});
+    fixture.upsertPathNode(path);
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    GraphExploreRequest req;
+    req.query = path.string();
+    req.budget.maxSnippetLines = 2;
+    const auto result = service->explore(req);
+
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().files.size() == 1);
+    CHECK(result.value().files.front().endLine == 2);
+    CHECK(result.value().files.front().truncated);
+    CHECK(result.value().truncated);
+
+    req.budget.maxSnippetLines = 3;
+    const auto complete = service->explore(req);
+    REQUIRE(complete.has_value());
+    REQUIRE(complete.value().files.size() == 1);
+    CHECK_FALSE(complete.value().files.front().truncated);
+    CHECK_FALSE(complete.value().truncated);
+}
+
+TEST_CASE("GraphContextService explore propagates unavailable-source truncation",
+          "[services][graph][context][retrieval-contract]") {
+    GraphContextServiceFixture fixture;
+    const auto path = fixture.testDir / "src" / "not_present.cpp";
+    fixture.upsertPathNode(path);
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    GraphExploreRequest req;
+    req.query = path.string();
+    const auto result = service->explore(req);
+
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().files.size() == 1);
+    CHECK(result.value().files.front().mode == GraphContextSnippetMode::Omitted);
+    CHECK(result.value().files.front().truncated);
+    CHECK(result.value().truncated);
+    REQUIRE(result.value().warnings.size() == 1);
+    CHECK(result.value().warnings.front().find("Could not read source file") != std::string::npos);
+}
+
 TEST_CASE("GraphContextService explore clamps zero-based symbol lines",
           "[services][graph][context]") {
     GraphContextServiceFixture fixture;
@@ -476,6 +550,250 @@ TEST_CASE("GraphContextService explore tolerates stale symbol lines past end of 
     CHECK(result.value().files.front().content.empty());
     REQUIRE((result.value().warnings.size() == 1));
     CHECK((result.value().warnings.front().find("stale source location") != std::string::npos));
+}
+
+TEST_CASE("GraphContextService explore finds scoped files despite a saturated global label pool",
+          "[services][graph][context][graph-ranking]") {
+    GraphContextServiceFixture fixture;
+    const auto target = fixture.writeSource("local/AGENTS.md", {"# Repository instructions"});
+    fixture.upsertPathNode(target, "path:file:" + target.string(), "file");
+    const auto summary = fixture.writeSource("local/.pi/summary.md", {"AGENTS.md was mentioned"});
+    const auto summaryId = fixture.upsertNodeFor(
+        fixture.symbol(summary, "# AGENTS.md mention", "summary", 1, 1, "text_segment"));
+    KGAlias alias;
+    alias.nodeId = summaryId;
+    alias.alias = "AGENTS.md";
+    REQUIRE(fixture.kgStore->addAlias(alias).has_value());
+    for (int i = 0; i < 80; ++i) {
+        fixture.upsertNodeFor(
+            fixture.symbol(fixture.testDir / "foreign" / (std::to_string(i) + ".md"),
+                           "# AGENTS.md foreign " + std::to_string(i),
+                           "foreign" + std::to_string(i), 1, 1, "text_segment"));
+    }
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    GraphExploreRequest req;
+    req.query = "AGENTS.md";
+    req.scopePathPrefix = target.parent_path().string();
+    req.budget.maxFiles = 1;
+    req.budget.maxSymbols = 2;
+    const auto result = service->explore(req);
+    REQUIRE(result.has_value());
+    REQUIRE_FALSE(result.value().entrySymbols.empty());
+    CHECK(result.value().entrySymbols.front().filePath == target.string());
+    CHECK(result.value().entrySymbols.front().exactMatch);
+    REQUIRE(result.value().files.size() == 1);
+    CHECK(result.value().files.front().filePath == target.string());
+
+    // The ordinary bounded lookup cannot see this target: direct-key seeding,
+    // not merely reordering the same candidate pool, is what restores it.
+    GraphSymbolLookupRequest bounded;
+    bounded.symbol = req.query;
+    bounded.file = target.string();
+    bounded.budget.maxSymbols = 64;
+    const auto control = service->lookupSymbol(bounded);
+    REQUIRE(control.has_value());
+    CHECK(control.value().matches.empty());
+}
+
+TEST_CASE("GraphContextService explore budgets distinct file contexts rather than versions",
+          "[services][graph][context][graph-ranking]") {
+    GraphContextServiceFixture fixture;
+    const auto first = fixture.writeSource("src/a_guide.cpp", {"int firstGuide() {}"});
+    const auto second = fixture.writeSource("src/z_guide.cpp", {"int secondGuide() {}"});
+    fixture.upsertPathNode(first, "path:file:" + first.string(), "file");
+    for (int i = 0; i < 40; ++i) {
+        fixture.upsertPathNode(first, "path:snapshot-" + std::to_string(i) + ":" + first.string(),
+                               i % 2 == 0 ? "path" : "document");
+    }
+    fixture.upsertPathNode(second, "path:file:" + second.string(), "file");
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    GraphExploreRequest req;
+    req.query = "guide";
+    req.budget.maxFiles = 2;
+    req.budget.maxSymbols = 2;
+    const auto result = service->explore(req);
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().entrySymbols.size() == 2);
+    CHECK(result.value().entrySymbols[0].filePath != result.value().entrySymbols[1].filePath);
+    REQUIRE(result.value().files.size() == 2);
+    CHECK(result.value().files[0].filePath == first.string());
+    CHECK(result.value().files[1].filePath == second.string());
+    CHECK_FALSE(result.value().truncated);
+
+    GraphSymbolLookupRequest lookup;
+    lookup.symbol = "guide";
+    lookup.budget.maxSymbols = 64;
+    const auto raw = service->lookupSymbol(lookup);
+    REQUIRE(raw.has_value());
+    CHECK(raw.value().matches.size() == 42);
+}
+
+TEST_CASE("GraphContextService explore preserves ambiguous basenames and distinct same-file spans",
+          "[services][graph][context][graph-ranking]") {
+    GraphContextServiceFixture fixture;
+    const auto first = fixture.writeSource("one/AGENTS.md", {"first", "second"});
+    const auto second = fixture.writeSource("two/AGENTS.md", {"other"});
+    fixture.upsertPathNode(first, "path:file:" + first.string(), "file");
+    fixture.upsertPathNode(second, "path:file:" + second.string(), "file");
+    fixture.upsertNodeFor(
+        fixture.symbol(first, "AGENTS.md section", "firstSection", 1, 1, "text_segment"));
+    fixture.upsertNodeFor(
+        fixture.symbol(first, "AGENTS.md section", "secondSection", 2, 2, "text_segment"));
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    GraphExploreRequest req;
+    req.query = "AGENTS.md";
+    req.scopePathPrefix = fixture.testDir.string();
+    const auto result = service->explore(req);
+    REQUIRE(result.has_value());
+    CHECK(result.value().entrySymbols.size() == 4);
+    CHECK(result.value().files.size() == 2);
+    CHECK(result.value().entrySymbols.front().exactMatch);
+
+    req.query = "two/AGENTS.md";
+    req.budget.maxFiles = 1;
+    const auto relative = service->explore(req);
+    REQUIRE(relative.has_value());
+    REQUIRE(relative.value().files.size() == 1);
+    CHECK(relative.value().files.front().filePath == second.string());
+    CHECK(relative.value().entrySymbols.front().exactMatch);
+
+    req.query = "../outside/AGENTS.md";
+    const auto scopedMiss = service->explore(req);
+    REQUIRE(scopedMiss.has_value());
+    CHECK(scopedMiss.value().files.empty());
+}
+
+TEST_CASE("GraphContextService explore preserves edges from duplicate file representations",
+          "[services][graph][context][graph-review]") {
+    GraphContextServiceFixture fixture;
+    const auto path = fixture.writeSource("src/guide.cpp", {"int guide() {}"});
+    const auto live = fixture.upsertPathNode(path, "path:logical:" + path.string());
+    const auto snapshot = fixture.upsertPathNode(path, "path:snapshot:" + path.string());
+    KGNode blob;
+    blob.nodeKey = "blob:guide";
+    blob.label = "guide blob";
+    blob.type = "blob";
+    const auto blobId = fixture.kgStore->upsertNode(blob);
+    REQUIRE(blobId.has_value());
+    KGEdge edge;
+    edge.srcNodeId = live;
+    edge.dstNodeId = snapshot;
+    edge.relation = "path_version";
+    REQUIRE(fixture.kgStore->addEdge(edge).has_value());
+    edge.srcNodeId = snapshot;
+    edge.dstNodeId = blobId.value();
+    edge.relation = "has_version";
+    REQUIRE(fixture.kgStore->addEdge(edge).has_value());
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    GraphExploreRequest req;
+    req.query = path.string();
+    const auto result = service->explore(req);
+    REQUIRE(result.has_value());
+    CHECK(result.value().entrySymbols.size() == 1);
+    CHECK(result.value().files.size() == 1);
+    CHECK(result.value().relationships.size() == 2);
+    CHECK_FALSE(result.value().truncated);
+}
+
+TEST_CASE("GraphContextService explore retains segment provenance and document spans",
+          "[services][graph][context][graph-review]") {
+    GraphContextServiceFixture fixture;
+    const auto path = fixture.writeSource("src/guide.cpp", {"first", "second"});
+    for (const auto* region : {"title", "summary"}) {
+        KGNode node;
+        node.nodeKey = std::string("segment:") + region + ":guide";
+        node.type = "text_segment";
+        node.label = "guide";
+        node.properties = nlohmann::json{{"source_file", path.string()},
+                                         {"region", region},
+                                         {"start_offset", 0},
+                                         {"end_offset", 5}}
+                              .dump();
+        REQUIRE(fixture.kgStore->upsertNode(node).has_value());
+    }
+    fixture.upsertNodeFor(fixture.symbol(path, "guide", "firstParagraph", 1, 1, "document"));
+    fixture.upsertNodeFor(fixture.symbol(path, "guide", "secondParagraph", 2, 2, "document"));
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    GraphExploreRequest req;
+    req.query = "guide";
+    const auto result = service->explore(req);
+    REQUIRE(result.has_value());
+    CHECK(result.value().entrySymbols.size() == 4);
+    REQUIRE(result.value().files.size() == 1);
+    CHECK(result.value().files.front().symbols.size() == 4);
+}
+
+TEST_CASE("GraphContextService external file queries require explicit global scope",
+          "[services][graph][context][graph-review]") {
+    GraphContextServiceFixture fixture;
+    const auto local = fixture.writeSource("local/src/shared.cpp", {"local"});
+    const auto external = fixture.writeSource("other/src/shared.cpp", {"external"});
+    fixture.upsertPathNode(local, "path:file:" + local.string(), "file");
+    fixture.upsertPathNode(external, "path:file:" + external.string(), "file");
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    GraphExploreRequest req;
+    req.query = external.string();
+    req.scopePathPrefix = (fixture.testDir / "local").string();
+    const auto scoped = service->explore(req);
+    REQUIRE(scoped.has_value());
+    CHECK(scoped.value().files.empty());
+    req.scopePathPrefix.clear();
+    const auto global = service->explore(req);
+    REQUIRE(global.has_value());
+    REQUIRE(global.value().files.size() == 1);
+    CHECK(global.value().files.front().filePath == external.string());
+}
+
+TEST_CASE("GraphContextService contributor relationships respect output and disabled budgets",
+          "[services][graph][context][graph-review]") {
+    GraphContextServiceFixture fixture;
+    const auto path = fixture.writeSource("src/edge_cap.cpp", {"int edgeCap() {}"});
+    const auto live = fixture.upsertPathNode(path, "path:logical:" + path.string());
+    for (int i = 0; i < 40; ++i) {
+        const auto snapshot = fixture.upsertPathNode(path, "path:snapshot-" + std::to_string(i) +
+                                                               ":" + path.string());
+        KGEdge edge;
+        edge.srcNodeId = live;
+        edge.dstNodeId = snapshot;
+        edge.relation = "path_version";
+        REQUIRE(fixture.kgStore->addEdge(edge).has_value());
+        for (int j = 0; j < 3; ++j) {
+            KGNode blob;
+            blob.nodeKey = "blob:cap-" + std::to_string(i) + "-" + std::to_string(j);
+            blob.label = "edge target";
+            blob.type = "blob";
+            const auto id = fixture.kgStore->upsertNode(blob);
+            REQUIRE(id.has_value());
+            edge.srcNodeId = snapshot;
+            edge.dstNodeId = id.value();
+            edge.relation = "has_version";
+            REQUIRE(fixture.kgStore->addEdge(edge).has_value());
+        }
+    }
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    GraphExploreRequest req;
+    req.query = path.string();
+    req.includeCode = false;
+    const auto capped = service->explore(req);
+    REQUIRE(capped.has_value());
+    CHECK(capped.value().entrySymbols.size() == 1);
+    CHECK(capped.value().relationships.size() == 128);
+    CHECK(capped.value().truncated);
+
+    req.budget.includeRelationships = false;
+    const auto disabled = service->explore(req);
+    REQUIRE(disabled.has_value());
+    CHECK(disabled.value().entrySymbols.size() == 1);
+    CHECK(disabled.value().relationships.empty());
+    CHECK_FALSE(disabled.value().truncated);
+
+    req.budget.includeRelationships = true;
+    req.budget.maxSymbols = 0;
+    const auto empty = service->explore(req);
+    REQUIRE(empty.has_value());
+    CHECK(empty.value().entrySymbols.empty());
+    CHECK(empty.value().relationships.empty());
+    CHECK(empty.value().files.empty());
 }
 
 TEST_CASE("GraphContextService explore favors multi-term file coverage",
