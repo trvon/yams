@@ -876,6 +876,24 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         metadata::MetadataSyncAdapter metadataAdapter{*repository, *memorySync_};
         auto published = metadataAdapter.publish(document, tags);
         if (!published) {
+            // A document record larger than the resident limit can never publish under the
+            // current limits, and throwing here pins documentIdCursor so the same document is
+            // retried every cycle forever, re-reconciling the whole store each time. Confirm the
+            // oversize from the actual bytes rather than the error text, then skip it so the
+            // pass reaches later documents. Vectors already do the same.
+            const bool exceedsResidentLimit =
+                published.error().code == ErrorCode::InvalidArgument &&
+                metadata::MetadataSyncAdapter::serializedRecordBytes(document, tags) >
+                    memorySync_->maxPublishValueBytes();
+            if (exceedsResidentLimit) {
+                spdlog::warn("[ServiceManager] memory_sync backfill skipping document {} "
+                             "(record exceeds the resident publish limit): {}",
+                             document.id, published.error().message);
+                state.documentIdCursor = std::max(state.documentIdCursor, document.id);
+                ++skippedDocuments;
+                notifyMemorySyncStage("backfill.skip_document");
+                return true;
+            }
             if (isUnrecoverableBlobFailure(published.error().code)) {
                 spdlog::warn("[ServiceManager] memory_sync backfill skipping document {} "
                              "(record unrecoverable): {}",

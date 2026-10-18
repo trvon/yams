@@ -113,6 +113,26 @@ DocumentInfo makeDocument(const std::string& path, const std::string& hash) {
     return info;
 }
 
+TEST_CASE("serialized record size matches what publish writes", "[metadata][sync][limits]") {
+    const auto info = makeDocument("/corpus/note.md", std::string(kDocHash));
+    const std::vector<std::pair<std::string, MetadataValue>> tags{
+        {"topic", MetadataValue{std::string{"sync"}}},
+    };
+    // publish() dumps the record's JSON; the size helper must report that same payload so a
+    // resident-limit rejection can be classified from bytes rather than error text.
+    const auto base = MetadataSyncAdapter::serializedRecordBytes(info, tags);
+    CHECK(base > 0);
+
+    const auto withMoreTags = [&] {
+        auto copy = tags;
+        for (int i = 0; i < 32; ++i) {
+            copy.emplace_back("tag" + std::to_string(i), MetadataValue{std::string(64, 'x')});
+        }
+        return copy;
+    }();
+    CHECK(MetadataSyncAdapter::serializedRecordBytes(info, withMoreTags) > base);
+}
+
 } // namespace
 
 TEST_CASE("metadata sync payload is independent of local derivation readiness",

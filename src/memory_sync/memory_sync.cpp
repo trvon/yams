@@ -701,6 +701,28 @@ Result<std::size_t> MemorySyncLoop::replayReadyErases() {
     return static_cast<std::size_t>(ready);
 }
 
+bool MemorySyncLoop::verifiedEnvelope(const std::string& envelopeHash,
+                                      const MemoryIndexRecord& record) {
+    if (verifiedEnvelopes_.find(envelopeHash) != verifiedEnvelopes_.end()) {
+        return true;
+    }
+    ++fixedLayoutVerifyAttempts_; // counts real verifications, not lookups
+    if (!writerAuth_ || !writerAuth_->verify(record)) {
+        return false;
+    }
+    try {
+        if (verifiedEnvelopes_.size() >= limits_.maxVerifiedEnvelopes) {
+            // Bounded residency: drop the whole set rather than evict selectively. A miss
+            // costs one verification, never an acceptance.
+            verifiedEnvelopes_.clear();
+        }
+        verifiedEnvelopes_.insert(envelopeHash);
+    } catch (...) {
+        verifiedEnvelopes_.clear();
+    }
+    return true;
+}
+
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
     YAMS_ZONE_SCOPED_N("memory_sync.sync");
     if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
@@ -760,7 +782,8 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
             quarantine(key, "index envelope exceeds configured size limit");
             continue;
         }
-        if (hashContent(fetched.value()) != expectedRecordHash) {
+        const auto envelopeHash = hashContent(fetched.value());
+        if (envelopeHash != expectedRecordHash) {
             quarantine(key, "index envelope digest mismatch");
             continue;
         }
@@ -810,7 +833,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         const bool authenticatedSchema =
             record.value().schemaVersion == kAuthenticatedMemoryIndexSchemaVersion;
         if ((authenticatedSchema || authenticationRequired) &&
-            (!writerAuth_ || !writerAuth_->verify(record.value()))) {
+            !verifiedEnvelope(envelopeHash, record.value())) {
             recordAuthFailure();
             quarantine(key, "writer authentication failed");
             continue;
