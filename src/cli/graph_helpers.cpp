@@ -252,8 +252,22 @@ std::string buildGraphExploreHint(const std::string& filePath, const std::string
     if (filePath.empty()) {
         return {};
     }
-    const auto displayPath = projectPathForCli(filePath, cwd);
-    return "yams graph --explore \"" + displayPath + "\"";
+    auto target = filePath;
+    bool global = false;
+    try {
+        const auto original = (cwd / std::filesystem::path(filePath)).lexically_normal();
+        const auto relative = original.lexically_relative(cwd.lexically_normal());
+        global = relative.empty() || *relative.begin() == "..";
+        const auto displayPath = projectPathForCli(filePath, cwd);
+        // A display projection can shorten paths from another repository. Only use it
+        // as an executable target when it still resolves to the original path.
+        target = (cwd / std::filesystem::path(displayPath)).lexically_normal() == original
+                     ? displayPath
+                     : original.generic_string();
+    } catch (const std::exception& e) {
+        spdlog::trace("Graph explore hint path parsing failed for '{}': {}", filePath, e.what());
+    }
+    return "yams graph --explore \"" + target + "\"" + (global ? " --global" : "");
 }
 
 std::string buildGraphSearchHint(const std::string& value, const std::filesystem::path& cwd) {
