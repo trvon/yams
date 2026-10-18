@@ -2103,7 +2103,8 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
         !applyLimit("max_value_bytes", policy.limits.maxValueBytes) ||
         !applyLimit("max_merged_keys", policy.limits.maxMergedKeys) ||
         !applyLimit("max_cache_bytes", policy.limits.maxCacheBytes) ||
-        !applyLimit("max_tracked_identities", policy.limits.maxTrackedIdentities)) {
+        !applyLimit("max_tracked_identities", policy.limits.maxTrackedIdentities) ||
+        !applyLimit("max_scan_bytes", policy.limits.maxScanBytes)) {
         config.memorySync.enabled = false;
         return false;
     }

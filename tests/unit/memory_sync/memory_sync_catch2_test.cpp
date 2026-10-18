@@ -99,8 +99,14 @@ public:
         if (key.starts_with("blob/")) {
             ++blobRetrieveCalls_;
         }
-        return backend_.retrieve(key);
+        auto result = backend_.retrieve(key);
+        if (key.starts_with("index/") && afterIndexRetrieve) {
+            afterIndexRetrieve();
+        }
+        return result;
     }
+
+    std::function<void()> afterIndexRetrieve;
 
     yams::Result<bool> exists(std::string_view key) const override {
         if (key.starts_with("blob/")) {
@@ -1112,6 +1118,244 @@ TEST_CASE("MemorySyncLoop commits bounded index windows only after a complete sw
     CHECK(reader.testingCachedBlobCount() == 1);
 }
 
+TEST_CASE("A sweep budget is aggregate across pages and fails without committing a prefix",
+          "[memory-sync][scan-safety][bounds]") {
+    BackendFixture fixture{"scan-byte-budget"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.publish("a", bytes("old snapshot")).has_value());
+    auto first = fixture.backend.list("index/");
+    REQUIRE(first.has_value());
+    REQUIRE(first.value().size() == 1);
+    auto envelope = fixture.backend.retrieve(first.value().front());
+    REQUIRE(envelope.has_value());
+
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = GENERATE(std::size_t{1}, std::size_t{4096});
+    limits.maxScanBytes = first.value().front().size() + envelope.value().size();
+    MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false, limits};
+    REQUIRE(reader.syncFully().has_value()); // the exact byte boundary is admitted
+    const auto committed = reader.replicationState().commitments;
+    REQUIRE(writer.publish("b", bytes("new snapshot")).has_value());
+
+    const auto failed = reader.syncFully();
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error().code == yams::ErrorCode::ResourceExhausted);
+    CHECK(reader.mergedRecordCount() == 1);
+    CHECK(reader.replicationState().commitments == committed);
+    CHECK(reader.replicationState().version.counters().size() == 1);
+    CHECK(reader.replicationState().version.get("writer") == 1);
+    CHECK(reader.testingScanCandidateCount() == 0);
+    CHECK(reader.testingScanBytes() == 0);
+    CHECK(text(reader.readCached("a").value()) == "old snapshot");
+
+    // Removing the over-budget object lets the same loop restart from the beginning.
+    auto added = fixture.backend.list("index/b/");
+    REQUIRE(added.has_value());
+    REQUIRE(added.value().size() == 1);
+    REQUIRE(fixture.backend.remove(added.value().front()).has_value());
+    REQUIRE(reader.syncFully().has_value());
+    CHECK(reader.mergedRecordCount() == 1);
+}
+
+TEST_CASE("Sweep byte admission handles zero and maximum size without overflow",
+          "[memory-sync][scan-safety][bounds]") {
+    BackendFixture fixture{"scan-byte-extremes"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.publish("a", bytes("one")).has_value());
+    MemorySyncLimits limits;
+    limits.maxScanBytes = GENERATE(std::size_t{0}, std::numeric_limits<std::size_t>::max());
+    MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false, limits};
+    const auto result = reader.syncFully();
+    if (limits.maxScanBytes == 0) {
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == yams::ErrorCode::ResourceExhausted);
+        CHECK(reader.mergedRecordCount() == 0);
+    } else {
+        REQUIRE(result.has_value());
+        CHECK(reader.hasMergedRecord("a"));
+    }
+    CHECK(reader.testingScanBytes() == 0);
+}
+
+TEST_CASE("Sweep count exhaustion is not a successful truncated security decision",
+          "[memory-sync][scan-safety][bounds]") {
+    BackendFixture fixture{"scan-count-budget"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.publish("a", bytes("one")).has_value());
+    REQUIRE(writer.publish("b", bytes("two")).has_value());
+    MemorySyncLimits limits;
+    limits.maxTrackedIdentities = 1;
+    limits.maxIndexObjectsPerSync = GENERATE(std::size_t{1}, std::size_t{4096});
+    MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false, limits};
+    const auto result = reader.syncFully();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::ResourceExhausted);
+    CHECK(reader.mergedRecordCount() == 0);
+    CHECK(reader.replicationState().commitments.empty());
+    CHECK(reader.testingScanCandidateCount() == 0);
+    CHECK(reader.testingScanBytes() == 0);
+}
+
+TEST_CASE("Cancellation discards an incomplete sweep before a retry",
+          "[memory-sync][scan-safety][cancellation]") {
+    BackendFixture fixture{"scan-cancel-restart"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.publish("a", bytes("removed before retry")).has_value());
+    REQUIRE(writer.publish("b", bytes("retained")).has_value());
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 1;
+    bool cancelled = false;
+    MemorySyncLoop reader{fixture.backend,
+                          "reader",
+                          "local-test-corpus",
+                          1,
+                          false,
+                          limits,
+                          MemorySyncControl{[&] { return cancelled; }, {}}};
+    REQUIRE(reader.sync().has_value());
+    CHECK(reader.mergedRecordCount() == 0);
+    cancelled = true;
+    const auto stopped = reader.sync();
+    REQUIRE_FALSE(stopped.has_value());
+    CHECK(stopped.error().code == yams::ErrorCode::OperationCancelled);
+    CHECK(reader.testingScanCandidateCount() == 0);
+    CHECK(reader.testingScanBytes() == 0);
+    const auto removed = fixture.backend.list("index/a/");
+    REQUIRE(removed.has_value());
+    REQUIRE(fixture.backend.remove(removed.value().front()).has_value());
+    cancelled = false;
+    REQUIRE(reader.syncFully().has_value());
+    CHECK_FALSE(reader.hasMergedRecord("a"));
+    CHECK(reader.hasMergedRecord("b"));
+}
+
+TEST_CASE("Misplaced causal observations are charged even when they cannot be winners",
+          "[memory-sync][scan-safety][bounds][identity]") {
+    BackendFixture fixture{"misplaced-scan-budget"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.publish("correct", bytes("value")).has_value());
+    const auto original = fixture.backend.list("index/");
+    REQUIRE(original.has_value());
+    const auto envelope = fixture.backend.retrieve(original.value().front());
+    REQUIRE(envelope.has_value());
+    const auto misplaced = "index/misplaced/" + digest(envelope.value());
+    REQUIRE(fixture.backend.store(misplaced, envelope.value()).has_value());
+    REQUIRE(fixture.backend.remove(original.value().front()).has_value());
+    MemorySyncLimits limits;
+    limits.maxScanBytes = misplaced.size() + envelope.value().size() - 1;
+    MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false, limits};
+    const auto result = reader.syncFully();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::ResourceExhausted);
+    CHECK(reader.mergedRecordCount() == 0);
+    CHECK(reader.replicationState().version.empty());
+    CHECK(reader.testingScanBytes() == 0);
+}
+
+TEST_CASE("Fork variants cannot bypass the candidate count budget by reusing identities",
+          "[memory-sync][scan-safety][bounds][identity]") {
+    BackendFixture fixture{"fork-variant-scan-budget"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.publish("same", bytes("value")).has_value());
+    const auto keys = fixture.backend.list("index/");
+    REQUIRE(keys.has_value());
+    const auto envelope = fixture.backend.retrieve(keys.value().front());
+    REQUIRE(envelope.has_value());
+    auto record = nlohmann::json::parse(text(envelope.value())).get<MemoryIndexRecord>();
+    ++record.ts.logical; // same operation and version vector, different envelope digest
+    const auto variant = jsonBytes(nlohmann::json(record));
+    REQUIRE(fixture.backend.store("index/same/" + digest(variant), variant).has_value());
+    MemorySyncLimits limits;
+    limits.maxTrackedIdentities = GENERATE(std::size_t{1}, std::size_t{2});
+    limits.maxIndexObjectsPerSync = 1;
+    MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false, limits};
+    const auto result = reader.syncFully();
+    if (limits.maxTrackedIdentities == 1) {
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == yams::ErrorCode::ResourceExhausted);
+    } else {
+        REQUIRE(result.has_value());
+        CHECK(reader.writerQuarantined("writer"));
+    }
+    CHECK(reader.mergedRecordCount() == 0);
+    CHECK(reader.replicationState().commitments.empty());
+    CHECK(reader.testingScanCandidateCount() == 0);
+}
+
+TEST_CASE("Listing failure discards an incomplete sweep before a retry",
+          "[memory-sync][scan-safety][retry]") {
+    CountingBackendFixture fixture{"scan-list-failure"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.publish("a", bytes("removed before retry")).has_value());
+    REQUIRE(writer.publish("b", bytes("retained")).has_value());
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 1;
+    MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false, limits};
+    REQUIRE(reader.sync().has_value());
+    fixture.backend.failNextList("index/");
+    const auto failed = reader.sync();
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error().code == yams::ErrorCode::IOError);
+    CHECK(reader.testingScanCandidateCount() == 0);
+    CHECK(reader.testingScanBytes() == 0);
+    auto first = fixture.backend.list("index/a/");
+    REQUIRE(first.has_value());
+    REQUIRE(fixture.backend.remove(first.value().front()).has_value());
+    REQUIRE(reader.syncFully().has_value());
+    CHECK_FALSE(reader.hasMergedRecord("a"));
+    CHECK(reader.hasMergedRecord("b"));
+}
+
+TEST_CASE("An exception while fetching a page discards the incomplete sweep",
+          "[memory-sync][scan-safety][retry][exception]") {
+    CountingBackendFixture fixture{"scan-fetch-exception"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.publish("a", bytes("removed before retry")).has_value());
+    REQUIRE(writer.publish("b", bytes("retained")).has_value());
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 1;
+    MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false, limits};
+    REQUIRE(reader.sync().has_value());
+    fixture.backend.afterIndexRetrieve = [] { throw std::bad_alloc{}; };
+    CHECK_THROWS_AS(reader.sync(), std::bad_alloc);
+    CHECK(reader.testingScanCandidateCount() == 0);
+    CHECK(reader.testingScanBytes() == 0);
+    auto first = fixture.backend.list("index/a/");
+    REQUIRE(first.has_value());
+    REQUIRE(fixture.backend.remove(first.value().front()).has_value());
+    fixture.backend.afterIndexRetrieve = {};
+    REQUIRE(reader.syncFully().has_value());
+    CHECK_FALSE(reader.hasMergedRecord("a"));
+    CHECK(reader.hasMergedRecord("b"));
+}
+
+TEST_CASE("Cancellation during the final fetch is checked before history finalization",
+          "[memory-sync][scan-safety][cancellation]") {
+    CountingBackendFixture fixture{"cancel-last-fetch"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.publish("a", bytes("value")).has_value());
+    bool cancelled = false;
+    fixture.backend.afterIndexRetrieve = [&] { cancelled = true; };
+    MemorySyncLoop reader{fixture.backend,
+                          "reader",
+                          "local-test-corpus",
+                          1,
+                          false,
+                          {},
+                          MemorySyncControl{[&] { return cancelled; }, {}}};
+    const auto stopped = reader.syncFully();
+    REQUIRE_FALSE(stopped.has_value());
+    CHECK(stopped.error().code == yams::ErrorCode::OperationCancelled);
+    CHECK(reader.mergedRecordCount() == 0);
+    CHECK(reader.replicationState().commitments.empty());
+    CHECK(reader.replicationState().version.empty());
+    CHECK(reader.testingScanCandidateCount() == 0);
+    fixture.backend.afterIndexRetrieve = {};
+    cancelled = false;
+    REQUIRE(reader.syncFully().has_value());
+    CHECK(reader.hasMergedRecord("a"));
+}
+
 TEST_CASE("Exclusive filesystem listing snapshots follow committed key mutations",
           "[memory-sync][listing-cache][mutations]") {
     CountingBackendFixture fixture{"listing-mutations"};
@@ -2015,7 +2259,9 @@ TEST_CASE("historical writer commitments persist independently of identity limit
     limits.maxTrackedIdentities = 1;
     WriterHistoryCommitment middle;
     {
-        MemorySyncLoop writer{fixture.backend, "writer", "prefix-index-corpus", 1, false, limits};
+        // Build complete durable history under normal scan admission. The restricted
+        // restart below must resolve its historical commitment without scanning at all.
+        MemorySyncLoop writer{fixture.backend, "writer", "prefix-index-corpus", 1};
         REQUIRE(writer.publish("user/one", bytes("one")).has_value());
         REQUIRE(writer.publish("user/two", bytes("two")).has_value());
         middle = writer.replicationState().commitments.at("writer");

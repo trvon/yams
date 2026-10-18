@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -158,6 +159,8 @@ struct FilesystemListingStats {
     std::size_t entriesVisited{0};
     std::size_t matchingKeys{0};
     std::size_t peakRetainedKeys{0};
+    /// Deterministic mid-walk interruption seam; called before entry filtering.
+    std::function<void()> onEntry;
 };
 
 /// Thread-local observation; returns the previous sink so tests can restore it with RAII.
@@ -189,8 +192,12 @@ public:
     bool isRemote() const override { return false; }
     Result<void> flush() override { return {}; }
     Result<void> clear() override;
+    void requestCancel() noexcept override { cancelled_.store(true, std::memory_order_relaxed); }
+    void resetCancel() noexcept override { cancelled_.store(false, std::memory_order_relaxed); }
 
 private:
+    // Unconditional: production and test translation units must agree on the layout.
+    std::atomic<bool> cancelled_{false};
     std::filesystem::path basePath_;
     Result<std::filesystem::path> getObjectPath(std::string_view key) const;
     Result<void> ensureDirectoryExists(const std::filesystem::path& path) const;

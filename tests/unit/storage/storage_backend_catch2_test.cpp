@@ -644,6 +644,54 @@ TEST_CASE("FilesystemBackend - Bounded page semantics",
     CHECK_FALSE(unbounded.value().nextCursor.has_value());
 }
 
+TEST_CASE("FilesystemBackend - Listing cancellation interrupts the directory walk",
+          "[storage][backend][filesystem][scan-safety][cancellation]") {
+    TestDirectory testDir;
+    auto backend = createFilesystemBackend(testDir.subdir("storage"));
+    REQUIRE(backend != nullptr);
+    const std::vector<std::byte> value{std::byte{42}};
+    for (int i = 0; i < 16; ++i) {
+        REQUIRE(backend->store("unrelated/" + std::to_string(i), value).has_value());
+    }
+    const bool paged = GENERATE(false, true);
+    const auto list = [&]() -> Result<std::size_t> {
+        if (paged) {
+            auto result = backend->listPage("index/", std::nullopt, 1);
+            if (!result) {
+                return result.error();
+            }
+            return result.value().keys.size();
+        }
+        auto result = backend->list("index/");
+        if (!result) {
+            return result.error();
+        }
+        return result.value().size();
+    };
+    FilesystemListingStats stats;
+    struct RestoreObservation {
+        FilesystemListingStats* previous;
+        ~RestoreObservation() { testing_setFilesystemListingStats(previous); }
+    } restore{testing_setFilesystemListingStats(&stats)};
+
+    SECTION("already cancelled") {
+        backend->requestCancel();
+    }
+    SECTION("cancel during traversal before prefix filtering") {
+        stats.onEntry = [&] { backend->requestCancel(); };
+    }
+    const auto cancelled = list();
+    REQUIRE_FALSE(cancelled.has_value());
+    CHECK(cancelled.error().code == ErrorCode::OperationCancelled);
+    CHECK(stats.entriesVisited <= 1);
+    stats.onEntry = {};
+    backend->resetCancel();
+    const auto restarted = list();
+    REQUIRE(restarted.has_value());
+    CHECK(restarted.value() == 0);
+    CHECK(stats.entriesVisited >= 16);
+}
+
 TEST_CASE("FilesystemBackend - Page-boundary traversal and retained keys",
           "[storage][backend][filesystem][list][pagination][bounds]") {
     const auto records = GENERATE(std::size_t{511}, std::size_t{513}, std::size_t{1025});
