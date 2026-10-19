@@ -39,6 +39,8 @@ struct MemorySyncControl {
     /// The loop is the backend's only writer (direct transport's local op store), so a
     /// complete scan stays valid until the loop itself stores or removes an object.
     bool exclusiveBackend{false};
+    /// Admission for local spill/finalization work, independent of remote transport.
+    std::function<bool()> canAdmitLocalWork{};
 };
 
 /// Tombstone collection is disabled unless the deployment supplies its complete,
@@ -59,6 +61,8 @@ struct MemorySyncLimits {
     std::size_t maxValueBytes{std::size_t{16} * 1024 * 1024};
     std::size_t maxMergedKeys{4096};
     std::size_t maxCacheBytes{std::size_t{64} * 1024 * 1024};
+    /// Resident scan window and maximum distinct writer/vector coordinates. Complete
+    /// operation/vector observations spill privately instead of limiting valid history.
     std::size_t maxTrackedIdentities{8192};
     /// Envelopes whose signature this loop has already checked. The set holds the
     /// envelope digest, so an entry is roughly 150 bytes at capacity.
@@ -69,8 +73,8 @@ struct MemorySyncLimits {
     std::size_t maxHistoryMigrationBytes{std::size_t{64} * 1024 * 1024};
     /// Aggregate encoded envelope + index-key bytes observed across a complete sweep,
     /// charged before retaining causal identities (even for misplaced envelopes).
-    /// Together with maxTrackedIdentities (also the candidate-count ceiling), bounds
-    /// decoded scan state in proportion to input. Not an allocator/RSS ceiling.
+    /// Together with the resident window and bounded disk staging, limits a complete
+    /// sweep without truncating security observations. Not an allocator/RSS ceiling.
     std::size_t maxScanBytes{std::size_t{64} * 1024 * 1024};
 };
 
@@ -145,6 +149,10 @@ struct ColdBootstrapSnapshot {
     std::string rootDigest{};
     DetachedWriterSignature witnessSignature{};
 };
+
+namespace detail {
+class SweepStore;
+}
 
 /// Backend-agnostic memory sync loop. Memory records are published as
 /// content-addressed blobs plus one version-vector-tagged index record per write;
@@ -294,6 +302,8 @@ public:
     /// Return the number of records observed by the most recent reconciliation.
     /// This is intentionally side-effect free so status callers do not force sync.
     [[nodiscard]] std::size_t mergedRecordCount() const noexcept;
+    /// Size of the bounded current-page/finalization diagnostic sample, not a
+    /// count of all rejected history. Security observations are tracked separately.
     [[nodiscard]] std::size_t quarantinedRecordCount() const noexcept;
     [[nodiscard]] std::size_t authFailureCount() const noexcept;
 
@@ -332,6 +342,7 @@ public:
         return scanCandidates_.size();
     }
     [[nodiscard]] std::size_t testingScanBytes() const noexcept { return scanBytes_; }
+    [[nodiscard]] bool testingHasSpilledScan() const noexcept { return bool(sweepStore_); }
     [[nodiscard]] std::size_t testingCachedBlobCount() const noexcept {
         return cachedBlobs_.size();
     }
@@ -560,7 +571,13 @@ private:
     std::string advanceHistory(std::string_view writerId, const WriterHistoryCommitment& previous,
                                std::string_view recordHash, std::uint64_t counter) const;
 
-    Result<void> commitScannedHistory(const std::vector<ScanCandidate>& candidates);
+    Result<void> commitScannedHistory();
+    Result<void> spillScanIfNeeded();
+    Result<void>
+    visitScanCandidates(bool historyOrder,
+                        const std::function<Result<void>(const ScanCandidate&)>& visitor);
+    Result<bool> forkedOperation(std::string_view operationId);
+    Result<void> beforeStagingWork() const;
 
     Result<WriterHistoryCommitment> computeHistoryCommitmentAt(std::string_view writerId,
                                                                std::uint64_t targetCounter);
@@ -749,6 +766,10 @@ private:
     std::map<std::string, std::pair<std::string, std::string>> vectorIdentities_;
     std::vector<ScanCandidate> scanCandidates_;
     std::size_t scanBytes_{0};
+    std::set<NodeId> scanWriters_;
+    // Opaque private implementation; shared_ptr preserves the inline destructor and
+    // existing implicit move. The loop is already noncopyable and is its sole owner.
+    std::shared_ptr<detail::SweepStore> sweepStore_;
     std::set<std::string> forkedOperations_;
     std::map<std::string, std::pair<std::string, std::string>> deltaOperations_;
     std::deque<std::string> deltaOperationOrder_;

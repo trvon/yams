@@ -295,12 +295,11 @@ loadWriterAuthenticator(const MemorySyncDaemonConfig& config,
 /// Build a MemorySyncService from the daemon config. Resolves the backend:
 /// `filesystem` -> FilesystemBackend at `path`; `s3` -> StorageBackendFactory.
 /// Returns Error when the backend cannot be created/initialized.
-inline Result<std::unique_ptr<MemorySyncService>>
-createMemorySyncService(const MemorySyncDaemonConfig& config,
-                        std::optional<storage::BackendConfig> resolvedS3Config = std::nullopt,
-                        std::function<bool()> canAdmitRemoteWork = {},
-                        WriterPrivateKeyReader privateKeyReader = {},
-                        WriterTrustFileReader trustFileReader = {}) {
+inline Result<std::unique_ptr<MemorySyncService>> createMemorySyncService(
+    const MemorySyncDaemonConfig& config,
+    std::optional<storage::BackendConfig> resolvedS3Config = std::nullopt,
+    std::function<bool()> canAdmitRemoteWork = {}, WriterPrivateKeyReader privateKeyReader = {},
+    WriterTrustFileReader trustFileReader = {}, std::function<bool()> canAdmitLocalWork = {}) {
     if (!config.enabled) {
         return Error{ErrorCode::InvalidState, "memory_sync is disabled"};
     }
@@ -469,8 +468,8 @@ createMemorySyncService(const MemorySyncDaemonConfig& config,
     serviceConfig.exclusiveBackend = config.exclusiveBackend && !temporary;
     return std::make_unique<MemorySyncService>(
         std::move(backend), std::move(serviceConfig), std::move(canAdmitRemoteWork),
-        config.allowLegacyUnbound, std::move(sessionMaintenanceBackend),
-        std::move(sessionLeaseKey));
+        config.allowLegacyUnbound, std::move(sessionMaintenanceBackend), std::move(sessionLeaseKey),
+        std::move(canAdmitLocalWork));
 }
 
 } // namespace yams::memory_sync

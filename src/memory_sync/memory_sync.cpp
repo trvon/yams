@@ -3,11 +3,29 @@
 #include <yams/memory_sync/memory_sync.h>
 #include <yams/profiling.h>
 
+#include "sweep_store.h"
+
 #include <spdlog/spdlog.h>
 
 #include <typeinfo>
 
 namespace yams::memory_sync {
+namespace {
+Result<void> checkReconciliationWork(const MemorySyncControl& control, bool remote, bool staging) {
+    if (control.isCancelled && control.isCancelled()) {
+        return Error{ErrorCode::OperationCancelled, "memory sync reconciliation cancelled"};
+    }
+    if (remote && control.canAdmitRemoteWork && !control.canAdmitRemoteWork()) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "memory sync remote work denied by resource governor"};
+    }
+    if (staging && control.canAdmitLocalWork && !control.canAdmitLocalWork()) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "memory sync local staging denied by resource governor"};
+    }
+    return {};
+}
+} // namespace
 
 bool MemorySyncLoop::WriteCountingBackend::filesystemSnapshotEligible() const {
     // getType() is descriptive, not a cursor contract: a decorator may keep that name
@@ -723,6 +741,130 @@ bool MemorySyncLoop::verifiedEnvelope(const std::string& envelopeHash,
     return true;
 }
 
+Result<void> MemorySyncLoop::beforeStagingWork() const {
+    return checkReconciliationWork(control_, backend_->isRemote(), true);
+}
+
+Result<void> MemorySyncLoop::spillScanIfNeeded() {
+    if (sweepStore_ || (scanCandidates_.size() < limits_.maxTrackedIdentities &&
+                        operations_.size() < limits_.maxTrackedIdentities &&
+                        vectorIdentities_.size() < limits_.maxTrackedIdentities)) {
+        return {};
+    }
+    if (limits_.maxTrackedIdentities == 0) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "memory sync complete-sweep candidate budget exhausted: zero resident window"};
+    }
+    if (auto ready = beforeStagingWork(); !ready) {
+        return ready.error();
+    }
+    // Do not capture the loop address: its existing implicit move must remain safe
+    // after spilling. The counted backend stays at a stable heap address on move.
+    auto created =
+        detail::SweepStore::create(limits_.maxScanBytes, [control = control_, backend = backend_] {
+            return checkReconciliationWork(control, backend->isRemote(), true);
+        });
+    if (!created) {
+        return created.error();
+    }
+    auto stage = std::move(created.value());
+    for (const auto& [operation, fingerprint] : operations_) {
+        if (auto stored = stage->observeOperation(operation, fingerprint.first, fingerprint.second);
+            !stored) {
+            return stored.error();
+        }
+    }
+    for (const auto& [identity, fingerprint] : vectorIdentities_) {
+        if (auto stored = stage->observeVector(identity, fingerprint.first, fingerprint.second);
+            !stored) {
+            return stored.error();
+        }
+    }
+    for (const auto& operation : forkedOperations_) {
+        if (auto stored = stage->markFork(operation); !stored) {
+            return stored.error();
+        }
+    }
+    for (const auto& candidate : scanCandidates_) {
+        const auto encoded = serialize(candidate.record);
+        if (auto stored = stage->addCandidate(
+                candidate.indexKey, candidate.logicalKey, candidate.recordHash,
+                candidate.record.origin, candidate.record.vv.get(candidate.record.origin), encoded);
+            !stored) {
+            return stored.error();
+        }
+    }
+    sweepStore_ = std::move(stage);
+    operations_.clear();
+    vectorIdentities_.clear();
+    forkedOperations_.clear();
+    std::vector<ScanCandidate>{}.swap(scanCandidates_);
+    return {};
+}
+
+Result<bool> MemorySyncLoop::forkedOperation(std::string_view operationId) {
+    if (sweepStore_) {
+        return sweepStore_->forked(operationId);
+    }
+    return forkedOperations_.contains(std::string(operationId));
+}
+
+Result<void> MemorySyncLoop::visitScanCandidates(
+    bool historyOrder, const std::function<Result<void>(const ScanCandidate&)>& visitor) {
+    if (auto ready = beforeStagingWork(); !ready) {
+        return ready.error();
+    }
+    if (sweepStore_) {
+        return sweepStore_->forEach(
+            historyOrder,
+            [&](std::string_view index, std::string_view logical, std::string_view hash,
+                std::span<const std::byte> encoded) -> Result<void> {
+                auto record = deserialize(encoded);
+                if (!record) {
+                    return record.error();
+                }
+                if (!record.value().hasValidIdentity(corpusId_, corpusEpoch_, logical)) {
+                    return Error{ErrorCode::InvalidData, "memory sync staged identity mismatch"};
+                }
+                return visitor(ScanCandidate{std::string(index), std::string(logical),
+                                             std::string(hash), std::move(record.value())});
+            });
+    }
+    const auto visit = [&](const ScanCandidate& candidate) -> Result<void> {
+        if (auto ready = beforeStagingWork(); !ready) {
+            return ready.error();
+        }
+        return visitor(candidate);
+    };
+    if (!historyOrder) {
+        for (const auto& candidate : scanCandidates_) {
+            if (auto visited = visit(candidate); !visited) {
+                return visited.error();
+            }
+        }
+        return {};
+    }
+    // Only the bounded resident window uses an in-memory pointer sort. Spilled
+    // histories stream through the stage's unsigned-counter ordering index.
+    std::vector<const ScanCandidate*> ordered;
+    ordered.reserve(scanCandidates_.size());
+    for (const auto& candidate : scanCandidates_) {
+        ordered.push_back(&candidate);
+    }
+    std::ranges::sort(ordered, [](const ScanCandidate* lhs, const ScanCandidate* rhs) {
+        return std::tuple{lhs->record.origin, lhs->record.vv.get(lhs->record.origin),
+                          lhs->recordHash} < std::tuple{rhs->record.origin,
+                                                        rhs->record.vv.get(rhs->record.origin),
+                                                        rhs->recordHash};
+    });
+    for (const auto* candidate : ordered) {
+        if (auto visited = visit(*candidate); !visited) {
+            return visited.error();
+        }
+    }
+    return {};
+}
+
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
     YAMS_ZONE_SCOPED_N("memory_sync.sync");
     // Any failed/throwing page restarts the entire security decision. Keeping a cursor
@@ -731,6 +873,8 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         scanCursor_.clear();
         std::vector<ScanCandidate>{}.swap(scanCandidates_);
         scanBytes_ = 0;
+        scanWriters_.clear();
+        sweepStore_.reset();
         operations_.clear();
         vectorIdentities_.clear();
         forkedOperations_.clear();
@@ -783,6 +927,14 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         forkedOperations_.clear();
         scanCandidates_.clear();
         scanBytes_ = 0;
+        sweepStore_.reset();
+        scanWriters_.clear();
+        for (const auto& [writer, _] : version_.counters()) {
+            scanWriters_.insert(writer);
+        }
+        if (scanWriters_.size() > limits_.maxTrackedIdentities) {
+            return Error{ErrorCode::ResourceExhausted, "memory sync writer identity limit reached"};
+        }
     }
     std::ranges::sort(keys);
 
@@ -873,45 +1025,68 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         // misplaced envelopes which will not become candidates. Otherwise oversized index
         // keys could fill operations_ without ever being charged to the sweep budget.
         const auto remaining = limits_.maxScanBytes - std::min(scanBytes_, limits_.maxScanBytes);
-        if (key.size() > remaining || envelopeBytes > remaining - key.size() ||
-            scanCandidates_.size() >= limits_.maxTrackedIdentities) {
+        if (key.size() > remaining || envelopeBytes > remaining - key.size()) {
             return Error{ErrorCode::ResourceExhausted,
-                         "memory sync complete-sweep candidate budget exhausted"};
+                         "memory sync complete-sweep candidate budget exhausted: encoded bytes (" +
+                             std::to_string(scanBytes_) + "/" +
+                             std::to_string(limits_.maxScanBytes) + ")"};
         }
         scanBytes_ += key.size() + envelopeBytes;
-
-        // Operation IDs are writer-global within a corpus epoch. Observe them
-        // before validating the index logical key so a copied envelope cannot
-        // leave the correctly placed sibling accepted as a valid operation.
-        if (!operations_.contains(record.value().operationId) &&
-            operations_.size() >= limits_.maxTrackedIdentities) {
-            return Error{ErrorCode::ResourceExhausted,
-                         "memory sync complete-sweep operation identity limit reached"};
+        for (const auto& [writer, _] : record.value().vv.counters()) {
+            if (!scanWriters_.contains(writer) &&
+                scanWriters_.size() >= limits_.maxTrackedIdentities) {
+                return Error{ErrorCode::ResourceExhausted,
+                             "memory sync writer identity limit reached"};
+            }
+            scanWriters_.insert(writer);
         }
-        const auto [operation, inserted] = operations_.emplace(
-            record.value().operationId, std::pair{candidateRecordHash, logicalKey});
-        if (!inserted && operation->second != std::pair{candidateRecordHash, logicalKey}) {
-            forkedOperations_.insert(record.value().operationId);
+        if (auto spilled = spillScanIfNeeded(); !spilled) {
+            return spilled.error();
         }
 
+        // Observe misplaced copies too: their exact fingerprint can invalidate a
+        // correctly placed sibling even after the resident window has spilled.
+        if (sweepStore_) {
+            if (auto observed = sweepStore_->observeOperation(record.value().operationId,
+                                                              candidateRecordHash, logicalKey);
+                !observed) {
+                return observed.error();
+            }
+        } else {
+            const auto [operation, inserted] = operations_.emplace(
+                record.value().operationId, std::pair{candidateRecordHash, logicalKey});
+            if (!inserted && operation->second != std::pair{candidateRecordHash, logicalKey}) {
+                forkedOperations_.insert(record.value().operationId);
+            }
+        }
         if (!record.value().hasValidIdentity(corpusId_, corpusEpoch_, logicalKey)) {
             quarantine(key, "record logical identity does not match its index key");
             continue;
         }
         const std::string vectorIdentity = nlohmann::json(record.value().vv).dump();
-        if (!vectorIdentities_.contains(vectorIdentity) &&
-            vectorIdentities_.size() >= limits_.maxTrackedIdentities) {
-            return Error{ErrorCode::ResourceExhausted,
-                         "memory sync complete-sweep vector identity limit reached"};
+        if (sweepStore_) {
+            if (auto observed = sweepStore_->observeVector(vectorIdentity, candidateRecordHash,
+                                                           record.value().operationId);
+                !observed) {
+                return observed.error();
+            }
+            const auto encoded = serialize(record.value());
+            if (auto stored = sweepStore_->addCandidate(
+                    key, logicalKey, candidateRecordHash, record.value().origin,
+                    record.value().vv.get(record.value().origin), encoded);
+                !stored) {
+                return stored.error();
+            }
+        } else {
+            const auto [vector, inserted] = vectorIdentities_.emplace(
+                vectorIdentity, std::pair{candidateRecordHash, record.value().operationId});
+            if (!inserted && vector->second.first != candidateRecordHash) {
+                forkedOperations_.insert(vector->second.second);
+                forkedOperations_.insert(record.value().operationId);
+            }
+            scanCandidates_.push_back(
+                ScanCandidate{key, logicalKey, candidateRecordHash, std::move(record.value())});
         }
-        const auto [vector, vectorInserted] = vectorIdentities_.emplace(
-            vectorIdentity, std::pair{candidateRecordHash, record.value().operationId});
-        if (!vectorInserted && vector->second.first != candidateRecordHash) {
-            forkedOperations_.insert(vector->second.second);
-            forkedOperations_.insert(record.value().operationId);
-        }
-        scanCandidates_.push_back(
-            ScanCandidate{key, logicalKey, candidateRecordHash, std::move(record.value())});
     }
 
     // Cancellation may arrive during the last fetch/verification, or on an empty page.
@@ -927,49 +1102,60 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         return merged_;
     }
 
-    auto candidates = std::move(scanCandidates_);
-    scanCandidates_.clear();
-    scanBytes_ = 0;
-    for (const auto& candidate : candidates) {
-        if (writerQuarantined(candidate.record.origin)) {
-            if (auto captured =
-                    captureQuarantineInvalidation(candidate.logicalKey, candidate.record);
-                !captured) {
-                return captured.error();
-            }
-        }
+    if (auto captured = visitScanCandidates(
+            false,
+            [&](const ScanCandidate& candidate) -> Result<void> {
+                return writerQuarantined(candidate.record.origin)
+                           ? captureQuarantineInvalidation(candidate.logicalKey, candidate.record)
+                           : Result<void>{};
+            });
+        !captured) {
+        return captured.error();
     }
-    if (auto committed = commitScannedHistory(candidates); !committed) {
+    if (auto committed = commitScannedHistory(); !committed) {
         return committed.error();
     }
     const auto previousMerged = merged_;
     auto merged = merged_;
-    for (const auto& candidate : candidates) {
-        if (writerQuarantined(candidate.record.origin)) {
-            quarantine(candidate.indexKey, "writer is durably quarantined");
-            continue;
-        }
-        if (forkedOperations_.contains(candidate.record.operationId)) {
-            quarantine(candidate.indexKey, "duplicate writer operation fork");
-            continue;
-        }
-        version_.merge(candidate.record.vv);
-        const auto it = merged.find(candidate.logicalKey);
-        if (it == merged.end()) {
-            if (merged.size() >= limits_.maxMergedKeys) {
-                quarantine(candidate.indexKey, "merged key limit reached");
-                continue;
-            }
-            merged[candidate.logicalKey] = candidate.record;
-        } else if (resolveLww(candidate.record, it->second) == LwwDecision::First) {
-            merged[candidate.logicalKey] = candidate.record;
-        }
+    if (auto visited = visitScanCandidates(
+            false,
+            [&](const ScanCandidate& candidate) -> Result<void> {
+                if (writerQuarantined(candidate.record.origin)) {
+                    quarantine(candidate.indexKey, "writer is durably quarantined");
+                    return {};
+                }
+                auto forked = forkedOperation(candidate.record.operationId);
+                if (!forked) {
+                    return forked.error();
+                }
+                if (forked.value()) {
+                    quarantine(candidate.indexKey, "duplicate writer operation fork");
+                    return {};
+                }
+                version_.merge(candidate.record.vv);
+                const auto it = merged.find(candidate.logicalKey);
+                if (it == merged.end()) {
+                    if (merged.size() >= limits_.maxMergedKeys) {
+                        quarantine(candidate.indexKey, "merged key limit reached");
+                        return {};
+                    }
+                    merged[candidate.logicalKey] = candidate.record;
+                } else if (resolveLww(candidate.record, it->second) == LwwDecision::First) {
+                    merged[candidate.logicalKey] = candidate.record;
+                }
+                return {};
+            });
+        !visited) {
+        return visited.error();
     }
 
     // Forks and durable writer quarantine invalidate earlier winners.
     for (auto it = merged.begin(); it != merged.end();) {
-        if (writerQuarantined(it->second.origin) ||
-            forkedOperations_.contains(it->second.operationId)) {
+        auto forked = forkedOperation(it->second.operationId);
+        if (!forked) {
+            return forked.error();
+        }
+        if (writerQuarantined(it->second.origin) || forked.value()) {
             it = merged.erase(it);
         } else {
             ++it;
@@ -987,7 +1173,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
             ++it;
             continue;
         }
-        if (auto ready = beforeRemoteWork(); !ready) {
+        if (auto ready = beforeStagingWork(); !ready) {
             return ready.error();
         }
         auto blob = backend_->retrieve(blobKey(hash));
@@ -1059,6 +1245,9 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
     // Stamp after the scan's own writes (acknowledgements, legacy upgrades) so they do
     // not force another pass over the same store.
     completeScan_ = CompleteScanStamp{countedBackend_->writes(), durableQuarantineGeneration_};
+    std::vector<ScanCandidate>{}.swap(scanCandidates_);
+    scanWriters_.clear();
+    scanBytes_ = 0;
     guard.keep = true;
     return merged_;
 }
@@ -1589,6 +1778,13 @@ Result<bool> MemorySyncLoop::quarantineWriter(std::string_view writerId,
         }
         auto invalidation = makeQuarantineInvalidation(key, record);
         if (invalidation) {
+            if ((!invalidations.contains(key) &&
+                 invalidations.size() >= limits_.maxTrackedIdentities) ||
+                (!invalidationSources.contains(key) &&
+                 invalidationSources.size() >= limits_.maxTrackedIdentities)) {
+                return Error{ErrorCode::ResourceExhausted,
+                             "memory sync quarantine invalidation limit reached"};
+            }
             invalidations[key] = std::move(invalidation.value());
             invalidationSources[key] = record;
         }
@@ -2281,7 +2477,7 @@ void MemorySyncLoop::quarantineDirectDelta(const MemoryDelta& delta, std::string
                                            DeltaApplyResult& result) {
     const std::string identity = delta.logicalKey + "#" + delta.record.operationId;
     result.quarantined[identity] = reason;
-    quarantined_[identity] = std::move(reason);
+    quarantine(identity, reason);
 }
 
 std::string_view MemorySyncLoop::readinessProbeName(EraseReadinessProbe probe) {
@@ -2557,9 +2753,19 @@ Result<void> MemorySyncLoop::commitPreparedErase(const EraseIntentState& intent)
             merged_[intent.logicalKey] = *intent.record;
         }
     };
-    const auto operation = operations_.find(intent.record->operationId);
-    if (operation != operations_.end()) {
-        if (operation->second != std::pair{intent.recordHash, intent.logicalKey}) {
+    using Fingerprint = std::pair<std::string, std::string>;
+    Result<std::optional<Fingerprint>> operation = std::optional<Fingerprint>{};
+    if (sweepStore_) {
+        operation = sweepStore_->operation(intent.record->operationId);
+    } else if (const auto found = operations_.find(intent.record->operationId);
+               found != operations_.end()) {
+        operation = std::optional<Fingerprint>{found->second};
+    }
+    if (!operation) {
+        return operation.error();
+    }
+    if (operation.value()) {
+        if (*operation.value() != std::pair{intent.recordHash, intent.logicalKey}) {
             return Error{ErrorCode::InvalidState,
                          "prepared erase operation conflicts with committed history"};
         }
@@ -2610,7 +2816,15 @@ Result<void> MemorySyncLoop::commitPreparedErase(const EraseIntentState& intent)
         !stored) {
         return stored.error();
     }
-    operations_[intent.record->operationId] = {intent.recordHash, intent.logicalKey};
+    if (sweepStore_) {
+        if (auto observed = sweepStore_->observeOperation(intent.record->operationId,
+                                                          intent.recordHash, intent.logicalKey);
+            !observed) {
+            return observed.error();
+        }
+    } else {
+        operations_[intent.record->operationId] = {intent.recordHash, intent.logicalKey};
+    }
     version_.merge(intent.record->vv);
     logicalClock_ = std::max(logicalClock_, intent.record->ts.logical);
     retainCommittedWinner();
@@ -2670,14 +2884,7 @@ Result<void> MemorySyncLoop::reconcileBeforeWrite(bool allowDeferredPreparedEras
 }
 
 Result<void> MemorySyncLoop::beforeRemoteWork() const {
-    if (control_.isCancelled && control_.isCancelled()) {
-        return Error{ErrorCode::OperationCancelled, "memory sync reconciliation cancelled"};
-    }
-    if (backend_->isRemote() && control_.canAdmitRemoteWork && !control_.canAdmitRemoteWork()) {
-        return Error{ErrorCode::ResourceExhausted,
-                     "memory sync remote work denied by resource governor"};
-    }
-    return {};
+    return checkReconciliationWork(control_, backend_->isRemote(), false);
 }
 
 Result<void> MemorySyncLoop::beforeDirectIngress() const {
@@ -3337,51 +3544,46 @@ std::string MemorySyncLoop::advanceHistory(std::string_view writerId,
         reinterpret_cast<const std::byte*>(material.data()), material.size()});
 }
 
-Result<void> MemorySyncLoop::commitScannedHistory(const std::vector<ScanCandidate>& candidates) {
+Result<void> MemorySyncLoop::commitScannedHistory() {
     auto next = historyCommitments_;
-    std::vector<const ScanCandidate*> ordered;
-    ordered.reserve(candidates.size());
-    for (const auto& candidate : candidates) {
-        ordered.push_back(&candidate);
-    }
-    std::ranges::sort(ordered, [](const ScanCandidate* lhs, const ScanCandidate* rhs) {
-        return std::tuple{lhs->record.origin, lhs->record.vv.get(lhs->record.origin),
-                          lhs->recordHash} < std::tuple{rhs->record.origin,
-                                                        rhs->record.vv.get(rhs->record.origin),
-                                                        rhs->recordHash};
-    });
-    for (const auto* candidate : ordered) {
-        const auto& writer = candidate->record.origin;
+    auto committed = visitScanCandidates(true, [&](const ScanCandidate& candidate) -> Result<void> {
+        const auto& writer = candidate.record.origin;
         if (writerQuarantined(writer)) {
-            continue;
+            return {};
         }
-        if (forkedOperations_.contains(candidate->record.operationId)) {
-            auto quarantined = quarantineWriter(writer, nodeId_,
-                                                "duplicate writer operation fork in shared store");
-            if (!quarantined) {
+        auto forked = forkedOperation(candidate.record.operationId);
+        if (!forked) {
+            return forked.error();
+        }
+        if (forked.value()) {
+            if (auto quarantined = quarantineWriter(
+                    writer, nodeId_, "duplicate writer operation fork in shared store");
+                !quarantined) {
                 return quarantined.error();
             }
-            continue;
+            return {};
         }
-        const auto counter = candidate->record.vv.get(writer);
-        auto previous = next.contains(writer) ? next.at(writer) : WriterHistoryCommitment{};
-        if (counter <= previous.counter) {
-            continue;
+        const auto counter = candidate.record.vv.get(writer);
+        const auto previous = next.contains(writer) ? next.at(writer) : WriterHistoryCommitment{};
+        if (counter <= previous.counter || counter != previous.counter + 1) {
+            // A later winner is not proof of a contiguous authenticated prefix.
+            return {};
         }
-        if (counter != previous.counter + 1) {
-            // Shared/legacy stores may retain only a later winner. Never manufacture a
-            // full-history commitment from that frontier; leave it uncommitted so direct
-            // equal-counter handshakes fail closed until bounded history/bootstrap repairs it.
-            continue;
+        if (!next.contains(writer) && next.size() >= limits_.maxTrackedIdentities) {
+            return Error{ErrorCode::ResourceExhausted, "memory sync history writer limit reached"};
         }
         const WriterHistoryCommitment commitment{
             .counter = counter,
-            .digest = advanceHistory(writer, previous, candidate->recordHash, counter)};
-        if (auto indexed = storeHistoryEntry(candidate->record, candidate->recordHash, commitment);
+            .digest = advanceHistory(writer, previous, candidate.recordHash, counter)};
+        if (auto indexed = storeHistoryEntry(candidate.record, candidate.recordHash, commitment);
             !indexed) {
             return indexed.error();
         }
         next[writer] = commitment;
+        return {};
+    });
+    if (!committed) {
+        return committed.error();
     }
     for (const auto& [writer, _] : durableQuarantinedWriters_) {
         next.erase(writer);
@@ -3594,6 +3796,11 @@ Result<void> MemorySyncLoop::captureQuarantineInvalidation(std::string_view logi
         // downstream invalidation and continue reconstructing the remaining valid keys.
         return {};
     }
+    if (source == quarantineInvalidationSources_.end() &&
+        quarantineInvalidationSources_.size() >= limits_.maxTrackedIdentities) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "memory sync quarantine invalidation limit reached"};
+    }
     quarantineInvalidationSources_[std::string(logicalKey)] = record;
     quarantineInvalidations_[std::string(logicalKey)] = std::move(tombstone.value());
     ++durableQuarantineGeneration_;
@@ -3663,7 +3870,17 @@ Result<MemoryIndexRecord> MemorySyncLoop::deserialize(std::span<const std::byte>
 }
 
 void MemorySyncLoop::quarantine(std::string_view key, std::string_view reason) {
-    quarantined_[std::string(key)] = std::string(reason);
+    // Rejected envelopes consume page slots without entering the candidate window.
+    // Preserve those page diagnostics in addition to the bounded finalization sample.
+    // This is not the exact security index: all fork observations remain in the stage.
+    const auto room = std::numeric_limits<std::size_t>::max() - limits_.maxTrackedIdentities;
+    const auto diagnosticLimit =
+        limits_.maxIndexObjectsPerSync > room
+            ? std::numeric_limits<std::size_t>::max()
+            : limits_.maxTrackedIdentities + limits_.maxIndexObjectsPerSync;
+    if (quarantined_.size() < diagnosticLimit || quarantined_.contains(std::string(key))) {
+        quarantined_[std::string(key)] = std::string(reason);
+    }
 }
 
 void MemorySyncLoop::recordAuthFailure() noexcept {

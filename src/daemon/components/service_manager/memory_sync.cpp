@@ -1287,7 +1287,8 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
             policy.transport == "direct"
                 ? yams::memory_sync::
                       WriterTrustFileReader{service_manager_detail::readProtectedP2pTrustFile}
-                : yams::memory_sync::WriterTrustFileReader{});
+                : yams::memory_sync::WriterTrustFileReader{},
+            [] { return ResourceGovernor::instance().canAdmitWork(); });
         if (!svc) {
             return Error{svc.error().code,
                          "memory_sync service creation failed: " + svc.error().message};

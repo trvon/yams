@@ -4,6 +4,7 @@
 yams_memory_sync = static_library('yams_memory_sync',
   [
     'memory_sync.cpp',
+    'sweep_store.cpp',
   ],
   include_directories: include_directories('../../include'),
   dependencies: [
@@ -12,6 +13,7 @@ yams_memory_sync = static_library('yams_memory_sync',
     dependency('yams_core'),
     dependency('yams_crypto'),
     dependency('yams_storage_engine'),
+    sqlite_dep,
   ] + yams_tracy_deps,
   cpp_args: yams_tracy_args,
   install: false,
@@ -26,6 +28,7 @@ yams_memory_sync_dep = declare_dependency(
     dependency('yams_core'),
     dependency('yams_crypto'),
     dependency('yams_storage_engine'),
+    sqlite_dep,
   ],
 )
 meson.override_dependency('yams_memory_sync', yams_memory_sync_dep)

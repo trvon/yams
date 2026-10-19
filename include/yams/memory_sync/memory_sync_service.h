@@ -59,7 +59,8 @@ public:
                       std::function<bool()> canAdmitRemoteWork = {},
                       bool allowLegacyUnbound = false,
                       std::unique_ptr<storage::IStorageBackend> sessionMaintenanceBackend = {},
-                      std::string sessionLeaseKey = {})
+                      std::string sessionLeaseKey = {},
+                      std::function<bool()> canAdmitLocalWork = {})
         : backend_(std::move(backend)),
           sessionMaintenanceBackend_(std::move(sessionMaintenanceBackend)),
           sessionLeaseKey_(std::move(sessionLeaseKey)), config_(std::move(config)),
@@ -68,7 +69,8 @@ public:
                 MemorySyncControl{
                     .isCancelled = [this] { return stop_.load(std::memory_order_acquire); },
                     .canAdmitRemoteWork = std::move(canAdmitRemoteWork),
-                    .exclusiveBackend = config_.exclusiveBackend},
+                    .exclusiveBackend = config_.exclusiveBackend,
+                    .canAdmitLocalWork = std::move(canAdmitLocalWork)},
                 {}, config_.writerAuth, config_.controlScope) {}
 
     ~MemorySyncService() { stop(); }
