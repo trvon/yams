@@ -1510,7 +1510,8 @@ if catch2_dep.found()
   )
 
   catch2_memory_sync_exe = executable('catch2_memory_sync',
-    files('unit/memory_sync/memory_sync_catch2_test.cpp'),
+    files('unit/memory_sync/memory_sync_catch2_test.cpp',
+          'unit/memory_sync/sweep_store_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [
       catch2_dep,
