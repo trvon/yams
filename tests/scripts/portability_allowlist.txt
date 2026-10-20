@@ -275,8 +275,8 @@ tests/integration/daemon/onnx_tuning_integration_test.cpp:409:portability/env-re
 tests/integration/daemon/onnx_tuning_integration_test.cpp:410:portability/env-read # reviewed raw environment read
 tests/integration/services/grep_service_expectations_catch2_test.cpp:676:portability/env-read # reviewed raw environment read
 tests/integration/services/ipc_conformance_catch2_test.cpp:199:portability/env-read # reviewed raw environment read
-tests/integration/services/retrieval_and_ingestion_catch2_test.cpp:216:portability/env-read # reviewed raw environment read
-tests/integration/services/retrieval_and_ingestion_catch2_test.cpp:1212:portability/env-read # reviewed raw environment read
+tests/integration/services/retrieval_and_ingestion_catch2_test.cpp:217:portability/env-read # reviewed raw environment read
+tests/integration/services/retrieval_and_ingestion_catch2_test.cpp:1210:portability/env-read # reviewed raw environment read
 tests/integration/services/ui_cli_expectations_catch2_test.cpp:46:portability/env-read # reviewed raw environment read
 tests/integration/services/ui_cli_expectations_catch2_test.cpp:1265:portability/env-read # reviewed raw environment read
 tests/integration/smoke/add_command_sandbox_smoke_catch2_test.cpp:41:portability/env-read # reviewed raw environment read

@@ -259,12 +259,13 @@ compute_deb_version() {
   fi
   # Nightly: nightly-YYYYMMDD-<hash>
   if [[ "$in_ver" =~ ^nightly-([0-9]{8})-([0-9a-fA-F]{7,40})$ ]]; then
-    echo "${base_ver}~nightly.${BASH_REMATCH[1]}+g${BASH_REMATCH[2],,}"
+    # Nightlies follow the base stable release, but precede the next numeric release.
+    echo "${base_ver}+nightly.${BASH_REMATCH[1]}+g${BASH_REMATCH[2],,}"
     return
   fi
   # Weekly: weekly-YYYYwWW-<hash>
   if [[ "$in_ver" =~ ^weekly-([0-9]{4}w[0-9]{2})-([0-9a-fA-F]{7,40})$ ]]; then
-    echo "${base_ver}~weekly.${BASH_REMATCH[1]}+g${BASH_REMATCH[2],,}"
+    echo "${base_ver}+weekly.${BASH_REMATCH[1]}+g${BASH_REMATCH[2],,}"
     return
   fi
   # Fallback: general sanitize
@@ -296,13 +297,14 @@ compute_rpm_nv() {
   # Nightly pattern
   if [[ "$in_ver" =~ ^nightly-([0-9]{8})-([0-9a-fA-F]{7,40})$ ]]; then
     echo "$base_ver"
-    echo "0.1~nightly.${BASH_REMATCH[1]}.g${BASH_REMATCH[2],,}"
+    # Release 1.1.* follows stable Release 1 at the same base Version.
+    echo "1.1.nightly.${BASH_REMATCH[1]}.g${BASH_REMATCH[2],,}"
     return
   fi
   # Weekly pattern
   if [[ "$in_ver" =~ ^weekly-([0-9]{4}w[0-9]{2})-([0-9a-fA-F]{7,40})$ ]]; then
     echo "$base_ver"
-    echo "0.1~weekly.${BASH_REMATCH[1]}.g${BASH_REMATCH[2],,}"
+    echo "1.1.weekly.${BASH_REMATCH[1]}.g${BASH_REMATCH[2],,}"
     return
   fi
   # Fallback: generic sanitize in Release, keep Version as base

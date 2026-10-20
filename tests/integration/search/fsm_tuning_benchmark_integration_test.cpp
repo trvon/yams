@@ -30,7 +30,9 @@
 #include <yams/search/search_tuner.h>
 #include <yams/storage/corpus_stats.h>
 
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -253,8 +255,25 @@ TEST_CASE("FSM Tuning Integration: CorpusStats reflects ingested documents",
 
 TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
           "[integration][search][fsm][tuner]") {
-    // This test validates SearchTuner state selection logic
-    // without requiring daemon - uses CorpusStats directly
+    // State selection and usable normalized output are contracts; the exact
+    // benchmark-driven profile weights are not.
+    const auto checkWeights = [](const SearchTuner& tuner) {
+        const auto params = tuner.getParams();
+        const std::array weights = {
+            params.weights.text.value,     params.weights.simeonText.value,
+            params.weights.vector.value,   params.weights.entityVector.value,
+            params.weights.pathTree.value, params.weights.kg.value,
+            params.weights.tag.value,      params.weights.metadata.value,
+        };
+        float total = 0.0f;
+        for (std::size_t i = 0; i < weights.size(); ++i) {
+            CAPTURE(i, weights[i]);
+            CHECK(std::isfinite(weights[i]));
+            CHECK(weights[i] >= 0.0f);
+            total += weights[i];
+        }
+        CHECK(total == Approx(1.0f));
+    };
 
     SECTION("Code-heavy corpus selects CODE state") {
         CorpusStats stats;
@@ -269,16 +288,7 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
 
         // With code ratio > 0.7 and doc count < 1000, should be SMALL_CODE
         CHECK(tuner.currentState() == TuningState::SMALL_CODE);
-        CHECK(tuner.getRrfK() == 20);
-        // Graph-aware tuning may shift some rank mass from text/vector to KG.
-        if (stats.hasKnowledgeGraph()) {
-            CHECK(tuner.getParams().weights.text.value < 0.45f);
-            CHECK(tuner.getParams().weights.text.value > 0.39f);
-            CHECK(tuner.getParams().weights.kg.value > 0.05f);
-        } else {
-            CHECK(tuner.getParams().weights.text.value == Approx(0.45f));
-        }
-        CHECK(tuner.getParams().weights.pathTree.value == Approx(0.15f).epsilon(0.01));
+        checkWeights(tuner);
     }
 
     SECTION("Prose-heavy corpus selects PROSE state") {
@@ -296,9 +306,7 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
 
         // With prose ratio > 0.7 and doc count < 1000, should be SMALL_PROSE
         CHECK(tuner.currentState() == TuningState::SMALL_PROSE);
-        CHECK(tuner.getRrfK() == 25);
-        CHECK(tuner.getParams().weights.vector.value == Approx(0.40f));
-        CHECK(tuner.getParams().weights.pathTree.value == Approx(0.00f));
+        checkWeights(tuner);
     }
 
     SECTION("Scientific corpus (prose without path/tag structure)") {
@@ -314,17 +322,15 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
 
         SearchTuner tuner(stats);
 
-        // Scientific corpus: prose-dominant, flat structure, no tags. The profile
-        // intentionally reuses the product MIXED_PRECISION text/vector package and
-        // zeros structure-only sources instead of applying the old aggressive
-        // scientific overrides.
         CHECK(tuner.currentState() == TuningState::SCIENTIFIC);
-        CHECK((tuner.getRrfK() == 45));
-        CHECK((tuner.getParams().weights.text.value == Approx(0.61538f).margin(0.0001f)));
-        CHECK((tuner.getParams().weights.simeonText.value == Approx(0.00f).margin(0.0001f)));
-        CHECK((tuner.getParams().weights.vector.value == Approx(0.38462f).margin(0.0001f)));
-        CHECK((tuner.getParams().weights.kg.value == Approx(0.00f).margin(0.0001f)));
-        CHECK((tuner.getParams().weights.tag.value == Approx(0.00f).margin(0.0001f)));
+        checkWeights(tuner);
+
+        // This corpus has no usable structure signals. These zeros express
+        // capability gates, not a preferred text/vector/Simeon blend.
+        const auto params = tuner.getParams();
+        CHECK(params.weights.pathTree.value == 0.0f);
+        CHECK(params.weights.kg.value == 0.0f);
+        CHECK(params.weights.tag.value == 0.0f);
     }
 
     SECTION("Large mixed corpus") {
@@ -340,7 +346,7 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
 
         // Mixed content, neither code nor prose dominant
         CHECK((tuner.currentState() == TuningState::MIXED));
-        CHECK((tuner.getRrfK() == 45));
+        checkWeights(tuner);
     }
 
     SECTION("Minimal corpus") {
@@ -354,11 +360,8 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
 
         SearchTuner tuner(stats);
 
-        // Very small corpus should use MINIMAL state. Dead-source gates renormalize
-        // the default MINIMAL weights after disabling unavailable structure signals.
         CHECK((tuner.currentState() == TuningState::MINIMAL));
-        CHECK((tuner.getRrfK() == 15));
-        CHECK((tuner.getParams().weights.text.value == Approx(0.56701f).margin(0.0001f)));
+        checkWeights(tuner);
     }
 }
 
@@ -381,7 +384,10 @@ TEST_CASE("FSM Tuning Integration: TunedParams apply to config",
 
     // Verify config has tuned weights applied
     CHECK((config.textWeight == tuner.getParams().weights.text.value));
+    CHECK((config.simeonTextWeight == tuner.getParams().weights.simeonText.value));
     CHECK((config.vectorWeight == tuner.getParams().weights.vector.value));
+    CHECK((config.entityVectorWeight == tuner.getParams().weights.entityVector.value));
+    CHECK((config.rrfK == static_cast<float>(tuner.getRrfK())));
     CHECK((config.pathTreeWeight == tuner.getParams().weights.pathTree.value));
     CHECK((config.kgWeight == tuner.getParams().weights.kg.value));
     CHECK((config.tagWeight == tuner.getParams().weights.tag.value));

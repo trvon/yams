@@ -36,6 +36,10 @@ ARG="${3:-}"
 
 UNIT=yams-daemon.service
 USER_UNIT_DIR=/usr/lib/systemd/user
+SYSTEM_UNIT_DIR=/usr/lib/systemd/system
+LEGACY_DATA_DIR=/var/lib/yams
+LEGACY_MANIFEST=/var/tmp/yams-validate-legacy.sha256
+UPGRADE_NOTE=/var/tmp/yams-validate-upgrade-note.txt
 TUSER=alice   # the user whose daemon the checks drive (lingering)
 OUSER=bob     # a second user, for isolation
 PUSER=carol   # probes the bundled ONNX Runtime with its own config
@@ -154,11 +158,47 @@ pkg_files() {
 	done | sort -u
 }
 
+# Compare package-manager identity, not the filename or the CLI's base version.
+package_identity_from_file() {
+	local pkg="$1" name version arch
+	case "${PM}" in
+	deb)
+		name="$(dpkg-deb -f "${pkg}" Package)" || return 1
+		version="$(dpkg-deb -f "${pkg}" Version)" || return 1
+		arch="$(dpkg-deb -f "${pkg}" Architecture)" || return 1
+		[ "${name}" = yams ] && [ -n "${version}" ] && [ -n "${arch}" ] || return 1
+		printf '%s %s %s\n' "${name}" "${version}" "${arch}"
+		;;
+	rpm) rpm -qp --qf '%{NAME} %{EPOCHNUM}:%{VERSION}-%{RELEASE} %{ARCH}\n' "${pkg}" ;;
+	arch) pacman -Qp "${pkg}" ;;
+	*) return 1 ;;
+	esac
+}
+
+installed_package_identity() {
+	case "${PM}" in
+	deb)
+		[ "$(dpkg-query -W -f='${Status}' yams 2>/dev/null)" = 'install ok installed' ] || return 1
+		dpkg-query -W -f='${Package} ${Version} ${Architecture}\n' yams
+		;;
+	rpm) rpm -q --qf '%{NAME} %{EPOCHNUM}:%{VERSION}-%{RELEASE} %{ARCH}\n' yams ;;
+	arch) pacman -Q yams ;;
+	*) return 1 ;;
+	esac
+}
+
 # ---------------------------------------------------------------------------
 phase_install() {
 	local pkg="${ARG:?package file}"
 	local log=/var/tmp/yams-validate-install.log
-	local rc=0
+	local rc=0 expected actual
+	# An earlier successful old-package install must not certify a failed candidate.
+	remember INSTALL_VERIFIED no
+	if ! expected="$(package_identity_from_file "${pkg}")" || [ -z "${expected}" ]; then
+		fail install-identity "cannot read candidate package metadata"
+		return
+	fi
+	case "${expected}" in yams\ *) ;; *) fail install-identity "candidate is not yams"; return ;; esac
 	case "${PM}" in
 	deb)
 		# The Docker base image's policy-rc.d blocks service starts; a real host has none.
@@ -169,12 +209,18 @@ phase_install() {
 	rpm) dnf install -y "${pkg}" >"${log}" 2>&1 || rc=$? ;;
 	arch) pacman -U --noconfirm "${pkg}" >"${log}" 2>&1 || rc=$? ;;
 	esac
-	if [ "${rc}" -eq 0 ]; then
-		pass install "$(basename "${pkg}")"
-	else
+	if [ "${rc}" -ne 0 ]; then
 		fail install "$(basename "${pkg}") (rc=${rc})"
 		tail -n 20 "${log}" | sed 's/^/INFO install-log /'
+		return
 	fi
+	if ! actual="$(installed_package_identity)" || [ "${actual}" != "${expected}" ]; then
+		fail install-identity "expected '${expected}', installed '${actual:-unknown}'"
+		return
+	fi
+	remember INSTALL_EXPECTED "${expected}"
+	remember INSTALL_VERIFIED yes
+	pass install "$(basename "${pkg}") (${actual})"
 }
 
 # ---------------------------------------------------------------------------
@@ -487,38 +533,152 @@ phase_persist() {
 }
 
 # ---------------------------------------------------------------------------
-# Before upgrading from a release that ran a system service.
+# Record existing legacy bytes only after the old system daemon has stopped.
+# Do not manufacture an absent /var/lib/yams to satisfy an upgrade postcondition.
+snapshot_legacy_corpus() {
+	[ -d "${LEGACY_DATA_DIR}" ] && [ ! -L "${LEGACY_DATA_DIR}" ] || return 1
+	[ -n "$(find "${LEGACY_DATA_DIR}" -type f -print -quit)" ] || return 1
+	find "${LEGACY_DATA_DIR}" -type f -print0 | LC_ALL=C sort -z |
+		xargs -0 sha256sum >"${LEGACY_MANIFEST}" || return 1
+	[ -s "${LEGACY_MANIFEST}" ]
+}
+
 phase_seed() {
 	: >"${TOKEN_FILE}"
-	local state=""
-	for _ in $(seq 1 120); do
-		state="$(systemctl is-active "${UNIT}" 2>/dev/null || true)"
-		[ "${state}" = active ] && break
-		sleep 0.5
-	done
-	if [ "${state}" = active ]; then
+	local mode t hash out state="" rc=0
+	if [ -f "${SYSTEM_UNIT_DIR}/${UNIT}" ] || [ -f "/lib/systemd/system/${UNIT}" ]; then
+		mode=legacy
+		# Keep the original startup budget, but only for a real legacy system unit.
+		for _ in $(seq 1 120); do
+			state="$(systemctl is-active "${UNIT}" 2>/dev/null || true)"
+			[ "${state}" = active ] && break
+			sleep 0.5
+		done
+		if [ "${state}" != active ]; then
+			fail upgrade-seed-service "legacy system daemon is not active"
+			return
+		fi
 		pass upgrade-old-system-unit "old release runs the system ${UNIT}"
+		if ! systemctl stop "${UNIT}" || [ "$(systemctl is-active "${UNIT}" 2>/dev/null)" = active ]; then
+			fail upgrade-seed-legacy "cannot quiesce legacy corpus"
+			return
+		fi
+	elif [ -f "${USER_UNIT_DIR}/${UNIT}" ]; then
+		mode=per-user
+		info upgrade-old-system-unit "per-user release; no legacy system service expected"
 	else
-		info upgrade-old-system-unit "old release's system unit is '${state:-?}'"
+		fail upgrade-seed-mode "neither a legacy system unit nor a packaged user unit exists"
+		return
+	fi
+	if [ "${mode}" = legacy ] || [ -e "${LEGACY_DATA_DIR}" ]; then
+		if ! snapshot_legacy_corpus; then
+			fail upgrade-seed-legacy "no verifiable existing legacy corpus"
+			return
+		fi
+		remember LEGACY_PRESENT yes
+		pass upgrade-seed-legacy "existing legacy files recorded by SHA256"
+	else
+		remember LEGACY_PRESENT no
 	fi
 	ensure_user "${TUSER}"
-	wait_user_manager "${TUSER}" || true
-	systemctl show -p MainPID --value "${UNIT}" >/var/tmp/yams-validate-oldpid 2>/dev/null || true
+	if ! wait_user_manager "${TUSER}"; then
+		fail upgrade-seed-service "no user manager for ${TUSER}"
+		return
+	fi
+	if [ "${mode}" = per-user ]; then
+		uctl "${TUSER}" start "${UNIT}" >/dev/null
+		if ! wait_user_active "${TUSER}"; then
+			fail upgrade-seed-service "old per-user daemon is not ready"
+			return
+		fi
+	fi
+	# The legacy lane also preserves a user's locally ingested document while
+	# migrating the package from system-service to per-user-service layout.
+	t="$(token seed)"
+	printf 'package upgrade note %s\n' "${t}" >"${UPGRADE_NOTE}"
+	chmod 644 "${UPGRADE_NOTE}"
+	hash="$(sha256sum "${UPGRADE_NOTE}" | awk '{print $1}')"
+	if ! as_user "${TUSER}" "cat '${UPGRADE_NOTE}' > ~/pre-upgrade-note.txt"; then
+		fail upgrade-seed-add "cannot prepare user source document"
+		return
+	fi
+	out="$(as_user "${TUSER}" 'timeout 120 yams add ~/pre-upgrade-note.txt' 2>&1)" || rc=$?
+	if [ "${rc}" -ne 0 ]; then
+		fail upgrade-seed-add "rc=${rc}: $(printf '%s' "${out}" | tail -n 2)"
+		return
+	fi
+	if ! as_user "${TUSER}" "timeout 120 yams cat --hash '${hash}'" >"${UPGRADE_NOTE}.before" ||
+		! cmp -s "${UPGRADE_NOTE}" "${UPGRADE_NOTE}.before"; then
+		fail upgrade-seed-body "pre-transition body does not match original bytes"
+		return
+	fi
+	if ! search_finds "${TUSER}" "${t}" pre-upgrade-note; then
+		fail upgrade-seed-search "pre-transition document is not searchable"
+		return
+	fi
+	# Do not let an old CLI-spawned daemon answer the post-install probes.
+	if ! as_user "${TUSER}" 'timeout 60 yams daemon stop'; then
+		fail upgrade-seed-service "cannot stop old user daemon before package transition"
+		return
+	fi
+	remember UPGRADE_TOKEN "${t}"
+	remember UPGRADE_HASH "${hash}"
+	remember UPGRADE_MODE "${mode}"
+	pass upgrade-seed-body "pre-transition document searchable and SHA256 body hydrated"
+	# The candidate package must be installed next; an old install cannot qualify it.
+	remember INSTALL_VERIFIED no
 }
 
 phase_upgraded() {
+	local mode hash t expected actual legacy_present
+	mode="$(recall UPGRADE_MODE)"
+	legacy_present="$(recall LEGACY_PRESENT)"
+	hash="$(recall UPGRADE_HASH)"
+	t="$(recall UPGRADE_TOKEN)"
+	case "${mode}" in
+	legacy | per-user) ;;
+	*) fail upgrade-prerequisites "missing verified pre-transition corpus"; return ;;
+	esac
+	case "${legacy_present}" in
+	yes | no) ;;
+	*) fail upgrade-prerequisites "legacy corpus precondition not recorded"; return ;;
+	esac
+	if [ "${mode}" = legacy ] && [ "${legacy_present}" != yes ]; then
+		fail upgrade-prerequisites "legacy fixture did not record existing corpus"
+		return
+	fi
+	if [ -z "${t}" ] || ! printf '%s\n' "${hash}" | grep -Eq '^[0-9a-f]{64}$' ||
+		[ ! -s "${UPGRADE_NOTE}" ]; then
+		fail upgrade-prerequisites "missing verified pre-transition body/hash"
+		return
+	fi
+	expected="$(recall INSTALL_EXPECTED)"
+	if [ "$(recall INSTALL_VERIFIED)" != yes ] || [ -z "${expected}" ] ||
+		! actual="$(installed_package_identity)" || [ "${actual}" != "${expected}" ]; then
+		fail upgrade-package-identity "candidate install not verified or installed metadata differs"
+		return
+	fi
+	pass upgrade-package-identity "candidate '${actual}' installed and configured"
 	if [ "$(systemctl is-active "${UNIT}" 2>/dev/null)" = active ]; then
 		fail upgrade-system-unit-stopped "old system unit still running"
 	else
 		pass upgrade-system-unit-stopped "old system unit stopped"
 	fi
-	if [ -e "/usr/lib/systemd/system/${UNIT}" ] || [ -e "/lib/systemd/system/${UNIT}" ]; then
+	if [ -e "${SYSTEM_UNIT_DIR}/${UNIT}" ] || [ -e "/lib/systemd/system/${UNIT}" ]; then
 		fail upgrade-system-unit-removed "system unit file still installed"
 	else
 		pass upgrade-system-unit-removed "system unit file removed"
 	fi
 	check_no_dangling_links upgrade-no-dangling-links
-	check upgrade-old-corpus-kept "/var/lib/yams left in place" test -e /var/lib/yams
+	if [ "${legacy_present}" = yes ]; then
+		if [ -s "${LEGACY_MANIFEST}" ] && sha256sum --quiet -c "${LEGACY_MANIFEST}"; then
+			pass upgrade-old-corpus-kept "every recorded legacy file retains its SHA256"
+		else
+			fail upgrade-old-corpus-kept "legacy manifest missing, files removed or bytes changed"
+		fi
+	else
+		info upgrade-old-corpus-kept "no pre-existing legacy corpus; checking seeded user data"
+	fi
 	local g
 	g="$(systemctl --global is-enabled "${UNIT}" 2>/dev/null || true)"
 	if [ "${g}" = enabled ]; then pass upgrade-global-enabled "user unit enabled for all users"; else fail upgrade-global-enabled "'${g:-?}'"; fi
@@ -536,7 +696,18 @@ phase_upgraded() {
 		user_journal "${TUSER}"
 		return
 	fi
-	local t rc=0
+	if as_user "${TUSER}" "timeout 120 yams cat --hash '${hash}'" >"${UPGRADE_NOTE}.after" &&
+		cmp -s "${UPGRADE_NOTE}" "${UPGRADE_NOTE}.after"; then
+		pass upgrade-seeded-body "pre-transition body retains its SHA256 and exact bytes"
+	else
+		fail upgrade-seeded-body "pre-transition document missing or changed"
+	fi
+	if search_finds "${TUSER}" "${t}" pre-upgrade-note; then
+		pass upgrade-seeded-search "pre-transition document remains searchable"
+	else
+		fail upgrade-seeded-search "pre-transition document missing from search"
+	fi
+	local rc=0
 	t="$(token upgrade)"
 	as_user "${TUSER}" "printf 'upgrade note %s\n' '${t}' > ~/upgrade-note.txt"
 	as_user "${TUSER}" 'timeout 120 yams add ~/upgrade-note.txt' >/dev/null 2>&1 || rc=$?

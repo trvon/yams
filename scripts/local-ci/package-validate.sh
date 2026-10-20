@@ -28,9 +28,10 @@
 #              corpora kept (deb: also purge)
 #   minimal  - a second container from the bare base image (no systemd, no
 #              lane tooling) installs the package with declared deps only
-# With --upgrade-from-<fmt>, a second container installs that older package
-# (0.20.x ran a system service), upgrades, and checks the system unit is gone,
-# its corpus left alone and the user's daemon works.
+# With --upgrade-from-<fmt>, a second container installs that older package,
+# seeds and hydrates a user document, then verifies it after the transition.
+# Legacy system-service lanes additionally record the quiesced /var/lib/yams
+# files and verify their hashes; per-user lanes need no invented legacy path.
 #
 # Checks never stop at the first failure: each lane prints PASS/FAIL lines and
 # a summary, and the script exits non-zero if any check failed.
@@ -213,7 +214,7 @@ stage_files() { # stage_files <container> <file>...
 
 run_phase() { # run_phase <lane> <container> <phase> [pkg]
 	local lane="$1" c="$2" phase="$3" pkg="${4:-}" out="${WORK}/$1.results"
-	local arg=""
+	local arg="" rc=0
 	[ -n "${pkg}" ] && arg="/var/tmp/yams-validate/$(basename "${pkg}")"
 	log "${lane}: ${phase}"
 	docker exec "${c}" bash /var/tmp/yams-validate/checks.sh "${phase}" "$(lane_fmt "${lane}")" "${arg}" 2>&1 |
@@ -223,7 +224,12 @@ run_phase() { # run_phase <lane> <container> <phase> [pkg]
 		*" FAIL "*) printf '  \033[31m%s\033[0m\n' "${line#* }" ;;
 		*) printf '  %s\n' "${line#* }" ;;
 		esac
-	done
+	done || rc=$?
+	# Docker/transport errors may produce no child FAIL line for the summary.
+	if [ "${rc}" -ne 0 ]; then
+		note_fail "${lane}" "${phase}" "checks exited ${rc}"
+	fi
+	return "${rc}"
 }
 
 note_fail() { printf '%s FAIL %s %s\n' "$1" "$2" "$3" >>"${WORK}/$1.results"; err "$1: $2 $3"; }
@@ -249,7 +255,7 @@ validate_lane() {
 		return
 	fi
 	stage_files "${c}" "${pkg}"
-	run_phase "${lane}" "${c}" install "${pkg}"
+	if ! run_phase "${lane}" "${c}" install "${pkg}"; then return; fi
 	run_phase "${lane}" "${c}" layout
 	run_phase "${lane}" "${c}" service
 	run_phase "${lane}" "${c}" user
@@ -294,9 +300,10 @@ validate_lane() {
 		fi
 		stage_files "${u}" "${upgrade_from}" "${pkg}"
 		log "${lane}: upgrade path $(basename "${upgrade_from}") -> $(basename "${pkg}")"
-		run_phase "${lane}" "${u}" install "${upgrade_from}"
-		run_phase "${lane}" "${u}" seed
-		run_phase "${lane}" "${u}" install "${pkg}"
+		# A failed install or seed cannot certify an upgrade against the old package.
+		if ! run_phase "${lane}" "${u}" install "${upgrade_from}"; then return; fi
+		if ! run_phase "${lane}" "${u}" seed; then return; fi
+		if ! run_phase "${lane}" "${u}" install "${pkg}"; then return; fi
 		run_phase "${lane}" "${u}" upgraded
 		docker rm -f "${u}" >/dev/null 2>&1 || true
 	fi

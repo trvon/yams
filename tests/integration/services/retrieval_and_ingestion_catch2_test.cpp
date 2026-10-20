@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -308,9 +309,9 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddViaDaemonAndListGetGrep"
         if (!found)
             std::this_thread::sleep_for(50ms);
     }
-    if (!found) {
-        SKIP("List output did not surface hello.txt; eventual consistency issue.");
-    }
+    INFO("Successfully ingested hello.txt must become visible through list");
+    CAPTURE(addRes.value().hash, filePath, storageDir_);
+    REQUIRE(found);
 
     // 4) Get by hash
     yams::app::services::GetOptions greq;
@@ -332,9 +333,8 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddViaDaemonAndListGetGrep"
         if (!grepReady)
             std::this_thread::sleep_for(50ms);
     }
-    if (!grepReady) {
-        SKIP("Grep matches not available; skipping on this runner.");
-    }
+    INFO("Successfully ingested text must become visible through grep");
+    REQUIRE(grepReady);
 
     // 6) Name-smart get
     auto gname = rsvc.getByNameSmart("hello.txt", false, true, false, std::string{}, ropts, {});
@@ -740,7 +740,8 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "RetrievalGetToFileWritesCon
     using yams::app::services::RetrievalOptions;
     using yams::app::services::RetrievalService;
 
-    auto doc = fixtures_->createTextFixture("rtv/one.txt", "retrieval content", {"retrieval"});
+    const std::string expectedContent = "retrieval content";
+    auto doc = fixtures_->createTextFixture("rtv/one.txt", expectedContent, {"retrieval"});
 
     DocumentIngestionService ing;
     yams::app::services::AddOptions opts;
@@ -749,8 +750,10 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "RetrievalGetToFileWritesCon
     opts.path = doc.path.string();
     opts.recursive = false;
     opts.noEmbeddings = true;
+    opts.waitForProcessing = true;
     auto addRes = ing.addViaDaemon(opts);
     REQUIRE(addRes);
+    REQUIRE_FALSE(addRes.value().hash.empty());
 
     RetrievalService rsvc;
     RetrievalOptions ro;
@@ -761,24 +764,23 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "RetrievalGetToFileWritesCon
     gi.hash = addRes.value().hash;
     auto outPath = testRoot_ / "out_one.txt";
 
-    if (auto chunked = rsvc.getChunkedBuffer(gi, 8, ro); chunked) {
-        CHECK((chunked.value().content.size() > 0u));
-        return;
-    }
-    auto wr = rsvc.getToFile(gi, outPath, ro);
-    if (!wr) {
-        SKIP("RetrievalService getToFile/chunked unavailable: " + wr.error().message);
-    }
+    // This case must exercise the file writer, not pass via a short buffer read.
+    auto written = rsvc.getToFile(gi, outPath, ro);
+    INFO((written ? "file retrieval succeeded" : written.error().message));
+    REQUIRE(written);
 
     std::error_code ec;
-    if (!fs::exists(outPath, ec)) {
-        SKIP("Output path not created.");
-    }
-    auto sz = fs::file_size(outPath, ec);
-    if (ec) {
-        SKIP("Cannot stat output path: " + ec.message());
-    }
-    CHECK((sz > 0u));
+    const bool regularFile = fs::is_regular_file(outPath, ec);
+    REQUIRE_FALSE(ec);
+    REQUIRE(regularFile);
+    const auto size = fs::file_size(outPath, ec);
+    REQUIRE_FALSE(ec);
+    CHECK(size == expectedContent.size());
+    std::ifstream output(outPath, std::ios::binary);
+    REQUIRE(output.is_open());
+    const std::string content{std::istreambuf_iterator<char>(output),
+                              std::istreambuf_iterator<char>()};
+    CHECK(content == expectedContent);
 }
 
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "BinaryChunkedGetBytesRoundTrip",
@@ -809,6 +811,7 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "BinaryChunkedGetBytesRoundT
     a.path = p.string();
     a.recursive = false;
     a.noEmbeddings = true;
+    a.waitForProcessing = true;
     a.timeoutMs = kRequestTimeoutMs;
     auto addRes = ing.addViaDaemon(a);
     REQUIRE(addRes);
@@ -823,18 +826,13 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "BinaryChunkedGetBytesRoundT
 
     yams::app::services::GetInitOptions gi{};
     gi.name = p.filename().string();
+    gi.byName = true;
     gi.maxBytes = 0;
     gi.chunkSize = 4;
     auto cr = rsvc.getChunkedBuffer(gi, 16, ropts);
-    if (!cr) {
-        SKIP("Chunked retrieval unavailable: " + cr.error().message);
-    }
-    auto out = cr.value().content;
-    if (out.empty()) {
-        SKIP("Chunked retrieval returned empty content.");
-    }
-    REQUIRE((bytes.size() >= out.size()));
-    CHECK((out == bytes.substr(0, out.size())));
+    INFO((cr ? "binary retrieval succeeded" : cr.error().message));
+    REQUIRE(cr);
+    CHECK(cr.value().content == bytes);
 }
 
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "RetrievalListRespectsLimitAndPattern",
