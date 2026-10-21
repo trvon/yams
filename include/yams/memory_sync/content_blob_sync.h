@@ -123,9 +123,79 @@ public:
     /// Pull and persist the blob only when it is absent from the local store.
     Result<void> apply(std::string_view hash) { return applyImpl(hash, false); }
 
-    /// Apply a winner from the service's already-reconciled cache. Daemon apply
-    /// paths use this variant to avoid one full backend listing per content blob.
+    /// Apply a winner from an explicitly cache-only consumer's already-reconciled snapshot.
     Result<void> applyCached(std::string_view hash) { return applyImpl(hash, true); }
+
+    /// Apply the complete pinned daemon generation without per-blob reconciliation. Cache
+    /// residency is not a replication prerequisite; only genuinely absent bytes are deferred.
+    Result<ContentBlobApplyPass> applyCommitted() {
+        auto view = syncService_.captureAdapterView();
+        if (!view) {
+            return view.error();
+        }
+        constexpr std::string_view kPrefix = "content-blob/";
+        ContentBlobApplyPass pass;
+        const auto recordFailure = [&pass](Error error) {
+            if (!pass.failure) {
+                pass.failure = std::move(error);
+            }
+        };
+        auto visited = syncService_.visitAdapterWinners(
+            view.value(), kPrefix,
+            [&](const std::string& key, const MemoryIndexRecord& record) -> Result<void> {
+                const std::string_view hash{key.data() + kPrefix.size(),
+                                            key.size() - kPrefix.size()};
+                if (!isSha256Digest(hash)) {
+                    recordFailure(
+                        Error{ErrorCode::InvalidData, "invalid content-blob memory-sync key"});
+                    return {};
+                }
+                if (record.isTombstone()) {
+                    auto removed = applyDelete(hash);
+                    if (!removed) {
+                        recordFailure(removed.error());
+                    } else {
+                        pass.applied += removed.value() ? 1 : 0;
+                    }
+                    return {};
+                }
+                auto exists = contentExists(hash);
+                if (!exists) {
+                    recordFailure(exists.error());
+                    return {};
+                }
+                if (exists.value()) {
+                    return {};
+                }
+                auto content = syncService_.readAdapterPayload(view.value(), key);
+                if (!content) {
+                    // Cache misses and absent filesystem objects use different codes. Only
+                    // absence is retryable here; integrity/permission/I/O failures stay hard.
+                    if (content.error().code == ErrorCode::NotFound ||
+                        content.error().code == ErrorCode::ChunkNotFound) {
+                        pass.deferredKeys.push_back(key);
+                    } else {
+                        recordFailure(content.error());
+                    }
+                    return {};
+                }
+                if (!matchesDigest(hash, content.value())) {
+                    recordFailure(Error{ErrorCode::HashMismatch,
+                                        "replicated content bytes do not match the claimed hash"});
+                    return {};
+                }
+                if (auto stored = storeContent(hash, content.value()); !stored) {
+                    recordFailure(stored.error());
+                } else {
+                    ++pass.applied;
+                }
+                return {};
+            });
+        if (!visited) {
+            return visited.error();
+        }
+        return pass;
+    }
 
     /// Apply every content-blob winner in `winners` (other stores are ignored) from the sync
     /// cache. Blobs are content-addressed and independent, so one bad blob must not starve the

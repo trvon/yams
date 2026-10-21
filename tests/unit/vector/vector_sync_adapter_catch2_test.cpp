@@ -81,6 +81,100 @@ struct TempDirGuard {
 
 } // namespace
 
+TEST_CASE("vector sync classifies only eligible models across the complete pinned pass",
+          "[vector][memory-sync][adapter-eligibility]") {
+    const auto skip = skipReasonIfAny();
+    if (!skip.empty())
+        SKIP(skip);
+    enum class Ineligible { Dimension, MissingContent, ContentProbe };
+    Ineligible reason = Ineligible::Dimension;
+    SECTION("a different target dimension must not suppress the representable model") {
+        reason = Ineligible::Dimension;
+    }
+    SECTION("missing content does not participate in a model conflict") {
+        reason = Ineligible::MissingContent;
+    }
+    SECTION("a failed content probe does not participate in a model conflict") {
+        reason = Ineligible::ContentProbe;
+    }
+    TempDirGuard temp;
+    const auto badDimensions = reason == Ineligible::Dimension ? 2U : 4U;
+    auto sourceBad = makeVectorDb(badDimensions);
+    auto sourceGood = makeVectorDb(4);
+    auto target = makeVectorDb(4);
+    MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"writer"}};
+    VectorSyncAdapter badPublisher{*sourceBad, writer};
+    VectorSyncAdapter publisher{*sourceGood, writer};
+    const auto makeRecord = [](std::string chunk, std::string model, std::size_t dim,
+                               std::string document) {
+        VectorRecord record;
+        record.chunk_id = std::move(chunk);
+        record.model_id = std::move(model);
+        record.document_hash = std::move(document);
+        record.embedding.assign(dim, 0.0F);
+        record.embedding.front() = 1.0F;
+        record.embedding_dim = dim;
+        record.content = "content";
+        return record;
+    };
+    const std::string chunk = "shared/chunk%id";
+    const std::string badDocument(64, 'a');
+    const std::string goodDocument(64, 'b');
+    auto bad = makeRecord(chunk, "alpha/model", badDimensions, badDocument);
+    REQUIRE(sourceBad->insertVectorChecked(bad).has_value());
+    REQUIRE(badPublisher.publish(bad).has_value());
+    for (int i = 0; i < 4; ++i) {
+        auto middle = makeRecord("middle/" + std::to_string(i), "middle/model", 4, goodDocument);
+        REQUIRE(sourceGood->insertVectorChecked(middle).has_value());
+        REQUIRE(publisher.publish(middle).has_value());
+    }
+    auto good = makeRecord(chunk, "omega/model", 4, goodDocument);
+    REQUIRE(sourceGood->insertVectorChecked(good).has_value());
+    REQUIRE(publisher.publish(good).has_value());
+    REQUIRE(writer.syncFully().has_value());
+    REQUIRE(writer.mergedRecordCount() == 6);
+    MemorySyncConfig config{"reader"};
+    config.exclusiveBackend = true;
+    config.limits.maxIndexObjectsPerSync = 1;
+    MemorySyncService reader{makeBackend(temp.path / "sync"), config};
+    REQUIRE(reader.syncFully().has_value());
+    REQUIRE(reader.mergedRecordCount() == 6);
+    const auto badKey =
+        "embedding/" + escapeRecordKeySegment(bad.model_id) + "/" + escapeRecordKeySegment(chunk);
+    REQUIRE(reader.readCommitted(badKey).has_value());
+    VectorSyncAdapter consumer{
+        *target, reader, {}, nullptr, [&](std::string_view document) -> yams::Result<bool> {
+            if (document == badDocument && reason == Ineligible::MissingContent)
+                return false;
+            if (document == badDocument && reason == Ineligible::ContentProbe)
+                return yams::Error{yams::ErrorCode::IOError, "injected content probe failure"};
+            return true;
+        }};
+    auto applied = consumer.apply();
+    REQUIRE(applied.has_value());
+    CHECK(applied.value() == 5);
+    CHECK(target->getVectorCount() == 5);
+    auto retained = target->getVector(chunk);
+    CHECK(retained.has_value());
+    if (retained) {
+        CHECK(retained->model_id == good.model_id);
+        CHECK(retained->embedding == good.embedding);
+    }
+    if (reason == Ineligible::MissingContent) {
+        CHECK_FALSE(consumer.failure().has_value());
+        REQUIRE(consumer.deferredKeys().size() == 1);
+        CHECK(consumer.deferredKeys().front() == badKey);
+    } else {
+        REQUIRE(consumer.failure().has_value());
+        CHECK(consumer.failure()->code != yams::ErrorCode::NotSupported);
+        CHECK(consumer.failure()->message.starts_with(badKey));
+    }
+    auto repeated = consumer.apply();
+    REQUIRE(repeated.has_value());
+    CHECK(repeated.value() == 0);
+    CHECK(target->getVectorCount() == 5);
+}
+
 TEST_CASE("vector sync adapter suite supports disabled-vector CI lanes",
           "[vector][memory-sync][registration]") {
     SUCCEED("The binary remains valid when behavior cases are intentionally skipped");
@@ -145,6 +239,129 @@ TEST_CASE("vector sync adapter converges an embedding from A to B",
     CHECK(deleted.value() == 1);
     CHECK_FALSE(dbB->getVector(record.chunk_id).has_value());
     CHECK(dbB->getVectorCount() == 0);
+}
+
+TEST_CASE("vector adapter applies every exclusive winner beyond resident budgets",
+          "[vector][memory-sync][paged-adapter][disk-backed-serving]") {
+    const auto skip = skipReasonIfAny();
+    if (!skip.empty()) {
+        SKIP(skip);
+    }
+    TempDirGuard temp;
+    auto source = makeVectorDb(4);
+    auto target = makeVectorDb(4);
+    std::vector<VectorRecord> records;
+    std::size_t payloadBytes = 0;
+    {
+        MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"writer"}};
+        VectorSyncAdapter publisher{*source, writer};
+        for (int i = 0; i < 6; ++i) {
+            VectorRecord record;
+            record.chunk_id = "page-chunk-" + std::to_string(i);
+            record.document_hash = "page-doc-" + std::to_string(i);
+            record.model_id = "model-v1";
+            record.model_version = "1";
+            record.embedding = {1.0F, 0.0F, 0.0F, 0.0F};
+            record.embedding_dim = 4;
+            record.content = "paged embedding";
+            REQUIRE(source->insertVectorChecked(record).has_value());
+            REQUIRE(publisher.publish(record).has_value());
+            records.push_back(std::move(record));
+        }
+        const auto payload = writer.readCommitted("embedding/model-v1/page-chunk-0");
+        REQUIRE(payload.has_value());
+        payloadBytes = payload.value().size();
+    }
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 2;
+    SECTION("metadata slots") {
+        limits.maxMergedKeys = 2;
+    }
+    SECTION("payload cache bytes") {
+        limits.maxCacheBytes = 2 * payloadBytes;
+    }
+    MemorySyncConfig config{"reader", 60'000, "local-test-corpus", 1, limits};
+    config.exclusiveBackend = true;
+    MemorySyncService reader{makeBackend(temp.path / "sync"), config};
+    REQUIRE(reader.syncFully().has_value());
+    REQUIRE(reader.mergedRecordCount() == records.size());
+    VectorSyncAdapter consumer{*target, reader};
+    const auto applied = consumer.apply();
+    REQUIRE(applied.has_value());
+    CHECK(applied.value() == records.size());
+    CHECK_FALSE(consumer.failure().has_value());
+    CHECK(consumer.deferredKeys().empty());
+    for (const auto& record : records) {
+        const auto actual = target->getVector(record.chunk_id);
+        CHECK(actual.has_value());
+        if (actual) {
+            CHECK(actual->embedding == record.embedding);
+            CHECK(actual->document_hash == record.document_hash);
+            CHECK(actual->model_id == record.model_id);
+        }
+    }
+    CHECK(target->getVectorCount() == records.size());
+    const auto repeated = consumer.apply();
+    REQUIRE(repeated.has_value());
+    CHECK(repeated.value() == 0);
+    CHECK_FALSE(consumer.failure().has_value());
+}
+
+TEST_CASE("vector model conflicts are classified before mutation across page boundaries",
+          "[vector][memory-sync][paged-characterization]") {
+    const auto skip = skipReasonIfAny();
+    if (!skip.empty()) {
+        SKIP(skip);
+    }
+    TempDirGuard temp;
+    auto sourceA = makeVectorDb(4);
+    auto sourceB = makeVectorDb(4);
+    auto target = makeVectorDb(4);
+    {
+        MemorySyncService syncA{makeBackend(temp.path / "sync"), MemorySyncConfig{"A"}};
+        MemorySyncService syncB{makeBackend(temp.path / "sync"), MemorySyncConfig{"B"}};
+        VectorSyncAdapter publisherA{*sourceA, syncA};
+        VectorSyncAdapter publisherB{*sourceB, syncB};
+        const auto publish = [](VectorDatabase& database, VectorSyncAdapter& publisher,
+                                std::string model, std::string chunk) {
+            VectorRecord record;
+            record.chunk_id = std::move(chunk);
+            record.document_hash = "doc-1";
+            record.model_id = std::move(model);
+            record.embedding = {1.0F, 0.0F, 0.0F, 0.0F};
+            record.embedding_dim = 4;
+            REQUIRE(database.insertVectorChecked(record).has_value());
+            REQUIRE(publisher.publish(record).has_value());
+        };
+        publish(*sourceA, publisherA, "alpha", "competing-chunk");
+        for (int i = 0; i < 4; ++i) {
+            publish(*sourceA, publisherA, "middle", "independent-" + std::to_string(i));
+        }
+        publish(*sourceB, publisherB, "omega", "competing-chunk");
+    }
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 1;
+    // Keep all six resident for the pre-refactor characterization. A paged implementation
+    // must still see both models before choosing whether to mutate this chunk.
+    MemorySyncConfig config{"reader", 60'000, "local-test-corpus", 1, limits};
+    config.exclusiveBackend = true;
+    MemorySyncService reader{makeBackend(temp.path / "sync"), config};
+    REQUIRE(reader.syncFully().has_value());
+    REQUIRE(reader.mergedRecordCount() == 6);
+    VectorSyncAdapter consumer{*target, reader};
+    const auto applied = consumer.apply();
+    REQUIRE(applied.has_value());
+    CHECK(applied.value() == 4);
+    REQUIRE(consumer.failure().has_value());
+    CHECK(consumer.failure()->code == yams::ErrorCode::NotSupported);
+    CHECK_FALSE(target->getVector("competing-chunk").has_value());
+    for (int i = 0; i < 4; ++i) {
+        CHECK(target->getVector("independent-" + std::to_string(i)).has_value());
+    }
+    const auto repeated = consumer.apply();
+    REQUIRE(repeated.has_value());
+    CHECK(repeated.value() == 0);
+    CHECK_FALSE(target->getVector("competing-chunk").has_value());
 }
 
 TEST_CASE("vector sync adapter skips and reports payload identity mismatches",

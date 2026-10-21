@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -100,6 +101,122 @@ TEST_CASE("content blob adapter mirrors a local write and hydrates a missing pee
     const auto afterDelete = storeB->exists(blobHash);
     REQUIRE(afterDelete.has_value());
     CHECK_FALSE(afterDelete.value());
+}
+
+TEST_CASE("daemon content pass hydrates every exclusive winner beyond resident budgets",
+          "[memory-sync][content-blob][paged-adapter][disk-backed-serving]") {
+    TempDirGuard temp;
+    auto target = makeContentStore(temp.path / "target");
+    std::vector<std::vector<std::byte>> payloads;
+    std::vector<std::string> hashes;
+    {
+        MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"writer"}};
+        for (int i = 0; i < 6; ++i) {
+            payloads.push_back(bytes("blob-" + std::to_string(i)));
+            hashes.push_back(digest(payloads.back()));
+            REQUIRE(writer.publish("content-blob/" + hashes.back(), payloads.back()).has_value());
+        }
+    }
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 2;
+    SECTION("metadata slots") {
+        limits.maxMergedKeys = 2;
+    }
+    SECTION("payload cache bytes") {
+        limits.maxCacheBytes = 2 * payloads.front().size();
+    }
+    MemorySyncConfig config{"reader", 60'000, "local-test-corpus", 1, limits};
+    config.exclusiveBackend = true;
+    MemorySyncService reader{makeBackend(temp.path / "sync"), config};
+    REQUIRE(reader.syncFully().has_value());
+    REQUIRE(reader.mergedRecordCount() == hashes.size());
+    ContentBlobSyncAdapter adapter{*target, reader};
+    const auto applied = adapter.applyCommitted();
+    REQUIRE(applied.has_value());
+    REQUIRE_FALSE(applied.value().failure.has_value());
+    CHECK(applied.value().applied == hashes.size());
+    CHECK(applied.value().deferredKeys.empty());
+    for (std::size_t i = 0; i < hashes.size(); ++i) {
+        const auto actual = target->retrieve(hashes[i]);
+        CHECK(actual.has_value());
+        if (actual) {
+            CHECK(actual.value() == payloads[i]);
+        }
+    }
+    const auto repeated = adapter.applyCommitted();
+    REQUIRE(repeated.has_value());
+    CHECK_FALSE(repeated.value().failure.has_value());
+    CHECK(repeated.value().deferredKeys.empty());
+    CHECK(repeated.value().applied == 0);
+}
+
+TEST_CASE("daemon content pass reports cold faults without starving later pages",
+          "[memory-sync][content-blob][paged-adapter][fault]") {
+    TempDirGuard temp;
+    auto target = makeContentStore(temp.path / "target");
+    std::vector<std::pair<std::string, std::vector<std::byte>>> payloads;
+    {
+        MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"writer"}};
+        for (int i = 0; i < 6; ++i) {
+            auto payload = bytes("cold-" + std::to_string(i));
+            auto hash = digest(payload);
+            REQUIRE(writer.publish("content-blob/" + hash, payload).has_value());
+            payloads.emplace_back(std::move(hash), std::move(payload));
+        }
+    }
+    std::sort(payloads.begin(), payloads.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 1;
+    limits.maxMergedKeys = 1;
+    MemorySyncConfig config{"reader", 60'000, "local-test-corpus", 1, limits};
+    config.exclusiveBackend = true;
+    MemorySyncService reader{makeBackend(temp.path / "sync"), config};
+    REQUIRE(reader.syncFully().has_value());
+    REQUIRE(reader.mergedRecordCount() == payloads.size());
+    // Make the sole resident payload explicit, so all injected faults are cold even if cache
+    // eviction order changes. This refresh occurs once, before the daemon-stage capture.
+    REQUIRE(reader.readCommitted("content-blob/" + payloads.front().first).has_value());
+    REQUIRE(reader.syncFully().has_value());
+    REQUIRE(reader.readCached("content-blob/" + payloads.front().first).has_value());
+    const auto& corrupt = payloads[1];
+    const auto& missing = payloads[2];
+    const auto& laterGood = payloads.back();
+    // Fault the authoritative payload objects after successful recovery; envelopes and the
+    // pinned winner generation are unchanged. Other backend handles model storage faults,
+    // not concurrent writers participating in the exclusive-owner protocol.
+    auto source = makeBackend(temp.path / "sync");
+    REQUIRE(source->store("blob/" + corrupt.first, bytes("wrong bytes")).has_value());
+    REQUIRE(source->remove("blob/" + missing.first).has_value());
+    ContentBlobSyncAdapter adapter{*target, reader};
+    const auto pass = adapter.applyCommitted();
+    REQUIRE(pass.has_value());
+    REQUIRE(pass.value().failure.has_value());
+    CHECK(pass.value().failure->code == yams::ErrorCode::HashMismatch);
+    CHECK(pass.value().applied == payloads.size() - 2);
+    REQUIRE(pass.value().deferredKeys.size() == 1);
+    CHECK(pass.value().deferredKeys.front() == "content-blob/" + missing.first);
+    const auto later = target->retrieve(laterGood.first);
+    REQUIRE(later.has_value());
+    CHECK(later.value() == laterGood.second);
+    for (const auto& hash : {corrupt.first, missing.first}) {
+        const auto exists = target->exists(hash);
+        REQUIRE(exists.has_value());
+        CHECK_FALSE(exists.value());
+    }
+    REQUIRE(source->store("blob/" + missing.first, missing.second).has_value());
+    const auto retried = adapter.applyCommitted();
+    REQUIRE(retried.has_value());
+    CHECK(retried.value().applied == 1);
+    CHECK(retried.value().deferredKeys.empty());
+    REQUIRE(retried.value().failure.has_value());
+    CHECK(retried.value().failure->code == yams::ErrorCode::HashMismatch);
+    REQUIRE(source->store("blob/" + corrupt.first, corrupt.second).has_value());
+    const auto repaired = adapter.applyCommitted();
+    REQUIRE(repaired.has_value());
+    CHECK(repaired.value().applied == 1);
+    CHECK_FALSE(repaired.value().failure.has_value());
+    CHECK(repaired.value().deferredKeys.empty());
 }
 
 TEST_CASE("content blob adapter rejects a valid-looking hash for different bytes",
