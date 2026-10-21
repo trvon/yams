@@ -687,7 +687,11 @@ public:
         return std::atomic_load_explicit(&embeddingConfig_, std::memory_order_acquire);
     }
     const StateComponent& getState() const { return state_; }
-    const std::filesystem::path& getResolvedDataDir() const { return resolvedDataDir_; }
+    /// Owning snapshot: bootstrap/fallback may republish the active root while metrics reads it.
+    std::filesystem::path getResolvedDataDir() const {
+        std::lock_guard lock(resolvedDataDirMutex_);
+        return resolvedDataDir_;
+    }
 
     /// Resolved live daemon log file path (empty when the daemon was not configured with one).
     const std::filesystem::path& getResolvedLogFilePath() const { return config_.logFile; }
@@ -737,7 +741,9 @@ public:
 
 #ifdef YAMS_TESTING
     // Test helpers: inject mock provider and tweak provider state/name.
-    void __test_setResolvedDataDir(std::filesystem::path dir) { resolvedDataDir_ = std::move(dir); }
+    void testingSetResolvedDataDir(std::filesystem::path dir) {
+        publishResolvedDataDir(std::move(dir));
+    }
     void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
         storeModelProvider(std::move(provider));
     }
@@ -859,6 +865,7 @@ private:
     std::chrono::milliseconds runSessionWatcherIteration();
     boost::asio::awaitable<void> co_runSessionWatcher(const yams::compat::stop_token& token);
 
+    void publishResolvedDataDir(std::filesystem::path dir);
     Result<void> initializeImpl(const std::function<void()>& beforePoolConfigure);
     Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
@@ -969,6 +976,7 @@ private:
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> initStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> pluginStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
+    mutable std::mutex resolvedDataDirMutex_;
     std::filesystem::path resolvedDataDir_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;

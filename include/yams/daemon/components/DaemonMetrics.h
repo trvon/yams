@@ -1,5 +1,7 @@
 #pragma once
 
+#include <yams/daemon/components/polling_completion.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -543,9 +545,7 @@ private:
     // Timer pointer for cancellation from stopPolling()
     boost::asio::steady_timer* pollingTimer_{nullptr};
     // Shutdown synchronization - signaled when polling loop exits
-    std::mutex pollingMutex_;
-    std::condition_variable pollingCv_;
-    bool pollingStopped_{true};
+    detail::PollingCompletion pollingCompletion_;
 
     // CPU utilization sampling state (Linux): deltas over /proc since last snapshot
     mutable std::uint64_t lastProcJiffies_{0};

@@ -777,6 +777,11 @@ ServiceManager::~ServiceManager() {
     }
 }
 
+void ServiceManager::publishResolvedDataDir(std::filesystem::path dir) {
+    std::lock_guard lock(resolvedDataDirMutex_);
+    resolvedDataDir_ = std::move(dir);
+}
+
 yams::Result<void> ServiceManager::initialize() {
     return initializeImpl({});
 }
@@ -826,7 +831,7 @@ ServiceManager::initializeImpl(const std::function<void()>& beforePoolConfigure)
     }
 
     // Persist resolved dataDir for downstream components/telemetry
-    resolvedDataDir_ = std::move(dataDir);
+    publishResolvedDataDir(std::move(dataDir));
 
     // Configure required pool defaults before initializing storage-backed services.
     auto poolResult = configureResourcePools(beforePoolConfigure);
@@ -1660,7 +1665,7 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
     if (!directoryResult) {
         return directoryResult.error();
     }
-    resolvedDataDir_ = dataDir;
+    publishResolvedDataDir(dataDir);
 
     auto storageDecision =
         yams::storage::resolveStorageBootstrapDecision(config_.configFilePath, dataDir);
@@ -1676,7 +1681,7 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
         if (!directoryResult) {
             return directoryResult.error();
         }
-        resolvedDataDir_ = dataDir;
+        publishResolvedDataDir(dataDir);
     }
 
     if (storageDecision.value().fallbackTriggered) {
