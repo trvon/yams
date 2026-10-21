@@ -142,6 +142,64 @@ TEST_CASE("apply health records a pass that both failed and deferred",
     CHECK(snapshot.deferredIn(ApplyStage::Content) == 0);
 }
 
+TEST_CASE("apply health keeps exact totals separate from bounded diagnostic samples",
+          "[memory-sync][apply-health][sampled-total]") {
+    ApplyHealth health;
+    const auto start = ApplyHealth::Clock::time_point{} + 1h;
+    yams::memory_sync::ApplyStagePass topology;
+    topology.deferredKeys = {"topology-edge/a/rel/b", "topology-edge/c/rel/d"};
+    topology.deferredCount = 70;
+    topology.failure = "independent row failed";
+    CHECK(health.recordPass(ApplyStage::Topology, topology, start).empty());
+    auto snapshot = health.snapshot(start + 5s);
+    CHECK(snapshot.deferredIn(ApplyStage::Topology) == 70);
+    CHECK(snapshot.failuresIn(ApplyStage::Topology) == 1);
+    CHECK(snapshot.oldestDeferralAgeMs == 5000);
+    yams::memory_sync::ApplyStagePass metadata;
+    metadata.deferredKeys = {"document/sampled"};
+    metadata.deferredCount = 100;
+    CHECK(health.recordPass(ApplyStage::Metadata, metadata, start + 5s).empty());
+    CHECK(health.snapshot(start + 6s).deferredTotal() == 170);
+    // Incomplete scans cannot overwrite the previously observed exact total.
+    health.recordFailure(ApplyStage::Topology, "later scan interrupted", start + 6s);
+    CHECK(health.snapshot(start + 7s).deferredIn(ApplyStage::Topology) == 70);
+    topology.failure.reset();
+    topology.deferredKeys = {"topology-edge/c/rel/d"};
+    topology.deferredCount = 80;
+    CHECK(health.recordPass(ApplyStage::Topology, topology, start + 10s).empty());
+    snapshot = health.snapshot(start + 12s);
+    CHECK(snapshot.deferredIn(ApplyStage::Topology) == 80);
+    CHECK(snapshot.deferredTotal() == 180);
+    CHECK(snapshot.oldestDeferralAgeMs == 12000);
+    CHECK(snapshot.failuresIn(ApplyStage::Topology) == 2);
+    CHECK(health.recordPass(ApplyStage::Topology, {}, start + 20s).empty());
+    CHECK(health.recordPass(ApplyStage::Metadata, {}, start + 20s).empty());
+    snapshot = health.snapshot(start + 21s);
+    CHECK(snapshot.deferredTotal() == 0);
+    CHECK(snapshot.oldestDeferralAgeMs == 0);
+}
+
+TEST_CASE("apply health accepts counter-only passes without undercounting known sampled keys",
+          "[memory-sync][apply-health][sampled-total]") {
+    ApplyHealth health;
+    const auto start = ApplyHealth::Clock::time_point{} + 1h;
+    yams::memory_sync::ApplyStagePass pass;
+    pass.deferredCount = 70;
+    CHECK(health.recordPass(ApplyStage::Topology, pass, start).empty());
+    CHECK(health.snapshot(start + 1s).deferredIn(ApplyStage::Topology) == 70);
+    pass.deferredKeys = {"a", "b"};
+    pass.deferredCount = 1; // An inconsistent producer must never hide known keys.
+    CHECK(health.recordPass(ApplyStage::Topology, pass, start + 2s).empty());
+    CHECK(health.snapshot(start + 3s).deferredIn(ApplyStage::Topology) == 2);
+    pass.deferredCount.reset();
+    CHECK(health.recordPass(ApplyStage::Topology, pass, start + 4s).empty());
+    CHECK(health.snapshot(start + 5s).deferredIn(ApplyStage::Topology) == 2);
+    pass.deferredKeys.clear();
+    pass.deferredCount = 0;
+    CHECK(health.recordPass(ApplyStage::Topology, pass, start + 6s).empty());
+    CHECK(health.snapshot(start + 7s).deferredTotal() == 0);
+}
+
 TEST_CASE("apply health counts failures, failed cycles, and publish outcomes",
           "[memory-sync][apply-health]") {
     ApplyHealth health;
@@ -168,4 +226,60 @@ TEST_CASE("apply health counts failures, failed cycles, and publish outcomes",
     CHECK(snapshot.lastFailureAgeMs == 3000);
     CHECK(snapshot.publishSkippedCycles == 1);
     CHECK(snapshot.publishFailedCycles == 2);
+}
+
+TEST_CASE("apply health preserves the last complete observation during admission deferral",
+          "[memory-sync][apply-health][incomplete]") {
+    ApplyHealth health;
+    const auto start = ApplyHealth::Clock::time_point{} + 1h;
+    CHECK_FALSE(health.snapshot(start).scannedAllIn(ApplyStage::Topology));
+    yams::memory_sync::ApplyStagePass complete;
+    complete.deferredKeys = {"topology-edge/a/rel/b"};
+    complete.deferredCount = 70;
+    CHECK(health.recordPass(ApplyStage::Topology, complete, start).empty());
+    CHECK(health.snapshot(start + 5s).scannedAllIn(ApplyStage::Topology));
+
+    yams::memory_sync::ApplyStagePass interrupted;
+    interrupted.scanComplete = false;
+    interrupted.deferredKeys = {"partial-observation-is-not-an-exact-set"};
+    interrupted.deferredCount = 1;
+    CHECK(health.recordPass(ApplyStage::Topology, interrupted, start + 6s).empty());
+    const auto pending = health.snapshot(start + 7s);
+    CHECK_FALSE(pending.scannedAllIn(ApplyStage::Topology));
+    CHECK(pending.deferredIn(ApplyStage::Topology) == 70);
+    CHECK(pending.oldestDeferralAgeMs == 7000);
+    CHECK(pending.failuresIn(ApplyStage::Topology) == 0);
+    CHECK(pending.lastFailureStage.empty());
+
+    CHECK(health.recordPass(ApplyStage::Topology, {}, start + 8s).empty());
+    const auto recovered = health.snapshot(start + 9s);
+    CHECK(recovered.scannedAllIn(ApplyStage::Topology));
+    CHECK(recovered.deferredIn(ApplyStage::Topology) == 0);
+    CHECK(recovered.oldestDeferralAgeMs == 0);
+}
+
+TEST_CASE("apply health interruption cannot hide hard failures or clear known counts",
+          "[memory-sync][apply-health][incomplete]") {
+    ApplyHealth health;
+    const auto start = ApplyHealth::Clock::time_point{} + 1h;
+    yams::memory_sync::ApplyStagePass complete;
+    complete.deferredKeys = {"topology-edge/a/rel/b"};
+    complete.deferredCount = 70;
+    CHECK(health.recordPass(ApplyStage::Topology, complete, start).empty());
+    yams::memory_sync::ApplyStagePass interrupted;
+    interrupted.scanComplete = false;
+    interrupted.failure = "actual scratch capacity failure";
+    CHECK(health.recordPass(ApplyStage::Topology, interrupted, start + 1s).empty());
+    auto snapshot = health.snapshot(start + 2s);
+    CHECK_FALSE(snapshot.scannedAllIn(ApplyStage::Topology));
+    CHECK(snapshot.deferredIn(ApplyStage::Topology) == 70);
+    CHECK(snapshot.failuresIn(ApplyStage::Topology) == 1);
+    CHECK(snapshot.lastFailureStage == "topology");
+    CHECK(snapshot.lastFailure == "actual scratch capacity failure");
+    health.recordFailure(ApplyStage::Topology, "later I/O failure", start + 3s);
+    snapshot = health.snapshot(start + 4s);
+    CHECK_FALSE(snapshot.scannedAllIn(ApplyStage::Topology));
+    CHECK(snapshot.deferredIn(ApplyStage::Topology) == 70);
+    CHECK(snapshot.failuresIn(ApplyStage::Topology) == 2);
+    CHECK(snapshot.lastFailure == "later I/O failure");
 }

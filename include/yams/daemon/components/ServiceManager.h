@@ -222,6 +222,9 @@ public:
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);
     Result<std::string> readMemorySyncCached(const std::string& key) const;
+    /// Explicit fallible I/O against the committed generation; never starts a corpus sweep.
+    /// IPC callers must dispatch this on an admitted worker, not the connection strand.
+    Result<std::string> readMemorySyncCommitted(const std::string& key) const;
     Result<MemorySyncStatus> getMemorySyncStatus() const;
     Result<p2p::P2pSyncResult> connectP2p(std::string_view connectionString);
     Result<void> disconnectP2p(std::string_view nodeId);

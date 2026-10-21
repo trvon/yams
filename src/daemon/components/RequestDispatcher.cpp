@@ -39,6 +39,7 @@
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -185,7 +186,21 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
             break;
         }
         case MemorySyncOperation::Read: {
-            auto value = serviceManager_->readMemorySyncCached(req.key);
+            // offload_to_worker has a synchronous fallback for uninitialized services;
+            // explicit disk reads must never take that fallback on the IPC strand.
+            if (!serviceManager_->getWorkCoordinator()) {
+                co_return dispatch::makeErrorResponse(ErrorCode::NotInitialized,
+                                                      "memory sync read workers are unavailable");
+            }
+            auto& governor = ResourceGovernor::instance();
+            if (governor.hostPressureElevated() || !governor.canAdmitWork()) {
+                co_return dispatch::makeErrorResponse(
+                    ErrorCode::ResourceBusy, "memory sync read deferred by local pressure");
+            }
+            auto value = co_await dispatch::offload_to_worker(
+                serviceManager_, "memory_sync.read", [manager = serviceManager_, key = req.key] {
+                    return manager->readMemorySyncCommitted(key);
+                });
             if (!value) {
                 co_return dispatch::makeErrorResponse(value.error().code, value.error().message);
             }
