@@ -99,6 +99,7 @@ public:
     }
 
     bool empty() const { return counters_.empty(); }
+    bool operator==(const VersionVector&) const = default;
 
     const std::map<NodeId, std::uint64_t>& counters() const { return counters_; }
 
@@ -141,6 +142,8 @@ struct MemoryIndexRecord {
     std::string signatureAlgorithm; /// schema-v4 signature algorithm
     std::string signingKeyId;       /// configured writer-key generation identifier
     std::string signature;          /// lowercase hex Ed25519 signature
+
+    bool operator==(const MemoryIndexRecord&) const = default;
 
     bool isTombstone() const noexcept { return recordKind == kMemoryTombstoneRecordKind; }
     bool hasValidEntryHash() const {
