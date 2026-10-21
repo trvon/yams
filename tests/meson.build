@@ -33,6 +33,28 @@ _test_timeout_cpp_arg = '-DYAMS_TEST_TIMEOUT_SCALE=' + _test_timeout_scale.to_st
 
 fs = import('fs')
 
+# Sanitized shared libraries must not introduce a different compiler's runtime.
+# Inspect the built artifact without loading it, so mixed-runtime startup crashes
+# are reported as a precise linkage assertion rather than hiding the regression.
+if yams_sanitize_thread and host_machine.system() == 'linux' and is_variable('yams_onnx_resource_lib')
+    sanitizer_compiler = meson.get_compiler('cpp').get_id()
+    if sanitizer_compiler in ['clang', 'gcc']
+        sanitizer_readelf = find_program('readelf', required: true)
+        test('onnx_resource_tsan_linkage',
+            python_exe,
+            args: [
+                files('scripts/check_sanitizer_runtime_linkage.py'),
+                '--library', yams_onnx_resource_lib.full_path(),
+                '--compiler', sanitizer_compiler,
+                '--readelf', sanitizer_readelf.full_path(),
+            ],
+            depends: [yams_onnx_resource_lib],
+            suite: ['unit', 'build', 'sanitizer'],
+            timeout: 30,
+        )
+    endif
+endif
+
 raw_environment_policy_script = files('scripts/check_raw_environment_calls.py')
 raw_environment_policy_tests = files('scripts/test_check_raw_environment_calls.py')
 raw_environment_allowlist = files('scripts/raw_environment_allowlist.txt')
