@@ -835,6 +835,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     res.overallStatus = "degraded";
                     res.lifecycleState = "degraded";
                     break;
+                case LifecycleState::Failed:
+                    res.overallStatus = "failed";
+                    res.lifecycleState = "failed";
+                    break;
                 case LifecycleState::Stopping:
                     res.overallStatus = "stopping";
                     res.lifecycleState = "stopping";

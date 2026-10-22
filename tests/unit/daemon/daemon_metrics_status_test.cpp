@@ -4803,7 +4803,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         svc.__test_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
-        svc.__test_setResolvedDataDir({});
+        svc.testingSetResolvedDataDir({});
         const auto strayDb = std::filesystem::current_path() / "vectors.db";
         const bool existedBefore = std::filesystem::exists(strayDb);
 
@@ -4817,7 +4817,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     }
 
     SECTION("embed documents returns success when repair finds no work") {
-        svc.__test_setResolvedDataDir(cfg.dataDir);
+        svc.testingSetResolvedDataDir(cfg.dataDir);
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-empty.onnx");
         svc.__test_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
@@ -4839,7 +4839,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     }
 
     SECTION("embed documents rejects non-empty hash lists that resolve to no daemon documents") {
-        svc.__test_setResolvedDataDir(cfg.dataDir);
+        svc.testingSetResolvedDataDir(cfg.dataDir);
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-missing-hashes.onnx");
         svc.__test_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
@@ -4944,7 +4944,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         configSvc.__test_setModelProvider(provider);
         configSvc.__test_setContentStore(std::make_shared<StubContentStore>());
         configSvc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
-        configSvc.__test_setResolvedDataDir(cfg.dataDir);
+        configSvc.testingSetResolvedDataDir(cfg.dataDir);
         RequestDispatcher configDispatcher(&lifecycle, &configSvc, &state);
 
         EmbedDocumentsRequest req;
@@ -5873,7 +5873,7 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         auto svc = std::make_unique<ServiceManager>(cfg, *state, *lifecycleFsm);
         // The data directory is only resolved during initialize(); tests that place plugins
         // under it would otherwise write to the working directory.
-        svc->__test_setResolvedDataDir(cfg.dataDir);
+        svc->testingSetResolvedDataDir(cfg.dataDir);
         svc->__test_pluginScanComplete(0);
         REQUIRE(svc->getPluginHostFsmSnapshot().state == PluginHostState::Ready);
 
@@ -6941,6 +6941,22 @@ TEST_CASE("DaemonMetrics: cold snapshot refreshes synchronously", "[daemon][metr
     CHECK(snap->statusDetailAgeMs == 0);
     CHECK(snap->statusDetailStale);
     CHECK_FALSE(snap->statusDetailAvailable);
+}
+
+TEST_CASE("RequestDispatcher preserves failed lifecycle instead of reporting initialization",
+          "[daemon][status][memory-sync-recovery]") {
+    StateComponent state;
+    StubLifecycle lifecycle{LifecycleState::Failed};
+    // Lifecycle rendering is independent of services. Avoid bootstrapping plugins,
+    // background workers and checkpoint threads just to exercise this status seam.
+    RequestDispatcher dispatcher(&lifecycle, nullptr, &state);
+
+    const auto response = dispatchRequest(dispatcher, Request{StatusRequest{}});
+    REQUIRE(std::holds_alternative<StatusResponse>(response));
+    const auto& status = std::get<StatusResponse>(response);
+    CHECK(status.lifecycleState == "failed");
+    CHECK(status.overallStatus == "failed");
+    CHECK_FALSE(status.ready);
 }
 
 TEST_CASE("RequestDispatcher: status refreshes cold snapshot without retry hint",

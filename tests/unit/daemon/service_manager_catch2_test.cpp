@@ -36,6 +36,7 @@
 
 #include "../../../include/yams/daemon/components/db_integrity_stamp.h"
 #include "../../../src/daemon/components/service_manager/bootstrap_status.h"
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
@@ -469,6 +470,61 @@ struct ScopedCurrentPath {
         fs::current_path(original_, ec);
     }
 };
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager data-directory snapshots survive publication",
+                 "[daemon][service_manager][data-dir-snapshot]") {
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+
+    // Holding a const reference must extend the lifetime of an owning snapshot,
+    // not expose the mutable path that early metrics and storage fallback publish.
+    const auto& beforePublication = manager.getResolvedDataDir();
+    REQUIRE(beforePublication.empty());
+    const auto primary = testDir_ / "primary-data";
+    manager.testingSetResolvedDataDir(primary);
+    CHECK(beforePublication.empty());
+
+    const auto& primarySnapshot = manager.getResolvedDataDir();
+    REQUIRE(primarySnapshot == primary);
+    const auto fallback = testDir_ / "fallback-data";
+    manager.testingSetResolvedDataDir(fallback);
+    CHECK(primarySnapshot == primary);
+    CHECK(manager.getResolvedDataDir() == fallback);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager snapshots remain whole during publication",
+                 "[daemon][service_manager][data-dir-snapshot][concurrency]") {
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    // These are path values only: no filesystem entry with a long component is created.
+    const auto primary = testDir_ / std::string(512, 'a');
+    const auto fallback = testDir_ / std::string(512, 'b');
+    manager.testingSetResolvedDataDir(primary);
+    const auto& initialSnapshot = manager.getResolvedDataDir();
+
+    std::promise<void> begin;
+    const auto ready = begin.get_future().share();
+    yams::compat::jthread writer([&] {
+        ready.wait();
+        for (unsigned i = 0; i < 256; ++i) {
+            manager.testingSetResolvedDataDir(i % 2 == 0 ? primary : fallback);
+        }
+    });
+    begin.set_value();
+    unsigned invalidSnapshots = 0;
+    for (unsigned i = 0; i < 256; ++i) {
+        const auto snapshot = manager.getResolvedDataDir();
+        if (snapshot != primary && snapshot != fallback) {
+            ++invalidSnapshots;
+        }
+    }
+    writer.join();
+    CHECK(invalidSnapshots == 0);
+    CHECK(initialSnapshot == primary);
+}
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager construction succeeds",
                  "[daemon][service_manager]") {
