@@ -154,10 +154,7 @@ public:
             waiters.swap(waiters_);
         }
         for (const auto& timer : waiters) {
-            boost::asio::post(timer->get_executor(), [timer] {
-                boost::system::error_code ignored;
-                timer->cancel(ignored);
-            });
+            boost::asio::post(timer->get_executor(), [timer] { (void)timer->cancel(); });
         }
     }
 
