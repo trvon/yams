@@ -613,7 +613,7 @@ void ensureBenchmarkEmbeddingsReady(yams::daemon::YamsDaemon* daemon, bool enabl
         }
         auto sharedProvider =
             std::make_shared<BenchmarkMockModelProvider>(std::max<std::size_t>(dim, 1));
-        serviceManager->__test_setModelProvider(sharedProvider);
+        serviceManager->testing_setModelProvider(sharedProvider);
     }
 
     const std::string model = embeddingModel.empty() ? "simeon-default" : embeddingModel;

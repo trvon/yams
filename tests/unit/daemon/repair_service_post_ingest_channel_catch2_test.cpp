@@ -1087,7 +1087,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     const std::string kModelName = "test-model";
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "never-poison");
-    sm->__test_setModelProvider(provider);
+    sm->testing_setModelProvider(provider);
 
     const auto now =
         std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
@@ -1209,7 +1209,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "never-poison");
     REQUIRE((provider->loadModel(kModelName).has_value()));
-    sm->__test_setModelProvider(provider);
+    sm->testing_setModelProvider(provider);
 
     const std::string hash = std::string(64, 'e');
     const auto now =
@@ -1303,7 +1303,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "poison-pill");
     REQUIRE((provider->loadModel(kModelName).has_value()));
-    sm->__test_setModelProvider(provider);
+    sm->testing_setModelProvider(provider);
 
     auto embedChannel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
@@ -1750,7 +1750,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "never-poison");
     REQUIRE((provider->loadModel(modelName).has_value()));
-    sm->__test_setModelProvider(provider);
+    sm->testing_setModelProvider(provider);
 
     const auto now =
         std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());

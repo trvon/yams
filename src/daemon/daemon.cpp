@@ -725,9 +725,11 @@ void YamsDaemon::runLoop() {
                     snapshot.state == ServiceManagerState::Stopped) {
                     break;
                 }
-                spdlog::debug("[InitWaiter] ServiceManager still initializing (state={}), "
-                              "continuing to wait",
-                              static_cast<int>(snapshot.state));
+                spdlog::warn("[InitWaiter] ServiceManager still initializing (state={}, "
+                             "phase={}, phase_elapsed_ms={}), continuing to wait",
+                             static_cast<int>(snapshot.state),
+                             startupPhaseName(serviceManager_->getStartupPhase()),
+                             serviceManager_->getStartupPhaseElapsedMs());
             }
 
             initHandled_.store(true, std::memory_order_release);
@@ -1009,9 +1011,11 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
                     snapshot.state == ServiceManagerState::Stopped) {
                     break;
                 }
-                spdlog::debug("[InitWaiter] ServiceManager still initializing (state={}), "
-                              "continuing to wait",
-                              static_cast<int>(snapshot.state));
+                spdlog::warn("[InitWaiter] ServiceManager still initializing (state={}, "
+                             "phase={}, phase_elapsed_ms={}), continuing to wait",
+                             static_cast<int>(snapshot.state),
+                             startupPhaseName(serviceManager_->getStartupPhase()),
+                             serviceManager_->getStartupPhaseElapsedMs());
             }
 
             initHandled_.store(true, std::memory_order_release);

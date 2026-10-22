@@ -1001,7 +1001,7 @@ TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][m
 
     auto injectedProvider = std::make_shared<StubModelProvider>();
     REQUIRE(injectedProvider != nullptr);
-    serviceManager->__test_setModelProvider(injectedProvider);
+    serviceManager->testing_setModelProvider(injectedProvider);
 
     LoadModelRequest emptyLoadWithProviderReq;
     auto emptyLoadWithProviderResult =
@@ -1919,7 +1919,7 @@ TEST_CASE("Daemon client repair request execution", "[daemon][socket][requests][
 
     auto injectedProvider = std::make_shared<StubModelProvider>();
     REQUIRE(injectedProvider != nullptr);
-    serviceManager->__test_setModelProvider(injectedProvider);
+    serviceManager->testing_setModelProvider(injectedProvider);
     REQUIRE(injectedProvider->loadModel("repair-embed-model").has_value());
 
     EmbedDocumentsRequest embedReq;

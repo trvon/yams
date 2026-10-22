@@ -134,7 +134,7 @@ struct MeshNode {
             REQUIRE(graph.has_value());
         }
         kgStore = std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(graph.value()));
-        manager->__test_setKgStore(kgStore);
+        manager->testing_setKgStore(kgStore);
 
         if (!syncBackend) {
             syncBackend = makeBackend(sharedStore);

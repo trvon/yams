@@ -1020,7 +1020,7 @@ TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embeddi
 
     SECTION("Snapshot includes embedding backend information") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/test-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setAdoptedProviderPluginName("stub");
 
         // Model provider is now directly used - no need to ensure generator
@@ -1739,7 +1739,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model rejects missing name when provider exists") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         LoadModelRequest req;
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -1752,7 +1752,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model with options succeeds and records provider state") {
         auto provider = std::make_shared<StubModelProvider>(768, "/tmp/provider-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         LoadModelRequest req;
         req.modelName = "dispatcher-model";
@@ -1772,7 +1772,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("load model failure marks embedding degraded") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/failing-model.onnx");
         provider->setLoadError(Error{ErrorCode::InvalidState, "provider refused load"});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         lifecycle.resetDegradedState();
 
         LoadModelRequest req;
@@ -1805,7 +1805,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         invalidMessage.push_back(static_cast<char>(0xC0));
         invalidMessage.push_back(static_cast<char>(0xFF));
         provider->setLoadError(Error{ErrorCode::InvalidState, invalidMessage});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         LoadModelRequest req;
         req.modelName = "utf8-model";
@@ -1832,7 +1832,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("load model returns internal error when provider throws after load") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/throwing-model.onnx");
         provider->setThrowOnMemoryUsage(true);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         LoadModelRequest req;
         req.modelName = "throwing-model";
@@ -1848,7 +1848,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("load model skips rebuild when model is already loaded") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/already-loaded-model.onnx");
         REQUIRE(provider->loadModel("already-loaded-model").has_value());
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         LoadModelRequest req;
         req.modelName = "already-loaded-model";
@@ -1864,7 +1864,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model honors timeout env floor") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
         struct ShutdownBeforeEnvRestore {
             ServiceManager& svc;
@@ -1883,7 +1883,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model survives invalid timeout env value") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-invalid.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
         struct ShutdownBeforeEnvRestore {
             ServiceManager& svc;
@@ -1903,7 +1903,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("load model rebuilds when cached search engine reports missing embedding generator") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/rebuild-health.onnx");
         REQUIRE(provider->loadModel("already-loaded-health-model").has_value());
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         metadata::ConnectionPoolConfig poolCfg{};
         poolCfg.enableWAL = false;
@@ -1930,7 +1930,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model ignores isModelLoaded exceptions before loading") {
         auto provider = std::make_shared<StubModelProvider>(4, "/tmp/isloaded-throw.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         metadata::ConnectionPoolConfig poolCfg{};
         poolCfg.enableWAL = false;
@@ -1969,7 +1969,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model survives lifecycle degradation callback exceptions") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/lifecycle-throw.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         lifecycle.setThrowOnSetSubsystemDegraded(true);
 
         LoadModelRequest req;
@@ -1987,7 +1987,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("unload model rejects missing name") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         UnloadModelRequest req;
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -2000,7 +2000,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("unload model propagates provider missing-model error") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         UnloadModelRequest req;
         req.modelName = "missing-model";
@@ -2023,7 +2023,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("model status returns loaded model details and filters by name") {
         auto provider = std::make_shared<StubModelProvider>(512, "/tmp/status-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         REQUIRE(provider->loadModel("status-model").has_value());
 
         ModelStatusRequest req;
@@ -2043,7 +2043,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         auto provider = std::make_shared<StubModelProvider>(256, "/tmp/status-fallback.onnx");
         REQUIRE(provider->loadModel("status-fallback").has_value());
         provider->setFailModelInfo(true);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         auto resp = dispatchRequest(dispatcher, Request{ModelStatusRequest{}});
 
@@ -2059,7 +2059,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("model status returns empty response when provider unavailable") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
         provider->setAvailable(false);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         auto resp = dispatchRequest(dispatcher, Request{ModelStatusRequest{}});
 
@@ -2073,7 +2073,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
         REQUIRE(provider->loadModel("status-throw").has_value());
         provider->setThrowOnMemoryUsage(true);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         auto resp = dispatchRequest(dispatcher, Request{ModelStatusRequest{}});
 
@@ -4550,7 +4550,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("generate embedding auto-loads unloaded model and returns vector") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-model.onnx");
         provider->setSingleEmbeddingResult({0.1f, 0.2f, 0.3f});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         GenerateEmbeddingRequest req{"hello world", "embed-model", true};
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -4567,7 +4567,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-error.onnx");
         provider->setGenerateEmbeddingError(
             Error{ErrorCode::InvalidState, "generator unavailable"});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         GenerateEmbeddingRequest req{"hello world", "embed-error", true};
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -4593,7 +4593,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         invalidMessage.push_back(static_cast<char>(0xC0));
         invalidMessage.push_back(static_cast<char>(0xFF));
         provider->setLoadError(Error{ErrorCode::InvalidState, invalidMessage});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         GenerateEmbeddingRequest req{"hello world", "embed-utf8", true};
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -4618,7 +4618,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("generate embedding honors timeout env floor while auto-loading") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-timeout.onnx");
         provider->setSingleEmbeddingResult({0.7f, 0.8f, 0.9f});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
 
         GenerateEmbeddingRequest req{"hello world", "embed-timeout", true};
@@ -4633,7 +4633,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("generate embedding converts isModelLoaded exceptions into internal errors") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-throw.onnx");
         provider->setThrowOnIsModelLoadedCount(2);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         GenerateEmbeddingRequest req{"hello world", "embed-throw", true};
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -4649,7 +4649,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-fallback.onnx");
         provider->setGenerateBatchError(Error{ErrorCode::NotImplemented, "batch unsupported"});
         provider->setSingleEmbeddingResult({0.4f, 0.6f});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         BatchEmbeddingRequest req;
         req.texts = {"one", "two"};
@@ -4675,7 +4675,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         provider->setGenerateBatchError(Error{ErrorCode::NotImplemented, "batch unsupported"});
         provider->setSingleEmbeddingResult({0.9f, 0.1f});
         provider->setSingleTextError("bad", Error{ErrorCode::InternalError, "single failed"});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         BatchEmbeddingRequest req;
         req.texts = {"good", "bad", "good-again"};
@@ -4695,7 +4695,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("batch embedding forwards non-fallback errors") {
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-error.onnx");
         provider->setGenerateBatchError(Error{ErrorCode::InvalidState, "batch failed"});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         BatchEmbeddingRequest req;
         req.texts = {"one", "two"};
@@ -4712,7 +4712,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("batch embedding auto-loads model and returns direct batch results") {
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-direct.onnx");
         provider->setBatchEmbeddingResult({{0.2f, 0.8f}});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
 
         BatchEmbeddingRequest req;
@@ -4737,7 +4737,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("batch embedding returns load failures for unloaded models") {
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-load-fail.onnx");
         provider->setLoadError(Error{ErrorCode::InvalidState, "batch load refused"});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
 
         BatchEmbeddingRequest req;
@@ -4755,7 +4755,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("batch embedding converts isModelLoaded exceptions into internal errors") {
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-throw.onnx");
         provider->setThrowOnIsModelLoadedCount(2);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         BatchEmbeddingRequest req;
         req.texts = {"one"};
@@ -4783,7 +4783,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("embed documents reports unavailable model provider") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-provider.onnx");
         provider->setAvailable(false);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         EmbedDocumentsRequest req;
         req.modelName = "repair-model";
@@ -4800,7 +4800,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         // Repair used to fall back to a relative "vectors.db" and create it in the working
         // directory when the data directory was not resolved.
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-empty.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
         svc.testingSetResolvedDataDir({});
@@ -4819,7 +4819,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("embed documents returns success when repair finds no work") {
         svc.testingSetResolvedDataDir(cfg.dataDir);
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-empty.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
 
@@ -4841,7 +4841,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("embed documents rejects non-empty hash lists that resolve to no daemon documents") {
         svc.testingSetResolvedDataDir(cfg.dataDir);
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-missing-hashes.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
 
@@ -4861,8 +4861,8 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
     SECTION("embed documents rejects degraded providers") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-degraded.onnx");
-        svc.__test_setModelProvider(provider);
-        svc.__test_setModelProviderDegraded(true, "simulated degraded state");
+        svc.testing_setModelProvider(provider);
+        svc.testing_setModelProviderDegraded(true, "simulated degraded state");
 
         auto resp = dispatchRequest(dispatcher, Request{EmbedDocumentsRequest{}});
 
@@ -4871,12 +4871,12 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         CHECK(err.code == ErrorCode::InvalidState);
         CHECK(err.message == "Embedding generation disabled: provider degraded");
 
-        svc.__test_setModelProviderDegraded(false);
+        svc.testing_setModelProviderDegraded(false);
     }
 
     SECTION("embed documents reports missing content store") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-content.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
 
         EmbedDocumentsRequest req;
@@ -4892,7 +4892,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
     SECTION("embed documents reports missing metadata repo") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-meta.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
 
         EmbedDocumentsRequest req;
@@ -4908,7 +4908,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
     SECTION("embed documents reports missing configured model name") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-empty-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
 
@@ -4925,7 +4925,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
     SECTION("embed documents uses daemon config resolver when request model is empty") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-config-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
 
@@ -4941,7 +4941,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
         DaemonLifecycleFsm configLifecycleFsm;
         ServiceManager configSvc(cfg, state, configLifecycleFsm);
-        configSvc.__test_setModelProvider(provider);
+        configSvc.testing_setModelProvider(provider);
         configSvc.__test_setContentStore(std::make_shared<StubContentStore>());
         configSvc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
         configSvc.testingSetResolvedDataDir(cfg.dataDir);

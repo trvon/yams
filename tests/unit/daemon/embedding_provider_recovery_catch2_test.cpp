@@ -21,13 +21,13 @@ TEST_CASE("EmbeddingProviderRecovery: degraded then recovered to ready", "[daemo
     ServiceManager sm(cfg, state, lifecycleFsm);
 
     // Simulate degraded provider
-    sm.__test_setModelProviderDegraded(true, "unit-test degraded");
+    sm.testing_setModelProviderDegraded(true, "unit-test degraded");
     auto s1 = sm.getEmbeddingProviderFsmSnapshot();
     CHECK(s1.state == EmbeddingProviderState::Degraded);
     CHECK(s1.lastError.find("degraded") != std::string::npos);
 
     // Simulate recovery (helper dispatches ModelLoadedEvent with dimension 0)
-    sm.__test_setModelProviderDegraded(false, "");
+    sm.testing_setModelProviderDegraded(false, "");
     auto s2 = sm.getEmbeddingProviderFsmSnapshot();
     CHECK(s2.state == EmbeddingProviderState::ModelReady);
     CHECK(s2.embeddingDimension == 0u);

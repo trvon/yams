@@ -346,6 +346,9 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
   endif
 endif
 
+# Snapshot non-CLI dependencies for component-only tests before the broad CLI lane.
+embedding_service_test_deps = test_deps
+
 tests_has_cli = false
 tests_has_cli11 = cli11_dep.found()
 
@@ -758,7 +761,6 @@ if catch2_dep.found()
       'unit/daemon/components/checkpoint_manager_test.cpp',
       'unit/daemon/components/config_resolver_test.cpp',
       'unit/daemon/components/database_manager_test.cpp',
-      'unit/daemon/components/embedding_service_timing_catch2_test.cpp',
       'unit/daemon/components/plugin_manager_test.cpp',
       'unit/daemon/plugin_manager_config_test.cpp',
       'unit/daemon/components/topology_tuner_catch2_test.cpp',
@@ -767,6 +769,16 @@ if catch2_dep.found()
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+# Keep embedding/bootstrap regressions independent of unrelated component bootstrap.
+  catch2_embedding_service_timing_exe = executable('catch2_embedding_service_timing',
+    files('unit/daemon/components/embedding_service_timing_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + embedding_service_test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
     install: false,
@@ -3844,6 +3856,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'components', 'yams-zns'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
+  )
+
+  test('embedding_service_timing', catch2_embedding_service_timing_exe,
+    suite: ['catch2', 'unit', 'daemon', 'embedding', 'startup'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('gradient_limiter', catch2_gradient_limiter_exe,

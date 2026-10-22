@@ -47,6 +47,7 @@
 #include <yams/daemon/components/SearchEngineFsm.h>
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
+#include <yams/daemon/components/startup_phase.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/test_hooks.h>
 #include <yams/daemon/components/TopologyManager.h>
@@ -665,6 +666,11 @@ public:
     // FSM snapshots (read-only) for status/diagnostics
     ServiceManagerSnapshot getServiceManagerFsmSnapshot() const { return serviceFsm_.snapshot(); }
 
+    // Coarse async-init progress. Atomic reads only: never query memory-sync here, whose loop
+    // mutex is held for the whole recovery sweep and would block the status path.
+    StartupPhase getStartupPhase() const noexcept { return startupPhase_.phase(); }
+    std::int64_t getStartupPhaseElapsedMs() const noexcept { return startupPhase_.elapsedMs(); }
+
     ServiceManagerSnapshot waitForServiceManagerTerminalState(int timeoutSeconds = 60) {
         return serviceFsm_.waitForTerminalState(timeoutSeconds);
     }
@@ -747,7 +753,7 @@ public:
     void testingSetResolvedDataDir(std::filesystem::path dir) {
         publishResolvedDataDir(std::move(dir));
     }
-    void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
+    void testing_setModelProvider(std::shared_ptr<IModelProvider> provider) {
         storeModelProvider(std::move(provider));
     }
     void __test_setMetadataRepo(std::shared_ptr<metadata::MetadataRepository> repo) {
@@ -760,7 +766,7 @@ public:
             databaseManager_->setContentStore(std::move(store));
         }
     }
-    void __test_setKgStore(std::shared_ptr<metadata::KnowledgeGraphStore> store) {
+    void testing_setKgStore(std::shared_ptr<metadata::KnowledgeGraphStore> store) {
         if (databaseManager_) {
             databaseManager_->setKgStore(std::move(store));
         }
@@ -802,8 +808,8 @@ public:
     YAMS_DAEMON_TEST_HOOK static Result<void>
     __test_writeProtectedP2pPrivateKey(const std::filesystem::path& keyPath,
                                        std::string_view contents);
-    YAMS_DAEMON_TEST_HOOK void __test_setModelProviderDegraded(bool degraded,
-                                                               const std::string& error = {});
+    YAMS_DAEMON_TEST_HOOK void testing_setModelProviderDegraded(bool degraded,
+                                                                const std::string& error = {});
 #endif
 
 #ifdef YAMS_TESTING
@@ -1009,6 +1015,7 @@ private:
     DaemonLifecycleFsm& lifecycleFsm_;
 
     ServiceManagerFsm serviceFsm_{};
+    StartupPhaseTracker startupPhase_{};
 
     SearchEngineManager searchEngineManager_;
     std::unique_ptr<SearchComponent> searchComponent_;
