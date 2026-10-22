@@ -592,6 +592,21 @@ if catch2_with_main_dep.found()
   )
 
   alias_target('bench_memory_sync_listing', memory_sync_listing_bench)
+
+  # Direct-quarantine staging cost; run explicitly, never in the default test lane.
+  memory_sync_quarantine_bench = executable('memory_sync_quarantine_bench',
+    files('memory_sync_quarantine_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      dependency('nlohmann_json'),
+      dependency('yams_storage_engine'),
+      dependency('yams_crypto'),
+      dependency('yams_memory_sync'),
+      dependency('yams_core'),
+    ],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
 else
   message('Catch2 not found, skipping hnsw_entity_search_bench and multi_client_ingestion_bench')
 endif
