@@ -5,9 +5,9 @@
 #                 ./tools/fuzzing/fuzz.sh build
 #   libfuzzer - plain clang with the libFuzzer runtime; every project object is built with
 #               -fsanitize=fuzzer-no-link plus ASan/UBSan, harnesses link -fsanitize=fuzzer:
-#                 CC=clang CXX=clang++ meson setup build/fuzz -Dbuild-fuzzers=true -Db_lundef=false \
+#                 CC=clang CXX=clang++ meson setup build/fuzzing -Dbuild-fuzzers=true -Db_lundef=false \
 #                   -Dbuild-tests=false -Dbuild-plugins=false -Dbuild-cli=false
-#                 meson compile -C build/fuzz
+# meson compile -C build/fuzzing tools/fuzzing/fuzz_startup
 #               then ./tools/fuzzing/fuzz.sh local <target> (see fuzz.sh usage).
 
 cpp = meson.get_compiler('cpp')
@@ -74,6 +74,20 @@ fuzz_abi_negotiation_plugin = shared_module('fuzz_abi_negotiation_plugin',
 # Link against the daemon library built in this tree
 # The daemon library contains MessageFramer and IPC protocol implementation
 # Note: yams_daemon_lib is defined in src/daemon/meson.build and available in this scope
+
+# Startup lifecycle/pressure schedules and semantic-score boundary. Shared replay support
+# also runs under Catch2; this target adds the configured coverage-guided fuzzing engine.
+fuzz_startup = executable('fuzz_startup',
+  'fuzz_startup.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  # The harness includes spdlog directly; link_with does not propagate that dependency's
+  # include paths or compile definitions (same reason as fuzz_deps above).
+  dependencies: fuzz_deps + [dependency('spdlog')],
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
 
 # IPC Protocol Fuzzer
 fuzz_ipc_protocol = executable('fuzz_ipc_protocol',

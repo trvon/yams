@@ -784,6 +784,18 @@ if catch2_dep.found()
     install: false,
   )
 
+# Virtual-time startup contracts: no database, model, socket, CLI or live governor needed.
+  catch2_startup_replay_exe = executable('catch2_startup_replay',
+    files('unit/daemon/components/startup_replay_catch2_test.cpp',
+          '../tools/fuzzing/fuzz_startup.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('yams_tune_advisor_testing'),
+                   dependency('yams_daemon'), dependency('yams_core'), dependency('spdlog')],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Gradient limiter tests(Netflix Gradient2 adaptive concurrency)
   catch2_gradient_limiter_exe = executable('catch2_gradient_limiter',
     files('unit/daemon/components/gradient_limiter_catch2_test.cpp'),
@@ -3862,6 +3874,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'embedding', 'startup'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('startup_replay', catch2_startup_replay_exe,
+    suite: ['catch2', 'unit', 'daemon', 'startup', 'fuzz-smoke'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('gradient_limiter', catch2_gradient_limiter_exe,
