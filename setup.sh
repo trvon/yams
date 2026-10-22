@@ -1059,9 +1059,11 @@ fi
 # ThreadSanitizer: default enabled for Debug builds, can be overridden with --tsan/--no-tsan
 if [[ -z "${ENABLE_TSAN}" ]]; then
 	# Profiling stays uninstrumented so Tracy timings are not TSAN-distorted (opt in with --tsan).
-	if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
+	# Fuzzing stays uninstrumented too: the fuzz harnesses link -fsanitize=fuzzer,address,undefined
+	# and ASan cannot share a process with TSan.
+	if [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 		ENABLE_TSAN=false
-	elif [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
+	elif [[ "${BUILD_TYPE}" == "Debug" ]]; then
 		ENABLE_TSAN=true
 	else
 		ENABLE_TSAN=false
@@ -1083,6 +1085,13 @@ if [[ "${ENABLE_TSAN}" == "true" ]] && [[ "${ENABLE_ASAN}" == "true" ]]; then
 	echo "Use separate invocations, e.g.:" >&2
 	echo "  ./setup.sh Debug --tsan --no-asan" >&2
 	echo "  ./setup.sh Debug --asan --no-tsan" >&2
+	exit 1
+fi
+
+# Fuzz harnesses link -fsanitize=fuzzer,address,undefined, so TSan cannot share the binary.
+if [[ "${ENABLE_FUZZING:-false}" == "true" ]] && [[ "${ENABLE_TSAN}" == "true" ]]; then
+	echo "Error: Fuzzing builds link ASan/UBSan via the fuzz harnesses and cannot use TSAN." >&2
+	echo "Drop --tsan, or configure a separate directory without -Dbuild-fuzzers=true." >&2
 	exit 1
 fi
 
