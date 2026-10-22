@@ -576,7 +576,7 @@ static void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, b
             dim = vectorDb->getConfig().embedding_dim;
         }
         auto sharedProvider = std::make_shared<BenchmarkMockModelProvider>(dim);
-        serviceManager->__test_setModelProvider(sharedProvider);
+        serviceManager->testing_setModelProvider(sharedProvider);
     }
 
     if (embedBackendSimeon) {

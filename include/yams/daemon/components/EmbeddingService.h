@@ -17,6 +17,7 @@
 #include <yams/daemon/components/embedding_service_config.h>
 #include <yams/daemon/components/IComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/metadata/document_metadata.h>
 
 namespace yams {
@@ -76,6 +77,12 @@ public:
                                                         std::function<void(const ModelLoadEvent&)>)>
                           ensureModelReady = {});
 
+    // Configure before start(), like providers. Unset means automatic maintenance is
+    // ineligible; explicit rebuild/backfill APIs remain usable by standalone callers.
+    void setStartupStateGetter(std::function<ServiceManagerState()> getter) {
+        getStartupState_ = std::move(getter);
+    }
+
     void setWriteCoordinatorGetter(std::function<WriteCoordinator*()> getter) {
         getWriteCoordinator_ = std::move(getter);
     }
@@ -131,6 +138,8 @@ private:
     static EffectiveEmbeddingServiceConfig
     resolveConcurrencyPolicy(const EmbeddingServiceConfig& config);
 
+    bool semanticBackfillEligible(bool daemonIdle) const;
+
     // Parallel poller that dispatches jobs to work executor
     boost::asio::awaitable<void> channelPoller();
 
@@ -165,6 +174,7 @@ private:
     std::function<std::shared_ptr<yams::vector::VectorDatabase>()> getVectorDatabase_;
     std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore_;
     std::function<WriteCoordinator*()> getWriteCoordinator_;
+    std::function<ServiceManagerState()> getStartupState_;
     std::function<Result<std::string>(const std::string&,
                                       std::function<void(const ModelLoadEvent&)>)>
         ensureModelReady_;

@@ -1,6 +1,7 @@
 #include "embedding_derivation_policy.h"
 #include "embedding_input_selection.h"
 #include "semantic_graph_candidate_policy.h"
+#include "startup_work_policy.h"
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 
@@ -333,6 +334,14 @@ void EmbeddingService::setEmbeddingsCommittedCallback(
     embeddingsCommittedCallback_ = std::move(cb);
 }
 
+bool EmbeddingService::semanticBackfillEligible(bool daemonIdle) const {
+    if (!daemonIdle || stop_.load(std::memory_order_acquire) || !getStartupState_) {
+        return false;
+    }
+    return embed::startupMaintenanceEligible(getStartupState_(),
+                                             stop_.load(std::memory_order_acquire), daemonIdle);
+}
+
 std::size_t EmbeddingService::queuedJobs() const {
     YAMS_ZONE_SCOPED_N("Embedding::queuedJobs");
     const auto chPtr = std::atomic_load_explicit(&embedChannel_, std::memory_order_acquire);
@@ -426,40 +435,15 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
     const auto explicitSemanticThreshold = []() -> std::optional<float> {
         if (const char* env = std::getenv("YAMS_GRAPH_SEMANTIC_THRESHOLD")) {
             try {
-                return std::clamp(std::stof(env), 0.0f, 1.0f);
+                return embed::semanticExplicitThreshold(std::stof(env));
             } catch (...) {
             }
         }
         return std::nullopt;
     }();
 
-    const auto inverseNorm = [](const std::vector<float>& v) {
-        double norm = 0.0;
-        for (float x : v) {
-            const double xd = x;
-            norm += xd * xd;
-        }
-        if (norm <= 0.0) {
-            return 0.0f;
-        }
-        return static_cast<float>(1.0 / std::sqrt(norm));
-    };
-
-    const auto cosineSimilarity = [](const std::vector<float>& a, float invNormA,
-                                     const std::vector<float>& b, float invNormB) {
-        if (a.empty() || b.empty() || a.size() != b.size()) {
-            return 0.0f;
-        }
-        if (invNormA <= 0.0f || invNormB <= 0.0f) {
-            return 0.0f;
-        }
-
-        double dot = 0.0;
-        for (std::size_t i = 0; i < a.size(); ++i) {
-            dot += static_cast<double>(a[i]) * static_cast<double>(b[i]);
-        }
-        return static_cast<float>(dot * invNormA * invNormB);
-    };
+    const auto inverseNorm = embed::semanticInverseNorm;
+    const auto cosineSimilarity = embed::semanticCosineSimilarity;
 
     struct CorpusVector {
         std::string hash;
@@ -1606,7 +1590,9 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
             pendingApprox_.load(std::memory_order_relaxed) == 0) {
             const auto snap = TuningSnapshotRegistry::instance().get();
             const bool daemonIdle = snap && snap->daemonIdle;
-            if (daemonIdle && getPreferredModel_ &&
+            // Idle during startup is not readiness. Check prerequisites BEFORE asking the
+            // starvation guard: its forced pass must never bypass initialization or stop.
+            if (semanticBackfillEligible(daemonIdle) && getPreferredModel_ &&
                 ResourceGovernor::instance().admitDeferrable(DeferrableWork::SemanticBackfill)) {
                 std::string model = getPreferredModel_();
                 if (!model.empty()) {
