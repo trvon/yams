@@ -13,9 +13,15 @@
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/tcp.hpp>
 
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -71,6 +77,34 @@ TEST_CASE("P2P TLS identity derives a stable SPKI pin from writer key", "[daemon
     CHECK(first.spkiPin().size() == 64);
     CHECK(first.spkiPin() == reloaded.spkiPin());
     CHECK(first.spkiPin() != other.spkiPin());
+}
+
+TEST_CASE("P2P TLS certificate binds matching subject and issuer to the node",
+          "[daemon][p2p][tls][certificate]") {
+    auto key = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(key.has_value());
+    const auto tlsIdentity = identity("certificate-node", key.value());
+    const auto pem = tlsIdentity.certPem();
+    const auto bio = std::unique_ptr<BIO, decltype(&BIO_free)>(
+        BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())), BIO_free);
+    REQUIRE(bio != nullptr);
+    const auto certificate = std::unique_ptr<X509, decltype(&X509_free)>(
+        PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr), X509_free);
+    REQUIRE(certificate != nullptr);
+    const auto* subject = X509_get_subject_name(certificate.get());
+    const auto* issuer = X509_get_issuer_name(certificate.get());
+    REQUIRE(subject != nullptr);
+    REQUIRE(issuer != nullptr);
+    std::array<char, 256> commonName{};
+    const auto length = X509_NAME_get_text_by_NID(subject, NID_commonName, commonName.data(),
+                                                  static_cast<int>(commonName.size()));
+    REQUIRE(length > 0);
+    CHECK(std::string(commonName.data(), static_cast<std::size_t>(length)) == "certificate-node");
+    CHECK(X509_NAME_cmp(subject, issuer) == 0);
+    const auto publicKey = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>(
+        X509_get_pubkey(certificate.get()), EVP_PKEY_free);
+    REQUIRE(publicKey != nullptr);
+    CHECK(X509_verify(certificate.get(), publicKey.get()) == 1);
 }
 
 TEST_CASE("P2P transport trust defaults fail closed", "[daemon][p2p][tls]") {

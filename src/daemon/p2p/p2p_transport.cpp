@@ -180,13 +180,16 @@ Result<Cert> makeSelfSignedCertificate(EVP_PKEY* key, std::string_view nodeId) {
         X509_set_pubkey(cert.get(), key) != 1) {
         return Error{ErrorCode::InternalError, "failed to initialize X509 certificate"};
     }
-    X509_NAME* name = X509_get_subject_name(cert.get());
+    const auto name =
+        std::unique_ptr<X509_NAME, decltype(&X509_NAME_free)>(X509_NAME_new(), X509_NAME_free);
     const std::string node(nodeId);
     if (name == nullptr ||
-        X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+        X509_NAME_add_entry_by_txt(name.get(), "CN", MBSTRING_ASC,
                                    reinterpret_cast<const unsigned char*>(node.c_str()), -1, -1,
                                    0) != 1 ||
-        X509_set_issuer_name(cert.get(), name) != 1 || X509_sign(cert.get(), key, nullptr) <= 0) {
+        X509_set_subject_name(cert.get(), name.get()) != 1 ||
+        X509_set_issuer_name(cert.get(), name.get()) != 1 ||
+        X509_sign(cert.get(), key, nullptr) <= 0) {
         return Error{ErrorCode::InternalError, "failed to self-sign X509 certificate"};
     }
     return cert;
