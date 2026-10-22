@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,7 @@
 
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/config/config_helpers.h>
+#include <yams/memory_sync/lifecycle_drain.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/storage/storage_backend.h>
 
@@ -101,6 +103,40 @@ public:
 
 private:
     yams::storage::FilesystemBackend backend_;
+};
+
+class SecondPageGateBackend final : public CountingBackend {
+public:
+    std::future<void> arm() {
+        armed_.store(true);
+        return entered_.get_future();
+    }
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            released_ = true;
+        }
+        cv_.notify_all();
+    }
+    void requestCancel() noexcept override { release(); }
+    yams::Result<yams::storage::ObjectListPage> listPage(std::string_view prefix,
+                                                         std::optional<std::string_view> cursor,
+                                                         std::size_t limit) const override {
+        if (armed_.load() && prefix == "index/" && calls_.fetch_add(1) == 1) {
+            entered_.set_value();
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait(lock, [&] { return released_; });
+        }
+        return CountingBackend::listPage(prefix, cursor, limit);
+    }
+
+private:
+    std::atomic<bool> armed_{false};
+    mutable std::atomic<std::size_t> calls_{0};
+    mutable std::promise<void> entered_;
+    mutable std::mutex mutex_;
+    mutable std::condition_variable cv_;
+    bool released_{false};
 };
 
 class FailPrefixOnceBackend final : public CountingBackend {
@@ -372,7 +408,539 @@ struct TempDirGuard {
     std::filesystem::path path;
 };
 
+class FilesystemReadObserverGuard {
+public:
+    explicit FilesystemReadObserverGuard(std::function<void(std::string_view)>& observer)
+        : previous_(yams::storage::testing_setFilesystemReadObserver(&observer)) {}
+    ~FilesystemReadObserverGuard() { yams::storage::testing_setFilesystemReadObserver(previous_); }
+
+private:
+    std::function<void(std::string_view)>* previous_;
+};
+
+class PressurePauseObserverGuard {
+public:
+    explicit PressurePauseObserverGuard(std::function<void()>& observer)
+        : previous_(MemorySyncService::testingSetPressurePauseObserver(&observer)) {}
+    ~PressurePauseObserverGuard() { MemorySyncService::testingSetPressurePauseObserver(previous_); }
+
+private:
+    std::function<void()>* previous_;
+};
+
 } // namespace
+
+TEST_CASE("MemorySyncService adapter indexes have independent bounded bookkeeping",
+          "[memory-sync][service][adapter-index]") {
+    TempDirGuard tmp;
+    MemorySyncConfig config{"reader"};
+    config.exclusiveBackend = true;
+    config.limits.maxMergedKeys = 2;
+    config.limits.maxCacheBytes = 8;
+    config.limits.maxEnvelopeBytes = 1024;
+    MemorySyncService service{makeBackend(tmp.path), config};
+    REQUIRE(service.publish("document/a", bytes("a")).has_value());
+    auto view = service.captureAdapterView();
+    REQUIRE(view.has_value());
+    auto index = service.createAdapterIndex(view.value());
+    REQUIRE(index.has_value());
+    for (int i = 0; i < 6; ++i) {
+        REQUIRE(index.value()
+                    ->put("chunk/" + std::to_string(i), "model/" + std::to_string(i))
+                    .has_value());
+    }
+    for (int i = 5; i >= 0; --i) {
+        auto row = index.value()->lookup("chunk/" + std::to_string(i));
+        REQUIRE(row.has_value());
+        REQUIRE(row.value().has_value());
+        CHECK(*row.value() == "model/" + std::to_string(i));
+    }
+    auto absent = index.value()->lookup("absent");
+    REQUIRE(absent.has_value());
+    CHECK_FALSE(absent.value().has_value());
+    auto cached = service.readCached("document/a");
+    REQUIRE(cached.has_value());
+    CHECK(text(cached.value()) == "a");
+    CHECK(service.mergedRecordCount() == 1);
+
+    SECTION("input row limit rejects before mutation and leaves earlier rows readable") {
+        // maxEnvelopeBytes*4, independently of the eight-byte verified-value cache.
+        auto rejected = index.value()->put("oversized", std::string(4097, 'x'));
+        REQUIRE_FALSE(rejected.has_value());
+        CHECK(rejected.error().code == yams::ErrorCode::ResourceExhausted);
+        auto retained = index.value()->lookup("chunk/0");
+        REQUIRE(retained.has_value());
+        REQUIRE(retained.value().has_value());
+        CHECK(*retained.value() == "model/0");
+    }
+    SECTION("SQLite encoded-row overhead also preserves earlier rows on rejection") {
+        const std::string key = "boundary";
+        // Raw bytes fit; SQLite's record header crosses the 4096-byte encoded-row limit.
+        auto rejected = index.value()->put(key, std::string(4095 - key.size(), 'x'));
+        REQUIRE_FALSE(rejected.has_value());
+        CHECK(rejected.error().code == yams::ErrorCode::ResourceExhausted);
+        auto retained = index.value()->lookup("chunk/0");
+        REQUIRE(retained.has_value());
+        REQUIRE(retained.value().has_value());
+        CHECK(*retained.value() == "model/0");
+    }
+    SECTION("updates and binary-safe identities do not change source visibility") {
+        const std::string key{"chunk\0model", 11};
+        const std::string value{"value\0bytes", 11};
+        REQUIRE(index.value()->put(key, value).has_value());
+        auto row = index.value()->lookup(key);
+        REQUIRE(row.has_value());
+        REQUIRE(row.value().has_value());
+        CHECK(*row.value() == value);
+        REQUIRE(index.value()->put("chunk/0", "replacement").has_value());
+        auto updated = index.value()->lookup("chunk/0");
+        REQUIRE(updated.has_value());
+        REQUIRE(updated.value().has_value());
+        CHECK(*updated.value() == "replacement");
+        TempDirGuard otherTmp;
+        MemorySyncService other{makeBackend(otherTmp.path), MemorySyncConfig{"other"}};
+        auto foreign = other.createAdapterIndex(view.value());
+        REQUIRE_FALSE(foreign.has_value());
+        CHECK(foreign.error().code == yams::ErrorCode::InvalidArgument);
+    }
+}
+
+TEST_CASE("MemorySyncService concurrent adapter allocation respects the shared lease quota",
+          "[memory-sync][service][adapter-index][concurrency]") {
+    TempDirGuard tmp;
+    MemorySyncConfig config{"reader"};
+    config.exclusiveBackend = true;
+    MemorySyncService service{makeBackend(tmp.path), config};
+    REQUIRE(service.publish("document/a", bytes("a")).has_value());
+    auto view = service.captureAdapterView();
+    REQUIRE(view.has_value());
+    auto one = service.createAdapterIndex(view.value());
+    auto two = service.createAdapterIndex(view.value());
+    REQUIRE(one.has_value());
+    REQUIRE(two.has_value());
+    const auto activeDirectories = [&]() {
+        std::size_t count = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(tmp.path / "temp")) {
+            if (entry.is_directory() && entry.path().filename().string().starts_with("sync-sweep-"))
+                ++count;
+        }
+        return count;
+    };
+    REQUIRE(activeDirectories() == 3); // one committed generation and two scratch indexes
+    CompletionSignal entered;
+    CompletionSignal release;
+    std::atomic<bool> observerTimedOut{false};
+    auto allocating = std::async(std::launch::async, [&]() {
+        struct Reset {
+            ~Reset() { MemorySyncLoop::testingSetScratchAllocationObserver({}); }
+        } reset;
+        MemorySyncLoop::testingSetScratchAllocationObserver([&]() {
+            entered.signal();
+            if (!release.waitFor(std::chrono::seconds(5)))
+                observerTimedOut.store(true);
+        });
+        return service.createAdapterIndex(view.value());
+    });
+    const bool reachedBoundary = entered.waitFor(std::chrono::seconds(2));
+    auto competing =
+        std::async(std::launch::async, [&]() { return service.createAdapterIndex(view.value()); });
+    const bool completedBeforeRelease =
+        competing.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+    release.signal();
+    auto first = allocating.get();
+    auto second = competing.get();
+    // Drain every worker and release the gate before any fatal assertion.
+    REQUIRE(reachedBoundary);
+    REQUIRE_FALSE(observerTimedOut.load());
+    CHECK(completedBeforeRelease);
+    REQUIRE(first.has_value());
+    CHECK_FALSE(second.has_value());
+    if (!second)
+        CHECK(second.error().code == yams::ErrorCode::ResourceExhausted);
+    CHECK(activeDirectories() <= 4);
+}
+
+TEST_CASE("MemorySyncService cold adapter I/O does not serialize independent mutations",
+          "[memory-sync][service][adapter-concurrency][disk-backed-serving]") {
+    TempDirGuard tmp;
+    {
+        MemorySyncService writer{makeBackend(tmp.path), MemorySyncConfig{"writer"}};
+        REQUIRE(writer.publish("user/cold", bytes("colddata")).has_value());
+        REQUIRE(writer.publish("user/other", bytes("other---")).has_value());
+        REQUIRE(writer.publish("user/warm", bytes("warmdata")).has_value());
+    }
+    MemorySyncConfig config{"reader"};
+    config.exclusiveBackend = true;
+    config.limits.maxMergedKeys = 1;
+    config.limits.maxCacheBytes = 8;
+    config.limits.maxIndexObjectsPerSync = 1;
+    MemorySyncService service{makeBackend(tmp.path), config};
+    REQUIRE(service.syncFully().has_value());
+    REQUIRE(service.mergedRecordCount() == 3);
+    REQUIRE(service.readCommitted("user/warm").has_value());
+    auto view = service.captureAdapterView();
+    REQUIRE(view.has_value());
+    REQUIRE_FALSE(service.readCached("user/cold").has_value());
+    const auto cold = service.readCommittedWinnersAfter("user/cold", "", 1);
+    REQUIRE(cold.has_value());
+    REQUIRE(cold.value().size() == 1);
+    REQUIRE(cold.value().front().first == "user/cold");
+    const auto blobKey = "blob/" + cold.value().front().second.entryHash;
+
+    bool quarantineDuringFetch = false;
+    SECTION("an independent publisher completes while the cold read is gated") {}
+    SECTION("a mid-fetch quarantine completes and rejects the pinned payload") {
+        quarantineDuringFetch = true;
+    }
+
+    std::promise<void> enteredPromise;
+    auto entered = enteredPromise.get_future();
+    std::promise<void> releasePromise;
+    auto release = releasePromise.get_future().share();
+    std::atomic<bool> gated{false};
+    auto reading = std::async(std::launch::async, [&] {
+        std::function<void(std::string_view)> observer = [&](std::string_view key) {
+            if (key == blobKey && !gated.exchange(true)) {
+                enteredPromise.set_value();
+                release.wait();
+            }
+        };
+        FilesystemReadObserverGuard observed{observer};
+        return service.readAdapterPayload(view.value(), "user/cold");
+    });
+    const bool readEntered = entered.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    CompletionSignal mutationStarted;
+    auto mutation = std::async(std::launch::async, [&]() -> yams::Result<void> {
+        mutationStarted.signal();
+        if (!quarantineDuringFetch) {
+            return service.publish("user/new", bytes("nextdata"));
+        }
+        const auto banned = service.quarantineWriter("writer", "reader", "mid-fetch test");
+        if (!banned) {
+            return banned.error();
+        }
+        if (!banned.value()) {
+            return yams::Error{yams::ErrorCode::InvalidState, "writer was not quarantined"};
+        }
+        return {};
+    });
+    const bool started = mutationStarted.waitFor(std::chrono::seconds(2));
+    // A generous bound for a tiny local write under TSAN; no time is spent sleeping to
+    // manufacture the interleaving. The old implementation cannot finish until release.
+    const bool mutationBeforeRelease =
+        mutation.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+    releasePromise.set_value();
+    const auto payload = reading.get();
+    const auto changed = mutation.get();
+    // Release/join both tasks before fatal assertions, including fixture failures.
+    REQUIRE(readEntered);
+    REQUIRE(started);
+    REQUIRE(changed.has_value());
+    CHECK(mutationBeforeRelease);
+    if (quarantineDuringFetch) {
+        CHECK_FALSE(payload.has_value());
+        if (!payload) {
+            CHECK(payload.error().code == yams::ErrorCode::Unauthorized);
+        }
+    } else {
+        REQUIRE(payload.has_value());
+        CHECK(text(payload.value()) == "colddata");
+        CHECK(service.mergedRecordCount() == 4);
+    }
+}
+
+TEST_CASE("MemorySyncService adapter pressure pauses do not hold the loop lock",
+          "[memory-sync][service][adapter-concurrency][governor]") {
+    TempDirGuard tmp;
+    MemorySyncConfig config{"reader"};
+    config.exclusiveBackend = true;
+    config.limits.maxIndexObjectsPerSync = 1;
+    std::atomic<bool> pressure{false};
+    MemorySyncService service{makeBackend(tmp.path),          config, {}, false, {}, "",
+                              [&] { return pressure.load(); }};
+    REQUIRE(service.publish("user/a", bytes("alpha")).has_value());
+    auto view = service.captureAdapterView();
+    REQUIRE(view.has_value());
+    REQUIRE(service.mergedRecordCount() == 1);
+    pressure.store(true);
+    service.testingExpireWorkQuantum();
+
+    bool cancelDuringPause = false;
+    SECTION("publish can proceed while the visitor is pressure paused") {}
+    SECTION("stop cancels the paused visitor before it visits a row") {
+        cancelDuringPause = true;
+    }
+
+    std::promise<void> enteredPromise;
+    auto entered = enteredPromise.get_future();
+    std::promise<void> releasePromise;
+    auto release = releasePromise.get_future().share();
+    std::atomic<bool> gated{false};
+    std::size_t visited = 0;
+    auto visiting = std::async(std::launch::async, [&] {
+        std::function<void()> observer = [&] {
+            if (!gated.exchange(true)) {
+                enteredPromise.set_value();
+                release.wait();
+            }
+        };
+        PressurePauseObserverGuard observed{observer};
+        return service.visitAdapterWinners(view.value(), "user/",
+                                           [&](const auto&, const auto&) -> yams::Result<void> {
+                                               ++visited;
+                                               return {};
+                                           });
+    });
+    const bool pauseEntered =
+        entered.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    CompletionSignal mutationStarted;
+    auto mutation = std::async(std::launch::async, [&]() -> yams::Result<void> {
+        mutationStarted.signal();
+        if (cancelDuringPause) {
+            service.stop();
+            return {};
+        }
+        return service.publish("user/b", bytes("beta"));
+    });
+    const bool started = mutationStarted.waitFor(std::chrono::seconds(2));
+    const bool mutationBeforeRelease =
+        mutation.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+    releasePromise.set_value();
+    const auto progress = visiting.get();
+    const auto changed = mutation.get();
+    REQUIRE(pauseEntered);
+    REQUIRE(started);
+    REQUIRE(changed.has_value());
+    CHECK(mutationBeforeRelease);
+    if (cancelDuringPause) {
+        REQUIRE_FALSE(progress.has_value());
+        CHECK(progress.error().code == yams::ErrorCode::OperationCancelled);
+        CHECK(visited == 0);
+    } else {
+        REQUIRE(progress.has_value());
+        CHECK(visited == 1); // The concurrent publication is outside the pinned generation.
+        CHECK(service.mergedRecordCount() == 2);
+    }
+}
+
+TEST_CASE("MemorySyncService pinned transaction work defers pressure without waiting",
+          "[memory-sync][service][adapter-pressure-defer][governor]") {
+    TempDirGuard tmp;
+    MemorySyncConfig config{"reader"};
+    config.exclusiveBackend = true;
+    config.limits.maxMergedKeys = 2;
+    config.limits.maxCacheBytes = 8;
+    config.limits.maxIndexObjectsPerSync = 1;
+    std::atomic<bool> pressure{false};
+    MemorySyncService service{makeBackend(tmp.path),          config, {}, false, {}, "",
+                              [&] { return pressure.load(); }};
+    REQUIRE(service.publish("user/a", bytes("aaaaaaaa")).has_value());
+    REQUIRE(service.publish("user/b", bytes("bbbbbbbb")).has_value());
+    auto view = service.captureAdapterView(MemorySyncService::AdapterPressureMode::Defer);
+    REQUIRE(view.has_value());
+    REQUIRE(service.mergedRecordCount() == 2);
+    const std::string warm = service.readCached("user/a") ? "user/a" : "user/b";
+    const std::string cold = warm == "user/a" ? "user/b" : "user/a";
+    REQUIRE(service.readCached(warm).has_value());
+    REQUIRE_FALSE(service.readCached(cold).has_value());
+    auto index = service.createAdapterIndex(view.value());
+    REQUIRE(index.has_value());
+    REQUIRE(index.value()->put("old", "kept").has_value());
+    std::size_t pauses = 0;
+    std::size_t blobReads = 0;
+    std::function<void()> pauseObserver = [&] { ++pauses; };
+    std::function<void(std::string_view)> readObserver = [&](std::string_view key) {
+        if (key.starts_with("blob/")) {
+            ++blobReads;
+        }
+    };
+    PressurePauseObserverGuard paused{pauseObserver};
+    FilesystemReadObserverGuard retrieved{readObserver};
+    // Temporary local admission is distinct from scratch capacity or remote-admission errors.
+    auto checkDeferred = [](const auto& result) {
+        CHECK_FALSE(result.has_value());
+        if (!result) {
+            CHECK(result.error().code == yams::ErrorCode::ResourceBusy);
+        }
+    };
+    pressure.store(true);
+    service.testingExpireWorkQuantum();
+    checkDeferred(service.captureAdapterView(MemorySyncService::AdapterPressureMode::Defer));
+    service.testingExpireWorkQuantum();
+    std::size_t visited = 0;
+    auto visit = service.visitAdapterWinners(view.value(), "user/",
+                                             [&](const auto&, const auto&) -> yams::Result<void> {
+                                                 ++visited;
+                                                 return {};
+                                             });
+    checkDeferred(visit);
+    CHECK(visited == 0);
+    service.testingExpireWorkQuantum();
+    checkDeferred(service.readAdapterPayload(view.value(), cold));
+    service.testingExpireWorkQuantum();
+    checkDeferred(service.readAdapterPayload(view.value(), warm));
+    service.testingExpireWorkQuantum();
+    auto created = service.createAdapterIndex(view.value());
+    checkDeferred(created);
+    service.testingExpireWorkQuantum();
+    checkDeferred(index.value()->put("blocked", "not committed"));
+    service.testingExpireWorkQuantum();
+    checkDeferred(index.value()->lookup("old"));
+    CHECK(pauses == 0);
+    CHECK(blobReads == 0);
+    // The explicitly cache-only API stays available and never becomes a pressure wait.
+    CHECK(service.readCached(warm).has_value());
+    pressure.store(false);
+    auto retained = index.value()->lookup("old");
+    auto rejected = index.value()->lookup("blocked");
+    REQUIRE(retained.has_value());
+    REQUIRE(retained.value().has_value());
+    CHECK(*retained.value() == "kept");
+    REQUIRE(rejected.has_value());
+    CHECK_FALSE(rejected.value().has_value());
+    auto retry = service.readAdapterPayload(view.value(), cold);
+    REQUIRE(retry.has_value());
+    CHECK(text(retry.value()) == (cold == "user/a" ? "aaaaaaaa" : "bbbbbbbb"));
+    visited = 0;
+    REQUIRE(service
+                .visitAdapterWinners(view.value(), "user/",
+                                     [&](const auto&, const auto&) -> yams::Result<void> {
+                                         ++visited;
+                                         return {};
+                                     })
+                .has_value());
+    CHECK(visited == 2);
+    service.stop();
+    auto cancelled = service.readAdapterPayload(view.value(), warm);
+    REQUIRE_FALSE(cancelled.has_value());
+    CHECK(cancelled.error().code == yams::ErrorCode::OperationCancelled);
+}
+
+TEST_CASE("MemorySyncService deferred adapter work still checks remote admission",
+          "[memory-sync][service][adapter-pressure-defer][governor]") {
+    class RemoteBackend final : public CountingBackend {
+    public:
+        bool isRemote() const override { return true; }
+    };
+    TempDirGuard tmp;
+    auto backend = std::make_unique<RemoteBackend>();
+    yams::storage::BackendConfig backendConfig;
+    backendConfig.type = "filesystem";
+    backendConfig.localPath = tmp.path;
+    REQUIRE(backend->initialize(backendConfig).has_value());
+    std::atomic<bool> admitted{true};
+    MemorySyncService service{std::move(backend), MemorySyncConfig{"reader"},
+                              [&] { return admitted.load(); }};
+    REQUIRE(service.publish("user/a", bytes("value")).has_value());
+    auto view = service.captureAdapterView(MemorySyncService::AdapterPressureMode::Defer);
+    REQUIRE(view.has_value());
+    auto index = service.createAdapterIndex(view.value());
+    REQUIRE(index.has_value());
+    REQUIRE(index.value()->put("old", "kept").has_value());
+    admitted.store(false);
+    auto checkDenied = [](const auto& result) {
+        CHECK_FALSE(result.has_value());
+        if (!result) {
+            CHECK(result.error().code == yams::ErrorCode::ResourceExhausted);
+        }
+    };
+    checkDenied(service.readAdapterPayload(view.value(), "user/a"));
+    checkDenied(service.createAdapterIndex(view.value()));
+    checkDenied(index.value()->lookup("old"));
+    checkDenied(index.value()->put("blocked", "not committed"));
+    admitted.store(true);
+    auto retained = index.value()->lookup("old");
+    auto rejected = index.value()->lookup("blocked");
+    REQUIRE(retained.has_value());
+    REQUIRE(retained.value().has_value());
+    CHECK(*retained.value() == "kept");
+    REQUIRE(rejected.has_value());
+    CHECK_FALSE(rejected.value().has_value());
+    service.stop();
+    auto cancelled = service.readAdapterPayload(view.value(), "user/a");
+    REQUIRE_FALSE(cancelled.has_value());
+    CHECK(cancelled.error().code == yams::ErrorCode::OperationCancelled);
+}
+
+TEST_CASE("MemorySyncService escaped adapter indexes cancel after their owner is destroyed",
+          "[memory-sync][service][adapter-pressure-defer][adapter-index-lifetime]") {
+    auto mode = MemorySyncService::AdapterPressureMode::Wait;
+    SECTION("ordinary pressure policy") {}
+    SECTION("immediate pressure deferral") {
+        mode = MemorySyncService::AdapterPressureMode::Defer;
+    }
+    TempDirGuard tmp;
+    std::shared_ptr<MemorySyncLoop::AdapterIndex> escaped;
+    {
+        MemorySyncConfig config{"reader"};
+        config.exclusiveBackend = true;
+        MemorySyncService service{makeBackend(tmp.path), config};
+        REQUIRE(service.publish("user/a", bytes("a")).has_value());
+        auto view = service.captureAdapterView(mode);
+        REQUIRE(view.has_value());
+        auto index = service.createAdapterIndex(view.value());
+        REQUIRE(index.has_value());
+        REQUIRE(index.value()->put("old", "kept").has_value());
+        escaped = std::move(index.value());
+    }
+    auto read = escaped->lookup("old");
+    auto write = escaped->put("new", "blocked");
+    CHECK_FALSE(read.has_value());
+    if (!read) {
+        CHECK(read.error().code == yams::ErrorCode::OperationCancelled);
+    }
+    CHECK_FALSE(write.has_value());
+    if (!write) {
+        CHECK(write.error().code == yams::ErrorCode::OperationCancelled);
+    }
+}
+
+TEST_CASE("MemorySyncService deferred payload reads do not wait for busy mutable state",
+          "[memory-sync][service][adapter-pressure-defer][adapter-state-busy]") {
+    TempDirGuard tmp;
+    auto backend = std::make_unique<SecondPageGateBackend>();
+    auto* gate = backend.get();
+    yams::storage::BackendConfig backendConfig;
+    backendConfig.type = "filesystem";
+    backendConfig.localPath = tmp.path;
+    REQUIRE(backend->initialize(backendConfig).has_value());
+    MemorySyncConfig config{"reader"};
+    config.limits.maxIndexObjectsPerSync = 1;
+    MemorySyncService service{std::move(backend), config};
+    REQUIRE(service.publish("user/a", bytes("alpha")).has_value());
+    REQUIRE(service.publish("user/b", bytes("beta")).has_value());
+    auto view = service.captureAdapterView(MemorySyncService::AdapterPressureMode::Defer);
+    REQUIRE(view.has_value());
+    auto entered = gate->arm();
+    auto syncing = std::async(std::launch::async, [&] { return service.syncFully(); });
+    const bool stateHeld = entered.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    CompletionSignal readStarted;
+    auto reading = std::async(std::launch::async, [&] {
+        readStarted.signal();
+        return service.readAdapterPayload(view.value(), "user/a");
+    });
+    const bool started = readStarted.waitFor(std::chrono::seconds(2));
+    const bool rejectedBeforeRelease =
+        reading.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+    const auto cached = service.readCached("user/a");
+    // Release and join every background operation before any fatal assertion.
+    gate->release();
+    const auto reconciled = syncing.get();
+    const auto read = reading.get();
+    REQUIRE(stateHeld);
+    REQUIRE(started);
+    REQUIRE(reconciled.has_value());
+    REQUIRE(cached.has_value());
+    CHECK(text(cached.value()) == "alpha");
+    CHECK(rejectedBeforeRelease);
+    CHECK_FALSE(read.has_value());
+    if (!read) {
+        CHECK(read.error().code == yams::ErrorCode::ResourceBusy);
+    }
+    const auto retried = service.readAdapterPayload(view.value(), "user/a");
+    REQUIRE(retried.has_value());
+    CHECK(text(retried.value()) == "alpha");
+}
 
 TEST_CASE("MemorySyncService start/stop is idempotent and clean", "[memory-sync][service]") {
     TempDirGuard tmp;
@@ -491,6 +1059,149 @@ TEST_CASE("MemorySyncService publishIfChanged suppresses unchanged causal envelo
     CHECK(afterRecord.ts == beforeRecord.ts);
     CHECK(afterRecord.origin == beforeRecord.origin);
     CHECK(afterRecord.vv.counters() == beforeRecord.vv.counters());
+}
+
+TEST_CASE("MemorySyncService does not republish unchanged evicted winners",
+          "[memory-sync][service][disk-backed-writes][backfill]") {
+    TempDirGuard tmp;
+    {
+        auto backend = makeBackend(tmp.path);
+        MemorySyncLoop writer{*backend, "writer"};
+        for (int i = 0; i < 6; ++i) {
+            REQUIRE(
+                writer
+                    .publish("user/key-" + std::to_string(i), bytes("payload-" + std::to_string(i)))
+                    .has_value());
+        }
+    }
+    MemorySyncConfig config{"writer", 5000};
+    config.exclusiveBackend = true;
+    config.limits.maxMergedKeys = 2;
+    config.limits.maxCacheBytes = 18;
+    MemorySyncService service{makeBackend(tmp.path), config};
+    REQUIRE(service.syncFully().has_value());
+    for (int i = 0; i < 6; ++i) {
+        CAPTURE(i);
+        const auto published = service.publishIfChanged("user/key-" + std::to_string(i),
+                                                        bytes("payload-" + std::to_string(i)));
+        REQUIRE(published.has_value());
+        CHECK_FALSE(published.value());
+    }
+}
+
+TEST_CASE("MemorySyncService pages every exclusive winner beyond resident budgets",
+          "[memory-sync][service][disk-backed-serving][pagination]") {
+    TempDirGuard tmp;
+    constexpr std::size_t kRecords = 6;
+    constexpr std::size_t kPageSize = 2;
+    std::vector<std::pair<std::string, std::string>> expected;
+    {
+        auto backend = makeBackend(tmp.path);
+        MemorySyncLoop writer{*backend, "writer"};
+        for (std::size_t i = 0; i < kRecords; ++i) {
+            expected.emplace_back("user/key-" + std::to_string(i), "payload-" + std::to_string(i));
+            REQUIRE(
+                writer.publish(expected.back().first, bytes(expected.back().second)).has_value());
+        }
+    }
+    MemorySyncConfig config{"reader", 5000};
+    config.exclusiveBackend = true;
+    config.limits.maxIndexObjectsPerSync = kPageSize;
+    config.limits.maxMergedKeys = kPageSize;
+    config.limits.maxCacheBytes = kPageSize * expected.front().second.size();
+
+    for (int recovery = 0; recovery < 2; ++recovery) {
+        CAPTURE(recovery);
+        MemorySyncService service{makeBackend(tmp.path), config};
+        const auto recovered = service.syncFully();
+        INFO("recovery result: " << (recovered ? std::string{"success"}
+                                               : recovered.error().message));
+        REQUIRE(recovered.has_value());
+        CHECK(service.mergedRecordCount() == kRecords);
+        CHECK(service.committedWinnersAfter("user/", "", 0).empty());
+        std::size_t seen = 0;
+        std::string cursor;
+        bool drained = false;
+        // Bound the test even if a broken implementation never drains its cursor.
+        for (std::size_t pageIndex = 0; pageIndex <= kRecords; ++pageIndex) {
+            const auto page = service.committedWinnersAfter("user/", cursor, kPageSize);
+            REQUIRE(page.size() <= kPageSize);
+            if (page.empty()) {
+                drained = true;
+                break;
+            }
+            for (const auto& [key, record] : page) {
+                REQUIRE(seen < expected.size());
+                REQUIRE(key > cursor);
+                CHECK(key == expected[seen].first);
+                CHECK(record.logicalKey == key);
+                const auto value = service.read(key);
+                REQUIRE(value.has_value());
+                CHECK(text(value.value()) == expected[seen].second);
+                cursor = key;
+                ++seen;
+            }
+        }
+        CHECK(drained);
+        CHECK(seen == kRecords);
+    }
+}
+
+TEST_CASE("MemorySyncService counts complete sweeps rather than successful pages",
+          "[memory-sync][service][sweep-progress]") {
+    TempDirGuard tmp;
+    auto backend = std::make_unique<SecondPageGateBackend>();
+    yams::storage::BackendConfig backendConfig;
+    backendConfig.localPath = tmp.path;
+    REQUIRE(backend->initialize(backendConfig).has_value());
+    MemorySyncLoop writer{*backend, "writer"};
+    REQUIRE(writer.publish("a", bytes("one")).has_value());
+    REQUIRE(writer.publish("b", bytes("two")).has_value());
+    auto* gate = backend.get();
+    auto secondPage = gate->arm();
+    MemorySyncConfig config{"reader", 1};
+    config.limits.maxIndexObjectsPerSync = 1;
+    std::atomic<std::size_t> callbacks{0};
+    CompletionSignal complete;
+    MemorySyncService service{std::move(backend), config};
+    service.setAfterSyncCallback([&] {
+        callbacks.fetch_add(1);
+        complete.signal();
+    });
+    REQUIRE(service.start().has_value());
+    REQUIRE(secondPage.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    CHECK(service.successfulSyncCycles() == 0);
+    CHECK(callbacks.load() == 0);
+    gate->release();
+    REQUIRE(complete.waitFor(std::chrono::seconds(2)));
+    service.stop();
+    CHECK(service.successfulSyncCycles() >= 1);
+}
+
+TEST_CASE("MemorySyncService makes paged progress under sustained local pressure",
+          "[memory-sync][service][governor][sweep-progress]") {
+    TempDirGuard tmp;
+    auto backend = std::make_unique<CountingBackend>();
+    yams::storage::BackendConfig backendConfig;
+    backendConfig.localPath = tmp.path;
+    REQUIRE(backend->initialize(backendConfig).has_value());
+    MemorySyncLoop writer{*backend, "writer"};
+    REQUIRE(writer.publish("a", bytes("one")).has_value());
+    REQUIRE(writer.publish("b", bytes("two")).has_value());
+    auto* observed = backend.get();
+    const auto before = observed->listPageCalls.load();
+    MemorySyncConfig config{"reader", 5000};
+    config.limits.maxIndexObjectsPerSync = 1;
+    std::atomic<std::size_t> pressureChecks{0};
+    MemorySyncService service{std::move(backend), config, {}, false, {}, "", [&] {
+                                  pressureChecks.fetch_add(1);
+                                  return true;
+                              }};
+    // syncFully drives all pages without wall-clock waits between worker cycles.
+    REQUIRE(service.syncFully().has_value());
+    CHECK(pressureChecks.load() > 0);
+    CHECK(observed->listPageCalls.load() - before == 2);
+    CHECK(service.mergedRecordCount() == 2);
 }
 
 TEST_CASE("MemorySyncService invokes apply callback after periodic reconciliation",
@@ -1295,6 +2006,20 @@ TEST_CASE("MemorySyncService publishes quarantine snapshot before adapter invali
     REQUIRE(repeated.has_value());
     CHECK_FALSE(repeated.value());
     CHECK(callbacks.load(std::memory_order_relaxed) == 1);
+}
+
+TEST_CASE("MemorySync callback drain releases lifecycle before waiting",
+          "[memory-sync][service][lifecycle][callback-drain-order]") {
+    std::mutex lifecycle;
+    std::recursive_mutex callbacks;
+    std::unique_lock<std::mutex> lifecycleGate(lifecycle);
+    bool lifecycleHeldAtBoundary = true;
+    auto callbackDrain = yams::memory_sync::detail::acquireCallbackDrain(
+        lifecycleGate, callbacks, [&] { lifecycleHeldAtBoundary = lifecycleGate.owns_lock(); });
+
+    CHECK_FALSE(lifecycleHeldAtBoundary);
+    CHECK(lifecycleGate.owns_lock());
+    CHECK(callbackDrain.owns_lock());
 }
 
 TEST_CASE("MemorySyncService readers do not block on a slow reconciliation",
