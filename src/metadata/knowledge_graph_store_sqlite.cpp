@@ -484,6 +484,47 @@ public:
         });
     }
 
+    // Scoped statements finalize before returning the read connection, including a
+    // successful first row; presence probes must not pin a pooled read snapshot.
+    Result<bool> hasNodeByKey(std::string_view nodeKey) override {
+        return readPool()->withConnection([&](Database& db) -> Result<bool> {
+            auto prepared = db.prepare("SELECT 1 FROM kg_nodes WHERE node_key = ? LIMIT 1");
+            if (!prepared) {
+                return prepared.error();
+            }
+            auto stmt = std::move(prepared).value();
+            if (auto bound = stmt.bind(1, nodeKey); !bound) {
+                return bound.error();
+            }
+            return stmt.step();
+        });
+    }
+
+    Result<bool> hasEdgeByKeys(std::string_view srcNodeKey, std::string_view dstNodeKey,
+                               std::string_view relation) override {
+        return readPool()->withConnection([&](Database& db) -> Result<bool> {
+            auto prepared = db.prepare(
+                "SELECT 1 FROM kg_edges AS e "
+                "JOIN kg_nodes AS src ON src.id = e.src_node_id "
+                "JOIN kg_nodes AS dst ON dst.id = e.dst_node_id "
+                "WHERE src.node_key = ? AND dst.node_key = ? AND e.relation = ? LIMIT 1");
+            if (!prepared) {
+                return prepared.error();
+            }
+            auto stmt = std::move(prepared).value();
+            if (auto bound = stmt.bind(1, srcNodeKey); !bound) {
+                return bound.error();
+            }
+            if (auto bound = stmt.bind(2, dstNodeKey); !bound) {
+                return bound.error();
+            }
+            if (auto bound = stmt.bind(3, relation); !bound) {
+                return bound.error();
+            }
+            return stmt.step();
+        });
+    }
+
     Result<std::vector<KGNode>> getNodesByKeys(const std::vector<std::string>& nodeKeys) override {
         if (nodeKeys.empty()) {
             return std::vector<KGNode>{};
@@ -2950,6 +2991,83 @@ public:
     SqliteWriteBatch& operator=(const SqliteWriteBatch&) = delete;
     SqliteWriteBatch(SqliteWriteBatch&&) = delete;
     SqliteWriteBatch& operator=(SqliteWriteBatch&&) = delete;
+
+    Result<std::optional<KGNode>> getNodeByKey(std::string_view nodeKey) override {
+        if (!transactionStarted_ || committed_) {
+            return Error{ErrorCode::InvalidState, "Transaction is not active"};
+        }
+        Database& db = **conn_;
+        auto stmtResult = db.prepare(std::string("SELECT ") + kKgNodeSelectProjection +
+                                     " FROM kg_nodes WHERE node_key = ? LIMIT 1");
+        if (!stmtResult) {
+            return stmtResult.error();
+        }
+        auto stmt = std::move(stmtResult).value();
+        if (auto bound = stmt.bind(1, nodeKey); !bound) {
+            return bound.error();
+        }
+        auto stepped = stmt.step();
+        if (!stepped) {
+            return stepped.error();
+        }
+        if (!stepped.value()) {
+            return std::optional<KGNode>{};
+        }
+        return std::optional<KGNode>{hydrateKgNodeRow(stmt)};
+    }
+
+    Result<std::vector<KGEdge>> getEdgesBetweenPage(std::int64_t srcNodeId, std::int64_t dstNodeId,
+                                                    std::optional<std::string_view> relation,
+                                                    std::optional<std::int64_t> afterId) override {
+        if (!transactionStarted_ || committed_) {
+            return Error{ErrorCode::InvalidState, "Transaction is not active"};
+        }
+        Database& db = **conn_;
+        std::string sql = "SELECT " + std::string(kKgEdgeColumns) +
+                          " FROM kg_edges WHERE src_node_id = ? AND dst_node_id = ?";
+        if (relation) {
+            sql += " AND relation = ?";
+        }
+        if (afterId) {
+            sql += " AND id > ?";
+        }
+        sql += " ORDER BY id LIMIT " + std::to_string(kEdgePageSize);
+        auto stmtResult = db.prepare(sql);
+        if (!stmtResult) {
+            return stmtResult.error();
+        }
+        auto stmt = std::move(stmtResult).value();
+        if (auto bound = stmt.bind(1, srcNodeId); !bound) {
+            return bound.error();
+        }
+        if (auto bound = stmt.bind(2, dstNodeId); !bound) {
+            return bound.error();
+        }
+        int parameter = 3;
+        if (relation) {
+            if (auto bound = stmt.bind(parameter++, *relation); !bound) {
+                return bound.error();
+            }
+        }
+        if (afterId) {
+            if (auto bound = stmt.bind(parameter, *afterId); !bound) {
+                return bound.error();
+            }
+        }
+        std::vector<KGEdge> page;
+        page.reserve(kEdgePageSize);
+        while (page.size() < kEdgePageSize) {
+            auto stepped = stmt.step();
+            if (!stepped) {
+                return stepped.error();
+            }
+            if (!stepped.value()) {
+                break;
+            }
+            page.push_back(hydrateKgEdgeRow(stmt));
+        }
+        return page;
+    }
 
     Result<std::int64_t> upsertNode(const KGNode& node) override {
         if (!transactionStarted_) {

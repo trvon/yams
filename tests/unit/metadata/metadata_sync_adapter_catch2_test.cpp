@@ -135,6 +135,110 @@ TEST_CASE("serialized record size matches what publish writes", "[metadata][sync
 
 } // namespace
 
+TEST_CASE("metadata adapter applies every exclusive winner beyond its resident working set",
+          "[metadata][memory-sync][disk-backed-serving][paged-adapter]") {
+    TempDirGuard temp;
+    RepoFixture repo("meta_sync_paged_winners_");
+    std::vector<DocumentInfo> documents;
+    for (int i = 0; i < 6; ++i) {
+        documents.push_back(makeDocument("/corpus/page-" + std::to_string(i) + ".md",
+                                         std::string(63, 'a') + std::to_string(i)));
+    }
+    {
+        MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"writer"}};
+        MetadataSyncAdapter publisher{*repo.repository_, writer};
+        for (const auto& document : documents) {
+            REQUIRE(publisher.publish(document, {}).has_value());
+        }
+    }
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 2;
+    bool publishDuringApply = false;
+    SECTION("metadata slots are a working set, not the corpus size") {
+        limits.maxMergedKeys = 2;
+    }
+    SECTION("value bytes are a working set, not the corpus size") {
+        limits.maxCacheBytes =
+            2 * MetadataSyncAdapter::serializedRecordBytes(documents.front(), {});
+    }
+    SECTION("application pins its inputs while an observer publishes a later winner") {
+        publishDuringApply = true;
+    }
+    MemorySyncConfig config{"reader", 60'000, "local-test-corpus", 1, limits};
+    config.exclusiveBackend = true;
+    MemorySyncService reader{makeBackend(temp.path / "sync"), config};
+    REQUIRE(reader.syncFully().has_value());
+    REQUIRE(reader.mergedRecordCount() == documents.size());
+    std::set<std::string> observed;
+    bool published = false;
+    MetadataSyncAdapter adapter{*repo.repository_, reader, {}, [&](const DocumentInfo& info) {
+                                    observed.insert(info.sha256Hash);
+                                    if (publishDuringApply && !published) {
+                                        published = true;
+                                        MetadataSyncAdapter concurrent{*repo.repository_, reader};
+                                        auto update = makeDocument("/corpus/updated.md",
+                                                                   documents.back().sha256Hash);
+                                        REQUIRE(concurrent.publish(update, {}).has_value());
+                                    }
+                                }};
+    const auto applied = adapter.apply();
+    INFO("apply=" << (applied ? std::to_string(applied.value()) : applied.error().message));
+    REQUIRE(applied.has_value());
+    CHECK(applied.value() == documents.size());
+    CHECK(observed.size() == documents.size());
+    for (const auto& expected : documents) {
+        const auto actual = repo.repository_->getDocumentByHash(expected.sha256Hash);
+        REQUIRE(actual.has_value());
+        CHECK(actual.value().has_value());
+        if (actual.value()) {
+            CHECK(actual.value()->filePath == expected.filePath);
+        }
+    }
+    REQUIRE(adapter.deferredKeys().empty());
+    const auto repeated = adapter.apply();
+    REQUIRE(repeated.has_value());
+    CHECK(repeated.value() == (publishDuringApply ? 1 : 0));
+    CHECK(published == publishDuringApply);
+    CHECK(observed.size() == documents.size());
+}
+
+TEST_CASE("metadata adapter validates later pages before mutating earlier documents",
+          "[metadata][memory-sync][paged-adapter][identity]") {
+    TempDirGuard temp;
+    RepoFixture repo("meta_sync_page_preflight_");
+    {
+        MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"writer"}};
+        MetadataSyncAdapter publisher{*repo.repository_, writer};
+        REQUIRE(publisher.publish(makeDocument("/corpus/first.md", std::string(kDocHash)), {})
+                    .has_value());
+        MetadataDocumentRecord invalid;
+        invalid.documentId = kDocHash;
+        invalid.contentHash = kDocHash;
+        invalid.filePath = "/corpus/invalid.md";
+        // Sorts after the valid document, but deliberately claims that document's identity.
+        REQUIRE(writer
+                    .publish("document/" + std::string(kOtherDocHash),
+                             bytes(nlohmann::json(invalid).dump()))
+                    .has_value());
+    }
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 1;
+    MemorySyncConfig config{"reader", 60'000, "local-test-corpus", 1, limits};
+    config.exclusiveBackend = true;
+    MemorySyncService reader{makeBackend(temp.path / "sync"), config};
+    REQUIRE(reader.syncFully().has_value());
+    std::size_t observed = 0;
+    MetadataSyncAdapter adapter{
+        *repo.repository_, reader, {}, [&](const DocumentInfo&) { ++observed; }};
+    const auto applied = adapter.apply();
+    REQUIRE_FALSE(applied.has_value());
+    CHECK(applied.error().code == yams::ErrorCode::InvalidData);
+    const auto first = repo.repository_->getDocumentByHash(std::string(kDocHash));
+    REQUIRE(first.has_value());
+    CHECK_FALSE(first.value().has_value());
+    CHECK(observed == 0);
+}
+
 TEST_CASE("metadata sync payload is independent of local derivation readiness",
           "[metadata][memory-sync][freshness]") {
     TempDirGuard temp;

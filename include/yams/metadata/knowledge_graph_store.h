@@ -182,6 +182,20 @@ public:
             return Error{ErrorCode::NotImplemented,
                          "Exact transactional node replacement is not implemented"};
         }
+        /// Read this batch's current node state, including pending replacements/deletions.
+        virtual Result<std::optional<KGNode>> getNodeByKey(std::string_view /*nodeKey*/) {
+            return Error{ErrorCode::NotImplemented, "Transactional node lookup is not implemented"};
+        }
+        static constexpr std::size_t kEdgePageSize = 64;
+        /// Read at most kEdgePageSize edges in ascending ID order on this transaction.
+        /// afterId is exclusive; no cursor includes every valid signed ID. An absent
+        /// relation selects all relations between the two endpoints. Errors are not EOF.
+        virtual Result<std::vector<KGEdge>>
+        getEdgesBetweenPage(std::int64_t /*srcNodeId*/, std::int64_t /*dstNodeId*/,
+                            std::optional<std::string_view> /*relation*/ = std::nullopt,
+                            std::optional<std::int64_t> /*afterId*/ = std::nullopt) {
+            return Error{ErrorCode::NotImplemented, "Transactional edge paging is not implemented"};
+        }
         virtual Result<std::int64_t> addEdge(const KGEdge& edge) = 0;
         virtual Result<void> removeEdgeById(std::int64_t /*edgeId*/) {
             return Error{ErrorCode::NotImplemented,
@@ -570,6 +584,19 @@ public:
 
     // Health check (e.g., PRAGMA integrity_check in SQLite backends)
     virtual Result<void> healthCheck() = 0;
+
+    // Ordinary-read presence probes. Implementations must not materialize node/edge
+    // properties or collections; false means absent, not an unsupported or failed read.
+    // Optional for existing providers: callers propagate NotImplemented, never hydrate
+    // full records as a fallback. Kept at the end to preserve existing virtual slots.
+    virtual Result<bool> hasNodeByKey(std::string_view /*nodeKey*/) {
+        return Error{ErrorCode::NotImplemented, "Payload-free node presence is not implemented"};
+    }
+    virtual Result<bool> hasEdgeByKeys(std::string_view /*srcNodeKey*/,
+                                       std::string_view /*dstNodeKey*/,
+                                       std::string_view /*relation*/) {
+        return Error{ErrorCode::NotImplemented, "Payload-free edge presence is not implemented"};
+    }
 };
 
 /**
