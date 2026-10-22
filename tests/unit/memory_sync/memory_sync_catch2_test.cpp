@@ -1270,6 +1270,17 @@ TEST_CASE("Direct writer quarantine cannot exceed the invalidation window",
             REQUIRE_FALSE(retried.has_value());
             CHECK(retried.error().code == yams::ErrorCode::ResourceExhausted);
             CHECK(reader.durableQuarantineGeneration() == generation);
+            // Re-verify durable state, not just the returned error: a retry that leaked its first
+            // staged key would otherwise still satisfy the generation and status checks above.
+            const auto afterRetry = fixture.backend.list("checkpoint/");
+            REQUIRE(afterRetry.has_value());
+            CHECK(afterRetry.value() == checkpointKeys.value());
+            for (const auto& [key, value] : checkpoints) {
+                const auto actual = fixture.backend.retrieve(key);
+                REQUIRE(actual.has_value());
+                CHECK(actual.value() == value);
+            }
+            CHECK_FALSE(reader.writerQuarantined("writer"));
         } else {
             REQUIRE(quarantined.has_value());
             CHECK(quarantined.value());
