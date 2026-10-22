@@ -233,6 +233,35 @@ Result<std::string> ServiceManager::readMemorySyncCached(const std::string& key)
     return text;
 }
 
+Result<std::string> ServiceManager::readMemorySyncCommitted(const std::string& key) const {
+    if (!memorySync_) {
+        return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
+    }
+    auto namespacedKey = memory_sync::userLogicalKey(key);
+    if (!namespacedKey) {
+        return namespacedKey.error();
+    }
+    auto& governor = ResourceGovernor::instance();
+    if (governor.hostPressureElevated() || !governor.canAdmitWork()) {
+        return Error{ErrorCode::ResourceBusy, "memory sync read deferred by local pressure"};
+    }
+    // This is an explicit disk read, not a cache miss followed by reconciliation.
+    // The loop validates the current committed winner/quarantine and exact blob digest.
+    auto value = memorySync_->readCommitted(namespacedKey.value());
+    if (!value) {
+        return value.error();
+    }
+    const auto& bytes = value.value();
+    std::string text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    if (key.starts_with(memory_sync::kTaskRecordPrefix)) {
+        const auto hash = crypto::SHA256Hasher::hash(std::span<const std::byte>(bytes));
+        if (auto valid = memory_sync::validateTaskRecordPublication(key, text, hash); !valid) {
+            return Error{ErrorCode::InvalidData, valid.error().message};
+        }
+    }
+    return text;
+}
+
 Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() const {
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
@@ -463,19 +492,17 @@ Result<memory_sync::ApplyStagePass> ServiceManager::applyMemorySyncContentBlobs(
         return Error{ErrorCode::InvalidState, "content store is not available"};
     }
 
-    auto merged = memorySync_->syncOnce();
-    if (!merged) {
-        return merged.error();
-    }
-
     // The adapter attempts every blob, so a corrupt blob neither starves the blobs after it nor
     // hides the blobs this scan deferred: both outcomes are recorded.
     memory_sync::ContentBlobSyncAdapter adapter{*contentStore, *memorySync_};
-    auto pass = adapter.applyWinners(merged.value());
+    auto pass = adapter.applyCommitted();
+    if (!pass) {
+        return pass.error();
+    }
     memory_sync::ApplyStagePass out;
-    out.deferredKeys = std::move(pass.deferredKeys);
-    if (pass.failure) {
-        out.failure = pass.failure->message;
+    out.deferredKeys = std::move(pass.value().deferredKeys);
+    if (pass.value().failure) {
+        out.failure = pass.value().failure->message;
     }
     return out;
 }
@@ -668,17 +695,29 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
                                                  std::chrono::steady_clock::now());
         };
         try {
-            // An error means the pass did not scan every record; a pass value that scanned every
-            // record can carry deferrals and a failure together, and both are recorded.
+            // Admission/contention is an incomplete attempt, not an I/O/capacity failure or a
+            // complete empty scan. Retain the last complete observation and expose uncertainty.
+            // Complete scans may carry both prerequisite deferrals and independent hard failures.
             auto pass = applyStage();
-            if (!pass) {
+            if (!pass && pass.error().code == ErrorCode::ResourceBusy) {
+                memorySyncApplyHealth_.recordPass(
+                    stage, memory_sync::ApplyStagePass{.scanComplete = false},
+                    std::chrono::steady_clock::now());
+                spdlog::debug("[ServiceManager] memory_sync {} apply deferred by admission", name);
+            } else if (!pass) {
                 recordFailure(pass.error().message);
             } else {
                 const auto& deferred = pass.value().deferredKeys;
-                if (!deferred.empty()) {
+                const auto deferredCount = std::max<std::uint64_t>(
+                    deferred.size(), pass.value().deferredCount.value_or(deferred.size()));
+                if (!pass.value().scanComplete) {
+                    spdlog::debug("[ServiceManager] memory_sync {} scan incomplete; "
+                                  "retaining last-known deferred totals",
+                                  name);
+                } else if (deferredCount != 0) {
                     spdlog::debug("[ServiceManager] memory_sync {} apply deferred {} record(s) "
-                                  "awaiting replicated prerequisites",
-                                  name, deferred.size());
+                                  "awaiting replicated prerequisites ({} diagnostic keys)",
+                                  name, deferredCount, deferred.size());
                 }
                 if (pass.value().failure) {
                     stageFailed = true;
@@ -774,7 +813,9 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
                           "endpoint node was deleted",
                           applied.value().edgesDropped);
         }
-        return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+        return StagePass{.deferredKeys = adapter.deferredKeys(),
+                         .failure = {},
+                         .deferredCount = applied.value().edgesDeferred};
     };
 
     using memory_sync::ApplyStage;
@@ -1287,7 +1328,11 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
             policy.transport == "direct"
                 ? yams::memory_sync::
                       WriterTrustFileReader{service_manager_detail::readProtectedP2pTrustFile}
-                : yams::memory_sync::WriterTrustFileReader{});
+                : yams::memory_sync::WriterTrustFileReader{},
+            [] {
+                auto& governor = ResourceGovernor::instance();
+                return governor.hostPressureElevated() || !governor.canAdmitWork();
+            });
         if (!svc) {
             return Error{svc.error().code,
                          "memory_sync service creation failed: " + svc.error().message};
