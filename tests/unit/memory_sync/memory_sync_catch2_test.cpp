@@ -1196,6 +1196,60 @@ TEST_CASE("Sweep count exhaustion is not a successful truncated security decisio
     CHECK(reader.testingScanBytes() == 0);
 }
 
+TEST_CASE("An unsatisfiable sweep backs off instead of re-walking the store",
+          "[memory-sync][scan-safety][bounds][backoff]") {
+    BackendFixture fixture{"scan-budget-backoff"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.publish("a", bytes("one")).has_value());
+    REQUIRE(writer.publish("b", bytes("two")).has_value());
+
+    MemorySyncLimits limits;
+    limits.maxTrackedIdentities = 1;
+    MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false, limits};
+
+    const auto first = reader.syncFully();
+    REQUIRE_FALSE(first.has_value());
+    CHECK(first.error().code == yams::ErrorCode::ResourceExhausted);
+    CHECK(reader.testingSweepAttempts() == 1);
+    CHECK(reader.testingSweepDegraded());
+    CHECK(reader.mergedRecordCount() == 0);
+
+    // A single exhaustion may be recoverable, so one retry is still admitted...
+    const auto second = reader.syncFully();
+    REQUIRE_FALSE(second.has_value());
+    CHECK(second.error().code == yams::ErrorCode::ResourceExhausted);
+    CHECK(reader.testingSweepAttempts() == 2);
+
+    // ...but a repeated failure disproves convergence and stops the store walk.
+    const auto third = reader.syncFully();
+    REQUIRE_FALSE(third.has_value());
+    CHECK(third.error().code == yams::ErrorCode::ResourceExhausted);
+    CHECK(reader.testingSweepAttempts() == 2);
+
+    // The backoff expiry is the only gate: the retry lists the store again.
+    reader.testingExpireSweepBackoff();
+    const auto fourth = reader.syncFully();
+    REQUIRE_FALSE(fourth.has_value());
+    CHECK(fourth.error().code == yams::ErrorCode::ResourceExhausted);
+    CHECK(reader.testingSweepAttempts() == 3);
+    CHECK(reader.testingScanBytes() == 0);
+}
+
+TEST_CASE("A sweep that fits its budget does not back off",
+          "[memory-sync][scan-safety][bounds][backoff]") {
+    BackendFixture fixture{"scan-budget-no-backoff"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.publish("a", bytes("one")).has_value());
+
+    MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus"};
+    REQUIRE(reader.syncFully().has_value());
+    CHECK_FALSE(reader.testingSweepDegraded());
+    CHECK(reader.testingSweepAttempts() == 1);
+
+    REQUIRE(reader.syncFully().has_value());
+    CHECK(reader.testingSweepAttempts() == 2);
+}
+
 TEST_CASE("Cancellation discards an incomplete sweep before a retry",
           "[memory-sync][scan-safety][cancellation]") {
     BackendFixture fixture{"scan-cancel-restart"};
@@ -1686,6 +1740,37 @@ TEST_CASE("MemorySyncLoop checks cancellation and remote admission before listin
     CHECK(result.error().code == yams::ErrorCode::ResourceExhausted);
     CHECK(backend.listPageCalls() == 0);
 
+    admitted = true;
+    REQUIRE(loop.sync().has_value());
+    CHECK(backend.listPageCalls() == 1);
+}
+
+TEST_CASE("A resource-governor denial is not latched as an unsatisfiable sweep",
+          "[memory-sync][sync-loop][bounds][backoff]") {
+    BackendFixture fixture{"governor-not-latched"};
+    CountingFilesystemBackend backend;
+    REQUIRE(backend.initialize(fixture.config).has_value());
+    backend.setRemote(true);
+
+    bool admitted = false;
+    MemorySyncLoop loop{backend,
+                        "reader",
+                        "local-test-corpus",
+                        1,
+                        false,
+                        {},
+                        MemorySyncControl{[] { return false; }, [&] { return admitted; }}};
+
+    // Repeated governed denials are backpressure, not proof that the sweep cannot fit.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const auto denied = loop.sync();
+        REQUIRE_FALSE(denied.has_value());
+        CHECK(denied.error().code == yams::ErrorCode::ResourceExhausted);
+    }
+    CHECK_FALSE(loop.testingSweepDegraded());
+    CHECK(backend.listPageCalls() == 0);
+
+    // Pressure lifted: the very next call must converge, with no backoff window.
     admitted = true;
     REQUIRE(loop.sync().has_value());
     CHECK(backend.listPageCalls() == 1);

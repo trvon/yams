@@ -332,6 +332,9 @@ public:
         return scanCandidates_.size();
     }
     [[nodiscard]] std::size_t testingScanBytes() const noexcept { return scanBytes_; }
+    [[nodiscard]] std::size_t testingSweepAttempts() const noexcept { return sweepAttempts_; }
+    [[nodiscard]] bool testingSweepDegraded() const noexcept { return sweepDegraded_; }
+    void testingExpireSweepBackoff() noexcept { nextSweepAttempt_ = {}; }
     [[nodiscard]] std::size_t testingCachedBlobCount() const noexcept {
         return cachedBlobs_.size();
     }
@@ -561,6 +564,10 @@ private:
                                std::string_view recordHash, std::uint64_t counter) const;
 
     Result<void> commitScannedHistory(const std::vector<ScanCandidate>& candidates);
+    /// One page of a complete sweep. Fails closed when the sweep cannot fit its bounds.
+    Result<std::map<std::string, MemoryIndexRecord>> syncImpl();
+    void noteSweepFailure(ErrorCode code, std::string_view reason);
+    void clearSweepDegraded() noexcept;
 
     Result<WriterHistoryCommitment> computeHistoryCommitmentAt(std::string_view writerId,
                                                                std::uint64_t targetCounter);
@@ -749,6 +756,20 @@ private:
     std::map<std::string, std::pair<std::string, std::string>> vectorIdentities_;
     std::vector<ScanCandidate> scanCandidates_;
     std::size_t scanBytes_{0};
+    /// A sweep that cannot satisfy its own bounds is an environmental condition, not a
+    /// transient one. Retrying it on every caller attempt re-walks the whole store and
+    /// pins a core without ever making progress, so record the failure and gate retries
+    /// behind a bounded exponential backoff until a complete sweep succeeds again.
+    bool sweepDegraded_{false};
+    /// Set only by the sweep's own budget sites. A resource-governor denial reports
+    /// ResourceExhausted too, but it is transient backpressure that must never be
+    /// latched as an unsatisfiable sweep.
+    bool sweepBoundExhausted_{false};
+    ErrorCode sweepDegradedCode_{ErrorCode::ResourceExhausted};
+    std::string sweepDegradedReason_;
+    std::size_t sweepDegradedAttempts_{0};
+    std::chrono::steady_clock::time_point nextSweepAttempt_{};
+    std::size_t sweepAttempts_{0};
     std::set<std::string> forkedOperations_;
     std::map<std::string, std::pair<std::string, std::string>> deltaOperations_;
     std::deque<std::string> deltaOperationOrder_;

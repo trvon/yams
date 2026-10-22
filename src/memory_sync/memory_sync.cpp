@@ -9,6 +9,12 @@
 
 namespace yams::memory_sync {
 
+namespace {
+/// One attempt per window once a sweep proves it cannot satisfy its own bounds.
+constexpr std::chrono::seconds kSweepBackoffBase{5};
+constexpr std::chrono::seconds kSweepBackoffCap{600};
+} // namespace
+
 bool MemorySyncLoop::WriteCountingBackend::filesystemSnapshotEligible() const {
     // getType() is descriptive, not a cursor contract: a decorator may keep that name
     // while using opaque tokens. Only the built-in backend has known lexical cursors.
@@ -724,7 +730,56 @@ bool MemorySyncLoop::verifiedEnvelope(const std::string& envelopeHash,
 }
 
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
+    if (sweepDegraded_ && std::chrono::steady_clock::now() < nextSweepAttempt_) {
+        return Error{sweepDegradedCode_, sweepDegradedReason_};
+    }
+    auto result = syncImpl();
+    if (!result) {
+        // Only a bound that the store itself cannot satisfy is remembered. Governed
+        // backpressure, cancellation, listing errors and throwing pages are transient
+        // and must retry freely, so they are excluded even though a governor denial
+        // also reports ResourceExhausted.
+        if (result.error().code == ErrorCode::ResourceExhausted && sweepBoundExhausted_) {
+            noteSweepFailure(result.error().code, result.error().message);
+        }
+        return result;
+    }
+    if (scanCursor_.empty()) {
+        clearSweepDegraded();
+    }
+    return result;
+}
+
+void MemorySyncLoop::noteSweepFailure(ErrorCode code, std::string_view reason) {
+    sweepDegraded_ = true;
+    sweepDegradedCode_ = code;
+    sweepDegradedReason_.assign(reason);
+    ++sweepDegradedAttempts_;
+    // One free retry: a single exhaustion may reflect a store that is about to fit
+    // (an erase or quarantine that lands between attempts), so latching on the first
+    // failure would turn a recoverable condition into a stuck one. From the second
+    // consecutive failure the loop is demonstrably not converging.
+    if (sweepDegradedAttempts_ < 2) {
+        nextSweepAttempt_ = {};
+        return;
+    }
+    // Bounded exponential backoff: one attempt per window instead of one per caller.
+    const auto shift = std::min<std::size_t>(sweepDegradedAttempts_ - 2, 7);
+    const auto delay = std::min<std::chrono::seconds>(kSweepBackoffBase * (std::size_t{1} << shift),
+                                                      kSweepBackoffCap);
+    nextSweepAttempt_ = std::chrono::steady_clock::now() + delay;
+}
+
+void MemorySyncLoop::clearSweepDegraded() noexcept {
+    sweepDegraded_ = false;
+    sweepDegradedReason_.clear();
+    sweepDegradedAttempts_ = 0;
+    nextSweepAttempt_ = {};
+}
+
+Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
     YAMS_ZONE_SCOPED_N("memory_sync.sync");
+    sweepBoundExhausted_ = false;
     // Any failed/throwing page restarts the entire security decision. Keeping a cursor
     // with half-observed identities could miss forks or double-charge a retried page.
     const auto resetScan = [&]() noexcept {
@@ -766,6 +821,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
     auto listed = backend_->listPage(
         "index/", scanCursor_.empty() ? std::nullopt : std::optional<std::string_view>{scanCursor_},
         limits_.maxIndexObjectsPerSync);
+    ++sweepAttempts_;
     if (!listed) {
         return listed.error();
     }
@@ -875,6 +931,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         const auto remaining = limits_.maxScanBytes - std::min(scanBytes_, limits_.maxScanBytes);
         if (key.size() > remaining || envelopeBytes > remaining - key.size() ||
             scanCandidates_.size() >= limits_.maxTrackedIdentities) {
+            sweepBoundExhausted_ = true;
             return Error{ErrorCode::ResourceExhausted,
                          "memory sync complete-sweep candidate budget exhausted"};
         }
@@ -885,6 +942,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         // leave the correctly placed sibling accepted as a valid operation.
         if (!operations_.contains(record.value().operationId) &&
             operations_.size() >= limits_.maxTrackedIdentities) {
+            sweepBoundExhausted_ = true;
             return Error{ErrorCode::ResourceExhausted,
                          "memory sync complete-sweep operation identity limit reached"};
         }
@@ -901,6 +959,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         const std::string vectorIdentity = nlohmann::json(record.value().vv).dump();
         if (!vectorIdentities_.contains(vectorIdentity) &&
             vectorIdentities_.size() >= limits_.maxTrackedIdentities) {
+            sweepBoundExhausted_ = true;
             return Error{ErrorCode::ResourceExhausted,
                          "memory sync complete-sweep vector identity limit reached"};
         }
