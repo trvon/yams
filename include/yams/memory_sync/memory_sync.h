@@ -39,6 +39,9 @@ struct MemorySyncControl {
     /// The loop is the backend's only writer (direct transport's local op store), so a
     /// complete scan stays valid until the loop itself stores or removes an object.
     bool exclusiveBackend{false};
+    /// Cooperative local/background pacing. May wait briefly but must remain cancellable.
+    /// Unlike admission rejection it preserves the current bounded sweep's progress.
+    std::function<Result<void>()> cooperate;
 };
 
 /// Tombstone collection is disabled unless the deployment supplies its complete,
@@ -166,7 +169,18 @@ public:
           allowLegacyUnbound_(allowLegacyUnbound), limits_(limits), control_(std::move(control)),
           tombstoneGc_(std::move(tombstoneGc)), writerAuth_(std::move(writerAuth)),
           controlScope_(controlScope.empty() ? corpusId_ + ":" + std::to_string(corpusEpoch_)
-                                             : std::move(controlScope)) {}
+                                             : std::move(controlScope)) {
+        if (control_.exclusiveBackend && !backend.isRemote()) {
+            if (auto* filesystem = dynamic_cast<storage::FilesystemBackend*>(&backend)) {
+                sweepDirectory_ = filesystem->scratchDirectory();
+            }
+        }
+        if (control_.cooperate) {
+            if (auto* filesystem = dynamic_cast<storage::FilesystemBackend*>(&backend)) {
+                filesystem->setListingWorkCheck(control_.cooperate);
+            }
+        }
+    }
 
 #ifdef YAMS_TESTING
     static std::unique_ptr<storage::IStorageBackend>
@@ -183,6 +197,10 @@ public:
     /// Publish a causally ordered deletion through the durable local outbox. The exact
     /// prepared envelope remains replayable until its index/history commit succeeds.
     Result<void> erase(std::string_view logicalKey, std::string tombstonePayload = {});
+    /// Prepare and durably publish an own-record deletion only while the exact observed
+    /// envelope is still current. False means obsolete; errors retain their original type.
+    Result<bool> eraseIfCurrent(std::string_view logicalKey, const MemoryIndexRecord& expected,
+                                std::string tombstonePayload = {});
 
     using EraseReadyValidator = std::function<Result<bool>()>;
 
@@ -212,6 +230,8 @@ public:
     /// per logical key, and fold remote histories into this node's version vector.
     /// Returns the merged `logicalKey -> winning record` map.
     Result<std::map<std::string, MemoryIndexRecord>> sync();
+    /// A successful page is progress, not a complete security/visibility decision.
+    [[nodiscard]] bool sweepInProgress() const noexcept { return !scanCursor_.empty(); }
 
     /// Complete the current bounded sweep and return a full committed view.
     /// Direct mode calls this against its local durable op store at startup.
@@ -300,6 +320,33 @@ public:
     /// Immutable copy of the reconciled state. IPC readers consume this instead
     /// of the live maps so a slow reconciliation cannot block status/cached reads;
     /// the owning service refreshes it at commit points while holding its lock.
+    using WinnerPage = std::vector<std::pair<std::string, MemoryIndexRecord>>;
+    /// A pinned, immutable committed generation. Disk-backed lookups are explicitly fallible;
+    /// cached reads continue to use only the bounded resident maps below.
+    class WinnerView {
+    public:
+        virtual ~WinnerView() = default;
+        [[nodiscard]] virtual std::size_t size() const noexcept = 0;
+        virtual Result<MemoryIndexRecord> find(std::string_view key) const = 0;
+        virtual Result<WinnerPage> page(std::string_view prefix, std::string_view afterKey,
+                                        std::size_t limit) const = 0;
+    };
+    /// Disposable indexed adapter bookkeeping, not an authenticated record source. The
+    /// implementation bounds its SQLite cache, row size, file size and live workspace count.
+    /// Callers retain only a row at a time; failures are never reported as absent rows.
+    class AdapterIndex {
+    public:
+        virtual ~AdapterIndex() = default;
+        virtual Result<void> put(std::string_view key, std::string_view value) = 0;
+        virtual Result<std::optional<std::string>> lookup(std::string_view key) const = 0;
+    };
+    static Result<std::shared_ptr<AdapterIndex>>
+    createAdapterIndex(const std::filesystem::path& directory, std::size_t maxBytes,
+                       std::size_t maxRowBytes, const std::function<Result<void>()>& cooperate);
+#ifdef YAMS_TESTING
+    static void testingSetScratchAllocationObserver(std::function<void()> observer);
+#endif
+
     struct CommittedState {
         // pi-lens-ignore: no-bit-fields
         std::map<std::string, MemoryIndexRecord> merged; // NOLINT(no-bit-fields)
@@ -309,6 +356,7 @@ public:
         std::map<std::string, std::string> quarantined; // NOLINT(no-bit-fields)
         std::size_t authFailures{0};
         ReplicationState replication;
+        std::shared_ptr<const WinnerView> winners;
     };
     [[nodiscard]] std::map<std::string, MemoryIndexRecord> adapterState() const;
 
@@ -326,7 +374,7 @@ public:
     /// Read the winning content for `logicalKey`. Re-syncs to stay current.
 #ifdef YAMS_TESTING
     [[nodiscard]] bool hasMergedRecord(std::string_view logicalKey) const {
-        return merged_.contains(std::string(logicalKey));
+        return committedWinner(logicalKey).has_value();
     }
     [[nodiscard]] std::size_t testingScanCandidateCount() const noexcept {
         return scanCandidates_.size();
@@ -347,8 +395,28 @@ public:
 #endif
 
     Result<std::vector<std::byte>> read(std::string_view logicalKey);
+    /// Read the last complete generation on demand without starting a new sweep.
+    Result<std::vector<std::byte>> readCommitted(std::string_view logicalKey);
+    Result<bool> matchesCommittedValue(std::string_view logicalKey,
+                                       std::span<const std::byte> content) const;
 
 private:
+    friend class MemorySyncService;
+    /// Pinned reads split mutable checks/cache selection from immutable backend I/O.
+    /// The service holds its loop lock for prepare/validate, not for a native filesystem
+    /// fetch. Fetch never reads mutable winners/caches or warms historical metadata.
+    Result<void> validatePinnedPayloadRead(const MemoryIndexRecord& record) const;
+    Result<std::optional<std::vector<std::byte>>>
+    preparePinnedPayload(const MemoryIndexRecord& record,
+                         const std::vector<std::byte>* trustedCached) const;
+    Result<std::vector<std::byte>> fetchPinnedPayload(const MemoryIndexRecord& record) const;
+    class SweepStore;
+    Result<std::shared_ptr<SweepStore>> makeSweepStore();
+    Result<void> ensureCommittedStore();
+    Result<MemoryIndexRecord> committedWinner(std::string_view logicalKey) const;
+    void cacheWinner(std::string_view logicalKey, const MemoryIndexRecord& record,
+                     std::span<const std::byte> payload);
+    Result<void> finalizeExclusiveSweep();
     Result<void>
     validateFrontierCommitments(const VersionVector& frontier,
                                 const std::map<NodeId, WriterHistoryCommitment>& commitments) const;
@@ -419,7 +487,7 @@ private:
 
     void rememberDirectOperation(const MemoryDelta& delta, const ValidatedDelta& validated);
 
-    bool commitDirectDelta(const MemoryDelta& delta, const DirectWinnerPlan& plan);
+    Result<bool> commitDirectDelta(const MemoryDelta& delta, const DirectWinnerPlan& plan);
 
     void quarantineDirectDelta(const MemoryDelta& delta, std::string reason,
                                DeltaApplyResult& result);
@@ -486,12 +554,15 @@ private:
     Result<WriterHistoryCommitment> preparedEraseCommitment(const MemoryIndexRecord& record,
                                                             std::string_view recordHash) const;
 
+    Result<void> prepareEraseIntent(EraseIntentState& intent);
     Result<void> commitPreparedErase(const EraseIntentState& intent);
 
     Result<void> replayReadyErasesAfterReconcile();
 
     Result<void> reconcileBeforeWrite(bool allowDeferredPreparedErase = false);
 
+    /// Immutable cancellation/remote-admission checks without a pressure wait.
+    [[nodiscard]] Result<void> checkWorkAdmission() const;
     [[nodiscard]] Result<void> beforeRemoteWork() const;
 
     /// Direct-P2P ingress is remote work by definition even though it lands on a local backend,
@@ -568,6 +639,7 @@ private:
     Result<std::map<std::string, MemoryIndexRecord>> syncImpl();
     void noteSweepFailure(ErrorCode code, std::string_view reason);
     void clearSweepDegraded() noexcept;
+    void discardSweep() noexcept;
 
     Result<WriterHistoryCommitment> computeHistoryCommitmentAt(std::string_view writerId,
                                                                std::uint64_t targetCounter);
@@ -613,8 +685,9 @@ private:
     /// Forwards to the injected backend and counts every mutation the loop makes, so an
     /// exclusive backend's complete scan can be reused without enumerating write paths.
     /// Exclusive filesystem listings retain one bounded, sorted snapshot per prefix; other
-    /// exclusive backends retain the old exact-page cache. This adapter is not thread-safe:
-    /// MemorySyncService serializes every caller through its loop mutex.
+    /// exclusive backends retain the old exact-page cache. Mutation/listing/cache access
+    /// requires the service loop mutex. retrieve/isRemote only forward to the stable inner
+    /// backend; native filesystem pinned reads may use those two concurrently.
     class WriteCountingBackend final : public storage::IStorageBackend {
     public:
         WriteCountingBackend(storage::IStorageBackend& inner, bool exclusive,
@@ -755,6 +828,9 @@ private:
     std::map<std::string, std::pair<std::string, std::string>> operations_;
     std::map<std::string, std::pair<std::string, std::string>> vectorIdentities_;
     std::vector<ScanCandidate> scanCandidates_;
+    std::filesystem::path sweepDirectory_;
+    std::shared_ptr<SweepStore> sweepStore_;
+    std::shared_ptr<SweepStore> committedStore_;
     std::size_t scanBytes_{0};
     /// A sweep that cannot satisfy its own bounds is an environmental condition, not a
     /// transient one. Retrying it on every caller attempt re-walks the whole store and

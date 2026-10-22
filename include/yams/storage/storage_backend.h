@@ -165,6 +165,11 @@ struct FilesystemListingStats {
 
 /// Thread-local observation; returns the previous sink so tests can restore it with RAII.
 FilesystemListingStats* testing_setFilesystemListingStats(FilesystemListingStats* stats) noexcept;
+
+/// Thread-local observation immediately before an actual native filesystem payload read.
+/// The caller owns the callback and restores the previous sink before it goes out of scope.
+std::function<void(std::string_view)>*
+testing_setFilesystemReadObserver(std::function<void(std::string_view)>* observer) noexcept;
 #endif
 
 /**
@@ -194,11 +199,18 @@ public:
     Result<void> clear() override;
     void requestCancel() noexcept override { cancelled_.store(true, std::memory_order_relaxed); }
     void resetCancel() noexcept override { cancelled_.store(false, std::memory_order_relaxed); }
+    /// Disposable reconciliation work belongs on the corpus filesystem, not OS tmpfs.
+    [[nodiscard]] std::filesystem::path scratchDirectory() const { return basePath_ / "temp"; }
+    /// Configure before use; checked within traversal even for nonmatching entries.
+    void setListingWorkCheck(std::function<Result<void>()> check) {
+        listingWorkCheck_ = std::move(check);
+    }
 
 private:
     // Unconditional: production and test translation units must agree on the layout.
     std::atomic<bool> cancelled_{false};
     std::filesystem::path basePath_;
+    std::function<Result<void>()> listingWorkCheck_;
     Result<std::filesystem::path> getObjectPath(std::string_view key) const;
     Result<void> ensureDirectoryExists(const std::filesystem::path& path) const;
 };

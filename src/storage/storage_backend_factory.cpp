@@ -22,6 +22,7 @@ namespace {
 
 #ifdef YAMS_TESTING
 thread_local FilesystemListingStats* listingStats = nullptr;
+thread_local std::function<void(std::string_view)>* readObserver = nullptr;
 
 FilesystemListingStats* listingStatsFor(std::string_view prefix) {
     return listingStats && (!listingStats->prefix || *listingStats->prefix == prefix) ? listingStats
@@ -95,12 +96,14 @@ void observePeakRetainedKeys(std::string_view prefix, std::size_t retainedKeys) 
 
 template <typename Visitor>
 Result<void> visitFilesystemKeys(const std::filesystem::path& basePath, std::string_view prefix,
-                                 const std::atomic<bool>& cancelled, Visitor&& visitor) {
+                                 const std::atomic<bool>& cancelled,
+                                 const std::function<Result<void>()>& cooperate,
+                                 Visitor&& visitor) {
     const auto checkCancelled = [&]() -> Result<void> {
         if (cancelled.load(std::memory_order_relaxed)) {
             return Error{ErrorCode::OperationCancelled, "filesystem listing cancelled"};
         }
-        return {};
+        return cooperate ? cooperate() : Result<void>{};
     };
     if (auto ready = checkCancelled(); !ready) {
         return ready.error();
@@ -173,6 +176,11 @@ Result<void> visitFilesystemKeys(const std::filesystem::path& basePath, std::str
 #ifdef YAMS_TESTING
 FilesystemListingStats* testing_setFilesystemListingStats(FilesystemListingStats* stats) noexcept {
     return std::exchange(listingStats, stats);
+}
+
+std::function<void(std::string_view)>*
+testing_setFilesystemReadObserver(std::function<void(std::string_view)>* observer) noexcept {
+    return std::exchange(readObserver, observer);
 }
 #endif
 
@@ -600,6 +608,11 @@ Result<void> FilesystemBackend::store(std::string_view key, std::span<const std:
 
 Result<std::vector<std::byte>> FilesystemBackend::retrieve(std::string_view key) const {
     YAMS_ZONE_SCOPED_N("storage_backend::filesystem_retrieve");
+#ifdef YAMS_TESTING
+    if (readObserver) {
+        (*readObserver)(key);
+    }
+#endif
     auto resolvedPath = getObjectPath(key);
     if (!resolvedPath) {
         return resolvedPath.error();
@@ -670,10 +683,11 @@ Result<void> FilesystemBackend::clear() {
 
 Result<std::vector<std::string>> FilesystemBackend::list(std::string_view prefix) const {
     std::vector<std::string> results;
-    auto visited = visitFilesystemKeys(basePath_, prefix, cancelled_, [&](std::string key) {
-        results.push_back(std::move(key));
-        observePeakRetainedKeys(prefix, results.size());
-    });
+    auto visited =
+        visitFilesystemKeys(basePath_, prefix, cancelled_, listingWorkCheck_, [&](std::string key) {
+            results.push_back(std::move(key));
+            observePeakRetainedKeys(prefix, results.size());
+        });
     if (!visited) {
         return visited.error();
     }
@@ -695,20 +709,21 @@ Result<ObjectListPage> FilesystemBackend::listPage(std::string_view prefix,
     // directory walk remains complete so traversal failures never return partial success.
     const auto retainedLimit = limit == std::numeric_limits<std::size_t>::max() ? limit : limit + 1;
     std::vector<std::string> keys;
-    auto visited = visitFilesystemKeys(basePath_, prefix, cancelled_, [&](std::string key) {
-        if (cursor && std::string_view{key} <= *cursor) {
-            return;
-        }
-        if (keys.size() < retainedLimit) {
-            keys.push_back(std::move(key));
-            std::push_heap(keys.begin(), keys.end());
-        } else if (key < keys.front()) {
-            std::pop_heap(keys.begin(), keys.end());
-            keys.back() = std::move(key);
-            std::push_heap(keys.begin(), keys.end());
-        }
-        observePeakRetainedKeys(prefix, keys.size());
-    });
+    auto visited =
+        visitFilesystemKeys(basePath_, prefix, cancelled_, listingWorkCheck_, [&](std::string key) {
+            if (cursor && std::string_view{key} <= *cursor) {
+                return;
+            }
+            if (keys.size() < retainedLimit) {
+                keys.push_back(std::move(key));
+                std::push_heap(keys.begin(), keys.end());
+            } else if (key < keys.front()) {
+                std::pop_heap(keys.begin(), keys.end());
+                keys.back() = std::move(key);
+                std::push_heap(keys.begin(), keys.end());
+            }
+            observePeakRetainedKeys(prefix, keys.size());
+        });
     if (!visited) {
         return visited.error();
     }
