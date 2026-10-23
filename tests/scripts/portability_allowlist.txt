@@ -157,7 +157,7 @@ src/metadata/versioning_util.cpp:101:portability/env-read # reviewed raw environ
 src/plugins/plugin_repo_client.cpp:62:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:407:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:420:portability/env-read # reviewed raw environment read
-src/search/search_engine.cpp:2909:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:2913:portability/env-read # reviewed raw environment read
 src/search/search_lexical_pipeline.cpp:601:portability/env-read # reviewed raw environment read
 src/storage/compressed_storage_engine.cpp:636:portability/env-read # reviewed raw environment read
 src/storage/object_storage_plugin_loader.cpp:126:portability/env-read # reviewed raw environment read
@@ -364,7 +364,7 @@ tests/unit/repair/embedding_repair_scan_catch2_test.cpp:229:portability/env-read
 tests/unit/search/graph_expansion_catch2_test.cpp:18:portability/env-read # reviewed raw environment read
 tests/unit/search/hybrid_search_comprehensive_test.cpp:272:portability/env-read # reviewed raw environment read
 tests/unit/search/kg_scorer_simple_catch2_test.cpp:35:portability/env-read # reviewed raw environment read
-tests/unit/search/search_engine_simeon_lexical_catch2_test.cpp:25:portability/env-read # reviewed raw environment read
+tests/unit/search/search_engine_simeon_lexical_catch2_test.cpp:27:portability/env-read # reviewed raw environment read
 tests/unit/search/simeon_bandit_backend_catch2_test.cpp:30:portability/env-read # reviewed raw environment read
 tests/unit/search/simeon_lexical_backend_catch2_test.cpp:29:portability/env-read # reviewed raw environment read
 tests/unit/search/topology_search_test_support.h:40:portability/env-read # reviewed raw environment read
