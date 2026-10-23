@@ -260,6 +260,33 @@ else
   message('Google Benchmark not found; skipping service and metadata benchmark executables')
 endif
 
+# Isolated builder publication vs asynchronous Simeon lexical readiness. This
+# target provides its own main and does not depend on optional Google Benchmark.
+# getrusage is needed for CPU/RSS metrics; the Windows lane has no equivalent here.
+if host_machine.system() != 'windows'
+  search_build_phase_bench = executable('search_build_phase_bench',
+    files('search/search_build_phase_bench.cpp'),
+    include_directories: incs,
+    dependencies: tune_advisor_testing_link + [
+      dependency('yams_metadata'),
+      dependency('yams_search'),
+      dependency('yams_vector'),
+      dependency('yams_daemon'),
+      dependency('spdlog'),
+      dependency('nlohmann_json'),
+    ] + yams_tracy_deps,
+    cpp_args: yams_tracy_args,
+    install: false,
+  )
+  alias_target('bench_search_build_phase', search_build_phase_bench)
+  test('search_build_phase_smoke', search_build_phase_bench,
+    args: ['--docs', '5', '--deadline-ms', '15000'],
+    suite: ['bench', 'search-build'],
+    is_parallel: false,
+    timeout: 60,
+  )
+endif
+
 # PBI-004: End-to-end ingestion pipeline benchmark. It provides its own main
 # and must remain buildable when the optional Google Benchmark dependency is absent.
 ingestion_e2e_bench = executable('ingestion_e2e_bench',
