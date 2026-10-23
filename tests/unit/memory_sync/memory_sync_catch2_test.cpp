@@ -1982,6 +1982,59 @@ TEST_CASE("Cancellation during the final fetch is checked before history finaliz
     CHECK(reader.hasMergedRecord("a"));
 }
 
+TEST_CASE("Bounded filesystem snapshots certify only complete traversals",
+          "[memory-sync][listing-cache][snapshot]") {
+    BackendFixture fixture{"bounded-snapshot"};
+    for (const auto* key : {"index/c", "index/a", "index/b", "blob/unrelated"}) {
+        REQUIRE(fixture.backend.store(key, bytes("value")).has_value());
+    }
+    const auto full = fixture.backend.listBoundedSnapshot("index/", 3, 21);
+    REQUIRE(full.has_value());
+    REQUIRE(full.value().has_value());
+    CHECK(*full.value() == std::vector<std::string>{"index/a", "index/b", "index/c"});
+
+    const auto tooMany = fixture.backend.listBoundedSnapshot("index/", 2, 21);
+    REQUIRE(tooMany.has_value());
+    CHECK_FALSE(tooMany.value().has_value());
+    const auto tooLarge = fixture.backend.listBoundedSnapshot("index/", 3, 20);
+    REQUIRE(tooLarge.has_value());
+    CHECK_FALSE(tooLarge.value().has_value());
+
+    yams::storage::FilesystemListingStats stats;
+    stats.prefix = "index/";
+    stats.onEntry = [&] { fixture.backend.requestCancel(); };
+    struct RestoreObservation {
+        yams::storage::FilesystemListingStats* previous;
+        ~RestoreObservation() { yams::storage::testing_setFilesystemListingStats(previous); }
+    } restore{yams::storage::testing_setFilesystemListingStats(&stats)};
+    const auto interrupted = fixture.backend.listBoundedSnapshot("index/", 3, 21);
+    REQUIRE_FALSE(interrupted.has_value());
+    CHECK(interrupted.error().code == yams::ErrorCode::OperationCancelled);
+    fixture.backend.resetCancel();
+}
+
+TEST_CASE("Exclusive filesystem listing falls back to pages above the snapshot budget",
+          "[memory-sync][listing-cache][budget]") {
+    BackendFixture fixture{"snapshot-fallback"};
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 1; // 64 retained key slots, fewer than the 65 objects.
+    auto cached = MemorySyncLoop::testing_countedBackend(fixture.backend, true, limits);
+    for (std::size_t i = 0; i < 65; ++i) {
+        REQUIRE(cached->store("index/" + std::to_string(10'000 + i), bytes("value")).has_value());
+    }
+    std::vector<std::string> keys;
+    std::optional<std::string> cursor;
+    do {
+        auto page = cached->listPage("index/", cursor, 1);
+        REQUIRE(page.has_value());
+        keys.insert(keys.end(), page.value().keys.begin(), page.value().keys.end());
+        cursor = page.value().nextCursor;
+    } while (cursor);
+    REQUIRE(keys.size() == 65);
+    CHECK(keys.front() == "index/10000");
+    CHECK(keys.back() == "index/10064");
+}
+
 TEST_CASE("Exclusive filesystem listing snapshots follow committed key mutations",
           "[memory-sync][listing-cache][mutations]") {
     CountingBackendFixture fixture{"listing-mutations"};
@@ -2519,7 +2572,8 @@ TEST_CASE("MemorySyncLoop retains complete exclusive listings during active publ
     REQUIRE(warm.has_value());
     REQUIRE(warm.value().size() == records);
     const auto warmWalks = stats.walks;
-    CHECK(warmWalks == (records + 511) / 512);
+    // A certified complete filesystem listing should cost one traversal, regardless of pages.
+    CHECK(warmWalks == 1);
     for (const auto* key : {"active/a", "active/z"}) {
         REQUIRE(loop.publish(key, bytes("live value")).has_value());
         const auto reconciled = loop.syncFully();
