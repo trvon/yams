@@ -17,9 +17,12 @@
 // state leaks between repeats or arms.
 //
 // Scenarios:
-//   cold    first sweep over a pre-seeded store (no cached listing)
+//   outbox  first pendingErases() over a pre-seeded store with no erase intents
+//   cold    first syncFully() over a pre-seeded store (no cached listing)
 //   warm    second sweep with no intervening write (idle reuse path)
 //   active  warm sweep, then --publishes publish+syncFully cycles
+// Outbox and cold isolate the two serialized pre-search startup barriers; neither
+// measures SearchEngineManager::buildEngine or search query quality.
 //
 // Reported: wall/user/system microseconds and peak RSS. Timings are comparable only
 // within one build type, machine and filesystem.
@@ -150,7 +153,7 @@ bool parse(int argc, char** argv, Options& options) {
             options.reuse = true;
         } else if (arg == "--help") {
             std::cout << "usage: memory_sync_listing_bench --records N [--publishes K]\n"
-                         "       --scenario cold|warm|active --dir DIR [--reuse]\n"
+                         "       --scenario outbox|cold|warm|active --dir DIR [--reuse]\n"
                          "       [--seed-only] [--label ARM] [--json OUT]\n";
             return false;
         } else {
@@ -161,7 +164,8 @@ bool parse(int argc, char** argv, Options& options) {
     if (!options.dir) {
         options.dir = std::filesystem::temp_directory_path() / "yams-memory-sync-listing-bench";
     }
-    return options.scenario == "cold" || options.scenario == "warm" || options.scenario == "active";
+    return options.scenario == "outbox" || options.scenario == "cold" ||
+           options.scenario == "warm" || options.scenario == "active";
 }
 
 // Seed the store with N well-formed bound envelopes under index/<logical>/<digest>.
@@ -219,7 +223,11 @@ int main(int argc, char** argv) {
         std::ifstream in{marker};
         in >> seededRecords;
     }
-    if (!std::filesystem::exists(marker) || seededRecords != options.records) {
+    if (std::filesystem::exists(marker) && seededRecords != options.records) {
+        std::cerr << "fixture record count differs; use a fresh --dir (refusing mixed corpus)\n";
+        return 3;
+    }
+    if (!std::filesystem::exists(marker)) {
         if (!seedCorpus(dir, options.records)) {
             return 3;
         }
@@ -257,18 +265,31 @@ int main(int argc, char** argv) {
     std::uint64_t sys = 0;
     rusage after{};
 
-    if (options.scenario == "cold") {
+    if (options.scenario == "cold" || options.scenario == "outbox") {
         const auto wallStart = nowMicros(CLOCK_MONOTONIC);
         rusage before{};
         [[maybe_unused]] const auto beforeStatus = getrusage(RUSAGE_SELF, &before);
-        const auto synced = loop.syncFully();
-        if (!synced) {
-            std::cerr << "syncFully failed: " << synced.error().message << '\n';
-            return 5;
+        if (options.scenario == "outbox") {
+            const auto pending = loop.pendingErases();
+            if (!pending) {
+                std::cerr << "pendingErases failed: " << pending.error().message << '\n';
+                return 5;
+            }
+            // This workload has no staged erases: a nonzero count invalidates the fixture.
+            if (!pending.value().empty()) {
+                std::cerr << "outbox fixture contains pending erases\n";
+                return 5;
+            }
+        } else {
+            const auto synced = loop.syncFully();
+            if (!synced) {
+                std::cerr << "syncFully failed: " << synced.error().message << '\n';
+                return 5;
+            }
+            reconciled = synced.value().size();
         }
         const auto wallEnd = nowMicros(CLOCK_MONOTONIC);
         [[maybe_unused]] const auto afterStatus = getrusage(RUSAGE_SELF, &after);
-        reconciled = synced.value().size();
         wall = wallEnd - wallStart;
         user = userMicros(after) - userMicros(before);
         sys = systemMicros(after) - systemMicros(before);

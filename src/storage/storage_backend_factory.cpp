@@ -694,6 +694,35 @@ Result<std::vector<std::string>> FilesystemBackend::list(std::string_view prefix
     return results;
 }
 
+Result<std::optional<std::vector<std::string>>>
+FilesystemBackend::listBoundedSnapshot(std::string_view prefix, std::size_t maxKeys,
+                                       std::size_t maxKeyBytes) const {
+    std::vector<std::string> keys;
+    std::size_t retainedBytes = 0;
+    bool oversized = false;
+    auto visited =
+        visitFilesystemKeys(basePath_, prefix, cancelled_, listingWorkCheck_, [&](std::string key) {
+            if (oversized) {
+                return;
+            }
+            if (keys.size() >= maxKeys || key.size() > maxKeyBytes - retainedBytes) {
+                oversized = true;
+                return;
+            }
+            retainedBytes += key.size();
+            keys.push_back(std::move(key));
+            observePeakRetainedKeys(prefix, keys.size());
+        });
+    if (!visited) {
+        return visited.error();
+    }
+    if (oversized) {
+        return std::optional<std::vector<std::string>>{};
+    }
+    std::ranges::sort(keys);
+    return std::optional<std::vector<std::string>>{std::move(keys)};
+}
+
 Result<ObjectListPage> FilesystemBackend::listPage(std::string_view prefix,
                                                    std::optional<std::string_view> cursor,
                                                    std::size_t limit) const {
