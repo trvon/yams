@@ -69,6 +69,8 @@ config_key_usage_report_tests = files('scripts/test_report_config_key_usage.py')
 portability_policy_script = files('scripts/check_portability.py')
 portability_policy_tests = files('scripts/test_check_portability.py')
 portability_allowlist = files('scripts/portability_allowlist.txt')
+tracy_zone_policy_script = files('scripts/check_tracy_zones.py')
+tracy_zone_policy_tests = files('scripts/test_check_tracy_zones.py')
 repository_metadata_policy_script = files('scripts/check_repository_metadata.py')
 forgejo_mirror_policy_script = files('scripts/check_forgejo_mirror_workflow.py')
 experimental_release_source_policy_script = files('scripts/check_experimental_release_source.py')
@@ -211,6 +213,18 @@ test('portability_policy',
     '--allowlist', portability_allowlist,
   ],
   suite: ['unit', 'policy', 'portability'],
+  timeout: 30,
+)
+test('tracy_zone_policy_unit',
+  python_exe,
+  args: [tracy_zone_policy_tests],
+  suite: ['unit', 'policy', 'profiling'],
+  timeout: 30,
+)
+test('tracy_zone_policy',
+  python_exe,
+  args: [tracy_zone_policy_script, '--root', meson.project_source_root()],
+  suite: ['unit', 'policy', 'profiling'],
   timeout: 30,
 )
 

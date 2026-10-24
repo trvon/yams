@@ -1188,7 +1188,6 @@ Result<std::size_t> EmbeddingService::backfillSemanticNeighborGraph(const std::s
 }
 
 boost::asio::awaitable<void> EmbeddingService::channelPoller() {
-    YAMS_ZONE_SCOPED_N("Embedding::channelPoller");
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
     pollerRunning_.store(true, std::memory_order_release);

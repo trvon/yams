@@ -155,6 +155,11 @@ class YamsConan(ConanFile):
             if self.settings.compiler in ["gcc", "clang"]:  # type: ignore
                 self.settings.compiler.libcxx = "libstdc++11"  # type: ignore
 
+        # meson compiles yams with -DTRACY_ON_DEMAND; the client library must match, or the
+        # two disagree on Tracy's class layout and the client records from startup.
+        if self.options.enable_profiling:  # type: ignore
+            self.options["tracy"].on_demand = True  # type: ignore
+
         # Force SQLite3 to build from source with FTS5 (don't use pre-built binaries)
         self.options["sqlite3"].enable_fts5 = True  # type: ignore
         self.options["sqlite3"].enable_json1 = True  # type: ignore

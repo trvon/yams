@@ -12,6 +12,7 @@
 #include <tracy/Tracy.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <type_traits>
 
 namespace yams::profiling_detail {
@@ -40,6 +41,19 @@ template <typename T> constexpr auto plotValue(T v) {
 #define YAMS_ZONE_SCOPED_DYN(ptr, len)                                                             \
     ZoneNamed(YAMS_ZONE_CONCAT(__yamsZoneDyn_, __LINE__), true);                                   \
     YAMS_ZONE_CONCAT(__yamsZoneDyn_, __LINE__).Name(ptr, len)
+
+// A zone must begin and end on the same thread, in stack order. In a coroutine, a
+// scoped zone must not stay open across co_await/co_yield: the coroutine can resume
+// on another thread and the profiler drops the capture ("Zone is ended twice").
+// Scope zones to synchronous code. YAMS_ZONE_SYNC_N opens a zone that
+// YAMS_ZONE_END closes early, at the same scope, before the first suspension point.
+// tests/scripts/check_tracy_zones.py enforces this.
+#define YAMS_ZONE_SYNC_N(var, name)                                                                \
+    static constexpr ::tracy::SourceLocationData YAMS_ZONE_CONCAT(__yamsSyncLoc_, var){            \
+        name, TracyFunction, TracyFile, (uint32_t)TracyLine, 0};                                   \
+    std::optional<::tracy::ScopedZone> var;                                                        \
+    var.emplace(&YAMS_ZONE_CONCAT(__yamsSyncLoc_, var), TRACY_CALLSTACK, true)
+#define YAMS_ZONE_END(var) var.reset()
 
 // Frame marking
 #define YAMS_FRAME_MARK() FrameMark
@@ -98,6 +112,8 @@ template <typename T> constexpr auto plotValue(T v) {
 #define YAMS_ZONE_SCOPED_C(color)
 #define YAMS_ZONE_SCOPED_NC(name, color)
 #define YAMS_ZONE_SCOPED_DYN(ptr, len)
+#define YAMS_ZONE_SYNC_N(var, name)
+#define YAMS_ZONE_END(var)
 
 #define YAMS_FRAME_MARK()
 #define YAMS_FRAME_MARK_NAMED(name)

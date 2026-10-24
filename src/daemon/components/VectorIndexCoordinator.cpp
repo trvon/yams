@@ -257,7 +257,6 @@ void VectorIndexCoordinator::doFinalizeOnStrand() {
 }
 
 boost::asio::awaitable<Result<void>> VectorIndexCoordinator::requestRebuild(RebuildReason reason) {
-    YAMS_ZONE_SCOPED_N("VecIdxCoord::requestRebuild");
     // Register the completion handler while holding the same mutex used by epoch completion.
     // The rebuild cannot publish an epoch result before this caller has a waiter for it.
     co_return co_await boost::asio::async_initiate<const boost::asio::use_awaitable_t<>&,
@@ -376,7 +375,6 @@ void VectorIndexCoordinator::doRebuildOnStrand(uint32_t /*reasons*/) {
 }
 
 boost::asio::awaitable<Result<void>> VectorIndexCoordinator::initialBuildIfNeeded() {
-    YAMS_ZONE_SCOPED_N("VecIdxCoord::initialBuildIfNeeded");
     co_await boost::asio::dispatch(strand_, boost::asio::use_awaitable);
 
     if (buildsSuppressed_.load(std::memory_order_relaxed)) {

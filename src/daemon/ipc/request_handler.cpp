@@ -1850,7 +1850,6 @@ boost::asio::awaitable<void>
 RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket,
                              ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
-    YAMS_ZONE_SCOPED_N("RequestHandler::writer_drain");
 
     // Guard: if connection is already closing, don't attempt writes on a dead socket.
     // This prevents the SIGSEGV when a concurrent request coroutine restarts drain

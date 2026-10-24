@@ -78,7 +78,6 @@ public:
     }
 
     boost::asio::awaitable<Result<void>> executeAsync() override {
-        YAMS_ZONE_SCOPED_N("StatusCommand::execute");
         try {
             const bool cliOneShot = yams::cli::cli_one_shot_enabled();
 

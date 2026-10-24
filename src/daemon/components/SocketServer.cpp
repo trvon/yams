@@ -713,8 +713,6 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
     uint32_t noSlotRejectStreak = 0;
 
     while (running_ && !stopping_) {
-        YAMS_ZONE_SCOPED_N("SocketServer::accept_loop");
-
         // IMPORTANT: Accept first, then try to acquire a slot.
         // If we acquire slots before accept(), we can starve the acceptor/backlog under load.
         // Shared so a connection handler that outlives stop() can still release its slot.
@@ -941,7 +939,6 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
 
 awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,
                                                 uint64_t conn_token, bool isProxy) {
-    YAMS_ZONE_SCOPED_N("SocketServer::handle_connection");
     static const bool trace = stream_trace_enabled();
     const auto handler_start_time = std::chrono::steady_clock::now();
 

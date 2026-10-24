@@ -454,7 +454,6 @@ RequestDispatcher::acquireSearchAdmission(uint32_t concurrencyCap) {
 }
 
 boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req) {
-    YAMS_ZONE_SCOPED_N("RequestDispatcher::dispatch");
     // Immediately handle status and ping requests for responsiveness, bypassing other checks.
     if (std::holds_alternative<StatusRequest>(req)) {
         co_return co_await handleStatusRequest(std::get<StatusRequest>(req));

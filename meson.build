@@ -188,28 +188,39 @@ yams_tracy_enabled = false
 if get_option('enable-profiling')
   _tracy_dep = dependency('tracy', modules: ['Tracy::TracyClient'], required: false, static: true)
   if _tracy_dep.found()
+    # Link a real zone: an empty program never pulls TracyClient's objects and passes even
+    # when the client needs libraries that are missing.
+    _tracy_args = ['-DTRACY_ENABLE', '-DTRACY_ON_DEMAND']
+    _tracy_probe = '#include <tracy/Tracy.hpp>\nint main() { ZoneScopedN("yams-tracy-link-check"); return 0; }\n'
     yams_tracy_deps = [_tracy_dep]
+    _tracy_links = cpp.links(_tracy_probe, args: _tracy_args, dependencies: yams_tracy_deps,
+                             name: 'tracy-link-check')
+    # A Tracy built against ROCm needs rocprofiler-sdk at link time. Add it only then, so
+    # builds that do not need it carry no ROCm runtime dependency.
     _rocprof_opt = get_option('enable-rocprofiler-tracy')
     _want_rocprof = (not _rocprof_opt.disabled()) and (_rocprof_opt.enabled() or (_rocprof_opt.auto() and fs.exists('/opt/rocm')))
-    if _want_rocprof
+    if _want_rocprof and (_rocprof_opt.enabled() or not _tracy_links)
+      # rocprofiler-sdk ships a CMake config package; it is found through the prefix path.
       _rocprof_dep = dependency(
         'rocprofiler-sdk',
         method: 'cmake',
-        cmake_module_path: ['/opt/rocm/lib/cmake', '/opt/rocm/lib64/cmake'],
+        cmake_args: ['-DCMAKE_PREFIX_PATH=/opt/rocm'],
         required: _rocprof_opt.enabled(),
       )
       if _rocprof_dep.found()
         yams_tracy_deps += _rocprof_dep
+        _tracy_links = cpp.links(_tracy_probe, args: _tracy_args, dependencies: yams_tracy_deps,
+                                 name: 'tracy-rocprofiler-link-check')
       else
-        warning('Tracy present but rocprofiler-sdk missing; ROCm hooks unavailable')
+        warning('Tracy needs rocprofiler-sdk, which was not found')
       endif
     endif
-    if cpp.links('int main(){ return 0; }', dependencies: yams_tracy_deps, name: 'tracy-link-check', required: false)
-      yams_tracy_args = ['-DTRACY_ENABLE', '-DTRACY_ON_DEMAND']
+    if _tracy_links
+      yams_tracy_args = _tracy_args
       yams_tracy_enabled = true
       message('Tracy profiling enabled for all yams libraries')
     else
-      warning('Tracy dependency failed to link (likely missing rocprofiler-sdk); disabling Tracy for this build')
+      warning('Tracy dependency failed to link; disabling Tracy for this build')
       yams_tracy_deps = []
     endif
   else
