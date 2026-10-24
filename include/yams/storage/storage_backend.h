@@ -187,6 +187,12 @@ public:
     Result<std::vector<std::string>> list(std::string_view prefix) const override;
     Result<ObjectListPage> listPage(std::string_view prefix, std::optional<std::string_view> cursor,
                                     std::size_t limit) const override;
+    /// A complete, lexically sorted listing only when it fits both retention bounds.
+    /// A failed traversal is an error, never a partial snapshot; an oversized traversal
+    /// returns nullopt so callers can fall back to normal paged listing.
+    Result<std::optional<std::vector<std::string>>>
+    listBoundedSnapshot(std::string_view prefix, std::size_t maxKeys,
+                        std::size_t maxKeyBytes) const;
     Result<::yams::StorageStats> getStats() const override;
 
     std::future<Result<void>> storeAsync(std::string_view key,

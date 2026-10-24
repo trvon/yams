@@ -279,6 +279,42 @@ Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPage(
                 clearListingCaches();
             }
         }
+        // Only the built-in filesystem traversal certifies completeness. A backend that
+        // merely describes itself as filesystem may return an opaque, short, cursor-less
+        // page; the ordinary cursor-gap checks below remain authoritative for those.
+        if (!cursor && typeid(inner_) == typeid(storage::FilesystemBackend) &&
+            !prefixListings_.contains(prefix) && prefixListings_.size() < kMaxPrefixes) {
+            const auto remainingKeys =
+                maxRetainedKeys_ - std::min(retainedKeyCount_, maxRetainedKeys_);
+            const auto remainingBytes =
+                maxRetainedKeyBytes_ - std::min(retainedKeyBytes_, maxRetainedKeyBytes_);
+            if (remainingKeys && remainingBytes) {
+                auto snapshot =
+                    static_cast<const storage::FilesystemBackend&>(inner_).listBoundedSnapshot(
+                        prefix, remainingKeys, remainingBytes);
+                if (!snapshot) {
+                    return snapshot.error();
+                }
+                if (snapshot.value()) {
+                    try {
+                        PrefixListing listing;
+                        listing.keys = std::move(*snapshot.value());
+                        listing.complete = true;
+                        if (testing_beforeCacheAllocation) {
+                            testing_beforeCacheAllocation("prefix-insert");
+                        }
+                        auto [found, inserted] =
+                            prefixListings_.emplace(std::string(prefix), std::move(listing));
+                        if (inserted) {
+                            accountKeys(found->second.keys);
+                        }
+                        return pageFromSnapshot(found->second, cursor, limit);
+                    } catch (...) {
+                        clearListingCaches();
+                    }
+                }
+            }
+        }
         auto page = inner_.listPage(prefix, cursor, limit);
         if (page) {
             try {
