@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <future>
+#include <map>
 #include <memory>
 #include <new>
 #include <optional>
@@ -1219,6 +1220,83 @@ TEST_CASE("Sweep byte admission handles zero and maximum size without overflow",
         CHECK(reader.hasMergedRecord("a"));
     }
     CHECK(reader.testingScanBytes() == 0);
+}
+
+TEST_CASE("Direct writer quarantine cannot exceed the invalidation window",
+          "[memory-sync][recovery][review-regression]") {
+    BackendFixture fixture{"quarantine-invalidation-window"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    REQUIRE(writer.erase("a").has_value());
+    REQUIRE(writer.erase("b").has_value());
+    MemorySyncLimits limits;
+    limits.maxTrackedIdentities = GENERATE(std::size_t{1}, std::size_t{2});
+    CAPTURE(limits.maxTrackedIdentities);
+    MemorySyncControl control;
+    control.exclusiveBackend = true;
+    {
+        MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false,
+                              limits,          control};
+        REQUIRE(reader.syncFully().has_value());
+        REQUIRE(reader.mergedRecordCount() == 2);
+        const auto generation = reader.durableQuarantineGeneration();
+        const auto checkpointKeys = fixture.backend.list("checkpoint/");
+        REQUIRE(checkpointKeys.has_value());
+        REQUIRE_FALSE(checkpointKeys.value().empty());
+        std::map<std::string, std::vector<std::byte>> checkpoints;
+        for (const auto& key : checkpointKeys.value()) {
+            auto value = fixture.backend.retrieve(key);
+            REQUIRE(value.has_value());
+            checkpoints.emplace(key, std::move(value.value()));
+        }
+
+        const auto quarantined =
+            reader.quarantineWriter("writer", "reader", "bounded invalidations");
+        if (limits.maxTrackedIdentities == 1) {
+            REQUIRE_FALSE(quarantined.has_value());
+            CHECK(quarantined.error().code == yams::ErrorCode::ResourceExhausted);
+            CHECK_FALSE(reader.writerQuarantined("writer"));
+            CHECK(reader.durableQuarantineGeneration() == generation);
+            CHECK(reader.mergedRecordCount() == 2);
+            const auto after = fixture.backend.list("checkpoint/");
+            REQUIRE(after.has_value());
+            CHECK(after.value() == checkpointKeys.value());
+            for (const auto& [key, value] : checkpoints) {
+                const auto actual = fixture.backend.retrieve(key);
+                REQUIRE(actual.has_value());
+                CHECK(actual.value() == value);
+            }
+            // A retry must not accumulate staged entries or publish a partial quarantine.
+            const auto retried = reader.quarantineWriter("writer", "reader", "retry");
+            REQUIRE_FALSE(retried.has_value());
+            CHECK(retried.error().code == yams::ErrorCode::ResourceExhausted);
+            CHECK(reader.durableQuarantineGeneration() == generation);
+            // Re-verify durable state, not just the returned error: a retry that leaked its first
+            // staged key would otherwise still satisfy the generation and status checks above.
+            const auto afterRetry = fixture.backend.list("checkpoint/");
+            REQUIRE(afterRetry.has_value());
+            CHECK(afterRetry.value() == checkpointKeys.value());
+            for (const auto& [key, value] : checkpoints) {
+                const auto actual = fixture.backend.retrieve(key);
+                REQUIRE(actual.has_value());
+                CHECK(actual.value() == value);
+            }
+            CHECK_FALSE(reader.writerQuarantined("writer"));
+        } else {
+            REQUIRE(quarantined.has_value());
+            CHECK(quarantined.value());
+            CHECK(reader.writerQuarantined("writer"));
+            const auto repeated =
+                reader.quarantineWriter("writer", "reader", "already quarantined");
+            REQUIRE(repeated.has_value());
+            CHECK_FALSE(repeated.value());
+        }
+    }
+    // Reopening sees exactly the committed outcome, never an over-budget attempt.
+    MemorySyncLoop restarted{fixture.backend, "reader", "local-test-corpus", 1, false,
+                             limits,          control};
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK(restarted.writerQuarantined("writer") == (limits.maxTrackedIdentities == 2));
+    CHECK(restarted.mergedRecordCount() == (limits.maxTrackedIdentities == 2 ? 0 : 2));
 }
 
 TEST_CASE("Sweep count exhaustion is not a successful truncated security decision",

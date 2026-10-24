@@ -2099,6 +2099,13 @@ Result<bool> MemorySyncLoop::quarantineWriter(std::string_view writerId,
         }
         auto invalidation = makeQuarantineInvalidation(key, record);
         if (invalidation) {
+            if ((!invalidations.contains(key) &&
+                 invalidations.size() >= limits_.maxTrackedIdentities) ||
+                (!invalidationSources.contains(key) &&
+                 invalidationSources.size() >= limits_.maxTrackedIdentities)) {
+                return Error{ErrorCode::ResourceExhausted,
+                             "memory sync quarantine invalidation limit reached"};
+            }
             invalidations[key] = std::move(invalidation.value());
             invalidationSources[key] = record;
         }
