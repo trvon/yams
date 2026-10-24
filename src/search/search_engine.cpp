@@ -1251,10 +1251,14 @@ public:
         status.configured = true;
         status.ready = simeonLexical_->ready();
         status.building = simeonLexical_->building();
-        status.fragmentGeometryReady = simeonLexical_->fragmentGeometryReady();
         status.conceptMiningEnabled = simeonLexical_->concept_mining_enabled();
-        status.docCount = simeonLexical_->doc_count();
-        status.conceptCount = simeonLexical_->concept_count();
+        // The build worker publishes its index and counters before ready_. A status
+        // request during construction must not read those non-atomic fields.
+        if (status.ready && !status.building) {
+            status.fragmentGeometryReady = simeonLexical_->fragmentGeometryReady();
+            status.docCount = simeonLexical_->doc_count();
+            status.conceptCount = simeonLexical_->concept_count();
+        }
         return status;
     }
 

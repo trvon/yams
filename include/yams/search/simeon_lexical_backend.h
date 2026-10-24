@@ -193,7 +193,9 @@ public:
     std::uint32_t concept_count() const noexcept;
     const Config& config() const noexcept { return cfg_; }
     bool fragmentGeometryReady() const noexcept {
-        return fragment_encoder_ != nullptr && !doc_frags_.empty();
+        // The build worker replaces these non-atomic fields before publishing ready_.
+        // Readers must not inspect them until its one-shot publication completes.
+        return ready() && !building() && fragment_encoder_ != nullptr && !doc_frags_.empty();
     }
     // Empty for corpus-trained PMI because that space requires an artifact
     // fingerprint before it can participate in a construction-bound proof.
