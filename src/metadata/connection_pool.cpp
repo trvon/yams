@@ -414,6 +414,12 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
             bool woke = false;
             {
                 YAMS_ZONE_SCOPED_N("MetadataPool::wait");
+#if defined(TRACY_ENABLE)
+                // Name the wait by pool and caller so a profile says who queues for which pool.
+                const std::string waitZoneName =
+                    "MetadataPool::wait[" + std::string(pool_role(config_)) + "] " + effectiveTag;
+                YAMS_ZONE_TRANSIENT_N(callerWaitZone, waitZoneName.c_str());
+#endif
                 woke = cv_.wait_until(lock, deadline, [this, effectiveMaxConnections] {
                     return !available_.empty() ||
                            totalConnections_ + pendingCreations_ < effectiveMaxConnections ||

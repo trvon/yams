@@ -44,6 +44,7 @@ acknowledgeKnowledgeGraph(const std::shared_ptr<metadata::MetadataRepository>& r
         return {};
     if (!repo)
         return Error{ErrorCode::NotInitialized, "KG completion metadata unavailable"};
+    metadata::MetadataOpScope opScope("graph_kg_acknowledgement");
     auto completed = repo->completeKnowledgeGraphEnrichment(documentId, token);
     if (!completed)
         return completed.error();

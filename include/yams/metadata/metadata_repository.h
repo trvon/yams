@@ -10,6 +10,7 @@
 #include <optional>
 #include <random>
 #include <shared_mutex>
+#include <source_location>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -1425,11 +1426,14 @@ private:
         return executeQueryOnPool<T>(readPool, "read", func);
     }
 
+    // An untagged write is named after its calling method, so pool waits, traces and timeout
+    // holder lists say which repository operation queued for the single write connection.
     template <typename T>
-    Result<T> executeWriteQuery(const std::function<Result<T>(Database&)>& func) {
+    Result<T> executeWriteQuery(const std::function<Result<T>(Database&)>& func,
+                                std::source_location caller = std::source_location::current()) {
         ensureCountersInitialized();
         if (current_metadata_op().empty()) {
-            MetadataOpScope opScope("write_query");
+            MetadataOpScope opScope(caller.function_name());
             return executeQueryOnPool<T>(pool_, "write", func);
         }
         return executeQueryOnPool<T>(pool_, "write", func);
@@ -1505,8 +1509,10 @@ private:
         return Error{result.error()};
     }
 
-    template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
-        return executeWriteQuery<T>(std::move(func));
+    template <typename T>
+    Result<T> executeQuery(std::function<Result<T>(Database&)> func,
+                           std::source_location caller = std::source_location::current()) {
+        return executeWriteQuery<T>(std::move(func), caller);
     }
 };
 

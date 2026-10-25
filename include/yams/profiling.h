@@ -54,6 +54,9 @@ template <typename T> constexpr auto plotValue(T v) {
     std::optional<::tracy::ScopedZone> var;                                                        \
     var.emplace(&YAMS_ZONE_CONCAT(__yamsSyncLoc_, var), TRACY_CALLSTACK, true)
 #define YAMS_ZONE_END(var) var.reset()
+// Zone with a runtime name (a C string). The profiler groups zones by name, so this attributes
+// time per runtime key (for example a caller). It allocates per call; keep it off hot paths.
+#define YAMS_ZONE_TRANSIENT_N(var, name) ZoneTransientN(var, name, true)
 
 // Frame marking
 #define YAMS_FRAME_MARK() FrameMark
@@ -114,6 +117,7 @@ template <typename T> constexpr auto plotValue(T v) {
 #define YAMS_ZONE_SCOPED_DYN(ptr, len)
 #define YAMS_ZONE_SYNC_N(var, name)
 #define YAMS_ZONE_END(var)
+#define YAMS_ZONE_TRANSIENT_N(var, name)
 
 #define YAMS_FRAME_MARK()
 #define YAMS_FRAME_MARK_NAMED(name)

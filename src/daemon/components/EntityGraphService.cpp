@@ -187,6 +187,7 @@ bool EntityGraphService::process(Job& job) {
     auto repo = services_->getMetadataRepo();
     if (!repo)
         return false;
+    metadata::MetadataOpScope opScope("entity_graph_kg_acknowledgement");
     return repo->completeKnowledgeGraphEnrichment(job.documentDbId, job.knowledgeGraphToken)
         .has_value();
 }
