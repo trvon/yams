@@ -730,6 +730,24 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                         }
 
                         result = RetT(newEngine);
+                        // Build the topology route index now, off the query path, so the first
+                        // routed query does not. Posted separately: readiness does not wait.
+                        boost::asio::post(workerExecutor, [newEngine]() {
+                            try {
+                                if (auto warmed = newEngine->prewarmTopologyRouting(); !warmed) {
+                                    spdlog::debug("[SearchEngineManager] topology route warm-up "
+                                                  "failed: {}",
+                                                  warmed.error().message);
+                                }
+                            } catch (const std::exception& e) {
+                                spdlog::debug("[SearchEngineManager] topology route warm-up "
+                                              "threw: {}",
+                                              e.what());
+                            } catch (...) {
+                                spdlog::debug("[SearchEngineManager] topology route warm-up "
+                                              "threw (unknown)");
+                            }
+                        });
                     } else {
                         try {
                             SearchEngineRebuildFailedEvent ev;

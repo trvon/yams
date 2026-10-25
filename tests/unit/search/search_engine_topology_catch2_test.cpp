@@ -2319,3 +2319,78 @@ TEST_CASE("Topology routing hydrates ranked candidates and trace stages in batch
         CHECK(result.addedCandidateHashes.empty());
     }
 }
+
+namespace {
+
+std::vector<std::string> rankedHashes(const SearchResponse& response) {
+    std::vector<std::string> hashes;
+    for (const auto& result : response.results) {
+        hashes.push_back(result.document.sha256Hash);
+    }
+    return hashes;
+}
+
+} // namespace
+
+TEST_CASE("SearchEngine topology warm-up serves the first routed query from the cache",
+          "[search][topology][prewarm][catch2]") {
+    TopologySearchFixture fix;
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+    const SearchEngineConfig config = topologyRoutingTestConfig(true);
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    context.freshness.vectorReady = true;
+    context.freshness.kgReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+    SearchParams params;
+    params.limit = 4;
+
+    SearchEngine cold(fix.repo, fix.vectorDb, generator, fix.kgStore, config);
+    auto coldResponse = cold.searchWithResponse("zz", params);
+    REQUIRE(coldResponse.has_value());
+    REQUIRE((coldResponse.value().debugStats.at("topology_weak_query_load_succeeded") == "1"));
+    CHECK((coldResponse.value().debugStats.at("topology_snapshot_cache_hit") == "0"));
+
+    SearchEngine warmed(fix.repo, fix.vectorDb, generator, fix.kgStore, config);
+    auto prewarm = warmed.prewarmTopologyRouting();
+    REQUIRE(prewarm.has_value());
+    CHECK(prewarm.value());
+    auto warmResponse = warmed.searchWithResponse("zz", params);
+    REQUIRE(warmResponse.has_value());
+
+    // The first routed query reads the warmed snapshot, and warming changes no result.
+    const auto& debug = warmResponse.value().debugStats;
+    CHECK((debug.at("topology_weak_query_load_succeeded") == "1"));
+    CHECK((debug.at("topology_snapshot_cache_hit") == "1"));
+    CHECK(rankedHashes(warmResponse.value()) == rankedHashes(coldResponse.value()));
+}
+
+TEST_CASE("SearchEngine topology warm-up does nothing when routing is disabled",
+          "[search][topology][prewarm][catch2]") {
+    TopologySearchFixture fix;
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    SearchEngine engine(fix.repo, fix.vectorDb, generator, fix.kgStore,
+                        topologyRoutingTestConfig(false));
+    auto prewarm = engine.prewarmTopologyRouting();
+    REQUIRE(prewarm.has_value());
+    CHECK_FALSE(prewarm.value());
+}
+
+TEST_CASE("SearchEngine topology warm-up reports no snapshot before one is published",
+          "[search][topology][prewarm][catch2]") {
+    TopologySearchFixture fix;
+    seedTopologyDocuments(fix);
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    SearchEngine engine(fix.repo, fix.vectorDb, generator, fix.kgStore,
+                        topologyRoutingTestConfig(true));
+    auto prewarm = engine.prewarmTopologyRouting();
+    REQUIRE(prewarm.has_value());
+    CHECK_FALSE(prewarm.value());
+}

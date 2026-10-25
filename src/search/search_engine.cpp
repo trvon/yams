@@ -1175,6 +1175,24 @@ public:
 
     const SearchEngineConfig& getConfig() const { return config_; }
 
+    Result<bool> prewarmTopologyRouting() {
+        YAMS_ZONE_SCOPED_N("search_engine::prewarm_topology_routing");
+        if (!topologySnapshotCache_) {
+            return false;
+        }
+        const SearchEngineConfig config = config_;
+        const auto mode = resolveTopologyRoutingMode(config);
+        if (!topologyRoutingMayLoad(mode, false) && !topologyRoutingMayLoad(mode, true)) {
+            return false;
+        }
+        auto lookup = getRoutingSnapshot(*topologySnapshotCache_, 0,
+                                         makeTopologyRoutingOptions(config, mode, false));
+        if (!lookup) {
+            return lookup.error();
+        }
+        return lookup.value().snapshot != nullptr;
+    }
+
     const SearchEngine::Statistics& getStatistics() const { return stats_; }
 
     void resetStatistics() {
@@ -5285,6 +5303,10 @@ void SearchEngine::setConfig(const SearchEngineConfig& config) {
 
 const SearchEngineConfig& SearchEngine::getConfig() const {
     return pImpl_->getConfig();
+}
+
+Result<bool> SearchEngine::prewarmTopologyRouting() {
+    return pImpl_->prewarmTopologyRouting();
 }
 
 const SearchEngine::Statistics& SearchEngine::getStatistics() const {
