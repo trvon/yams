@@ -50,7 +50,7 @@ if (get_option('enable-integration-tests') or dbg) and integration_smoke_srcs.le
   )
 
   test('integration_smoke', integ_exe,
-    suite: ['integration', 'isolated'],
+    suite: ['integration', 'isolated', 'concurrency'],
     args: smoke_test_args,
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',

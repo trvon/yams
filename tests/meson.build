@@ -612,7 +612,7 @@ if catch2_dep.found()
       'unit/daemon/systemd_user_unit_catch2_test.cpp',
     ),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'components'],
+    'suite': ['catch2', 'unit', 'daemon', 'components', 'concurrency'],
     'timeout': 60,
     'is_parallel': false,
   }]
@@ -621,7 +621,7 @@ if catch2_dep.found()
     'name': 'p2p_transport',
     'sources': files('unit/daemon/p2p_transport_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'p2p', 'network'],
+    'suite': ['catch2', 'unit', 'daemon', 'p2p', 'network', 'concurrency'],
     'timeout': 60,
     'is_parallel': false,
   }]
@@ -657,7 +657,7 @@ if catch2_dep.found()
     'name': 'p2p_manager',
     'sources': files('unit/daemon/p2p_manager_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'p2p', 'network', 'sqlite'],
+    'suite': ['catch2', 'unit', 'daemon', 'p2p', 'network', 'sqlite', 'concurrency'],
     'timeout': 60,
     'is_parallel': false,
   }]
@@ -742,7 +742,7 @@ if catch2_dep.found()
       'unit/daemon/proto_serializer_catch2_test.cpp',
     ),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'protocol'],
+    'suite': ['catch2', 'unit', 'daemon', 'protocol', 'concurrency'],
     'timeout': 60,
     'is_parallel': false,
   }]
@@ -760,7 +760,7 @@ if catch2_dep.found()
     'name': 'daemon_graph_component',
     'sources': files('unit/daemon/graph_component_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'graph', 'pbi-009'],
+    'suite': ['catch2', 'unit', 'daemon', 'graph'],
     'timeout': 60,
   }]
 
@@ -791,7 +791,7 @@ if catch2_dep.found()
       'unit/search/topological_quality_catch2_test.cpp',
     ),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'components', 'yams-zns'],
+    'suite': ['catch2', 'unit', 'daemon', 'components'],
     'timeout': 120,
   }]
 
@@ -800,7 +800,7 @@ if catch2_dep.found()
     'name': 'embedding_service_timing',
     'sources': files('unit/daemon/components/embedding_service_timing_catch2_test.cpp'),
     'deps': embedding_service_test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'embedding', 'startup'],
+    'suite': ['catch2', 'unit', 'daemon', 'embedding', 'startup', 'concurrency'],
     'timeout': 60,
   }]
 
@@ -849,7 +849,7 @@ if catch2_dep.found()
     'name': 'pressure_limited_poller',
     'sources': files('unit/daemon/components/pressure_limited_poller_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'poller'],
+    'suite': ['catch2', 'unit', 'daemon', 'poller', 'concurrency'],
     'timeout': 30,
   }]
 
@@ -1028,7 +1028,7 @@ if catch2_dep.found()
     'target': 'catch2_repair_scheduling',
     'sources': files('unit/daemon/repair_scheduling_adapter_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon', 'repair'],
     'timeout': 120,
   }]
 
@@ -1053,7 +1053,7 @@ if catch2_dep.found()
     'name': 'write_coordinator',
     'sources': files('unit/daemon/write_coordinator_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'write-coordinator'],
+    'suite': ['catch2', 'unit', 'daemon', 'write-coordinator', 'concurrency'],
     'timeout': 60,
     'is_parallel': false,
   }]
@@ -1062,7 +1062,7 @@ if catch2_dep.found()
     'name': 'service_manager',
     'sources': files('unit/daemon/service_manager_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon', 'service-manager', 'concurrency'],
     'timeout': 120,
   }]
 
@@ -1078,7 +1078,7 @@ if catch2_dep.found()
     'name': 'db_recovery',
     'sources': files('unit/daemon/db_recovery_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'db_recovery'],
+    'suite': ['catch2', 'unit', 'daemon', 'db-recovery'],
     'timeout': 30,
   }]
 
@@ -1086,7 +1086,7 @@ if catch2_dep.found()
     'name': 'db_salvage',
     'sources': files('unit/daemon/db_salvage_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'db_salvage'],
+    'suite': ['catch2', 'unit', 'daemon', 'db-salvage'],
     'timeout': 30,
   }]
 
@@ -1094,7 +1094,7 @@ if catch2_dep.found()
     'name': 'db_recovery_vacuum',
     'sources': files('unit/daemon/db_recovery_vacuum_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'db_recovery'],
+    'suite': ['catch2', 'unit', 'daemon', 'db-recovery'],
     'timeout': 60,
   }]
 
@@ -1102,7 +1102,7 @@ if catch2_dep.found()
     'name': 'storage_preflight',
     'sources': files('unit/daemon/storage_preflight_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'storage_preflight'],
+    'suite': ['catch2', 'unit', 'daemon', 'storage-preflight'],
     'timeout': 30,
   }]
 
@@ -1110,7 +1110,7 @@ if catch2_dep.found()
     'name': 'tune_advisor_snapshot',
     'sources': files('unit/daemon/tune_advisor_snapshot_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'tune_advisor'],
+    'suite': ['catch2', 'unit', 'daemon', 'tune-advisor'],
     'timeout': 30,
   }]
 
@@ -1134,7 +1134,7 @@ if catch2_dep.found()
     'name': 'streaming_processor',
     'sources': files('unit/daemon/streaming_processor_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'streaming', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon', 'streaming', 'concurrency'],
     'args': ['--allow-running-no-tests'],  # Skips entirely on Windows
     'timeout': 60,
   }]
@@ -1161,7 +1161,7 @@ if catch2_dep.found()
     'name': 'multiplex_client',
     'sources': files('unit/daemon/multiplex_client_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'multiplex', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon', 'multiplex'],
     'args': ['--allow-running-no-tests'],  # All tests have [.requires_daemon] tag
     'timeout': 60,
   }]
@@ -1170,7 +1170,7 @@ if catch2_dep.found()
     'name': 'entity_graph_service',
     'sources': files('unit/daemon/entity_graph_service_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon'],
     'timeout': 120,
   }]
 
@@ -1180,7 +1180,7 @@ if catch2_dep.found()
     'name': 'service_manager_shutdown',
     'sources': files('unit/daemon/service_manager_shutdown_ownership_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon', 'service-manager'],
     'timeout': 120,
     'is_parallel': false,
   }]
@@ -1189,7 +1189,7 @@ if catch2_dep.found()
     'name': 'service_manager_degraded',
     'sources': files('unit/daemon/service_manager_provider_degraded_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon', 'service-manager'],
     'timeout': 120,
     'is_parallel': false,
   }]
@@ -1198,7 +1198,7 @@ if catch2_dep.found()
     'name': 'repair_binary_filter',
     'sources': files('unit/daemon/repair_binary_filter_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon', 'repair'],
     'timeout': 120,
     'is_parallel': false,
   }]
@@ -1207,7 +1207,7 @@ if catch2_dep.found()
     'name': 'abi_model_provider_dim',
     'sources': files('unit/daemon/abi_model_provider_dimension_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon'],
     'timeout': 60,
   }]
 
@@ -1223,7 +1223,7 @@ if catch2_dep.found()
     'name': 'model_provider_registry',
     'sources': files('unit/daemon/model_provider_registry_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'model_provider'],
+    'suite': ['catch2', 'unit', 'daemon', 'model-provider'],
     'timeout': 30,
   }]
 
@@ -1231,7 +1231,7 @@ if catch2_dep.found()
     'name': 'simeon_model_provider',
     'sources': files('unit/daemon/simeon_model_provider_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'model_provider', 'simeon'],
+    'suite': ['catch2', 'unit', 'daemon', 'model-provider', 'simeon'],
     'timeout': 30,
   }]
 
@@ -1239,7 +1239,7 @@ if catch2_dep.found()
     'name': 'embedding_recovery',
     'sources': files('unit/daemon/embedding_provider_recovery_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon'],
     'args': ['--allow-running-no-tests'],  # Skips entirely on Windows
     'timeout': 120,
     'is_parallel': false,
@@ -1249,7 +1249,7 @@ if catch2_dep.found()
     'name': 'request_io_edge',
     'sources': files('unit/daemon/request_handler_io_edge_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon', 'concurrency'],
     'args': ['--allow-running-no-tests'],  # Placeholder tests - all skipped
     'timeout': 120,
     'is_parallel': false,
@@ -1259,7 +1259,7 @@ if catch2_dep.found()
     'name': 'daemon_warm_bench',
     'sources': files('unit/daemon/daemon_warm_bench_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'bench', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon', 'bench'],
     'args': ['--allow-running-no-tests'],  # Bench only runs when YAMS_BENCH_FAST=1
     'timeout': 120,
   }]
@@ -1277,7 +1277,7 @@ if catch2_dep.found()
     'name': 'request_lifetime',
     'sources': files('unit/daemon/request_handler_lifetime_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    'suite': ['catch2', 'unit', 'daemon'],
     'args': ['--allow-running-no-tests'],  # Skips when streaming disabled
     'timeout': 120,
     'is_parallel': false,
@@ -1297,7 +1297,7 @@ if catch2_dep.found()
     'name': 'asio_connection_pool',
     'sources': files('unit/daemon/asio_connection_pool_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'connection-pool'],
+    'suite': ['catch2', 'unit', 'daemon', 'connection-pool', 'concurrency'],
     'timeout': 120,
     'is_parallel': false,
   }]
@@ -1403,7 +1403,7 @@ if catch2_dep.found()
     'name': 'timing_audit',
     'sources': files('unit/daemon/timing_audit_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'timing-audit'],
+    'suite': ['catch2', 'unit', 'daemon', 'timing-audit', 'concurrency'],
     'timeout': 120,
   }]
 
@@ -1452,7 +1452,7 @@ if catch2_dep.found()
     'name': 'vector_index_coordinator_coalesce',
     'sources': files('unit/daemon/vector_index_coordinator_coalesce_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
+    'suite': ['catch2', 'unit', 'daemon', 'vector', 'coordinator', 'concurrency'],
     'timeout': 60,
   }]
 
@@ -1460,7 +1460,7 @@ if catch2_dep.found()
     'name': 'vector_index_coordinator_telemetry',
     'sources': files('unit/daemon/vector_index_coordinator_telemetry_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
+    'suite': ['catch2', 'unit', 'daemon', 'vector', 'coordinator', 'concurrency'],
     'timeout': 60,
   }]
 
@@ -1514,7 +1514,7 @@ if catch2_dep.found()
       'unit/storage/windows_path_catch2_test.cpp',
     ),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'storage', 'backend'],
+    'suite': ['catch2', 'unit', 'storage', 'backend', 'concurrency'],
     'timeout': 120,
   }]
 
@@ -1709,7 +1709,7 @@ if catch2_dep.found()
       'unit/search/search_facets_catch2_test.cpp',
     ),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'search', 'yams-1yq'],
+    'suite': ['catch2', 'unit', 'search', 'concurrency'],
     'timeout': 180,
   }]
 
@@ -1717,7 +1717,7 @@ if catch2_dep.found()
     'name': 'search_vector_stage',
     'sources': files('unit/search/search_vector_stage_characterization_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'search', 'vector_stage'],
+    'suite': ['catch2', 'unit', 'search', 'vector-stage'],
     'timeout': 180,
   }]
 
@@ -1725,7 +1725,7 @@ if catch2_dep.found()
     'name': 'search_vector_stage_route_only',
     'sources': files('unit/search/search_vector_stage_route_only_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'search', 'vector_stage'],
+    'suite': ['catch2', 'unit', 'search', 'vector-stage'],
     'timeout': 180,
   }]
 
@@ -1735,7 +1735,7 @@ if catch2_dep.found()
     'name': 'search_vector_stage_road_beam',
     'sources': files('unit/search/search_vector_stage_road_beam_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'search', 'vector_stage'],
+    'suite': ['catch2', 'unit', 'search', 'vector-stage'],
     'timeout': 180,
   }]
 
@@ -1745,7 +1745,7 @@ if catch2_dep.found()
     'name': 'search_vector_stage_road_walk',
     'sources': files('unit/search/search_vector_stage_road_walk_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'search', 'vector_stage'],
+    'suite': ['catch2', 'unit', 'search', 'vector-stage'],
     'timeout': 180,
   }]
 
@@ -1762,7 +1762,7 @@ if catch2_dep.found()
     'name': 'search_vector_stage_timeout',
     'sources': files('unit/search/search_vector_stage_timeout_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'search', 'vector_stage'],
+    'suite': ['catch2', 'unit', 'search', 'vector-stage'],
     'timeout': 60,
   }]
 
@@ -1770,7 +1770,7 @@ if catch2_dep.found()
     'name': 'evidence_search_pipeline',
     'sources': files('unit/search/evidence_search_pipeline_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'search', 'evidence_pipeline'],
+    'suite': ['catch2', 'unit', 'search', 'evidence-pipeline'],
     'timeout': 30,
   }]
 
@@ -1801,7 +1801,7 @@ if catch2_dep.found()
     'name': 'search_tuner',
     'sources': files('unit/search/search_tuner_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'search', 'tuner', 'yams-7ez4'],
+    'suite': ['catch2', 'unit', 'search', 'tuner'],
     'timeout': 60,
   }]
 
@@ -1812,7 +1812,7 @@ if catch2_dep.found()
     'name': 'internal_benchmark',
     'sources': files('unit/search/internal_benchmark_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'search', 'benchmark', 'yams-7ez4'],
+    'suite': ['catch2', 'unit', 'search', 'benchmark'],
     'timeout': 60,
   }]
 
@@ -2125,7 +2125,7 @@ if catch2_dep.found()
     'name': 'tokenizer',
     'sources': files('unit/vector/tokenizer_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'vector', 'yams-tokenizer'],
+    'suite': ['catch2', 'unit', 'vector', 'tokenizer'],
     'timeout': 60,
   }]
 
@@ -2143,7 +2143,7 @@ if catch2_dep.found()
       'unit/api/semantic_search_api_catch2_test.cpp',
     ),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'api', 'yams-api'],
+    'suite': ['catch2', 'unit', 'api', 'concurrency'],
     'timeout': 180,
   }]
 
@@ -2156,7 +2156,7 @@ if catch2_dep.found()
     'name': 'downloader_submodule',
     'sources': files('unit/downloader/downloader_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'downloader', 'yams-downloader'],
+    'suite': ['catch2', 'unit', 'downloader'],
     'timeout': 180,
   }]
 
@@ -2169,7 +2169,7 @@ if catch2_dep.found()
     'name': 'resolve_submodule',
     'sources': files('unit/resolve/resolver_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'resolve', 'yams-resolve'],
+    'suite': ['catch2', 'unit', 'resolve'],
     'timeout': 180,
   }]
 
@@ -2182,7 +2182,7 @@ if catch2_dep.found()
     'name': 'manifest_submodule',
     'sources': files('unit/manifest/manifest_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'manifest', 'yams-manifest'],
+    'suite': ['catch2', 'unit', 'manifest'],
     'timeout': 180,
   }]
 
@@ -2196,7 +2196,7 @@ if catch2_dep.found()
     'name': 'repair_submodule',
     'sources': files('unit/repair/embedding_repair_scan_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'repair', 'yams-repair'],
+    'suite': ['catch2', 'unit', 'repair'],
     'args': ['--allow-running-no-tests'],
     'timeout': 180,
   }]
@@ -2209,7 +2209,7 @@ if catch2_dep.found()
     'name': 'versioning_submodule',
     'sources': files('unit/metadata/versioning_util_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'versioning', 'yams-versioning'],
+    'suite': ['catch2', 'unit', 'versioning'],
     'timeout': 180,
   }]
 
@@ -2244,7 +2244,7 @@ if catch2_dep.found()
     'name': 'metadata_unit',
     'sources': files('unit/metadata/metadata_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'metadata', 'yams-metadata'],
+    'suite': ['catch2', 'unit', 'metadata'],
     'timeout': 120,
   }]
 
@@ -2255,7 +2255,7 @@ if catch2_dep.found()
     'name': 'connection_pool',
     'sources': files('unit/metadata/connection_pool_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'metadata', 'connection_pool'],
+    'suite': ['catch2', 'unit', 'metadata', 'connection-pool', 'concurrency'],
     'timeout': 120,
   }]
 
@@ -2278,7 +2278,7 @@ if catch2_dep.found()
       'unit/metadata/kg_relation_summary_catch2_test.cpp',
     ),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'metadata', 'kg'],
+    'suite': ['catch2', 'unit', 'metadata', 'kg', 'concurrency'],
     'timeout': 120,
   }]
 
@@ -2340,7 +2340,7 @@ if catch2_dep.found()
     'name': 'tree_builder',
     'sources': files('unit/metadata/tree_builder_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'metadata', 'tree_builder'],
+    'suite': ['catch2', 'unit', 'metadata', 'tree-builder'],
     'timeout': 120,
   }]
 
@@ -2351,7 +2351,7 @@ if catch2_dep.found()
     'name': 'tree_differ',
     'sources': files('unit/metadata/tree_differ_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'metadata', 'tree_differ'],
+    'suite': ['catch2', 'unit', 'metadata', 'tree-differ'],
     'timeout': 120,
   }]
 
@@ -2362,7 +2362,7 @@ if catch2_dep.found()
     'name': 'path_tree_delete',
     'sources': files('unit/metadata/path_tree_delete_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'metadata', 'path_tree'],
+    'suite': ['catch2', 'unit', 'metadata', 'path-tree'],
     'timeout': 120,
   }]
 
@@ -2387,7 +2387,7 @@ if catch2_dep.found()
       'unit/metadata/metadata_repository_tag_stats_catch2_test.cpp',
     ),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'metadata', 'repository'],
+    'suite': ['catch2', 'unit', 'metadata', 'repository', 'concurrency'],
     'timeout': 180,
   }]
 
@@ -2589,7 +2589,7 @@ if catch2_dep.found()
     'name': 'query_helpers_integration',
     'sources': files('unit/metadata/query_helpers_integration_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'metadata', 'query_helpers'],
+    'suite': ['catch2', 'unit', 'metadata', 'query-helpers'],
     'timeout': 60,
   }]
 
@@ -2623,7 +2623,7 @@ if catch2_dep.found()
     'name': 'corpus_stats',
     'sources': files('unit/metadata/corpus_stats_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'metadata', 'corpus_stats'],
+    'suite': ['catch2', 'unit', 'metadata', 'corpus-stats'],
     'timeout': 120,
   }]
 
@@ -2855,7 +2855,7 @@ if catch2_dep.found()
     'target': 'builtin_content_extractor',
     'sources': files('unit/extraction/builtin_content_extractor_catch2_test.cpp'),
     'deps': content_test_deps,
-    'suite': ['catch2', 'unit', 'extraction', 'content_extractor'],
+    'suite': ['catch2', 'unit', 'extraction', 'content-extractor'],
     'timeout': 60,
   }]
 
@@ -2882,7 +2882,7 @@ if catch2_dep.found()
     'target': 'plugin_process',
     'sources': files('unit/extraction/plugin_process_test.cpp'),
     'deps': plugin_process_test_deps,
-    'suite': ['catch2', 'unit', 'extraction', 'plugin'],
+    'suite': ['catch2', 'unit', 'extraction', 'plugins'],
     'timeout': 120,
   }]
 
@@ -2891,7 +2891,7 @@ if catch2_dep.found()
     'target': 'plugin_process_minimal',
     'sources': files('unit/extraction/plugin_process_minimal_test.cpp'),
     'deps': plugin_process_test_deps,
-    'suite': ['catch2', 'unit', 'extraction', 'plugin', 'debug'],
+    'suite': ['catch2', 'unit', 'extraction', 'plugins', 'debug'],
     'timeout': 120,
     'is_parallel': false,
   }]
@@ -2919,7 +2919,7 @@ if catch2_dep.found()
     'target': 'external_plugin_extractor',
     'sources': files('unit/extraction/external_plugin_extractor_test.cpp'),
     'deps': plugin_process_test_deps,
-    'suite': ['catch2', 'unit', 'extraction', 'plugin'],
+    'suite': ['catch2', 'unit', 'extraction', 'plugins'],
     'timeout': 60,
   }]
 
@@ -2982,7 +2982,7 @@ if catch2_dep.found()
     'target': 'document_service',
     'sources': files('unit/app/services/document_service_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'unit', 'services', 'document'],
+    'suite': ['catch2', 'unit', 'services', 'document', 'concurrency'],
     'timeout': 180,
   }]
 
@@ -3145,7 +3145,7 @@ if catch2_dep.found()
   )
 
   test('plugin_process_launcher', plugin_process_launcher_exe,
-    suite: ['catch2', 'unit', 'extraction', 'plugin', 'launcher'],
+    suite: ['catch2', 'unit', 'extraction', 'plugins', 'launcher'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
     timeout: host_machine.system() == 'windows' ? 180 : 120,
 #PyInstaller process tests have resource contention when run in parallel
@@ -3154,7 +3154,7 @@ if catch2_dep.found()
 
 #Search tests
   test('hybrid_search', hybrid_search_exe,
-    suite: ['catch2', 'unit', 'search', 'hybrid'],
+    suite: ['catch2', 'unit', 'search', 'hybrid', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
@@ -3164,7 +3164,7 @@ if catch2_dep.found()
   )
 
   test('hybrid_search_slow', hybrid_search_exe,
-    suite: ['catch2', 'slow', 'search', 'hybrid'],
+    suite: ['catch2', 'slow', 'search', 'hybrid', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
@@ -3175,7 +3175,7 @@ if catch2_dep.found()
 
   if not _test_address_sanitizer
     test('corpus_stats_search_integration', corpus_stats_search_integration_exe,
-      suite: ['catch2', 'integration', 'search', 'corpus_stats'],
+      suite: ['catch2', 'integration', 'search', 'corpus-stats'],
       env: {
         'LD_LIBRARY_PATH': _test_env_ld_library_path,
         'YAMS_DISABLE_VECTORS': '1',
@@ -3188,7 +3188,7 @@ if catch2_dep.found()
   daemon_metrics_timeout = (yams_sanitize_thread or yams_sanitize_address) ? 240 : 180
 
   test('daemon_metrics_status', catch2_daemon_metrics_status_exe,
-    suite: ['catch2', 'unit', 'daemon', 'metrics', 'status'],
+    suite: ['catch2', 'unit', 'daemon', 'metrics', 'status', 'concurrency'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: daemon_metrics_timeout,
     is_parallel: false
@@ -3233,7 +3233,7 @@ if catch2_dep.found()
   )
 
   test('repair_service', catch2_repair_service_exe,
-    suite: ['catch2', 'unit', 'daemon', 'repair', 'stuck-docs'],
+    suite: ['catch2', 'unit', 'daemon', 'repair', 'stuck-docs', 'concurrency'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -3251,28 +3251,28 @@ if catch2_dep.found()
   )
 
   test('daemon_background_processing', catch2_daemon_background_exe,
-    suite: ['catch2', 'unit', 'daemon', 'background'],
+    suite: ['catch2', 'unit', 'daemon', 'background', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
 
   test('daemon_background_processing_slow', catch2_daemon_background_exe,
-    suite: ['catch2', 'slow', 'daemon', 'background'],
+    suite: ['catch2', 'slow', 'daemon', 'background', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
 
   test('work_coordinator', catch2_work_coordinator_exe,
-    suite: ['catch2', 'unit', 'daemon', 'work-coordinator'],
+    suite: ['catch2', 'unit', 'daemon', 'work-coordinator', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
 
   test('work_coordinator_slow', catch2_work_coordinator_exe,
-    suite: ['catch2', 'slow', 'daemon', 'work-coordinator'],
+    suite: ['catch2', 'slow', 'daemon', 'work-coordinator', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
@@ -3287,7 +3287,7 @@ if catch2_dep.found()
   )
 
   test('search_service', catch2_search_service_exe,
-    suite: ['catch2', 'unit', 'services', 'search'],
+    suite: ['catch2', 'unit', 'services', 'search', 'concurrency'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -3302,7 +3302,7 @@ if catch2_dep.found()
   )
 
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
-    suite: ['catch2', 'unit', 'daemon', 'plugin'],
+    suite: ['catch2', 'unit', 'daemon', 'plugins'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
@@ -3332,7 +3332,7 @@ if catch2_dep.found()
   endif
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
-    suite: ['catch2', 'unit', 'daemon', 'plugin', 'infrastructure'],
+    suite: ['catch2', 'unit', 'daemon', 'plugins', 'infrastructure', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
@@ -3340,7 +3340,7 @@ if catch2_dep.found()
   )
 
   test('plugin_infrastructure_slow', catch2_plugin_infrastructure_exe,
-    suite: ['catch2', 'slow', 'daemon', 'plugin', 'infrastructure'],
+    suite: ['catch2', 'slow', 'daemon', 'plugins', 'infrastructure', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
@@ -3348,21 +3348,21 @@ if catch2_dep.found()
   )
 
   test('external_plugin_host', catch2_external_plugin_host_exe,
-    suite: ['catch2', 'unit', 'daemon', 'plugin', 'external'],
+    suite: ['catch2', 'unit', 'daemon', 'plugins', 'external'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
   )
 
   test('in_process_transport', catch2_in_process_transport_exe,
-    suite: ['catch2', 'unit', 'daemon', 'streaming', 'inprocess'],
+    suite: ['catch2', 'unit', 'daemon', 'streaming', 'inprocess', 'concurrency'],
     args: ['--allow-running-no-tests'],  # Skips entirely on Windows
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
 
   test('asio_transport_exhaustion', catch2_asio_transport_exhaustion_exe,
-    suite: ['catch2', 'unit', 'daemon', 'transport', 'max-inflight'],
+    suite: ['catch2', 'unit', 'daemon', 'transport', 'max-inflight', 'concurrency'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120,
     is_parallel: false,
@@ -3371,7 +3371,7 @@ if catch2_dep.found()
   )
 
   test('asio_transport_inflight_close_ipc_prefix', catch2_asio_transport_inflight_close_ipc_prefix_exe,
-    suite: ['catch2', 'unit', 'daemon', 'transport', 'ipc'],
+    suite: ['catch2', 'unit', 'daemon', 'transport', 'ipc', 'concurrency'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120,
     is_parallel: false,
@@ -3380,7 +3380,7 @@ if catch2_dep.found()
   )
 
   test('daemon', catch2_daemon_exe,
-    suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    suite: ['catch2', 'unit', 'daemon', 'concurrency'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
 #Disable ABI plugins to avoid TSAN + ONNX memory pressure causing SIGKILL
@@ -3448,7 +3448,7 @@ if catch2_dep.found()
   )
 
   test('memory_sync_service', catch2_memory_sync_service_exe,
-    suite: ['catch2', 'unit', 'memory-sync'],
+    suite: ['catch2', 'unit', 'memory-sync', 'concurrency'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
@@ -3466,14 +3466,14 @@ if catch2_dep.found()
   )
 
   test('storage_submodule', catch2_storage_submodule_exe,
-    suite: ['catch2', 'unit', 'storage', 'yams-8b9'],
+    suite: ['catch2', 'unit', 'storage', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
   )
 
   test('storage_submodule_slow', catch2_storage_submodule_exe,
-    suite: ['catch2', 'slow', 'storage', 'yams-8b9'],
+    suite: ['catch2', 'slow', 'storage', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
@@ -3495,20 +3495,20 @@ if catch2_dep.found()
   heavy_submodule_timeout = (yams_sanitize_thread or yams_sanitize_address) ? 600 : 300
 
   test('compression_submodule', catch2_compression_submodule_exe,
-    suite: ['catch2', 'unit', 'compression', 'yams-pmf'],
+    suite: ['catch2', 'unit', 'compression', 'concurrency'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: heavy_submodule_timeout
   )
 
   test('mcp_submodule', catch2_mcp_submodule_exe,
-    suite: ['catch2', 'unit', 'mcp', 'yams-84g'],
+    suite: ['catch2', 'unit', 'mcp', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
   )
 
   test('mcp_submodule_slow', catch2_mcp_submodule_exe,
-    suite: ['catch2', 'slow', 'mcp', 'yams-84g'],
+    suite: ['catch2', 'slow', 'mcp', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
@@ -3525,49 +3525,49 @@ if catch2_dep.found()
   }
 
   test('cli_common', catch2_cli_common_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'common'],
+    suite: ['catch2', 'unit', 'cli', 'common'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 120
   )
 
   test('cli_config', catch2_cli_config_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'config'],
+    suite: ['catch2', 'unit', 'cli', 'config'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 180
   )
 
   test('cli_commands', catch2_cli_commands_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'commands'],
+    suite: ['catch2', 'unit', 'cli', 'commands'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 180
   )
 
   test('cli_model_plugin', catch2_cli_model_plugin_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'model-plugin'],
+    suite: ['catch2', 'unit', 'cli', 'model-plugin'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 120
   )
 
   test('cli_doctor', catch2_cli_doctor_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'doctor'],
+    suite: ['catch2', 'unit', 'cli', 'doctor'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 180
   )
 
   test('cli_graph', catch2_cli_graph_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'graph'],
+    suite: ['catch2', 'unit', 'cli', 'graph'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 120
   )
 
   test('cli_daemon', catch2_cli_daemon_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'daemon'],
+    suite: ['catch2', 'unit', 'cli', 'daemon'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 120
@@ -3577,7 +3577,7 @@ if catch2_dep.found()
 #Migrated from GTest as part of yams - 3s4 / yams - 1d4
   if get_option('enable-vector-tests')
     test('vector_submodule', catch2_vector_submodule_exe,
-      suite: ['catch2', 'unit', 'vector', 'yams-1d4'],
+      suite: ['catch2', 'unit', 'vector', 'concurrency'],
       env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
       timeout: heavy_submodule_timeout
     )
