@@ -746,6 +746,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return applyMemorySyncContentBlobs();
     };
     const auto applyMetadata = [this]() -> Result<StagePass> {
+        YAMS_ZONE_SCOPED_N("memory_sync.apply_metadata");
         auto repository = getMetadataRepo();
         if (!repository) {
             return StagePass{};
@@ -769,6 +770,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
     };
     const auto applyVectors = [this]() -> Result<StagePass> {
+        YAMS_ZONE_SCOPED_N("memory_sync.apply_vectors");
         auto vectorDatabase = getVectorDatabase();
         if (!vectorDatabase) {
             return StagePass{};
@@ -799,6 +801,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return pass;
     };
     const auto applyTopology = [this]() -> Result<StagePass> {
+        YAMS_ZONE_SCOPED_N("memory_sync.apply_topology");
         auto kgStore = getKgStore();
         if (!kgStore) {
             return StagePass{};
