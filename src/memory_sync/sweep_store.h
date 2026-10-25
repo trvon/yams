@@ -4,6 +4,7 @@
 
 #include <sqlite3.h>
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -73,7 +74,15 @@ private:
     std::size_t rowBytes_{0};
     std::size_t count_{0};
     std::int64_t generation_{0};
+    // Unique per store for the process lifetime, so an identity never matches a later store
+    // that reuses this one's address.
+    const std::uint64_t instance_{nextInstance()};
     bool building_{true};
+
+    static std::uint64_t nextInstance() noexcept {
+        static std::atomic<std::uint64_t> next{1};
+        return next.fetch_add(1, std::memory_order_relaxed);
+    }
     mutable bool healthy_{true};
 
     void sql(const char* query, std::initializer_list<std::string_view> values = {}) {
@@ -341,10 +350,18 @@ private:
         std::shared_ptr<const SweepStore> store_;
         std::int64_t generation_;
         std::size_t count_;
+        bool named_;
 
     public:
-        View(std::shared_ptr<const SweepStore> store, std::int64_t generation, std::size_t count)
-            : store_(std::move(store)), generation_(generation), count_(count) {}
+        View(std::shared_ptr<const SweepStore> store, std::int64_t generation, std::size_t count,
+             bool named)
+            : store_(std::move(store)), generation_(generation), count_(count), named_(named) {}
+        std::optional<Identity> identity() const noexcept override {
+            if (!named_) {
+                return std::nullopt;
+            }
+            return Identity{.instance = store_->instance_, .generation = generation_};
+        }
         std::size_t size() const noexcept override { return count_; }
         Result<MemoryIndexRecord> find(std::string_view key) const override {
             return store_->findAt(key, generation_);
@@ -358,7 +375,10 @@ private:
 public:
     [[nodiscard]] std::shared_ptr<const WinnerView> view() const {
         std::lock_guard lock(mutex_);
-        return std::make_shared<View>(shared_from_this(), generation_, count_);
+        // Rows added while building do not advance the generation, so a view taken then
+        // cannot name its contents.
+        return std::make_shared<View>(shared_from_this(), generation_, count_,
+                                      !building_ && healthy_);
     }
     [[nodiscard]] std::size_t size() const noexcept { return count_; }
     [[nodiscard]] bool needsCompaction() const noexcept {

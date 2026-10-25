@@ -70,6 +70,52 @@ public:
     /// Capacity and remote-admission errors retain their original codes.
     enum class AdapterPressureMode : std::uint8_t { Wait, Defer };
 
+    /// Everything an adapter pass reads: the pinned winner set and the overlay rows. An
+    /// adapter sees an overlay row only when the winner store lacks its key; resident copies of
+    /// committed winners are invisible, so differing copies do not make the inputs differ.
+    struct AdapterInputs {
+        using Rows = std::map<std::string, MemoryIndexRecord>;
+        MemorySyncLoop::WinnerView::Identity winners;
+        std::shared_ptr<const Rows> overlays;
+        /// The pinned winners, for visibility lookups. Not needed to name the inputs; drop it
+        /// before keeping the value so an old store is not held open.
+        std::shared_ptr<const MemorySyncLoop::WinnerView> view;
+
+        /// True when an adapter pass would read the same records from both. `previous` may have
+        /// dropped its view: equal winner identities hold equal contents, so this view serves
+        /// both. Equal overlay rows need no lookup; otherwise only adapter-visible rows count.
+        [[nodiscard]] bool sameAs(const AdapterInputs& previous) const {
+            if (winners != previous.winners || !overlays || !previous.overlays) {
+                return false;
+            }
+            if (overlays == previous.overlays || *overlays == *previous.overlays) {
+                return true;
+            }
+            const auto current = visible(*overlays);
+            const auto earlier = visible(*previous.overlays);
+            return current && earlier && *current == *earlier;
+        }
+
+    private:
+        [[nodiscard]] std::optional<Rows> visible(const Rows& rows) const {
+            if (!view) {
+                return rows;
+            }
+            Rows out;
+            for (const auto& [key, record] : rows) {
+                auto committed = view->find(key);
+                if (committed) {
+                    continue;
+                }
+                if (committed.error().code != ErrorCode::NotFound) {
+                    return std::nullopt;
+                }
+                out.emplace(key, record);
+            }
+            return out;
+        }
+    };
+
     /// An opaque pinned adapter generation. It owns its metadata, not a service/backend
     /// reference; payload I/O always requires the still-live originating service.
     class AdapterView {
@@ -86,6 +132,25 @@ public:
             : state_(std::move(state)), overlays_(std::move(overlays)), owner_(std::move(owner)),
               pressureMode_(pressureMode) {}
 
+    public:
+        /// Names everything an adapter pass reads through this view. nullopt when the pinned
+        /// winners cannot be named; callers must then treat the inputs as changed. A view with
+        /// no committed winner store reads overlays only (winner instance 0, never a store's).
+        [[nodiscard]] std::optional<AdapterInputs> inputs() const {
+            if (!state_ || !overlays_) {
+                return std::nullopt;
+            }
+            if (!state_->winners) {
+                return AdapterInputs{.winners = {}, .overlays = overlays_, .view = nullptr};
+            }
+            auto named = state_->winners->identity();
+            if (!named) {
+                return std::nullopt;
+            }
+            return AdapterInputs{.winners = *named, .overlays = overlays_, .view = state_->winners};
+        }
+
+    private:
         Result<MemoryIndexRecord> find(std::string_view key) const {
             if (state_->winners) {
                 auto record = state_->winners->find(key);
@@ -523,6 +588,18 @@ public:
         return AdapterView{committedSnapshot(),
                            std::make_shared<const AdapterView::Rows>(loop_.adapterState()),
                            adapterIdentity_, pressureMode};
+    }
+
+    /// The inputs an adapter pass started now would read, or nullopt when they cannot be
+    /// named. Captured like captureAdapterView: inside an after-sync callback it names
+    /// the pinned snapshot the pass will read; otherwise the pass syncs again and can only see
+    /// the same or newer winners.
+    Result<std::optional<AdapterInputs>> adapterInputs() {
+        auto view = captureAdapterView(AdapterPressureMode::Defer);
+        if (!view) {
+            return view.error();
+        }
+        return view.value().inputs();
     }
 
     /// Check admission/cancellation for a pinned pass without starting a new sweep.

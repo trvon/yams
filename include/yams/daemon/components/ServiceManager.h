@@ -487,6 +487,19 @@ public:
         std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
         nextMemorySyncBackfill_ = {};
     }
+    /// Make the next apply cycle run a full pass even if its inputs are unchanged.
+    void testingExpireMemorySyncFullApply() {
+        std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
+        nextMemorySyncFullApply_ = {};
+    }
+    /// Run every inbound stage on every cycle, for tests that observe stages per call. Lock-free,
+    /// so it is safe while an apply cycle holds memorySyncApplyMutex_.
+    void testingDisableMemorySyncApplySkip() noexcept {
+        memorySyncApplySkipDisabled_.store(true, std::memory_order_release);
+    }
+    std::uint64_t testingMemorySyncApplySkippedCycles() const noexcept {
+        return memorySyncApplySkippedCycles_.load(std::memory_order_acquire);
+    }
     void testingSetMemorySyncBackfillItemBudget(std::size_t budget) {
         std::lock_guard<std::mutex> lock(memorySyncBackfillMutex_);
         memorySyncBackfillState_.itemBudgetPerCycle = std::max<std::size_t>(budget, 1);
@@ -1113,6 +1126,15 @@ private:
         std::chrono::milliseconds timeBudgetPerCycle{100};
     } memorySyncBackfillState_;
     std::chrono::steady_clock::time_point nextMemorySyncBackfill_{};
+    // Inbound apply skips a cycle whose adapter inputs match the last complete, clean pass. A
+    // full pass still runs every kMemorySyncFullApplyInterval, so local drift (a replicated record
+    // deleted or changed locally) is repaired within that bound. Guarded by memorySyncApplyMutex_.
+    static constexpr std::chrono::minutes kMemorySyncFullApplyInterval{5};
+    // Holds the last clean pass's overlay rows (bounded by the merged-cache limit).
+    std::optional<memory_sync::MemorySyncService::AdapterInputs> lastCleanMemorySyncApplyInputs_;
+    std::chrono::steady_clock::time_point nextMemorySyncFullApply_{};
+    std::atomic<std::uint64_t> memorySyncApplySkippedCycles_{0};
+    std::atomic<bool> memorySyncApplySkipDisabled_{false};
 
     // Cached GLiNER query concept extraction function.
     mutable search::EntityExtractionFunc cachedQueryConceptExtractor_;
