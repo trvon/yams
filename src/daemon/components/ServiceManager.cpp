@@ -4354,6 +4354,22 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                 self->topologyManager_.restoreDirtyHashes(rebuildHashes);
             } else if (result.value().skipped) {
                 self->topologyManager_.restoreDirtyHashes(rebuildHashes);
+            } else if (result.value().stored) {
+                // A new epoch invalidates the cached route index; rebuild it here, in the
+                // background rebuild task, instead of inside the next routed query.
+                if (auto engine = self->searchEngineManager_.getCachedEngine()) {
+                    try {
+                        if (auto warmed = engine->prewarmTopologyRouting(); !warmed) {
+                            spdlog::debug("[ServiceManager] topology route warm-up failed: {}",
+                                          warmed.error().message);
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::debug("[ServiceManager] topology route warm-up threw: {}",
+                                      e.what());
+                    } catch (...) {
+                        spdlog::debug("[ServiceManager] topology route warm-up threw (unknown)");
+                    }
+                }
             }
         }
 

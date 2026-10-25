@@ -415,9 +415,8 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
                          TopologyRoutingSessionResult& result,
                          std::shared_ptr<const TopologyRoutingSnapshot>& snapshot) {
     const auto loadStart = std::chrono::steady_clock::now();
-    auto lookup = snapshotCache->get(
-        request.expectedTopologyEpoch, request.options.denseAnnCandidateLimit > 0,
-        request.options.bqPrefixDimension, toBinaryRotation(request.options.bqRotation));
+    auto lookup =
+        getRoutingSnapshot(*snapshotCache, request.expectedTopologyEpoch, request.options);
     result.timings.loadMicros += microsSince(loadStart);
     if (!lookup) {
         const auto& message = lookup.error().message;
@@ -1959,6 +1958,13 @@ std::string topologyRoutingPolicyFingerprint(std::string_view representationFing
     fingerprintIntegral(hash, static_cast<unsigned>(options.graphNeighborReciprocalOnly));
     fingerprintIntegral(hash, static_cast<unsigned>(options.graphWeightedSeedRanking));
     return fingerprintHex(hash);
+}
+
+Result<TopologyRoutingSnapshotLookup> getRoutingSnapshot(TopologyRoutingSnapshotCache& cache,
+                                                         std::uint64_t expectedEpoch,
+                                                         const TopologyRoutingOptions& options) {
+    return cache.get(expectedEpoch, options.denseAnnCandidateLimit > 0, options.bqPrefixDimension,
+                     toBinaryRotation(options.bqRotation));
 }
 
 TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader) {

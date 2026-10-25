@@ -205,6 +205,12 @@ makeTopologyRoutingOptions(const SearchEngineConfig& config,
                            SearchEngineConfig::TopologyRoutingMode routingMode, bool weakTier1Query,
                            bool collectRouteMembership = false);
 
+/// The snapshot (with its route index) that a routed query with `options` reads. Queries and
+/// warm-ups share this so a warmed entry is the one the next query looks up.
+[[nodiscard]] Result<TopologyRoutingSnapshotLookup>
+getRoutingSnapshot(TopologyRoutingSnapshotCache& cache, std::uint64_t expectedEpoch,
+                   const TopologyRoutingOptions& options);
+
 struct TopologyRoutingSessionRequest {
     std::string query;
     std::vector<std::string> seedDocumentHashes;
