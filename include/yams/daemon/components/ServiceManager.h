@@ -480,6 +480,9 @@ public:
         }
     }
     void testingApplyMemorySyncWinners() { applyMemorySyncWinners(); }
+    void testingMarkVectorDbReadyAfterCommit(const std::vector<std::string>& hashes) {
+        markVectorDbReadyAfterCommit(hashes);
+    }
     void testingPublishMemorySyncBackfill() { publishMemorySyncBackfill(); }
     /// Let the next apply cycle reach the rate-limited outbound backfill immediately, so a test
     /// can drive a bounded number of full sync cycles without wall-clock waits.
@@ -900,6 +903,14 @@ private:
                                                memory_sync::EraseReadinessProbe probe) const;
     void publishMemorySyncBackfill() noexcept;
     void notifyMemorySyncStage(std::string_view stage) noexcept;
+    // Vector DB readiness is "initialized and holding vectors". It is set at init only when rows
+    // already exist, so a corpus that starts empty must flip it once its first vectors commit.
+    void markVectorDbReadyAfterCommit(const std::vector<std::string>& committedHashes) noexcept {
+        if (!committedHashes.empty() &&
+            state_.readiness.vectorDbInitAttempted.load(std::memory_order_acquire)) {
+            state_.readiness.vectorDbReady.store(true, std::memory_order_release);
+        }
+    }
     void notifyMemorySyncDeleteOutboxStage(std::string_view stage) noexcept;
     Result<memory_sync::ApplyStagePass> applyMemorySyncContentBlobs();
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,

@@ -531,6 +531,25 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager construction succeeds",
     REQUIRE_NOTHROW(ServiceManager(config_, state_, lifecycleFsm_));
 }
 
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager marks the vector DB ready once its first vectors commit",
+                 "[daemon][components][service-manager][catch2][vector-readiness]") {
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    state_.readiness.vectorDbReady = false;
+
+    // Before the vector DB was opened, a commit callback proves nothing about it.
+    state_.readiness.vectorDbInitAttempted = false;
+    manager.testingMarkVectorDbReadyAfterCommit({"hash-a"});
+    CHECK_FALSE(state_.readiness.vectorDbReady.load());
+
+    // An initialized DB that started empty becomes ready on the first non-empty commit.
+    state_.readiness.vectorDbInitAttempted = true;
+    manager.testingMarkVectorDbReadyAfterCommit({});
+    CHECK_FALSE(state_.readiness.vectorDbReady.load());
+    manager.testingMarkVectorDbReadyAfterCommit({"hash-a", "hash-b"});
+    CHECK(state_.readiness.vectorDbReady.load());
+}
+
 TEST_CASE("Async initialization completion wait survives caller timeout",
           "[daemon][service_manager][async-completion]") {
     AsyncInitOrchestrator init;
