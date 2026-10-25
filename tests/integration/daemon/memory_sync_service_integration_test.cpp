@@ -243,6 +243,33 @@ template <typename Fn> void asTestStageCaller(Fn&& fn) {
     std::forward<Fn>(fn)();
 }
 
+// Stops a sync service from inside an apply or backfill stage observer. The observer runs
+// under ServiceManager's apply lock, and a blocking stop() there takes the service's callback
+// lock in the opposite order from the worker (TSan lock-order-inversion; the worker can also be
+// waiting on the apply lock while stop() joins it). stop() runs on a helper thread instead;
+// request() returns once the stop flag is visible, and join() runs after the stage call returns.
+class StopFromStage {
+public:
+    void request(yams::memory_sync::MemorySyncService& sync) {
+        if (stopper_.joinable()) {
+            return;
+        }
+        stopper_ = std::thread([&sync] { sync.stop(); });
+        while (!sync.stopRequested()) {
+            std::this_thread::yield();
+        }
+    }
+    void join() {
+        if (stopper_.joinable()) {
+            stopper_.join();
+        }
+    }
+    ~StopFromStage() { join(); }
+
+private:
+    std::thread stopper_;
+};
+
 std::unique_ptr<yams::storage::FilesystemBackend>
 makeFilesystemBackend(const std::filesystem::path& path) {
     yams::storage::BackendConfig config;
@@ -762,15 +789,17 @@ TEST_CASE("Daemon memory sync stop during production apply prevents later adapte
     std::atomic<bool> afterMetadata{false};
     // Stages are observed per call; never let an unchanged-input cycle skip them.
     serviceManager->testingDisableMemorySyncApplySkip();
+    StopFromStage stopFromStage;
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (stage == "apply.after_content") {
             afterContent.store(true, std::memory_order_release);
-            daemonSync->stop();
+            stopFromStage.request(*daemonSync);
         } else if (stage == "apply.after_metadata") {
             afterMetadata.store(true, std::memory_order_release);
         }
     });
     serviceManager->testingApplyMemorySyncWinners();
+    stopFromStage.join();
 
     CHECK(afterContent.load(std::memory_order_acquire));
     CHECK_FALSE(afterMetadata.load(std::memory_order_acquire));
@@ -1660,13 +1689,15 @@ TEST_CASE("Daemon memory sync stop during production backfill bounds published d
     std::atomic<std::size_t> completedDocuments{0};
     // Stages are observed per call; never let an unchanged-input cycle skip them.
     serviceManager->testingDisableMemorySyncApplySkip();
+    StopFromStage stopFromStage;
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (stage == "backfill.after_document") {
             completedDocuments.fetch_add(1, std::memory_order_relaxed);
-            daemonSync->stop();
+            stopFromStage.request(*daemonSync);
         }
     });
     serviceManager->testingPublishMemorySyncBackfill();
+    stopFromStage.join();
     CHECK(completedDocuments.load(std::memory_order_relaxed) == 1);
 
     yams::memory_sync::MemorySyncService peer{
