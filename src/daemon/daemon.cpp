@@ -1138,8 +1138,8 @@ Result<void> YamsDaemon::stop() {
 
     stopRequested_.store(true, std::memory_order_release);
     stop_cv_.notify_all();
-    repairBusySince_ = {};
-    repairReadySince_ = {};
+    // repairBusySince_/repairReadySince_ belong to the runLoop thread, which may still be running
+    // here; start() resets them before the next loop begins.
 
     const auto lifecycleBeforeShutdown = lifecycleFsm_.snapshot().state;
     if (lifecycleBeforeShutdown != LifecycleState::Stopping &&
