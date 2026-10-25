@@ -224,7 +224,6 @@ boost::asio::awaitable<void> TuningManager::tuningLoop() {
     spdlog::debug("TuningManager loop started");
 
     while (running_.load()) {
-        YAMS_ZONE_SCOPED_N("TuningManager::loop");
         try {
             (void)tick_once();
         } catch (const std::exception& e) {

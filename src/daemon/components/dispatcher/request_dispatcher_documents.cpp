@@ -1489,7 +1489,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
-    YAMS_ZONE_SCOPED_N("handleAddDocumentRequest");
     co_return co_await yams::daemon::dispatch::guard_await(
         "add_document", [this, req]() -> boost::asio::awaitable<Response> {
             const auto requestStart = std::chrono::steady_clock::now();
@@ -1618,7 +1617,6 @@ RequestDispatcher::handleUpdateDocumentRequest(const UpdateDocumentRequest& req)
 }
 
 boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
-    YAMS_ZONE_SCOPED_N("request_dispatcher::handle_grep");
     co_return co_await yams::daemon::dispatch::guard_await(
         "grep", [this, req]() -> boost::asio::awaitable<Response> {
             const uint32_t grepInflightLimit = TuneAdvisor::grepInflightLimit();

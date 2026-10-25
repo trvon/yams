@@ -282,7 +282,6 @@ bool StreamingRequestProcessor::supports_streaming(const Request& request) const
 
 // -------------------- next_chunk (deterministic) ---------------------------
 boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcessor::next_chunk() {
-    YAMS_ZONE_SCOPED_N("SRP::next_chunk");
 #if defined(TRACY_ENABLE)
     // Mark this streaming step as its own fiber segment for clearer stacks
     YAMS_FIBER_ENTER("srp_chunk");

@@ -611,7 +611,7 @@ void AsioConnectionPool::retire_connection(const std::shared_ptr<AsioConnection>
 }
 
 awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::acquire() {
-    YAMS_ZONE_SCOPED_N("ConnectionPool::acquire");
+    YAMS_ZONE_SYNC_N(acquireZone, "ConnectionPool::acquire");
     const auto acquire_start = std::chrono::steady_clock::now();
     // Check if pool is being shut down
     if (shutdown_.load(std::memory_order_acquire)) {
@@ -661,6 +661,8 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::acquire()
             }
         }
     }
+
+    YAMS_ZONE_END(acquireZone);
 
     // Slow path: create new connection
     auto created = co_await create_connection();
@@ -741,7 +743,6 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 }
 
 awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_connection() {
-    YAMS_ZONE_SCOPED_N("ConnectionPool::create_connection");
     const auto create_start = std::chrono::steady_clock::now();
     auto io_guard = GlobalIOContext::instance().acquire_operation_guard();
 

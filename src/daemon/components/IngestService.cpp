@@ -150,7 +150,6 @@ std::uint32_t IngestService::resolveStoreBatchLimit(std::uint32_t configuredBatc
 }
 
 boost::asio::awaitable<void> IngestService::channelPoller() {
-    YAMS_ZONE_SCOPED_N("IngestService::channelPoller");
     running_.store(true, std::memory_order_release);
     struct RunningGuard {
         std::atomic<bool>& running;

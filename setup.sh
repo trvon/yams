@@ -45,6 +45,8 @@
 #                              false: always download/build via Conan recipe
 #   YAMS_ONNX_PREFIX         - Override prefix path for system onnxruntime
 #                              (e.g., /opt/homebrew/opt/onnxruntime)
+#   YAMS_TRACY_ROCPROF       - Profiling builds: 1 keeps Tracy's ROCm GPU hooks (needs
+#                              librocprofiler-sdk at run time). Default: off
 #   YAMS_ROCM_PATH           - ROCm installation path for MIGraphX builds (default: /opt/rocm)
 #   YAMS_ROCM_GPU_TARGETS    - Semicolon-separated AMD GPU architectures for MIGraphX builds
 #                              (default: gfx900;gfx906;gfx908;gfx90a;gfx1030;gfx1100)
@@ -548,6 +550,11 @@ if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
 	echo "Tracy profiling enabled"
 	CONAN_ARGS+=(-o "yams/*:enable_profiling=True")
 	CONAN_ARGS+=(-o "tracy/*:enable=True")
+	# Tracy's CMake links ROCm hooks whenever /opt/rocm exists. Those hooks make every
+	# binary need librocprofiler-sdk at run time. Keep them out unless asked for.
+	if [[ "${YAMS_TRACY_ROCPROF:-0}" != "1" ]]; then
+		CONAN_ARGS+=(-c "tracy/*:tools.cmake.cmaketoolchain:extra_variables={'CMAKE_DISABLE_FIND_PACKAGE_rocprofiler-sdk':'ON'}")
+	fi
 fi
 
 if [[ "${ENABLE_ONNX}" != "true" ]]; then
