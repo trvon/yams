@@ -1007,3 +1007,132 @@ TEST_CASE("Memory sync retracts records deleted after the sweeps went idle",
     CHECK(view.tombstoned(topologyEdgeKey(corpus.first.nodeKey, corpus.second.nodeKey)));
     CHECK(view.published(topologyNodeKey(corpus.first.nodeKey)));
 }
+
+namespace {
+
+/// Publish `sourceKey -> targetKey` from `writer` with both endpoints, as its backfill would.
+void publishEdgeWithEndpoints(MeshNode& writer, const std::string& sourceKey,
+                              const std::string& targetKey) {
+    const auto source = writer.addNode(sourceKey, "alpha");
+    const auto target = writer.addNode(targetKey, "omega");
+    writer.addEdge(source, target);
+    const metadata::KGEdge edge{.srcNodeId = source.id,
+                                .dstNodeId = target.id,
+                                .relation = std::string(kRelation),
+                                .weight = 1.0F};
+    metadata::TopologySyncAdapter publisher{*writer.kgStore, *writer.sync_};
+    REQUIRE(publisher.publishEdgeWithEndpoints(source, edge, target).has_value());
+}
+
+/// Apply until `reader` holds the edge, then once more so a clean pass is on record.
+void applyUntilEdge(MeshNode& reader, const std::string& sourceKey, const std::string& targetKey) {
+    for (int round = 0; round < 4 && !reader.hasEdge(sourceKey, targetKey); ++round) {
+        reader.manager->testingApplyMemorySyncWinners();
+    }
+    REQUIRE(reader.hasEdge(sourceKey, targetKey));
+    reader.manager->testingApplyMemorySyncWinners();
+}
+
+std::uint64_t applyCycles(const MeshNode& node) {
+    const auto status = node.manager->getMemorySyncStatus();
+    REQUIRE(status.has_value());
+    return status.value().apply.applyCycles;
+}
+
+} // namespace
+
+TEST_CASE("Memory sync apply skips cycles whose replicated inputs have not changed",
+          "[daemon][memory-sync][apply][idle]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore, MeshNode::KgReads::Counted};
+    publishEdgeWithEndpoints(writer, "entity:idle:source", "entity:idle:target");
+    applyUntilEdge(reader, "entity:idle:source", "entity:idle:target");
+
+    const auto skipped = reader.manager->testingMemorySyncApplySkippedCycles();
+    const auto reads = reader.kgStoreAcquisitions();
+    const auto cycles = applyCycles(reader);
+    for (int round = 0; round < 4; ++round) {
+        reader.manager->testingApplyMemorySyncWinners();
+    }
+
+    // Unchanged inputs: the inbound stages never run and never touch the graph store, but each
+    // cycle still counts as a healthy apply cycle.
+    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == skipped + 4);
+    CHECK(reader.kgStoreAcquisitions() == reads);
+    CHECK(applyCycles(reader) == cycles + 4);
+    CHECK(reader.hasEdge("entity:idle:source", "entity:idle:target"));
+}
+
+TEST_CASE("Memory sync apply runs again as soon as a new winner arrives",
+          "[daemon][memory-sync][apply][idle]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore};
+    publishEdgeWithEndpoints(writer, "entity:first:source", "entity:first:target");
+    applyUntilEdge(reader, "entity:first:source", "entity:first:target");
+    reader.manager->testingApplyMemorySyncWinners();
+    const auto skipped = reader.manager->testingMemorySyncApplySkippedCycles();
+    REQUIRE(skipped > 0);
+
+    publishEdgeWithEndpoints(writer, "entity:second:source", "entity:second:target");
+    reader.manager->testingApplyMemorySyncWinners();
+
+    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == skipped);
+    CHECK(reader.hasEdge("entity:second:source", "entity:second:target"));
+    CHECK(reader.hasEdge("entity:first:source", "entity:first:target"));
+}
+
+TEST_CASE("Memory sync full apply repairs a replicated record deleted locally",
+          "[daemon][memory-sync][apply][idle]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore};
+    publishEdgeWithEndpoints(writer, "entity:drift:source", "entity:drift:target");
+    applyUntilEdge(reader, "entity:drift:source", "entity:drift:target");
+
+    // Local drift: the replicated source node (and, by cascade, its edge) disappears locally
+    // while its winner stays in the replicated index.
+    const auto local = reader.kgStore->getNodeByKey("entity:drift:source");
+    REQUIRE(local.has_value());
+    REQUIRE(local.value().has_value());
+    reader.deleteNode(*local.value());
+
+    // Before the full-pass deadline the cycle skips, so the drift stays.
+    reader.manager->testingApplyMemorySyncWinners();
+    CHECK_FALSE(reader.hasNode("entity:drift:source"));
+
+    // The next full pass restores it.
+    reader.manager->testingExpireMemorySyncFullApply();
+    reader.manager->testingApplyMemorySyncWinners();
+    CHECK(reader.hasNode("entity:drift:source"));
+    CHECK(reader.hasEdge("entity:drift:source", "entity:drift:target"));
+}
+
+TEST_CASE("Memory sync apply never skips a cycle that deferred records",
+          "[daemon][memory-sync][apply][idle]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore, MeshNode::KgReads::Counted};
+    // The writer's edge reaches the shared store ahead of its target node.
+    writer.seedEdgePublishedAheadOfTarget();
+
+    reader.manager->testingApplyMemorySyncWinners();
+    REQUIRE(reader.deferredTopology() == 1);
+    const auto reads = reader.kgStoreAcquisitions();
+    reader.manager->testingApplyMemorySyncWinners();
+    reader.manager->testingApplyMemorySyncWinners();
+
+    // A deferral waits on a local prerequisite, so every cycle keeps retrying it.
+    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == 0);
+    CHECK(reader.kgStoreAcquisitions() > reads);
+    CHECK(reader.deferredTopology() == 1);
+}

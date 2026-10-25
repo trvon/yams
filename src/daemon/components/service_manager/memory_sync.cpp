@@ -668,6 +668,40 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     } catch (...) {
         spdlog::debug("[memory_sync] quarantine reason logging skipped");
     }
+    const auto publishBackfillIfDue = [this] {
+        if (memorySync_->stopRequested()) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= nextMemorySyncBackfill_) {
+            nextMemorySyncBackfill_ = now + std::chrono::seconds{5};
+            publishMemorySyncBackfill();
+        }
+    };
+    // Re-applying unchanged winners re-reads and re-checks every record. When the adapter inputs
+    // match the last complete, clean pass, skip the inbound stages until the next full pass.
+    // Unknown inputs (an unnamed winner view, admission pressure) never skip.
+    std::optional<memory_sync::MemorySyncService::AdapterInputs> applyInputs;
+    bool inputsUnchanged = false;
+    try {
+        YAMS_ZONE_SCOPED_N("memory_sync.apply_inputs");
+        if (auto inputs = memorySync_->adapterInputs(); inputs) {
+            applyInputs = std::move(inputs.value());
+        }
+        inputsUnchanged = applyInputs && lastCleanMemorySyncApplyInputs_ &&
+                          applyInputs->sameAs(*lastCleanMemorySyncApplyInputs_);
+    } catch (...) {
+        applyInputs.reset();
+        inputsUnchanged = false;
+    }
+    const auto cycleStart = std::chrono::steady_clock::now();
+    if (inputsUnchanged && cycleStart < nextMemorySyncFullApply_ &&
+        !memorySyncApplySkipDisabled_.load(std::memory_order_acquire)) {
+        memorySyncApplySkippedCycles_.fetch_add(1, std::memory_order_acq_rel);
+        memorySyncApplyHealth_.recordCycle(false);
+        publishBackfillIfDue();
+        return;
+    }
     // Stage dependencies. Inbound stages run in prerequisite order so that a prerequisite which
     // lands in this cycle is already visible to its dependents in the same cycle:
     //   content  - independent; content-addressed bytes.
@@ -682,14 +716,19 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     // prerequisites never arrived. Only a stop request ends the cycle early.
     // A stage that defers records is healthy; only a hard failure marks the cycle failed.
     bool stageFailed = false;
-    const auto runStage = [this, &stageFailed](memory_sync::ApplyStage stage,
-                                               std::string_view completedStage, auto&& applyStage) {
+    // Clean: every stage scanned completely with nothing deferred and nothing failed. Only a clean
+    // pass may let later cycles skip, since a deferral waits on local prerequisites to arrive.
+    bool cycleClean = true;
+    const auto runStage = [this, &stageFailed, &cycleClean](memory_sync::ApplyStage stage,
+                                                            std::string_view completedStage,
+                                                            auto&& applyStage) {
         if (memorySync_->stopRequested()) {
             return false;
         }
         const auto name = memory_sync::applyStageName(stage);
         const auto recordFailure = [&](std::string message) {
             stageFailed = true;
+            cycleClean = false;
             spdlog::warn("[ServiceManager] memory_sync {} apply failed: {}", name, message);
             memorySyncApplyHealth_.recordFailure(stage, std::move(message),
                                                  std::chrono::steady_clock::now());
@@ -700,6 +739,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
             // Complete scans may carry both prerequisite deferrals and independent hard failures.
             auto pass = applyStage();
             if (!pass && pass.error().code == ErrorCode::ResourceBusy) {
+                cycleClean = false;
                 memorySyncApplyHealth_.recordPass(
                     stage, memory_sync::ApplyStagePass{.scanComplete = false},
                     std::chrono::steady_clock::now());
@@ -710,6 +750,9 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
                 const auto& deferred = pass.value().deferredKeys;
                 const auto deferredCount = std::max<std::uint64_t>(
                     deferred.size(), pass.value().deferredCount.value_or(deferred.size()));
+                if (!pass.value().scanComplete || deferredCount != 0 || pass.value().failure) {
+                    cycleClean = false;
+                }
                 if (!pass.value().scanComplete) {
                     spdlog::debug("[ServiceManager] memory_sync {} scan incomplete; "
                                   "retaining last-known deferred totals",
@@ -829,15 +872,17 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return;
     }
     memorySyncApplyHealth_.recordCycle(stageFailed);
+    if (applyInputs && cycleClean && !stageFailed) {
+        if (!inputsUnchanged || cycleStart >= nextMemorySyncFullApply_) {
+            nextMemorySyncFullApply_ = cycleStart + kMemorySyncFullApplyInterval;
+        }
+        applyInputs->view.reset(); // keep the name only; never hold an old store open
+        lastCleanMemorySyncApplyInputs_ = std::move(applyInputs);
+    } else {
+        lastCleanMemorySyncApplyInputs_.reset();
+    }
 
-    if (memorySync_->stopRequested()) {
-        return;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= nextMemorySyncBackfill_) {
-        nextMemorySyncBackfill_ = now + std::chrono::seconds{5};
-        publishMemorySyncBackfill();
-    }
+    publishBackfillIfDue();
 }
 
 void ServiceManager::publishMemorySyncBackfill() noexcept try {

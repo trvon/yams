@@ -325,7 +325,20 @@ public:
     /// cached reads continue to use only the bounded resident maps below.
     class WinnerView {
     public:
+        /// Names one pinned winner set. Two equal identities hold the same records: the
+        /// instance is unique per store for the process lifetime and the generation advances
+        /// on every winner change.
+        struct Identity {
+            std::uint64_t instance{0};
+            std::int64_t generation{0};
+            bool operator==(const Identity&) const = default;
+        };
         virtual ~WinnerView() = default;
+        /// nullopt when this view cannot name its contents (for example while the store is
+        /// still being built); callers must then treat the contents as changed.
+        [[nodiscard]] virtual std::optional<Identity> identity() const noexcept {
+            return std::nullopt;
+        }
         [[nodiscard]] virtual std::size_t size() const noexcept = 0;
         virtual Result<MemoryIndexRecord> find(std::string_view key) const = 0;
         virtual Result<WinnerPage> page(std::string_view prefix, std::string_view afterKey,

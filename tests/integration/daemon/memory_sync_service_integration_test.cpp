@@ -760,6 +760,8 @@ TEST_CASE("Daemon memory sync stop during production apply prevents later adapte
 
     std::atomic<bool> afterContent{false};
     std::atomic<bool> afterMetadata{false};
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    serviceManager->testingDisableMemorySyncApplySkip();
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (stage == "apply.after_content") {
             afterContent.store(true, std::memory_order_release);
@@ -805,6 +807,8 @@ TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
     auto secondEntered = secondEnteredPromise.get_future();
     std::promise<void> releaseFirstPromise;
     auto releaseFirst = releaseFirstPromise.get_future().share();
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    serviceManager->testingDisableMemorySyncApplySkip();
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (stage != "apply.after_content" || !tlsTestStageCaller) {
             return;
@@ -877,6 +881,8 @@ TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
     auto secondBackfillEntered = secondBackfillEnteredPromise.get_future();
     std::promise<void> releaseFirstBackfillPromise;
     auto releaseFirstBackfill = releaseFirstBackfillPromise.get_future().share();
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    serviceManager->testingDisableMemorySyncApplySkip();
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (!stage.starts_with("backfill.") || !tlsTestStageCaller) {
             return;
@@ -1238,6 +1244,8 @@ TEST_CASE("MCP get serves authenticated replicated cold documents after content 
     REQUIRE(repository != nullptr);
     REQUIRE(contentStore != nullptr);
     sync->setAfterSyncCallback({});
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    manager->testingDisableMemorySyncApplySkip();
     manager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (tlsTestStageCaller) {
             stages.emplace_back(stage);
@@ -1447,6 +1455,8 @@ TEST_CASE("Daemon memory sync stage failures neither skip later stages nor block
         makeFilesystemBackend(harness.dataDir() / "shared-memory"),
         yams::memory_sync::MemorySyncConfig{"apply-peer", 60'000, "apply-prerequisite-corpus", 1}};
     std::vector<std::string> stages;
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    serviceManager->testingDisableMemorySyncApplySkip();
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (tlsTestStageCaller) {
             stages.emplace_back(stage);
@@ -1648,6 +1658,8 @@ TEST_CASE("Daemon memory sync stop during production backfill bounds published d
     REQUIRE(repository->batchInsertDocumentsWithMetadata(inserts).has_value());
 
     std::atomic<std::size_t> completedDocuments{0};
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    serviceManager->testingDisableMemorySyncApplySkip();
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (stage == "backfill.after_document") {
             completedDocuments.fetch_add(1, std::memory_order_relaxed);
