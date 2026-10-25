@@ -2430,6 +2430,41 @@ TEST_CASE_METHOD(
     CHECK((after.value().front().chunk_id == "chunk_external_target"));
 }
 
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend does not re-prepare live statements on an existing database",
+                 "[vector][backend][lifecycle][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    {
+        SqliteVecBackend seed(config);
+        REQUIRE((seed.initialize(dbPath).has_value()));
+        REQUIRE((seed.createTables(kDim).has_value()));
+    }
+
+    auto liveStatements = [](sqlite3* db) {
+        int count = 0;
+        for (sqlite3_stmt* stmt = sqlite3_next_stmt(db, nullptr); stmt != nullptr;
+             stmt = sqlite3_next_stmt(db, stmt)) {
+            ++count;
+        }
+        return count;
+    };
+
+    // initialize() prepares statements because the tables exist; createTables() used to
+    // prepare them again over the live handles, which leaked them and left the connection
+    // open after close().
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(dbPath).has_value()));
+    const int afterInitialize = liveStatements(backend.getDbHandle());
+    REQUIRE((backend.createTables(kDim).has_value()));
+    REQUIRE((backend.createTables(kDim).has_value()));
+    CHECK(liveStatements(backend.getDbHandle()) == afterInitialize);
+}
+
 TEST_CASE_METHOD(
     SqliteVecBackendFixture,
     "SqliteVecBackend preserves vector generation tracking while migrating update triggers",
