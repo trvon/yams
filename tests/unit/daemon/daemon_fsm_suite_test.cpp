@@ -449,14 +449,24 @@ TEST_CASE("ServiceManagerFSM: OpeningDatabase stuck without progress is reachabl
         REQUIRE(fsm.isTerminalState());
     }
 
-    SECTION("completeShutdown recovers if another FSM instance reset shared state") {
+    SECTION("Another FSM instance does not change this one's state") {
+        fsm.dispatch(OpeningDatabaseEvent{});
+        fsm.dispatch(DatabaseOpenedEvent{});
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::DatabaseReady);
+
+        // A second ServiceManager in the same process (restart, or a daemon that lost the
+        // instance lock) constructs, resets and shuts down its own FSM.
+        ServiceManagerFsm other;
+        REQUIRE(other.snapshot().state == ServiceManagerState::Uninitialized);
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::DatabaseReady);
+
+        other.dispatch(ShutdownEvent{});
+        REQUIRE(other.completeShutdown());
+        other.reset();
+        REQUIRE(fsm.snapshot().state == ServiceManagerState::DatabaseReady);
+        REQUIRE_FALSE(fsm.hasShutdown());
+
         fsm.dispatch(ShutdownEvent{});
-        REQUIRE(fsm.snapshot().state == ServiceManagerState::ShuttingDown);
-
-        // tinyfsm stores state process-wide; constructing another facade resets the shared machine.
-        ServiceManagerFsm concurrentFacade;
-        REQUIRE(concurrentFacade.snapshot().state == ServiceManagerState::Uninitialized);
-
         REQUIRE(fsm.completeShutdown());
         REQUIRE(fsm.snapshot().state == ServiceManagerState::Stopped);
         REQUIRE(fsm.isTerminalState());
