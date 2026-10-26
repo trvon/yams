@@ -39,7 +39,7 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
     files('sync_indexing_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: ['-DYAMS_TESTING=1'],
+    cpp_args: ['-DYAMS_TESTING=1', _test_timeout_cpp_arg],
     install: false,
   )
 
