@@ -1,123 +1,90 @@
 #include <yams/daemon/components/ServiceManagerFsm.h>
 
 #include <spdlog/spdlog.h>
-#include <tinyfsm.hpp>
 #include <yams/core/assert.hpp>
 
 namespace yams::daemon {
-namespace detail {
 
-struct SMUninitialized;
-struct SMOpeningDatabase;
-struct SMDatabaseReady;
-struct SMMigratingSchema;
-struct SMSchemaReady;
-struct SMVectorsReady;
-struct SMBuildingSearchEngine;
-struct SMReady;
-struct SMShuttingDown;
-struct SMStopped;
-struct SMFailed;
+// Transitions. Each state's accepted events match the former tinyfsm machine: events a state does
+// not handle are ignored, InitializationFailedEvent moves any non-terminal state to Failed, and
+// ShutdownEvent moves any state except ShuttingDown/Stopped to ShuttingDown.
+void ServiceManagerFsm::enterLocked(ServiceManagerState next) {
+    const auto prev = snap_.state;
+    snap_.state = next;
+    snap_.lastTransition = std::chrono::steady_clock::now();
+    spdlog::info("[ServiceManagerFSM] {} -> {}", static_cast<int>(prev), static_cast<int>(next));
+}
 
-struct ServiceManagerMachine : tinyfsm::MooreMachine<ServiceManagerMachine> {
-    static ServiceManagerSnapshot snap;
-
-    virtual void react(const OpeningDatabaseEvent&) {}
-    virtual void react(const DatabaseOpenedEvent&) {}
-    virtual void react(const MigrationStartedEvent&) {}
-    virtual void react(const MigrationCompletedEvent&) {}
-    virtual void react(const VectorsInitializedEvent&) {}
-    virtual void react(const SearchEngineBuildStartedEvent&) {}
-    virtual void react(const SearchEngineBuiltEvent&) {}
-    virtual void react(const InitializationFailedEvent& ev);
-    virtual void react(const ShutdownEvent&);
-    virtual void react(const ServiceManagerStoppedEvent&) {}
-
-protected:
-    void applyEntry(ServiceManagerState next) {
-        auto prev = snap.state;
-        snap.state = next;
-        snap.lastTransition = std::chrono::steady_clock::now();
-        spdlog::info("[ServiceManagerFSM] {} -> {}", static_cast<int>(prev),
-                     static_cast<int>(next));
+void ServiceManagerFsm::applyLocked(const OpeningDatabaseEvent&) {
+    if (snap_.state == ServiceManagerState::Uninitialized) {
+        enterLocked(ServiceManagerState::OpeningDatabase);
     }
-};
-
-ServiceManagerSnapshot ServiceManagerMachine::snap{};
-
-struct SMUninitialized : ServiceManagerMachine {
-    void entry() override { applyEntry(ServiceManagerState::Uninitialized); }
-    void react(const OpeningDatabaseEvent&) override { transit<SMOpeningDatabase>(); }
-};
-
-struct SMOpeningDatabase : ServiceManagerMachine {
-    void entry() override { applyEntry(ServiceManagerState::OpeningDatabase); }
-    void react(const DatabaseOpenedEvent&) override { transit<SMDatabaseReady>(); }
-};
-
-struct SMDatabaseReady : ServiceManagerMachine {
-    void entry() override { applyEntry(ServiceManagerState::DatabaseReady); }
-    void react(const MigrationStartedEvent&) override { transit<SMMigratingSchema>(); }
-};
-
-struct SMMigratingSchema : ServiceManagerMachine {
-    void entry() override { applyEntry(ServiceManagerState::MigratingSchema); }
-    void react(const MigrationCompletedEvent&) override { transit<SMSchemaReady>(); }
-};
-
-struct SMSchemaReady : ServiceManagerMachine {
-    void entry() override { applyEntry(ServiceManagerState::SchemaReady); }
-    void react(const VectorsInitializedEvent&) override { transit<SMVectorsReady>(); }
-    void react(const SearchEngineBuildStartedEvent&) override { transit<SMBuildingSearchEngine>(); }
-};
-
-struct SMVectorsReady : ServiceManagerMachine {
-    void entry() override { applyEntry(ServiceManagerState::VectorsReady); }
-    void react(const SearchEngineBuildStartedEvent&) override { transit<SMBuildingSearchEngine>(); }
-};
-
-struct SMBuildingSearchEngine : ServiceManagerMachine {
-    void entry() override { applyEntry(ServiceManagerState::BuildingSearchEngine); }
-    void react(const SearchEngineBuiltEvent&) override { transit<SMReady>(); }
-};
-
-struct SMReady : ServiceManagerMachine {
-    void entry() override { applyEntry(ServiceManagerState::Ready); }
-    void react(const InitializationFailedEvent&) override {}
-};
-
-struct SMShuttingDown : ServiceManagerMachine {
-    void entry() override { applyEntry(ServiceManagerState::ShuttingDown); }
-    void react(const InitializationFailedEvent&) override {}
-    void react(const ShutdownEvent&) override {}
-    void react(const ServiceManagerStoppedEvent&) override { transit<SMStopped>(); }
-};
-
-struct SMStopped : ServiceManagerMachine {
-    void entry() override { applyEntry(ServiceManagerState::Stopped); }
-    void react(const InitializationFailedEvent&) override {}
-    void react(const ShutdownEvent&) override {}
-};
-
-struct SMFailed : ServiceManagerMachine {
-    void entry() override { applyEntry(ServiceManagerState::Failed); }
-    void react(const InitializationFailedEvent&) override {}
-};
-
-void ServiceManagerMachine::react(const InitializationFailedEvent& ev) {
-    snap.lastError = ev.error;
-    transit<SMFailed>();
 }
 
-void ServiceManagerMachine::react(const ShutdownEvent&) {
-    transit<SMShuttingDown>();
+void ServiceManagerFsm::applyLocked(const DatabaseOpenedEvent&) {
+    if (snap_.state == ServiceManagerState::OpeningDatabase) {
+        enterLocked(ServiceManagerState::DatabaseReady);
+    }
 }
 
-} // namespace detail
+void ServiceManagerFsm::applyLocked(const MigrationStartedEvent&) {
+    if (snap_.state == ServiceManagerState::DatabaseReady) {
+        enterLocked(ServiceManagerState::MigratingSchema);
+    }
+}
+
+void ServiceManagerFsm::applyLocked(const MigrationCompletedEvent&) {
+    if (snap_.state == ServiceManagerState::MigratingSchema) {
+        enterLocked(ServiceManagerState::SchemaReady);
+    }
+}
+
+void ServiceManagerFsm::applyLocked(const VectorsInitializedEvent&) {
+    if (snap_.state == ServiceManagerState::SchemaReady) {
+        enterLocked(ServiceManagerState::VectorsReady);
+    }
+}
+
+void ServiceManagerFsm::applyLocked(const SearchEngineBuildStartedEvent&) {
+    if (snap_.state == ServiceManagerState::SchemaReady ||
+        snap_.state == ServiceManagerState::VectorsReady) {
+        enterLocked(ServiceManagerState::BuildingSearchEngine);
+    }
+}
+
+void ServiceManagerFsm::applyLocked(const SearchEngineBuiltEvent&) {
+    if (snap_.state == ServiceManagerState::BuildingSearchEngine) {
+        enterLocked(ServiceManagerState::Ready);
+    }
+}
+
+void ServiceManagerFsm::applyLocked(const InitializationFailedEvent& ev) {
+    switch (snap_.state) {
+        case ServiceManagerState::Ready:
+        case ServiceManagerState::ShuttingDown:
+        case ServiceManagerState::Stopped:
+        case ServiceManagerState::Failed:
+            return;
+        default:
+            snap_.lastError = ev.error;
+            enterLocked(ServiceManagerState::Failed);
+    }
+}
+
+void ServiceManagerFsm::applyLocked(const ShutdownEvent&) {
+    if (snap_.state != ServiceManagerState::ShuttingDown &&
+        snap_.state != ServiceManagerState::Stopped) {
+        enterLocked(ServiceManagerState::ShuttingDown);
+    }
+}
+
+void ServiceManagerFsm::applyLocked(const ServiceManagerStoppedEvent&) {
+    if (snap_.state == ServiceManagerState::ShuttingDown) {
+        enterLocked(ServiceManagerState::Stopped);
+    }
+}
+
 } // namespace yams::daemon
-
-FSM_INITIAL_STATE(yams::daemon::detail::ServiceManagerMachine,
-                  yams::daemon::detail::SMUninitialized)
 
 namespace yams::daemon {
 
@@ -177,13 +144,12 @@ static bool isTerminal(ServiceManagerState s) {
            s == ServiceManagerState::Stopped || s == ServiceManagerState::ShuttingDown;
 }
 
-template <typename Event>
-void dispatchNoThrow(std::mutex& mutex, std::condition_variable& cv, const Event& ev) noexcept {
+template <typename Event> void ServiceManagerFsm::dispatchNoThrow(const Event& ev) noexcept {
     try {
-        std::lock_guard<std::mutex> lock(mutex);
-        detail::ServiceManagerMachine::dispatch(ev);
-        if (isTerminal(detail::ServiceManagerMachine::snap.state))
-            cv.notify_all();
+        std::lock_guard<std::mutex> lock(mutex_);
+        applyLocked(ev);
+        if (isTerminal(snap_.state))
+            cv_.notify_all();
     } catch (const std::exception& e) {
         spdlog::debug("[ServiceManagerFSM] dispatchNoThrow swallowed exception: {}", e.what());
     } catch (...) {
@@ -192,32 +158,31 @@ void dispatchNoThrow(std::mutex& mutex, std::condition_variable& cv, const Event
 }
 
 ServiceManagerFsm::ServiceManagerFsm() {
-    std::lock_guard<std::mutex> lock(sharedMutex());
-    detail::ServiceManagerMachine::snap = {};
-    detail::ServiceManagerMachine::start();
+    std::lock_guard<std::mutex> lock(mutex_);
+    enterLocked(ServiceManagerState::Uninitialized);
 }
 
 ServiceManagerSnapshot ServiceManagerFsm::snapshot() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        return detail::ServiceManagerMachine::snap;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return snap_;
     } catch (...) {
-        return detail::ServiceManagerMachine::snap;
+        return snap_;
     }
 }
 
 void ServiceManagerFsm::dispatch(const OpeningDatabaseEvent& ev) noexcept {
     validateDispatch(snapshot().state, ev,
                      "ServiceManagerFsm OpeningDatabaseEvent requires Uninitialized state");
-    dispatchNoThrow(sharedMutex(), cv_, ev);
+    dispatchNoThrow(ev);
 }
 
 bool ServiceManagerFsm::tryStartOpeningDatabase() noexcept {
     try {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        const auto state = detail::ServiceManagerMachine::snap.state;
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto state = snap_.state;
         if (state == ServiceManagerState::Uninitialized) {
-            detail::ServiceManagerMachine::dispatch(OpeningDatabaseEvent{});
+            applyLocked(OpeningDatabaseEvent{});
             return true;
         }
         if (state == ServiceManagerState::ShuttingDown || state == ServiceManagerState::Stopped) {
@@ -238,67 +203,67 @@ bool ServiceManagerFsm::tryStartOpeningDatabase() noexcept {
 void ServiceManagerFsm::dispatch(const DatabaseOpenedEvent& ev) noexcept {
     validateDispatch(snapshot().state, ev,
                      "ServiceManagerFsm DatabaseOpenedEvent requires OpeningDatabase state");
-    dispatchNoThrow(sharedMutex(), cv_, ev);
+    dispatchNoThrow(ev);
 }
 
 void ServiceManagerFsm::dispatch(const MigrationStartedEvent& ev) noexcept {
     validateDispatch(snapshot().state, ev,
                      "ServiceManagerFsm MigrationStartedEvent requires DatabaseReady state");
-    dispatchNoThrow(sharedMutex(), cv_, ev);
+    dispatchNoThrow(ev);
 }
 
 void ServiceManagerFsm::dispatch(const MigrationCompletedEvent& ev) noexcept {
     validateDispatch(snapshot().state, ev,
                      "ServiceManagerFsm MigrationCompletedEvent requires MigratingSchema state");
-    dispatchNoThrow(sharedMutex(), cv_, ev);
+    dispatchNoThrow(ev);
 }
 
 void ServiceManagerFsm::dispatch(const VectorsInitializedEvent& ev) noexcept {
     validateDispatch(snapshot().state, ev,
                      "ServiceManagerFsm VectorsInitializedEvent requires SchemaReady or later "
                      "vector-activation startup states");
-    dispatchNoThrow(sharedMutex(), cv_, ev);
+    dispatchNoThrow(ev);
 }
 
 void ServiceManagerFsm::dispatch(const SearchEngineBuildStartedEvent& ev) noexcept {
     validateDispatch(snapshot().state, ev,
                      "ServiceManagerFsm SearchEngineBuildStartedEvent requires SchemaReady or "
                      "VectorsReady state");
-    dispatchNoThrow(sharedMutex(), cv_, ev);
+    dispatchNoThrow(ev);
 }
 
 void ServiceManagerFsm::dispatch(const SearchEngineBuiltEvent& ev) noexcept {
     validateDispatch(
         snapshot().state, ev,
         "ServiceManagerFsm SearchEngineBuiltEvent requires BuildingSearchEngine state");
-    dispatchNoThrow(sharedMutex(), cv_, ev);
+    dispatchNoThrow(ev);
 }
 
 void ServiceManagerFsm::dispatch(const InitializationFailedEvent& ev) noexcept {
     validateDispatch(snapshot().state, ev,
                      "ServiceManagerFsm InitializationFailedEvent invalid in terminal states");
-    dispatchNoThrow(sharedMutex(), cv_, ev);
+    dispatchNoThrow(ev);
 }
 
 void ServiceManagerFsm::dispatch(const ShutdownEvent& ev) noexcept {
-    dispatchNoThrow(sharedMutex(), cv_, ev);
+    dispatchNoThrow(ev);
 }
 
 void ServiceManagerFsm::dispatch(const ServiceManagerStoppedEvent& ev) noexcept {
     validateDispatch(snapshot().state, ev,
                      "ServiceManagerFsm ServiceManagerStoppedEvent requires ShuttingDown state");
-    dispatchNoThrow(sharedMutex(), cv_, ev);
+    dispatchNoThrow(ev);
 }
 
 bool ServiceManagerFsm::completeShutdown() noexcept {
     try {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        auto& state = detail::ServiceManagerMachine::snap.state;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& state = snap_.state;
         if (state != ServiceManagerState::ShuttingDown && state != ServiceManagerState::Stopped) {
-            detail::ServiceManagerMachine::dispatch(ShutdownEvent{});
+            applyLocked(ShutdownEvent{});
         }
         if (state == ServiceManagerState::ShuttingDown) {
-            detail::ServiceManagerMachine::dispatch(ServiceManagerStoppedEvent{});
+            applyLocked(ServiceManagerStoppedEvent{});
         }
         if (isTerminal(state)) {
             cv_.notify_all();
@@ -314,8 +279,8 @@ bool ServiceManagerFsm::completeShutdown() noexcept {
 
 bool ServiceManagerFsm::canInitializeVectors() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        return detail::ServiceManagerMachine::snap.state == ServiceManagerState::SchemaReady;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return snap_.state == ServiceManagerState::SchemaReady;
     } catch (...) {
         return false;
     }
@@ -323,8 +288,8 @@ bool ServiceManagerFsm::canInitializeVectors() const noexcept {
 
 bool ServiceManagerFsm::canBuildSearchEngine() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        auto s = detail::ServiceManagerMachine::snap.state;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto s = snap_.state;
         return s == ServiceManagerState::VectorsReady || s == ServiceManagerState::SchemaReady;
     } catch (...) {
         return false;
@@ -333,8 +298,8 @@ bool ServiceManagerFsm::canBuildSearchEngine() const noexcept {
 
 bool ServiceManagerFsm::isReady() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        return detail::ServiceManagerMachine::snap.state == ServiceManagerState::Ready;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return snap_.state == ServiceManagerState::Ready;
     } catch (...) {
         return false;
     }
@@ -342,8 +307,8 @@ bool ServiceManagerFsm::isReady() const noexcept {
 
 bool ServiceManagerFsm::hasShutdown() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        auto s = detail::ServiceManagerMachine::snap.state;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto s = snap_.state;
         return s == ServiceManagerState::Stopped || s == ServiceManagerState::ShuttingDown;
     } catch (...) {
         return true;
@@ -352,8 +317,8 @@ bool ServiceManagerFsm::hasShutdown() const noexcept {
 
 bool ServiceManagerFsm::isTerminalState() const noexcept {
     try {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        return isTerminal(detail::ServiceManagerMachine::snap.state);
+        std::lock_guard<std::mutex> lock(mutex_);
+        return isTerminal(snap_.state);
     } catch (...) {
         return true;
     }
@@ -361,30 +326,29 @@ bool ServiceManagerFsm::isTerminalState() const noexcept {
 
 ServiceManagerSnapshot ServiceManagerFsm::waitForTerminalState(int timeoutSeconds) noexcept {
     try {
-        std::unique_lock<std::mutex> lock(sharedMutex());
-        auto pred = []() { return isTerminal(detail::ServiceManagerMachine::snap.state); };
+        std::unique_lock<std::mutex> lock(mutex_);
+        auto pred = [this]() { return isTerminal(snap_.state); };
         bool completed = cv_.wait_for(lock, std::chrono::seconds(timeoutSeconds), pred);
         if (!completed) {
             try {
                 spdlog::warn("[ServiceManagerFSM] waitForTerminalState timed out after {}s, "
                              "current state={}",
-                             timeoutSeconds,
-                             static_cast<int>(detail::ServiceManagerMachine::snap.state));
+                             timeoutSeconds, static_cast<int>(snap_.state));
             } catch (const std::exception& e) {
                 spdlog::debug("[ServiceManagerFSM] timeout warning logging failed: {}", e.what());
             } catch (...) {
                 spdlog::debug("[ServiceManagerFSM] timeout warning logging failed: unknown error");
             }
         }
-        return detail::ServiceManagerMachine::snap;
+        return snap_;
     } catch (...) {
-        return detail::ServiceManagerMachine::snap;
+        return snap_;
     }
 }
 
 void ServiceManagerFsm::cancelWait() noexcept {
     try {
-        std::lock_guard<std::mutex> lock(sharedMutex());
+        std::lock_guard<std::mutex> lock(mutex_);
         cv_.notify_all();
     } catch (const std::exception& e) {
         spdlog::debug("[ServiceManagerFSM] cancelWait swallowed exception: {}", e.what());
@@ -395,9 +359,9 @@ void ServiceManagerFsm::cancelWait() noexcept {
 
 void ServiceManagerFsm::reset() noexcept {
     try {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        detail::ServiceManagerMachine::snap = {};
-        detail::ServiceManagerMachine::start();
+        std::lock_guard<std::mutex> lock(mutex_);
+        snap_ = {};
+        enterLocked(ServiceManagerState::Uninitialized);
     } catch (const std::exception& e) {
         spdlog::debug("[ServiceManagerFSM] reset swallowed exception: {}", e.what());
     } catch (...) {
