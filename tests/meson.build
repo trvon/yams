@@ -112,7 +112,8 @@ test('serve_runtime_environment_unit',
   timeout: 30,
 )
 if is_variable('yams_cli_exe') and get_option('build-mcp-server') and host_machine.system() != 'windows'
-  serve_delegation_args = [files('scripts/test_serve_delegation.py'), '--cli', yams_cli_exe.full_path()]
+  serve_delegation_args = [files('scripts/test_serve_delegation.py'), '--cli', yams_cli_exe.full_path(),
+    '--timeout-scale', _test_timeout_scale.to_string()]
   serve_delegation_deps = [yams_cli_exe]
   if is_variable('yams_onnx_resource_lib')
     # The fixture relocates the executable, not its build-tree shared libraries.
