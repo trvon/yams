@@ -7,6 +7,7 @@
 #include <array>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <map>
 #include <memory>
@@ -1519,7 +1520,16 @@ TEST_CASE("Exclusive winner workspaces clean abandoned state without removing pi
     }
     REQUIRE(std::filesystem::exists(live));
     const auto abandoned = fixture.dir / "temp" / ("sync-sweep-1-0" + live.extension().string());
-    std::filesystem::copy(live, abandoned, std::filesystem::copy_options::recursive);
+    // Build the abandoned workspace by hand. Copying `live` reads its lease, which the pinned
+    // generation holds under a byte-range lock; Windows locks are mandatory, so the copy fails.
+    REQUIRE(std::filesystem::create_directory(abandoned));
+    {
+        std::ofstream lease{abandoned / "lease", std::ios::binary};
+        lease << "YAMS disposable memory-sync workspace v1\n";
+        std::ofstream db{abandoned / "winners.sqlite", std::ios::binary};
+        db << "abandoned";
+        REQUIRE((lease && db));
+    }
     {
         MemorySyncLoop restarted{fixture.backend,
                                  "reader",
