@@ -81,7 +81,8 @@ struct GraphContextServiceFixture {
         for (const auto& line : lines) {
             out << line << '\n';
         }
-        return path;
+        // Ingest stores forward-slash paths; return the same form so fixture keys match on Windows.
+        return std::filesystem::path(path.generic_string());
     }
 
     TestSymbol symbol(const std::filesystem::path& path, std::string name,
