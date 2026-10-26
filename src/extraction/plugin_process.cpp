@@ -90,9 +90,9 @@ public:
     [[nodiscard]] ProcessState state() const noexcept;
     [[nodiscard]] bool is_alive() const noexcept;
     void terminate(std::chrono::milliseconds timeout);
-    [[nodiscard]] std::span<const std::byte> read_stdout();
+    [[nodiscard]] std::vector<std::byte> read_stdout();
     void consume_stdout(size_t bytes);
-    [[nodiscard]] std::span<const std::byte> read_stderr();
+    [[nodiscard]] std::vector<std::byte> read_stderr();
     size_t write_stdin(std::span<const std::byte> data);
     void close_stdin();
     [[nodiscard]] int64_t pid() const noexcept;
@@ -968,9 +968,9 @@ bool PluginProcess::Impl::is_alive() const noexcept {
     return true;
 }
 
-std::span<const std::byte> PluginProcess::Impl::read_stdout() {
+std::vector<std::byte> PluginProcess::Impl::read_stdout() {
     std::lock_guard lock{stdout_mutex_};
-    return {stdout_buffer_.data(), stdout_buffer_.size()};
+    return stdout_buffer_;
 }
 
 void PluginProcess::Impl::consume_stdout(size_t bytes) {
@@ -981,9 +981,9 @@ void PluginProcess::Impl::consume_stdout(size_t bytes) {
     }
 }
 
-std::span<const std::byte> PluginProcess::Impl::read_stderr() {
+std::vector<std::byte> PluginProcess::Impl::read_stderr() {
     std::lock_guard lock{stderr_mutex_};
-    return {stderr_buffer_.data(), stderr_buffer_.size()};
+    return stderr_buffer_;
 }
 
 int64_t PluginProcess::Impl::pid() const noexcept {
@@ -1023,7 +1023,7 @@ void PluginProcess::terminate(std::chrono::milliseconds timeout) {
     impl_->terminate(timeout);
 }
 
-std::span<const std::byte> PluginProcess::read_stdout() {
+std::vector<std::byte> PluginProcess::read_stdout() {
     return impl_->read_stdout();
 }
 
@@ -1031,7 +1031,7 @@ void PluginProcess::consume_stdout(size_t bytes) {
     impl_->consume_stdout(bytes);
 }
 
-std::span<const std::byte> PluginProcess::read_stderr() {
+std::vector<std::byte> PluginProcess::read_stderr() {
     return impl_->read_stderr();
 }
 
