@@ -42,6 +42,8 @@ struct InitializationFailedEvent {
 struct ShutdownEvent {};
 struct ServiceManagerStoppedEvent {};
 
+// Startup/shutdown lifecycle of one ServiceManager. Each instance owns its state; managers in the
+// same process (a restart, a second daemon that loses the instance lock, tests) do not share it.
 class ServiceManagerFsm {
 public:
     ServiceManagerFsm();
@@ -62,9 +64,8 @@ public:
     void dispatch(const InitializationFailedEvent&) noexcept;
     void dispatch(const ShutdownEvent&) noexcept;
     void dispatch(const ServiceManagerStoppedEvent&) noexcept;
-    // Race-safe shutdown finalizer for daemon/service-manager teardown. The tinyfsm backend stores
-    // process-wide state, so concurrent ServiceManagerFsm construction in tests or same-process
-    // retries can reset the shared state between shutdown start and shutdown completion.
+    // Shutdown finalizer for daemon/service-manager teardown: drives this instance to Stopped from
+    // any state and returns whether it got there.
     [[nodiscard]] bool completeShutdown() noexcept;
 
     bool canInitializeVectors() const noexcept;
@@ -78,12 +79,22 @@ public:
     void reset() noexcept;
 
 private:
-    static std::mutex& sharedMutex() {
-        static std::mutex mutex;
-        return mutex;
-    }
+    void enterLocked(ServiceManagerState next);
+    void applyLocked(const OpeningDatabaseEvent&);
+    void applyLocked(const DatabaseOpenedEvent&);
+    void applyLocked(const MigrationStartedEvent&);
+    void applyLocked(const MigrationCompletedEvent&);
+    void applyLocked(const VectorsInitializedEvent&);
+    void applyLocked(const SearchEngineBuildStartedEvent&);
+    void applyLocked(const SearchEngineBuiltEvent&);
+    void applyLocked(const InitializationFailedEvent&);
+    void applyLocked(const ShutdownEvent&);
+    void applyLocked(const ServiceManagerStoppedEvent&);
+    template <typename Event> void dispatchNoThrow(const Event& ev) noexcept;
 
+    mutable std::mutex mutex_;
     std::condition_variable cv_;
+    ServiceManagerSnapshot snap_{};
 };
 
 } // namespace yams::daemon
