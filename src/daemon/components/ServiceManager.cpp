@@ -1515,11 +1515,10 @@ void ServiceManager::shutdown() {
             return;
         }
 
-        // The FSM state is process-wide (tinyfsm), so ShuttingDown/Stopped here can belong to
-        // another ServiceManager in this process, e.g. a failed second daemon whose destructor
-        // ran shutdown(). shutdownInvoked_ is the per-instance guard; the shared state only
-        // decides whether to dispatch. Returning on it skipped this manager's teardown and left
-        // its WorkCoordinator threads and background coroutines running.
+        // shutdownInvoked_ decides whether this manager tears down; the FSM state only decides
+        // whether to dispatch. Teardown must run even if the FSM already reads ShuttingDown or
+        // Stopped (an init path may have recorded the shutdown), otherwise this manager's
+        // WorkCoordinator threads and background coroutines keep running.
         try {
             auto ss = serviceFsm_.snapshot();
             if (ss.state != ServiceManagerState::ShuttingDown &&
