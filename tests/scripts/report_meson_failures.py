@@ -190,4 +190,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Windows CI consoles default to cp1252; test output with non-ASCII text (e.g. "❌") made the
+    # reporter crash and hid the failing assertions.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())

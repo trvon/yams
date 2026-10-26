@@ -162,6 +162,16 @@ std::vector<std::string> splitPathSegments(const std::filesystem::path& path) {
 
 } // namespace
 
+std::filesystem::path invocationCwdForCli() {
+    auto cwd = std::filesystem::current_path();
+    std::error_code ec;
+    auto canonical = std::filesystem::weakly_canonical(cwd, ec);
+    if (!ec && !canonical.empty()) {
+        return canonical;
+    }
+    return cwd;
+}
+
 std::string projectPathForCli(const std::string& rawPath, const std::filesystem::path& cwd) {
     if (rawPath.empty()) {
         return {};

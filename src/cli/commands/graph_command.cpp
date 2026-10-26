@@ -200,7 +200,7 @@ public:
     boost::asio::awaitable<Result<void>> executeAsync() override {
         try {
             using namespace yams::daemon;
-            invocationCwd_ = std::filesystem::current_path();
+            invocationCwd_ = invocationCwdForCli();
 
             if (!exploreQuery_.empty()) {
                 co_return co_await executeGraphExplore();
@@ -1076,7 +1076,7 @@ private:
     }
 
     YamsCLI* cli_{nullptr};
-    std::filesystem::path invocationCwd_ = std::filesystem::current_path();
+    std::filesystem::path invocationCwd_ = invocationCwdForCli();
     std::string hash_;
     std::string name_;
     std::string nodeKey_;

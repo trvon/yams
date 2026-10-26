@@ -483,6 +483,9 @@ sync_interval_ms = 25
         if (!documentPublished || !blobPublished || !topologyNodePublished ||
             !topologyEdgePublished ||
             serviceManager->testingMemorySyncBackfillAttempts() <= backfillAttemptsBefore) {
+            // Backfill runs at most one 100 ms pass per 5 s. Let every periodic sync cycle run a
+            // pass, so a slow runner is bounded by publish cost rather than by that cadence.
+            serviceManager->testingExpireMemorySyncBackfillSchedule();
             std::this_thread::sleep_for(25ms);
         }
     }

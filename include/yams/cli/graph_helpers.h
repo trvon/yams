@@ -66,6 +66,11 @@ inline std::string formatRelationCounts(const std::unordered_map<std::string, st
     return out;
 }
 
+// The CLI's working directory in the same form as stored document paths. Stored paths go through
+// weakly_canonical, which expands Windows 8.3 short names (C:\\Users\\RUNNER~1 ->
+// C:/Users/runneradmin); current_path() keeps whatever form the process was started with.
+std::filesystem::path invocationCwdForCli();
+
 // Render a path for CLI display relative to cwd when possible.
 std::string projectPathForCli(const std::string& rawPath,
                               const std::filesystem::path& cwd = std::filesystem::current_path());

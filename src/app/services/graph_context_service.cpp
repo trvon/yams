@@ -83,7 +83,9 @@ bool relationEndpointWithinScope(std::string_view nodeKey, std::string_view scop
 }
 
 bool isWordChar(unsigned char c) {
-    return std::isalnum(c) != 0 || c == '_' || c == ':' || c == '.' || c == '/' || c == '-';
+    // '\\' and '~' keep native Windows paths, including 8.3 short names, as one query term.
+    return std::isalnum(c) != 0 || c == '_' || c == ':' || c == '.' || c == '/' || c == '-' ||
+           c == '\\' || c == '~';
 }
 
 bool isIdentifierChar(unsigned char c) {
