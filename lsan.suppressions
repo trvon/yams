@@ -1,0 +1,7 @@
+# LeakSanitizer suppressions for test runs (applied by the default 'asan' test setup in
+# tests/meson.build). Keep each rule narrow and say why it is safe.
+
+# OpenSSL's one-time config load during OPENSSL_init_crypto (reached through libcurl's first
+# init) allocates per-thread error state that OpenSSL never frees. It is a single 904-byte
+# block per process, owned by OpenSSL, and not reachable from YAMS code.
+leak:ossl_init_config
