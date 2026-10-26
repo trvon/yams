@@ -26,6 +26,11 @@ catch2_incs = []
 _tsan_suppressions_file = meson.project_source_root() / 'tsan.suppressions'
 _test_tsan_options = 'suppressions=' + _tsan_suppressions_file
 _test_thread_sanitizer = yams_sanitize_thread
+# Most test() calls pass their own env without TSAN_OPTIONS, so the suppressions file used to
+# reach only a few suites. The default setup applies it to every test in a TSan build.
+if _test_thread_sanitizer
+  add_test_setup('tsan', env: {'TSAN_OPTIONS': _test_tsan_options}, is_default: true)
+endif
 _test_address_sanitizer = yams_sanitize_address
 _test_debug_integrations = get_option('buildtype') == 'debug' and not _test_address_sanitizer
 _test_timeout_scale = _test_thread_sanitizer ? 10 : get_option('test-timeout-scale')
@@ -107,7 +112,8 @@ test('serve_runtime_environment_unit',
   timeout: 30,
 )
 if is_variable('yams_cli_exe') and get_option('build-mcp-server') and host_machine.system() != 'windows'
-  serve_delegation_args = [files('scripts/test_serve_delegation.py'), '--cli', yams_cli_exe.full_path()]
+  serve_delegation_args = [files('scripts/test_serve_delegation.py'), '--cli', yams_cli_exe.full_path(),
+    '--timeout-scale', _test_timeout_scale.to_string()]
   serve_delegation_deps = [yams_cli_exe]
   if is_variable('yams_onnx_resource_lib')
     # The fixture relocates the executable, not its build-tree shared libraries.

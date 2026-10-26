@@ -159,12 +159,13 @@ public:
     /**
      * @brief Read available data from stdout (non-blocking)
      *
-     * Returns a non-owning view of buffered stdout data. Data remains valid
-     * until next call to read_stdout() or object destruction.
+     * Returns a copy of the buffered stdout data, taken under the buffer lock. The
+     * reader thread appends to the buffer concurrently, so a view into it could dangle
+     * as soon as the lock is released.
      *
-     * @return Span of bytes from stdout buffer (C++20)
+     * @return Bytes currently buffered from stdout
      */
-    [[nodiscard]] std::span<const std::byte> read_stdout();
+    [[nodiscard]] std::vector<std::byte> read_stdout();
 
     /**
      * @brief Consume (remove) bytes from the front of stdout buffer
@@ -179,12 +180,13 @@ public:
     /**
      * @brief Read available data from stderr (non-blocking)
      *
-     * Returns a non-owning view of buffered stderr data. Data remains valid
-     * until next call to read_stderr() or object destruction.
+     * Returns a copy of the buffered stderr data, taken under the buffer lock. The
+     * reader thread appends to the buffer concurrently, so a view into it could dangle
+     * as soon as the lock is released.
      *
-     * @return Span of bytes from stderr buffer (C++20)
+     * @return Bytes currently buffered from stderr
      */
-    [[nodiscard]] std::span<const std::byte> read_stderr();
+    [[nodiscard]] std::vector<std::byte> read_stderr();
 
     /**
      * @brief Write data to stdin (blocking)

@@ -16,6 +16,9 @@ from pathlib import Path
 
 CLI_UNDER_TEST: Path | None = None
 RUNTIME_LIBRARY_DIRS: list[Path] = []
+# Sanitizer builds pass the build's test timeout scale; a first exec of a large freshly
+# copied binary can take several seconds there.
+TIMEOUT_SCALE = 1
 
 
 def _runtime_environment(
@@ -160,7 +163,7 @@ class ServeDelegationTests(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=10 * TIMEOUT_SCALE,
         )
 
     def assert_stub_argv(
@@ -251,15 +254,25 @@ class ServeDelegationTests(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=10 * TIMEOUT_SCALE,
             )
 
         self.assertEqual(raised.exception.filename, malformed_executable)
         self.assertFalse(marker.exists(), "the malformed outer spawn started a process")
 
 
+def _split_timeout_scale(argv: list[str]) -> tuple[int, list[str]]:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--timeout-scale", type=int, default=1)
+    args, rest = parser.parse_known_args(argv)
+    if args.timeout_scale < 1:
+        parser.error("--timeout-scale must be at least 1")
+    return args.timeout_scale, rest
+
+
 if __name__ == "__main__":
+    TIMEOUT_SCALE, harness_arguments = _split_timeout_scale(sys.argv[1:])
     CLI_UNDER_TEST, RUNTIME_LIBRARY_DIRS, unittest_arguments = _split_harness_arguments(
-        sys.argv[1:]
+        harness_arguments
     )
     unittest.main(argv=[sys.argv[0], *unittest_arguments])

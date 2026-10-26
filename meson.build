@@ -125,6 +125,11 @@ if enable_tsan
   if cpp.has_argument('-fsanitize=thread')
     # Use additional flags for better stack traces
     tsan_extra_flags = ['-fno-omit-frame-pointer']
+    # gcov/llvm-cov counters are plain increments; under TSan every counter two threads touch is
+    # reported as a data race. Atomic updates keep a TSan + coverage build usable.
+    if get_option('b_coverage') and cpp.has_argument('-fprofile-update=atomic')
+      tsan_extra_flags += ['-fprofile-update=atomic']
+    endif
     add_project_arguments(tsan_extra_flags, language: 'cpp')
     add_project_arguments(tsan_extra_flags, language: 'c')
     message('ThreadSanitizer enabled - expect significant performance impact')

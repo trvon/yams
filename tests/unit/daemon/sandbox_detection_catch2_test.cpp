@@ -14,6 +14,20 @@ using yams::daemon::ClientTransportMode;
 
 namespace {
 
+// Sanitizer builds run the probe several times slower, and the sanitizer lanes run tests in
+// parallel, so the latency budgets below scale by 10 there.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+constexpr int kSanitizerBudgetScale = 10;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+constexpr int kSanitizerBudgetScale = 10;
+#else
+constexpr int kSanitizerBudgetScale = 1;
+#endif
+#else
+constexpr int kSanitizerBudgetScale = 1;
+#endif
+
 class ProbeStub {
 public:
     explicit ProbeStub(bool permitted) {
@@ -169,9 +183,12 @@ TEST_CASE("unix_socket_io_permitted: real probe completes within budget",
     auto cachedElapsed = std::chrono::steady_clock::now() - cachedStart;
 
     CHECK(first == second);
-    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(firstElapsed).count() < 100);
-    CHECK(firstNs.count() < 100'000'000); // 100ms budget for the syscall path
-    CHECK(std::chrono::duration_cast<std::chrono::microseconds>(cachedElapsed).count() < 50);
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(firstElapsed).count() <
+          100 * kSanitizerBudgetScale);
+    // 100ms budget for the syscall path
+    CHECK(firstNs.count() < 100'000'000LL * kSanitizerBudgetScale);
+    CHECK(std::chrono::duration_cast<std::chrono::microseconds>(cachedElapsed).count() <
+          50 * kSanitizerBudgetScale);
 }
 
 TEST_CASE("unix_socket_io_permitted: stub probe is honored and cached",
