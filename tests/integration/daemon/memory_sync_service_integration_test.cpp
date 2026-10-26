@@ -1729,6 +1729,9 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
 
     auto* serviceManager = harness.daemon()->getServiceManager();
     REQUIRE(serviceManager != nullptr);
+    // The test counts one published item per cycle it drives. A background apply cycle running
+    // its own backfill in between would publish an extra item.
+    serviceManager->testingDeferMemorySyncBackfillSchedule();
     auto repository = serviceManager->getMetadataRepo();
     auto contentStore = serviceManager->getContentStore();
     auto kgStore = serviceManager->getKgStore();

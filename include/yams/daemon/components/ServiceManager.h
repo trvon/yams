@@ -490,6 +490,12 @@ public:
         std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
         nextMemorySyncBackfill_ = {};
     }
+    /// Keep background apply cycles from running the outbound backfill, so a test that drives
+    /// backfill by hand sees only its own cycles.
+    void testingDeferMemorySyncBackfillSchedule() {
+        std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
+        nextMemorySyncBackfill_ = std::chrono::steady_clock::time_point::max();
+    }
     /// Make the next apply cycle run a full pass even if its inputs are unchanged.
     void testingExpireMemorySyncFullApply() {
         std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
