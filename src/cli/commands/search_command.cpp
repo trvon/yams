@@ -103,7 +103,7 @@ private:
     int chunkSize_ = 64 * 1024;
 
     YamsCLI* cli_ = nullptr;
-    std::filesystem::path invocationCwd_ = std::filesystem::current_path();
+    std::filesystem::path invocationCwd_ = invocationCwdForCli();
     std::string query_;
     bool readStdin_ = false;
     std::string queryFile_;
@@ -1075,7 +1075,7 @@ public:
         YAMS_ZONE_SCOPED_N("SearchCommand::execute");
 
         try {
-            invocationCwd_ = std::filesystem::current_path();
+            invocationCwd_ = invocationCwdForCli();
             jsonOutput_ = jsonOutput_ || (cli_ && cli_->getJsonOutput());
             // Resolve base query from flags/stdin/file
             if (query_.empty()) {

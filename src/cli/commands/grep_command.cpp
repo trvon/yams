@@ -82,7 +82,7 @@ class GrepCommand : public ICommand {
 private:
     // Member variables
     YamsCLI* cli_ = nullptr;
-    std::filesystem::path invocationCwd_ = std::filesystem::current_path();
+    std::filesystem::path invocationCwd_ = invocationCwdForCli();
     std::string pattern_;
     std::vector<std::string> paths_;
     std::string includePatterns_;
@@ -385,7 +385,7 @@ public:
 
     Result<void> execute() override {
         try {
-            invocationCwd_ = std::filesystem::current_path();
+            invocationCwd_ = invocationCwdForCli();
             // Attempt daemon-first grep with complete protocol mapping
             {
                 std::string cwdScope;
