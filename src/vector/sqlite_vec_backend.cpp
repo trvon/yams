@@ -3224,18 +3224,25 @@ private:
         return record;
     }
 
-    // Prepare all statements
+    // Prepare the statements that are not prepared yet. initialize() and createTables() both
+    // call this on an existing database; preparing over a live handle would leak it, and the
+    // leaked statements keep the connection alive after sqlite3_close_v2().
     void prepareStatements() {
         std::lock_guard stmt_lock(stmt_mutex_);
-        sqlite3_prepare_v2(db_, kInsertVector, -1, &stmt_insert_, nullptr);
-        sqlite3_prepare_v2(db_, kSelectByChunkId, -1, &stmt_select_by_chunk_id_, nullptr);
-        sqlite3_prepare_v2(db_, kSelectByRowid, -1, &stmt_select_by_rowid_, nullptr);
-        sqlite3_prepare_v2(db_, kSelectByDocumentHash, -1, &stmt_select_by_doc_, nullptr);
-        sqlite3_prepare_v2(db_, kDeleteByChunkId, -1, &stmt_delete_by_chunk_id_, nullptr);
-        sqlite3_prepare_v2(db_, kDeleteByDocumentHash, -1, &stmt_delete_by_doc_, nullptr);
-        sqlite3_prepare_v2(db_, kGetRowidByChunkId, -1, &stmt_get_rowid_, nullptr);
-        sqlite3_prepare_v2(db_, kCountVectors, -1, &stmt_count_, nullptr);
-        sqlite3_prepare_v2(db_, kHasEmbedding, -1, &stmt_has_embedding_, nullptr);
+        auto prepare = [this](const char* sql, sqlite3_stmt*& stmt) {
+            if (!stmt) {
+                sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+            }
+        };
+        prepare(kInsertVector, stmt_insert_);
+        prepare(kSelectByChunkId, stmt_select_by_chunk_id_);
+        prepare(kSelectByRowid, stmt_select_by_rowid_);
+        prepare(kSelectByDocumentHash, stmt_select_by_doc_);
+        prepare(kDeleteByChunkId, stmt_delete_by_chunk_id_);
+        prepare(kDeleteByDocumentHash, stmt_delete_by_doc_);
+        prepare(kGetRowidByChunkId, stmt_get_rowid_);
+        prepare(kCountVectors, stmt_count_);
+        prepare(kHasEmbedding, stmt_has_embedding_);
     }
 
     // Finalize all statements
