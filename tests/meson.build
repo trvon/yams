@@ -32,6 +32,15 @@ if _test_thread_sanitizer
   add_test_setup('tsan', env: {'TSAN_OPTIONS': _test_tsan_options}, is_default: true)
 endif
 _test_address_sanitizer = yams_sanitize_address
+# ASan builds: keep meson's default ASAN_OPTIONS, add stack-use-after-return detection (it finds
+# references to destroyed stack temporaries, e.g. a request passed by reference into a lazily
+# started coroutine), and apply lsan.suppressions.
+if _test_address_sanitizer and not _test_thread_sanitizer
+  add_test_setup('asan', env: {
+    'ASAN_OPTIONS': 'halt_on_error=1:abort_on_error=1:print_summary=1:detect_stack_use_after_return=1',
+    'LSAN_OPTIONS': 'suppressions=' + (meson.project_source_root() / 'lsan.suppressions'),
+  }, is_default: true)
+endif
 _test_debug_integrations = get_option('buildtype') == 'debug' and not _test_address_sanitizer
 _test_timeout_scale = _test_thread_sanitizer ? 10 : get_option('test-timeout-scale')
 _test_timeout_cpp_arg = '-DYAMS_TEST_TIMEOUT_SCALE=' + _test_timeout_scale.to_string()
