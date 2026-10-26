@@ -1515,13 +1515,17 @@ void ServiceManager::shutdown() {
             return;
         }
 
+        // The FSM state is process-wide (tinyfsm), so ShuttingDown/Stopped here can belong to
+        // another ServiceManager in this process, e.g. a failed second daemon whose destructor
+        // ran shutdown(). shutdownInvoked_ is the per-instance guard; the shared state only
+        // decides whether to dispatch. Returning on it skipped this manager's teardown and left
+        // its WorkCoordinator threads and background coroutines running.
         try {
             auto ss = serviceFsm_.snapshot();
-            if (ss.state == ServiceManagerState::ShuttingDown ||
-                ss.state == ServiceManagerState::Stopped) {
-                return;
+            if (ss.state != ServiceManagerState::ShuttingDown &&
+                ss.state != ServiceManagerState::Stopped) {
+                serviceFsm_.dispatch(ShutdownEvent{});
             }
-            serviceFsm_.dispatch(ShutdownEvent{});
         } catch (const std::exception& e) {
             spdlog::debug("FSM dispatch failed for ShutdownEvent: {}", e.what());
         } catch (...) {

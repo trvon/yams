@@ -1124,6 +1124,33 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon concurrent start attempts", "[daemon][co
     REQUIRE(failCount.load() == kAttempts - 1);
 }
 
+TEST_CASE_METHOD(DaemonFixture, "Daemon stop shuts down its services after a failed second start",
+                 "[daemon][lifecycle][concurrency]") {
+    SKIP_ON_WINDOWS();
+
+    std::weak_ptr<ServiceManager> ownerServices;
+    {
+        YamsDaemon owner(config_);
+        auto started = owner.start();
+        if (!started && isSocketPermissionDenied(started.error())) {
+            SKIP("UNIX domain sockets not permitted");
+        }
+        REQUIRE(started);
+        ownerServices = owner.getServiceManager()->weak_from_this();
+        {
+            // The second daemon loses the instance lock. Destroying its never-started
+            // ServiceManager runs shutdown(), which drives the process-wide service FSM to
+            // Stopped. The owner must still run its own shutdown afterwards.
+            YamsDaemon loser(config_);
+            CHECK_FALSE(loser.start());
+        }
+        REQUIRE(owner.stop());
+    }
+    // A completed shutdown releases every service-graph reference, so the daemon's destructor
+    // drops the last one. A skipped shutdown leaves background coroutines holding it.
+    CHECK(ownerServices.expired());
+}
+
 TEST_CASE_METHOD(DaemonFixture, "Daemon stats tracking", "[daemon][stats]") {
     SKIP_ON_WINDOWS();
 
