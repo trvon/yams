@@ -567,7 +567,7 @@ if catch2_with_main_dep.found()
 
   test('multi_client_ingestion_bench', multi_client_ingestion_bench,
        args: ['--allow-running-no-tests'],
-       suite: ['bench', 'multi-client'],
+       suite: ['bench', 'multi-client', 'concurrency'],
        is_parallel: false,
        timeout: 600,
        env: multi_client_bench_env)

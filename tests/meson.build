@@ -544,6 +544,13 @@ elif get_option('enable-stress-tests')
   message('Catch2 not found; skipping stress test registration.')
 endif
 
+# Standard Catch2 tests: one row per test in catch2_test_table, built by the loop at the
+# end of this file. Each row needs 'name', 'sources', 'deps' (added after the Catch2
+# deps), 'suite' and 'timeout'. Optional: 'target' (default 'catch2_' + name), 'args'
+# and 'is_parallel'. Tests with extra env, cpp_args or several registrations stay
+# hand-written.
+catch2_test_table = []
+
 # ============================================================================
 #Catch2 Test Executables(PBI - 068 : Separated for isolation)
 #Each test suite gets its own executable to prevent resource conflicts
@@ -576,14 +583,16 @@ if catch2_dep.found()
 #Daemon Test Suites(6 consolidated executables)
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 
-  catch2_daemon_fsm_exe = executable('catch2_daemon_fsm',
-    files('unit/daemon/daemon_fsm_suite_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Daemon tests
+  catch2_test_table += [{
+    'name': 'daemon_fsm_suite',
+    'target': 'catch2_daemon_fsm',
+    'sources': files('unit/daemon/daemon_fsm_suite_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'fsm'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
   catch2_daemon_metrics_status_exe = executable('catch2_daemon_metrics_status',
     files('unit/daemon/daemon_metrics_status_test.cpp'),
@@ -594,32 +603,34 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_daemon_metrics_core_exe = executable('catch2_daemon_metrics_core',
-    files('unit/daemon/daemon_metrics_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'daemon_metrics_core',
+    'sources': files('unit/daemon/daemon_metrics_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'metrics', 'core'],
+    'timeout': 60,
+  }]
 
-  catch2_daemon_components_exe = executable('catch2_daemon_components',
-    files('unit/daemon/daemon_components_test.cpp', 'unit/daemon/systemd_user_unit_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'daemon_components',
+    'sources': files(
+      'unit/daemon/daemon_components_test.cpp',
+      'unit/daemon/systemd_user_unit_catch2_test.cpp',
+    ),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'components', 'concurrency'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
-  catch2_p2p_transport_exe = executable('catch2_p2p_transport',
-    files('unit/daemon/p2p_transport_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'p2p_transport',
+    'sources': files('unit/daemon/p2p_transport_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'p2p', 'network', 'concurrency'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
   catch2_p2p_protocol_exe = executable('catch2_p2p_protocol',
     files('unit/daemon/p2p_protocol_catch2_test.cpp'),
@@ -639,44 +650,43 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_peer_registry_exe = executable('catch2_peer_registry',
-    files('unit/daemon/peer_registry_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'peer_registry',
+    'sources': files('unit/daemon/peer_registry_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'p2p', 'sqlite'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
-  catch2_p2p_manager_exe = executable('catch2_p2p_manager',
-    files('unit/daemon/p2p_manager_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'p2p_manager',
+    'sources': files('unit/daemon/p2p_manager_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'p2p', 'network', 'sqlite', 'concurrency'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
-  catch2_admission_policy_exe = executable('catch2_admission_policy',
-    files('unit/daemon/admission_policy_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'admission_policy',
+    'sources': files('unit/daemon/admission_policy_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'admission-policy'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
-  catch2_grep_result_window_exe = executable('catch2_grep_result_window',
-    files(
+  catch2_test_table += [{
+    'name': 'grep_result_window',
+    'sources': files(
       'unit/daemon/grep_result_window_catch2_test.cpp',
       '../src/daemon/components/grep_result_window.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'grep'],
+    'timeout': 60,
+  }]
 
   catch2_daemon_client_link_exe = executable('catch2_daemon_client_link',
     files('unit/daemon/daemon_client_link_catch2_test.cpp'),
@@ -690,44 +700,45 @@ if catch2_dep.found()
     timeout: 30,
   )
 
-  catch2_search_admission_controller_exe = executable('catch2_search_admission_controller',
-    files('unit/daemon/search_admission_controller_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'search_admission_controller',
+    'sources': files('unit/daemon/search_admission_controller_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'search-admission'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
-  catch2_ingest_metrics_publisher_exe = executable('catch2_ingest_metrics_publisher',
-    files('unit/daemon/ingest_metrics_publisher_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'ingest_metrics_publisher',
+    'sources': files('unit/daemon/ingest_metrics_publisher_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'ingest-metrics'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
-  catch2_topology_manager_exe = executable('catch2_topology_manager',
-    files('unit/daemon/topology_manager_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_manager',
+    'sources': files('unit/daemon/topology_manager_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'topology-manager'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
-  catch2_embedding_lifecycle_exe = executable('catch2_embedding_lifecycle',
-    files('unit/daemon/embedding_lifecycle_manager_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'embedding_lifecycle',
+    'sources': files('unit/daemon/embedding_lifecycle_manager_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'embedding-lifecycle'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
-  catch2_daemon_protocol_exe = executable('catch2_daemon_protocol',
-    files(
+  catch2_test_table += [{
+    'name': 'daemon_protocol',
+    'sources': files(
       'unit/daemon/daemon_protocol_test.cpp',
       'unit/daemon/frame_reader_catch2_test.cpp',
       'unit/daemon/dispatch_response_mapper_catch2_test.cpp',
@@ -736,12 +747,11 @@ if catch2_dep.found()
       'unit/daemon/request_handler_status_unary_catch2_test.cpp',
       'unit/daemon/proto_serializer_catch2_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'protocol', 'concurrency'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
   catch2_daemon_background_exe = executable('catch2_daemon_background',
     files('unit/daemon/daemon_background_processing_test.cpp'),
@@ -752,32 +762,31 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_daemon_graph_component_exe = executable('catch2_daemon_graph_component',
-    files('unit/daemon/graph_component_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'daemon_graph_component',
+    'sources': files('unit/daemon/graph_component_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'graph'],
+    'timeout': 60,
+  }]
 
-  catch2_graph_services_exe = executable('catch2_graph_services',
-    files(
+  catch2_test_table += [{
+    'name': 'graph_services',
+    'sources': files(
       'unit/app/services/graph_query_service_catch2_test.cpp',
       'unit/app/services/graph_context_service_catch2_test.cpp',
       'unit/metadata/delete_cascade_catch2_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'graph'],
+    'timeout': 60,
+  }]
 
 #Daemon component submodule tests(CheckpointManager, ConfigResolver, etc.)
 #Migrated from GTest as part of yams - 3s4 / yams - zns
-  catch2_daemon_component_submodule_exe = executable('catch2_daemon_component_submodule',
-    files(
+  catch2_test_table += [{
+    'name': 'daemon_component_submodule',
+    'sources': files(
       'unit/daemon/components/checkpoint_manager_test.cpp',
       'unit/daemon/components/config_resolver_test.cpp',
       'unit/daemon/components/database_manager_test.cpp',
@@ -787,44 +796,40 @@ if catch2_dep.found()
       'unit/daemon/components/vector_system_manager_test.cpp',
       'unit/search/topological_quality_catch2_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'components'],
+    'timeout': 120,
+  }]
 
 # Keep embedding/bootstrap regressions independent of unrelated component bootstrap.
-  catch2_embedding_service_timing_exe = executable('catch2_embedding_service_timing',
-    files('unit/daemon/components/embedding_service_timing_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + embedding_service_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'embedding_service_timing',
+    'sources': files('unit/daemon/components/embedding_service_timing_catch2_test.cpp'),
+    'deps': embedding_service_test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'embedding', 'startup', 'concurrency'],
+    'timeout': 60,
+  }]
 
 # Virtual-time startup contracts: no database, model, socket, CLI or live governor needed.
-  catch2_startup_replay_exe = executable('catch2_startup_replay',
-    files('unit/daemon/components/startup_replay_catch2_test.cpp',
-          '../tools/fuzzing/fuzz_startup.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep, dependency('yams_tune_advisor_testing'),
-                   dependency('yams_daemon'), dependency('yams_core'), dependency('spdlog')],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'startup_replay',
+    'sources': files(
+      'unit/daemon/components/startup_replay_catch2_test.cpp',
+      '../tools/fuzzing/fuzz_startup.cpp',
+    ),
+    'deps': [dependency('yams_tune_advisor_testing'), dependency('yams_daemon'), dependency('yams_core'), dependency('spdlog')],
+    'suite': ['catch2', 'unit', 'daemon', 'startup', 'fuzz-smoke'],
+    'timeout': 30,
+  }]
 
 #Gradient limiter tests(Netflix Gradient2 adaptive concurrency)
-  catch2_gradient_limiter_exe = executable('catch2_gradient_limiter',
-    files('unit/daemon/components/gradient_limiter_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'gradient_limiter',
+    'sources': files('unit/daemon/components/gradient_limiter_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'gradient'],
+    'timeout': 60,
+  }]
 
 #WorkCoordinator tests(async work coordination)
   catch2_work_coordinator_exe = executable('catch2_work_coordinator',
@@ -837,24 +842,22 @@ if catch2_dep.found()
   )
 
 #PostIngestQueue unit tests(LruCache template + stage constants)
-  catch2_post_ingest_queue_unit_exe = executable('catch2_post_ingest_queue_unit',
-    files('unit/daemon/components/post_ingest_queue_unit_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'post_ingest_queue_unit',
+    'sources': files('unit/daemon/components/post_ingest_queue_unit_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'post-ingest'],
+    'timeout': 60,
+  }]
 
 #PressureLimitedPoller shutdown unit tests(capability - sleep / stop paths)
-  catch2_pressure_limited_poller_exe = executable('catch2_pressure_limited_poller',
-    files('unit/daemon/components/pressure_limited_poller_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'pressure_limited_poller',
+    'sources': files('unit/daemon/components/pressure_limited_poller_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'poller', 'concurrency'],
+    'timeout': 30,
+  }]
 
 #Assertion validation tests(fork - based death tests for YAMS_ASSERT / YAMS_PRECONDITION)
   catch2_assert_val_exe = executable('catch2_assert_val',
@@ -867,14 +870,13 @@ if catch2_dep.found()
   )
 
 #Metrics consistency tests(migrated from GTest)
-  catch2_metrics_consistency_exe = executable('catch2_metrics_consistency',
-    files('unit/daemon/metrics_consistency_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'metrics_consistency',
+    'sources': files('unit/daemon/metrics_consistency_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'metrics'],
+    'timeout': 60,
+  }]
 
 #SearchService integration tests(migrated from GTest)
   catch2_search_service_exe = executable('catch2_search_service',
@@ -890,14 +892,15 @@ if catch2_dep.found()
   )
 
 #FTS5 performance / stress tests(migrated from GTest, opt - in via YAMS_RUN_STRESS_TESTS = 1)
-  catch2_fts5_stress_exe = executable('catch2_fts5_stress',
-    files('unit/metadata/fts5_performance_stress_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'fts5_stress',
+    'sources': files('unit/metadata/fts5_performance_stress_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'stress', 'metadata', 'fts5'],
+    'args': ['--allow-running-no-tests'],
+    'timeout': 300,
+    'is_parallel': false,
+  }]
 
 #Add plugin path for plugin harness tests
   plugin_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
@@ -1018,23 +1021,22 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_extractor_adapter_exe = executable('catch2_extractor_adapter',
-    files('unit/daemon/plugin_content_extractor_adapter_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'extractor_adapter',
+    'sources': files('unit/daemon/plugin_content_extractor_adapter_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'extractor'],
+    'timeout': 60,
+  }]
 
-  catch2_repair_scheduling_exe = executable('catch2_repair_scheduling',
-    files('unit/daemon/repair_scheduling_adapter_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'repair_scheduling_adapter',
+    'target': 'catch2_repair_scheduling',
+    'sources': files('unit/daemon/repair_scheduling_adapter_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'repair'],
+    'timeout': 120,
+  }]
 
   catch2_repair_service_exe = executable('catch2_repair_service',
     files('unit/daemon/repair_service_post_ingest_channel_catch2_test.cpp'),
@@ -1045,113 +1047,103 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_repair_maintenance_exe = executable('catch2_repair_maintenance',
-    files('unit/daemon/repair_maintenance_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'repair_maintenance',
+    'sources': files('unit/daemon/repair_maintenance_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'repair'],
+    'timeout': 60,
+  }]
 
-  catch2_write_coordinator_exe = executable('catch2_write_coordinator',
-    files('unit/daemon/write_coordinator_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'write_coordinator',
+    'sources': files('unit/daemon/write_coordinator_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'write-coordinator', 'concurrency'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
-  catch2_service_manager_exe = executable('catch2_service_manager',
-    files('unit/daemon/service_manager_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'service_manager',
+    'sources': files('unit/daemon/service_manager_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'service-manager', 'concurrency'],
+    'timeout': 120,
+  }]
 
-  catch2_memory_sync_apply_exe = executable('catch2_memory_sync_apply',
-    files('unit/daemon/memory_sync_apply_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'memory_sync_apply',
+    'sources': files('unit/daemon/memory_sync_apply_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'memory-sync'],
+    'timeout': 120,
+  }]
 
-  catch2_db_recovery_exe = executable('catch2_db_recovery',
-    files('unit/daemon/db_recovery_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'db_recovery',
+    'sources': files('unit/daemon/db_recovery_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'db-recovery'],
+    'timeout': 30,
+  }]
 
-  catch2_db_salvage_exe = executable('catch2_db_salvage',
-    files('unit/daemon/db_salvage_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'db_salvage',
+    'sources': files('unit/daemon/db_salvage_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'db-salvage'],
+    'timeout': 30,
+  }]
 
-  catch2_db_recovery_vacuum_exe = executable('catch2_db_recovery_vacuum',
-    files('unit/daemon/db_recovery_vacuum_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'db_recovery_vacuum',
+    'sources': files('unit/daemon/db_recovery_vacuum_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'db-recovery'],
+    'timeout': 60,
+  }]
 
-  catch2_storage_preflight_exe = executable('catch2_storage_preflight',
-    files('unit/daemon/storage_preflight_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'storage_preflight',
+    'sources': files('unit/daemon/storage_preflight_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'storage-preflight'],
+    'timeout': 30,
+  }]
 
-  catch2_tune_advisor_snapshot_exe = executable('catch2_tune_advisor_snapshot',
-    files('unit/daemon/tune_advisor_snapshot_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'tune_advisor_snapshot',
+    'sources': files('unit/daemon/tune_advisor_snapshot_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'tune-advisor'],
+    'timeout': 30,
+  }]
 
-  catch2_repair_hold_hints_exe = executable('catch2_repair_hold_hints',
-    files('unit/daemon/repair_hold_hints_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'repair_hold_hints',
+    'sources': files('unit/daemon/repair_hold_hints_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'tuning'],
+    'timeout': 30,
+  }]
 
-  catch2_physical_walk_ttl_exe = executable('catch2_physical_walk_ttl',
-    files('unit/daemon/physical_walk_ttl_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'physical_walk_ttl',
+    'sources': files('unit/daemon/physical_walk_ttl_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'tuning'],
+    'timeout': 30,
+  }]
 
-  catch2_streaming_processor_exe = executable('catch2_streaming_processor',
-    files('unit/daemon/streaming_processor_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'streaming_processor',
+    'sources': files('unit/daemon/streaming_processor_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'streaming', 'concurrency'],
+    'args': ['--allow-running-no-tests'],  # Skips entirely on Windows
+    'timeout': 60,
+  }]
 
   catch2_in_process_transport_exe = executable('catch2_in_process_transport',
     files('unit/daemon/in_process_transport_catch2_test.cpp'),
@@ -1163,122 +1155,120 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_sandbox_detection_exe = executable('catch2_sandbox_detection',
-    files('unit/daemon/sandbox_detection_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'sandbox_detection',
+    'sources': files('unit/daemon/sandbox_detection_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'sandbox'],
+    'timeout': 60,
+  }]
 
-  catch2_multiplex_client_exe = executable('catch2_multiplex_client',
-    files('unit/daemon/multiplex_client_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'multiplex_client',
+    'sources': files('unit/daemon/multiplex_client_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'multiplex'],
+    'args': ['--allow-running-no-tests'],  # All tests have [.requires_daemon] tag
+    'timeout': 60,
+  }]
 
-  catch2_entity_graph_service_exe = executable('catch2_entity_graph_service',
-    files('unit/daemon/entity_graph_service_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'entity_graph_service',
+    'sources': files('unit/daemon/entity_graph_service_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon'],
+    'timeout': 120,
+  }]
 
-  catch2_service_manager_shutdown_exe = executable('catch2_service_manager_shutdown',
-    files('unit/daemon/service_manager_shutdown_ownership_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#These tests use ServiceManager / WorkCoordinator which have resource contention
+#when run in parallel with other daemon tests - run sequentially
+  catch2_test_table += [{
+    'name': 'service_manager_shutdown',
+    'sources': files('unit/daemon/service_manager_shutdown_ownership_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'service-manager'],
+    'timeout': 120,
+    'is_parallel': false,
+  }]
 
-  catch2_service_manager_degraded_exe = executable('catch2_service_manager_degraded',
-    files('unit/daemon/service_manager_provider_degraded_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'service_manager_degraded',
+    'sources': files('unit/daemon/service_manager_provider_degraded_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'service-manager'],
+    'timeout': 120,
+    'is_parallel': false,
+  }]
 
-  catch2_repair_binary_filter_exe = executable('catch2_repair_binary_filter',
-    files('unit/daemon/repair_binary_filter_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'repair_binary_filter',
+    'sources': files('unit/daemon/repair_binary_filter_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'repair'],
+    'timeout': 120,
+    'is_parallel': false,
+  }]
 
-  catch2_abi_model_provider_dim_exe = executable('catch2_abi_model_provider_dim',
-    files('unit/daemon/abi_model_provider_dimension_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'abi_model_provider_dim',
+    'sources': files('unit/daemon/abi_model_provider_dimension_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon'],
+    'timeout': 60,
+  }]
 
-  catch2_status_readiness_vector_usable_exe = executable('catch2_status_readiness_vector_usable',
-    files('unit/daemon/status_readiness_vector_usable_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'status_readiness_vector_usable',
+    'sources': files('unit/daemon/status_readiness_vector_usable_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'readiness'],
+    'timeout': 30,
+  }]
 
-  catch2_model_provider_registry_exe = executable('catch2_model_provider_registry',
-    files('unit/daemon/model_provider_registry_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'model_provider_registry',
+    'sources': files('unit/daemon/model_provider_registry_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'model-provider'],
+    'timeout': 30,
+  }]
 
-  catch2_simeon_model_provider_exe = executable('catch2_simeon_model_provider',
-    files('unit/daemon/simeon_model_provider_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'simeon_model_provider',
+    'sources': files('unit/daemon/simeon_model_provider_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'model-provider', 'simeon'],
+    'timeout': 30,
+  }]
 
-  catch2_embedding_recovery_exe = executable('catch2_embedding_recovery',
-    files('unit/daemon/embedding_provider_recovery_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'embedding_recovery',
+    'sources': files('unit/daemon/embedding_provider_recovery_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon'],
+    'args': ['--allow-running-no-tests'],  # Skips entirely on Windows
+    'timeout': 120,
+    'is_parallel': false,
+  }]
 
-  catch2_request_io_edge_exe = executable('catch2_request_io_edge',
-    files('unit/daemon/request_handler_io_edge_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'request_io_edge',
+    'sources': files('unit/daemon/request_handler_io_edge_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'concurrency'],
+    'args': ['--allow-running-no-tests'],  # Placeholder tests - all skipped
+    'timeout': 120,
+    'is_parallel': false,
+  }]
 
-  catch2_daemon_warm_bench_exe = executable('catch2_daemon_warm_bench',
-    files('unit/daemon/daemon_warm_bench_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'daemon_warm_bench',
+    'sources': files('unit/daemon/daemon_warm_bench_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'bench'],
+    'args': ['--allow-running-no-tests'],  # Bench only runs when YAMS_BENCH_FAST=1
+    'timeout': 120,
+  }]
 
   catch2_daemon_idle_control_bench_exe = executable('catch2_daemon_idle_control_bench',
     files('unit/daemon/daemon_idle_control_bench_catch2_test.cpp'),
@@ -1289,32 +1279,34 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_request_lifetime_exe = executable('catch2_request_lifetime',
-    files('unit/daemon/request_handler_lifetime_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'request_lifetime',
+    'sources': files('unit/daemon/request_handler_lifetime_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon'],
+    'args': ['--allow-running-no-tests'],  # Skips when streaming disabled
+    'timeout': 120,
+    'is_parallel': false,
+  }]
 
-  catch2_writer_drain_cleanup_exe = executable('catch2_writer_drain_cleanup',
-    files('unit/daemon/request_handler_writer_drain_cleanup_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'writer_drain_cleanup',
+    'sources': files('unit/daemon/request_handler_writer_drain_cleanup_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'ipc', 'mux'],
+    'args': ['--allow-running-no-tests'],  # Skips entirely on Windows
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
-  catch2_asio_connection_pool_exe = executable('catch2_asio_connection_pool',
-    files('unit/daemon/asio_connection_pool_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'asio_connection_pool',
+    'sources': files('unit/daemon/asio_connection_pool_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'connection-pool', 'concurrency'],
+    'timeout': 120,
+    'is_parallel': false,
+  }]
 
   catch2_asio_transport_exhaustion_exe = executable('catch2_asio_transport_exhaustion',
     files('unit/daemon/asio_transport_exhaustion_catch2_test.cpp'),
@@ -1345,23 +1337,21 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_tune_advisor_threshold_exe = executable('catch2_tune_advisor_threshold',
-    files('unit/daemon/tune_advisor_threshold_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'tune_advisor_threshold',
+    'sources': files('unit/daemon/tune_advisor_threshold_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'tune', 'advisor'],
+    'timeout': 120,
+  }]
 
-  catch2_tuning_allocation_exe = executable('catch2_tuning_allocation',
-    files('unit/daemon/tuning_allocation_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'tuning_allocation',
+    'sources': files('unit/daemon/tuning_allocation_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'tune', 'allocation'],
+    'timeout': 120,
+  }]
 
   # Real-service registry controls have process-global publication and bootstrap costs.
   catch2_tuning_registry_activity_exe = executable('catch2_tuning_registry_activity',
@@ -1383,77 +1373,69 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_tuning_reconciliation_exe = executable('catch2_tuning_reconciliation',
-    files('unit/daemon/tuning_reconciliation_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'tuning_reconciliation',
+    'sources': files('unit/daemon/tuning_reconciliation_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'tune', 'reconciliation'],
+    'timeout': 120,
+  }]
 
-  catch2_post_ingest_dynamic_cap_recovery_exe = executable('catch2_post_ingest_dynamic_cap_recovery',
-    files('unit/daemon/post_ingest_dynamic_cap_recovery_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'post_ingest_dynamic_cap_recovery',
+    'sources': files('unit/daemon/post_ingest_dynamic_cap_recovery_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'tune', 'post-ingest'],
+    'timeout': 60,
+  }]
 
-  catch2_resource_governance_exe = executable('catch2_resource_governance',
-    files('unit/daemon/resource_governance_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'resource_governance',
+    'sources': files('unit/daemon/resource_governance_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'governance'],
+    'timeout': 60,
+  }]
 
-  catch2_host_pressure_exe = executable('catch2_host_pressure',
-    files('unit/daemon/host_pressure_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'host_pressure',
+    'sources': files('unit/daemon/host_pressure_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'governance'],
+    'timeout': 60,
+  }]
 
-  catch2_timing_audit_exe = executable('catch2_timing_audit',
-    files('unit/daemon/timing_audit_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'timing_audit',
+    'sources': files('unit/daemon/timing_audit_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'timing-audit', 'concurrency'],
+    'timeout': 120,
+  }]
 
-  catch2_dynamic_cap_sentinel_exe = executable('catch2_dynamic_cap_sentinel',
-    files('unit/daemon/dynamic_cap_sentinel_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'dynamic_cap_sentinel',
+    'sources': files('unit/daemon/dynamic_cap_sentinel_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'tune', 'dynamic-cap'],
+    'timeout': 60,
+  }]
 
-  catch2_idle_zero_concurrency_exe = executable('catch2_idle_zero_concurrency',
-    files('unit/daemon/idle_zero_concurrency_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'idle_zero_concurrency',
+    'sources': files('unit/daemon/idle_zero_concurrency_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'tune', 'idle'],
+    'timeout': 60,
+  }]
 
-  catch2_health_check_isolation_exe = executable('catch2_health_check_isolation',
-    files('unit/daemon/health_check_isolation_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'health_check_isolation',
+    'sources': files('unit/daemon/health_check_isolation_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'state', 'health-check'],
+    'timeout': 60,
+  }]
 
   catch2_socket_server_teardown_exe = executable('catch2_socket_server_teardown',
     files('unit/daemon/socket_server_teardown_catch2_test.cpp'),
@@ -1464,44 +1446,37 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_vector_index_coordinator_bulk_scope_exe = executable(
-    'catch2_vector_index_coordinator_bulk_scope',
-    files('unit/daemon/vector_index_coordinator_bulk_scope_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'vector_index_coordinator_bulk_scope',
+    'sources': files('unit/daemon/vector_index_coordinator_bulk_scope_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
+    'timeout': 60,
+  }]
 
-  catch2_vector_index_coordinator_coalesce_exe = executable(
-    'catch2_vector_index_coordinator_coalesce',
-    files('unit/daemon/vector_index_coordinator_coalesce_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'vector_index_coordinator_coalesce',
+    'sources': files('unit/daemon/vector_index_coordinator_coalesce_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'vector', 'coordinator', 'concurrency'],
+    'timeout': 60,
+  }]
 
-  catch2_vector_index_coordinator_telemetry_exe = executable(
-    'catch2_vector_index_coordinator_telemetry',
-    files('unit/daemon/vector_index_coordinator_telemetry_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'vector_index_coordinator_telemetry',
+    'sources': files('unit/daemon/vector_index_coordinator_telemetry_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'vector', 'coordinator', 'concurrency'],
+    'timeout': 60,
+  }]
 
-  catch2_tuning_loop_wakeup_exe = executable('catch2_tuning_loop_wakeup',
-    files('unit/daemon/tuning_loop_wakeup_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'tuning_loop_wakeup',
+    'sources': files('unit/daemon/tuning_loop_wakeup_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'tune', 'wakeup'],
+    'timeout': 60,
+  }]
 
   if onnx_dep.found()
     catch2_onnx_model_pool_exe = executable('catch2_onnx_model_pool',
@@ -1526,36 +1501,36 @@ if catch2_dep.found()
 #CLI Test Suites(Catch2)
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 
-  catch2_cli_init_command_exe = executable('catch2_cli_init_command',
-    files('unit/cli/init_command_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'cli_init_command',
+    'sources': files('unit/cli/init_command_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'cli', 'init'],
+    'timeout': 120,
+    'is_parallel': false,
+  }]
 
 #Storage Test Suites(Catch2)
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 
-  catch2_storage_backend_exe = executable('catch2_storage_backend',
-    files('unit/storage/storage_backend_catch2_test.cpp',
-          'unit/storage/windows_path_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'storage_backend',
+    'sources': files(
+      'unit/storage/storage_backend_catch2_test.cpp',
+      'unit/storage/windows_path_catch2_test.cpp',
+    ),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'storage', 'backend', 'concurrency'],
+    'timeout': 120,
+  }]
 
-  catch2_version_vector_exe = executable('catch2_version_vector',
-    files('unit/memory_sync/version_vector_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'version_vector',
+    'sources': files('unit/memory_sync/version_vector_catch2_test.cpp'),
+    'deps': [dependency('nlohmann_json')],
+    'suite': ['catch2', 'unit', 'memory-sync'],
+    'timeout': 60,
+  }]
 
   catch2_memory_sync_apply_health_exe = executable('catch2_memory_sync_apply_health',
     files('unit/memory_sync/apply_health_catch2_test.cpp'),
@@ -1566,14 +1541,13 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_memory_sync_records_exe = executable('catch2_memory_sync_records',
-    files('unit/memory_sync/records_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'memory_sync_records',
+    'sources': files('unit/memory_sync/records_catch2_test.cpp'),
+    'deps': [dependency('nlohmann_json')],
+    'suite': ['catch2', 'unit', 'memory-sync'],
+    'timeout': 60,
+  }]
 
   catch2_memory_sync_exe = executable('catch2_memory_sync',
     files('unit/memory_sync/memory_sync_catch2_test.cpp'),
@@ -1698,24 +1672,24 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_wal_submodule_exe = executable('catch2_wal_submodule',
-    files(
+  catch2_test_table += [{
+    'name': 'wal_submodule',
+    'sources': files(
       'unit/wal/wal_file_catch2_test.cpp',
       'unit/wal/wal_manager_catch2_test.cpp',
       'unit/wal/wal_metrics_provider_catch2_test.cpp',
       'unit/wal/wal_recovery_catch2_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'wal'],
+    'timeout': 120,
+  }]
 
 #Search submodule tests
 #Migrated from GTest as part of yams - 3s4 / yams - 1yq
-  catch2_search_submodule_exe = executable('catch2_search_submodule',
-    files(
+  catch2_test_table += [{
+    'name': 'search_submodule',
+    'sources': files(
       'unit/search/chunk_coverage_catch2_test.cpp',
       'unit/search/graph_expansion_catch2_test.cpp',
       'unit/search/hotzone_manager_catch2_test.cpp',
@@ -1740,122 +1714,113 @@ if catch2_dep.found()
       'unit/search/search_vector_pipeline_catch2_test.cpp',
       'unit/search/search_facets_catch2_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'concurrency'],
+    'timeout': 180,
+  }]
 
-  catch2_search_vector_stage_exe = executable('catch2_search_vector_stage',
-    files('unit/search/search_vector_stage_characterization_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'search_vector_stage',
+    'sources': files('unit/search/search_vector_stage_characterization_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'vector-stage'],
+    'timeout': 180,
+  }]
 
-  catch2_search_vector_stage_route_only_exe = executable('catch2_search_vector_stage_route_only',
-    files('unit/search/search_vector_stage_route_only_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'search_vector_stage_route_only',
+    'sources': files('unit/search/search_vector_stage_route_only_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'vector-stage'],
+    'timeout': 180,
+  }]
 
   # Road beam (search.topology.road_hops) in RouteOnly / Augment; kept apart from the RouteOnly
   # cells so their goldens stay byte-identical.
-  catch2_search_vector_stage_road_beam_exe = executable('catch2_search_vector_stage_road_beam',
-    files('unit/search/search_vector_stage_road_beam_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'search_vector_stage_road_beam',
+    'sources': files('unit/search/search_vector_stage_road_beam_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'vector-stage'],
+    'timeout': 180,
+  }]
 
   # Road walk (search.topology.road_walk_window) along ordered cluster members in RouteOnly /
   # Augment; kept apart from the RouteOnly and road beam cells so their goldens stay byte-identical.
-  catch2_search_vector_stage_road_walk_exe = executable('catch2_search_vector_stage_road_walk',
-    files('unit/search/search_vector_stage_road_walk_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'search_vector_stage_road_walk',
+    'sources': files('unit/search/search_vector_stage_road_walk_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'vector-stage'],
+    'timeout': 180,
+  }]
 
-  catch2_symspell_search_exe = executable('catch2_symspell_search',
-    files('unit/search/symspell_search_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'symspell_search',
+    'sources': files('unit/search/symspell_search_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'symspell'],
+    'timeout': 30,
+  }]
 
   # Executor-backed vector stage under a component deadline (lifetime of late completions).
-  catch2_search_vector_stage_timeout_exe = executable('catch2_search_vector_stage_timeout',
-    files('unit/search/search_vector_stage_timeout_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'search_vector_stage_timeout',
+    'sources': files('unit/search/search_vector_stage_timeout_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'vector-stage'],
+    'timeout': 60,
+  }]
 
-  catch2_evidence_search_pipeline_exe = executable('catch2_evidence_search_pipeline',
-    files('unit/search/evidence_search_pipeline_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'evidence_search_pipeline',
+    'sources': files('unit/search/evidence_search_pipeline_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'evidence-pipeline'],
+    'timeout': 30,
+  }]
 
 #TuningSlot tests(provenance - tracking primitives for restructured tuning pipeline)
-  catch2_tuning_slot_exe = executable('catch2_tuning_slot',
-    files('unit/search/tuning_slot_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#TuningSlot provenance tests
+  catch2_test_table += [{
+    'name': 'tuning_slot',
+    'sources': files('unit/search/tuning_slot_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'tuner'],
+    'timeout': 30,
+  }]
 
 #R3 Tuning features + reward(featurize / bucketize / combineReward)
-  catch2_tuning_features_exe = executable('catch2_tuning_features',
-    files('unit/search/tuning_features_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#R3 tuning features + reward tests
+  catch2_test_table += [{
+    'name': 'tuning_features',
+    'sources': files('unit/search/tuning_features_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'tuner'],
+    'timeout': 30,
+  }]
 
 # SearchTuner tests: adaptive search engine tuning via corpus-aware FSM.
 #Tests FSM state transitions, TunedParams matrix, and SearchEngineConfig generation
-  catch2_search_tuner_exe = executable('catch2_search_tuner',
-    files('unit/search/search_tuner_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#SearchTuner FSM tests(Phase 2 of Epic yams - 7ez4)
+  catch2_test_table += [{
+    'name': 'search_tuner',
+    'sources': files('unit/search/search_tuner_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'tuner'],
+    'timeout': 60,
+  }]
 
 #InternalBenchmark tests(Phase 3 of Epic yams - 7ez4 : Internal Benchmark Suite)
 #Tests LatencyStats, BenchmarkResults, BenchmarkComparison, query generation configs
-  catch2_internal_benchmark_exe = executable('catch2_internal_benchmark',
-    files('unit/search/internal_benchmark_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#InternalBenchmark tests(Phase 3 of Epic yams - 7ez4)
+  catch2_test_table += [{
+    'name': 'internal_benchmark',
+    'sources': files('unit/search/internal_benchmark_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'benchmark'],
+    'timeout': 60,
+  }]
 
   catch2_benchmark_history_store_exe = executable('catch2_benchmark_history_store',
     files('unit/search/benchmark_history_store_catch2_test.cpp'),
@@ -1875,17 +1840,16 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_retrieval_benchmark_support_exe = executable('catch2_retrieval_benchmark_support',
-    files(
+  catch2_test_table += [{
+    'name': 'retrieval_benchmark_support',
+    'sources': files(
       'unit/search/retrieval_benchmark_support_catch2_test.cpp',
       'benchmarks/search/retrieval_benchmark_support.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'benchmark'],
+    'timeout': 30,
+  }]
 
   catch2_search_bandit_bench_exe = executable('catch2_search_bandit_bench',
     files('benchmarks/search_bandit_bench.cpp'),
@@ -1896,14 +1860,13 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_relevance_label_store_exe = executable('catch2_relevance_label_store',
-    files('unit/search/relevance_label_store_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'relevance_label_store',
+    'sources': files('unit/search/relevance_label_store_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'relevance'],
+    'timeout': 30,
+  }]
 
 # Compression submodule tests.
 #Migrated from GTest as part of yams - 3s4 / yams - pmf
@@ -2144,541 +2107,497 @@ if catch2_dep.found()
     )
   endif
 
-  catch2_vector_vec0_cosine_order_exe = executable('catch2_vector_vec0_cosine_order',
-    files('unit/vector/vec0_cosine_order_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'vector_vec0_cosine_order',
+    'sources': files('unit/vector/vec0_cosine_order_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'vector'],
+    'timeout': 120,
+  }]
 
-  catch2_vector_sync_adapter_exe = executable('catch2_vector_sync_adapter',
-    files('unit/vector/vector_sync_adapter_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'vector_sync_adapter',
+    'sources': files('unit/vector/vector_sync_adapter_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'vector', 'memory-sync'],
+    'timeout': 120,
+  }]
 
 #Tokenizer Tests(Catch2) - HuggingFaceTokenizer WordPiece, Unigram, special token injection
 #Always - on : uses synthetic tokenizer.json files, no model downloads or sqlite - vec required.
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_tokenizer_exe = executable('catch2_tokenizer',
-    files(
-      'unit/vector/tokenizer_catch2_test.cpp',
-    ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Tokenizer tests(WordPiece, Unigram, special token injection)
+  catch2_test_table += [{
+    'name': 'tokenizer',
+    'sources': files('unit/vector/tokenizer_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'vector', 'tokenizer'],
+    'timeout': 60,
+  }]
 
 #API Test Suites(Catch2) - content store API tests
 #Migrated from GTest as part of yams - 3s4 / api
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_api_submodule_exe = executable('catch2_api_submodule',
-    files(
+#API submodule tests(content store, metadata API)
+#Migrated from GTest as part of yams - 3s4 / api
+  catch2_test_table += [{
+    'name': 'api_submodule',
+    'sources': files(
       'unit/api/content_store_catch2_test.cpp',
       'unit/api/content_store_builder_compression_catch2_test.cpp',
       'unit/api/metadata_api_catch2_test.cpp',
       'unit/api/semantic_search_api_catch2_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'api', 'concurrency'],
+    'timeout': 180,
+  }]
 
 #Downloader Test Suites(Catch2) - download manager, resume store, CAS helpers
 #Migrated from GTest as part of yams - 3s4 / downloader
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_downloader_submodule_exe = executable('catch2_downloader_submodule',
-    files(
-      'unit/downloader/downloader_catch2_test.cpp',
-    ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Downloader submodule tests(download manager, resume, CAS)
+#Migrated from GTest as part of yams - 3s4 / downloader
+  catch2_test_table += [{
+    'name': 'downloader_submodule',
+    'sources': files('unit/downloader/downloader_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'downloader'],
+    'timeout': 180,
+  }]
 
 #Resolve Test Suites(Catch2) - resolver, backend implementations
 #Migrated from GTest as part of yams - 3s4 / resolve
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_resolve_submodule_exe = executable('catch2_resolve_submodule',
-    files(
-      'unit/resolve/resolver_catch2_test.cpp',
-    ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Resolve submodule tests(resolver, backends)
+#Migrated from GTest as part of yams - 3s4 / resolve
+  catch2_test_table += [{
+    'name': 'resolve_submodule',
+    'sources': files('unit/resolve/resolver_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'resolve'],
+    'timeout': 180,
+  }]
 
 #Manifest Test Suites(Catch2) - manifest manager, serialization, reconstruction
 #Migrated from GTest as part of yams - 3s4 / yams - 1jm
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_manifest_submodule_exe = executable('catch2_manifest_submodule',
-    files(
-      'unit/manifest/manifest_catch2_test.cpp',
-    ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Manifest submodule tests(manifest manager, serialization, reconstruction)
+#Migrated from GTest as part of yams - 3s4 / yams - 1jm
+  catch2_test_table += [{
+    'name': 'manifest_submodule',
+    'sources': files('unit/manifest/manifest_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'manifest'],
+    'timeout': 180,
+  }]
 
 #Repair Test Suites(Catch2) - embedding repair scan
 #Migrated from GTest as part of yams - 3s4 / yams - 1jm
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_repair_submodule_exe = executable('catch2_repair_submodule',
-    files(
-      'unit/repair/embedding_repair_scan_catch2_test.cpp',
-    ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Repair submodule tests(embedding repair scan)
+#Migrated from GTest as part of yams - 3s4 / yams - 1jm
+#Note : --allow - running - no - tests needed because tests skip when YAMS_DISABLE_VECTORS = 1
+  catch2_test_table += [{
+    'name': 'repair_submodule',
+    'sources': files('unit/repair/embedding_repair_scan_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'repair'],
+    'args': ['--allow-running-no-tests'],
+    'timeout': 180,
+  }]
 
 #Versioning Test Suites(Catch2) - versioning utility
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_versioning_submodule_exe = executable('catch2_versioning_submodule',
-    files(
-      'unit/metadata/versioning_util_catch2_test.cpp',
-    ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Versioning submodule tests(document versioning, indexer)
+#Migrated from GTest as part of yams - 3s4 / yams - 1jm
+  catch2_test_table += [{
+    'name': 'versioning_submodule',
+    'sources': files('unit/metadata/versioning_util_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'versioning'],
+    'timeout': 180,
+  }]
 
 #Metadata Test Suites(4 executables)
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 
-  catch2_metadata_retrieval_exe = executable('catch2_metadata_retrieval',
-    files('unit/app/services/retrieval_schema_validation_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Metadata tests
+  catch2_test_table += [{
+    'name': 'metadata_retrieval_schema',
+    'target': 'catch2_metadata_retrieval',
+    'sources': files('unit/app/services/retrieval_schema_validation_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'retrieval'],
+    'timeout': 60,
+  }]
 
 #Removed : catch2_metadata_search(search_metadata_interface_test.cpp) - HybridSearchEngine specific
 
-  catch2_metadata_migration_exe = executable('catch2_metadata_migration',
-    files('unit/metadata/migration_validation_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'metadata_migration_validation',
+    'target': 'catch2_metadata_migration',
+    'sources': files('unit/metadata/migration_validation_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'migration'],
+    'timeout': 120,
+  }]
 
 #Metadata Unit Tests(Catch2) - concepts, database, query_helpers, sql, value_variant
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_metadata_unit_exe = executable('catch2_metadata_unit',
-    files('unit/metadata/metadata_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'metadata_unit',
+    'sources': files('unit/metadata/metadata_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata'],
+    'timeout': 120,
+  }]
 
 #Connection Pool Tests(Catch2) - pool maintenance, waiting guard
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_connection_pool_exe = executable('catch2_connection_pool',
-    files('unit/metadata/connection_pool_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'connection_pool',
+    'sources': files('unit/metadata/connection_pool_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'connection-pool', 'concurrency'],
+    'timeout': 120,
+  }]
 
 # Document snapshot membership and the legacy per-snapshot key backfill
-  catch2_document_snapshots_exe = executable('catch2_document_snapshots',
-    files('unit/metadata/document_snapshots_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'document_snapshots',
+    'sources': files('unit/metadata/document_snapshots_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'snapshots'],
+    'timeout': 120,
+  }]
 
 #KG Store Tests(Catch2) - knowledge graph store operations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_kg_store_exe = executable('catch2_kg_store',
-    files(
+  catch2_test_table += [{
+    'name': 'kg_store',
+    'sources': files(
       'unit/metadata/kg_store_catch2_test.cpp',
       'unit/metadata/kg_relation_summary_catch2_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'kg', 'concurrency'],
+    'timeout': 120,
+  }]
 
 #KG Write Buffer Tests(Catch2) - in - memory edge / entity coalescing
-  catch2_kg_write_buffer_exe = executable('catch2_kg_write_buffer',
-    files('unit/metadata/kg_write_buffer_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'kg_write_buffer',
+    'sources': files('unit/metadata/kg_write_buffer_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'kg'],
+    'timeout': 60,
+  }]
 
 #Database Tests(Catch2) - database operations, connection pool, migrations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_database_exe = executable('catch2_database',
-    files('unit/metadata/database_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'database',
+    'sources': files('unit/metadata/database_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'database'],
+    'timeout': 120,
+  }]
 
 #Metadata Corruption Tests(Catch2) - corruption injection, detection, recovery
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_metadata_corruption_exe = executable('catch2_metadata_corruption',
-    files(
+  catch2_test_table += [{
+    'name': 'metadata_corruption',
+    'sources': files(
       'unit/metadata/database_corruption_catch2_test.cpp',
       'unit/metadata/migration_corruption_catch2_test.cpp',
       'unit/metadata/kg_store_corruption_catch2_test.cpp',
       'unit/metadata/connection_pool_corruption_catch2_test.cpp',
       'unit/metadata/writer_corruption_catch2_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'corruption'],
+    'timeout': 120,
+  }]
 
 #FTS5 Tests(Catch2) - FTS5 support detection and fallback
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_fts5_exe = executable('catch2_fts5',
-    files(
+  catch2_test_table += [{
+    'name': 'fts5',
+    'sources': files(
       'unit/metadata/fts5_catch2_test.cpp',
       'unit/metadata/fts5_query_sanitizer_catch2_test.cpp',
       'unit/metadata/search_query_helpers_catch2_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'fts5'],
+    'timeout': 60,
+  }]
 
 #Tree Builder Tests(Catch2) - tree node operations and directory tree building
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_tree_builder_exe = executable('catch2_tree_builder',
-    files('unit/metadata/tree_builder_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'tree_builder',
+    'sources': files('unit/metadata/tree_builder_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'tree-builder'],
+    'timeout': 120,
+  }]
 
 #Tree Differ Tests(Catch2) - tree diffing operations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_tree_differ_exe = executable('catch2_tree_differ',
-    files('unit/metadata/tree_differ_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'tree_differ',
+    'sources': files('unit/metadata/tree_differ_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'tree-differ'],
+    'timeout': 120,
+  }]
 
 #Path Tree Delete Tests(Catch2) - path tree removal operations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_path_tree_delete_exe = executable('catch2_path_tree_delete',
-    files('unit/metadata/path_tree_delete_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'path_tree_delete',
+    'sources': files('unit/metadata/path_tree_delete_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'path-tree'],
+    'timeout': 120,
+  }]
 
 #Session Isolation Tests(Catch2) - session - isolated memory operations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_session_isolation_exe = executable('catch2_session_isolation',
-    files('unit/metadata/session_isolation_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'session_isolation',
+    'sources': files('unit/metadata/session_isolation_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'session'],
+    'timeout': 120,
+  }]
 
 #Metadata Repository Tests(Catch2) - repository operations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_metadata_repository_exe = executable('catch2_metadata_repository',
-    files(
+  catch2_test_table += [{
+    'name': 'metadata_repository',
+    'sources': files(
       'unit/metadata/metadata_repository_catch2_test.cpp',
       'unit/metadata/metadata_repository_tag_stats_catch2_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'repository', 'concurrency'],
+    'timeout': 180,
+  }]
 
-  catch2_metadata_content_transaction_exe = executable(
-    'catch2_metadata_content_transaction',
-    files('unit/metadata/metadata_content_transaction_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'metadata_content_transaction',
+    'sources': files('unit/metadata/metadata_content_transaction_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'repository', 'transaction'],
+    'timeout': 120,
+  }]
 
-  catch2_metadata_sync_adapter_exe = executable(
-    'catch2_metadata_sync_adapter',
-    files('unit/metadata/metadata_sync_adapter_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'metadata_sync_adapter',
+    'sources': files('unit/metadata/metadata_sync_adapter_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'memory-sync'],
+    'timeout': 120,
+  }]
 
-  catch2_topology_sync_adapter_exe = executable(
-    'catch2_topology_sync_adapter',
-    files('unit/metadata/topology_sync_adapter_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_sync_adapter',
+    'sources': files('unit/metadata/topology_sync_adapter_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'topology', 'memory-sync'],
+    'timeout': 120,
+  }]
 
 #Metadata Repository Cache Tests(Catch2) - cache operations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_metadata_repository_cache_exe = executable('catch2_metadata_repository_cache',
-    files('unit/metadata/metadata_repository_cache_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'metadata_repository_cache',
+    'sources': files('unit/metadata/metadata_repository_cache_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'cache'],
+    'timeout': 60,
+  }]
 
-  catch2_topology_baseline_exe = executable('catch2_topology_baseline',
-    files('unit/topology/topology_baseline_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_baseline',
+    'sources': files('unit/topology/topology_baseline_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 60,
+  }]
 
-  catch2_topology_identity_exe = executable('catch2_topology_identity',
-    files('unit/topology/protected_relation_identity_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_identity',
+    'sources': files('unit/topology/protected_relation_identity_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 30,
+  }]
 
-  catch2_topology_factory_exe = executable('catch2_topology_factory',
-    files('unit/topology/topology_factory_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_factory',
+    'sources': files('unit/topology/topology_factory_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 30,
+  }]
 
-  catch2_topology_kmeans_exe = executable('catch2_topology_kmeans',
-    files('unit/topology/kmeans_engine_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_kmeans',
+    'sources': files('unit/topology/kmeans_engine_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 30,
+  }]
 
-  catch2_topology_representative_rule_exe = executable('catch2_topology_representative_rule',
-    files('unit/topology/topology_representative_rule_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_representative_rule',
+    'sources': files('unit/topology/topology_representative_rule_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 30,
+  }]
 
-  catch2_topology_roads_exe = executable('catch2_topology_roads',
-    files('unit/topology/topology_roads_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_roads',
+    'sources': files('unit/topology/topology_roads_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 30,
+  }]
 
-  catch2_topology_road_sidecar_exe = executable('catch2_topology_road_sidecar',
-    files('unit/topology/topology_road_sidecar_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_road_sidecar',
+    'sources': files('unit/topology/topology_road_sidecar_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 60,
+  }]
 
-  catch2_topology_roads_incremental_exe = executable('catch2_topology_roads_incremental',
-    files('unit/topology/topology_roads_incremental_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_roads_incremental',
+    'sources': files('unit/topology/topology_roads_incremental_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 60,
+  }]
 
-  catch2_topology_input_event_time_exe = executable('catch2_topology_input_event_time',
-    files('unit/topology/topology_input_event_time_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_input_event_time',
+    'sources': files('unit/topology/topology_input_event_time_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 60,
+  }]
 
-  catch2_topology_ordered_members_exe = executable('catch2_topology_ordered_members',
-    files('unit/topology/topology_ordered_members_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_ordered_members',
+    'sources': files('unit/topology/topology_ordered_members_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 60,
+  }]
 
-  catch2_topology_codec_exe = executable('catch2_topology_codec',
-    files('unit/topology/topology_codec_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_codec',
+    'sources': files('unit/topology/topology_codec_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 30,
+  }]
 
-  catch2_topology_metadata_store_exe = executable('catch2_topology_metadata_store',
-    files('unit/topology/topology_metadata_store_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'topology_metadata_store',
+    'sources': files('unit/topology/topology_metadata_store_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 30,
+  }]
 
-  catch2_string_interner_exe = executable('catch2_string_interner',
-    files('unit/search/string_interner_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'string_interner',
+    'sources': files('unit/search/string_interner_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search'],
+    'timeout': 30,
+  }]
 
-  catch2_binary_quantization_exe = executable('catch2_binary_quantization',
-    files('unit/vector/binary_quantization_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'binary_quantization',
+    'sources': files('unit/vector/binary_quantization_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'vector'],
+    'timeout': 30,
+  }]
 
 #Fuzzy Index Prioritization Tests(Catch2) - fuzzy index scoring
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_fuzzy_index_prioritization_exe = executable('catch2_fuzzy_index_prioritization',
-    files('unit/metadata/fuzzy_index_prioritization_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'fuzzy_index_prioritization',
+    'sources': files('unit/metadata/fuzzy_index_prioritization_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'fuzzy'],
+    'timeout': 60,
+  }]
 
 #KG Store Alias and Entities Tests(Catch2) - KG alias and entity operations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_kg_store_alias_entities_exe = executable('catch2_kg_store_alias_entities',
-    files('unit/metadata/kg_store_alias_and_entities_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'kg_store_alias_entities',
+    'sources': files('unit/metadata/kg_store_alias_and_entities_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'kg'],
+    'timeout': 120,
+  }]
 
 #FTS Query Spec Integration Tests(Catch2) - FTS search integration
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_fts_queryspec_integration_exe = executable('catch2_fts_queryspec_integration',
-    files('unit/metadata/fts_queryspec_integration_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'fts_queryspec_integration',
+    'sources': files('unit/metadata/fts_queryspec_integration_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'fts'],
+    'timeout': 60,
+  }]
 
 #Tags Query Spec Integration Tests(Catch2) - tags query integration
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_tags_queryspec_integration_exe = executable('catch2_tags_queryspec_integration',
-    files('unit/metadata/tags_queryspec_integration_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'tags_queryspec_integration',
+    'sources': files('unit/metadata/tags_queryspec_integration_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'tags'],
+    'timeout': 60,
+  }]
 
 #Query Helpers Integration Tests(Catch2) - query helper integration
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_query_helpers_integration_exe = executable('catch2_query_helpers_integration',
-    files('unit/metadata/query_helpers_integration_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'query_helpers_integration',
+    'sources': files('unit/metadata/query_helpers_integration_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'query-helpers'],
+    'timeout': 60,
+  }]
 
 #Metadata Schema Tests(Catch2) - comprehensive schema, CRUD, FTS, migrations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
@@ -2695,38 +2614,35 @@ if catch2_dep.found()
 #FTS5 Failure Scenarios Tests(Catch2) - FTS5 edge cases and failure modes
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_fts5_failure_scenarios_exe = executable('catch2_fts5_failure_scenarios',
-    files('unit/metadata/fts5_failure_scenarios_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'fts5_failure_scenarios',
+    'sources': files('unit/metadata/fts5_failure_scenarios_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'fts5', 'failure'],
+    'timeout': 180,
+  }]
 
 #Corpus Stats Tests(Catch2) - corpus statistics for adaptive search tuning
 #Phase 1 of Epic yams - 7ez4 : Adaptive Search Engine Tuning via Corpus - Aware FSM
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_corpus_stats_exe = executable('catch2_corpus_stats',
-    files('unit/metadata/corpus_stats_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'corpus_stats',
+    'sources': files('unit/metadata/corpus_stats_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'corpus-stats'],
+    'timeout': 120,
+  }]
 
 #Repository Foundation Tests(Catch2) - entity_traits, result_helpers, crud_ops
 #Phase 1 of ADR - 0004 : MetadataRepository Refactor with Templates and Metaprogramming
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_repository_foundation_exe = executable('catch2_repository_foundation',
-    files('unit/metadata/repository_foundation_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'repository_foundation',
+    'sources': files('unit/metadata/repository_foundation_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'repository', 'foundation'],
+    'timeout': 180,
+  }]
 
 #Core tests(minimal dependencies - no daemon)
   core_test_deps = [
@@ -2734,50 +2650,51 @@ if catch2_dep.found()
     dependency('yams_core'),
   ]
 
-  core_cpp23_features_exe = executable('core_cpp23_features',
-    files('unit/core/cpp23_features_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Core tests
+  catch2_test_table += [{
+    'name': 'core_cpp23_features',
+    'target': 'core_cpp23_features',
+    'sources': files('unit/core/cpp23_features_test.cpp'),
+    'deps': core_test_deps,
+    'suite': ['catch2', 'unit', 'core', 'cpp23'],
+    'timeout': 60,
+  }]
 
-  core_cpp23_features_fallback_exe = executable('core_cpp23_features_fallback',
-    files('unit/core/cpp23_features_fallback_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'core_cpp23_features_fallback',
+    'target': 'core_cpp23_features_fallback',
+    'sources': files('unit/core/cpp23_features_fallback_test.cpp'),
+    'deps': core_test_deps,
+    'suite': ['catch2', 'unit', 'core', 'cpp23'],
+    'timeout': 60,
+  }]
 
-  core_magic_numbers_exe = executable('core_magic_numbers',
-    files('unit/core/magic_numbers_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'core_magic_numbers',
+    'target': 'core_magic_numbers',
+    'sources': files('unit/core/magic_numbers_test.cpp'),
+    'deps': core_test_deps,
+    'suite': ['catch2', 'unit', 'core', 'magic'],
+    'timeout': 60,
+  }]
 
-  core_uuid_exe = executable('core_uuid',
-    files('unit/core/uuid_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'core_uuid',
+    'target': 'core_uuid',
+    'sources': files('unit/core/uuid_test.cpp'),
+    'deps': core_test_deps,
+    'suite': ['catch2', 'unit', 'core', 'uuid'],
+    'timeout': 60,
+  }]
 
-  core_checked_arithmetic_exe = executable('core_checked_arithmetic',
-    files('unit/core/checked_arithmetic_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'core_checked_arithmetic',
+    'target': 'core_checked_arithmetic',
+    'sources': files('unit/core/checked_arithmetic_catch2_test.cpp'),
+    'deps': core_test_deps,
+    'suite': ['catch2', 'unit', 'core', 'arithmetic'],
+    'timeout': 60,
+  }]
 
   config_parse_utils_exe = executable('config_parse_utils',
     files(
@@ -2825,33 +2742,33 @@ if catch2_dep.found()
     install: false,
   )
 
-  detection_exe = executable('detection',
-    files(
+  catch2_test_table += [{
+    'name': 'detection',
+    'target': 'detection',
+    'sources': files(
       'unit/detection/command_integration_test.cpp',
       'unit/detection/detection_test_helpers.h',
       'unit/detection/file_type_detector_test.cpp',
       'unit/detection/file_type_graceful_fallback_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'detection'],
+    'timeout': 120,
+  }]
 
 #Plugins tests(Catch2 - migrated from GTest)
-  plugins_catch2_exe = executable('plugins_catch2',
-    files(
+  catch2_test_table += [{
+    'name': 'plugins_catch2',
+    'target': 'plugins_catch2',
+    'sources': files(
       'unit/plugins/plugin_installer_test.cpp',
       'unit/plugins/plugin_repo_client_test.cpp',
       'unit/plugins/onnx_request_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'plugins'],
+    'timeout': 120,
+  }]
 
 #Integrity tests(Catch2 - migrated from GTest)
   integrity_test_deps = [
@@ -2892,70 +2809,71 @@ if catch2_dep.found()
     dependency('sqlite3'),
   ]
 
-  content_handlers_exe = executable('content_handlers',
-    files('unit/content/content_handlers_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Content tests
+  catch2_test_table += [{
+    'name': 'content_handlers',
+    'target': 'content_handlers',
+    'sources': files('unit/content/content_handlers_test.cpp'),
+    'deps': content_test_deps,
+    'suite': ['catch2', 'unit', 'content', 'handlers'],
+    'timeout': 60,
+  }]
 
 #Archive content handler tests(formatToString, ProcessingStats, helper functions, canHandle)
-  archive_content_handler_exe = executable('archive_content_handler',
-    files('unit/content/archive_content_handler_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'archive_content_handler',
+    'target': 'archive_content_handler',
+    'sources': files('unit/content/archive_content_handler_catch2_test.cpp'),
+    'deps': content_test_deps,
+    'suite': ['catch2', 'unit', 'content', 'archive'],
+    'timeout': 60,
+  }]
 
-  html_extractor_robust_exe = executable('html_extractor_robust',
-    files('unit/extraction/html_extractor_robust_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'html_extractor_robust',
+    'target': 'html_extractor_robust',
+    'sources': files('unit/extraction/html_extractor_robust_test.cpp'),
+    'deps': content_test_deps,
+    'suite': ['catch2', 'unit', 'extraction', 'html'],
+    'timeout': 120,
+  }]
 
-  plain_text_extractor_exe = executable('plain_text_extractor',
-    files('unit/extraction/plain_text_extractor_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'plain_text_extractor',
+    'target': 'plain_text_extractor',
+    'sources': files('unit/extraction/plain_text_extractor_catch2_test.cpp'),
+    'deps': content_test_deps,
+    'suite': ['catch2', 'unit', 'extraction'],
+    'timeout': 60,
+  }]
 
-  text_basic_handler_exe = executable('text_basic_handler',
-    files('unit/extraction/text_basic_handler_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'text_basic_handler',
+    'target': 'text_basic_handler',
+    'sources': files('unit/extraction/text_basic_handler_catch2_test.cpp'),
+    'deps': content_test_deps,
+    'suite': ['catch2', 'unit', 'extraction'],
+    'timeout': 60,
+  }]
 
-  builtin_content_extractor_exe = executable('builtin_content_extractor',
-    files('unit/extraction/builtin_content_extractor_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'builtin_content_extractor',
+    'target': 'builtin_content_extractor',
+    'sources': files('unit/extraction/builtin_content_extractor_catch2_test.cpp'),
+    'deps': content_test_deps,
+    'suite': ['catch2', 'unit', 'extraction', 'content-extractor'],
+    'timeout': 60,
+  }]
 
 #Text extraction to FTS5 pipeline test(detection->extraction->indexing->search)
-  text_extraction_fts5_pipeline_exe = executable('text_extraction_fts5_pipeline',
-    files('unit/extraction/text_extraction_fts5_pipeline_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps + [dependency('yams_metadata')],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'text_extraction_fts5_pipeline',
+    'target': 'text_extraction_fts5_pipeline',
+    'sources': files('unit/extraction/text_extraction_fts5_pipeline_test.cpp'),
+    'deps': content_test_deps + [dependency('yams_metadata')],
+    'suite': ['catch2', 'unit', 'extraction', 'pipeline', 'fts5'],
+    'timeout': 60,
+  }]
 
 #Plugin process tests(external plugin infrastructure)
   plugin_process_test_deps = [
@@ -2965,23 +2883,24 @@ if catch2_dep.found()
     dependency('nlohmann_json'),
   ]
 
-  plugin_process_exe = executable('plugin_process',
-    files('unit/extraction/plugin_process_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + plugin_process_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'plugin_process',
+    'target': 'plugin_process',
+    'sources': files('unit/extraction/plugin_process_test.cpp'),
+    'deps': plugin_process_test_deps,
+    'suite': ['catch2', 'unit', 'extraction', 'plugins'],
+    'timeout': 120,
+  }]
 
-  plugin_process_minimal_exe = executable('plugin_process_minimal',
-    files('unit/extraction/plugin_process_minimal_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + plugin_process_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'plugin_process_minimal',
+    'target': 'plugin_process_minimal',
+    'sources': files('unit/extraction/plugin_process_minimal_test.cpp'),
+    'deps': plugin_process_test_deps,
+    'suite': ['catch2', 'unit', 'extraction', 'plugins', 'debug'],
+    'timeout': 120,
+    'is_parallel': false,
+  }]
 
   plugin_process_launcher_exe = executable('plugin_process_launcher',
     files('unit/extraction/plugin_process_launcher_test.cpp'),
@@ -2992,23 +2911,23 @@ if catch2_dep.found()
     install: false,
   )
 
-  jsonrpc_client_exe = executable('jsonrpc_client',
-    files('unit/extraction/jsonrpc_client_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + plugin_process_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'jsonrpc_client',
+    'target': 'jsonrpc_client',
+    'sources': files('unit/extraction/jsonrpc_client_test.cpp'),
+    'deps': plugin_process_test_deps,
+    'suite': ['catch2', 'unit', 'extraction', 'jsonrpc'],
+    'timeout': 60,
+  }]
 
-  external_plugin_extractor_exe = executable('external_plugin_extractor',
-    files('unit/extraction/external_plugin_extractor_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + plugin_process_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'external_plugin_extractor',
+    'target': 'external_plugin_extractor',
+    'sources': files('unit/extraction/external_plugin_extractor_test.cpp'),
+    'deps': plugin_process_test_deps,
+    'suite': ['catch2', 'unit', 'extraction', 'plugins'],
+    'timeout': 60,
+  }]
 
 #Chunking tests(depends on chunking module)
   chunking_test_deps = [
@@ -3018,14 +2937,15 @@ if catch2_dep.found()
     dependency('yams_crypto'),
   ]
 
-  chunking_exe = executable('chunking',
-    files('unit/chunking/chunking_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + chunking_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Chunking tests
+  catch2_test_table += [{
+    'name': 'chunking',
+    'target': 'chunking',
+    'sources': files('unit/chunking/chunking_test.cpp'),
+    'deps': chunking_test_deps,
+    'suite': ['catch2', 'unit', 'chunking'],
+    'timeout': 60,
+  }]
 
 #Crypto tests(depends on crypto module)
   crypto_test_deps = [
@@ -3034,41 +2954,43 @@ if catch2_dep.found()
     dependency('yams_crypto'),
   ]
 
-  crypto_exe = executable('crypto',
-    files('unit/crypto/crypto_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + crypto_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Crypto tests
+  catch2_test_table += [{
+    'name': 'crypto',
+    'target': 'crypto',
+    'sources': files('unit/crypto/crypto_test.cpp'),
+    'deps': crypto_test_deps,
+    'suite': ['catch2', 'unit', 'crypto'],
+    'timeout': 60,
+  }]
 
-  grep_service_exe = executable('grep_service',
-    files('unit/app/services/grep_service_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+#Service tests
+  catch2_test_table += [{
+    'name': 'grep_service',
+    'target': 'grep_service',
+    'sources': files('unit/app/services/grep_service_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'grep'],
+    'timeout': 120,
+  }]
 
-  indexing_service_exe = executable('indexing_service',
-    files('unit/app/services/indexing_service_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'indexing_service',
+    'target': 'indexing_service',
+    'sources': files('unit/app/services/indexing_service_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'indexing'],
+    'timeout': 180,
+  }]
 
-  document_service_exe = executable('document_service',
-    files('unit/app/services/document_service_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'document_service',
+    'target': 'document_service',
+    'sources': files('unit/app/services/document_service_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'document', 'concurrency'],
+    'timeout': 180,
+  }]
 
   document_service_update_metadata_exe = executable('document_service_update_metadata',
     files('unit/app/services/document_service_update_metadata_catch2_test.cpp'),
@@ -3079,64 +3001,65 @@ if catch2_dep.found()
     install: false,
   )
 
-  document_ingestion_batch_exe = executable('document_ingestion_batch',
-    files('unit/app/services/document_ingestion_batch_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'document_ingestion_batch',
+    'target': 'document_ingestion_batch',
+    'sources': files('unit/app/services/document_ingestion_batch_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'ingestion', 'batch'],
+    'timeout': 60,
+  }]
 
-  service_utilities_exe = executable('service_utilities',
-    files(
+  catch2_test_table += [{
+    'name': 'service_utilities',
+    'target': 'service_utilities',
+    'sources': files(
       'unit/app/services/service_utilities_test.cpp',
       'unit/app/services/download_metadata_entries_test.cpp',
       'unit/app/services/enhanced_search_config_catch2_test.cpp',
       'unit/app/services/retrieval_service_mapping_catch2_test.cpp',
     ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'utilities'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
 
-  service_deadline_exe = executable('service_deadline',
-    files('unit/app/services/service_deadline_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'service_deadline',
+    'target': 'service_deadline',
+    'sources': files('unit/app/services/service_deadline_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'deadline'],
+    'timeout': 30,
+  }]
 
-  simd_memmem_exe = executable('simd_memmem',
-    files('unit/app/services/simd_memmem_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'simd_memmem',
+    'target': 'simd_memmem',
+    'sources': files('unit/app/services/simd_memmem_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'simd'],
+    'timeout': 60,
+  }]
 
-  grep_regex_exe = executable('grep_regex',
-    files('unit/app/services/grep_regex_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'grep_regex',
+    'target': 'grep_regex',
+    'sources': files('unit/app/services/grep_regex_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'grep'],
+    'timeout': 60,
+  }]
 
-  literal_extractor_exe = executable('literal_extractor',
-    files('unit/app/services/literal_extractor_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  catch2_test_table += [{
+    'name': 'literal_extractor',
+    'target': 'literal_extractor',
+    'sources': files('unit/app/services/literal_extractor_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'literal'],
+    'timeout': 60,
+  }]
 
   search_test_deps = [
     dependency('spdlog'),
@@ -3184,237 +3107,8 @@ if catch2_dep.found()
 #Test Registrations
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 
-#Metadata tests
-  test('metadata_retrieval_schema', catch2_metadata_retrieval_exe,
-    suite: ['catch2', 'unit', 'metadata', 'retrieval'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
 #Removed : metadata_search test - HybridSearchEngine specific
 
-
-  test('metadata_migration_validation', catch2_metadata_migration_exe,
-    suite: ['catch2', 'unit', 'metadata', 'migration'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('metadata_unit', catch2_metadata_unit_exe,
-    suite: ['catch2', 'unit', 'metadata', 'yams-metadata'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('connection_pool', catch2_connection_pool_exe,
-    suite: ['catch2', 'unit', 'metadata', 'connection_pool'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('document_snapshots', catch2_document_snapshots_exe,
-    suite: ['catch2', 'unit', 'metadata', 'snapshots'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('kg_store', catch2_kg_store_exe,
-    suite: ['catch2', 'unit', 'metadata', 'kg'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('kg_write_buffer', catch2_kg_write_buffer_exe,
-    suite: ['catch2', 'unit', 'metadata', 'kg'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('database', catch2_database_exe,
-    suite: ['catch2', 'unit', 'metadata', 'database'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('metadata_corruption', catch2_metadata_corruption_exe,
-    suite: ['catch2', 'unit', 'metadata', 'corruption'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('fts5', catch2_fts5_exe,
-    suite: ['catch2', 'unit', 'metadata', 'fts5'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('tree_builder', catch2_tree_builder_exe,
-    suite: ['catch2', 'unit', 'metadata', 'tree_builder'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('tree_differ', catch2_tree_differ_exe,
-    suite: ['catch2', 'unit', 'metadata', 'tree_differ'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('path_tree_delete', catch2_path_tree_delete_exe,
-    suite: ['catch2', 'unit', 'metadata', 'path_tree'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('session_isolation', catch2_session_isolation_exe,
-    suite: ['catch2', 'unit', 'metadata', 'session'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('metadata_repository', catch2_metadata_repository_exe,
-    suite: ['catch2', 'unit', 'metadata', 'repository'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-  test('metadata_content_transaction', catch2_metadata_content_transaction_exe,
-    suite: ['catch2', 'unit', 'metadata', 'repository', 'transaction'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('metadata_sync_adapter', catch2_metadata_sync_adapter_exe,
-    suite: ['catch2', 'unit', 'metadata', 'memory-sync'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('topology_sync_adapter', catch2_topology_sync_adapter_exe,
-    suite: ['catch2', 'unit', 'metadata', 'topology', 'memory-sync'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('metadata_repository_cache', catch2_metadata_repository_cache_exe,
-    suite: ['catch2', 'unit', 'metadata', 'cache'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('topology_baseline', catch2_topology_baseline_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('topology_identity', catch2_topology_identity_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('topology_factory', catch2_topology_factory_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('topology_kmeans', catch2_topology_kmeans_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('topology_representative_rule', catch2_topology_representative_rule_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('topology_roads', catch2_topology_roads_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('topology_road_sidecar', catch2_topology_road_sidecar_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('topology_roads_incremental', catch2_topology_roads_incremental_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('topology_input_event_time', catch2_topology_input_event_time_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('topology_ordered_members', catch2_topology_ordered_members_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('topology_codec', catch2_topology_codec_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('topology_metadata_store', catch2_topology_metadata_store_exe,
-    suite: ['catch2', 'unit', 'topology'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('string_interner', catch2_string_interner_exe,
-    suite: ['catch2', 'unit', 'search'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('binary_quantization', catch2_binary_quantization_exe,
-    suite: ['catch2', 'unit', 'vector'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('fuzzy_index_prioritization', catch2_fuzzy_index_prioritization_exe,
-    suite: ['catch2', 'unit', 'metadata', 'fuzzy'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('kg_store_alias_entities', catch2_kg_store_alias_entities_exe,
-    suite: ['catch2', 'unit', 'metadata', 'kg'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('fts_queryspec_integration', catch2_fts_queryspec_integration_exe,
-    suite: ['catch2', 'unit', 'metadata', 'fts'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('tags_queryspec_integration', catch2_tags_queryspec_integration_exe,
-    suite: ['catch2', 'unit', 'metadata', 'tags'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('query_helpers_integration', catch2_query_helpers_integration_exe,
-    suite: ['catch2', 'unit', 'metadata', 'query_helpers'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
 
   test('metadata_schema', catch2_metadata_schema_exe,
     suite: ['catch2', 'unit', 'metadata', 'schema'],
@@ -3429,55 +3123,6 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300,
     is_parallel: false
-  )
-
-  test('fts5_failure_scenarios', catch2_fts5_failure_scenarios_exe,
-    suite: ['catch2', 'unit', 'metadata', 'fts5', 'failure'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180  # Includes concurrent and large content tests
-  )
-
-  test('corpus_stats', catch2_corpus_stats_exe,
-    suite: ['catch2', 'unit', 'metadata', 'corpus_stats'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('repository_foundation', catch2_repository_foundation_exe,
-    suite: ['catch2', 'unit', 'metadata', 'repository', 'foundation'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-#Core tests
-  test('core_cpp23_features', core_cpp23_features_exe,
-    suite: ['catch2', 'unit', 'core', 'cpp23'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('core_cpp23_features_fallback', core_cpp23_features_fallback_exe,
-    suite: ['catch2', 'unit', 'core', 'cpp23'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('core_magic_numbers', core_magic_numbers_exe,
-    suite: ['catch2', 'unit', 'core', 'magic'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('core_uuid', core_uuid_exe,
-    suite: ['catch2', 'unit', 'core', 'uuid'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('core_checked_arithmetic', core_checked_arithmetic_exe,
-    suite: ['catch2', 'unit', 'core', 'arithmetic'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
   )
 
   test('config_parse_utils', config_parse_utils_exe,
@@ -3499,173 +3144,23 @@ if catch2_dep.found()
     timeout: 30
   )
 
-  test('detection', detection_exe,
-    suite: ['catch2', 'unit', 'detection'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('plugins_catch2', plugins_catch2_exe,
-    suite: ['catch2', 'unit', 'plugins'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
   test('integrity_catch2', integrity_catch2_exe,
     suite: ['catch2', 'unit', 'integrity'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: host_machine.system() == 'windows' ? 600 : 120
   )
 
-#Content tests
-  test('content_handlers', content_handlers_exe,
-    suite: ['catch2', 'unit', 'content', 'handlers'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('archive_content_handler', archive_content_handler_exe,
-    suite: ['catch2', 'unit', 'content', 'archive'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('html_extractor_robust', html_extractor_robust_exe,
-    suite: ['catch2', 'unit', 'extraction', 'html'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120  # Allow longer timeout for large file tests
-  )
-
-  test('plain_text_extractor', plain_text_extractor_exe,
-    suite: ['catch2', 'unit', 'extraction'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('text_basic_handler', text_basic_handler_exe,
-    suite: ['catch2', 'unit', 'extraction'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('builtin_content_extractor', builtin_content_extractor_exe,
-    suite: ['catch2', 'unit', 'extraction', 'content_extractor'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('text_extraction_fts5_pipeline', text_extraction_fts5_pipeline_exe,
-    suite: ['catch2', 'unit', 'extraction', 'pipeline', 'fts5'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('plugin_process', plugin_process_exe,
-    suite: ['catch2', 'unit', 'extraction', 'plugin'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('plugin_process_minimal', plugin_process_minimal_exe,
-    suite: ['catch2', 'unit', 'extraction', 'plugin', 'debug'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120,
-    is_parallel: false
-  )
-
   test('plugin_process_launcher', plugin_process_launcher_exe,
-    suite: ['catch2', 'unit', 'extraction', 'plugin', 'launcher'],
+    suite: ['catch2', 'unit', 'extraction', 'plugins', 'launcher'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path, 'YAMS_SOURCE_DIR': meson.project_source_root() },
     timeout: host_machine.system() == 'windows' ? 180 : 120,
 #PyInstaller process tests have resource contention when run in parallel
     is_parallel: false
   )
 
-  test('jsonrpc_client', jsonrpc_client_exe,
-    suite: ['catch2', 'unit', 'extraction', 'jsonrpc'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('external_plugin_extractor', external_plugin_extractor_exe,
-    suite: ['catch2', 'unit', 'extraction', 'plugin'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-#Chunking tests
-  test('chunking', chunking_exe,
-    suite: ['catch2', 'unit', 'chunking'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-#Crypto tests
-  test('crypto', crypto_exe,
-    suite: ['catch2', 'unit', 'crypto'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-#Service tests
-  test('grep_service', grep_service_exe,
-    suite: ['catch2', 'unit', 'services', 'grep'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('indexing_service', indexing_service_exe,
-    suite: ['catch2', 'unit', 'services', 'indexing'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-  test('document_service', document_service_exe,
-    suite: ['catch2', 'unit', 'services', 'document'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-  test('document_ingestion_batch', document_ingestion_batch_exe,
-    suite: ['catch2', 'unit', 'services', 'ingestion', 'batch'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('service_utilities', service_utilities_exe,
-    suite: ['catch2', 'unit', 'services', 'utilities'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
-  test('service_deadline', service_deadline_exe,
-    suite: ['catch2', 'unit', 'services', 'deadline'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('simd_memmem', simd_memmem_exe,
-    suite: ['catch2', 'unit', 'services', 'simd'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('grep_regex', grep_regex_exe,
-    suite: ['catch2', 'unit', 'services', 'grep'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('literal_extractor', literal_extractor_exe,
-    suite: ['catch2', 'unit', 'services', 'literal'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
 #Search tests
   test('hybrid_search', hybrid_search_exe,
-    suite: ['catch2', 'unit', 'search', 'hybrid'],
+    suite: ['catch2', 'unit', 'search', 'hybrid', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
@@ -3675,7 +3170,7 @@ if catch2_dep.found()
   )
 
   test('hybrid_search_slow', hybrid_search_exe,
-    suite: ['catch2', 'slow', 'search', 'hybrid'],
+    suite: ['catch2', 'slow', 'search', 'hybrid', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
@@ -3686,7 +3181,7 @@ if catch2_dep.found()
 
   if not _test_address_sanitizer
     test('corpus_stats_search_integration', corpus_stats_search_integration_exe,
-      suite: ['catch2', 'integration', 'search', 'corpus_stats'],
+      suite: ['catch2', 'integration', 'search', 'corpus-stats'],
       env: {
         'LD_LIBRARY_PATH': _test_env_ld_library_path,
         'YAMS_DISABLE_VECTORS': '1',
@@ -3696,40 +3191,12 @@ if catch2_dep.found()
 
   endif
 
-#Daemon tests
-  test('daemon_fsm_suite', catch2_daemon_fsm_exe,
-    suite: ['catch2', 'unit', 'daemon', 'fsm'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
   daemon_metrics_timeout = (yams_sanitize_thread or yams_sanitize_address) ? 240 : 180
 
   test('daemon_metrics_status', catch2_daemon_metrics_status_exe,
-    suite: ['catch2', 'unit', 'daemon', 'metrics', 'status'],
+    suite: ['catch2', 'unit', 'daemon', 'metrics', 'status', 'concurrency'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: daemon_metrics_timeout,
-    is_parallel: false
-  )
-
-  test('daemon_metrics_core', catch2_daemon_metrics_core_exe,
-    suite: ['catch2', 'unit', 'daemon', 'metrics', 'core'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('daemon_components', catch2_daemon_components_exe,
-    suite: ['catch2', 'unit', 'daemon', 'components'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
-  test('p2p_transport', catch2_p2p_transport_exe,
-    suite: ['catch2', 'unit', 'daemon', 'p2p', 'network'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
     is_parallel: false
   )
 
@@ -3771,70 +3238,8 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  test('peer_registry', catch2_peer_registry_exe,
-    suite: ['catch2', 'unit', 'daemon', 'p2p', 'sqlite'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
-  test('p2p_manager', catch2_p2p_manager_exe,
-    suite: ['catch2', 'unit', 'daemon', 'p2p', 'network', 'sqlite'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
-  test('admission_policy', catch2_admission_policy_exe,
-    suite: ['catch2', 'unit', 'daemon', 'admission-policy'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
-  test('grep_result_window', catch2_grep_result_window_exe,
-    suite: ['catch2', 'unit', 'daemon', 'grep'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('search_admission_controller', catch2_search_admission_controller_exe,
-    suite: ['catch2', 'unit', 'daemon', 'search-admission'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
-  test('ingest_metrics_publisher', catch2_ingest_metrics_publisher_exe,
-    suite: ['catch2', 'unit', 'daemon', 'ingest-metrics'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
-  test('topology_manager', catch2_topology_manager_exe,
-    suite: ['catch2', 'unit', 'daemon', 'topology-manager'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
-  test('embedding_lifecycle', catch2_embedding_lifecycle_exe,
-    suite: ['catch2', 'unit', 'daemon', 'embedding-lifecycle'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
-  test('write_coordinator', catch2_write_coordinator_exe,
-    suite: ['catch2', 'unit', 'daemon', 'write-coordinator'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
   test('repair_service', catch2_repair_service_exe,
-    suite: ['catch2', 'unit', 'daemon', 'repair', 'stuck-docs'],
+    suite: ['catch2', 'unit', 'daemon', 'repair', 'stuck-docs', 'concurrency'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -3851,87 +3256,32 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  test('daemon_protocol', catch2_daemon_protocol_exe,
-    suite: ['catch2', 'unit', 'daemon', 'protocol'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
   test('daemon_background_processing', catch2_daemon_background_exe,
-    suite: ['catch2', 'unit', 'daemon', 'background'],
+    suite: ['catch2', 'unit', 'daemon', 'background', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
 
   test('daemon_background_processing_slow', catch2_daemon_background_exe,
-    suite: ['catch2', 'slow', 'daemon', 'background'],
+    suite: ['catch2', 'slow', 'daemon', 'background', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
 
-  test('daemon_graph_component', catch2_daemon_graph_component_exe,
-    suite: ['catch2', 'unit', 'daemon', 'graph', 'pbi-009'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('graph_services', catch2_graph_services_exe,
-    suite: ['catch2', 'unit', 'services', 'graph'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('daemon_component_submodule', catch2_daemon_component_submodule_exe,
-    suite: ['catch2', 'unit', 'daemon', 'components', 'yams-zns'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('embedding_service_timing', catch2_embedding_service_timing_exe,
-    suite: ['catch2', 'unit', 'daemon', 'embedding', 'startup'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('startup_replay', catch2_startup_replay_exe,
-    suite: ['catch2', 'unit', 'daemon', 'startup', 'fuzz-smoke'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('gradient_limiter', catch2_gradient_limiter_exe,
-    suite: ['catch2', 'unit', 'daemon', 'gradient'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
   test('work_coordinator', catch2_work_coordinator_exe,
-    suite: ['catch2', 'unit', 'daemon', 'work-coordinator'],
+    suite: ['catch2', 'unit', 'daemon', 'work-coordinator', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
 
   test('work_coordinator_slow', catch2_work_coordinator_exe,
-    suite: ['catch2', 'slow', 'daemon', 'work-coordinator'],
+    suite: ['catch2', 'slow', 'daemon', 'work-coordinator', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
-  )
-
-  test('post_ingest_queue_unit', catch2_post_ingest_queue_unit_exe,
-    suite: ['catch2', 'unit', 'daemon', 'post-ingest'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('pressure_limited_poller', catch2_pressure_limited_poller_exe,
-    suite: ['catch2', 'unit', 'daemon', 'poller'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
   )
 
   test('assert_val', catch2_assert_val_exe,
@@ -3942,14 +3292,8 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  test('metrics_consistency', catch2_metrics_consistency_exe,
-    suite: ['catch2', 'unit', 'daemon', 'metrics'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
   test('search_service', catch2_search_service_exe,
-    suite: ['catch2', 'unit', 'services', 'search'],
+    suite: ['catch2', 'unit', 'services', 'search', 'concurrency'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
@@ -3963,16 +3307,8 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  test('fts5_stress', catch2_fts5_stress_exe,
-    suite: ['catch2', 'stress', 'metadata', 'fts5'],
-    args: ['--allow-running-no-tests'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 300,
-    is_parallel: false
-  )
-
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
-    suite: ['catch2', 'unit', 'daemon', 'plugin'],
+    suite: ['catch2', 'unit', 'daemon', 'plugins'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
@@ -4002,7 +3338,7 @@ if catch2_dep.found()
   endif
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
-    suite: ['catch2', 'unit', 'daemon', 'plugin', 'infrastructure'],
+    suite: ['catch2', 'unit', 'daemon', 'plugins', 'infrastructure', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
@@ -4010,7 +3346,7 @@ if catch2_dep.found()
   )
 
   test('plugin_infrastructure_slow', catch2_plugin_infrastructure_exe,
-    suite: ['catch2', 'slow', 'daemon', 'plugin', 'infrastructure'],
+    suite: ['catch2', 'slow', 'daemon', 'plugins', 'infrastructure', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
@@ -4018,212 +3354,21 @@ if catch2_dep.found()
   )
 
   test('external_plugin_host', catch2_external_plugin_host_exe,
-    suite: ['catch2', 'unit', 'daemon', 'plugin', 'external'],
+    suite: ['catch2', 'unit', 'daemon', 'plugins', 'external'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
-  )
-
-  test('extractor_adapter', catch2_extractor_adapter_exe,
-    suite: ['catch2', 'unit', 'daemon', 'extractor'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('repair_scheduling_adapter', catch2_repair_scheduling_exe,
-    suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('repair_maintenance', catch2_repair_maintenance_exe,
-    suite: ['catch2', 'unit', 'daemon', 'repair'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('service_manager', catch2_service_manager_exe,
-    suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('memory_sync_apply', catch2_memory_sync_apply_exe,
-    suite: ['catch2', 'unit', 'daemon', 'memory-sync'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('db_recovery', catch2_db_recovery_exe,
-    suite: ['catch2', 'unit', 'daemon', 'db_recovery'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('db_salvage', catch2_db_salvage_exe,
-    suite: ['catch2', 'unit', 'daemon', 'db_salvage'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('db_recovery_vacuum', catch2_db_recovery_vacuum_exe,
-    suite: ['catch2', 'unit', 'daemon', 'db_recovery'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('storage_preflight', catch2_storage_preflight_exe,
-    suite: ['catch2', 'unit', 'daemon', 'storage_preflight'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('tune_advisor_snapshot', catch2_tune_advisor_snapshot_exe,
-    suite: ['catch2', 'unit', 'daemon', 'tune_advisor'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('repair_hold_hints', catch2_repair_hold_hints_exe,
-    suite: ['catch2', 'unit', 'daemon', 'tuning'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('physical_walk_ttl', catch2_physical_walk_ttl_exe,
-    suite: ['catch2', 'unit', 'daemon', 'tuning'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('streaming_processor', catch2_streaming_processor_exe,
-    suite: ['catch2', 'unit', 'daemon', 'streaming', 'yams-3s4'],
-    args: ['--allow-running-no-tests'],  # Skips entirely on Windows
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
   )
 
   test('in_process_transport', catch2_in_process_transport_exe,
-    suite: ['catch2', 'unit', 'daemon', 'streaming', 'inprocess'],
+    suite: ['catch2', 'unit', 'daemon', 'streaming', 'inprocess', 'concurrency'],
     args: ['--allow-running-no-tests'],  # Skips entirely on Windows
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
-  )
-
-  test('sandbox_detection', catch2_sandbox_detection_exe,
-    suite: ['catch2', 'unit', 'daemon', 'sandbox'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('multiplex_client', catch2_multiplex_client_exe,
-    suite: ['catch2', 'unit', 'daemon', 'multiplex', 'yams-3s4'],
-    args: ['--allow-running-no-tests'],  # All tests have [.requires_daemon] tag
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('entity_graph_service', catch2_entity_graph_service_exe,
-    suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-#These tests use ServiceManager / WorkCoordinator which have resource contention
-#when run in parallel with other daemon tests - run sequentially
-  test('service_manager_shutdown', catch2_service_manager_shutdown_exe,
-    suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120,
-    is_parallel: false
-  )
-
-  test('service_manager_degraded', catch2_service_manager_degraded_exe,
-    suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120,
-    is_parallel: false
-  )
-
-  test('repair_binary_filter', catch2_repair_binary_filter_exe,
-    suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120,
-    is_parallel: false
-  )
-
-  test('abi_model_provider_dim', catch2_abi_model_provider_dim_exe,
-    suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('status_readiness_vector_usable', catch2_status_readiness_vector_usable_exe,
-    suite: ['catch2', 'unit', 'daemon', 'readiness'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('model_provider_registry', catch2_model_provider_registry_exe,
-    suite: ['catch2', 'unit', 'daemon', 'model_provider'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('simeon_model_provider', catch2_simeon_model_provider_exe,
-    suite: ['catch2', 'unit', 'daemon', 'model_provider', 'simeon'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('embedding_recovery', catch2_embedding_recovery_exe,
-    suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
-    args: ['--allow-running-no-tests'],  # Skips entirely on Windows
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120,
-    is_parallel: false
-  )
-
-  test('request_io_edge', catch2_request_io_edge_exe,
-    suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
-    args: ['--allow-running-no-tests'],  # Placeholder tests - all skipped
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120,
-    is_parallel: false
-  )
-
-  test('daemon_warm_bench', catch2_daemon_warm_bench_exe,
-    suite: ['catch2', 'unit', 'daemon', 'bench', 'yams-3s4'],
-    args: ['--allow-running-no-tests'],  # Bench only runs when YAMS_BENCH_FAST=1
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('request_lifetime', catch2_request_lifetime_exe,
-    suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
-    args: ['--allow-running-no-tests'],  # Skips when streaming disabled
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120,
-    is_parallel: false
-  )
-
-  test('writer_drain_cleanup', catch2_writer_drain_cleanup_exe,
-    suite: ['catch2', 'unit', 'daemon', 'ipc', 'mux'],
-    args: ['--allow-running-no-tests'],  # Skips entirely on Windows
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
-
-  test('asio_connection_pool', catch2_asio_connection_pool_exe,
-    suite: ['catch2', 'unit', 'daemon', 'connection-pool'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120,
-    is_parallel: false
   )
 
   test('asio_transport_exhaustion', catch2_asio_transport_exhaustion_exe,
-    suite: ['catch2', 'unit', 'daemon', 'transport', 'max-inflight'],
+    suite: ['catch2', 'unit', 'daemon', 'transport', 'max-inflight', 'concurrency'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120,
     is_parallel: false,
@@ -4232,7 +3377,7 @@ if catch2_dep.found()
   )
 
   test('asio_transport_inflight_close_ipc_prefix', catch2_asio_transport_inflight_close_ipc_prefix_exe,
-    suite: ['catch2', 'unit', 'daemon', 'transport', 'ipc'],
+    suite: ['catch2', 'unit', 'daemon', 'transport', 'ipc', 'concurrency'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120,
     is_parallel: false,
@@ -4241,24 +3386,12 @@ if catch2_dep.found()
   )
 
   test('daemon', catch2_daemon_exe,
-    suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
+    suite: ['catch2', 'unit', 'daemon', 'concurrency'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
 #Disable ABI plugins to avoid TSAN + ONNX memory pressure causing SIGKILL
       'YAMS_DISABLE_ABI_PLUGINS': '1',
     },
-    timeout: 120
-  )
-
-  test('tune_advisor_threshold', catch2_tune_advisor_threshold_exe,
-    suite: ['catch2', 'unit', 'daemon', 'tune', 'advisor'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('tuning_allocation', catch2_tuning_allocation_exe,
-    suite: ['catch2', 'unit', 'daemon', 'tune', 'allocation'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
 
@@ -4286,54 +3419,6 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  test('tuning_reconciliation', catch2_tuning_reconciliation_exe,
-    suite: ['catch2', 'unit', 'daemon', 'tune', 'reconciliation'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('post_ingest_dynamic_cap_recovery', catch2_post_ingest_dynamic_cap_recovery_exe,
-    suite: ['catch2', 'unit', 'daemon', 'tune', 'post-ingest'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('resource_governance', catch2_resource_governance_exe,
-    suite: ['catch2', 'unit', 'daemon', 'governance'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('host_pressure', catch2_host_pressure_exe,
-    suite: ['catch2', 'unit', 'daemon', 'governance'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('timing_audit', catch2_timing_audit_exe,
-    suite: ['catch2', 'unit', 'daemon', 'timing-audit'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('dynamic_cap_sentinel', catch2_dynamic_cap_sentinel_exe,
-    suite: ['catch2', 'unit', 'daemon', 'tune', 'dynamic-cap'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('idle_zero_concurrency', catch2_idle_zero_concurrency_exe,
-    suite: ['catch2', 'unit', 'daemon', 'tune', 'idle'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('health_check_isolation', catch2_health_check_isolation_exe,
-    suite: ['catch2', 'unit', 'daemon', 'state', 'health-check'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
   if host_machine.system() != 'windows'
     test('socket_server_teardown', catch2_socket_server_teardown_exe,
       suite: ['catch2', 'unit', 'daemon', 'socket', 'shutdown'],
@@ -4341,30 +3426,6 @@ if catch2_dep.found()
       timeout: 60
     )
   endif
-
-  test('vector_index_coordinator_bulk_scope', catch2_vector_index_coordinator_bulk_scope_exe,
-    suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('vector_index_coordinator_coalesce', catch2_vector_index_coordinator_coalesce_exe,
-    suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('vector_index_coordinator_telemetry', catch2_vector_index_coordinator_telemetry_exe,
-    suite: ['catch2', 'unit', 'daemon', 'vector', 'coordinator'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('tuning_loop_wakeup', catch2_tuning_loop_wakeup_exe,
-    suite: ['catch2', 'unit', 'daemon', 'tune', 'wakeup'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
 
   if onnx_dep.found()
     test('onnx_model_pool', catch2_onnx_model_pool_exe,
@@ -4374,32 +3435,7 @@ if catch2_dep.found()
     )
   endif
 
-  test('cli_init_command', catch2_cli_init_command_exe,
-    suite: ['catch2', 'unit', 'cli', 'init'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120,
-    is_parallel: false
-  )
-
-  test('storage_backend', catch2_storage_backend_exe,
-    suite: ['catch2', 'unit', 'storage', 'backend'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('version_vector', catch2_version_vector_exe,
-    suite: ['catch2', 'unit', 'memory-sync'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
   test('memory_sync_apply_health', catch2_memory_sync_apply_health_exe,
-    suite: ['catch2', 'unit', 'memory-sync'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('memory_sync_records', catch2_memory_sync_records_exe,
     suite: ['catch2', 'unit', 'memory-sync'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
@@ -4418,7 +3454,7 @@ if catch2_dep.found()
   )
 
   test('memory_sync_service', catch2_memory_sync_service_exe,
-    suite: ['catch2', 'unit', 'memory-sync'],
+    suite: ['catch2', 'unit', 'memory-sync', 'concurrency'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
@@ -4436,14 +3472,14 @@ if catch2_dep.found()
   )
 
   test('storage_submodule', catch2_storage_submodule_exe,
-    suite: ['catch2', 'unit', 'storage', 'yams-8b9'],
+    suite: ['catch2', 'unit', 'storage', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
   )
 
   test('storage_submodule_slow', catch2_storage_submodule_exe,
-    suite: ['catch2', 'slow', 'storage', 'yams-8b9'],
+    suite: ['catch2', 'slow', 'storage', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
@@ -4455,88 +3491,6 @@ if catch2_dep.found()
     timeout: 60
   )
 
-  test('wal_submodule', catch2_wal_submodule_exe,
-    suite: ['catch2', 'unit', 'wal'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('search_submodule', catch2_search_submodule_exe,
-    suite: ['catch2', 'unit', 'search', 'yams-1yq'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-  test('search_vector_stage', catch2_search_vector_stage_exe,
-    suite: ['catch2', 'unit', 'search', 'vector_stage'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-  test('search_vector_stage_route_only', catch2_search_vector_stage_route_only_exe,
-    suite: ['catch2', 'unit', 'search', 'vector_stage'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-  test('search_vector_stage_road_beam', catch2_search_vector_stage_road_beam_exe,
-    suite: ['catch2', 'unit', 'search', 'vector_stage'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-  test('search_vector_stage_road_walk', catch2_search_vector_stage_road_walk_exe,
-    suite: ['catch2', 'unit', 'search', 'vector_stage'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-  test('symspell_search', catch2_symspell_search_exe,
-    suite: ['catch2', 'unit', 'search', 'symspell'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('search_vector_stage_timeout', catch2_search_vector_stage_timeout_exe,
-    suite: ['catch2', 'unit', 'search', 'vector_stage'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('evidence_search_pipeline', catch2_evidence_search_pipeline_exe,
-    suite: ['catch2', 'unit', 'search', 'evidence_pipeline'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-#TuningSlot provenance tests
-  test('tuning_slot', catch2_tuning_slot_exe,
-    suite: ['catch2', 'unit', 'search', 'tuner'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-#R3 tuning features + reward tests
-  test('tuning_features', catch2_tuning_features_exe,
-    suite: ['catch2', 'unit', 'search', 'tuner'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-#SearchTuner FSM tests(Phase 2 of Epic yams - 7ez4)
-  test('search_tuner', catch2_search_tuner_exe,
-    suite: ['catch2', 'unit', 'search', 'tuner', 'yams-7ez4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-#InternalBenchmark tests(Phase 3 of Epic yams - 7ez4)
-  test('internal_benchmark', catch2_internal_benchmark_exe,
-    suite: ['catch2', 'unit', 'search', 'benchmark', 'yams-7ez4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
   test('benchmark_invocation', catch2_benchmark_invocation_exe,
     suite: ['catch2', 'unit', 'benchmark', 'harness'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -4544,35 +3498,23 @@ if catch2_dep.found()
     timeout: 30
   )
 
-  test('retrieval_benchmark_support', catch2_retrieval_benchmark_support_exe,
-    suite: ['catch2', 'unit', 'search', 'benchmark'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
-  test('relevance_label_store', catch2_relevance_label_store_exe,
-    suite: ['catch2', 'unit', 'search', 'relevance'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
-  )
-
   heavy_submodule_timeout = (yams_sanitize_thread or yams_sanitize_address) ? 600 : 300
 
   test('compression_submodule', catch2_compression_submodule_exe,
-    suite: ['catch2', 'unit', 'compression', 'yams-pmf'],
+    suite: ['catch2', 'unit', 'compression', 'concurrency'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: heavy_submodule_timeout
   )
 
   test('mcp_submodule', catch2_mcp_submodule_exe,
-    suite: ['catch2', 'unit', 'mcp', 'yams-84g'],
+    suite: ['catch2', 'unit', 'mcp', 'concurrency'],
     args: ['~[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
   )
 
   test('mcp_submodule_slow', catch2_mcp_submodule_exe,
-    suite: ['catch2', 'slow', 'mcp', 'yams-84g'],
+    suite: ['catch2', 'slow', 'mcp', 'concurrency'],
     args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
@@ -4589,49 +3531,49 @@ if catch2_dep.found()
   }
 
   test('cli_common', catch2_cli_common_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'common'],
+    suite: ['catch2', 'unit', 'cli', 'common'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 120
   )
 
   test('cli_config', catch2_cli_config_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'config'],
+    suite: ['catch2', 'unit', 'cli', 'config'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 180
   )
 
   test('cli_commands', catch2_cli_commands_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'commands'],
+    suite: ['catch2', 'unit', 'cli', 'commands'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 180
   )
 
   test('cli_model_plugin', catch2_cli_model_plugin_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'model-plugin'],
+    suite: ['catch2', 'unit', 'cli', 'model-plugin'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 120
   )
 
   test('cli_doctor', catch2_cli_doctor_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'doctor'],
+    suite: ['catch2', 'unit', 'cli', 'doctor'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 180
   )
 
   test('cli_graph', catch2_cli_graph_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'graph'],
+    suite: ['catch2', 'unit', 'cli', 'graph'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 120
   )
 
   test('cli_daemon', catch2_cli_daemon_exe,
-    suite: ['catch2', 'unit', 'cli', 'yams-cli', 'daemon'],
+    suite: ['catch2', 'unit', 'cli', 'daemon'],
     env: cli_test_env,
     depends: [yams_cli_exe, version_header],
     timeout: 120
@@ -4641,78 +3583,27 @@ if catch2_dep.found()
 #Migrated from GTest as part of yams - 3s4 / yams - 1d4
   if get_option('enable-vector-tests')
     test('vector_submodule', catch2_vector_submodule_exe,
-      suite: ['catch2', 'unit', 'vector', 'yams-1d4'],
+      suite: ['catch2', 'unit', 'vector', 'concurrency'],
       env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
       timeout: heavy_submodule_timeout
     )
   endif
 
-  test('vector_vec0_cosine_order', catch2_vector_vec0_cosine_order_exe,
-    suite: ['catch2', 'unit', 'vector'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-  test('vector_sync_adapter', catch2_vector_sync_adapter_exe,
-    suite: ['catch2', 'unit', 'vector', 'memory-sync'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
-
-#API submodule tests(content store, metadata API)
-#Migrated from GTest as part of yams - 3s4 / api
-  test('api_submodule', catch2_api_submodule_exe,
-    suite: ['catch2', 'unit', 'api', 'yams-api'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-#Tokenizer tests(WordPiece, Unigram, special token injection)
-  test('tokenizer', catch2_tokenizer_exe,
-    suite: ['catch2', 'unit', 'vector', 'yams-tokenizer'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-#Downloader submodule tests(download manager, resume, CAS)
-#Migrated from GTest as part of yams - 3s4 / downloader
-  test('downloader_submodule', catch2_downloader_submodule_exe,
-    suite: ['catch2', 'unit', 'downloader', 'yams-downloader'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-#Resolve submodule tests(resolver, backends)
-#Migrated from GTest as part of yams - 3s4 / resolve
-  test('resolve_submodule', catch2_resolve_submodule_exe,
-    suite: ['catch2', 'unit', 'resolve', 'yams-resolve'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-#Manifest submodule tests(manifest manager, serialization, reconstruction)
-#Migrated from GTest as part of yams - 3s4 / yams - 1jm
-  test('manifest_submodule', catch2_manifest_submodule_exe,
-    suite: ['catch2', 'unit', 'manifest', 'yams-manifest'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-#Repair submodule tests(embedding repair scan)
-#Migrated from GTest as part of yams - 3s4 / yams - 1jm
-#Note : --allow - running - no - tests needed because tests skip when YAMS_DISABLE_VECTORS = 1
-  test('repair_submodule', catch2_repair_submodule_exe,
-    suite: ['catch2', 'unit', 'repair', 'yams-repair'],
-    args: ['--allow-running-no-tests'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
-
-#Versioning submodule tests(document versioning, indexer)
-#Migrated from GTest as part of yams - 3s4 / yams - 1jm
-  test('versioning_submodule', catch2_versioning_submodule_exe,
-    suite: ['catch2', 'unit', 'versioning', 'yams-versioning'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 180
-  )
 endif
+
+foreach t : catch2_test_table
+  t_exe = executable(t.get('target', 'catch2_' + t['name']), t['sources'],
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + t['deps'],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  test(t['name'], t_exe,
+    suite: t['suite'],
+    args: t.get('args', []),
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: t['timeout'],
+    is_parallel: t.get('is_parallel', true),
+  )
+endforeach
