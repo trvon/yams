@@ -267,6 +267,14 @@ test('promotion_reconciliation',
   timeout: 30,
 )
 
+prerelease_prune_tests = files('scripts/test_prune_prereleases.py')
+test('prerelease_prune',
+  python_exe,
+  args: [prerelease_prune_tests],
+  suite: ['unit', 'policy', 'release'],
+  timeout: 30,
+)
+
 cli11_dep = cli11_resolved_dep
 if not cli11_dep.found()
   cli11_dep = declare_dependency()
