@@ -777,6 +777,11 @@ ServiceManager::~ServiceManager() {
     }
 }
 
+void ServiceManager::publishResolvedDataDir(std::filesystem::path dir) {
+    std::lock_guard lock(resolvedDataDirMutex_);
+    resolvedDataDir_ = std::move(dir);
+}
+
 yams::Result<void> ServiceManager::initialize() {
     return initializeImpl({});
 }
@@ -826,7 +831,7 @@ ServiceManager::initializeImpl(const std::function<void()>& beforePoolConfigure)
     }
 
     // Persist resolved dataDir for downstream components/telemetry
-    resolvedDataDir_ = std::move(dataDir);
+    publishResolvedDataDir(std::move(dataDir));
 
     // Configure required pool defaults before initializing storage-backed services.
     auto poolResult = configureResourcePools(beforePoolConfigure);
@@ -1510,13 +1515,16 @@ void ServiceManager::shutdown() {
             return;
         }
 
+        // shutdownInvoked_ decides whether this manager tears down; the FSM state only decides
+        // whether to dispatch. Teardown must run even if the FSM already reads ShuttingDown or
+        // Stopped (an init path may have recorded the shutdown), otherwise this manager's
+        // WorkCoordinator threads and background coroutines keep running.
         try {
             auto ss = serviceFsm_.snapshot();
-            if (ss.state == ServiceManagerState::ShuttingDown ||
-                ss.state == ServiceManagerState::Stopped) {
-                return;
+            if (ss.state != ServiceManagerState::ShuttingDown &&
+                ss.state != ServiceManagerState::Stopped) {
+                serviceFsm_.dispatch(ShutdownEvent{});
             }
-            serviceFsm_.dispatch(ShutdownEvent{});
         } catch (const std::exception& e) {
             spdlog::debug("FSM dispatch failed for ShutdownEvent: {}", e.what());
         } catch (...) {
@@ -1660,7 +1668,7 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
     if (!directoryResult) {
         return directoryResult.error();
     }
-    resolvedDataDir_ = dataDir;
+    publishResolvedDataDir(dataDir);
 
     auto storageDecision =
         yams::storage::resolveStorageBootstrapDecision(config_.configFilePath, dataDir);
@@ -1676,7 +1684,7 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
         if (!directoryResult) {
             return directoryResult.error();
         }
-        resolvedDataDir_ = dataDir;
+        publishResolvedDataDir(dataDir);
     }
 
     if (storageDecision.value().fallbackTriggered) {
@@ -2339,9 +2347,15 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                                                                    /*keepHot=*/true,
                                                                    /*warmup=*/true);
                     });
+                embeddingService->setStartupStateGetter([weakSelf] {
+                    auto self = weakSelf.lock();
+                    return self ? self->getServiceManagerFsmSnapshot().state
+                                : ServiceManagerState::Stopped;
+                });
                 embeddingService->setEmbeddingsCommittedCallback(
                     [weakSelf](const std::vector<std::string>& hashes) {
                         if (auto self = weakSelf.lock()) {
+                            self->markVectorDbReadyAfterCommit(hashes);
                             // The job's vectors are committed: queue them for memory sync too.
                             self->notifyMemorySyncEmbeddingsCommitted(hashes);
                             self->requestTopologyRebuild("embedding_batch_complete", hashes);
@@ -2544,6 +2558,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     refreshPluginStatusSnapshot();
 
     spdlog::info("[ServiceManager] Phase: Vector DB Init (post-plugins, sync).");
+    // Unconditional: with vectors disabled or unresolved the old marker stayed Idle while init
+    // work was running, so the waiter reported "idle" during a real stall.
+    startupPhase_.begin(StartupPhase::VectorsInitialized);
     if (!vectorsDisabled) {
         auto vdbRes = vectorSystemManager_ ? vectorSystemManager_->initializeOnce(dataDir)
                                            : Result<bool>(false);
@@ -2551,6 +2568,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("[ServiceManager] Vector DB init failed: {}", vdbRes.error().message);
         } else if (vdbRes.value()) {
             spdlog::info("[ServiceManager] Vector DB initialized successfully");
+            startupPhase_.begin(StartupPhase::EmbeddingReconcile);
             // Wire the VDB into the coordinator now that it's ready.
             if (vectorIndexCoordinator_) {
                 if (auto vdb = getVectorDatabase()) {
@@ -2719,9 +2737,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // All replicated destination stores are now initialized. Attach the ordered apply callback
     // only at this point so the convergence worker cannot race database/vector/KG startup.
+    // Coarse phase markers for the init-waiter warning. Atomics only: both calls below can block
+    // for minutes on a corpus-sized scan, so a status path must never query memory-sync.
+    startupPhase_.begin(StartupPhase::MemorySyncApply);
     if (auto applyResult = configureMemorySyncApply(); !applyResult) {
         co_return applyResult.error();
     }
+    startupPhase_.begin(StartupPhase::DirectP2p);
     if (auto p2pResult = initializeDirectP2p(dataDir); !p2pResult) {
         co_return Error{p2pResult.error().code,
                         "direct P2P initialization failed: " + p2pResult.error().message};
@@ -2730,12 +2752,17 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Full SearchEngine construction is non-critical. Metadata search is already available via
     // MetadataRepository, and RequestDispatcher falls back to metadata while searchEngineReady is
     // false. Schedule the heavier hybrid/FTS/vector bootstrap out-of-band.
+    // SearchBuild means "build scheduled", not "build finished": buildEngine runs later and
+    // dispatches SearchEngineBuiltEvent. AsyncInitComplete therefore marks the end of this setup
+    // coroutine, not daemon readiness or search completion.
+    startupPhase_.begin(StartupPhase::SearchBuild);
     scheduleInitialSearchBuild();
     spdlog::info("[ServiceManager] Phase: Search Engine Build Scheduled.");
     if (ingestService_) {
         ingestService_->start();
     }
     spdlog::info("[ServiceManager] Phase: Ingest Service Started.");
+    startupPhase_.begin(StartupPhase::AsyncInitComplete);
 
     co_return Result<void>();
 }
@@ -4107,7 +4134,7 @@ void ServiceManager::clearModelProviderError() {
     lifecycleFsm_.setSubsystemDegraded("embeddings", false);
 }
 
-void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::string& error) {
+void ServiceManager::testing_setModelProviderDegraded(bool degraded, const std::string& error) {
     try {
         lifecycleFsm_.setSubsystemDegraded("embeddings", degraded, error);
         if (pluginManager_) {
@@ -4122,9 +4149,9 @@ void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::s
             }
         }
     } catch (const std::exception& e) {
-        spdlog::debug("__test_setModelProviderDegraded failed: {}", e.what());
+        spdlog::debug("testing_setModelProviderDegraded failed: {}", e.what());
     } catch (...) {
-        spdlog::debug("__test_setModelProviderDegraded failed with unknown exception");
+        spdlog::debug("testing_setModelProviderDegraded failed with unknown exception");
     }
 }
 
@@ -4331,6 +4358,22 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                 self->topologyManager_.restoreDirtyHashes(rebuildHashes);
             } else if (result.value().skipped) {
                 self->topologyManager_.restoreDirtyHashes(rebuildHashes);
+            } else if (result.value().stored) {
+                // A new epoch invalidates the cached route index; rebuild it here, in the
+                // background rebuild task, instead of inside the next routed query.
+                if (auto engine = self->searchEngineManager_.getCachedEngine()) {
+                    try {
+                        if (auto warmed = engine->prewarmTopologyRouting(); !warmed) {
+                            spdlog::debug("[ServiceManager] topology route warm-up failed: {}",
+                                          warmed.error().message);
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::debug("[ServiceManager] topology route warm-up threw: {}",
+                                      e.what());
+                    } catch (...) {
+                        spdlog::debug("[ServiceManager] topology route warm-up threw (unknown)");
+                    }
+                }
             }
         }
 

@@ -1,6 +1,7 @@
 #include <yams/topology/topology_input_extractor.h>
 #include <yams/vector/vector_database.h>
 
+#include <spdlog/spdlog.h>
 #include <simeon/minhash.hpp>
 
 #include <algorithm>
@@ -19,6 +20,211 @@
 namespace yams::topology {
 
 namespace {
+
+bool isAsciiDigit(char c) noexcept {
+    return c >= '0' && c <= '9';
+}
+
+bool isAsciiSpace(char c) noexcept {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+/// Read exactly `count` decimal digits at `pos`; advances `pos` on success.
+bool parseFixedDigits(std::string_view s, std::size_t& pos, std::size_t count, int& out) noexcept {
+    if (pos + count > s.size()) {
+        return false;
+    }
+    int value = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        const char c = s[pos + i];
+        if (!isAsciiDigit(c)) {
+            return false;
+        }
+        value = value * 10 + (c - '0');
+    }
+    pos += count;
+    out = value;
+    return true;
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian civil date (H. Hinnant's days_from_civil).
+constexpr std::int64_t daysFromCivil(std::int64_t year, unsigned month, unsigned day) noexcept {
+    year -= month <= 2;
+    const std::int64_t era = (year >= 0 ? year : year - 399) / 400;
+    const auto yoe = static_cast<unsigned>(year - era * 400);
+    const unsigned doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + static_cast<std::int64_t>(doe) - 719468;
+}
+
+constexpr bool isLeapYear(int year) noexcept {
+    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+constexpr int daysInMonth(int year, int month) noexcept {
+    constexpr int kDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    return month == 2 && isLeapYear(year) ? 29 : kDays[month - 1];
+}
+
+/// Optionally signed run of decimal digits spanning the whole view.
+std::optional<std::int64_t> parseEpochSeconds(std::string_view s) noexcept {
+    std::size_t pos = 0;
+    bool negative = false;
+    if (s[0] == '-' || s[0] == '+') {
+        negative = s[0] == '-';
+        pos = 1;
+    }
+    if (pos >= s.size() || s.size() - pos > 18) {
+        return std::nullopt;
+    }
+    std::int64_t value = 0;
+    for (; pos < s.size(); ++pos) {
+        if (!isAsciiDigit(s[pos])) {
+            return std::nullopt;
+        }
+        value = value * 10 + (s[pos] - '0');
+    }
+    return negative ? -value : value;
+}
+
+} // namespace
+
+std::optional<std::int64_t> parseTopologyEventTime(std::string_view value) noexcept {
+    while (!value.empty() && isAsciiSpace(value.front())) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && isAsciiSpace(value.back())) {
+        value.remove_suffix(1);
+    }
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    if (auto epoch = parseEpochSeconds(value)) {
+        return epoch;
+    }
+
+    std::size_t pos = 0;
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    if (!parseFixedDigits(value, pos, 4, year) || pos >= value.size() || value[pos] != '-') {
+        return std::nullopt;
+    }
+    ++pos;
+    if (!parseFixedDigits(value, pos, 2, month) || pos >= value.size() || value[pos] != '-') {
+        return std::nullopt;
+    }
+    ++pos;
+    if (!parseFixedDigits(value, pos, 2, day)) {
+        return std::nullopt;
+    }
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) {
+        return std::nullopt;
+    }
+    std::int64_t seconds =
+        daysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) * 86400;
+    if (pos == value.size()) {
+        return seconds;
+    }
+
+    if (value[pos] != 'T' && value[pos] != 't' && value[pos] != ' ') {
+        return std::nullopt;
+    }
+    ++pos;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    if (!parseFixedDigits(value, pos, 2, hour) || pos >= value.size() || value[pos] != ':') {
+        return std::nullopt;
+    }
+    ++pos;
+    if (!parseFixedDigits(value, pos, 2, minute)) {
+        return std::nullopt;
+    }
+    if (pos < value.size() && value[pos] == ':') {
+        ++pos;
+        if (!parseFixedDigits(value, pos, 2, second)) {
+            return std::nullopt;
+        }
+        if (pos < value.size() && (value[pos] == '.' || value[pos] == ',')) {
+            ++pos;
+            std::size_t fractionDigits = 0;
+            while (pos < value.size() && isAsciiDigit(value[pos])) {
+                ++pos;
+                ++fractionDigits;
+            }
+            if (fractionDigits == 0) {
+                return std::nullopt;
+            }
+        }
+    }
+    if (hour > 23 || minute > 59 || second > 60) {
+        return std::nullopt;
+    }
+    seconds += static_cast<std::int64_t>(hour) * 3600 + minute * 60 + second;
+    if (pos == value.size()) {
+        return seconds;
+    }
+
+    if (value[pos] == 'Z' || value[pos] == 'z') {
+        ++pos;
+        return pos == value.size() ? std::optional<std::int64_t>{seconds} : std::nullopt;
+    }
+    if (value[pos] != '+' && value[pos] != '-') {
+        return std::nullopt;
+    }
+    const bool negativeOffset = value[pos] == '-';
+    ++pos;
+    int offsetHours = 0;
+    int offsetMinutes = 0;
+    if (!parseFixedDigits(value, pos, 2, offsetHours)) {
+        return std::nullopt;
+    }
+    if (pos < value.size() && value[pos] == ':') {
+        ++pos;
+    }
+    if (pos < value.size() && !parseFixedDigits(value, pos, 2, offsetMinutes)) {
+        return std::nullopt;
+    }
+    if (pos != value.size() || offsetHours > 23 || offsetMinutes > 59) {
+        return std::nullopt;
+    }
+    const std::int64_t offset = static_cast<std::int64_t>(offsetHours) * 3600 + offsetMinutes * 60;
+    // `+02:00` means the local clock runs ahead of UTC, so UTC is earlier.
+    return negativeOffset ? seconds + offset : seconds - offset;
+}
+
+namespace {
+
+/// Lift `event_time` / `session_id` out of the loaded metadata map; createdTime is the event
+/// time fallback (zero = unknown). Never fails: a bad `event_time` is logged and skipped.
+void resolveTypedInputFields(TopologyDocumentInput& input, const metadata::DocumentInfo& document,
+                             TopologyExtractionStats& stats) {
+    if (auto it = input.metadata.find(std::string(kTopologyEventTimeMetadataKey));
+        it != input.metadata.end()) {
+        if (auto parsed = parseTopologyEventTime(it->second)) {
+            input.eventTime = parsed;
+            ++stats.eventTimesFromMetadata;
+        } else {
+            ++stats.eventTimesInvalid;
+            spdlog::debug("[topology] ignoring unparsable {} '{}' on document {}",
+                          kTopologyEventTimeMetadataKey, it->second, document.sha256Hash);
+        }
+    }
+    if (!input.eventTime.has_value()) {
+        const auto created =
+            static_cast<std::int64_t>(document.createdTime.time_since_epoch().count());
+        if (created != 0) {
+            input.eventTime = created;
+            ++stats.eventTimesFromCreatedTime;
+        }
+    }
+    if (auto it = input.metadata.find(std::string(kTopologySessionIdMetadataKey));
+        it != input.metadata.end() && !it->second.empty()) {
+        input.sessionId = it->second;
+        ++stats.sessionIdsLoaded;
+    }
+}
 
 constexpr std::string_view kDocNodePrefix = "doc:";
 constexpr std::uint64_t kFnv1aOffset = 14695981039346656037ULL;
@@ -723,6 +929,7 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
             input.metadata["file_extension"] = document.fileExtension;
             ++localStats.metadataMapsLoaded;
         }
+        resolveTypedInputFields(input, document, localStats);
 
         if (nodeResult.value().has_value()) {
             input.neighbors = collectNeighborsForDocument(

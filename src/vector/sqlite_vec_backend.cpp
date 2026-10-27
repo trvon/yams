@@ -214,6 +214,15 @@ inline bool normalizeEmbeddingInPlace(std::vector<float>& embedding) {
     return true;
 }
 
+inline bool isUnitNormEmbedding(const std::vector<float>& embedding) {
+    constexpr double kUnitNormTolerance = 1e-4;
+    double norm_sq = 0.0;
+    for (float val : embedding) {
+        norm_sq += static_cast<double>(val) * static_cast<double>(val);
+    }
+    return std::abs(norm_sq - 1.0) < kUnitNormTolerance;
+}
+
 inline bool isFiniteEmbedding(const std::vector<float>& embedding) {
     for (float val : embedding) {
         if (!std::isfinite(val)) {
@@ -3215,18 +3224,25 @@ private:
         return record;
     }
 
-    // Prepare all statements
+    // Prepare the statements that are not prepared yet. initialize() and createTables() both
+    // call this on an existing database; preparing over a live handle would leak it, and the
+    // leaked statements keep the connection alive after sqlite3_close_v2().
     void prepareStatements() {
         std::lock_guard stmt_lock(stmt_mutex_);
-        sqlite3_prepare_v2(db_, kInsertVector, -1, &stmt_insert_, nullptr);
-        sqlite3_prepare_v2(db_, kSelectByChunkId, -1, &stmt_select_by_chunk_id_, nullptr);
-        sqlite3_prepare_v2(db_, kSelectByRowid, -1, &stmt_select_by_rowid_, nullptr);
-        sqlite3_prepare_v2(db_, kSelectByDocumentHash, -1, &stmt_select_by_doc_, nullptr);
-        sqlite3_prepare_v2(db_, kDeleteByChunkId, -1, &stmt_delete_by_chunk_id_, nullptr);
-        sqlite3_prepare_v2(db_, kDeleteByDocumentHash, -1, &stmt_delete_by_doc_, nullptr);
-        sqlite3_prepare_v2(db_, kGetRowidByChunkId, -1, &stmt_get_rowid_, nullptr);
-        sqlite3_prepare_v2(db_, kCountVectors, -1, &stmt_count_, nullptr);
-        sqlite3_prepare_v2(db_, kHasEmbedding, -1, &stmt_has_embedding_, nullptr);
+        auto prepare = [this](const char* sql, sqlite3_stmt*& stmt) {
+            if (!stmt) {
+                sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+            }
+        };
+        prepare(kInsertVector, stmt_insert_);
+        prepare(kSelectByChunkId, stmt_select_by_chunk_id_);
+        prepare(kSelectByRowid, stmt_select_by_rowid_);
+        prepare(kSelectByDocumentHash, stmt_select_by_doc_);
+        prepare(kDeleteByChunkId, stmt_delete_by_chunk_id_);
+        prepare(kDeleteByDocumentHash, stmt_delete_by_doc_);
+        prepare(kGetRowidByChunkId, stmt_get_rowid_);
+        prepare(kCountVectors, stmt_count_);
+        prepare(kHasEmbedding, stmt_has_embedding_);
     }
 
     // Finalize all statements
@@ -3403,6 +3419,11 @@ private:
         return true;
     }
 
+    // The vec0 table is a derived ranking index over `vectors.embedding`. vec0 ranks by L2
+    // distance, and L2 order equals cosine order only for unit vectors, so it holds the unit
+    // direction of each stored row. The source blob keeps its original magnitude for
+    // export/sync and exact cosine scoring. Zero rows have no direction: they are left out and
+    // never match, as in the exact scan and the Simeon PQ index.
     Result<void> rebuildVec0DimUnlocked(size_t dim) {
         auto table_result = ensureVec0TableUnlocked(dim);
         if (!table_result) {
@@ -3451,6 +3472,10 @@ private:
             }
 
             auto& [rowid, embedding] = *decoded;
+            if (isZeroNormEmbedding(embedding) || !normalizeEmbeddingInPlace(embedding)) {
+                continue;
+            }
+            YAMS_DCHECK(isUnitNormEmbedding(embedding), "vec0 rows must be unit length");
             sqlite3_bind_int64(insert_stmt, 1, static_cast<sqlite3_int64>(rowid));
             sqlite3_bind_blob(insert_stmt, 2, embedding.data(),
                               static_cast<int>(embedding.size() * sizeof(float)), SQLITE_TRANSIENT);
@@ -4512,6 +4537,16 @@ ORDER BY rowid
         if (candidateRowids != nullptr && candidateRowids->empty()) {
             return std::vector<VectorRecord>{};
         }
+        // Rows in the vec0 table are unit length (see rebuildVec0DimUnlocked); rank the unit
+        // query against them so L2 order is cosine order. A zero query has no direction and is
+        // rejected, as the exact scan rejects it.
+        std::vector<float> unit_query = query_embedding;
+        if (!isFiniteEmbedding(unit_query) || isZeroNormEmbedding(unit_query) ||
+            !normalizeEmbeddingInPlace(unit_query)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "vec0 vector search requires a finite, non-zero query embedding"};
+        }
+        YAMS_DCHECK(isUnitNormEmbedding(unit_query), "vec0 query must be unit length");
 
         const size_t query_dim = query_embedding.size();
 
@@ -4534,9 +4569,8 @@ ORDER BY rowid
                                                        std::string(sqlite3_errmsg(db_))};
         }
 
-        sqlite3_bind_blob(stmt, 1, query_embedding.data(),
-                          static_cast<int>(query_embedding.size() * sizeof(float)),
-                          SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, unit_query.data(),
+                          static_cast<int>(unit_query.size() * sizeof(float)), SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(k));
         if (config_.vec0_phss_enabled) {
             sqlite3_bind_int(stmt, 3, 1);
@@ -4581,6 +4615,14 @@ ORDER BY rowid
                              std::string(sqlite3_errmsg(db_))};
         }
 
+        // Unit L2 order and cosine order agree up to float rounding in vec0's distance; order
+        // the returned rows by the cosine score they report, with the PQ path's tie-break.
+        std::stable_sort(records.begin(), records.end(), [](const auto& a, const auto& b) {
+            if (a.relevance_score != b.relevance_score) {
+                return a.relevance_score > b.relevance_score;
+            }
+            return a.chunk_id < b.chunk_id;
+        });
         return records;
     }
 

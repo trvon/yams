@@ -155,6 +155,7 @@ bool mallocStackLoggingEnabled() {
 #endif
 }
 
+#if defined(__APPLE__)
 bool mallocStackLoggingNoCompactEnabled() {
 #ifdef YAMS_TESTING
     return envFlagEnabled("MallocStackLoggingNoCompact");
@@ -163,6 +164,7 @@ bool mallocStackLoggingNoCompactEnabled() {
     return enabled;
 #endif
 }
+#endif
 
 #if defined(__APPLE__)
 std::pair<std::uint64_t, std::uint64_t> sampleMallocStackLogFootprint() {
@@ -722,21 +724,12 @@ void DaemonMetrics::startPolling() {
         return; // Already running
     }
     // Mark as not stopped before spawning the coroutine
-    {
-        std::lock_guard<std::mutex> lk(pollingMutex_);
-        pollingStopped_ = false;
-    }
+    pollingCompletion_.markStarted();
     coordinator_->spawnDetached(strand_, pollingLoop());
 }
 
 void DaemonMetrics::stopPolling() {
-    bool shouldStopPolling = true;
-    {
-        std::lock_guard<std::mutex> lk(pollingMutex_);
-        if (pollingStopped_) {
-            shouldStopPolling = false; // Not running or already stopped.
-        }
-    }
+    const bool shouldStopPolling = !pollingCompletion_.isStopped();
 
     if (shouldStopPolling) {
         // Signal the polling loop to stop
@@ -750,10 +743,7 @@ void DaemonMetrics::stopPolling() {
             }
         });
 
-        {
-            std::unique_lock<std::mutex> lk(pollingMutex_);
-            pollingCv_.wait(lk, [this]() { return pollingStopped_; });
-        }
+        pollingCompletion_.wait();
     }
 
     // getSnapshot()/refresh() may dispatch off-strand collectors even when the
@@ -938,11 +928,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
     }
     // Clear timer pointer and signal that polling has stopped
     pollingTimer_ = nullptr;
-    {
-        std::lock_guard<std::mutex> lk(pollingMutex_);
-        pollingStopped_ = true;
-    }
-    pollingCv_.notify_one();
+    pollingCompletion_.complete();
     spdlog::info("DaemonMetrics: polling loop stopped");
 }
 

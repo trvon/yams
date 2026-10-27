@@ -1,6 +1,7 @@
 #include <yams/profiling.h>
 #include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_baseline.h>
+#include <yams/topology/topology_member_order.h>
 #include <yams/topology/topology_representatives.h>
 #include <yams/topology/topology_sgc.h>
 #include <yams/vector/binary_quantization.h>
@@ -144,7 +145,7 @@ splitOversizedComponent(std::vector<std::size_t>& component, std::size_t maxComp
 
 void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>& component,
                    const Adjacency& adjacency, std::span<const TopologyDocumentInput> documents,
-                   std::size_t routingRepresentativeCount) {
+                   std::size_t routingRepresentativeCount, RepresentativeRule representativeRule) {
     if (component.empty()) {
         return;
     }
@@ -200,7 +201,8 @@ void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>&
         }
         return documents[a].documentHash > documents[b].documentHash;
     });
-    const std::size_t medoidIdx = *medoidIt;
+    const std::size_t medoidIdx =
+        applyRepresentativeRule(representativeRule, documents, component, *medoidIt);
     const double medoidScore = weightedDegree[medoidIdx];
 
     ClusterArtifact cluster;
@@ -224,7 +226,10 @@ void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>&
                                            .representativeScore = std::max(0.0, medoidScore)};
     cluster.centroidEmbedding = detail::meanEmbedding(documents, component);
     cluster.routingRepresentatives = selectDiverseRoutingRepresentatives(
-        documents, component, cluster.centroidEmbedding, routingRepresentativeCount);
+        documents, component, cluster.centroidEmbedding, routingRepresentativeCount,
+        representativeRule == RepresentativeRule::Medoid
+            ? std::span<const float>(documents[medoidIdx].embedding)
+            : std::span<const float>(cluster.centroidEmbedding));
     cluster.memberDocumentHashes.reserve(component.size());
     std::ranges::transform(component, std::back_inserter(cluster.memberDocumentHashes),
                            [&](std::size_t idx) { return documents[idx].documentHash; });
@@ -269,6 +274,7 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
     batch.snapshotId = makeSnapshotId(static_cast<std::uint64_t>(nowMillis));
     batch.algorithm = "connected_components_v1";
     batch.inputKind = config.inputKind;
+    batch.representativeRule = config.representativeRule;
     batch.embeddingSpaceIdentity = config.embeddingSpaceIdentity;
     batch.generatedAtUnixSeconds = static_cast<std::uint64_t>(nowSeconds);
 
@@ -384,12 +390,19 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
     batch.memberships.reserve(effectiveDocuments.size());
     for (const auto& component : components) {
         emitComponent(batch, component, adjacency, effectiveDocuments,
-                      config.routingRepresentativeCount);
+                      config.routingRepresentativeCount, config.representativeRule);
     }
 
     std::ranges::sort(batch.clusters, {}, &ClusterArtifact::clusterId);
     std::ranges::sort(batch.memberships, {}, &DocumentClusterMembership::documentHash);
+    // Roads read the raw neighbor lists. The filtered `adjacency` only carries cross-cluster
+    // edges where an oversized component was split, so it cannot be the road source.
+    batch.roads = detail::accumulateClusterRoads(
+        effectiveDocuments, detail::primaryClusterByHash(batch), config.roadMaxPerCluster);
+    batch.roadMaxPerCluster = batch.roads.empty() ? 0 : config.roadMaxPerCluster;
     (void)applyOrthogonalBoundarySpill(effectiveDocuments, config, batch);
+    // After spill: the order is a permutation over the final member list, replicas included.
+    applyClusterMemberOrders(batch, effectiveDocuments, config.roadOrder);
 
     return batch;
 }
@@ -559,6 +572,9 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
     merged.snapshotId = rebuilt.value().snapshotId;
     merged.algorithm = rebuilt.value().algorithm;
     merged.inputKind = rebuilt.value().inputKind;
+    // Like routing_representatives, a rule change between builds only reaches untouched clusters
+    // on the next full rebuild; the snapshot reports the rule the rebuilt region used.
+    merged.representativeRule = rebuilt.value().representativeRule;
     merged.embeddingSpaceIdentity =
         existing.embeddingSpaceIdentity == rebuilt.value().embeddingSpaceIdentity
             ? existing.embeddingSpaceIdentity
@@ -695,6 +711,43 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
                   return lhs.documentHash < rhs.documentHash;
               });
 
+    // Roads: the region rebuild above saw only its own documents, so its roads are discarded and
+    // recomputed here against the merged memberships. Untouched pairs keep the previous snapshot's
+    // road; every road with an endpoint in a removed or rebuilt cluster (reused ids included) is
+    // recomputed from the region's raw neighbor lists, mirroring out-of-region targets; each
+    // source re-ranks its top-K over the union. The result is derived, not full: provenance
+    // records the epoch of the last full accumulation and how many passes sit on top of it.
+    merged.roadUnavailableReason.clear();
+    if (config.roadMaxPerCluster == 0) {
+        merged.roads.clear();
+        merged.roadMaxPerCluster = 0;
+        merged.roadsFullBuildEpoch = 0;
+        merged.roadsIncrementalPasses = 0;
+    } else {
+        std::unordered_set<std::string> retiredClusterIds = removedClusterIds;
+        for (const auto& cluster : rebuilt.value().clusters) {
+            retiredClusterIds.insert(cluster.clusterId);
+        }
+        merged.roads = detail::deriveIncrementalRoads(
+            existing.roads, retiredClusterIds, changedDocuments, merged, config.roadMaxPerCluster);
+        merged.roadMaxPerCluster = merged.roads.empty() ? 0 : config.roadMaxPerCluster;
+        merged.roadsFullBuildEpoch = existing.roadsIncrementalPasses == 0
+                                         ? existing.topologyEpoch
+                                         : existing.roadsFullBuildEpoch;
+        merged.roadsIncrementalPasses = existing.roadsIncrementalPasses + 1;
+    }
+
+    // Member orders: the rebuilt clusters carry the order the region build computed over their
+    // final members; untouched clusters keep the order they had, like the representative rule a
+    // kind change only reaches them on the next full rebuild. None clears every order.
+    merged.orderUnavailableReason.clear();
+    if (config.roadOrder == RoadOrderKind::None) {
+        for (auto& cluster : merged.clusters) {
+            cluster.orderKind = RoadOrderKind::None;
+            cluster.orderedMembers.clear();
+        }
+    }
+
     if (stats != nullptr) {
         stats->documentsProcessed = changedDocuments.size();
         stats->clustersCreated = rebuilt.value().clusters.size();
@@ -750,14 +803,13 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
     const auto index =
         buildRouteIndex(artifacts, request.denseAnnCandidateLimit > 0,
                         request.bqCandidateLimit > 0 || request.denseAnnCandidateLimit > 0,
-                        request.bqPrefixDimension);
+                        request.bqPrefixDimension, request.bqRotation);
     return route(request, artifacts, index);
 }
 
-SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifacts,
-                                                            bool buildDenseAnnIndex,
-                                                            bool buildBqIndex,
-                                                            std::size_t bqPrefixDimension) {
+SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(
+    const TopologyArtifactBatch& artifacts, bool buildDenseAnnIndex, bool buildBqIndex,
+    std::size_t bqPrefixDimension, yams::vector::BinaryRotation bqRotation) {
     YAMS_ZONE_SCOPED_N("topology::route::buildIndex");
     SparseRouteIndex index;
     index.centroidNorms.reserve(artifacts.clusters.size());
@@ -796,8 +848,9 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifa
         }
     }
     if (buildBqIndex && !centroids.empty()) {
-        auto bqIndex =
-            yams::vector::BinaryQuantizedIndex::build(centroidIds, centroids, bqPrefixDimension);
+        auto bqIndex = yams::vector::BinaryQuantizedIndex::build(
+            centroidIds, centroids, bqPrefixDimension, bqRotation,
+            yams::vector::kDefaultBinaryRotationSeed);
         if (bqIndex) {
             index.centroidBqIndex = std::move(bqIndex).value();
             YAMS_PLOT("topology::bq_index_bytes",

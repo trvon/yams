@@ -21,7 +21,6 @@
 namespace yams::daemon {
 
 boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
-    YAMS_ZONE_SCOPED_N("handleSearchRequest");
     try {
         const auto requestStart = std::chrono::steady_clock::now();
         const std::string traceId = yams::core::generateUUID();

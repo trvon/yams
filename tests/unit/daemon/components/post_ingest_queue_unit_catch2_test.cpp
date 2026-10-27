@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <future>
 #include <string>
 #include <thread>
 
@@ -131,6 +132,71 @@ TEST_CASE("LruCache access refreshes position", "[daemon][post-ingest][cache][ca
 // ============================================================================
 // PostIngestQueue Stage Constants
 // ============================================================================
+
+TEST_CASE("PostIngestQueue resume notifications drain paused extraction work and quiesce",
+          "[daemon][post-ingest][lifecycle][wake-timer][catch2]") {
+    auto& bus = InternalEventBus::instance();
+    auto normal = bus.get_or_create_channel<InternalEventBus::PostIngestTask>("post_ingest", 8);
+    auto rpc = bus.get_or_create_channel<InternalEventBus::PostIngestTask>("post_ingest_rpc", 8);
+    InternalEventBus::PostIngestTask stale;
+    while (normal->try_pop(stale)) {
+    }
+    while (rpc->try_pop(stale)) {
+    }
+
+    WorkCoordinator coordinator;
+    coordinator.start(1);
+    {
+        PostIngestQueue queue{nullptr, nullptr, {}, nullptr, nullptr, &coordinator, nullptr, 8};
+        queue.pauseStage(PostIngestQueue::Stage::Extraction);
+        queue.start();
+
+        auto firstDrain = std::make_shared<std::promise<void>>();
+        auto firstDrained = firstDrain->get_future();
+        queue.setDrainCallback([firstDrain]() { firstDrain->set_value(); });
+        REQUIRE(
+            queue.tryEnqueue(PostIngestQueue::Task{.hash = "resume-one", .mime = "text/plain"}));
+        CHECK(queue.failed() == 0);
+        CHECK(queue.size() == 1);
+
+        queue.resumeStage(PostIngestQueue::Stage::Extraction);
+        REQUIRE(firstDrained.wait_for(500ms) == std::future_status::ready);
+        CHECK(queue.failed() == 1);
+        CHECK(queue.size() == 0);
+
+        queue.pauseAll();
+        auto secondDrain = std::make_shared<std::promise<void>>();
+        auto secondDrained = secondDrain->get_future();
+        queue.setDrainCallback([secondDrain]() { secondDrain->set_value(); });
+        REQUIRE(
+            queue.tryEnqueue(PostIngestQueue::Task{.hash = "resume-all", .mime = "text/plain"}));
+        CHECK(queue.size() == 1);
+
+        queue.resumeAll();
+        REQUIRE(secondDrained.wait_for(500ms) == std::future_status::ready);
+        CHECK(queue.failed() == 2);
+        CHECK(queue.size() == 0);
+        queue.setDrainCallback({});
+        queue.stop();
+
+        queue.pauseStage(PostIngestQueue::Stage::Extraction);
+        queue.start();
+        auto restartedDrain = std::make_shared<std::promise<void>>();
+        auto restartedDrained = restartedDrain->get_future();
+        queue.setDrainCallback([restartedDrain]() { restartedDrain->set_value(); });
+        REQUIRE(queue.tryEnqueue(
+            PostIngestQueue::Task{.hash = "resume-restarted", .mime = "text/plain"}));
+        CHECK(queue.size() == 1);
+        queue.resumeStage(PostIngestQueue::Stage::Extraction);
+        REQUIRE(restartedDrained.wait_for(500ms) == std::future_status::ready);
+        CHECK(queue.failed() == 3);
+        CHECK(queue.size() == 0);
+        queue.setDrainCallback({});
+        queue.stop();
+    }
+    coordinator.stop();
+    coordinator.join();
+}
 
 TEST_CASE("PostIngestQueue rejects and accounts KG admission after stop",
           "[daemon][post-ingest][lifecycle][catch2]") {
@@ -313,15 +379,15 @@ yams::search::QueryConcept makeConcept(const std::string& text, const std::strin
             static_cast<std::uint32_t>(start + text.size())};
 }
 
-const yams::metadata::KGNode& findNode(const DeferredKGBatch& batch, const std::string& key) {
+const yams::metadata::KGNode& findNode(const DeferredKGBatch& batch, std::string_view key) {
     const auto it = std::find_if(batch.nodes.begin(), batch.nodes.end(),
                                  [&](const auto& node) { return node.nodeKey == key; });
     REQUIRE(it != batch.nodes.end());
     return *it;
 }
 
-const DeferredEdge& findEdge(const DeferredKGBatch& batch, const std::string& source,
-                             const std::string& target, const std::string& relation) {
+const DeferredEdge& findEdge(const DeferredKGBatch& batch, std::string_view source,
+                             std::string_view target, std::string_view relation) {
     const auto it =
         std::find_if(batch.deferredEdges.begin(), batch.deferredEdges.end(), [&](const auto& edge) {
             return edge.srcNodeKey == source && edge.dstNodeKey == target &&

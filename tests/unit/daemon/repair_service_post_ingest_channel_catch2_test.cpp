@@ -918,7 +918,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     // The background loop may have already recovered the document, so
     // succeeded==0 is legitimate (the repair is a no-op on already-recovered docs).
     // Regardless of who recovered it, assert the document is no longer in Failed state.
-    CHECK((op->succeeded >= 0));
+    static_cast<void>(op->succeeded);
     {
         // Give the WriteCoordinator time to process the MetadataWriteFacade flush.
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -1087,7 +1087,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     const std::string kModelName = "test-model";
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "never-poison");
-    sm->__test_setModelProvider(provider);
+    sm->testing_setModelProvider(provider);
 
     const auto now =
         std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
@@ -1209,7 +1209,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "never-poison");
     REQUIRE((provider->loadModel(kModelName).has_value()));
-    sm->__test_setModelProvider(provider);
+    sm->testing_setModelProvider(provider);
 
     const std::string hash = std::string(64, 'e');
     const auto now =
@@ -1303,7 +1303,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "poison-pill");
     REQUIRE((provider->loadModel(kModelName).has_value()));
-    sm->__test_setModelProvider(provider);
+    sm->testing_setModelProvider(provider);
 
     auto embedChannel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
@@ -1750,7 +1750,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto provider = std::make_shared<SelectiveFailingModelProvider>(
         vectorDb->getConfig().embedding_dim, "never-poison");
     REQUIRE((provider->loadModel(modelName).has_value()));
-    sm->__test_setModelProvider(provider);
+    sm->testing_setModelProvider(provider);
 
     const auto now =
         std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());

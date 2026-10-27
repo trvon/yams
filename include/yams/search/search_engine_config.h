@@ -132,6 +132,8 @@ struct SearchEngineConfig {
     bool tieredNarrowVectorSearch = false;
     size_t tieredMinCandidates = 10;
     size_t weakQueryMinTextHits = 3;
+    // Compared with the top lexical hit's single-hit score, not its per-batch normalized score.
+    // For FTS5 Text with divisor 25, 0.30 means bm25 <= -7.5; Simeon has its own raw score scale.
     float weakQueryMinTopTextScore = 0.30f;
     bool enableWeakQueryFanoutBoost = true;
     float weakQueryVectorFanoutMultiplier = 2.0f;
@@ -158,13 +160,19 @@ struct SearchEngineConfig {
 
     /// How routed topology members interact with the global vector retriever.
     /// Augment query-scores routed members and unions novel documents with global vector results.
-    /// Narrow filters Vec0 ANN traversal by certified routed membership; other vector engines
-    /// post-filter their bounded global results. Shadow records counterfactual route evidence while
-    /// returning the unchanged global vector leg.
+    /// Narrow restricts the vector leg to a certified route: Simeon PQ ranks the allowed set
+    /// directly (allowed-set ANN) and other engines post-filter their bounded global results, both
+    /// only once the observed route work is admitted, otherwise the global leg is returned. Vec0
+    /// supports neither routed candidates nor allowed-set ANN and always falls back. Shadow records
+    /// counterfactual route evidence while returning the unchanged global vector leg. RouteOnly
+    /// runs only the routed candidate queries with no global fill and without the admission
+    /// certificate; it is an evaluation arm gated by `allowUncertifiedRouteOnly` and downgrades to
+    /// Shadow when the gate is closed.
     enum class TopologyVectorPolicy {
         Augment,
         Narrow,
         Shadow,
+        RouteOnly,
     } topologyVectorPolicy = TopologyVectorPolicy::Shadow;
 
     [[nodiscard]] static constexpr const char*
@@ -176,9 +184,17 @@ struct SearchEngineConfig {
                 return "narrow";
             case TopologyVectorPolicy::Shadow:
                 return "shadow";
+            case TopologyVectorPolicy::RouteOnly:
+                return "route_only";
         }
         return "shadow";
     }
+
+    /// Evaluation gate for TopologyVectorPolicy::RouteOnly (`search.evaluation.
+    /// allow_uncertified_routes`). RouteOnly serves routed candidates whether or not the route is
+    /// certified, so an operator must opt in explicitly; without the gate the policy downgrades to
+    /// Shadow. Never set by corpus tuning.
+    bool allowUncertifiedRouteOnly = false;
 
     enum class TopologyRouteScoringMode {
         Current,
@@ -217,12 +233,46 @@ struct SearchEngineConfig {
     /// Leading coordinate prefix for the centroid BQ index. Only meaningful for
     /// Matryoshka-trained embeddings; zero uses the full dimension.
     size_t topologyRoutingBqPrefixDimension = 0;
+    /// Rotation applied to centroids and queries before taking BQ sign bits. Fwht applies a
+    /// fixed-seed randomized Hadamard rotation (rotate first, then take the prefix); None keeps
+    /// raw-coordinate sign bits.
+    enum class TopologyBqRotation {
+        None,
+        Fwht,
+    } topologyRoutingBqRotation = TopologyBqRotation::None;
+
+    [[nodiscard]] static constexpr const char*
+    topologyBqRotationToString(TopologyBqRotation rotation) noexcept {
+        switch (rotation) {
+            case TopologyBqRotation::None:
+                return "none";
+            case TopologyBqRotation::Fwht:
+                return "fwht";
+        }
+        return "none";
+    }
     /// Include another cluster while its score remains this close to the best route.
     float topologyAdaptiveProbeScoreGap = 0.0f;
     /// Abstain from hard narrowing when the selected/excluded boundary is closer
     /// than this margin. Mixed-corpus calibration favors 0.20; zero disables abstention.
     float topologyNarrowMinBoundaryMargin = 0.20f;
     size_t topologyMaxDocs = 64;
+    /// Road beam for RouteOnly and Augment (`search.topology.road_hops`): expand the selected
+    /// route clusters this many hops along cluster roads, scoring each next cluster by road weight
+    /// times centroid similarity to the query and keeping `topologyRoadBeamWidth` per hop. The
+    /// road-expanded members are queried as extra routes beside the certificate; they never widen
+    /// the certified allowed set, Narrow admission or the routing policy fingerprint. 0 (default)
+    /// is off and leaves every stage byte-identical; the width is read only when hops > 0.
+    size_t topologyRoadHops = 0;
+    size_t topologyRoadBeamWidth = 4;
+    /// Road walk for RouteOnly and Augment (`search.topology.road_walk_window`): around every
+    /// routed hit (certified route hits and road-beam hits) take the members within this many
+    /// positions along the hit's cluster walk order (`ClusterArtifact::orderedMembers`), bounded to
+    /// the cluster, and score them as one extra routed query. Clusters without an order are counted
+    /// and never walked. The walked documents never widen the certified allowed set, Narrow
+    /// admission or the routing policy fingerprint. 0 (default) is off and leaves every stage
+    /// byte-identical.
+    size_t topologyRoadWalkWindow = 0;
     /// Maximum independently scored topology-expansion results returned to shadow/augment.
     /// Zero inherits the global vector result limit for backward-compatible product behavior.
     size_t topologyExpansionOutputLimit = 0;
@@ -540,6 +590,7 @@ struct SearchEngineConfig {
     void applyTopologyPolicyFrom(const SearchEngineConfig& source) {
         topologyRoutingMode = source.topologyRoutingMode;
         topologyVectorPolicy = source.topologyVectorPolicy;
+        allowUncertifiedRouteOnly = source.allowUncertifiedRouteOnly;
         topologyRouteScoringMode = source.topologyRouteScoringMode;
         topologyMinClusters = source.topologyMinClusters;
         topologyMaxClusters = source.topologyMaxClusters;
@@ -548,9 +599,13 @@ struct SearchEngineConfig {
         topologyRoutingAnnCandidateLimit = source.topologyRoutingAnnCandidateLimit;
         topologyRoutingBqCandidateLimit = source.topologyRoutingBqCandidateLimit;
         topologyRoutingBqPrefixDimension = source.topologyRoutingBqPrefixDimension;
+        topologyRoutingBqRotation = source.topologyRoutingBqRotation;
         topologyAdaptiveProbeScoreGap = source.topologyAdaptiveProbeScoreGap;
         topologyNarrowMinBoundaryMargin = source.topologyNarrowMinBoundaryMargin;
         topologyMaxDocs = source.topologyMaxDocs;
+        topologyRoadHops = source.topologyRoadHops;
+        topologyRoadBeamWidth = source.topologyRoadBeamWidth;
+        topologyRoadWalkWindow = source.topologyRoadWalkWindow;
         topologyExpansionOutputLimit = source.topologyExpansionOutputLimit;
         topologyMedoidBoost = source.topologyMedoidBoost;
         topologyEvidenceWeight = source.topologyEvidenceWeight;

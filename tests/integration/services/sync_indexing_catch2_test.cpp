@@ -25,6 +25,12 @@
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
+// Sanitizer builds pass a larger scale (TSan: 10) so waits for indexing match their speed.
+#ifndef YAMS_TEST_TIMEOUT_SCALE
+#define YAMS_TEST_TIMEOUT_SCALE 1
+#endif
+constexpr int kTestTimeoutScale = YAMS_TEST_TIMEOUT_SCALE;
+
 // Windows daemon shutdown hangs at WorkCoordinator thread join - skip until fixed
 // Windows daemon IPC does not yet support this path.
 #ifdef _WIN32
@@ -88,7 +94,7 @@ public:
                           std::chrono::milliseconds totalTimeout = 3000ms,
                           std::chrono::milliseconds pollInterval = 100ms) {
         auto start = std::chrono::steady_clock::now();
-        auto deadline = start + totalTimeout;
+        auto deadline = start + totalTimeout * kTestTimeoutScale;
 
         yams::daemon::GrepRequest req;
         req.pattern = pattern;
@@ -98,7 +104,7 @@ public:
         while (std::chrono::steady_clock::now() < deadline) {
             attempts++;
 
-            auto result = yams::cli::run_sync(client_->grep(req), 1500ms);
+            auto result = yams::cli::run_sync(client_->grep(req), 1500ms * kTestTimeoutScale);
 
             if (result) {
                 size_t matchCount = result.value().matches.size();
@@ -206,7 +212,7 @@ TEST_CASE("SyncIndexing: No delay after sync add", "[integration][sync][indexing
 
     REQUIRE(found);
     // Relaxed timing - focus on correctness over strict performance
-    CHECK(grepMs < 2000);
+    CHECK(grepMs < 2000 * kTestTimeoutScale);
 
     INFO("Grep found content in " << grepMs << "ms");
 }

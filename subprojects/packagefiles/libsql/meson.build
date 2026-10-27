@@ -45,7 +45,7 @@ libsql_lib = custom_target(
     python,
     '-c',
     'import os, shutil, subprocess, sys\n' +
-    'src_dir, profile, libname, output_path, cargo, cargo_target, git_usr_bin = sys.argv[1:8]\n' +
+    'src_dir, profile, libname, output_path, cargo, cargo_target, git_usr_bin, cargo_target_dir = sys.argv[1:9]\n' +
     'env = os.environ.copy()\n' +
     'if git_usr_bin:\n' +
     '    git_dir = os.path.dirname(git_usr_bin)\n' +
@@ -81,13 +81,14 @@ libsql_lib = custom_target(
     '        env.setdefault("CMAKE_MAKE_PROGRAM", ninja)\n' +
     '        env.setdefault("TARGET_CMAKE_MAKE_PROGRAM", ninja)\n' +
     '        env.setdefault(f"CMAKE_MAKE_PROGRAM_{target_env}", ninja)\n' +
-    'cmd = [cargo, "build", "--locked"]\n' +
+    'env.pop("CARGO_TARGET_DIR", None)\n' +
+    'cmd = [cargo, "build", "--locked", "--target-dir", cargo_target_dir]\n' +
     'if cargo_target:\n' +
     '    cmd += ["--target", cargo_target]\n' +
     'if profile == "release":\n' +
     '    cmd.append("--release")\n' +
     'subprocess.check_call(cmd, cwd=src_dir, env=env)\n' +
-    'target_dir = os.path.join(src_dir, "target")\n' +
+    'target_dir = cargo_target_dir\n' +
     'if cargo_target:\n' +
     '    target_dir = os.path.join(target_dir, cargo_target)\n' +
     'lib_path = os.path.join(target_dir, profile, libname)\n' +
@@ -101,7 +102,8 @@ libsql_lib = custom_target(
     '@OUTPUT@',
     cargo,
     cargo_target,
-    git_usr_bin
+    git_usr_bin,
+    join_paths(meson.current_build_dir(), 'cargo-target')
   ],
   build_by_default: true
 )

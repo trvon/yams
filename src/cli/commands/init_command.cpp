@@ -1778,7 +1778,7 @@ private:
     /**
      * @brief Updates config.toml with reranker model path.
      */
-    void updateRerankerConfig(const fs::path& configPath, const fs::path& dataPath,
+    void updateRerankerConfig(const fs::path& configPath, const fs::path& /*dataPath*/,
                               const std::string& selectedRerankerModel) {
         try {
             std::ifstream in(configPath);

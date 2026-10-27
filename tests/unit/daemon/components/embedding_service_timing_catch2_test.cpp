@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -21,6 +22,7 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/connection_pool.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/vector_database.h>
@@ -128,6 +130,9 @@ class EmbeddingServiceTimingTestAccess {
 public:
     static void process(EmbeddingService& service, InternalEventBus::EmbedJob job) {
         service.processEmbedJob(std::move(job));
+    }
+    static bool maintenanceEligible(const EmbeddingService& service, bool idle) {
+        return service.semanticBackfillEligible(idle);
     }
     static void record(EmbeddingService& service, std::string_view phase) {
         service.recordPhaseTiming(phase, std::chrono::steady_clock::now() - 1ms);
@@ -709,6 +714,103 @@ TEST_CASE_METHOD(ServiceDerivationFixture,
                                           ConfigResolver::resolveEmbeddingSelectionPolicy()),
         provider->getEmbeddingSpaceIdentity("test-model"), provider->version, 64);
     CHECK(states.value().at(hash).token.recipe == recipe);
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "Semantic backfill bounds identical-vector cosine before adaptive thresholds",
+                 "[daemon][embedding][semantic-startup]") {
+    yams::test::ScopedEnvVar topK{"YAMS_GRAPH_SEMANTIC_TOPK", "8"};
+    yams::test::ScopedEnvVar threshold{"YAMS_GRAPH_SEMANTIC_THRESHOLD", std::nullopt};
+    auto store = metadata::makeSqliteKnowledgeGraphStore(*pool, {});
+    REQUIRE(store.has_value());
+    std::shared_ptr<metadata::KnowledgeGraphStore> kg(std::move(store.value()));
+    writer = std::make_unique<WriteCoordinator>(io, kg, repo);
+    service->setProviders([this] { return provider; }, [] { return "test-model"; },
+                          [this] { return vectors; }, [kg] { return kg; });
+
+    // Dyadic components and a fixed integer generator make this portable and replayable.
+    // With the old float inverse norm this legal vector's self-cosine rounds above one.
+    std::uint32_t seed = 50;
+    std::vector<float> embedding;
+    double squaredNorm = 0;
+    for (std::size_t i = 0; i < 64; ++i) {
+        seed = seed * 1664525U + 1013904223U;
+        const auto component = static_cast<float>(seed & 65535U) / 32768.0f - 1.0f;
+        embedding.push_back(component);
+        squaredNorm += static_cast<double>(component) * component;
+    }
+    const auto oldInverseNorm = static_cast<float>(1.0 / std::sqrt(squaredNorm));
+    REQUIRE(static_cast<float>(squaredNorm * oldInverseNorm * oldInverseNorm) > 1.0f);
+
+    std::vector<metadata::KGNode> nodes;
+    for (std::size_t i = 0; i < 9; ++i) {
+        std::string documentHash(64, 'a');
+        documentHash.back() = static_cast<char>('0' + i);
+        vector::VectorRecord record;
+        record.chunk_id = documentHash;
+        record.document_hash = documentHash;
+        record.embedding = embedding;
+        record.level = vector::EmbeddingLevel::DOCUMENT;
+        record.metadata["path"] = "/semantic/" + std::to_string(i);
+        REQUIRE(vectors->insertVector(record));
+        nodes.push_back(metadata::KGNode{
+            .nodeKey = "doc:" + documentHash, .label = documentHash, .type = "document"});
+    }
+    auto ids = kg->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+    writer->start();
+    runner = std::async(std::launch::async, [this] { io.run(); });
+
+    SECTION("bounded startup backfill") {
+        auto filled = service->backfillSemanticNeighborGraph("test-model", nodes.size());
+        REQUIRE(filled.has_value());
+        CHECK(filled.value() == nodes.size());
+    }
+    SECTION("explicit corpus rebuild uses the same scoring boundary") {
+        auto rebuilt = service->rebuildSemanticNeighborGraphForCorpus("test-model");
+        REQUIRE(rebuilt.has_value());
+        CHECK(rebuilt.value() == nodes.size() * 8);
+    }
+    REQUIRE(writer->flush(5s).has_value());
+    for (const auto id : ids.value()) {
+        auto edges = kg->getEdgesFrom(id, std::string_view{"semantic_neighbor"});
+        REQUIRE(edges.has_value());
+        REQUIRE(edges.value().size() == 8);
+        for (const auto& edge : edges.value()) {
+            CHECK(std::isfinite(edge.weight));
+            CHECK(edge.weight >= 0.0f);
+            CHECK(edge.weight <= 1.0f);
+        }
+    }
+}
+
+TEST_CASE("Embedding maintenance requires actual startup readiness and stops borrowing on shutdown",
+          "[daemon][embedding][startup-eligibility]") {
+    WorkCoordinator coordinator;
+    EmbeddingService service(nullptr, nullptr, &coordinator);
+    CHECK_FALSE(EmbeddingServiceTimingTestAccess::maintenanceEligible(service, true));
+    ServiceManagerState phase = ServiceManagerState::OpeningDatabase;
+    std::size_t calls = 0;
+    service.setStartupStateGetter([&] {
+        ++calls;
+        return phase;
+    });
+    for (auto state : {ServiceManagerState::OpeningDatabase, ServiceManagerState::DatabaseReady,
+                       ServiceManagerState::MigratingSchema, ServiceManagerState::SchemaReady,
+                       ServiceManagerState::VectorsReady, ServiceManagerState::BuildingSearchEngine,
+                       ServiceManagerState::Failed, ServiceManagerState::ShuttingDown,
+                       ServiceManagerState::Stopped}) {
+        phase = state;
+        CHECK_FALSE(EmbeddingServiceTimingTestAccess::maintenanceEligible(service, true));
+    }
+    phase = ServiceManagerState::Ready;
+    CHECK(EmbeddingServiceTimingTestAccess::maintenanceEligible(service, true));
+    const auto beforeBusy = calls;
+    CHECK_FALSE(EmbeddingServiceTimingTestAccess::maintenanceEligible(service, false));
+    CHECK(calls == beforeBusy);
+    service.shutdown();
+    CHECK_FALSE(EmbeddingServiceTimingTestAccess::maintenanceEligible(service, true));
+    CHECK(calls == beforeBusy);
 }
 
 } // namespace yams::daemon

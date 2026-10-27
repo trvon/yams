@@ -315,13 +315,15 @@ public:
         registerDetachedCancellationSignal(signal, serializedExecutor);
         std::weak_ptr<DetachedCancellationState> state = detachedCancellationState_;
         const auto* completedSignal = signal.get();
-        boost::asio::co_spawn(
-            serializedExecutor, std::forward<Awaitable>(awaitable),
-            boost::asio::bind_cancellation_slot(
-                signal->slot(),
-                [state, completedSignal, signal = std::move(signal)](std::exception_ptr) mutable {
-                    cleanupDetachedCancellationState(state, completedSignal);
-                }));
+        // Take the slot before the call: argument evaluation order is unspecified, and gcc
+        // moves `signal` into the handler before evaluating `signal->slot()`.
+        auto slot = signal->slot();
+        boost::asio::co_spawn(serializedExecutor, std::forward<Awaitable>(awaitable),
+                              boost::asio::bind_cancellation_slot(
+                                  slot, [state, completedSignal,
+                                         signal = std::move(signal)](std::exception_ptr) mutable {
+                                      cleanupDetachedCancellationState(state, completedSignal);
+                                  }));
     }
 
 private:

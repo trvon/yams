@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/core/types.h>
+#include <yams/vector/binary_quantization.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -71,6 +72,118 @@ parseDirtyRegionExpansionMode(std::string_view name) noexcept {
     return std::nullopt;
 }
 
+/// How a cluster's representative ("medoid") document is chosen.
+/// - Degree: the member with the largest within-cluster weighted degree (graph hub).
+/// - Medoid: the member minimising the sum of chordal distances sqrt(2(1-cos)) to the other
+///   members (a metric medoid on unit vectors). Falls back to Degree when fewer than two
+///   members carry a usable embedding.
+enum class RepresentativeRule : uint8_t {
+    Degree = 0,
+    Medoid = 1,
+};
+
+/// Config spelling of a RepresentativeRule (TOML `topology.representative_rule`).
+[[nodiscard]] constexpr std::string_view representativeRuleName(RepresentativeRule rule) noexcept {
+    switch (rule) {
+        case RepresentativeRule::Degree:
+            return "degree";
+        case RepresentativeRule::Medoid:
+            return "medoid";
+    }
+    return "degree";
+}
+
+/// Parse a config spelling (case-insensitive); nullopt for anything unrecognized.
+[[nodiscard]] inline std::optional<RepresentativeRule>
+parseRepresentativeRule(std::string_view name) noexcept {
+    for (const auto rule : {RepresentativeRule::Degree, RepresentativeRule::Medoid}) {
+        const auto expected = representativeRuleName(rule);
+        if (name.size() != expected.size()) {
+            continue;
+        }
+        bool equal = true;
+        for (std::size_t i = 0; i < name.size() && equal; ++i) {
+            const char c =
+                name[i] >= 'A' && name[i] <= 'Z' ? static_cast<char>(name[i] - 'A' + 'a') : name[i];
+            equal = c == expected[i];
+        }
+        if (equal) {
+            return rule;
+        }
+    }
+    return std::nullopt;
+}
+
+/// Walk order of a cluster's members (TOML `topology.road_order`). None stores no order.
+/// - Time: ascending `TopologyDocumentInput::eventTime`; ties by hash; members without a time
+///   last, by hash.
+/// - Session: grouped by `sessionId`. Groups are ordered by their earliest event time (groups
+///   without any time after those with one), then by session id; inside a group by time then
+///   hash. Members without a session come last, by time then hash.
+/// - SimilarityChain: greedy nearest-neighbor tour over the members' embeddings (cosine) starting
+///   from the cluster representative (`ClusterArtifact::medoid`, else the smallest-hash usable
+///   member); ties go to the smaller hash. Members without a usable embedding come last, by hash.
+enum class RoadOrderKind : uint8_t {
+    None = 0,
+    Time = 1,
+    Session = 2,
+    SimilarityChain = 3,
+};
+
+/// Config spelling of a RoadOrderKind.
+[[nodiscard]] constexpr std::string_view roadOrderKindName(RoadOrderKind kind) noexcept {
+    switch (kind) {
+        case RoadOrderKind::None:
+            return "none";
+        case RoadOrderKind::Time:
+            return "time";
+        case RoadOrderKind::Session:
+            return "session";
+        case RoadOrderKind::SimilarityChain:
+            return "similarity_chain";
+    }
+    return "none";
+}
+
+/// Parse a config spelling (case-insensitive); nullopt for anything unrecognized.
+[[nodiscard]] inline std::optional<RoadOrderKind>
+parseRoadOrderKind(std::string_view name) noexcept {
+    for (const auto kind : {RoadOrderKind::None, RoadOrderKind::Time, RoadOrderKind::Session,
+                            RoadOrderKind::SimilarityChain}) {
+        const auto expected = roadOrderKindName(kind);
+        if (name.size() != expected.size()) {
+            continue;
+        }
+        bool equal = true;
+        for (std::size_t i = 0; i < name.size() && equal; ++i) {
+            const char c =
+                name[i] >= 'A' && name[i] <= 'Z' ? static_cast<char>(name[i] - 'A' + 'a') : name[i];
+            equal = c == expected[i];
+        }
+        if (equal) {
+            return kind;
+        }
+    }
+    return std::nullopt;
+}
+
+/// Wire value of a RoadOrderKind (road sidecar v3); nullopt for an unknown value.
+[[nodiscard]] constexpr std::optional<RoadOrderKind>
+roadOrderKindFromWire(uint32_t value) noexcept {
+    switch (value) {
+        case 0:
+            return RoadOrderKind::None;
+        case 1:
+            return RoadOrderKind::Time;
+        case 2:
+            return RoadOrderKind::Session;
+        case 3:
+            return RoadOrderKind::SimilarityChain;
+        default:
+            return std::nullopt;
+    }
+}
+
 enum class DocumentTopologyRole : uint8_t {
     Core,
     Bridge,
@@ -86,10 +199,20 @@ struct TopologyNeighbor {
 
 struct TopologyDocumentInput {
     std::string documentHash;
-    std::string filePath;
-    std::vector<float> embedding;
-    std::vector<TopologyNeighbor> neighbors;
-    std::unordered_map<std::string, std::string> metadata;
+    std::string filePath{};
+    std::vector<float> embedding{};
+    std::vector<TopologyNeighbor> neighbors{};
+    std::unordered_map<std::string, std::string> metadata{};
+    /// Event time in epoch seconds (UTC), when known. The extractor reads the `event_time`
+    /// metadata key first (integer epoch seconds, or ISO-8601 `YYYY-MM-DD` /
+    /// `YYYY-MM-DD[T ]HH:MM[:SS[.frac]][Z|±HH:MM]`; a datetime without a zone is UTC; see
+    /// `parseTopologyEventTime`), then falls back to the document's createdTime. An unparsable
+    /// value is ignored with a debug log, and a zero createdTime leaves the field unset.
+    /// Metadata keys are only consulted when the extraction loads metadata.
+    std::optional<std::int64_t> eventTime{};
+    /// Session grouping key from the `session_id` metadata key; empty when absent.
+    /// Neither typed field enters artifacts, codecs or fingerprints (ordered roads consume them).
+    std::string sessionId{};
 };
 
 struct TopologyBuildConfig {
@@ -97,7 +220,7 @@ struct TopologyBuildConfig {
     TopologyInputKind inputKind{TopologyInputKind::Hybrid};
     // Versioned identity of the dense coordinates used for centroids and
     // representatives. Empty means theorem-backed narrowing must fail closed.
-    std::string embeddingSpaceIdentity;
+    std::string embeddingSpaceIdentity{};
     std::size_t maxDocuments{0};
     std::size_t maxNeighborsPerDocument{32};
     std::size_t maxDirtyRegionDocs{256};
@@ -137,11 +260,25 @@ struct TopologyBuildConfig {
     // Total dense route representatives per cluster, including the centroid. Values above one
     // add deterministic diverse member embeddings. The default preserves centroid-only routing.
     std::size_t routingRepresentativeCount{1};
+    // Cluster representative selection. Degree preserves the historical graph-hub choice.
+    // Medoid also seeds the farthest-first extra routing representatives from the chosen
+    // medoid instead of the centroid.
+    RepresentativeRule representativeRule{RepresentativeRule::Degree};
     // SGC smoothing hops applied to input embeddings before clustering (Lean SGC.lean).
     // 0 = disabled (legacy default), 1-2 = linear feature smoothing over reciprocal graph edges.
     std::size_t sgcHops{0};
     // Re-normalize smoothed feature vectors to unit L2 length to preserve cosine distance.
     bool sgcNormalize{true};
+    /// Cluster roads kept per cluster, heaviest first (TOML `topology.road_max_per_cluster`).
+    /// Roads are accumulated from the raw neighbor lists, before the reciprocal / minEdgeScore
+    /// construction filter, so cross-cluster evidence the filter dropped still links clusters.
+    /// 0 (default) computes no roads and leaves every other artifact unchanged.
+    std::size_t roadMaxPerCluster{0};
+    /// Walk order stored on every cluster with at least two members (TOML `topology.road_order`,
+    /// see RoadOrderKind). Computed at full build and for the rebuilt clusters of an incremental
+    /// update; independent of `roadMaxPerCluster`. None (default) stores no order and leaves the
+    /// main snapshot payload, the road sidecar and every fingerprint unchanged.
+    RoadOrderKind roadOrder{RoadOrderKind::None};
 };
 
 struct TopologyDirtyRegion {
@@ -158,13 +295,13 @@ struct TopologyDirtyRegion {
 struct DocumentClusterMembership {
     std::string documentHash;
     std::string clusterId;
-    std::optional<std::string> parentClusterId;
+    std::optional<std::string> parentClusterId{};
     std::size_t clusterLevel{0};
     double persistenceScore{0.0};
     double cohesionScore{0.0};
     double bridgeScore{0.0};
     DocumentTopologyRole role{DocumentTopologyRole::Core};
-    std::vector<std::string> overlapClusterIds;
+    std::vector<std::string> overlapClusterIds{};
 };
 
 struct ClusterRepresentative {
@@ -181,7 +318,7 @@ struct ClusterRoutingRepresentative {
 
 struct ClusterArtifact {
     std::string clusterId;
-    std::optional<std::string> parentClusterId;
+    std::optional<std::string> parentClusterId{};
     std::size_t level{0};
     std::size_t memberCount{0};
     double persistenceScore{0.0};
@@ -194,14 +331,33 @@ struct ClusterArtifact {
     /// remain together inside it. Both are zero when the construction supplied no pair evidence.
     std::size_t protectedPairCount{0};
     std::size_t preservedProtectedPairCount{0};
-    std::optional<ClusterRepresentative> medoid;
-    std::vector<std::string> memberDocumentHashes;
-    std::vector<std::string> overlapClusterIds;
-    // Phase S: optional running-mean centroid for online KMeans engine.
-    // Empty for engines that don't compute it (Connected/Louvain).
-    std::vector<float> centroidEmbedding;
+    std::optional<ClusterRepresentative> medoid{};
+    std::vector<std::string> memberDocumentHashes{};
+    std::vector<std::string> overlapClusterIds{};
+    // Cluster centroid; empty when no member has an embedding. Spherical k-means stores the
+    // unit mean direction it clusters against; the connected-component and Louvain engines
+    // store the arithmetic member mean. Routing compares it by cosine, so only SOAR boundary
+    // spill (Euclidean residuals) depends on its magnitude.
+    std::vector<float> centroidEmbedding{};
     // Additional bounded representatives; centroidEmbedding is always the implicit first one.
-    std::vector<ClusterRoutingRepresentative> routingRepresentatives;
+    std::vector<ClusterRoutingRepresentative> routingRepresentatives{};
+    /// Walk order over the hash-sorted `memberDocumentHashes`: `orderedMembers[i]` is the index
+    /// of the i-th member along the walk, each index exactly once. Empty, with `orderKind` None,
+    /// when no order was requested or the cluster has fewer than two members. Persisted in the
+    /// road sidecar (v3), never in the main snapshot payload or any routing fingerprint.
+    RoadOrderKind orderKind{RoadOrderKind::None};
+    std::vector<uint32_t> orderedMembers{};
+};
+
+/// One cluster's view of an undirected cluster-to-cluster link. `weight` is the sum of every raw
+/// neighbor observation between members of the two clusters, so it is the same from both sides;
+/// each endpoint keeps only its own top-K, so a link may appear with one or both orientations.
+struct ClusterRoad {
+    std::string fromClusterId;
+    std::string toClusterId;
+    double weight{0.0};
+
+    friend bool operator==(const ClusterRoad&, const ClusterRoad&) = default;
 };
 
 struct TopologyArtifactBatch {
@@ -218,8 +374,40 @@ struct TopologyArtifactBatch {
     // Distinct from snapshotId (which is a timestamp) so query-side code can detect
     // topology drift against the artifacts that seeded the route.
     uint64_t topologyEpoch{0};
+    /// Representative rule the builder applied. Persisted in the binary header so query-side
+    /// tracing can report which rule produced the snapshot; legacy snapshots decode as Degree.
+    RepresentativeRule representativeRule{RepresentativeRule::Degree};
     std::vector<ClusterArtifact> clusters;
     std::vector<DocumentClusterMembership> memberships;
+    /// Cluster roads, sorted by (fromClusterId asc, weight desc, toClusterId asc) with at most
+    /// `roadMaxPerCluster` entries per source cluster. Empty when roads are off. The main snapshot
+    /// codec and the routing construction fingerprint ignore roads; they persist in a separate
+    /// sidecar node (see topology_codec.h `TopologyRoadSidecar`) with their own identity,
+    /// `topologyRoadFingerprint`.
+    std::vector<ClusterRoad> roads;
+    /// Per-source bound the builder applied to `roads` (`TopologyBuildConfig::roadMaxPerCluster`).
+    /// Stored in the sidecar header so a reloaded sidecar can be checked against it.
+    std::size_t roadMaxPerCluster{0};
+    /// Road provenance. A full build accumulates roads over every document and leaves both at 0.
+    /// An incremental update derives roads instead (untouched pairs keep the previous snapshot's
+    /// road, every road with an endpoint in a removed or rebuilt cluster is recomputed from the
+    /// region's raw neighbor lists, then each source re-ranks its top-K) and counts one pass in
+    /// `roadsIncrementalPasses`; `roadsFullBuildEpoch` is the `topologyEpoch` of the snapshot
+    /// whose full accumulation the derived roads descend from. Derived roads are exact for the
+    /// rebuilt clusters when the neighbor graph is symmetric; an untouched source can only
+    /// re-rank the roads its last full build kept. Carried in the sidecar header (v2), never in
+    /// the main payload or the routing construction fingerprint.
+    uint64_t roadsFullBuildEpoch{0};
+    uint32_t roadsIncrementalPasses{0};
+    /// Load-time diagnostic, never persisted or fingerprinted: why `roads` is empty although a
+    /// sidecar existed (undecodable, failed validation). Empty when roads loaded or were never
+    /// written. A set reason never disables routing.
+    std::string roadUnavailableReason;
+    /// Load-time diagnostic for the clusters' walk orders, never persisted or fingerprinted:
+    /// `;`-joined `<token>[:<clusterId>]` entries naming each order the sidecar carried that was
+    /// dropped (see attachTopologyMemberOrders). Only the offending cluster loses its order; the
+    /// roads and the other orders stay.
+    std::string orderUnavailableReason;
 };
 
 struct TopologyUpdateStats {
@@ -253,12 +441,12 @@ struct WeightedDocumentSeed {
 struct TopologyRouteRequest {
     std::string queryText;
     std::vector<std::string> seedDocumentHashes;
-    std::vector<WeightedDocumentSeed> weightedSeedDocuments;
+    std::vector<WeightedDocumentSeed> weightedSeedDocuments{};
     std::size_t limit{8};
     RouteScoringMode scoringMode{RouteScoringMode::Current};
     // Phase S: optional dense signal for sparse-guided routing.
     // Empty queryEmbedding falls back to seed-only scoring (current behaviour).
-    std::vector<float> queryEmbedding;
+    std::vector<float> queryEmbedding{};
     // Blend factor for SparseGuidedClusterRouter: score = alpha · bm25_mass +
     // (1-alpha) · centroid_cosine. 0.0 = pure dense; 1.0 = pure sparse.
     float sparseDenseAlpha{0.5F};
@@ -275,18 +463,21 @@ struct TopologyRouteRequest {
     /// Learning). Zero uses the full vector dimension; values like 64 fit within a single 64-bit
     /// word.
     std::size_t bqPrefixDimension{0};
+    /// Rotation applied before taking BQ sign bits. Used only when route() builds its own index;
+    /// a prebuilt SparseRouteIndex carries the rotation chosen at build time.
+    yams::vector::BinaryRotation bqRotation{yams::vector::BinaryRotation::None};
 };
 
 struct ClusterRoute {
     std::string clusterId;
-    std::optional<std::string> medoidDocumentHash;
+    std::optional<std::string> medoidDocumentHash{};
     double routeScore{0.0};
     double stabilityScore{0.0};
     std::size_t memberCount{0};
     /// Pre-scalarization query-to-chart costs. Missing values mean that the route request did not
     /// provide usable evidence on that axis; they must not be interpreted as zero cost.
-    std::optional<double> semanticCost;
-    std::optional<double> sparseCost;
+    std::optional<double> semanticCost{};
+    std::optional<double> sparseCost{};
     double persistencePenalty{1.0};
     double cohesionPenalty{1.0};
     double sizePenalty{0.0};

@@ -41,6 +41,7 @@ python3 $M status                                     # artifacts/<stamp>/: stat
 python3 $M chaos restart n2                           # also kill|start|pause|unpause
 python3 $M chaos partition n3; python3 $M chaos heal n3
 python3 $M chaos netem n1 --delay-ms 200 --loss 5     # needs NET_ADMIN (granted); netem-clear
+python3 $M idle --seconds 600 --threads --max-cpu 10  # idle CPU/RSS per node; exit 5 over limit
 python3 $M down                                       # containers, network, volumes, image (--keep-image)
 ```
 
@@ -49,6 +50,23 @@ python3 $M down                                       # containers, network, vol
 ```bash
 python3 $M run --nodes 5 --build-dir build/release --docs-per-node 16 --timeout 600 --label exp-5node
 ```
+
+## Constrained lane
+
+`--cpus` and `--memory` on `up` or `run` set per-node cgroup limits so the mesh models a small
+host instead of the build machine:
+
+```bash
+python3 $M up --nodes 3 --build-dir build/release --cpus 2 --memory 2g
+python3 $M seed --docs-per-node 40 --topics 8 --settle 30
+python3 $M converge --timeout 600
+python3 $M idle --seconds 600 --interval 5 --threads --max-cpu 10
+```
+
+`idle` samples `docker stats` with no client traffic and writes `idle.csv` and `idle.json`
+(mean and max CPU%, last RSS, per node). `--threads` adds `top -H` of the hottest node so the
+busy thread is named. Use it before and after a change to a background path (p2p, topology,
+repair, post-ingest); the 2026-10 incident was a daemon that pinned a weak host's CPU while idle.
 
 `converge` polls `yams list` on every node until every seeded hash is present, then proves it
 with `yams get --hash` on every node. It records records, peers and failed cycles per node, and,

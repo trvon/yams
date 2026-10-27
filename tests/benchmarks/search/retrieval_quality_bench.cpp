@@ -22,6 +22,10 @@
                                           Cluster partition vs pure semantic_neighbor expansion
     YAMS_BENCH_TOPOLOGY_ENGINE=connected|louvain|kmeans
                                           Write topology engine into isolated config
+    YAMS_BENCH_TOPOLOGY_REPRESENTATIVE_RULE=degree|medoid
+                                          Write topology.representative_rule into isolated config
+    YAMS_BENCH_TOPOLOGY_BQ_ROTATION=none|fwht
+                                          Write search.topology.bq_rotation into isolated config
     YAMS_BENCH_TOPOLOGY_ROUTE_SCORING=current|size_weighted|seed_coverage
                                           Topology route scoring policy
     YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA=0..1
@@ -33,6 +37,14 @@
     YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS=N     Minimum adaptive routed-cluster prefix
     YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS=N
                                           Cap ranked lexical routing evidence
+    YAMS_BENCH_TOPOLOGY_ROAD_HOPS=N        Road beam hops for route_only/augment (0 = off)
+    YAMS_BENCH_TOPOLOGY_ROAD_BEAM_WIDTH=N  Clusters kept per road hop
+    YAMS_BENCH_TOPOLOGY_ROAD_WALK_WINDOW=N Positions walked around each routed hit along the
+                                          cluster walk order (route_only/augment; 0 = off)
+    YAMS_BENCH_TOPOLOGY_ROAD_MAX_PER_CLUSTER=N
+                                          Roads kept per cluster at topology build (0 = none)
+    YAMS_BENCH_TOPOLOGY_ROAD_ORDER=none|time|session|similarity_chain
+                                          Cluster walk order stored at topology build
     YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP=N.N
                                           Grow route prefix while scores remain near the best
     YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN=N.N
@@ -564,7 +576,7 @@ static void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, b
             dim = vectorDb->getConfig().embedding_dim;
         }
         auto sharedProvider = std::make_shared<BenchmarkMockModelProvider>(dim);
-        serviceManager->__test_setModelProvider(sharedProvider);
+        serviceManager->testing_setModelProvider(sharedProvider);
     }
 
     if (embedBackendSimeon) {
@@ -635,6 +647,7 @@ static Result<BEIRDataset> loadSciFactDataset(const fs::path& cacheDir) {
                 doc.id = j.value("id", "");
             doc.title = j.value("title", "");
             doc.text = j.value("text", "");
+            yams::bench::readBEIRDocumentMetadata(j, doc);
             if (!doc.id.empty() && !doc.text.empty()) {
                 dataset.documents[doc.id] = doc;
             }
@@ -5186,6 +5199,12 @@ struct BenchFixture {
                                                       "YAMS_GRAPH_SEMANTIC_THRESHOLD", 0.30f);
         const float semanticWeightFloor =
             parseFloatEnv("YAMS_BENCH_SEED_SEMANTIC_WEIGHT_FLOOR", nullptr, 0.10f);
+        // Off: mutual pairs only (the historical seeding). On: also one-way kNN edges, as the
+        // daemon writes them; the connected engine's roads need those (see
+        // buildSemanticNeighborSeedEdges).
+        const auto seedingMode = parseBoolEnv("YAMS_BENCH_SEED_SEMANTIC_DIRECTED", false)
+                                     ? yams::bench::SemanticNeighborSeeding::DirectedKnn
+                                     : yams::bench::SemanticNeighborSeeding::MutualPairs;
         const bool seedQrelCommunities = parseBoolEnv("YAMS_BENCH_SEED_QREL_COMMUNITIES", false) &&
                                          useBEIR && static_cast<bool>(beirCorpus);
         const std::size_t qrelTopK = parseSizeEnv("YAMS_BENCH_SEED_QREL_TOPK", nullptr, 4);
@@ -5678,44 +5697,24 @@ struct BenchFixture {
         }
 
         std::vector<metadata::KGEdge> edges;
-        std::size_t reciprocalPairs = 0;
-        for (const auto& [srcHash, neighbors] : neighborScores) {
-            for (const auto& [dstHash, forwardScore] : neighbors) {
-                if (srcHash >= dstHash) {
-                    continue;
-                }
-                const auto reverseIt = neighborScores.find(dstHash);
-                if (reverseIt == neighborScores.end()) {
-                    continue;
-                }
-                const auto reverseScoreIt = reverseIt->second.find(srcHash);
-                if (reverseScoreIt == reverseIt->second.end()) {
-                    continue;
-                }
-                const auto srcNodeIt = nodeIdByHash.find(srcHash);
-                const auto dstNodeIt = nodeIdByHash.find(dstHash);
-                if (srcNodeIt == nodeIdByHash.end() || dstNodeIt == nodeIdByHash.end()) {
-                    continue;
-                }
-
-                const float weight =
-                    std::max(semanticWeightFloor, (forwardScore + reverseScoreIt->second) * 0.5f);
-                metadata::KGEdge forward;
-                forward.srcNodeId = srcNodeIt->second;
-                forward.dstNodeId = dstNodeIt->second;
-                forward.relation = "semantic_neighbor";
-                forward.weight = weight;
-                edges.push_back(forward);
-
-                metadata::KGEdge reverse;
-                reverse.srcNodeId = dstNodeIt->second;
-                reverse.dstNodeId = srcNodeIt->second;
-                reverse.relation = "semantic_neighbor";
-                reverse.weight = weight;
-                edges.push_back(reverse);
-                reciprocalPairs += 1;
+        std::size_t mutualEdges = 0;
+        std::size_t oneWayEdges = 0;
+        for (const auto& seed : yams::bench::buildSemanticNeighborSeedEdges(
+                 neighborScores, semanticWeightFloor, seedingMode)) {
+            const auto srcNodeIt = nodeIdByHash.find(seed.sourceHash);
+            const auto dstNodeIt = nodeIdByHash.find(seed.targetHash);
+            if (srcNodeIt == nodeIdByHash.end() || dstNodeIt == nodeIdByHash.end()) {
+                continue;
             }
+            metadata::KGEdge edge;
+            edge.srcNodeId = srcNodeIt->second;
+            edge.dstNodeId = dstNodeIt->second;
+            edge.relation = "semantic_neighbor";
+            edge.weight = seed.weight;
+            edges.push_back(edge);
+            (seed.mutual ? mutualEdges : oneWayEdges) += 1;
         }
+        const std::size_t reciprocalPairs = mutualEdges / 2;
 
         std::size_t qrelPairs = 0;
         if (seedQrelCommunities) {
@@ -5819,9 +5818,10 @@ struct BenchFixture {
                                      addEdgesResult.error().message);
         }
 
-        spdlog::info("Seeded {} {} topology-source neighbor pairs and {} qrel-neighbor pairs ({} "
-                     "directed edges) for benchmark corpus after clearing {} prior semantic edges",
-                     reciprocalPairs, topologySource, qrelPairs, edges.size(),
+        spdlog::info("Seeded {} {} topology-source neighbor pairs, {} one-way kNN edges and {} "
+                     "qrel-neighbor pairs ({} directed edges) for benchmark corpus after clearing "
+                     "{} prior semantic edges",
+                     reciprocalPairs, topologySource, oneWayEdges, qrelPairs, edges.size(),
                      deleteExistingResult.value());
         return true;
     }
@@ -5857,6 +5857,14 @@ struct BenchFixture {
                      std::getenv("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS")
                          ? std::getenv("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS")
                          : "0"},
+                    // Requested arm values; per-query search_stats carry the effective
+                    // topology_representative_rule / topology_route_bq_rotation.
+                    {"topology_representative_rule",
+                     yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_REPRESENTATIVE_RULE")
+                         .value_or("degree")},
+                    {"topology_bq_rotation",
+                     yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_BQ_ROTATION")
+                         .value_or("none")},
                 };
                 debugLogWriteJsonLine(startEntry);
             } else {
@@ -6247,10 +6255,24 @@ struct BenchFixture {
             const auto envSet = [](const std::optional<std::string>& value) {
                 return value.has_value() && !value->empty();
             };
+            const auto topologyRoadHopsEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_HOPS");
+            const auto topologyRoadBeamWidthEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_BEAM_WIDTH");
+            const auto topologyRoadWalkWindowEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_WALK_WINDOW");
+            const auto topologyRoadMaxPerClusterEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_MAX_PER_CLUSTER");
+            const auto topologyRoadOrderEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_ORDER");
             const auto topologyBqCandidateLimitEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT");
             const auto topologyBqPrefixDimEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_PREFIX_DIM");
+            const auto topologyBqRotationEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_BQ_ROTATION");
+            const auto topologyRepresentativeRuleEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_REPRESENTATIVE_RULE");
             const auto topologySgcHopsEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_SGC_HOPS");
             const auto simeonOuterMaxSimEnv =
@@ -6283,18 +6305,22 @@ struct BenchFixture {
                 (topologyEngineEnv && *topologyEngineEnv) ||
                 (topologyRepresentativesEnv && *topologyRepresentativesEnv) ||
                 (topologyBoundarySpillEnv && *topologyBoundarySpillEnv) ||
-                envSet(topologySgcHopsEnv);
+                envSet(topologySgcHopsEnv) || envSet(topologyRepresentativeRuleEnv) ||
+                envSet(topologyRoadMaxPerClusterEnv) || envSet(topologyRoadOrderEnv);
             const bool writeTopologyRouteConfig =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_VECTOR_POLICY").has_value() ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MEDOID_ONLY_EXPANSION") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS") != nullptr) ||
+                envSet(topologyRoadHopsEnv) || envSet(topologyRoadBeamWidthEnv) ||
+                envSet(topologyRoadWalkWindowEnv) ||
                 (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) ||
                 (topologyAnnCandidateLimitEnv && *topologyAnnCandidateLimitEnv) ||
                 envSet(topologyBqCandidateLimitEnv) || envSet(topologyBqPrefixDimEnv) ||
-                envSet(graphCommunitySourceEnv) ||
+                envSet(topologyBqRotationEnv) || envSet(graphCommunitySourceEnv) ||
                 (topologyExpansionOutputLimitEnv && *topologyExpansionOutputLimitEnv) ||
                 (topologyGraphWeightedSeedRankingEnv && *topologyGraphWeightedSeedRankingEnv) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP") != nullptr) ||
@@ -6625,6 +6651,27 @@ struct BenchFixture {
                                   << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS",
                                                            32)
                                   << "\n";
+                        // Road beam arms (route_only / augment); unset keeps the product default
+                        // of no road hops.
+                        if (envSet(topologyRoadHopsEnv)) {
+                            configOut << "road_hops = "
+                                      << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_ROAD_HOPS", 0)
+                                      << "\n";
+                        }
+                        if (envSet(topologyRoadBeamWidthEnv)) {
+                            configOut
+                                << "road_beam_width = "
+                                << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_ROAD_BEAM_WIDTH", 4)
+                                << "\n";
+                        }
+                        // Road walk arm (route_only / augment); unset keeps the product default
+                        // of no walk.
+                        if (envSet(topologyRoadWalkWindowEnv)) {
+                            configOut
+                                << "road_walk_window = "
+                                << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_ROAD_WALK_WINDOW", 0)
+                                << "\n";
+                        }
                         if (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) {
                             configOut << "representative_limit = "
                                       << parseSizeEnvOrDefault(
@@ -6652,6 +6699,9 @@ struct BenchFixture {
                                       << parseSizeEnvOrDefault(
                                              "YAMS_BENCH_TOPOLOGY_ROUTE_BQ_PREFIX_DIM", 0)
                                       << "\n";
+                        }
+                        if (envSet(topologyBqRotationEnv)) {
+                            configOut << "bq_rotation = \"" << *topologyBqRotationEnv << "\"\n";
                         }
                         configOut << "adaptive_probe_score_gap = "
                                   << parseFloatEnvOrDefault(
@@ -6756,6 +6806,23 @@ struct BenchFixture {
                                       << "\n";
                         }
                     }
+                    // route_only is an evaluation arm: it serves uncertified routes, so the daemon
+                    // only runs it behind the explicit gate. The bench opts in whenever the arm is
+                    // selected; without this the policy downgrades to Shadow.
+                    if (const auto policy =
+                            yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_VECTOR_POLICY");
+                        policy && !policy->empty()) {
+                        std::string normalizedPolicy(*policy);
+                        std::transform(normalizedPolicy.begin(), normalizedPolicy.end(),
+                                       normalizedPolicy.begin(), [](unsigned char c) {
+                                           return c == '-' ? '_'
+                                                           : static_cast<char>(std::tolower(c));
+                                       });
+                        if (normalizedPolicy == "route_only") {
+                            configOut << "\n[search.evaluation]\n";
+                            configOut << "allow_uncertified_routes = true\n";
+                        }
+                    }
                     if (writeTopologyEngineConfig) {
                         configOut << "\n[topology]\n";
                         if (topologyEngineEnv && *topologyEngineEnv) {
@@ -6767,10 +6834,25 @@ struct BenchFixture {
                                              "YAMS_BENCH_TOPOLOGY_ROUTING_REPRESENTATIVES", 1)
                                       << "\n";
                         }
+                        if (envSet(topologyRepresentativeRuleEnv)) {
+                            configOut << "representative_rule = \""
+                                      << *topologyRepresentativeRuleEnv << "\"\n";
+                        }
                         if (envSet(topologySgcHopsEnv)) {
                             configOut << "sgc_hops = "
                                       << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_SGC_HOPS", 0)
                                       << "\n";
+                        }
+                        // Road network arms: roads per cluster and the walk order kind the build
+                        // stores (Eval 3 sets the order per arm).
+                        if (envSet(topologyRoadMaxPerClusterEnv)) {
+                            configOut << "road_max_per_cluster = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_ROAD_MAX_PER_CLUSTER", 0)
+                                      << "\n";
+                        }
+                        if (envSet(topologyRoadOrderEnv)) {
+                            configOut << "road_order = \"" << *topologyRoadOrderEnv << "\"\n";
                         }
                         if (topologyBoundarySpillEnv && *topologyBoundarySpillEnv) {
                             configOut << "boundary_spill = "
@@ -7350,6 +7432,25 @@ struct BenchFixture {
                                  repairResult.value().totalSucceeded,
                                  repairResult.value().totalFailed,
                                  repairResult.value().totalSkipped);
+                }
+            }
+
+            // Directory ingest carries no per-file metadata; copy the corpus metadata
+            // (event_time, session_id, round_index, ...) onto the stored documents so the
+            // topology extractor sees it. Idempotent, so warm caches repeat it.
+            if (useBEIR && beirCorpus) {
+                auto* daemon = harness ? harness->daemon() : nullptr;
+                auto* serviceManager = daemon ? daemon->getServiceManager() : nullptr;
+                auto metadataRepo = serviceManager ? serviceManager->getMetadataRepo() : nullptr;
+                if (metadataRepo) {
+                    std::size_t missing = 0;
+                    const auto applied = yams::bench::applyBenchmarkDocumentMetadata(
+                        *metadataRepo, *beirCorpus, &missing);
+                    if (applied > 0 || missing > 0) {
+                        spdlog::info("[Bench] Applied corpus metadata to {} documents ({} not "
+                                     "found)",
+                                     applied, missing);
+                    }
                 }
             }
 

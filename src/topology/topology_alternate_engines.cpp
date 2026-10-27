@@ -1,5 +1,6 @@
 #include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_alternate_engines.h>
+#include <yams/topology/topology_member_order.h>
 #include <yams/topology/topology_representatives.h>
 #include <yams/topology/topology_sgc.h>
 
@@ -90,6 +91,11 @@ makeAdjacency(std::size_t n, const PairWeightMap& pairWeights) {
         adjacency[key.first].emplace_back(key.second, weight);
         adjacency[key.second].emplace_back(key.first, weight);
     }
+    // pairWeights iterates in hash order, which differs between standard libraries; sort so
+    // weight sums and community moves are the same on every platform.
+    for (auto& neighbors : adjacency) {
+        std::ranges::sort(neighbors, {}, &std::pair<std::size_t, float>::first);
+    }
     return adjacency;
 }
 
@@ -99,15 +105,24 @@ makeAdjacency(std::size_t n, const PairWeightMap& pairWeights) {
 // an opaque bucket key. Cohesion / persistence are computed from `pairWeights`
 // when provided (graph-based engines); otherwise only structural metrics
 // populate. `algorithm` is stamped into the batch.
+//
+// `centroidKind` picks the stored cluster centroid. Graph engines keep the arithmetic member
+// mean. Spherical k-means stores the unit mean direction it assigned against, so the stored
+// centroid is the clustering centroid and Euclidean consumers (SOAR boundary residuals) measure
+// on the same sphere the cosine router ranks on.
+enum class CentroidKind { ArithmeticMean, UnitDirection };
+
 TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentInput> documents,
                                                const std::vector<std::int64_t>& assignment,
                                                const PairWeightMap& pairWeights,
                                                std::string algorithm, const TimeStamps& ts,
-                                               const TopologyBuildConfig& config) {
+                                               const TopologyBuildConfig& config,
+                                               CentroidKind centroidKind) {
     TopologyArtifactBatch batch;
     batch.snapshotId = makeSnapshotId(ts.unixMillis);
     batch.algorithm = std::move(algorithm);
     batch.inputKind = config.inputKind;
+    batch.representativeRule = config.representativeRule;
     batch.embeddingSpaceIdentity = config.embeddingSpaceIdentity;
     batch.protectedRelationIdentity = protectedRelationConstructionIdentity(documents, config);
     batch.generatedAtUnixSeconds = ts.unixSeconds;
@@ -196,6 +211,9 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                 medoidScore = candidate;
             }
         }
+        medoidIdx =
+            applyRepresentativeRule(config.representativeRule, documents, members, medoidIdx);
+        medoidScore = weightedDegree[medoidIdx];
 
         ClusterArtifact cluster;
         cluster.clusterId = clusterId;
@@ -218,8 +236,14 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                                                .filePath = documents[medoidIdx].filePath,
                                                .representativeScore = std::max(0.0, medoidScore)};
         cluster.centroidEmbedding = detail::meanEmbedding(documents, members);
+        if (centroidKind == CentroidKind::UnitDirection) {
+            detail::normalizeVector(cluster.centroidEmbedding);
+        }
         cluster.routingRepresentatives = selectDiverseRoutingRepresentatives(
-            documents, members, cluster.centroidEmbedding, config.routingRepresentativeCount);
+            documents, members, cluster.centroidEmbedding, config.routingRepresentativeCount,
+            config.representativeRule == RepresentativeRule::Medoid
+                ? std::span<const float>(documents[medoidIdx].embedding)
+                : std::span<const float>(cluster.centroidEmbedding));
         cluster.memberDocumentHashes.reserve(members.size());
         for (std::size_t idx : members) {
             cluster.memberDocumentHashes.push_back(documents[idx].documentHash);
@@ -262,7 +286,16 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                   return lhs.documentHash < rhs.documentHash;
               });
 
+    // Roads read the raw neighbor lists, not `pairWeights`: k-means never consults the graph for
+    // assignment and Louvain only sees filtered edges, so the construction graph has no record of
+    // the cross-cluster evidence a road is made of.
+    batch.roads = detail::accumulateClusterRoads(documents, detail::primaryClusterByHash(batch),
+                                                 config.roadMaxPerCluster);
+    batch.roadMaxPerCluster = batch.roads.empty() ? 0 : config.roadMaxPerCluster;
+
     (void)applyOrthogonalBoundarySpill(documents, config, batch);
+    // After spill: the order is a permutation over the final member list, replicas included.
+    applyClusterMemberOrders(batch, documents, config.roadOrder);
 
     return batch;
 }
@@ -567,7 +600,9 @@ runLouvain(std::span<const TopologyDocumentInput> documents,
                 }
                 const double gain = computeDeltaQ(i, candComm, weightToCand) -
                                     (-computeDeltaQ(i, fromComm, weightToFrom));
-                if (gain > bestGain) {
+                // weightToComm is unordered, so break equal gains on the community id;
+                // otherwise the move depends on the standard library's hash order.
+                if (gain > bestGain || (gain > 0.0 && gain == bestGain && candComm < bestComm)) {
                     bestGain = gain;
                     bestComm = candComm;
                 }
@@ -635,8 +670,8 @@ LouvainTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> doc
     auto pairWeights = buildPairWeights(effectiveDocs, indexByHash, config);
     auto adjacency = makeAdjacency(effectiveDocs.size(), pairWeights);
     auto assignment = runLouvain(effectiveDocs, adjacency);
-    auto batch =
-        buildBatchFromAssignment(effectiveDocs, assignment, pairWeights, "louvain_v1", ts, config);
+    auto batch = buildBatchFromAssignment(effectiveDocs, assignment, pairWeights, "louvain_v1", ts,
+                                          config, CentroidKind::ArithmeticMean);
     batch.inputKind = config.inputKind;
     return batch;
 }
@@ -699,8 +734,8 @@ KMeansTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> docu
     }
     auto pairWeights = buildPairWeights(effectiveDocs, indexByHash, config);
     auto assignment = runKMeans(effectiveDocs, config.kmeansK, config.kmeansMaxIterations);
-    auto batch =
-        buildBatchFromAssignment(effectiveDocs, assignment, pairWeights, "kmeans_v1", ts, config);
+    auto batch = buildBatchFromAssignment(effectiveDocs, assignment, pairWeights, "kmeans_v1", ts,
+                                          config, CentroidKind::UnitDirection);
     batch.inputKind = config.inputKind;
     return batch;
 }

@@ -162,6 +162,12 @@ public:
     [[nodiscard]] std::size_t routingRepresentativeCount() const noexcept {
         return routingRepresentativeCount_.load(std::memory_order_acquire);
     }
+    void setRepresentativeRule(topology::RepresentativeRule rule) noexcept {
+        representativeRule_.store(rule, std::memory_order_release);
+    }
+    [[nodiscard]] topology::RepresentativeRule representativeRule() const noexcept {
+        return representativeRule_.load(std::memory_order_acquire);
+    }
     /// SGC smoothing before clustering. Hops are capped: repeated propagation over-smooths
     /// features toward the graph's stationary distribution.
     static constexpr std::size_t kMaxSgcHops = 4;
@@ -192,6 +198,20 @@ public:
     }
     [[nodiscard]] bool boundarySpillEnabled() const noexcept {
         return boundarySpillEnabled_.load(std::memory_order_acquire);
+    }
+    /// Cluster roads kept per cluster at build time; 0 (default) computes none.
+    void setRoadMaxPerCluster(std::size_t maxPerCluster) noexcept {
+        roadMaxPerCluster_.store(maxPerCluster, std::memory_order_release);
+    }
+    [[nodiscard]] std::size_t roadMaxPerCluster() const noexcept {
+        return roadMaxPerCluster_.load(std::memory_order_acquire);
+    }
+    /// Walk order stored on every cluster at build time; None (default) stores none.
+    void setRoadOrder(topology::RoadOrderKind order) noexcept {
+        roadOrder_.store(order, std::memory_order_release);
+    }
+    [[nodiscard]] topology::RoadOrderKind roadOrder() const noexcept {
+        return roadOrder_.load(std::memory_order_acquire);
     }
     void setFeatureComposition(topology::FeatureComposition composition) {
         std::lock_guard lock(featureCompositionMutex_);
@@ -240,6 +260,8 @@ private:
     std::atomic<std::int64_t> lastRebuildEndSteadyMillis_{0};
     std::atomic<std::int64_t> rebuildMinIntervalMs_{0};
     std::atomic<std::size_t> routingRepresentativeCount_{1};
+    std::atomic<topology::RepresentativeRule> representativeRule_{
+        topology::TopologyBuildConfig{}.representativeRule};
     std::atomic<std::size_t> sgcHops_{0};
     std::atomic<topology::DirtyRegionExpansionMode> dirtyRegionExpansion_{
         topology::TopologyBuildConfig{}.dirtyRegionExpansion};
@@ -248,6 +270,8 @@ private:
     std::atomic<std::size_t> boundarySpillLimit_{1};
     std::atomic<double> boundarySpillDistanceRatio_{1.05};
     std::atomic<double> boundarySpillResidualPenalty_{1.0};
+    std::atomic<std::size_t> roadMaxPerCluster_{topology::TopologyBuildConfig{}.roadMaxPerCluster};
+    std::atomic<topology::RoadOrderKind> roadOrder_{topology::TopologyBuildConfig{}.roadOrder};
     mutable std::mutex featureCompositionMutex_;
     topology::FeatureComposition featureComposition_;
     std::atomic<bool> autoRebuildEnabled_{true};

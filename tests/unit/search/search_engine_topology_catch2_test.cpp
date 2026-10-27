@@ -30,58 +30,17 @@
 
 #include "src/search/search_vector_pipeline_internal.h"
 #include "tests/common/test_helpers_catch2.h"
+#include "tests/unit/search/topology_search_test_support.h"
 
 using namespace yams;
 using namespace yams::metadata;
 using namespace yams::search;
+using namespace yams::search::topology_test_support;
 
 // Catch2 assertion macros expand through do/while and large generated test bodies.
 // NOLINTBEGIN(cppcoreguidelines-avoid-do-while, readability-function-cognitive-complexity)
 
 namespace {
-
-std::filesystem::path tempDbPath(const char* prefix) {
-    const char* t = std::getenv("YAMS_TEST_TMPDIR");
-    auto base = (t && *t) ? std::filesystem::path(t) : std::filesystem::temp_directory_path();
-    std::error_code ec;
-    std::filesystem::create_directories(base, ec);
-    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
-    auto p = base / (std::string(prefix) + std::to_string(ts) + ".db");
-    std::filesystem::remove(p, ec);
-    return p;
-}
-
-class FixedEmbeddingBackend final : public vector::IEmbeddingBackend {
-public:
-    explicit FixedEmbeddingBackend(std::vector<float> embedding)
-        : embedding_(std::move(embedding)) {}
-
-    bool initialize() override {
-        initialized_ = true;
-        return true;
-    }
-    void shutdown() override { initialized_ = false; }
-    bool isInitialized() const override { return initialized_; }
-
-    Result<std::vector<float>> generateEmbedding(const std::string&) override { return embedding_; }
-
-    Result<std::vector<std::vector<float>>>
-    generateEmbeddings(std::span<const std::string> texts) override {
-        return std::vector<std::vector<float>>(texts.size(), embedding_);
-    }
-
-    size_t getEmbeddingDimension() const override { return embedding_.size(); }
-    size_t getMaxSequenceLength() const override { return 512; }
-    std::string getBackendName() const override { return "fixed-test"; }
-    std::string getEmbeddingSpaceIdentity() const override { return "test-space-v1"; }
-    bool isAvailable() const override { return true; }
-    vector::GenerationStats getStats() const override { return {}; }
-    void resetStats() override {}
-
-private:
-    std::vector<float> embedding_;
-    bool initialized_{false};
-};
 
 class HashLookupCountingRepository : public MetadataRepository {
 public:
@@ -106,118 +65,6 @@ public:
     bool failBatchLookups{false};
     int failBatchAt{0};
 };
-
-struct TopologySearchFixture {
-    explicit TopologySearchFixture(
-        vector::VectorSearchEngine searchEngine = vector::VectorSearchEngine::SimeonPqAdc)
-        : disableVectors("YAMS_DISABLE_VECTORS", std::optional<std::string>("0")),
-          skipVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::optional<std::string>("0")) {
-        dbPath = tempDbPath("search_topology_");
-        ConnectionPoolConfig poolConfig;
-        poolConfig.minConnections = 1;
-        poolConfig.maxConnections = 2;
-        pool = std::make_unique<ConnectionPool>(dbPath.string(), poolConfig);
-        REQUIRE(pool->initialize().has_value());
-        repo = std::make_shared<MetadataRepository>(*pool);
-        auto kgResult = makeSqliteKnowledgeGraphStore(*pool, KnowledgeGraphStoreConfig{});
-        REQUIRE(kgResult.has_value());
-        kgStore = std::shared_ptr<KnowledgeGraphStore>(kgResult.value().release());
-
-        vector::VectorDatabaseConfig vectorConfig;
-        vectorConfig.database_path = ":memory:";
-        vectorConfig.embedding_dim = 2;
-        vectorConfig.create_if_missing = true;
-        vectorConfig.use_in_memory = true;
-        vectorConfig.search_engine = searchEngine;
-        vectorConfig.vec0_phss_enabled = searchEngine == vector::VectorSearchEngine::Vec0L2;
-        vectorConfig.vec0_phss_candidates = 4;
-        vectorConfig.simeon_pq_centroids = 4;
-        vectorDb = std::make_shared<vector::VectorDatabase>(vectorConfig);
-        REQUIRE(vectorDb->initialize());
-    }
-
-    ~TopologySearchFixture() {
-        vectorDb.reset();
-        kgStore.reset();
-        repo.reset();
-        if (pool) {
-            pool->shutdown();
-        }
-        pool.reset();
-        std::error_code ec;
-        std::filesystem::remove(dbPath, ec);
-    }
-
-    void addDocument(const std::string& hash, const std::string& content,
-                     const std::vector<float>& embedding) {
-        DocumentInfo info;
-        info.filePath = "/tmp/" + hash + ".txt";
-        info.fileName = hash + ".txt";
-        info.fileExtension = ".txt";
-        info.fileSize = static_cast<int64_t>(content.size());
-        info.sha256Hash = hash;
-        info.mimeType = "text/plain";
-        info.createdTime =
-            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-        info.modifiedTime = info.createdTime;
-        info.indexedTime = info.createdTime;
-        auto docId = repo->insertDocument(info);
-        REQUIRE(docId.has_value());
-        REQUIRE(repo->indexDocumentContent(docId.value(), hash, content, "text/plain").has_value());
-
-        DocumentContent docContent;
-        docContent.documentId = docId.value();
-        docContent.contentText = content;
-        docContent.contentLength = static_cast<int64_t>(content.size());
-        docContent.extractionMethod = "test";
-        docContent.language = "en";
-        REQUIRE(repo->insertContent(docContent).has_value());
-
-        vector::VectorRecord record;
-        record.chunk_id = "doc-" + hash;
-        record.document_hash = hash;
-        record.embedding = embedding;
-        record.level = vector::EmbeddingLevel::DOCUMENT;
-        REQUIRE(vectorDb->insertVector(record));
-    }
-
-    yams::test::ScopedEnvVar disableVectors;
-    yams::test::ScopedEnvVar skipVecInit;
-    std::filesystem::path dbPath;
-    std::unique_ptr<ConnectionPool> pool;
-    std::shared_ptr<MetadataRepository> repo;
-    std::shared_ptr<KnowledgeGraphStore> kgStore;
-    std::shared_ptr<vector::VectorDatabase> vectorDb;
-};
-
-yams::topology::TopologyArtifactBatch buildTwoClusterTopologyBatch() {
-    yams::topology::ConnectedComponentTopologyEngine topologyEngine;
-    yams::topology::TopologyBuildConfig topologyConfig;
-    topologyConfig.reciprocalOnly = true;
-    topologyConfig.minEdgeScore = 0.5;
-    topologyConfig.embeddingSpaceIdentity = "test-space-v1";
-    std::vector<yams::topology::TopologyDocumentInput> topologyDocs{
-        {.documentHash = "x1",
-         .filePath = "/tmp/x1.txt",
-         .embedding = {1.0F, 0.0F},
-         .neighbors = {{.documentHash = "x2", .score = 0.9F, .reciprocal = true}}},
-        {.documentHash = "x2",
-         .filePath = "/tmp/x2.txt",
-         .embedding = {0.9F, 0.1F},
-         .neighbors = {{.documentHash = "x1", .score = 0.9F, .reciprocal = true}}},
-        {.documentHash = "y1",
-         .filePath = "/tmp/y1.txt",
-         .embedding = {0.0F, 1.0F},
-         .neighbors = {{.documentHash = "y2", .score = 0.9F, .reciprocal = true}}},
-        {.documentHash = "y2",
-         .filePath = "/tmp/y2.txt",
-         .embedding = {0.1F, 0.9F},
-         .neighbors = {{.documentHash = "y1", .score = 0.9F, .reciprocal = true}}},
-    };
-    auto topologyBatch = topologyEngine.buildArtifacts(topologyDocs, topologyConfig);
-    REQUIRE(topologyBatch.has_value());
-    return topologyBatch.value();
-}
 
 yams::topology::TopologyArtifactBatch buildMultiscaleOverlapTopologyBatch() {
     auto batch = buildTwoClusterTopologyBatch();
@@ -254,11 +101,6 @@ yams::topology::TopologyArtifactBatch buildMultiscaleOverlapTopologyBatch() {
     return batch;
 }
 
-void seedTwoClusterTopology(TopologySearchFixture& fix) {
-    yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
-    REQUIRE(topologyStore.storeBatch(buildTwoClusterTopologyBatch()).has_value());
-}
-
 void seedTopologyWithStaleClusterMember(TopologySearchFixture& fix) {
     auto topologyBatch = buildTwoClusterTopologyBatch();
     REQUIRE(!topologyBatch.clusters.empty());
@@ -267,84 +109,6 @@ void seedTopologyWithStaleClusterMember(TopologySearchFixture& fix) {
         topologyBatch.clusters.front().memberDocumentHashes.size();
     yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
     REQUIRE(topologyStore.storeBatch(topologyBatch).has_value());
-}
-
-void seedTopologyDocuments(TopologySearchFixture& fix) {
-    fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
-    fix.addDocument("x2", "alpha two", {0.9F, 0.1F});
-    fix.addDocument("y1", "omega one", {0.0F, 1.0F});
-    fix.addDocument("y2", "omega two", {0.1F, 0.9F});
-}
-
-std::shared_ptr<vector::EmbeddingGenerator> makeFixedGenerator(std::vector<float> embedding) {
-    vector::EmbeddingConfig embeddingConfig;
-    embeddingConfig.embedding_dim = embedding.size();
-    auto generator = std::make_shared<vector::EmbeddingGenerator>(
-        std::make_unique<FixedEmbeddingBackend>(std::move(embedding)), embeddingConfig);
-    REQUIRE(generator->initialize());
-    return generator;
-}
-
-SearchEngineConfig topologyRoutingTestConfig(bool enabled) {
-    SearchEngineConfig config;
-    config.includeDebugInfo = true;
-    config.enableParallelExecution = true;
-    config.textWeight = 1.0F;
-    config.simeonTextWeight = 0.0F;
-    config.pathTreeWeight = 0.0F;
-    config.kgWeight = 0.0F;
-    config.vectorWeight = 1.0F;
-    config.entityVectorWeight = 0.0F;
-    config.tagWeight = 0.0F;
-    config.metadataWeight = 0.0F;
-    config.vectorOnlyThreshold = 0.0F;
-    config.vectorOnlyPenalty = 1.0F;
-    config.vectorMaxResults = 4;
-    config.topologyRoutingMode = enabled ? SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly
-                                         : SearchEngineConfig::TopologyRoutingMode::Disabled;
-    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
-    config.topologyMaxClusters = 1;
-    config.topologyMaxDocs = 2;
-    return config;
-}
-
-Result<SearchResponse> runTopologySearch(
-    TopologySearchFixture& fix, const std::shared_ptr<vector::EmbeddingGenerator>& generator,
-    const SearchEngineConfig& config, std::size_t limit, std::string query = "unmatched query") {
-    SearchExecutionContext context = defaultSearchExecutionContext();
-    context.freshness.lexicalReady = true;
-    context.freshness.vectorReady = true;
-    context.freshness.kgReady = true;
-    context.freshness.topologyReady = true;
-    SearchExecutionContextGuard contextGuard(context);
-
-    SearchEngine engine(fix.repo, fix.vectorDb, generator, fix.kgStore, config);
-    SearchParams params;
-    params.limit = limit;
-    return engine.searchWithResponse(query, params);
-}
-
-void configureCertifiedTopologyRoute(SearchEngineConfig& config,
-                                     const yams::topology::TopologyArtifactBatch& batch,
-                                     std::size_t maxRowsVisited = 2) {
-    config.topologyRouteRiskCalibration.constructionFingerprint =
-        topologyRoutingConstructionFingerprint(batch);
-    auto options = makeTopologyRoutingOptions(config, config.topologyRoutingMode, true, true);
-    options.maxDocs = 0; // PQ narrowing defers the document limit to vector selection.
-    config.topologyRouteRiskCalibration.routingPolicyFingerprint =
-        topologyRoutingPolicyFingerprint(topologyRoutingRepresentationFingerprint(batch), options);
-    config.topologyRouteRiskCalibration.datasetIdentity = "fixture-held-out-v1";
-    config.topologyRouteRiskCalibration.calibrationQueries = 50;
-    config.topologyRouteRiskCalibration.protectedCandidates = 100;
-    config.topologyRouteRiskCalibration.missedProtectedCandidates = 0;
-    config.topologyRouteRiskCalibration.minCalibrationQueries = 30;
-    config.topologyRouteRiskCalibration.maxMissesPerThousand = 10;
-    config.topologyRouteRiskCalibration.minBoundaryMargin = 0.0F;
-    config.topologyRouteRiskCalibration.minSeedHits = 1;
-
-    config.topologyRouteWorkBudget.maxRowsVisited = maxRowsVisited;
-    config.topologyRouteWorkBudget.maxExactDistanceEvaluations = 2;
-    config.topologyRouteWorkBudget.maxAnnCandidates = 2;
 }
 
 } // namespace
@@ -1015,6 +779,164 @@ TEST_CASE("SearchEngine topology final-window rescue promotes a topology-scored 
     CHECK(debug.at("topology_final_rescue_displaced_doc_ids").find("x1") == std::string::npos);
 }
 
+namespace {
+
+// x2 shares a topology route with the lexical seed x1, but lexical Tier-1 keeps only x1
+// (textMaxResults=1) and the global vector top-1 is y1 (query embedding {0,1}). x2 is therefore
+// reachable only through topology routing.
+SearchEngineConfig routedOnlyCandidateConfig(SearchEngineConfig::TopologyVectorPolicy policy) {
+    auto config = topologyRoutingTestConfig(true);
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    config.topologyVectorPolicy = policy;
+    config.topologySparseDenseAlpha = 1.0F;
+    config.topologyNarrowMinBoundaryMargin = 0.0F;
+    config.textMaxResults = 1;
+    config.vectorMaxResults = 1;
+    config.enableWeakQueryFanoutBoost = false;
+    config.topologyMaxDocs = 2;
+    config.topologyExpansionOutputLimit = 2;
+    config.similarityThreshold = -1.0F;
+    return config;
+}
+
+TopologyAssistStageResult
+runRoutedOnlyAssistStage(TopologySearchFixture& fix,
+                         SearchEngineConfig::TopologyVectorPolicy policy) {
+    TopologyAssistStageRequest request;
+    request.query = "alpha one";
+    request.config = routedOnlyCandidateConfig(policy);
+    request.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.weakTier1Query = true;
+    request.tier1SeedHashes = {"x1"};
+    request.tier1SeedEvidence = {{.documentHash = "x1", .weight = 1.0F}};
+    request.existingCandidateHashes = {"x1"};
+    request.queryEmbedding = std::vector<float>{0.0F, 1.0F};
+    request.queryEmbeddingSpaceIdentity = "test-space-v1";
+    request.metadataRepo = fix.repo;
+    request.kgStore = fix.kgStore;
+    return runTopologyAssistStage(request);
+}
+
+} // namespace
+
+TEST_CASE("Topology assist stage reports routed members added under augment only",
+          "[search][topology][augment][catch2]") {
+    const TopologyVectorEnvPin vectorEnv;
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+
+    SECTION("augment counts allowed members that are new to the candidate pool") {
+        const auto stage =
+            runRoutedOnlyAssistStage(fix, SearchEngineConfig::TopologyVectorPolicy::Augment);
+        const auto& session = stage.session;
+        REQUIRE(session.applied);
+        CHECK(stage.skipReason.empty());
+        CHECK(session.certificate.allowedDocumentHashes ==
+              std::unordered_set<std::string>{"x1", "x2"});
+        CHECK(session.routedDocs == 2U);
+        CHECK(session.addedCandidates == 1U);
+        CHECK(session.duplicateCandidates == 1U);
+        CHECK(session.addedCandidateHashes == std::vector<std::string>{"x2"});
+    }
+
+    for (const auto policy : {SearchEngineConfig::TopologyVectorPolicy::Narrow,
+                              SearchEngineConfig::TopologyVectorPolicy::Shadow}) {
+        DYNAMIC_SECTION("policy " << SearchEngineConfig::topologyVectorPolicyToString(policy)
+                                  << " keeps the allowed set without claiming additions") {
+            const auto stage = runRoutedOnlyAssistStage(fix, policy);
+            const auto& session = stage.session;
+            REQUIRE(session.applied);
+            CHECK(session.certificate.allowedDocumentHashes ==
+                  std::unordered_set<std::string>{"x1", "x2"});
+            CHECK(session.routedDocs == 2U);
+            CHECK(session.addedCandidates == 0U);
+            CHECK(session.duplicateCandidates == 0U);
+            CHECK(session.addedCandidateHashes.empty());
+        }
+    }
+}
+
+TEST_CASE("SearchEngine topology augment adds a routed-only document to the fused results",
+          "[search][topology][augment][catch2]") {
+    const TopologyVectorEnvPin vectorEnv;
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    REQUIRE(fix.vectorDb->buildIndex());
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    auto disabledConfig =
+        routedOnlyCandidateConfig(SearchEngineConfig::TopologyVectorPolicy::Shadow);
+    disabledConfig.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::Disabled;
+    auto disabled = runTopologySearch(fix, generator, disabledConfig, 4, "alpha one");
+    REQUIRE(disabled.has_value());
+    const auto disabledHashes = resultHashes(disabled.value());
+    // Precondition: without topology the routed-only document is unreachable.
+    REQUIRE(std::ranges::find(disabledHashes, "x2") == disabledHashes.end());
+
+    SECTION("augment") {
+        auto response = runTopologySearch(
+            fix, generator,
+            routedOnlyCandidateConfig(SearchEngineConfig::TopologyVectorPolicy::Augment), 4,
+            "alpha one");
+        REQUIRE(response.has_value());
+        const auto routed = std::ranges::find_if(
+            response.value().results, [](const auto& r) { return r.document.sha256Hash == "x2"; });
+        REQUIRE(routed != response.value().results.end());
+        CHECK(routed->score > 0.0);
+
+        const auto& debug = response.value().debugStats;
+        CHECK(debug.at("topology_vector_policy") == "augment");
+        CHECK(debug.at("topology_weak_query_applied") == "1");
+        CHECK(debug.at("topology_weak_query_skip_reason").empty());
+        CHECK(debug.at("topology_weak_query_added_candidates") == "1");
+        CHECK(debug.at("topology_weak_query_duplicate_candidates") == "1");
+        CHECK(debug.at("topology_weak_query_total_candidates") == "2");
+        CHECK(debug.at("topology_candidate_rescue_applied") == "1");
+        CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+    }
+
+    SECTION("shadow matches topology-disabled results") {
+        auto response = runTopologySearch(
+            fix, generator,
+            routedOnlyCandidateConfig(SearchEngineConfig::TopologyVectorPolicy::Shadow), 4,
+            "alpha one");
+        REQUIRE(response.has_value());
+        REQUIRE(response.value().results.size() == disabled.value().results.size());
+        for (std::size_t i = 0; i < response.value().results.size(); ++i) {
+            CHECK(response.value().results[i].document.sha256Hash ==
+                  disabled.value().results[i].document.sha256Hash);
+            CHECK(response.value().results[i].score == disabled.value().results[i].score);
+        }
+        const auto& debug = response.value().debugStats;
+        CHECK(debug.at("topology_shadow_evaluated") == "1");
+        CHECK(debug.at("topology_weak_query_applied") == "0");
+        CHECK(debug.at("topology_weak_query_added_candidates") == "0");
+        CHECK(debug.at("topology_weak_query_duplicate_candidates") == "0");
+        CHECK(debug.at("topology_weak_query_total_candidates") == "1");
+    }
+
+    SECTION("narrow without a certificate stays global") {
+        auto response = runTopologySearch(
+            fix, generator,
+            routedOnlyCandidateConfig(SearchEngineConfig::TopologyVectorPolicy::Narrow), 4,
+            "alpha one");
+        REQUIRE(response.has_value());
+        const auto hashes = resultHashes(response.value());
+        CHECK(std::ranges::find(hashes, "x2") == hashes.end());
+        const auto& debug = response.value().debugStats;
+        CHECK(debug.at("topology_vector_policy") == "narrow");
+        CHECK(debug.at("topology_weak_query_applied") == "1");
+        CHECK(debug.at("topology_route_admission_eligible") == "0");
+        CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+        CHECK(debug.at("topology_weak_query_added_candidates") == "0");
+        CHECK(debug.at("topology_weak_query_duplicate_candidates") == "0");
+        CHECK(debug.at("topology_weak_query_total_candidates") == "1");
+        CHECK(debug.at("topology_candidate_rescue_attempted") == "0");
+    }
+}
+
 TEST_CASE("Evidence pipeline receives no topology adjustments under a shadow policy",
           "[search][topology][evidence_pipeline][catch2]") {
     TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
@@ -1563,6 +1485,20 @@ TEST_CASE("Topology routing options preserve the typed product configuration",
     CHECK(options.graphNeighborMinScore == Catch::Approx(0.31F));
     CHECK_FALSE(options.graphNeighborReciprocalOnly);
     CHECK(options.graphWeightedSeedRanking);
+
+    // Default (shadow) policy reports no additions; only augment counts route members.
+    CHECK_FALSE(options.countRouteMemberAdditions);
+    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
+    CHECK_FALSE(makeTopologyRoutingOptions(config, options.routingMode, true, true)
+                    .countRouteMemberAdditions);
+    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Augment;
+    const auto augment = makeTopologyRoutingOptions(config, options.routingMode, true, true);
+    CHECK(augment.countRouteMemberAdditions);
+    CHECK_FALSE(makeTopologyRoutingOptions(config, options.routingMode, true, false)
+                    .countRouteMemberAdditions);
+    // Accounting does not change the allowed-set policy identity used by route calibration.
+    CHECK(topologyRoutingPolicyFingerprint("representation", augment) ==
+          topologyRoutingPolicyFingerprint("representation", options));
 }
 
 TEST_CASE("Topology route admission requires the protected-relation proof obligations",
@@ -2382,4 +2318,79 @@ TEST_CASE("Topology routing hydrates ranked candidates and trace stages in batch
         CHECK(result.certificate.allowedDocumentHashes.empty());
         CHECK(result.addedCandidateHashes.empty());
     }
+}
+
+namespace {
+
+std::vector<std::string> rankedHashes(const SearchResponse& response) {
+    std::vector<std::string> hashes;
+    for (const auto& result : response.results) {
+        hashes.push_back(result.document.sha256Hash);
+    }
+    return hashes;
+}
+
+} // namespace
+
+TEST_CASE("SearchEngine topology warm-up serves the first routed query from the cache",
+          "[search][topology][prewarm][catch2]") {
+    TopologySearchFixture fix;
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+    const SearchEngineConfig config = topologyRoutingTestConfig(true);
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    context.freshness.vectorReady = true;
+    context.freshness.kgReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+    SearchParams params;
+    params.limit = 4;
+
+    SearchEngine cold(fix.repo, fix.vectorDb, generator, fix.kgStore, config);
+    auto coldResponse = cold.searchWithResponse("zz", params);
+    REQUIRE(coldResponse.has_value());
+    REQUIRE((coldResponse.value().debugStats.at("topology_weak_query_load_succeeded") == "1"));
+    CHECK((coldResponse.value().debugStats.at("topology_snapshot_cache_hit") == "0"));
+
+    SearchEngine warmed(fix.repo, fix.vectorDb, generator, fix.kgStore, config);
+    auto prewarm = warmed.prewarmTopologyRouting();
+    REQUIRE(prewarm.has_value());
+    CHECK(prewarm.value());
+    auto warmResponse = warmed.searchWithResponse("zz", params);
+    REQUIRE(warmResponse.has_value());
+
+    // The first routed query reads the warmed snapshot, and warming changes no result.
+    const auto& debug = warmResponse.value().debugStats;
+    CHECK((debug.at("topology_weak_query_load_succeeded") == "1"));
+    CHECK((debug.at("topology_snapshot_cache_hit") == "1"));
+    CHECK(rankedHashes(warmResponse.value()) == rankedHashes(coldResponse.value()));
+}
+
+TEST_CASE("SearchEngine topology warm-up does nothing when routing is disabled",
+          "[search][topology][prewarm][catch2]") {
+    TopologySearchFixture fix;
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    SearchEngine engine(fix.repo, fix.vectorDb, generator, fix.kgStore,
+                        topologyRoutingTestConfig(false));
+    auto prewarm = engine.prewarmTopologyRouting();
+    REQUIRE(prewarm.has_value());
+    CHECK_FALSE(prewarm.value());
+}
+
+TEST_CASE("SearchEngine topology warm-up reports no snapshot before one is published",
+          "[search][topology][prewarm][catch2]") {
+    TopologySearchFixture fix;
+    seedTopologyDocuments(fix);
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    SearchEngine engine(fix.repo, fix.vectorDb, generator, fix.kgStore,
+                        topologyRoutingTestConfig(true));
+    auto prewarm = engine.prewarmTopologyRouting();
+    REQUIRE(prewarm.has_value());
+    CHECK_FALSE(prewarm.value());
 }

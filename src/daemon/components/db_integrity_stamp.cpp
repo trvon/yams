@@ -167,8 +167,10 @@ DbFingerprintRead fingerprintDatabase(const std::string& dbPath) {
 #else
     const auto& modified = info.st_mtim;
 #endif
-    const __int128 modifiedTicks = static_cast<__int128>(modified.tv_sec) * 1'000'000'000 +
-                                   static_cast<__int128>(modified.tv_nsec);
+    // __int128 is a GCC/Clang extension; __extension__ marks the use as intentional for -Wpedantic.
+    __extension__ typedef __int128 WideTicks;
+    const WideTicks modifiedTicks = static_cast<WideTicks>(modified.tv_sec) * 1'000'000'000 +
+                                    static_cast<WideTicks>(modified.tv_nsec);
     if (modifiedTicks < std::numeric_limits<std::int64_t>::min() ||
         modifiedTicks > std::numeric_limits<std::int64_t>::max()) {
         return {false,

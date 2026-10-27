@@ -76,7 +76,7 @@ struct ReceivedDeltaBatch {
 };
 
 struct BootstrapPhaseResult {
-    DeltaExchangeStats stats;
+    DeltaExchangeStats stats{};
     memory_sync::VersionVector peerVersion;
 };
 

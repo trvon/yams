@@ -41,13 +41,13 @@ struct FilePattern {
  * @brief Configuration for FileTypeDetector
  */
 struct FileTypeDetectorConfig {
-    bool useLibMagic = true;            ///< Try to use libmagic if available
-    bool useBuiltinPatterns = true;     ///< Use built-in pattern database
-    bool useCustomPatterns = true;      ///< Allow custom patterns
-    std::filesystem::path patternsFile; ///< Path to custom patterns JSON file
-    size_t maxBytesToRead = 512;        ///< Maximum bytes to read for detection
-    bool cacheResults = true;           ///< Cache detection results
-    size_t cacheSize = 1000;            ///< Maximum cache entries
+    bool useLibMagic = true;              ///< Try to use libmagic if available
+    bool useBuiltinPatterns = true;       ///< Use built-in pattern database
+    bool useCustomPatterns = true;        ///< Allow custom patterns
+    std::filesystem::path patternsFile{}; ///< Path to custom patterns JSON file
+    size_t maxBytesToRead = 512;          ///< Maximum bytes to read for detection
+    bool cacheResults = true;             ///< Cache detection results
+    size_t cacheSize = 1000;              ///< Maximum cache entries
 };
 
 /**

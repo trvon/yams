@@ -1627,9 +1627,11 @@ private:
         namespace ms = yams::daemon;
         auto res = runDaemonClient(
             cfg,
-            [](ms::DaemonClient& client) {
-                return client.template call<ms::MemorySyncRequest>(
-                    ms::MemorySyncRequest{ms::MemorySyncOperation::Status, {}, {}});
+            // call() takes the request by reference and does not start until awaited, so the
+            // request must live in a coroutine frame rather than in a returned temporary.
+            [](ms::DaemonClient& client) -> boost::asio::awaitable<Result<ms::MemorySyncResponse>> {
+                const ms::MemorySyncRequest request{ms::MemorySyncOperation::Status, {}, {}};
+                co_return co_await client.template call<ms::MemorySyncRequest>(request);
             },
             std::chrono::seconds(3));
         if (!res) {

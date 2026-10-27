@@ -10,7 +10,8 @@ yams_wal = static_library('yams_wal',
     'wal_recovery.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, threads_dep, yams_core],
+  dependencies: [spdlog_dep, threads_dep, yams_core] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

@@ -67,7 +67,7 @@ struct SearchRequest {
     std::string collection = {}; // Scope to a named corpus (collection metadata key)
 
     // Daemon-local runtime state. Deliberately excluded from serialization.
-    std::shared_ptr<const std::atomic<bool>> cancellationSignal;
+    std::shared_ptr<const std::atomic<bool>> cancellationSignal{};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -330,8 +330,9 @@ struct GetRequest {
     bool extract = false; // force text extraction even when piping
 
     // Knowledge graph options
-    bool showGraph = false; // show related documents from knowledge graph
-    int graphDepth = 1;     // depth of graph traversal (1-5)
+    bool showGraph = false;  // show related documents from knowledge graph
+    int graphDepth = 1;      // depth of graph traversal (1-5)
+    uint32_t graphLimit = 0; // max related documents (0 = default caps)
 
     // Display options
     bool verbose = false;          // enable verbose output
@@ -365,6 +366,9 @@ struct GetRequest {
 
         // Display options
         ser << verbose << acceptCompressed;
+
+        // Appended after the original fields; older readers stop before it.
+        ser << graphLimit;
     }
 
     template <typename Deserializer>
@@ -514,6 +518,10 @@ struct GetRequest {
         if (!acceptCompressedResult)
             return acceptCompressedResult.error();
         req.acceptCompressed = acceptCompressedResult.value();
+
+        // Appended for backward compatibility with the original request layout.
+        if (auto r = deser.template read<uint32_t>(); r)
+            req.graphLimit = r.value();
 
         return req;
     }
@@ -2434,7 +2442,7 @@ struct GraphQueryRequest {
 
 struct GraphExploreRequest {
     std::string query;
-    std::string scopePathPrefix;
+    std::string scopePathPrefix{};
     uint64_t maxFiles{8};
     uint64_t maxSymbols{32};
     uint64_t maxTotalChars{24000};

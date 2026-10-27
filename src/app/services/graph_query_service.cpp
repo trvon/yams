@@ -43,6 +43,8 @@ std::vector<std::string> relationTypeToStrings(GraphRelationType type) {
                     "co_mentioned_with"};
         case GraphRelationType::PathVersion:
             return {"has_version", "path_version", "blob_at_path", "observed_as"};
+        case GraphRelationType::SemanticNeighbor:
+            return {"semantic_neighbor"};
         default:
             return {};
     }
@@ -397,6 +399,17 @@ private:
                     }
                 }
             }
+        } else if (node.nodeKey.starts_with("doc:")) {
+            // Document node: the key carries the content hash.
+            std::string hash = node.nodeKey.substr(4);
+            if (metadataRepo_) {
+                auto docResult = metadataRepo_->getDocumentByHash(hash);
+                if (docResult && docResult.value().has_value()) {
+                    metadata.documentId = docResult.value()->id;
+                    metadata.documentPath = docResult.value()->filePath;
+                }
+            }
+            metadata.documentHash = std::move(hash);
         } else if (node.nodeKey.starts_with("path:")) {
             // Path node - extract snapshot and path info
             // Format: "path:snapshotId:normalized_path"

@@ -725,9 +725,11 @@ void YamsDaemon::runLoop() {
                     snapshot.state == ServiceManagerState::Stopped) {
                     break;
                 }
-                spdlog::debug("[InitWaiter] ServiceManager still initializing (state={}), "
-                              "continuing to wait",
-                              static_cast<int>(snapshot.state));
+                spdlog::warn("[InitWaiter] ServiceManager still initializing (state={}, "
+                             "phase={}, phase_elapsed_ms={}), continuing to wait",
+                             static_cast<int>(snapshot.state),
+                             startupPhaseName(serviceManager_->getStartupPhase()),
+                             serviceManager_->getStartupPhaseElapsedMs());
             }
 
             initHandled_.store(true, std::memory_order_release);
@@ -1009,9 +1011,11 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
                     snapshot.state == ServiceManagerState::Stopped) {
                     break;
                 }
-                spdlog::debug("[InitWaiter] ServiceManager still initializing (state={}), "
-                              "continuing to wait",
-                              static_cast<int>(snapshot.state));
+                spdlog::warn("[InitWaiter] ServiceManager still initializing (state={}, "
+                             "phase={}, phase_elapsed_ms={}), continuing to wait",
+                             static_cast<int>(snapshot.state),
+                             startupPhaseName(serviceManager_->getStartupPhase()),
+                             serviceManager_->getStartupPhaseElapsedMs());
             }
 
             initHandled_.store(true, std::memory_order_release);
@@ -1134,8 +1138,8 @@ Result<void> YamsDaemon::stop() {
 
     stopRequested_.store(true, std::memory_order_release);
     stop_cv_.notify_all();
-    repairBusySince_ = {};
-    repairReadySince_ = {};
+    // repairBusySince_/repairReadySince_ belong to the runLoop thread, which may still be running
+    // here; start() resets them before the next loop begins.
 
     const auto lifecycleBeforeShutdown = lifecycleFsm_.snapshot().state;
     if (lifecycleBeforeShutdown != LifecycleState::Stopping &&

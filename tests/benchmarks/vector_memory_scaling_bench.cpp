@@ -94,7 +94,7 @@ void bench(const char* engineLabel, VectorSearchEngine engine, const Config& cfg
 
 } // namespace
 
-int main(int argc, char** argv) {
+int main() {
     std::printf("%-14s %-5s %-7s  %-12s %-12s\n", "engine", "dim", "vectors", "build_ms",
                 "query_us");
     std::printf("%s\n", std::string(56, '-').c_str());

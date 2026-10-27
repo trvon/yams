@@ -387,9 +387,11 @@ Result<void> renderGraphQueryResponse(std::ostream& out,
 
 Result<void> renderDocumentGraphResponse(std::ostream& out, const yams::daemon::GetResponse& resp,
                                          const DocumentGraphRenderOptions& options) {
+    // The daemon fills name; fileName is only set by some callers.
+    const auto& documentName = resp.fileName.empty() ? resp.name : resp.fileName;
     if (options.jsonOutput) {
         json payload;
-        payload["document"] = resp.fileName;
+        payload["document"] = documentName;
         payload["hash"] = resp.hash;
         payload["graphEnabled"] = resp.graphEnabled;
 
@@ -407,8 +409,8 @@ Result<void> renderDocumentGraphResponse(std::ostream& out, const yams::daemon::
 
     out << yams::cli::ui::section_header("Knowledge Graph") << "\n\n";
 
-    if (!resp.fileName.empty()) {
-        out << yams::cli::ui::key_value("Document", resp.fileName) << "\n";
+    if (!documentName.empty()) {
+        out << yams::cli::ui::key_value("Document", documentName) << "\n";
     }
     if (!resp.hash.empty()) {
         std::string hashDisplay =
@@ -434,7 +436,7 @@ Result<void> renderDocumentGraphResponse(std::ostream& out, const yams::daemon::
                 << "\n";
         }
         if (auto searchHint =
-                buildGraphSearchHint(resp.path.empty() ? resp.fileName : resp.path, options.cwd);
+                buildGraphSearchHint(resp.path.empty() ? documentName : resp.path, options.cwd);
             !searchHint.empty()) {
             out << yams::cli::ui::status_info("Or explore graph labels with: " + searchHint)
                 << "\n";

@@ -7,7 +7,8 @@ yams_chunking = dependency('yams_chunking', required: false)
 yams_manifest = static_library('yams_manifest',
   [ 'manifest_manager.cpp' ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, yams_core, yams_config, yams_crypto, yams_chunking],
+  dependencies: [spdlog_dep, yams_core, yams_config, yams_crypto, yams_chunking] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

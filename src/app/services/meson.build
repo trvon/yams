@@ -18,8 +18,9 @@ yams_write_coordinator_lib = static_library('yams_write_coordinator',
     dependency('yams_metadata'),
     boost_dep,
     dependency('spdlog'),
-  ],
+  ] + yams_tracy_deps,
   include_directories: include_directories('../../../include'),
+  cpp_args: yams_tracy_args,
   install: false,
 )
 
@@ -76,8 +77,9 @@ yams_app_services_lib = static_library('yams_app_services',
     dependency('nlohmann_json'),
     dependency('spdlog'),
     tl_expected_dep,
-  ] + _optional_deps,
+  ] + _optional_deps + yams_tracy_deps,
   include_directories: include_directories('../../../include'),
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

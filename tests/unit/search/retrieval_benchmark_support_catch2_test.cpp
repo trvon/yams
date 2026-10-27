@@ -1,13 +1,20 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "tests/benchmarks/search/retrieval_benchmark_support.h"
 #include "tests/common/test_helpers_catch2.h"
+
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
 
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <set>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 
@@ -312,6 +319,119 @@ TEST_CASE("Benchmark manifest loader preserves KG entity annotations", "[bench][
     CHECK((dataset.kgEntities[0].weight == 0.9F));
 }
 
+TEST_CASE("BEIR loader carries per-document metadata as strings", "[bench][retrieval][beir]") {
+    yams::test::TempDirGuard tempDir{"retrieval_beir_metadata_"};
+    const fs::path root = tempDir.path();
+    yams::test::write_file(
+        root / "corpus.jsonl",
+        R"JSONL({"_id": "s1", "title": "Chat Session - 2023/05/20", "text": "hello", "metadata": {"event_time": "2023-05-20T02:21:00", "session_id": "s1", "round_index": 3, "flag": true}}
+{"_id": "s2", "title": "", "text": "plain"}
+{"_id": "s3", "text": "no object", "metadata": "not-an-object"}
+)JSONL");
+    yams::test::write_file(root / "queries.jsonl", R"JSONL({"_id": "q1", "text": "hello"}
+)JSONL");
+    yams::test::write_file(root / "qrels" / "test.tsv", "query-id\tcorpus-id\tscore\nq1\ts1\t1\n");
+
+    auto datasetResult = yams::bench::loadBEIRDataset("unit-beir", root);
+    REQUIRE(datasetResult);
+    const auto& dataset = datasetResult.value();
+    REQUIRE((dataset.documents.size() == 3));
+
+    const auto& s1 = dataset.documents.at("s1").metadata;
+    REQUIRE((s1.size() == 4));
+    CHECK((s1.at("event_time") == "2023-05-20T02:21:00"));
+    CHECK((s1.at("session_id") == "s1"));
+    CHECK((s1.at("round_index") == "3"));
+    CHECK((s1.at("flag") == "true"));
+    CHECK(dataset.documents.at("s2").metadata.empty());
+    CHECK(dataset.documents.at("s3").metadata.empty());
+}
+
+TEST_CASE("BEIR corpus loader applies document metadata to ingested documents by path",
+          "[bench][retrieval][beir][metadata]") {
+    using namespace yams::metadata;
+
+    yams::test::TempDirGuard tempDir{"retrieval_beir_apply_"};
+    const fs::path root = tempDir.path();
+
+    yams::bench::BEIRDataset dataset;
+    dataset.name = "unit-beir";
+    dataset.documents["s1"] = yams::bench::BEIRDocument{
+        .id = "s1",
+        .title = "Session one",
+        .text = "hello",
+        .metadata = {{"event_time", "2023-05-20T02:21:00"}, {"session_id", "s1"}}};
+    dataset.documents["s1__r0"] = yams::bench::BEIRDocument{
+        .id = "s1__r0",
+        .title = "",
+        .text = "round",
+        .metadata = {
+            {"event_time", "2023-05-20T02:21:00"}, {"session_id", "s1"}, {"round_index", "0"}}};
+    dataset.documents["bare"] = yams::bench::BEIRDocument{.id = "bare", .text = "no metadata"};
+    dataset.documents["skipped"] = yams::bench::BEIRDocument{
+        .id = "skipped", .text = "never ingested", .metadata = {{"session_id", "x"}}};
+
+    yams::bench::BEIRCorpusLoader loader(dataset, root / "corpus");
+    loader.writeDocumentsAsFiles();
+
+    ConnectionPoolConfig poolConfig;
+    poolConfig.minConnections = 1;
+    poolConfig.maxConnections = 2;
+    ConnectionPool pool((root / "metadata.db").string(), poolConfig);
+    REQUIRE(pool.initialize().has_value());
+    MetadataRepository repo(pool);
+
+    // Simulate directory ingestion: every document except "skipped" lands under its file path.
+    std::map<std::string, std::int64_t> idsByDocId;
+    for (const auto* docId : {"s1", "s1__r0", "bare"}) {
+        const std::string path = (root / "corpus" / (std::string(docId) + ".txt")).string();
+        DocumentInfo info;
+        info.sha256Hash = std::string("hash-") + docId;
+        info.fileName = std::string(docId) + ".txt";
+        info.fileExtension = ".txt";
+        info.fileSize = 10;
+        info.mimeType = "text/plain";
+        auto derived = computePathDerivedValues(path);
+        info.filePath = derived.normalizedPath;
+        info.pathPrefix = derived.pathPrefix;
+        info.reversePath = derived.reversePath;
+        info.pathHash = derived.pathHash;
+        info.parentHash = derived.parentHash;
+        info.pathDepth = derived.pathDepth;
+        auto id = repo.insertDocument(info);
+        REQUIRE(id.has_value());
+        idsByDocId[docId] = id.value();
+    }
+
+    std::size_t missing = 0;
+    const auto applied = yams::bench::applyBenchmarkDocumentMetadata(repo, loader, &missing);
+    CHECK((applied == 2));
+    CHECK((missing == 1));
+
+    auto s1Meta = repo.getAllMetadata(idsByDocId.at("s1"));
+    REQUIRE(s1Meta.has_value());
+    REQUIRE((s1Meta.value().size() == 2));
+    CHECK((s1Meta.value().at("event_time").asString() == "2023-05-20T02:21:00"));
+    CHECK((s1Meta.value().at("session_id").asString() == "s1"));
+
+    auto roundMeta = repo.getAllMetadata(idsByDocId.at("s1__r0"));
+    REQUIRE(roundMeta.has_value());
+    CHECK((roundMeta.value().at("round_index").asString() == "0"));
+
+    auto bareMeta = repo.getAllMetadata(idsByDocId.at("bare"));
+    REQUIRE(bareMeta.has_value());
+    CHECK(bareMeta.value().empty());
+
+    // Re-applying is idempotent (warm caches re-run the step).
+    missing = 0;
+    CHECK((yams::bench::applyBenchmarkDocumentMetadata(repo, loader, &missing) == 2));
+    auto again = repo.getAllMetadata(idsByDocId.at("s1"));
+    REQUIRE(again.has_value());
+    CHECK((again.value().size() == 2));
+
+    pool.shutdown();
+}
+
 TEST_CASE("Hard lexical synthetic corpus produces graded retrieval queries", "[bench][retrieval]") {
     yams::test::TempDirGuard tempDir{"retrieval_hard_synth_"};
     CorpusGenerator corpus(tempDir.path(), SyntheticCorpusMode::HardLexical);
@@ -337,4 +457,46 @@ TEST_CASE("Hard lexical synthetic corpus produces graded retrieval queries", "[b
     REQUIRE((first.relevanceGrades.at("auth_password_reset_primary.txt") == 3));
     REQUIRE((first.relevanceGrades.at("auth_password_reset_secondary.txt") == 2));
     REQUIRE((first.relevanceGrades.at("auth_session_revocation_distractor.txt") == 1));
+}
+
+TEST_CASE("Semantic neighbor seeding keeps mutual pairs and, when directed, one-way kNN edges",
+          "[bench][retrieval][topology][seeding]") {
+    using yams::bench::buildSemanticNeighborSeedEdges;
+    using yams::bench::SemanticNeighborSeeding;
+    // a<->b mutual (0.8 / 0.6), a->c one-way 0.4, c->c self entry, d->a one-way 0.05 (floor).
+    std::unordered_map<std::string, std::unordered_map<std::string, float>> scores;
+    scores["a"]["b"] = 0.8F;
+    scores["b"]["a"] = 0.6F;
+    scores["a"]["c"] = 0.4F;
+    scores["c"]["c"] = 0.9F;
+    scores["d"]["a"] = 0.05F;
+
+    const auto mutual =
+        buildSemanticNeighborSeedEdges(scores, 0.10F, SemanticNeighborSeeding::MutualPairs);
+    REQUIRE(mutual.size() == 2);
+    CHECK(mutual[0].sourceHash == "a");
+    CHECK(mutual[0].targetHash == "b");
+    CHECK(mutual[1].sourceHash == "b");
+    CHECK(mutual[1].targetHash == "a");
+    for (const auto& edge : mutual) {
+        CHECK(edge.mutual);
+        CHECK(edge.weight == Catch::Approx(0.7F));
+    }
+
+    const auto directed =
+        buildSemanticNeighborSeedEdges(scores, 0.10F, SemanticNeighborSeeding::DirectedKnn);
+    REQUIRE(directed.size() == 4);
+    CHECK(directed[0].sourceHash == "a");
+    CHECK(directed[0].targetHash == "b");
+    CHECK(directed[0].mutual);
+    CHECK(directed[1].sourceHash == "a");
+    CHECK(directed[1].targetHash == "c");
+    CHECK_FALSE(directed[1].mutual);
+    CHECK(directed[1].weight == Catch::Approx(0.4F));
+    CHECK(directed[2].sourceHash == "b");
+    CHECK(directed[2].targetHash == "a");
+    CHECK(directed[3].sourceHash == "d");
+    CHECK(directed[3].targetHash == "a");
+    CHECK_FALSE(directed[3].mutual);
+    CHECK(directed[3].weight == Catch::Approx(0.10F));
 }

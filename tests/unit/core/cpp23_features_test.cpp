@@ -1,200 +1,225 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <cstring>
+// Included first, before any standard header, so the gates see only what the header
+// itself pulls in. A gate that reads a __cpp_lib_* macro without <version> fails the
+// agreement checks below.
+#include <yams/core/cpp23_features.hpp>
+
 #include <string>
 #include <vector>
+#include <version>
 #include <catch2/catch_test_macros.hpp>
-#include <yams/core/cpp23_features.hpp>
+
+#if YAMS_HAS_EXPECTED
+#include <expected>
+#endif
+#if YAMS_HAS_FLAT_MAP
+#include <flat_map>
+#endif
+#if YAMS_HAS_MOVE_ONLY_FUNCTION
+#include <functional>
+#include <memory>
+#endif
+#if YAMS_HAS_RANGES
+#include <ranges>
+#endif
+#if YAMS_HAS_REFLECTION
+#include <meta>
+#endif
 
 using namespace yams::features;
 
-TEST_CASE("C++23 feature flags are defined", "[core][cpp23]") {
-    // These should always be defined (either 0 or 1)
-    REQUIRE((YAMS_HAS_CONSTEXPR_VECTOR == 0 || YAMS_HAS_CONSTEXPR_VECTOR == 1));
-    REQUIRE((YAMS_HAS_CONSTEXPR_STRING == 0 || YAMS_HAS_CONSTEXPR_STRING == 1));
-    REQUIRE((YAMS_HAS_CONSTEXPR_CONTAINERS == 0 || YAMS_HAS_CONSTEXPR_CONTAINERS == 1));
-    REQUIRE((YAMS_HAS_PROFILES == 0 || YAMS_HAS_PROFILES == 1));
-    REQUIRE((YAMS_HAS_REFLECTION == 0 || YAMS_HAS_REFLECTION == 1));
+namespace {
+
+// Expected gate values, computed here from the compiler's own feature-test macros.
+#if defined(__cpp_lib_constexpr_vector) && __cpp_lib_constexpr_vector >= 201907L
+constexpr bool kStdConstexprVector = true;
+#else
+constexpr bool kStdConstexprVector = false;
+#endif
+#if defined(__cpp_lib_constexpr_string) && __cpp_lib_constexpr_string >= 201907L
+constexpr bool kStdConstexprString = true;
+#else
+constexpr bool kStdConstexprString = false;
+#endif
+#if defined(__cpp_lib_ranges) && __cpp_lib_ranges >= 201911L
+constexpr bool kStdRanges = true;
+#else
+constexpr bool kStdRanges = false;
+#endif
+#if defined(__cpp_lib_constexpr_algorithms) && __cpp_lib_constexpr_algorithms >= 201806L
+constexpr bool kStdConstexprAlgorithms = true;
+#else
+constexpr bool kStdConstexprAlgorithms = false;
+#endif
+#if defined(__has_cpp_attribute) && __has_cpp_attribute(likely) >= 201803L
+constexpr bool kStdLikely = true;
+#else
+constexpr bool kStdLikely = false;
+#endif
+#if defined(__cpp_lib_expected) && __cpp_lib_expected >= 202202L
+constexpr bool kStdExpected = true;
+#else
+constexpr bool kStdExpected = false;
+#endif
+#if defined(__cpp_lib_string_contains) && __cpp_lib_string_contains >= 202011L
+constexpr bool kStdStringContains = true;
+#else
+constexpr bool kStdStringContains = false;
+#endif
+#if defined(__cpp_lib_flat_map) && __cpp_lib_flat_map >= 202207L
+constexpr bool kStdFlatMap = true;
+#else
+constexpr bool kStdFlatMap = false;
+#endif
+#if defined(__cpp_lib_move_only_function) && __cpp_lib_move_only_function >= 202110L
+constexpr bool kStdMoveOnlyFunction = true;
+#else
+constexpr bool kStdMoveOnlyFunction = false;
+#endif
+#if defined(__cpp_impl_reflection) && __cpp_impl_reflection >= 202506L &&                          \
+    defined(__cpp_lib_reflection) && __cpp_lib_reflection >= 202506L
+constexpr bool kStdReflection = true;
+#else
+constexpr bool kStdReflection = false;
+#endif
+
+YAMS_CONSTEXPR_IF_SUPPORTED int answer() {
+    return 42;
 }
 
-TEST_CASE("FeatureInfo struct is accessible", "[core][cpp23]") {
-    // Should be able to access static constexpr members
-    bool has_containers = FeatureInfo::has_constexpr_containers;
-    bool has_vector = FeatureInfo::has_constexpr_vector;
-    bool has_string = FeatureInfo::has_constexpr_string;
-    bool has_profiles = FeatureInfo::has_profiles;
-    bool has_reflection = FeatureInfo::has_reflection;
+} // namespace
 
-    REQUIRE((has_containers == 0 || has_containers == 1));
-    REQUIRE((has_vector == 0 || has_vector == 1));
-    REQUIRE((has_string == 0 || has_string == 1));
-    REQUIRE((has_profiles == 0 || has_profiles == 1));
-    REQUIRE((has_reflection == 0 || has_reflection == 1));
+TEST_CASE("Feature gates agree with compiler feature-test macros", "[core][cpp23]") {
+    STATIC_REQUIRE(FeatureInfo::has_constexpr_vector == kStdConstexprVector);
+    STATIC_REQUIRE(FeatureInfo::has_constexpr_string == kStdConstexprString);
+    STATIC_REQUIRE(FeatureInfo::has_constexpr_containers ==
+                   (kStdConstexprVector && kStdConstexprString));
+    STATIC_REQUIRE(FeatureInfo::has_ranges == kStdRanges);
+    STATIC_REQUIRE(FeatureInfo::has_constexpr_algorithms == kStdConstexprAlgorithms);
+    STATIC_REQUIRE(FeatureInfo::has_likely_unlikely == kStdLikely);
+    STATIC_REQUIRE(FeatureInfo::has_expected == kStdExpected);
+    STATIC_REQUIRE(FeatureInfo::has_string_contains == kStdStringContains);
+    STATIC_REQUIRE(FeatureInfo::has_flat_map == kStdFlatMap);
+    STATIC_REQUIRE(FeatureInfo::has_move_only_function == kStdMoveOnlyFunction);
+    STATIC_REQUIRE(FeatureInfo::has_reflection == kStdReflection);
 }
 
-TEST_CASE("Containers flag is consistent with individual flags", "[core][cpp23]") {
-    if (YAMS_HAS_CONSTEXPR_CONTAINERS) {
-        // If containers are enabled, both vector and string must be enabled
-        REQUIRE(YAMS_HAS_CONSTEXPR_VECTOR == 1);
-        REQUIRE(YAMS_HAS_CONSTEXPR_STRING == 1);
+TEST_CASE("Gates match what every supported toolchain provides", "[core][cpp23]") {
+    // C++20 floor: GCC 12+/libstdc++, Clang 18+, Apple Clang 17+, MSVC 19.4x+.
+    STATIC_REQUIRE(YAMS_HAS_CONSTEXPR_CONTAINERS == 1);
+    STATIC_REQUIRE(YAMS_HAS_RANGES == 1);
+    STATIC_REQUIRE(YAMS_HAS_CONSTEXPR_ALGORITHMS == 1);
+    STATIC_REQUIRE(YAMS_HAS_LIKELY_UNLIKELY == 1);
+    STATIC_REQUIRE(YAMS_CPP_VERSION >= 202002L);
+}
+
+TEST_CASE("Enabled gates expose a usable feature", "[core][cpp23]") {
+#if YAMS_HAS_EXPECTED
+    std::expected<int, std::string> ok{7};
+    std::expected<int, std::string> err{std::unexpected(std::string{"bad"})};
+    CHECK(ok.value() == 7);
+    CHECK_FALSE(err.has_value());
+#endif
+#if YAMS_HAS_FLAT_MAP
+    std::flat_map<int, int> fm;
+    fm[2] = 20;
+    fm[1] = 10;
+    CHECK(fm.begin()->first == 1);
+#endif
+#if YAMS_HAS_MOVE_ONLY_FUNCTION
+    auto owned = std::make_unique<int>(5);
+    std::move_only_function<int()> fn = [p = std::move(owned)] { return *p; };
+    CHECK(fn() == 5);
+#endif
+#if YAMS_HAS_RANGES
+    std::vector<int> v{1, 2, 3, 4};
+    auto evens = v | std::views::filter([](int x) { return x % 2 == 0; });
+    CHECK(std::ranges::distance(evens) == 2);
+#endif
+#if YAMS_HAS_REFLECTION
+    STATIC_REQUIRE(std::meta::is_type(^^int));
+#endif
+#if YAMS_HAS_LIKELY_UNLIKELY
+    int branch = 0;
+    if (FeatureInfo::cpp_version > 0) [[likely]] {
+        branch = 1;
+    }
+    CHECK(branch == 1);
+#endif
+}
+
+TEST_CASE("Compiler info and summary are defined", "[core][cpp23]") {
+    REQUIRE(FeatureInfo::compiler_name != nullptr);
+    REQUIRE(FeatureInfo::compiler_version > 0);
+    REQUIRE(FeatureInfo::cpp_version >= 202002L);
+
+    const std::string summary = get_feature_summary();
+    if (FeatureInfo::cpp_version > 202302L) {
+        CHECK(summary == "C++26");
+    } else if (FeatureInfo::cpp_version > 202002L) {
+        CHECK(summary == "C++23");
     } else {
-        // If containers are disabled, at least one of vector/string is disabled
-        REQUIRE((YAMS_HAS_CONSTEXPR_VECTOR == 0 || YAMS_HAS_CONSTEXPR_STRING == 0));
+        CHECK(summary == "C++20");
     }
 }
 
-TEST_CASE("Compiler info is defined", "[core][cpp23]") {
-    const char* compiler_name = FeatureInfo::compiler_name;
-    int compiler_version = FeatureInfo::compiler_version;
-    long cpp_version = FeatureInfo::cpp_version;
-
-    REQUIRE(compiler_name != nullptr);
-    REQUIRE(compiler_version > 0);
-    REQUIRE(cpp_version >= 202002L); // At least C++20
+TEST_CASE("String helpers", "[core][cpp23]") {
+    const std::string path = "docs/notes.md";
+    CHECK(string_contains(path, "notes"));
+    CHECK_FALSE(string_contains(path, "absent"));
+    CHECK(string_starts_with(path, "docs/"));
+    CHECK(string_ends_with(path, ".md"));
+    CHECK_FALSE(string_ends_with(path, "docs/notes.md.bak"));
+    STATIC_REQUIRE(string_contains(std::string_view{"abc"}, "b"));
 }
 
-TEST_CASE("Feature summary string is valid", "[core][cpp23]") {
-    const char* summary = get_feature_summary();
-    REQUIRE(summary != nullptr);
-    REQUIRE(strlen(summary) > 0);
-
-    // Summary should mention C++20 or C++23
-    std::string summary_str(summary);
-    bool mentions_std = summary_str.find("C++20") != std::string::npos ||
-                        summary_str.find("C++23") != std::string::npos;
-    REQUIRE(mentions_std);
-}
-
-TEST_CASE("YAMS_CONSTEXPR_IF_SUPPORTED macro expands correctly", "[core][cpp23]") {
-    // This test verifies the macro expands without syntax errors
-    // The actual behavior (constexpr vs inline) depends on feature detection
-    auto test_func = []() YAMS_CONSTEXPR_IF_SUPPORTED -> int { return 42; };
-    REQUIRE(test_func() == 42);
-}
-
-TEST_CASE("YAMS_PROFILE macro expands without errors", "[core][cpp23]") {
-    // Profile macro should expand to either [[profile: ...]] or nothing
-    struct YAMS_PROFILE(type) TestStruct {
-        int value = 0;
-    };
-
-    TestStruct s;
-    s.value = 10;
-    REQUIRE(s.value == 10);
+TEST_CASE("YAMS_CONSTEXPR_IF_SUPPORTED expands", "[core][cpp23]") {
+    REQUIRE(answer() == 42);
+#if YAMS_HAS_CONSTEXPR_CONTAINERS
+    STATIC_REQUIRE(answer() == 42);
+#endif
 }
 
 #if YAMS_HAS_CONSTEXPR_CONTAINERS
-TEST_CASE("Constexpr vector works when available", "[core][cpp23][constexpr]") {
-    // NOTE: In GCC 15, even with C++23, lambdas with constexpr vector
-    // can have issues with operator new. Use a function instead.
-    constexpr auto make_vec = []() constexpr {
-        std::vector<int> v;
-        v.push_back(1);
-        v.push_back(2);
-        v.push_back(3);
-        return v;
-    };
-
-    // Test at runtime (constexpr works but GCC 15 has lambda limitations)
-    auto vec = make_vec();
-    REQUIRE(vec.size() == 3);
-    REQUIRE(vec[0] == 1);
-    REQUIRE(vec[1] == 2);
-    REQUIRE(vec[2] == 3);
-}
-
-TEST_CASE("Constexpr string works when available", "[core][cpp23][constexpr]") {
-    constexpr auto make_str = []() constexpr {
+TEST_CASE("Constexpr vector and string evaluate at compile time", "[core][cpp23][constexpr]") {
+    constexpr auto vecSum = [] {
+        std::vector<int> v{1, 2, 3};
+        int sum = 0;
+        for (int x : v) {
+            sum += x;
+        }
+        return sum;
+    }();
+    constexpr auto strLen = [] {
         std::string s = "hello";
         s += " world";
-        return s;
-    };
-
-    // Test at runtime
-    auto str = make_str();
-    REQUIRE(str == "hello world");
-    REQUIRE(str.size() == 11);
-}
-
-TEST_CASE("Constexpr containers work together", "[core][cpp23][constexpr]") {
-    // Simplified test - avoid complex nested constexpr for now
-    struct Data {
-        std::string name;
-        std::vector<int> values;
-    };
-
-    auto make_data = []() {
-        std::vector<Data> result;
-        result.push_back({"first", {1, 2, 3}});
-        result.push_back({"second", {4, 5, 6}});
-        return result;
-    };
-
-    auto data = make_data();
-    REQUIRE(data.size() == 2);
-    REQUIRE(data[0].name == "first");
-    REQUIRE(data[0].values.size() == 3);
-    REQUIRE(data[1].name == "second");
-    REQUIRE(data[1].values.size() == 3);
+        return s.size();
+    }();
+    STATIC_REQUIRE(vecSum == 6);
+    STATIC_REQUIRE(strLen == 11);
 }
 #endif
 
-#if !YAMS_HAS_CONSTEXPR_CONTAINERS
-TEST_CASE("C++20 fallback for vectors works", "[core][cpp23][fallback]") {
-    // In C++20 mode, we should still be able to use vectors and strings
-    // They just won't be constexpr
-    auto make_vec = []() {
-        std::vector<int> v;
-        v.push_back(1);
-        v.push_back(2);
-        v.push_back(3);
-        return v;
-    };
-
-    auto vec = make_vec();
-    REQUIRE(vec.size() == 3);
-    REQUIRE(vec[0] == 1);
-}
-
-TEST_CASE("C++20 fallback for strings works", "[core][cpp23][fallback]") {
-    auto make_str = []() {
-        std::string s = "hello";
-        s += " world";
-        return s;
-    };
-
-    auto str = make_str();
-    REQUIRE(str == "hello world");
-}
-#endif
-
-TEST_CASE("C++ version is checked correctly", "[core][cpp23]") {
-    long cpp_ver = YAMS_CPP_VERSION;
-
-    // Should be at least C++20
-    REQUIRE(cpp_ver >= 202002L);
-
-    // Note: MSVC may report __cplusplus as 202002L even when C++23 features
-    // are available. The YAMS_HAS_CONSTEXPR_CONTAINERS macro is based on
-    // actual feature detection, not __cplusplus value.
-    // Therefore we only verify the minimum required version (C++20).
-}
-
-TEST_CASE("Deprecation macro compiles without errors", "[core][cpp23]") {
+TEST_CASE("Deprecation macro compiles", "[core][cpp23]") {
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #elif defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
 #endif
     YAMS_CPP23_DEPRECATED("test message")
     auto old_function = []() { return 42; };
-
     REQUIRE(old_function() == 42);
 #if defined(__clang__)
 #pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
 #elif defined(_MSC_VER)
 #pragma warning(pop)
 #endif

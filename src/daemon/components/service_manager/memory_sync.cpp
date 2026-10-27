@@ -1,4 +1,5 @@
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/profiling.h>
 
 #include <algorithm>
 #include <chrono>
@@ -176,6 +177,7 @@ using yams::ErrorCode;
 using yams::Result;
 
 Result<void> ServiceManager::publishMemorySync(const std::string& key, const std::string& value) {
+    YAMS_ZONE_SCOPED_N("memory_sync.publish_key");
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
@@ -217,6 +219,35 @@ Result<std::string> ServiceManager::readMemorySyncCached(const std::string& key)
         return namespacedKey.error();
     }
     auto value = memorySync_->readCached(namespacedKey.value());
+    if (!value) {
+        return value.error();
+    }
+    const auto& bytes = value.value();
+    std::string text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    if (key.starts_with(memory_sync::kTaskRecordPrefix)) {
+        const auto hash = crypto::SHA256Hasher::hash(std::span<const std::byte>(bytes));
+        if (auto valid = memory_sync::validateTaskRecordPublication(key, text, hash); !valid) {
+            return Error{ErrorCode::InvalidData, valid.error().message};
+        }
+    }
+    return text;
+}
+
+Result<std::string> ServiceManager::readMemorySyncCommitted(const std::string& key) const {
+    if (!memorySync_) {
+        return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
+    }
+    auto namespacedKey = memory_sync::userLogicalKey(key);
+    if (!namespacedKey) {
+        return namespacedKey.error();
+    }
+    auto& governor = ResourceGovernor::instance();
+    if (governor.hostPressureElevated() || !governor.canAdmitWork()) {
+        return Error{ErrorCode::ResourceBusy, "memory sync read deferred by local pressure"};
+    }
+    // This is an explicit disk read, not a cache miss followed by reconciliation.
+    // The loop validates the current committed winner/quarantine and exact blob digest.
+    auto value = memorySync_->readCommitted(namespacedKey.value());
     if (!value) {
         return value.error();
     }
@@ -452,6 +483,7 @@ std::optional<std::string> ServiceManager::takeMemorySyncCommittedVectorDocument
 }
 
 Result<memory_sync::ApplyStagePass> ServiceManager::applyMemorySyncContentBlobs() {
+    YAMS_ZONE_SCOPED_N("memory_sync.apply_blobs");
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
@@ -460,19 +492,17 @@ Result<memory_sync::ApplyStagePass> ServiceManager::applyMemorySyncContentBlobs(
         return Error{ErrorCode::InvalidState, "content store is not available"};
     }
 
-    auto merged = memorySync_->syncOnce();
-    if (!merged) {
-        return merged.error();
-    }
-
     // The adapter attempts every blob, so a corrupt blob neither starves the blobs after it nor
     // hides the blobs this scan deferred: both outcomes are recorded.
     memory_sync::ContentBlobSyncAdapter adapter{*contentStore, *memorySync_};
-    auto pass = adapter.applyWinners(merged.value());
+    auto pass = adapter.applyCommitted();
+    if (!pass) {
+        return pass.error();
+    }
     memory_sync::ApplyStagePass out;
-    out.deferredKeys = std::move(pass.deferredKeys);
-    if (pass.failure) {
-        out.failure = pass.failure->message;
+    out.deferredKeys = std::move(pass.value().deferredKeys);
+    if (pass.value().failure) {
+        out.failure = pass.value().failure->message;
     }
     return out;
 }
@@ -539,6 +569,7 @@ ServiceManager::memorySyncDeleteLocallyAbsent(std::string_view contentHash,
 }
 
 bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
+    YAMS_ZONE_SCOPED_N("memory_sync.drain_deletes");
     try {
         notifyMemorySyncDeleteOutboxStage("delete_drain_waiting");
         std::lock_guard<std::mutex> deleteLock(memorySyncDeleteOutboxMutex_);
@@ -553,6 +584,7 @@ bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
         const std::string blobPrefix =
             std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::ContentBlob)) + "/";
         auto pending = std::move(intents.value());
+        YAMS_PLOT("memory_sync.pending_erases", static_cast<int64_t>(pending.size()));
         std::ranges::sort(pending, [](const auto& lhs, const auto& rhs) {
             const auto lhsCounter =
                 lhs.prepared ? lhs.preparedCounter : std::numeric_limits<std::uint64_t>::max();
@@ -613,6 +645,7 @@ bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
 }
 
 void ServiceManager::applyMemorySyncWinners() noexcept {
+    YAMS_ZONE_SCOPED_N("memory_sync.cycle");
     memorySyncApplyAttempts_.fetch_add(1, std::memory_order_acq_rel);
     std::lock_guard<std::mutex> applyLock(memorySyncApplyMutex_);
     if (!memorySync_ || memorySync_->stopRequested()) {
@@ -635,6 +668,40 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     } catch (...) {
         spdlog::debug("[memory_sync] quarantine reason logging skipped");
     }
+    const auto publishBackfillIfDue = [this] {
+        if (memorySync_->stopRequested()) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= nextMemorySyncBackfill_) {
+            nextMemorySyncBackfill_ = now + std::chrono::seconds{5};
+            publishMemorySyncBackfill();
+        }
+    };
+    // Re-applying unchanged winners re-reads and re-checks every record. When the adapter inputs
+    // match the last complete, clean pass, skip the inbound stages until the next full pass.
+    // Unknown inputs (an unnamed winner view, admission pressure) never skip.
+    std::optional<memory_sync::MemorySyncService::AdapterInputs> applyInputs;
+    bool inputsUnchanged = false;
+    try {
+        YAMS_ZONE_SCOPED_N("memory_sync.apply_inputs");
+        if (auto inputs = memorySync_->adapterInputs(); inputs) {
+            applyInputs = std::move(inputs.value());
+        }
+        inputsUnchanged = applyInputs && lastCleanMemorySyncApplyInputs_ &&
+                          applyInputs->sameAs(*lastCleanMemorySyncApplyInputs_);
+    } catch (...) {
+        applyInputs.reset();
+        inputsUnchanged = false;
+    }
+    const auto cycleStart = std::chrono::steady_clock::now();
+    if (inputsUnchanged && cycleStart < nextMemorySyncFullApply_ &&
+        !memorySyncApplySkipDisabled_.load(std::memory_order_acquire)) {
+        memorySyncApplySkippedCycles_.fetch_add(1, std::memory_order_acq_rel);
+        memorySyncApplyHealth_.recordCycle(false);
+        publishBackfillIfDue();
+        return;
+    }
     // Stage dependencies. Inbound stages run in prerequisite order so that a prerequisite which
     // lands in this cycle is already visible to its dependents in the same cycle:
     //   content  - independent; content-addressed bytes.
@@ -649,30 +716,51 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     // prerequisites never arrived. Only a stop request ends the cycle early.
     // A stage that defers records is healthy; only a hard failure marks the cycle failed.
     bool stageFailed = false;
-    const auto runStage = [this, &stageFailed](memory_sync::ApplyStage stage,
-                                               std::string_view completedStage, auto&& applyStage) {
+    // Clean: every stage scanned completely with nothing deferred and nothing failed. Only a clean
+    // pass may let later cycles skip, since a deferral waits on local prerequisites to arrive.
+    bool cycleClean = true;
+    const auto runStage = [this, &stageFailed, &cycleClean](memory_sync::ApplyStage stage,
+                                                            std::string_view completedStage,
+                                                            auto&& applyStage) {
         if (memorySync_->stopRequested()) {
             return false;
         }
         const auto name = memory_sync::applyStageName(stage);
         const auto recordFailure = [&](std::string message) {
             stageFailed = true;
+            cycleClean = false;
             spdlog::warn("[ServiceManager] memory_sync {} apply failed: {}", name, message);
             memorySyncApplyHealth_.recordFailure(stage, std::move(message),
                                                  std::chrono::steady_clock::now());
         };
         try {
-            // An error means the pass did not scan every record; a pass value that scanned every
-            // record can carry deferrals and a failure together, and both are recorded.
+            // Admission/contention is an incomplete attempt, not an I/O/capacity failure or a
+            // complete empty scan. Retain the last complete observation and expose uncertainty.
+            // Complete scans may carry both prerequisite deferrals and independent hard failures.
             auto pass = applyStage();
-            if (!pass) {
+            if (!pass && pass.error().code == ErrorCode::ResourceBusy) {
+                cycleClean = false;
+                memorySyncApplyHealth_.recordPass(
+                    stage, memory_sync::ApplyStagePass{.scanComplete = false},
+                    std::chrono::steady_clock::now());
+                spdlog::debug("[ServiceManager] memory_sync {} apply deferred by admission", name);
+            } else if (!pass) {
                 recordFailure(pass.error().message);
             } else {
                 const auto& deferred = pass.value().deferredKeys;
-                if (!deferred.empty()) {
+                const auto deferredCount = std::max<std::uint64_t>(
+                    deferred.size(), pass.value().deferredCount.value_or(deferred.size()));
+                if (!pass.value().scanComplete || deferredCount != 0 || pass.value().failure) {
+                    cycleClean = false;
+                }
+                if (!pass.value().scanComplete) {
+                    spdlog::debug("[ServiceManager] memory_sync {} scan incomplete; "
+                                  "retaining last-known deferred totals",
+                                  name);
+                } else if (deferredCount != 0) {
                     spdlog::debug("[ServiceManager] memory_sync {} apply deferred {} record(s) "
-                                  "awaiting replicated prerequisites",
-                                  name, deferred.size());
+                                  "awaiting replicated prerequisites ({} diagnostic keys)",
+                                  name, deferredCount, deferred.size());
                 }
                 if (pass.value().failure) {
                     stageFailed = true;
@@ -701,6 +789,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return applyMemorySyncContentBlobs();
     };
     const auto applyMetadata = [this]() -> Result<StagePass> {
+        YAMS_ZONE_SCOPED_N("memory_sync.apply_metadata");
         auto repository = getMetadataRepo();
         if (!repository) {
             return StagePass{};
@@ -724,6 +813,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
     };
     const auto applyVectors = [this]() -> Result<StagePass> {
+        YAMS_ZONE_SCOPED_N("memory_sync.apply_vectors");
         auto vectorDatabase = getVectorDatabase();
         if (!vectorDatabase) {
             return StagePass{};
@@ -754,6 +844,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return pass;
     };
     const auto applyTopology = [this]() -> Result<StagePass> {
+        YAMS_ZONE_SCOPED_N("memory_sync.apply_topology");
         auto kgStore = getKgStore();
         if (!kgStore) {
             return StagePass{};
@@ -768,7 +859,9 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
                           "endpoint node was deleted",
                           applied.value().edgesDropped);
         }
-        return StagePass{.deferredKeys = adapter.deferredKeys(), .failure = {}};
+        return StagePass{.deferredKeys = adapter.deferredKeys(),
+                         .failure = {},
+                         .deferredCount = applied.value().edgesDeferred};
     };
 
     using memory_sync::ApplyStage;
@@ -779,18 +872,21 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return;
     }
     memorySyncApplyHealth_.recordCycle(stageFailed);
+    if (applyInputs && cycleClean && !stageFailed) {
+        if (!inputsUnchanged || cycleStart >= nextMemorySyncFullApply_) {
+            nextMemorySyncFullApply_ = cycleStart + kMemorySyncFullApplyInterval;
+        }
+        applyInputs->view.reset(); // keep the name only; never hold an old store open
+        lastCleanMemorySyncApplyInputs_ = std::move(applyInputs);
+    } else {
+        lastCleanMemorySyncApplyInputs_.reset();
+    }
 
-    if (memorySync_->stopRequested()) {
-        return;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= nextMemorySyncBackfill_) {
-        nextMemorySyncBackfill_ = now + std::chrono::seconds{5};
-        publishMemorySyncBackfill();
-    }
+    publishBackfillIfDue();
 }
 
 void ServiceManager::publishMemorySyncBackfill() noexcept try {
+    YAMS_ZONE_SCOPED_N("memory_sync.backfill");
     memorySyncBackfillAttempts_.fetch_add(1, std::memory_order_acq_rel);
     std::lock_guard<std::mutex> backfillLock(memorySyncBackfillMutex_);
     if (!memorySync_) {
@@ -869,6 +965,24 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         metadata::MetadataSyncAdapter metadataAdapter{*repository, *memorySync_};
         auto published = metadataAdapter.publish(document, tags);
         if (!published) {
+            // A document record larger than the resident limit can never publish under the
+            // current limits, and throwing here pins documentIdCursor so the same document is
+            // retried every cycle forever, re-reconciling the whole store each time. Confirm the
+            // oversize from the actual bytes rather than the error text, then skip it so the
+            // pass reaches later documents. Vectors already do the same.
+            const bool exceedsResidentLimit =
+                published.error().code == ErrorCode::InvalidArgument &&
+                metadata::MetadataSyncAdapter::serializedRecordBytes(document, tags) >
+                    memorySync_->maxPublishValueBytes();
+            if (exceedsResidentLimit) {
+                spdlog::warn("[ServiceManager] memory_sync backfill skipping document {} "
+                             "(record exceeds the resident publish limit): {}",
+                             document.id, published.error().message);
+                state.documentIdCursor = std::max(state.documentIdCursor, document.id);
+                ++skippedDocuments;
+                notifyMemorySyncStage("backfill.skip_document");
+                return true;
+            }
             if (isUnrecoverableBlobFailure(published.error().code)) {
                 spdlog::warn("[ServiceManager] memory_sync backfill skipping document {} "
                              "(record unrecoverable): {}",
@@ -907,7 +1021,13 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_};
         auto published = adapter.publish(record);
         if (!published) {
-            if (isUnrecoverableBlobFailure(published.error().code)) {
+            const bool exceedsResidentLimit =
+                published.error().code == ErrorCode::InvalidArgument &&
+                !vector::VectorSyncAdapter::checkPublishable(record,
+                                                             memorySync_->maxPublishValueBytes());
+            if (isUnrecoverableBlobFailure(published.error().code) || exceedsResidentLimit) {
+                // Keep the local row, but let this pass reach the following vectors. A changed
+                // value advances the store generation; new limits create a fresh service/sweep.
                 skipVector(published.error());
                 return;
             }
@@ -953,7 +1073,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     };
 
     const auto publishVector = [&]() -> bool {
-        if (!vectorDatabase) {
+        if (!vectorDatabase || !state.vectorSweep.begin(vectorDatabase->changeGeneration())) {
             return false;
         }
         auto records = vectorDatabase->getVectorsPage(state.vectorDocumentHashCursor,
@@ -962,13 +1082,14 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
             throw std::runtime_error(records.error().message);
         }
         if (records.value().empty()) {
-            // Pass complete. The next one starts from the beginning, so vectors added or
-            // re-embedded behind the cursor are published by it, as topology passes repeat.
+            // Pass complete. The next one starts from the beginning once the store has changed,
+            // so vectors added or re-embedded behind the cursor are published by it.
             if (!state.vectorDocumentHashCursor.empty()) {
                 ++state.vectorSweepPasses;
             }
             state.vectorDocumentHashCursor.clear();
             state.vectorChunkIdCursor.clear();
+            state.vectorSweep.complete();
             return false;
         }
         const auto& record = records.value().front();
@@ -979,7 +1100,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     };
 
     const auto publishTopology = [&]() -> bool {
-        if (!kgStore) {
+        if (!kgStore || !state.topologySweep.begin(kgStore->changeGeneration())) {
             return false;
         }
         using Phase = MemorySyncBackfillState::TopologyPhase;
@@ -1044,12 +1165,14 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                     auto winners = memorySync_->committedWinnersAfter(
                         "topology-", state.topologyRetractionKeyCursor, 1);
                     if (winners.empty()) {
-                        // Pass complete. The next one starts from the beginning, so records
-                        // created or changed behind the cursors are published by it.
+                        // Pass complete. The next one starts from the beginning once the graph
+                        // has changed, so records created, changed, or deleted behind the
+                        // cursors are published or retracted by it.
                         state.topologyPhase = Phase::Nodes;
                         state.topologyNodeIdCursor = 0;
                         state.topologyEdgeIdCursor = 0;
                         state.topologyRetractionKeyCursor.clear();
+                        state.topologySweep.complete();
                         return false;
                     }
                     const auto& [key, winner] = winners.front();
@@ -1078,8 +1201,9 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     // arrives. A publish costs a large share of the per-cycle time budget, so a fair rotation let
     // derived records delay the documents every peer is waiting for. Committed vectors are new
     // work announced by embedding jobs, bounded by what was embedded, so they come next. The two
-    // catch-up sweeps repeat forever and so always have work: they alternate, item by item and
-    // across cycles, and a sweep that is done for this cycle leaves its turns to the other.
+    // catch-up sweeps run a pass whenever their store changed, and an idle store costs them
+    // nothing: while both have work they alternate, item by item and across cycles, and a sweep
+    // that is done for this cycle leaves its turns to the other.
     using Domain = MemorySyncBackfillState::Domain;
     constexpr std::size_t kDomainCount = 4;
     std::array<bool, kDomainCount> domainDone{};
@@ -1223,6 +1347,7 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
                 return trustedStore.error();
             }
             cfg.controlScope = std::move(trustedStore.value());
+            cfg.exclusiveBackend = true; // peers reach the op store only through this daemon
         }
 
         std::optional<yams::storage::BackendConfig> resolvedS3Config;
@@ -1251,7 +1376,11 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
             policy.transport == "direct"
                 ? yams::memory_sync::
                       WriterTrustFileReader{service_manager_detail::readProtectedP2pTrustFile}
-                : yams::memory_sync::WriterTrustFileReader{});
+                : yams::memory_sync::WriterTrustFileReader{},
+            [] {
+                auto& governor = ResourceGovernor::instance();
+                return governor.hostPressureElevated() || !governor.canAdmitWork();
+            });
         if (!svc) {
             return Error{svc.error().code,
                          "memory_sync service creation failed: " + svc.error().message};

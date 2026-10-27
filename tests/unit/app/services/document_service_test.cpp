@@ -6,10 +6,12 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <set>
 #include <span>
 #include <thread>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store_builder.h>
+#include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/compat/unistd.h>
@@ -812,6 +814,168 @@ TEST_CASE("DocumentService - Retrieval", "[document][service][retrieval]") {
         auto result = fixture.documentService_->retrieve(request);
 
         CHECK_FALSE(result);
+    }
+}
+
+TEST_CASE("DocumentService graph lookup matches doc node traversal",
+          "[document][service][retrieval][graph]") {
+    // Issue #280: `yams graph <hash>` and `--name` resolved the document but reported no graph,
+    // while `--node-key doc:<hash>` listed its semantic neighbours.
+    DocumentFixture fixture;
+
+    auto kgStoreRes = yams::metadata::makeSqliteKnowledgeGraphStore(*fixture.pool_);
+    REQUIRE(kgStoreRes);
+    std::shared_ptr<KnowledgeGraphStore> kgStore = std::move(kgStoreRes.value());
+
+    auto doc1 = fixture.metadataRepo_->getDocumentByHash(fixture.testHash1_);
+    REQUIRE(doc1);
+    REQUIRE(doc1.value().has_value());
+    const auto path1 = doc1.value()->filePath;
+
+    auto upsert = [&](const std::string& key, const std::string& label, const std::string& type) {
+        KGNode node;
+        node.nodeKey = key;
+        node.label = label;
+        node.type = type;
+        auto id = kgStore->upsertNode(node);
+        REQUIRE(id);
+        return id.value();
+    };
+    auto addEdge = [&](std::int64_t src, std::int64_t dst, const std::string& relation) {
+        KGEdge edge;
+        edge.srcNodeId = src;
+        edge.dstNodeId = dst;
+        edge.relation = relation;
+        REQUIRE(kgStore->addEdge(edge));
+    };
+
+    // Shape the ingest pipeline writes: blob -has_version-> doc, doc -semantic_neighbor-> doc.
+    const auto blob1 = upsert("blob:" + fixture.testHash1_, fixture.testHash1_, "blob");
+    const auto docNode1 = upsert("doc:" + fixture.testHash1_, path1, "document");
+    const auto docNode2 = upsert("doc:" + fixture.testHash2_, "test2.md", "document");
+    addEdge(blob1, docNode1, "has_version");
+    addEdge(docNode1, docNode2, "semantic_neighbor");
+
+    fixture.appContext_.kgStore = kgStore;
+    fixture.appContext_.graphQueryService = makeGraphQueryService(kgStore, fixture.metadataRepo_);
+    REQUIRE(fixture.appContext_.graphQueryService);
+    auto service = makeDocumentService(fixture.appContext_);
+
+    // Control: traverse the doc node directly, as `yams graph --node-key doc:<hash>` does.
+    GraphQueryRequest traversal;
+    traversal.nodeId = docNode1;
+    traversal.maxDepth = 1;
+    auto traversed = fixture.appContext_.graphQueryService->query(traversal);
+    REQUIRE(traversed);
+    std::set<std::string> traversedHashes;
+    for (const auto& node : traversed.value().allConnectedNodes) {
+        if (node.nodeMetadata.node.nodeKey.starts_with("doc:")) {
+            traversedHashes.insert(node.nodeMetadata.node.nodeKey.substr(4));
+        }
+    }
+    REQUIRE(traversedHashes == std::set<std::string>{fixture.testHash2_});
+
+    auto checkLookup = [&](RetrieveDocumentRequest request) {
+        request.metadataOnly = true;
+        request.graph = true;
+        request.depth = 1;
+        auto result = service->retrieve(request);
+        REQUIRE(result);
+        CHECK(result.value().graphEnabled);
+        std::set<std::string> relatedHashes;
+        for (const auto& rel : result.value().related) {
+            relatedHashes.insert(rel.hash);
+            CHECK(rel.relationship.value_or("") == "semantic_neighbor");
+            CHECK(rel.distance == 1);
+        }
+        CHECK(relatedHashes == traversedHashes);
+    };
+
+    SECTION("by hash") {
+        RetrieveDocumentRequest request;
+        request.hash = fixture.testHash1_;
+        checkLookup(request);
+    }
+
+    SECTION("by name") {
+        RetrieveDocumentRequest request;
+        request.name = path1;
+        checkLookup(request);
+    }
+}
+
+TEST_CASE("DocumentService graph lookup caps related documents at graphLimit",
+          "[document][service][retrieval][graph]") {
+    // #280 follow-up: `yams graph --limit` did not reach the lookup, which kept up to 100 graph
+    // nodes and 20 same-directory documents.
+    DocumentFixture fixture;
+
+    auto lookup = [&](std::size_t graphLimit) {
+        RetrieveDocumentRequest request;
+        request.hash = fixture.testHash1_;
+        request.metadataOnly = true;
+        request.graph = true;
+        request.depth = 1;
+        request.graphLimit = graphLimit;
+        auto result = fixture.documentService_->retrieve(request);
+        REQUIRE(result);
+        return result.value().related;
+    };
+
+    SECTION("same-directory fallback") {
+        // test2.md and libsample.so share test1.txt's directory and no graph edges exist.
+        auto all = lookup(0);
+        REQUIRE(all.size() == 2);
+        for (const auto& rel : all) {
+            CHECK(rel.relationship.value_or("") == "same_directory");
+        }
+        auto capped = lookup(1);
+        REQUIRE(capped.size() == 1);
+        CHECK(capped.front().relationship.value_or("") == "same_directory");
+    }
+
+    SECTION("graph neighbours") {
+        auto kgStoreRes = yams::metadata::makeSqliteKnowledgeGraphStore(*fixture.pool_);
+        REQUIRE(kgStoreRes);
+        std::shared_ptr<KnowledgeGraphStore> kgStore = std::move(kgStoreRes.value());
+
+        metadata::DocumentQueryOptions binaryQuery;
+        binaryQuery.fileName = "libsample.so";
+        auto binaryDocs = fixture.metadataRepo_->queryDocuments(binaryQuery);
+        REQUIRE(binaryDocs);
+        REQUIRE(binaryDocs.value().size() == 1);
+        const auto hash3 = binaryDocs.value().front().sha256Hash;
+
+        auto upsertDoc = [&](const std::string& hash) {
+            KGNode node;
+            node.nodeKey = "doc:" + hash;
+            node.label = hash;
+            node.type = "document";
+            auto id = kgStore->upsertNode(node);
+            REQUIRE(id);
+            return id.value();
+        };
+        const auto doc1 = upsertDoc(fixture.testHash1_);
+        for (const auto& hash : {fixture.testHash2_, hash3}) {
+            KGEdge edge;
+            edge.srcNodeId = doc1;
+            edge.dstNodeId = upsertDoc(hash);
+            edge.relation = "semantic_neighbor";
+            REQUIRE(kgStore->addEdge(edge));
+        }
+
+        fixture.appContext_.kgStore = kgStore;
+        fixture.appContext_.graphQueryService =
+            makeGraphQueryService(kgStore, fixture.metadataRepo_);
+        fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+        auto all = lookup(0);
+        REQUIRE(all.size() == 2);
+        auto capped = lookup(1);
+        REQUIRE(capped.size() == 1);
+        CHECK(capped.front().relationship.value_or("") == "semantic_neighbor");
+        CHECK(capped.front().hash == all.front().hash);
+        CHECK(lookup(5).size() == 2);
     }
 }
 

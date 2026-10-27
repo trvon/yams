@@ -6,7 +6,12 @@
 
 #include <yams/vector/binary_quantization.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <numbers>
+#include <span>
+#include <utility>
 #include <vector>
 
 using yams::vector::BinaryQuantizedIndex;
@@ -159,4 +164,215 @@ TEST_CASE("BinaryQuantizedIndex: build and search", "[vector][bq][index][catch2]
         CHECK(hits[1].id == 2);
         CHECK(hits[1].hammingDistance == 64);
     }
+}
+
+namespace {
+
+// Deterministic, platform-independent pseudo-random floats in [-1, 1).
+struct SplitMixFloats {
+    std::uint64_t state;
+    float next() {
+        std::uint64_t z = (state += 0x9E3779B97F4A7C15ULL);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z ^= z >> 31;
+        return static_cast<float>(static_cast<double>(z >> 11) * 0x1.0p-53 * 2.0 - 1.0);
+    }
+};
+
+// Reference raw-coordinate sign-bit shortlist: the behaviour of the unrotated index.
+std::vector<std::pair<std::size_t, std::size_t>>
+rawSignShortlist(const std::vector<std::vector<float>>& vectors, const std::vector<float>& query,
+                 std::size_t prefix, std::size_t topK) {
+    std::vector<std::pair<std::size_t, std::size_t>> ranked; // (hamming, id)
+    for (std::size_t id = 0; id < vectors.size(); ++id) {
+        std::size_t hamming = 0;
+        for (std::size_t i = 0; i < prefix; ++i) {
+            hamming += ((vectors[id][i] >= 0.0F) != (query[i] >= 0.0F)) ? 1U : 0U;
+        }
+        ranked.emplace_back(hamming, id);
+    }
+    std::ranges::sort(ranked);
+    ranked.resize(std::min(topK, ranked.size()));
+    return ranked;
+}
+
+} // namespace
+
+TEST_CASE("BinaryQuantizedIndex without rotation keeps raw-coordinate sign bits",
+          "[vector][bq][index][characterization][catch2]") {
+    constexpr std::size_t kVectors = 48;
+    constexpr std::size_t kDimension = 96;
+    SplitMixFloats rng{42};
+    std::vector<std::size_t> ids(kVectors);
+    std::vector<std::vector<float>> vectors(kVectors, std::vector<float>(kDimension));
+    for (std::size_t id = 0; id < kVectors; ++id) {
+        ids[id] = id;
+        for (auto& value : vectors[id]) {
+            value = rng.next();
+        }
+    }
+    std::vector<float> query(kDimension);
+    for (auto& value : query) {
+        value = rng.next();
+    }
+
+    for (const std::size_t prefix : {std::size_t{0}, std::size_t{16}}) {
+        auto index = BinaryQuantizedIndex::build(ids, vectors, prefix);
+        REQUIRE(index.has_value());
+        const auto effective = prefix == 0 ? kDimension : prefix;
+        CHECK(index.value()->dimension() == effective);
+        const auto hits = index.value()->search(query, 10);
+        const auto expected = rawSignShortlist(vectors, query, effective, 10);
+        REQUIRE(hits.size() == expected.size());
+        for (std::size_t i = 0; i < hits.size(); ++i) {
+            CHECK(hits[i].hammingDistance == expected[i].first);
+            CHECK(hits[i].id == expected[i].second);
+            CHECK(hits[i].estimatedSimilarity ==
+                  Catch::Approx(
+                      std::cos(std::numbers::pi_v<float> * static_cast<float>(expected[i].first) /
+                               static_cast<float>(effective))));
+        }
+    }
+}
+
+namespace {
+
+double dotProduct(std::span<const float> a, std::span<const float> b) {
+    double acc = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        acc += static_cast<double>(a[i]) * static_cast<double>(b[i]);
+    }
+    return acc;
+}
+
+double cosine(std::span<const float> a, std::span<const float> b) {
+    return dotProduct(a, b) / std::sqrt(dotProduct(a, a) * dotProduct(b, b));
+}
+
+// Anisotropic synthetic embeddings: three dominant coordinates carry the geometry and the
+// remaining coordinates hold small noise, the regime where raw sign bits mostly encode noise.
+std::vector<std::vector<float>> anisotropicVectors(std::size_t count, std::size_t dimension,
+                                                   std::uint64_t seed) {
+    SplitMixFloats rng{seed};
+    std::vector<std::vector<float>> vectors(count, std::vector<float>(dimension));
+    for (auto& vector : vectors) {
+        for (auto& value : vector) {
+            value = 0.03F * rng.next();
+        }
+        for (std::size_t d = 0; d < 3; ++d) {
+            vector[d] = rng.next();
+        }
+    }
+    return vectors;
+}
+
+double meanCosineEstimateError(const std::vector<std::vector<float>>& vectors,
+                               yams::vector::BinaryRotation rotation) {
+    std::vector<std::size_t> ids(vectors.size());
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        ids[i] = i;
+    }
+    auto index = BinaryQuantizedIndex::build(ids, vectors, 0, rotation);
+    REQUIRE(index.has_value());
+    double error = 0.0;
+    std::size_t pairs = 0;
+    for (std::size_t q = 0; q < vectors.size(); ++q) {
+        for (const auto& hit : index.value()->search(vectors[q], vectors.size())) {
+            if (hit.id == q) {
+                continue;
+            }
+            error += std::abs(static_cast<double>(hit.estimatedSimilarity) -
+                              cosine(vectors[q], vectors[hit.id]));
+            ++pairs;
+        }
+    }
+    return error / static_cast<double>(pairs);
+}
+
+} // namespace
+
+TEST_CASE("Randomized Hadamard rotation is orthogonal", "[vector][bq][rotation][catch2]") {
+    using yams::vector::RandomizedHadamardRotation;
+    constexpr std::size_t kDimension = 300; // padded to 512
+    const RandomizedHadamardRotation rotation(kDimension, yams::vector::kDefaultBinaryRotationSeed);
+    CHECK(rotation.inputDimension() == kDimension);
+    CHECK(rotation.outputDimension() == 512U);
+    CHECK(rotation.seed() == yams::vector::kDefaultBinaryRotationSeed);
+
+    SplitMixFloats rng{7};
+    std::vector<std::vector<float>> inputs(6, std::vector<float>(kDimension));
+    std::vector<std::vector<float>> outputs;
+    for (auto& input : inputs) {
+        for (auto& value : input) {
+            value = rng.next();
+        }
+        outputs.push_back(rotation.apply(input));
+        REQUIRE(outputs.back().size() == 512U);
+    }
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        CHECK(std::sqrt(dotProduct(outputs[i], outputs[i])) ==
+              Catch::Approx(std::sqrt(dotProduct(inputs[i], inputs[i]))).epsilon(1e-5));
+        for (std::size_t j = i + 1; j < inputs.size(); ++j) {
+            CHECK(dotProduct(outputs[i], outputs[j]) ==
+                  Catch::Approx(dotProduct(inputs[i], inputs[j])).margin(1e-3));
+        }
+    }
+    CHECK(rotation.apply(std::vector<float>(kDimension + 1, 1.0F)).empty());
+}
+
+TEST_CASE("Rotated sign bits estimate cosine better on anisotropic vectors",
+          "[vector][bq][rotation][catch2]") {
+    const auto vectors = anisotropicVectors(64, 128, 11);
+    const double rawError = meanCosineEstimateError(vectors, yams::vector::BinaryRotation::None);
+    const double rotatedError =
+        meanCosineEstimateError(vectors, yams::vector::BinaryRotation::Fwht);
+    INFO("raw=" << rawError << " rotated=" << rotatedError);
+    CHECK(rotatedError < rawError);
+    CHECK(rotatedError < 0.5 * rawError);
+}
+
+TEST_CASE("Rotated BQ index applies its own seed to stored vectors and queries",
+          "[vector][bq][rotation][catch2]") {
+    using yams::vector::BinaryRotation;
+    using yams::vector::RandomizedHadamardRotation;
+    const auto vectors = anisotropicVectors(16, 40, 3);
+    std::vector<std::size_t> ids(vectors.size());
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        ids[i] = 100 + i;
+    }
+    const auto query = vectors[5];
+
+    for (const std::size_t prefix : {std::size_t{0}, std::size_t{16}}) {
+        auto index = BinaryQuantizedIndex::build(ids, vectors, prefix, BinaryRotation::Fwht);
+        REQUIRE(index.has_value());
+        const auto& bq = *index.value();
+        CHECK(bq.rotation() == BinaryRotation::Fwht);
+        CHECK(bq.rotationSeed() == yams::vector::kDefaultBinaryRotationSeed);
+        // Rotate first (40 -> 64 coordinates), then take the prefix.
+        CHECK(bq.dimension() == (prefix == 0 ? 64U : prefix));
+
+        const RandomizedHadamardRotation rotation(40, yams::vector::kDefaultBinaryRotationSeed);
+        const auto rotatedQuery = rotation.apply(query);
+        const auto manual =
+            bq.search(BinaryQuantizer::quantize(
+                          std::span<const float>(rotatedQuery).subspan(0, bq.dimension())),
+                      4);
+        const auto automatic = bq.search(query, 4);
+        REQUIRE(automatic.size() == manual.size());
+        for (std::size_t i = 0; i < manual.size(); ++i) {
+            CHECK(automatic[i].id == manual[i].id);
+            CHECK(automatic[i].hammingDistance == manual[i].hammingDistance);
+        }
+        REQUIRE_FALSE(automatic.empty());
+        CHECK(automatic.front().id == 105U);
+        CHECK(automatic.front().hammingDistance == 0U);
+        // A query of another dimension cannot share the rotation.
+        CHECK(bq.search(std::vector<float>(41, 1.0F), 4).empty());
+    }
+
+    auto unrotated = BinaryQuantizedIndex::build(ids, vectors);
+    REQUIRE(unrotated.has_value());
+    CHECK(unrotated.value()->rotation() == BinaryRotation::None);
+    CHECK(unrotated.value()->rotationSeed() == 0U);
 }

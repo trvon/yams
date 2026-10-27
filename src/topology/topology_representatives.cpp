@@ -33,10 +33,20 @@ double cosineDistance(std::span<const float> lhs, std::span<const float> rhs) {
 std::vector<ClusterRoutingRepresentative> selectDiverseRoutingRepresentatives(
     std::span<const TopologyDocumentInput> documents, std::span<const std::size_t> members,
     std::span<const float> centroidEmbedding, std::size_t routingRepresentativeCount) {
+    return selectDiverseRoutingRepresentatives(documents, members, centroidEmbedding,
+                                               routingRepresentativeCount, centroidEmbedding);
+}
+
+std::vector<ClusterRoutingRepresentative> selectDiverseRoutingRepresentatives(
+    std::span<const TopologyDocumentInput> documents, std::span<const std::size_t> members,
+    std::span<const float> centroidEmbedding, std::size_t routingRepresentativeCount,
+    std::span<const float> seedEmbedding) {
     std::vector<ClusterRoutingRepresentative> selected;
     if (routingRepresentativeCount <= 1 || centroidEmbedding.empty()) {
         return selected;
     }
+    const std::span<const float> firstAnchor =
+        seedEmbedding.size() == centroidEmbedding.size() ? seedEmbedding : centroidEmbedding;
 
     std::vector<std::size_t> candidates;
     candidates.reserve(members.size());
@@ -70,7 +80,7 @@ std::vector<ClusterRoutingRepresentative> selectDiverseRoutingRepresentatives(
             }
             const auto& embedding = documents[candidates[candidate]].embedding;
             const auto distance = selection == 0
-                                      ? cosineDistance(embedding, centroidEmbedding)
+                                      ? cosineDistance(embedding, firstAnchor)
                                       : cosineDistance(embedding, selected.back().embedding);
             minDistances[candidate] = std::min(minDistances[candidate], distance);
             if (minDistances[candidate] > bestDistance) {
@@ -88,6 +98,101 @@ std::vector<ClusterRoutingRepresentative> selectDiverseRoutingRepresentatives(
                                          .embedding = documents[document].embedding});
     }
     return selected;
+}
+
+std::optional<MedoidRepresentativeSelection>
+selectMedoidRepresentative(std::span<const TopologyDocumentInput> documents,
+                           std::span<const std::size_t> members, std::size_t maxMembers) {
+    // Usable members, hash-sorted so the cap subsample and the tie-break are deterministic.
+    std::vector<std::size_t> usable;
+    usable.reserve(members.size());
+    std::size_t dimension = 0;
+    for (const auto member : members) {
+        if (member >= documents.size() || documents[member].embedding.empty()) {
+            continue;
+        }
+        const auto& embedding = documents[member].embedding;
+        if (dimension == 0) {
+            dimension = embedding.size();
+        }
+        if (embedding.size() != dimension ||
+            !std::ranges::all_of(embedding, [](float value) { return std::isfinite(value); })) {
+            continue;
+        }
+        usable.push_back(member);
+    }
+    std::ranges::sort(usable, [&](std::size_t lhs, std::size_t rhs) {
+        return documents[lhs].documentHash < documents[rhs].documentHash;
+    });
+
+    if (maxMembers >= 2 && usable.size() > maxMembers) {
+        std::vector<std::size_t> sampled;
+        sampled.reserve(maxMembers);
+        for (std::size_t i = 0; i < maxMembers; ++i) {
+            sampled.push_back(usable[(i * usable.size()) / maxMembers]);
+        }
+        usable.swap(sampled);
+    }
+
+    // Unit-normalize once; zero-norm members carry no direction and are dropped.
+    std::vector<std::vector<double>> unit;
+    std::vector<std::size_t> evaluated;
+    unit.reserve(usable.size());
+    evaluated.reserve(usable.size());
+    for (const auto member : usable) {
+        const auto& embedding = documents[member].embedding;
+        double normSq = 0.0;
+        for (const float value : embedding) {
+            normSq += static_cast<double>(value) * static_cast<double>(value);
+        }
+        if (normSq <= 0.0) {
+            continue;
+        }
+        const double inv = 1.0 / std::sqrt(normSq);
+        auto& row = unit.emplace_back(embedding.size());
+        for (std::size_t d = 0; d < embedding.size(); ++d) {
+            row[d] = static_cast<double>(embedding[d]) * inv;
+        }
+        evaluated.push_back(member);
+    }
+    if (evaluated.size() < 2) {
+        return std::nullopt;
+    }
+
+    const std::size_t n = evaluated.size();
+    std::vector<double> objective(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = i + 1; j < n; ++j) {
+            double dot = 0.0;
+            for (std::size_t d = 0; d < unit[i].size(); ++d) {
+                dot += unit[i][d] * unit[j][d];
+            }
+            const double chord = std::sqrt(std::max(0.0, 2.0 * (1.0 - std::clamp(dot, -1.0, 1.0))));
+            objective[i] += chord;
+            objective[j] += chord;
+        }
+    }
+
+    // evaluated is hash-sorted: on a tie the earlier (smaller hash) member is kept.
+    std::size_t best = 0;
+    for (std::size_t i = 1; i < n; ++i) {
+        if (objective[i] < objective[best] - 1e-9) {
+            best = i;
+        }
+    }
+    return MedoidRepresentativeSelection{
+        .document = evaluated[best], .objective = objective[best], .evaluatedMembers = n};
+}
+
+std::size_t applyRepresentativeRule(RepresentativeRule rule,
+                                    std::span<const TopologyDocumentInput> documents,
+                                    std::span<const std::size_t> members,
+                                    std::size_t degreeChoice) {
+    if (rule != RepresentativeRule::Medoid) {
+        return degreeChoice;
+    }
+    const auto medoid = selectMedoidRepresentative(documents, members);
+    return medoid.has_value() ? medoid->document : degreeChoice;
 }
 
 std::size_t applyOrthogonalBoundarySpill(std::span<const TopologyDocumentInput> documents,

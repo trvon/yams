@@ -183,9 +183,9 @@ public:
 
     struct Task {
         std::string hash;
-        std::string mime;
+        std::string mime{};
         int64_t documentId{-1};
-        std::string filePath;
+        std::string filePath{};
         bool noEmbeddings{false};
     };
 

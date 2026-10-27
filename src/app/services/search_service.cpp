@@ -585,7 +585,6 @@ public:
     }
 
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) override {
-        YAMS_ZONE_SCOPED_N("search_service::search");
         using namespace std::chrono;
         const auto t0 = steady_clock::now();
         MetadataTelemetry metadataTelemetry;
@@ -600,7 +599,7 @@ public:
             co_return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
 
-        YAMS_ZONE_SCOPED_N("search_service::parse_and_plan");
+        YAMS_ZONE_SYNC_N(planZone, "search_service::parse_and_plan");
         auto parsed = yams::search::parseQueryQualifiers(req.query);
         SearchRequest normalizedReq = req;
         normalizedReq.query = std::move(parsed.normalizedQuery);
@@ -684,9 +683,9 @@ public:
                 normalizedReq.pathsOnly ? response.paths.size() : response.results.size();
             return response;
         };
+        YAMS_ZONE_END(planZone);
 
         if (!normalizedReq.hash.empty()) {
-            YAMS_ZONE_SCOPED_N("search_service::hash_lookup");
             if (!yams::common::looksLikePartialHashArgument(normalizedReq.hash)) {
                 co_return Error{ErrorCode::InvalidArgument,
                                 "Invalid hash format (expected hex, 6-64 chars)"};
@@ -1158,7 +1157,7 @@ private:
             co_return;
         }
 
-        YAMS_ZONE_SCOPED_N("search_service::snippet_hydration");
+        YAMS_ZONE_SYNC_N(hydrationPrepZone, "search_service::snippet_hydration");
         const auto hydrationStart = std::chrono::steady_clock::now();
         bool hydrationTimingRecorded = false;
         resp.componentTimingMicros["snippet_lookup"] = 0;
@@ -1218,6 +1217,8 @@ private:
             finishHydrationTiming();
             co_return;
         }
+
+        YAMS_ZONE_END(hydrationPrepZone);
 
         // Batch fetch documents by hash (1 query instead of N)
         const auto lookupStart = std::chrono::steady_clock::now();
@@ -1293,11 +1294,13 @@ private:
 
         // Batch fetch content for all documents (1 query instead of N)
         if (!docIds.empty()) {
-            YAMS_ZONE_SCOPED_N("search_service::snippet_batch_fetch");
             const auto contentFetchStart = std::chrono::steady_clock::now();
             auto contentResult = co_await retryMetadataOp(
-                [&]() { return ctx_.metadataRepo->batchGetContent(docIds); }, 4,
-                std::chrono::milliseconds(25), telemetry);
+                [&]() {
+                    YAMS_ZONE_SCOPED_N("search_service::snippet_batch_fetch");
+                    return ctx_.metadataRepo->batchGetContent(docIds);
+                },
+                4, std::chrono::milliseconds(25), telemetry);
             const auto contentFetchElapsed =
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - contentFetchStart)
@@ -2490,8 +2493,9 @@ private:
         auto keywordResults = runFullTextSearch(keywordReq, false);
         auto fuzzyResults = runFuzzySearch(req);
         YAMS_PLOT("search_service::keyword_results",
-                  keywordResults ? keywordResults->results.size() : 0);
-        YAMS_PLOT("search_service::fuzzy_results", fuzzyResults ? fuzzyResults->results.size() : 0);
+                  keywordResults ? keywordResults.value().results.size() : 0);
+        YAMS_PLOT("search_service::fuzzy_results",
+                  fuzzyResults ? fuzzyResults.value().results.size() : 0);
 
         if (!keywordResults && !fuzzyResults) {
             return fuzzyResults.error();

@@ -3,27 +3,13 @@
 #include <yams/cli/graph_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/metadata/kg_relation_summary.h>
-#include <yams/metadata/path_utils.h>
 
-#include <spdlog/spdlog.h>
+#include <algorithm>
+#include <limits>
 
 namespace yams::cli {
 
 namespace {
-
-std::string buildPathFileNodeKey(const std::string& path) {
-    try {
-        auto derived = yams::metadata::computePathDerivedValues(path);
-        if (!derived.normalizedPath.empty()) {
-            return "path:file:" + derived.normalizedPath;
-        }
-    } catch (const std::exception& e) {
-        spdlog::trace("graph: path-derived node key fallback for '{}': {}", path, e.what());
-    } catch (...) {
-        spdlog::trace("graph: path-derived node key fallback for '{}'", path);
-    }
-    return "path:file:" + path;
-}
 
 std::vector<std::string> canonicalRelationFilters(const std::string& relationFilter) {
     if (relationFilter.empty()) {
@@ -102,36 +88,37 @@ executeGraphTraversalByNode(yams::daemon::DaemonClient& client,
     co_return co_await client.call(req);
 }
 
-boost::asio::awaitable<Result<std::optional<yams::daemon::GraphQueryResponse>>>
-executeGraphTraversalByNameCandidates(yams::daemon::DaemonClient& client,
-                                      const GraphTraversalQueryOptions& options,
-                                      const std::string& name, const std::filesystem::path& cwd) {
-    const auto candidates = build_graph_file_node_candidates(name, cwd);
-    for (const auto& candidate : candidates) {
-        auto req = makeTraversalRequest(options);
-        req.nodeKey = buildPathFileNodeKey(candidate);
-
-        auto result = co_await client.call(req);
-        if (result && result.value().kgAvailable && result.value().originNode.nodeId > 0) {
-            co_return std::optional<yams::daemon::GraphQueryResponse>{std::move(result.value())};
-        }
-    }
-
-    co_return std::optional<yams::daemon::GraphQueryResponse>{std::nullopt};
-}
-
 boost::asio::awaitable<Result<yams::daemon::GetResponse>>
 executeDocumentGraphLookup(yams::daemon::DaemonClient& client,
                            const DocumentGraphLookupOptions& options) {
     yams::daemon::GetRequest req;
     req.hash = options.hash;
-    req.name = options.name;
-    req.byName = !options.name.empty();
     req.metadataOnly = true;
     req.showGraph = true;
     req.graphDepth = options.depth;
+    req.graphLimit = static_cast<std::uint32_t>(
+        std::min<std::size_t>(options.limit, std::numeric_limits<std::uint32_t>::max()));
     req.verbose = options.verbose;
-    co_return co_await client.get(req);
+    if (options.name.empty()) {
+        co_return co_await client.get(req);
+    }
+
+    // The daemon may run in another directory, so send a relative path as the absolute path
+    // ingestion stored, then fall back to the name as given (file name or suffix match).
+    req.byName = true;
+    const auto candidates = buildGraphDocumentNameCandidates(options.name, options.cwd);
+    Result<yams::daemon::GetResponse> result =
+        Error{ErrorCode::NotFound, "Document not found with name: " + options.name};
+    for (const auto& candidate : candidates) {
+        req.name = candidate;
+        result = co_await client.get(req);
+        // Retry only when the name did not resolve; a resolved document's errors are final.
+        if (result || result.error().code != ErrorCode::NotFound ||
+            result.error().message.find("Document not found with name") == std::string::npos) {
+            break;
+        }
+    }
+    co_return result;
 }
 
 } // namespace yams::cli

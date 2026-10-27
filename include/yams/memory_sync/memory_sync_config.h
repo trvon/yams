@@ -72,6 +72,7 @@ struct MemorySyncDaemonConfig {
     bool writerAuthRequired{false};         /// require schema-v4 Ed25519 envelopes
     std::string writerAuthManifestPath;     /// ACL-protected corpus/epoch key manifest
     std::string controlScope;               /// authenticated local-store generation
+    bool exclusiveBackend{false};           /// daemon-owned store: direct transport op store
 
     /// Parse `memory_sync.*` keys from a flat `section.key -> value` map.
     static MemorySyncDaemonConfig fromToml(const std::map<std::string, std::string>& flat) {
@@ -152,6 +153,7 @@ struct MemorySyncDaemonConfig {
         parseLimit("max_merged_keys", cfg.limits.maxMergedKeys);
         parseLimit("max_cache_bytes", cfg.limits.maxCacheBytes);
         parseLimit("max_tracked_identities", cfg.limits.maxTrackedIdentities);
+        parseLimit("max_scan_bytes", cfg.limits.maxScanBytes);
         return cfg;
     }
 
@@ -293,12 +295,11 @@ loadWriterAuthenticator(const MemorySyncDaemonConfig& config,
 /// Build a MemorySyncService from the daemon config. Resolves the backend:
 /// `filesystem` -> FilesystemBackend at `path`; `s3` -> StorageBackendFactory.
 /// Returns Error when the backend cannot be created/initialized.
-inline Result<std::unique_ptr<MemorySyncService>>
-createMemorySyncService(const MemorySyncDaemonConfig& config,
-                        std::optional<storage::BackendConfig> resolvedS3Config = std::nullopt,
-                        std::function<bool()> canAdmitRemoteWork = {},
-                        WriterPrivateKeyReader privateKeyReader = {},
-                        WriterTrustFileReader trustFileReader = {}) {
+inline Result<std::unique_ptr<MemorySyncService>> createMemorySyncService(
+    const MemorySyncDaemonConfig& config,
+    std::optional<storage::BackendConfig> resolvedS3Config = std::nullopt,
+    std::function<bool()> canAdmitRemoteWork = {}, WriterPrivateKeyReader privateKeyReader = {},
+    WriterTrustFileReader trustFileReader = {}, std::function<bool()> shouldYieldLocalWork = {}) {
     if (!config.enabled) {
         return Error{ErrorCode::InvalidState, "memory_sync is disabled"};
     }
@@ -455,13 +456,20 @@ createMemorySyncService(const MemorySyncDaemonConfig& config,
         sessionLeaseKey = ".session-leases/" + config.sessionId;
     }
 
+    MemorySyncConfig serviceConfig{config.nodeId,
+                                   config.syncIntervalMs,
+                                   config.corpusId,
+                                   config.corpusEpoch,
+                                   config.limits,
+                                   temporary,
+                                   std::move(writerAuth.value()),
+                                   config.controlScope};
+    // A temporary namespace is cleared outside the loop on stop, so its scans are not reused.
+    serviceConfig.exclusiveBackend = config.exclusiveBackend && !temporary;
     return std::make_unique<MemorySyncService>(
-        std::move(backend),
-        MemorySyncConfig{config.nodeId, config.syncIntervalMs, config.corpusId, config.corpusEpoch,
-                         config.limits, temporary, std::move(writerAuth.value()),
-                         config.controlScope},
-        std::move(canAdmitRemoteWork), config.allowLegacyUnbound,
-        std::move(sessionMaintenanceBackend), std::move(sessionLeaseKey));
+        std::move(backend), std::move(serviceConfig), std::move(canAdmitRemoteWork),
+        config.allowLegacyUnbound, std::move(sessionMaintenanceBackend), std::move(sessionLeaseKey),
+        std::move(shouldYieldLocalWork));
 }
 
 } // namespace yams::memory_sync

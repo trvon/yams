@@ -88,8 +88,8 @@ struct DaemonStats {
     std::chrono::steady_clock::time_point startTime;
     std::atomic<uint64_t> requestsProcessed{0};
     std::atomic<uint64_t> activeConnections{0};
-    std::atomic<uint64_t> healthCheckConnections{
-        0}; // Liveness/ping connections (excluded from idle)
+    std::atomic<uint64_t> healthCheckConnections{0}; // Liveness/ping requests in progress
+    std::atomic<uint64_t> activeNonHealthRequests{0};
     std::atomic<uint64_t> maxConnections{0};
     std::atomic<uint64_t> connectionSlotsFree{0};
     std::atomic<uint64_t> oldestConnectionAge{0};

@@ -204,7 +204,7 @@ TEST_CASE("GhidraEntityIngestion: Entity provider infrastructure is ready",
         size_t entityInFlight = pq->entityInFlight();
         spdlog::info("Current entity inflight count: {}", entityInFlight);
         // Counter should be accessible (value doesn't matter)
-        REQUIRE(entityInFlight >= 0);
+        static_cast<void>(entityInFlight);
     }
 }
 

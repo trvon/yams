@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -148,6 +149,29 @@ public:
     virtual void resetCancel() noexcept {}
 };
 
+#ifdef YAMS_TESTING
+/// Observation of the real directory traversal, not calls through a backend wrapper.
+struct FilesystemListingStats {
+    // pi-lens-ignore: no-bit-fields -- ordinary optional field, not a bit-field
+    std::optional<std::string> prefix;
+    std::size_t pageCalls{0};
+    std::size_t walks{0};
+    std::size_t entriesVisited{0};
+    std::size_t matchingKeys{0};
+    std::size_t peakRetainedKeys{0};
+    /// Deterministic mid-walk interruption seam; called before entry filtering.
+    std::function<void()> onEntry;
+};
+
+/// Thread-local observation; returns the previous sink so tests can restore it with RAII.
+FilesystemListingStats* testing_setFilesystemListingStats(FilesystemListingStats* stats) noexcept;
+
+/// Thread-local observation immediately before an actual native filesystem payload read.
+/// The caller owns the callback and restores the previous sink before it goes out of scope.
+std::function<void(std::string_view)>*
+testing_setFilesystemReadObserver(std::function<void(std::string_view)>* observer) noexcept;
+#endif
+
 /**
  * Local filesystem backend implementation
  */
@@ -163,6 +187,12 @@ public:
     Result<std::vector<std::string>> list(std::string_view prefix) const override;
     Result<ObjectListPage> listPage(std::string_view prefix, std::optional<std::string_view> cursor,
                                     std::size_t limit) const override;
+    /// A complete, lexically sorted listing only when it fits both retention bounds.
+    /// A failed traversal is an error, never a partial snapshot; an oversized traversal
+    /// returns nullopt so callers can fall back to normal paged listing.
+    Result<std::optional<std::vector<std::string>>>
+    listBoundedSnapshot(std::string_view prefix, std::size_t maxKeys,
+                        std::size_t maxKeyBytes) const;
     Result<::yams::StorageStats> getStats() const override;
 
     std::future<Result<void>> storeAsync(std::string_view key,
@@ -173,9 +203,20 @@ public:
     bool isRemote() const override { return false; }
     Result<void> flush() override { return {}; }
     Result<void> clear() override;
+    void requestCancel() noexcept override { cancelled_.store(true, std::memory_order_relaxed); }
+    void resetCancel() noexcept override { cancelled_.store(false, std::memory_order_relaxed); }
+    /// Disposable reconciliation work belongs on the corpus filesystem, not OS tmpfs.
+    [[nodiscard]] std::filesystem::path scratchDirectory() const { return basePath_ / "temp"; }
+    /// Configure before use; checked within traversal even for nonmatching entries.
+    void setListingWorkCheck(std::function<Result<void>()> check) {
+        listingWorkCheck_ = std::move(check);
+    }
 
 private:
+    // Unconditional: production and test translation units must agree on the layout.
+    std::atomic<bool> cancelled_{false};
     std::filesystem::path basePath_;
+    std::function<Result<void>()> listingWorkCheck_;
     Result<std::filesystem::path> getObjectPath(std::string_view key) const;
     Result<void> ensureDirectoryExists(const std::filesystem::path& path) const;
 };

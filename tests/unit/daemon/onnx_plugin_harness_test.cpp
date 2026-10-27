@@ -26,15 +26,15 @@ namespace fs = std::filesystem;
 namespace {
 
 #if defined(__APPLE__) && defined(__SANITIZE_ADDRESS__)
-constexpr bool kAddressSanitizerEnabled = true;
+[[maybe_unused]] constexpr bool kAddressSanitizerEnabled = true;
 #elif defined(__APPLE__) && defined(__has_feature)
 #if __has_feature(address_sanitizer)
-constexpr bool kAddressSanitizerEnabled = true;
+[[maybe_unused]] constexpr bool kAddressSanitizerEnabled = true;
 #else
-constexpr bool kAddressSanitizerEnabled = false;
+[[maybe_unused]] constexpr bool kAddressSanitizerEnabled = false;
 #endif
 #else
-constexpr bool kAddressSanitizerEnabled = false;
+[[maybe_unused]] constexpr bool kAddressSanitizerEnabled = false;
 #endif
 
 using yams::test::ScopedEnvVar;

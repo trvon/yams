@@ -45,13 +45,13 @@ struct KnowledgeGraphStoreConfig {
  * Node representation (kg_nodes).
  */
 struct KGNode {
-    std::int64_t id = 0;                     // PRIMARY KEY (assigned by DB)
-    std::string nodeKey;                     // Unique logical key
-    std::optional<std::string> label;        // Human-readable name
-    std::optional<std::string> type;         // Node type/category
-    std::optional<std::int64_t> createdTime; // Unix seconds
-    std::optional<std::int64_t> updatedTime; // Unix seconds
-    std::optional<std::string> properties;   // JSON properties blob
+    std::int64_t id = 0;                       // PRIMARY KEY (assigned by DB)
+    std::string nodeKey;                       // Unique logical key
+    std::optional<std::string> label{};        // Human-readable name
+    std::optional<std::string> type{};         // Node type/category
+    std::optional<std::int64_t> createdTime{}; // Unix seconds
+    std::optional<std::int64_t> updatedTime{}; // Unix seconds
+    std::optional<std::string> properties{};   // JSON properties blob
 };
 
 /**
@@ -69,13 +69,13 @@ struct KGAlias {
  * Edge representation (kg_edges).
  */
 struct KGEdge {
-    std::int64_t id = 0;                     // PRIMARY KEY (assigned by DB)
-    std::int64_t srcNodeId = 0;              // REFERENCES kg_nodes(id)
-    std::int64_t dstNodeId = 0;              // REFERENCES kg_nodes(id)
-    std::string relation;                    // Relation/predicate
-    float weight = 1.0f;                     // Optional weight
-    std::optional<std::int64_t> createdTime; // Unix seconds
-    std::optional<std::string> properties;   // JSON properties blob
+    std::int64_t id = 0;                       // PRIMARY KEY (assigned by DB)
+    std::int64_t srcNodeId = 0;                // REFERENCES kg_nodes(id)
+    std::int64_t dstNodeId = 0;                // REFERENCES kg_nodes(id)
+    std::string relation;                      // Relation/predicate
+    float weight = 1.0f;                       // Optional weight
+    std::optional<std::int64_t> createdTime{}; // Unix seconds
+    std::optional<std::string> properties{};   // JSON properties blob
 };
 
 /**
@@ -93,14 +93,14 @@ struct KGNodeEmbedding {
  * Document entity annotation (doc_entities).
  */
 struct DocEntity {
-    std::int64_t id = 0;                     // PRIMARY KEY (assigned by DB)
-    std::int64_t documentId = 0;             // REFERENCES documents(id)
-    std::string entityText;                  // Surface text from document
-    std::optional<std::int64_t> nodeId;      // Linked node (nullable)
-    std::optional<std::int64_t> startOffset; // Byte start (optional)
-    std::optional<std::int64_t> endOffset;   // Byte end (exclusive, optional)
-    std::optional<float> confidence;         // [0,1]
-    std::optional<std::string> extractor;    // Which extractor/linker produced this
+    std::int64_t id = 0;                       // PRIMARY KEY (assigned by DB)
+    std::int64_t documentId = 0;               // REFERENCES documents(id)
+    std::string entityText;                    // Surface text from document
+    std::optional<std::int64_t> nodeId;        // Linked node (nullable)
+    std::optional<std::int64_t> startOffset{}; // Byte start (optional)
+    std::optional<std::int64_t> endOffset{};   // Byte end (exclusive, optional)
+    std::optional<float> confidence{};         // [0,1]
+    std::optional<std::string> extractor{};    // Which extractor/linker produced this
 };
 
 /**
@@ -121,7 +121,7 @@ struct GraphVersionPruneConfig {
 struct PathNodeDescriptor {
     std::string snapshotId;
     std::string path; // Normalized path within snapshot
-    std::string rootTreeHash;
+    std::string rootTreeHash{};
     bool isDirectory = false;
 };
 
@@ -182,6 +182,20 @@ public:
             return Error{ErrorCode::NotImplemented,
                          "Exact transactional node replacement is not implemented"};
         }
+        /// Read this batch's current node state, including pending replacements/deletions.
+        virtual Result<std::optional<KGNode>> getNodeByKey(std::string_view /*nodeKey*/) {
+            return Error{ErrorCode::NotImplemented, "Transactional node lookup is not implemented"};
+        }
+        static constexpr std::size_t kEdgePageSize = 64;
+        /// Read at most kEdgePageSize edges in ascending ID order on this transaction.
+        /// afterId is exclusive; no cursor includes every valid signed ID. An absent
+        /// relation selects all relations between the two endpoints. Errors are not EOF.
+        virtual Result<std::vector<KGEdge>>
+        getEdgesBetweenPage(std::int64_t /*srcNodeId*/, std::int64_t /*dstNodeId*/,
+                            std::optional<std::string_view> /*relation*/ = std::nullopt,
+                            std::optional<std::int64_t> /*afterId*/ = std::nullopt) {
+            return Error{ErrorCode::NotImplemented, "Transactional edge paging is not implemented"};
+        }
         virtual Result<std::int64_t> addEdge(const KGEdge& edge) = 0;
         virtual Result<void> removeEdgeById(std::int64_t /*edgeId*/) {
             return Error{ErrorCode::NotImplemented,
@@ -226,6 +240,11 @@ public:
     // Useful when the cache is stale and the overlay path needs
     // fresh counts without a full document-table reconcile.
     virtual void initializeEntityCountSnapshot() {}
+
+    // Count of write transactions this store has committed (single writes and write batches).
+    // Two equal readings mean no write landed through this store in between, so a scan that
+    // completed at one reading has nothing new to find at the other. Reads never move it.
+    virtual std::uint64_t changeGeneration() const noexcept = 0;
 
     // -----------------------------------------------------------------------------
     // Nodes
@@ -565,6 +584,19 @@ public:
 
     // Health check (e.g., PRAGMA integrity_check in SQLite backends)
     virtual Result<void> healthCheck() = 0;
+
+    // Ordinary-read presence probes. Implementations must not materialize node/edge
+    // properties or collections; false means absent, not an unsupported or failed read.
+    // Optional for existing providers: callers propagate NotImplemented, never hydrate
+    // full records as a fallback. Kept at the end to preserve existing virtual slots.
+    virtual Result<bool> hasNodeByKey(std::string_view /*nodeKey*/) {
+        return Error{ErrorCode::NotImplemented, "Payload-free node presence is not implemented"};
+    }
+    virtual Result<bool> hasEdgeByKeys(std::string_view /*srcNodeKey*/,
+                                       std::string_view /*dstNodeKey*/,
+                                       std::string_view /*relation*/) {
+        return Error{ErrorCode::NotImplemented, "Payload-free edge presence is not implemented"};
+    }
 };
 
 /**

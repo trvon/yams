@@ -47,6 +47,7 @@
 #include <yams/daemon/components/SearchEngineFsm.h>
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
+#include <yams/daemon/components/startup_phase.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/test_hooks.h>
 #include <yams/daemon/components/TopologyManager.h>
@@ -222,6 +223,9 @@ public:
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);
     Result<std::string> readMemorySyncCached(const std::string& key) const;
+    /// Explicit fallible I/O against the committed generation; never starts a corpus sweep.
+    /// IPC callers must dispatch this on an admitted worker, not the connection strand.
+    Result<std::string> readMemorySyncCommitted(const std::string& key) const;
     Result<MemorySyncStatus> getMemorySyncStatus() const;
     Result<p2p::P2pSyncResult> connectP2p(std::string_view connectionString);
     Result<void> disconnectP2p(std::string_view nodeId);
@@ -476,12 +480,34 @@ public:
         }
     }
     void testingApplyMemorySyncWinners() { applyMemorySyncWinners(); }
+    void testingMarkVectorDbReadyAfterCommit(const std::vector<std::string>& hashes) {
+        markVectorDbReadyAfterCommit(hashes);
+    }
     void testingPublishMemorySyncBackfill() { publishMemorySyncBackfill(); }
     /// Let the next apply cycle reach the rate-limited outbound backfill immediately, so a test
     /// can drive a bounded number of full sync cycles without wall-clock waits.
     void testingExpireMemorySyncBackfillSchedule() {
         std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
         nextMemorySyncBackfill_ = {};
+    }
+    /// Keep background apply cycles from running the outbound backfill, so a test that drives
+    /// backfill by hand sees only its own cycles.
+    void testingDeferMemorySyncBackfillSchedule() {
+        std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
+        nextMemorySyncBackfill_ = std::chrono::steady_clock::time_point::max();
+    }
+    /// Make the next apply cycle run a full pass even if its inputs are unchanged.
+    void testingExpireMemorySyncFullApply() {
+        std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
+        nextMemorySyncFullApply_ = {};
+    }
+    /// Run every inbound stage on every cycle, for tests that observe stages per call. Lock-free,
+    /// so it is safe while an apply cycle holds memorySyncApplyMutex_.
+    void testingDisableMemorySyncApplySkip() noexcept {
+        memorySyncApplySkipDisabled_.store(true, std::memory_order_release);
+    }
+    std::uint64_t testingMemorySyncApplySkippedCycles() const noexcept {
+        return memorySyncApplySkippedCycles_.load(std::memory_order_acquire);
     }
     void testingSetMemorySyncBackfillItemBudget(std::size_t budget) {
         std::lock_guard<std::mutex> lock(memorySyncBackfillMutex_);
@@ -662,6 +688,11 @@ public:
     // FSM snapshots (read-only) for status/diagnostics
     ServiceManagerSnapshot getServiceManagerFsmSnapshot() const { return serviceFsm_.snapshot(); }
 
+    // Coarse async-init progress. Atomic reads only: never query memory-sync here, whose loop
+    // mutex is held for the whole recovery sweep and would block the status path.
+    StartupPhase getStartupPhase() const noexcept { return startupPhase_.phase(); }
+    std::int64_t getStartupPhaseElapsedMs() const noexcept { return startupPhase_.elapsedMs(); }
+
     ServiceManagerSnapshot waitForServiceManagerTerminalState(int timeoutSeconds = 60) {
         return serviceFsm_.waitForTerminalState(timeoutSeconds);
     }
@@ -687,7 +718,11 @@ public:
         return std::atomic_load_explicit(&embeddingConfig_, std::memory_order_acquire);
     }
     const StateComponent& getState() const { return state_; }
-    const std::filesystem::path& getResolvedDataDir() const { return resolvedDataDir_; }
+    /// Owning snapshot: bootstrap/fallback may republish the active root while metrics reads it.
+    std::filesystem::path getResolvedDataDir() const {
+        std::lock_guard lock(resolvedDataDirMutex_);
+        return resolvedDataDir_;
+    }
 
     /// Resolved live daemon log file path (empty when the daemon was not configured with one).
     const std::filesystem::path& getResolvedLogFilePath() const { return config_.logFile; }
@@ -737,8 +772,10 @@ public:
 
 #ifdef YAMS_TESTING
     // Test helpers: inject mock provider and tweak provider state/name.
-    void __test_setResolvedDataDir(std::filesystem::path dir) { resolvedDataDir_ = std::move(dir); }
-    void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
+    void testingSetResolvedDataDir(std::filesystem::path dir) {
+        publishResolvedDataDir(std::move(dir));
+    }
+    void testing_setModelProvider(std::shared_ptr<IModelProvider> provider) {
         storeModelProvider(std::move(provider));
     }
     void __test_setMetadataRepo(std::shared_ptr<metadata::MetadataRepository> repo) {
@@ -751,7 +788,7 @@ public:
             databaseManager_->setContentStore(std::move(store));
         }
     }
-    void __test_setKgStore(std::shared_ptr<metadata::KnowledgeGraphStore> store) {
+    void testing_setKgStore(std::shared_ptr<metadata::KnowledgeGraphStore> store) {
         if (databaseManager_) {
             databaseManager_->setKgStore(std::move(store));
         }
@@ -793,8 +830,8 @@ public:
     YAMS_DAEMON_TEST_HOOK static Result<void>
     __test_writeProtectedP2pPrivateKey(const std::filesystem::path& keyPath,
                                        std::string_view contents);
-    YAMS_DAEMON_TEST_HOOK void __test_setModelProviderDegraded(bool degraded,
-                                                               const std::string& error = {});
+    YAMS_DAEMON_TEST_HOOK void testing_setModelProviderDegraded(bool degraded,
+                                                                const std::string& error = {});
 #endif
 
 #ifdef YAMS_TESTING
@@ -859,6 +896,7 @@ private:
     std::chrono::milliseconds runSessionWatcherIteration();
     boost::asio::awaitable<void> co_runSessionWatcher(const yams::compat::stop_token& token);
 
+    void publishResolvedDataDir(std::filesystem::path dir);
     Result<void> initializeImpl(const std::function<void()>& beforePoolConfigure);
     Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
@@ -871,6 +909,14 @@ private:
                                                memory_sync::EraseReadinessProbe probe) const;
     void publishMemorySyncBackfill() noexcept;
     void notifyMemorySyncStage(std::string_view stage) noexcept;
+    // Vector DB readiness is "initialized and holding vectors". It is set at init only when rows
+    // already exist, so a corpus that starts empty must flip it once its first vectors commit.
+    void markVectorDbReadyAfterCommit(const std::vector<std::string>& committedHashes) noexcept {
+        if (!committedHashes.empty() &&
+            state_.readiness.vectorDbInitAttempted.load(std::memory_order_acquire)) {
+            state_.readiness.vectorDbReady.store(true, std::memory_order_release);
+        }
+    }
     void notifyMemorySyncDeleteOutboxStage(std::string_view stage) noexcept;
     Result<memory_sync::ApplyStagePass> applyMemorySyncContentBlobs();
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
@@ -969,6 +1015,7 @@ private:
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> initStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> pluginStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
+    mutable std::mutex resolvedDataDirMutex_;
     std::filesystem::path resolvedDataDir_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
@@ -998,6 +1045,7 @@ private:
     DaemonLifecycleFsm& lifecycleFsm_;
 
     ServiceManagerFsm serviceFsm_{};
+    StartupPhaseTracker startupPhase_{};
 
     SearchEngineManager searchEngineManager_;
     std::unique_ptr<SearchComponent> searchComponent_;
@@ -1041,32 +1089,69 @@ private:
         // Topology are the catch-up sweeps.
         enum class Domain { Documents, CommittedVectors, Vectors, Topology };
 
+        // A sweep pass runs only while its store's change generation differs from the one the
+        // last completed pass began at. Writes behind a running pass's cursor move the
+        // generation past the pass's own reading, so the pass after it runs too; with no
+        // writes, the sweep costs nothing per cycle.
+        struct SweepGeneration {
+            std::optional<std::uint64_t> running; // generation the pass in progress began at
+            std::optional<std::uint64_t> swept;   // generation the last completed pass began at
+
+            // Start or continue a pass; false when the store is unchanged since the last pass.
+            bool begin(std::uint64_t current) {
+                if (running) {
+                    return true;
+                }
+                if (swept == current) {
+                    return false;
+                }
+                running = current;
+                return true;
+            }
+            void complete() {
+                swept = running;
+                running.reset();
+            }
+        };
+
         std::int64_t documentIdCursor{0};
         // The committed document being published and the last of its chunks already published.
         std::string committedVectorDocument;
         std::string committedVectorChunkCursor;
-        // Vectors are swept in repeating passes in (document_hash, chunk_id) order, so vectors
-        // added or re-embedded behind the cursor are published on a later pass.
+        // Vectors are swept in passes in (document_hash, chunk_id) order, so vectors added or
+        // re-embedded behind the cursor are published on the pass after the store changed.
         std::string vectorDocumentHashCursor;
         std::string vectorChunkIdCursor;
         std::uint64_t vectorSweepPasses{0};
-        // The two sweeps always have work once they repeat, so they take turns at the items
-        // documents and committed vectors leave: neither can take every item of a cycle.
+        SweepGeneration vectorSweep;
+        // While both sweeps have work they take turns at the items documents and committed
+        // vectors leave: neither can take every item of a cycle.
         Domain nextSweep{Domain::Vectors};
-        // Topology is swept in repeating passes: every node, then every edge (each with its
-        // endpoints), then this writer's committed topology records, so edges and nodes created
-        // or changed after a pass went by are published, and records the local graph dropped
-        // are retracted, on a later pass. The cursors are keyset positions (AUTOINCREMENT ids,
-        // logical keys), so inserts and deletes between items never shift them.
+        // Topology is swept in passes: every node, then every edge (each with its endpoints),
+        // then this writer's committed topology records, so edges and nodes created or changed
+        // after a pass went by are published, and records the local graph dropped are
+        // retracted, on the pass after the graph changed. The cursors are keyset positions
+        // (AUTOINCREMENT ids, logical keys), so inserts and deletes between items never shift
+        // them.
         enum class TopologyPhase { Nodes, Edges, Retractions };
         TopologyPhase topologyPhase{TopologyPhase::Nodes};
         std::int64_t topologyNodeIdCursor{0};
         std::int64_t topologyEdgeIdCursor{0};
         std::string topologyRetractionKeyCursor;
+        SweepGeneration topologySweep;
         std::size_t itemBudgetPerCycle{256};
         std::chrono::milliseconds timeBudgetPerCycle{100};
     } memorySyncBackfillState_;
     std::chrono::steady_clock::time_point nextMemorySyncBackfill_{};
+    // Inbound apply skips a cycle whose adapter inputs match the last complete, clean pass. A
+    // full pass still runs every kMemorySyncFullApplyInterval, so local drift (a replicated record
+    // deleted or changed locally) is repaired within that bound. Guarded by memorySyncApplyMutex_.
+    static constexpr std::chrono::minutes kMemorySyncFullApplyInterval{5};
+    // Holds the last clean pass's overlay rows (bounded by the merged-cache limit).
+    std::optional<memory_sync::MemorySyncService::AdapterInputs> lastCleanMemorySyncApplyInputs_;
+    std::chrono::steady_clock::time_point nextMemorySyncFullApply_{};
+    std::atomic<std::uint64_t> memorySyncApplySkippedCycles_{0};
+    std::atomic<bool> memorySyncApplySkipDisabled_{false};
 
     // Cached GLiNER query concept extraction function.
     mutable search::EntityExtractionFunc cachedQueryConceptExtractor_;

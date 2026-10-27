@@ -213,7 +213,7 @@ else
 
     test('daemon_socket_concurrent_requests',
       daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      suite: ['integration', 'daemon', 'catch2', 'socket', 'concurrency'],
       env: _daemon_test_env,
       is_parallel: false,
       timeout: daemon_integration_timeout,
@@ -311,10 +311,22 @@ else
       ],
     )
 
+    test('daemon_harness_full_isolation',
+      daemon_harness_exe,
+      suite: ['integration', 'daemon', 'catch2', 'harness'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: daemon_integration_timeout,
+      args: [
+        'DaemonHarness full isolation ignores ambient developer config and data',
+        '--allow-running-no-tests',
+      ],
+    )
+
     # Split shutdown tests into individual processes
     test('daemon_shutdown_timing',
       daemon_shutdown_exe,
-      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      suite: ['integration', 'daemon', 'catch2', 'shutdown', 'concurrency'],
       env: _daemon_test_env,
       is_parallel: false,
       timeout: daemon_integration_timeout,
@@ -323,7 +335,7 @@ else
 
     test('daemon_shutdown_inflight_ops',
       daemon_shutdown_exe,
-      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      suite: ['integration', 'daemon', 'catch2', 'shutdown', 'concurrency'],
       env: _daemon_test_env,
       is_parallel: false,
       timeout: daemon_integration_timeout,
@@ -332,7 +344,7 @@ else
 
     test('daemon_shutdown_draining_connections',
       daemon_shutdown_exe,
-      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      suite: ['integration', 'daemon', 'catch2', 'shutdown', 'concurrency'],
       env: _daemon_test_env,
       is_parallel: false,
       timeout: daemon_integration_timeout,
@@ -353,7 +365,7 @@ else
 
     test('post_ingest_queue_validation',
       post_ingest_queue_validation_exe,
-      suite: ['integration', 'daemon', 'catch2', 'post-ingest'],
+      suite: ['integration', 'daemon', 'catch2', 'post-ingest', 'concurrency'],
       env: _daemon_test_env,
       is_parallel: false,
       timeout: daemon_integration_timeout,
@@ -441,7 +453,7 @@ else
 
     test('daemon_db_corruption_recovery',
       daemon_db_corruption_recovery_exe,
-      suite: ['integration', 'daemon', 'catch2', 'db_recovery'],
+      suite: ['integration', 'daemon', 'catch2', 'db-recovery'],
       env: _daemon_test_env,
       is_parallel: false,
       timeout: daemon_integration_timeout,
@@ -458,7 +470,7 @@ else
 
     test('cli_responsiveness_under_load',
       cli_responsiveness_under_load_exe,
-      suite: ['integration', 'daemon', 'catch2', 'cli', 'responsiveness', 'load'],
+      suite: ['integration', 'daemon', 'catch2', 'cli', 'responsiveness', 'load', 'concurrency'],
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 120,  # 2 minutes for load testing
@@ -482,7 +494,7 @@ else
 
     test('ghidra_kg_entity_ingestion',
       ghidra_kg_entity_ingestion_exe,
-      suite: ['integration', 'daemon', 'catch2', 'kg', 'ghidra', 'pbi-3jb'],
+      suite: ['integration', 'daemon', 'catch2', 'kg', 'ghidra'],
       env: _kg_test_env,
       is_parallel: false,
       timeout: daemon_integration_timeout,
@@ -620,11 +632,43 @@ else
     )
     test('daemon_memory_sync_apply_serialization',
       memory_sync_service_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync', 'concurrency'],
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
       args: ['Daemon serializes concurrent memory sync apply callbacks', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_offresident_read',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon memory sync IPC reads off-resident authenticated winners'],
+    )
+    test('daemon_memory_sync_mcp_cold_read',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync', 'mcp'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 90,
+      args: ['MCP get serves authenticated replicated cold documents after content prerequisites'],
+    )
+    test('daemon_memory_sync_pressure_health',
+        memory_sync_service_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: 60,
+        args: ['Daemon memory sync pressure defers topology without reporting a hard failure'],
+    )
+    test('daemon_memory_sync_deferred_total',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon topology status keeps exact deferred totals and retries local prerequisites'],
     )
     test('daemon_memory_sync_prerequisites',
       memory_sync_service_integration_exe,
@@ -859,7 +903,7 @@ else
 
     test('resource_governor_concurrent',
       resource_governor_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'governor', 'concurrent'],
+      suite: ['integration', 'daemon', 'catch2', 'governor', 'concurrency'],
       env: _daemon_test_env,
       is_parallel: false,
       timeout: daemon_integration_timeout,

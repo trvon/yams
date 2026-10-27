@@ -4,6 +4,7 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_tracing.h>
+#include <yams/topology/topology_member_order.h>
 #include <yams/topology/topology_metadata_store.h>
 
 #include <algorithm>
@@ -12,7 +13,9 @@
 #include <cmath>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <ranges>
+#include <span>
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
@@ -392,6 +395,12 @@ void collectGraphNeighborStageTrace(
                  trace.eligibleUnresolvedCount);
 }
 
+yams::vector::BinaryRotation toBinaryRotation(SearchEngineConfig::TopologyBqRotation rotation) {
+    return rotation == SearchEngineConfig::TopologyBqRotation::Fwht
+               ? yams::vector::BinaryRotation::Fwht
+               : yams::vector::BinaryRotation::None;
+}
+
 std::shared_ptr<TopologyRoutingSnapshotCache>
 makeSnapshotCache(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
                   const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore) {
@@ -406,9 +415,8 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
                          TopologyRoutingSessionResult& result,
                          std::shared_ptr<const TopologyRoutingSnapshot>& snapshot) {
     const auto loadStart = std::chrono::steady_clock::now();
-    auto lookup = snapshotCache->get(request.expectedTopologyEpoch,
-                                     request.options.denseAnnCandidateLimit > 0,
-                                     request.options.bqPrefixDimension);
+    auto lookup =
+        getRoutingSnapshot(*snapshotCache, request.expectedTopologyEpoch, request.options);
     result.timings.loadMicros += microsSince(loadStart);
     if (!lookup) {
         const auto& message = lookup.error().message;
@@ -432,6 +440,11 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
     result.artifactsFresh = request.expectedTopologyEpoch == 0 ||
                             snapshot->artifacts->topologyEpoch == request.expectedTopologyEpoch;
     result.topologyEpoch = snapshot->artifacts->topologyEpoch;
+    result.representativeRule = snapshot->artifacts->representativeRule;
+    result.roadUnavailableReason = snapshot->artifacts->roadUnavailableReason;
+    result.orderUnavailableReason = snapshot->artifacts->orderUnavailableReason;
+    result.roadHopsRequested = request.options.roadHops;
+    result.roadWalkWindowRequested = request.options.roadWalkWindow;
     result.certificate.constructionFingerprint = snapshot->constructionFingerprint;
     result.certificate.routingPolicyFingerprint =
         topologyRoutingPolicyFingerprint(snapshot->representationFingerprint, request.options);
@@ -493,6 +506,7 @@ tryMedoidGraphExpansion(const TopologyRoutingSessionRequest& request,
     routeRequest.denseAnnCandidateLimit = request.options.denseAnnCandidateLimit;
     routeRequest.bqCandidateLimit = request.options.bqCandidateLimit;
     routeRequest.bqPrefixDimension = request.options.bqPrefixDimension;
+    routeRequest.bqRotation = toBinaryRotation(request.options.bqRotation);
     if (request.queryEmbedding.has_value()) {
         routeRequest.queryEmbedding = request.queryEmbedding.value();
     }
@@ -806,7 +820,8 @@ evaluateProtectedRelationFiberSaturation(const TopologyRoutingSnapshot& snapshot
 void materializeAllowedRouteMembers(
     const std::unordered_map<std::string, RoutedMemberAccumulator>& routedMembers,
     const TopologyRoutingSnapshot& snapshot, std::size_t maxDocs, std::uint64_t selectedScaleMask,
-    std::size_t acceptedRoutes, TopologyRoutingSessionResult& result) {
+    std::size_t acceptedRoutes, const std::unordered_set<std::string>* existingCandidates,
+    TopologyRoutingSessionResult& result) {
     using Entry = std::pair<const std::string, RoutedMemberAccumulator>;
     auto fiberClosedMembers = routedMembers;
     result.certificate.selectedProtectedRelationFiberIds.reserve(
@@ -876,6 +891,14 @@ void materializeAllowedRouteMembers(
     result.candidateStructureEvidence.reserve(take);
     for (const auto* entry : ranked | std::views::take(take)) {
         result.certificate.allowedDocumentHashes.insert(entry->first);
+        if (existingCandidates != nullptr) {
+            if (existingCandidates->contains(entry->first)) {
+                ++result.duplicateCandidates;
+            } else {
+                ++result.addedCandidates;
+                result.addedCandidateHashes.push_back(entry->first);
+            }
+        }
         if (entry->second.medoid) {
             result.routedCandidateHashes.insert(entry->first);
         }
@@ -889,6 +912,176 @@ void materializeAllowedRouteMembers(
         });
     }
     result.routedDocs = take;
+}
+
+float dotProductOf(std::span<const float> lhs, std::span<const float> rhs) {
+    float sum = 0.0F;
+    for (std::size_t i = 0; i < lhs.size() && i < rhs.size(); ++i) {
+        sum += lhs[i] * rhs[i];
+    }
+    return sum;
+}
+
+/// Road beam: from the selected route clusters, walk `options.roadHops` hops along the snapshot's
+/// road adjacency. Each hop scores every unvisited neighbour of the frontier by road weight times
+/// the query-centroid similarity the router uses ((cosine + 1) / 2), keeps the best
+/// `options.roadBeamWidth` (score desc, cluster id asc) and makes them the next frontier. Every
+/// centroid evaluation is counted once (cached per cluster) in the representative distance work.
+/// The expansion lands only in `result.roadExpanded*`; the certificate is never touched here.
+void expandRoadBeam(const TopologyRoutingSessionRequest& request,
+                    const TopologyRoutingSnapshot& snapshot,
+                    const std::vector<yams::topology::ClusterRoute>& selectedRoutes,
+                    TopologyRoutingSessionResult& result) {
+    const auto& options = request.options;
+    if (options.roadHops == 0) {
+        return;
+    }
+    if (snapshot.roadAdjacency.empty()) {
+        result.roadSkipReason = "roads_absent";
+        return;
+    }
+    const auto& topology = *snapshot.artifacts;
+    std::vector<bool> visited(topology.clusters.size(), false);
+    std::vector<std::size_t> frontier;
+    frontier.reserve(selectedRoutes.size());
+    for (const auto& route : selectedRoutes) {
+        const auto clusterIt = snapshot.clustersById.find(route.clusterId);
+        if (clusterIt == snapshot.clustersById.end() || visited[clusterIt->second]) {
+            continue;
+        }
+        visited[clusterIt->second] = true;
+        frontier.push_back(clusterIt->second);
+    }
+    if (frontier.empty()) {
+        result.roadSkipReason = "no_selected_routes";
+        return;
+    }
+
+    const std::vector<float>* queryEmbedding =
+        request.queryEmbedding.has_value() && !request.queryEmbedding->empty()
+            ? &*request.queryEmbedding
+            : nullptr;
+    const float queryNorm =
+        queryEmbedding ? std::sqrt(dotProductOf(*queryEmbedding, *queryEmbedding)) : 0.0F;
+    std::vector<std::optional<float>> similarityByCluster(topology.clusters.size());
+    const auto centroidSimilarity = [&](std::size_t clusterIndex) {
+        auto& cached = similarityByCluster[clusterIndex];
+        if (cached.has_value()) {
+            return *cached;
+        }
+        // Without a usable query/centroid pair the road weight alone ranks the step.
+        float similarity = 1.0F;
+        const auto& centroid = topology.clusters[clusterIndex].centroidEmbedding;
+        if (queryEmbedding != nullptr && queryNorm > 0.0F && !centroid.empty() &&
+            centroid.size() == queryEmbedding->size()) {
+            const float centroidNorm = clusterIndex < snapshot.sparseRouteIndex.centroidNorms.size()
+                                           ? snapshot.sparseRouteIndex.centroidNorms[clusterIndex]
+                                           : std::sqrt(dotProductOf(centroid, centroid));
+            if (centroidNorm > 0.0F) {
+                const float cosine =
+                    dotProductOf(*queryEmbedding, centroid) / (queryNorm * centroidNorm);
+                similarity = std::clamp((cosine + 1.0F) * 0.5F, 0.0F, 1.0F);
+                ++result.roadWorkCentroidEvaluations;
+                ++result.routeRepresentativeDistanceEvaluations;
+                ++result.routeExactRepresentativeDistanceEvaluations;
+            }
+        }
+        cached = similarity;
+        return similarity;
+    };
+
+    const std::size_t beamWidth = std::max<std::size_t>(1, options.roadBeamWidth);
+    std::unordered_set<std::string> listed;
+    for (std::size_t hop = 1; hop <= options.roadHops; ++hop) {
+        std::unordered_map<std::size_t, double> bestScore;
+        for (const auto from : frontier) {
+            for (const auto& neighbor : snapshot.roadAdjacency[from]) {
+                if (visited[neighbor.clusterIndex]) {
+                    continue;
+                }
+                const double score = neighbor.weight *
+                                     static_cast<double>(centroidSimilarity(neighbor.clusterIndex));
+                auto [it, inserted] = bestScore.try_emplace(neighbor.clusterIndex, score);
+                if (!inserted) {
+                    it->second = std::max(it->second, score);
+                }
+            }
+        }
+        if (bestScore.empty()) {
+            break;
+        }
+        std::vector<std::pair<std::size_t, double>> ranked(bestScore.begin(), bestScore.end());
+        std::ranges::sort(ranked, [&](const auto& lhs, const auto& rhs) {
+            if (lhs.second != rhs.second) {
+                return lhs.second > rhs.second;
+            }
+            return topology.clusters[lhs.first].clusterId < topology.clusters[rhs.first].clusterId;
+        });
+        if (ranked.size() > beamWidth) {
+            ranked.resize(beamWidth);
+        }
+        frontier.clear();
+        for (const auto& [clusterIndex, score] : ranked) {
+            visited[clusterIndex] = true;
+            frontier.push_back(clusterIndex);
+            const auto& cluster = topology.clusters[clusterIndex];
+            result.roadExpandedClusterIds.push_back(cluster.clusterId);
+            auto& group = result.roadExpandedDocumentHashGroups.emplace_back();
+            for (const auto& hash : cluster.memberDocumentHashes) {
+                if (hash.empty() || result.certificate.allowedDocumentHashes.contains(hash) ||
+                    !listed.insert(hash).second) {
+                    continue;
+                }
+                group.insert(hash);
+            }
+        }
+        result.roadHopsApplied = hop;
+    }
+}
+
+/// Road walk index: the walk orders of the selected routes and of the road-expanded clusters, in
+/// that order, keeping only the clusters that carry one. Walkable clusters without an order are
+/// counted in `result.roadWalkClustersUnordered`. The index is null when the window is 0 or no
+/// walkable cluster has an order; the certificate is never touched here.
+void buildRoadWalkIndex(const TopologyRoutingSessionRequest& request,
+                        const std::shared_ptr<const TopologyRoutingSnapshot>& snapshot,
+                        const std::vector<yams::topology::ClusterRoute>& selectedRoutes,
+                        TopologyRoutingSessionResult& result) {
+    if (request.options.roadWalkWindow == 0) {
+        return;
+    }
+    const auto& topology = *snapshot->artifacts;
+    std::vector<bool> seen(topology.clusters.size(), false);
+    auto index = std::make_shared<TopologyRoadWalkIndex>();
+    index->snapshot = snapshot;
+    const auto consider = [&](std::string_view clusterId) {
+        const auto clusterIt = snapshot->clustersById.find(clusterId);
+        if (clusterIt == snapshot->clustersById.end() || seen[clusterIt->second]) {
+            return;
+        }
+        seen[clusterIt->second] = true;
+        const auto clusterIndex = clusterIt->second;
+        if (clusterIndex >= snapshot->orderedMemberHashes.size() ||
+            snapshot->orderedMemberHashes[clusterIndex].empty()) {
+            ++result.roadWalkClustersUnordered;
+            return;
+        }
+        const std::size_t slot = index->clusterIndices.size();
+        index->clusterIndices.push_back(clusterIndex);
+        const auto& order = snapshot->orderedMemberHashes[clusterIndex];
+        for (std::size_t position = 0; position < order.size(); ++position) {
+            index->positions[order[position]].emplace_back(slot, position);
+        }
+    };
+    for (const auto& route : selectedRoutes) {
+        consider(route.clusterId);
+    }
+    for (const auto& clusterId : result.roadExpandedClusterIds) {
+        consider(clusterId);
+    }
+    if (!index->clusterIndices.empty()) {
+        result.roadWalkIndex = std::move(index);
+    }
 }
 
 void produceTopologyRouteAdmission(const std::vector<yams::topology::ClusterRoute>& selectedRoutes,
@@ -983,6 +1176,7 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
     routeRequest.denseAnnCandidateLimit = request.options.denseAnnCandidateLimit;
     routeRequest.bqCandidateLimit = request.options.bqCandidateLimit;
     routeRequest.bqPrefixDimension = request.options.bqPrefixDimension;
+    routeRequest.bqRotation = toBinaryRotation(request.options.bqRotation);
     if (request.queryEmbedding.has_value()) {
         routeRequest.queryEmbedding = request.queryEmbedding.value();
     }
@@ -1043,6 +1237,9 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
     if (selection.abstained) {
         result.artifactAdmitted = true;
         result.skipReason = "route_low_confidence";
+        if (request.options.roadHops > 0) {
+            result.roadSkipReason = "route_low_confidence";
+        }
         result.timings.totalMicros = microsSince(totalStart);
         return result;
     }
@@ -1186,8 +1383,18 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
             static_cast<float>(acceptedRouteScoreSum / static_cast<double>(result.acceptedRoutes));
     }
     if (request.options.collectRouteMembership && mayExpand) {
-        materializeAllowedRouteMembers(routedMembers, *snapshot, request.options.maxDocs,
-                                       selectedScaleMask, result.acceptedRoutes, result);
+        materializeAllowedRouteMembers(
+            routedMembers, *snapshot, request.options.maxDocs, selectedScaleMask,
+            result.acceptedRoutes,
+            request.options.countRouteMemberAdditions ? &request.existingCandidateHashes : nullptr,
+            result);
+    }
+    if (mayExpand) {
+        // After materialization so road groups exclude certificate members; before admission,
+        // which reads only the selected routes and the certificate.
+        expandRoadBeam(request, *snapshot, selection.routes, result);
+        // After the beam so the road-expanded clusters are walkable too.
+        buildRoadWalkIndex(request, snapshot, selection.routes, result);
     }
     produceTopologyRouteAdmission(selection.routes, *snapshot, request.options, result);
     result.applied = (mayExpand && (request.options.collectRouteMembership
@@ -1299,14 +1506,37 @@ makeTopologyRoutingOptions(const SearchEngineConfig& config,
         .denseAnnCandidateLimit = config.topologyRoutingAnnCandidateLimit,
         .bqCandidateLimit = config.topologyRoutingBqCandidateLimit,
         .bqPrefixDimension = config.topologyRoutingBqPrefixDimension,
+        .bqRotation = config.topologyRoutingBqRotation,
         .adaptiveProbeScoreGap = config.topologyAdaptiveProbeScoreGap,
         .narrowMinBoundaryMargin = config.topologyNarrowMinBoundaryMargin,
         .maxDocs = config.topologyMaxDocs,
+        // Only RouteOnly (gate open) and Augment consume road groups, so the beam and its work
+        // are requested only for them; a gated-off RouteOnly runs as Shadow and takes no roads.
+        .roadHops =
+            config.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Augment ||
+                    (config.topologyVectorPolicy ==
+                         SearchEngineConfig::TopologyVectorPolicy::RouteOnly &&
+                     config.allowUncertifiedRouteOnly)
+                ? config.topologyRoadHops
+                : std::size_t{0},
+        .roadBeamWidth = std::max<std::size_t>(1, config.topologyRoadBeamWidth),
+        // Same consumers as the beam: the walk anchors on routed hits, which only RouteOnly (gate
+        // open) and Augment produce.
+        .roadWalkWindow =
+            config.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Augment ||
+                    (config.topologyVectorPolicy ==
+                         SearchEngineConfig::TopologyVectorPolicy::RouteOnly &&
+                     config.allowUncertifiedRouteOnly)
+                ? config.topologyRoadWalkWindow
+                : std::size_t{0},
         .sparseDenseAlpha = config.topologySparseDenseAlpha,
         .minRouteScore = config.topologyMinRouteScore,
         .routeRiskCalibration = config.topologyRouteRiskCalibration,
         .routeWorkBudget = config.topologyRouteWorkBudget,
         .collectRouteMembership = collectRouteMembership,
+        .countRouteMemberAdditions =
+            collectRouteMembership &&
+            config.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Augment,
         .graphNeighborMinScore = config.topologyGraphNeighborMinScore,
         .graphNeighborReciprocalOnly = config.topologyGraphNeighborReciprocalOnly,
         .graphWeightedSeedRanking = config.topologyGraphWeightedSeedRanking,
@@ -1469,6 +1699,10 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
     fingerprintIntegral(hash, static_cast<std::uint8_t>(batch.inputKind));
     fingerprintString(hash, batch.embeddingSpaceIdentity);
     fingerprintString(hash, batch.protectedRelationIdentity);
+    // Only non-default rules extend the digest so existing Degree calibrations stay valid.
+    if (batch.representativeRule != yams::topology::RepresentativeRule::Degree) {
+        fingerprintString(hash, yams::topology::representativeRuleName(batch.representativeRule));
+    }
 
     std::vector<const yams::topology::ClusterArtifact*> clusters;
     clusters.reserve(batch.clusters.size());
@@ -1564,6 +1798,132 @@ topologyRoutingRepresentationFingerprint(const yams::topology::TopologyArtifactB
     return fingerprintHex(hash);
 }
 
+std::string topologyRoadFingerprint(const yams::topology::TopologyArtifactBatch& batch) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    fingerprintString(hash, "topology-roads-v1");
+    std::vector<const yams::topology::ClusterRoad*> roads;
+    roads.reserve(batch.roads.size());
+    for (const auto& road : batch.roads) {
+        roads.push_back(&road);
+    }
+    std::ranges::sort(roads, [](const auto* lhs, const auto* rhs) {
+        if (lhs->fromClusterId != rhs->fromClusterId) {
+            return lhs->fromClusterId < rhs->fromClusterId;
+        }
+        if (lhs->toClusterId != rhs->toClusterId) {
+            return lhs->toClusterId < rhs->toClusterId;
+        }
+        return std::bit_cast<std::uint64_t>(lhs->weight) <
+               std::bit_cast<std::uint64_t>(rhs->weight);
+    });
+    fingerprintIntegral(hash, roads.size());
+    for (const auto* road : roads) {
+        fingerprintString(hash, road->fromClusterId);
+        fingerprintString(hash, road->toClusterId);
+        fingerprintDouble(hash, road->weight);
+    }
+    return fingerprintHex(hash);
+}
+
+std::vector<std::vector<TopologyRoadNeighbor>>
+buildTopologyRoadAdjacency(const yams::topology::TopologyArtifactBatch& batch) {
+    if (batch.roads.empty()) {
+        return {};
+    }
+    std::unordered_map<std::string_view, std::size_t> indexById;
+    indexById.reserve(batch.clusters.size());
+    for (std::size_t index = 0; index < batch.clusters.size(); ++index) {
+        indexById.emplace(batch.clusters[index].clusterId, index);
+    }
+    std::vector<std::vector<TopologyRoadNeighbor>> adjacency(batch.clusters.size());
+    const auto link = [&](std::size_t from, std::size_t to, double weight) {
+        auto& neighbors = adjacency[from];
+        const auto existing = std::ranges::find_if(
+            neighbors, [to](const auto& neighbor) { return neighbor.clusterIndex == to; });
+        if (existing != neighbors.end()) {
+            existing->weight = std::max(existing->weight, weight);
+            return;
+        }
+        neighbors.push_back(TopologyRoadNeighbor{.clusterIndex = to, .weight = weight});
+    };
+    for (const auto& road : batch.roads) {
+        const auto from = indexById.find(road.fromClusterId);
+        const auto to = indexById.find(road.toClusterId);
+        if (from == indexById.end() || to == indexById.end() || from->second == to->second ||
+            !std::isfinite(road.weight) || road.weight < 0.0) {
+            continue;
+        }
+        link(from->second, to->second, road.weight);
+        link(to->second, from->second, road.weight);
+    }
+    for (auto& neighbors : adjacency) {
+        std::ranges::sort(neighbors, [&](const auto& lhs, const auto& rhs) {
+            if (lhs.weight != rhs.weight) {
+                return lhs.weight > rhs.weight;
+            }
+            return batch.clusters[lhs.clusterIndex].clusterId <
+                   batch.clusters[rhs.clusterIndex].clusterId;
+        });
+    }
+    return adjacency;
+}
+
+std::vector<std::vector<std::string_view>>
+buildTopologyOrderedMemberHashes(const yams::topology::TopologyArtifactBatch& batch) {
+    std::vector<std::vector<std::string_view>> orders(batch.clusters.size());
+    for (std::size_t index = 0; index < batch.clusters.size(); ++index) {
+        const auto& cluster = batch.clusters[index];
+        if (cluster.orderKind == yams::topology::RoadOrderKind::None ||
+            cluster.orderedMembers.empty() ||
+            yams::topology::validateMemberPermutation(cluster.orderedMembers,
+                                                      cluster.memberDocumentHashes.size())
+                .has_value()) {
+            continue;
+        }
+        auto& order = orders[index];
+        order.reserve(cluster.orderedMembers.size());
+        for (const auto memberIndex : cluster.orderedMembers) {
+            order.emplace_back(cluster.memberDocumentHashes[memberIndex]);
+        }
+    }
+    return orders;
+}
+
+std::unordered_set<std::string>
+walkTopologyRoadOrders(const TopologyRoadWalkIndex& index, std::span<const std::string> anchors,
+                       std::size_t window, const std::unordered_set<std::string>& exclude,
+                       std::size_t* anchorsExpanded) {
+    std::unordered_set<std::string> walked;
+    std::size_t expanded = 0;
+    if (window > 0) {
+        std::unordered_set<std::string_view> anchorSet(anchors.begin(), anchors.end());
+        for (const auto& anchor : anchors) {
+            const auto positionsIt = index.positions.find(anchor);
+            if (positionsIt == index.positions.end()) {
+                continue;
+            }
+            ++expanded;
+            for (const auto& [slot, position] : positionsIt->second) {
+                const auto& order = index.order(slot);
+                const std::size_t first = position > window ? position - window : 0;
+                const std::size_t last = std::min(order.size() - 1, position + window);
+                for (std::size_t at = first; at <= last; ++at) {
+                    const auto member = order[at];
+                    if (at == position || anchorSet.contains(member) ||
+                        exclude.contains(std::string{member})) {
+                        continue;
+                    }
+                    walked.emplace(member);
+                }
+            }
+        }
+    }
+    if (anchorsExpanded != nullptr) {
+        *anchorsExpanded = expanded;
+    }
+    return walked;
+}
+
 std::string topologyRoutingPolicyFingerprint(std::string_view representationFingerprint,
                                              const TopologyRoutingOptions& options) {
     std::uint64_t hash = 14695981039346656037ULL;
@@ -1580,7 +1940,15 @@ std::string topologyRoutingPolicyFingerprint(std::string_view representationFing
     fingerprintIntegral(hash, options.denseAnnCandidateLimit);
     fingerprintIntegral(hash, options.bqCandidateLimit);
     fingerprintIntegral(hash, options.bqPrefixDimension);
+    // Only a non-default rotation extends the digest so existing calibrations stay valid.
+    if (options.bqRotation != SearchEngineConfig::TopologyBqRotation::None) {
+        fingerprintString(hash, SearchEngineConfig::topologyBqRotationToString(options.bqRotation));
+    }
     fingerprintIntegral(hash, options.maxDocs);
+    // roadHops / roadBeamWidth / roadWalkWindow are intentionally absent: the road beam and the
+    // road walk expand beside the certificate (roadExpanded*, roadWalkIndex), never inside
+    // allowedDocumentHashes, so a calibration bound to this fingerprint remains valid when roads
+    // are switched on, widened or walked.
     fingerprintFloat(hash, options.adaptiveProbeScoreGap);
     fingerprintFloat(hash, options.narrowMinBoundaryMargin);
     fingerprintFloat(hash, options.sparseDenseAlpha);
@@ -1590,6 +1958,13 @@ std::string topologyRoutingPolicyFingerprint(std::string_view representationFing
     fingerprintIntegral(hash, static_cast<unsigned>(options.graphNeighborReciprocalOnly));
     fingerprintIntegral(hash, static_cast<unsigned>(options.graphWeightedSeedRanking));
     return fingerprintHex(hash);
+}
+
+Result<TopologyRoutingSnapshotLookup> getRoutingSnapshot(TopologyRoutingSnapshotCache& cache,
+                                                         std::uint64_t expectedEpoch,
+                                                         const TopologyRoutingOptions& options) {
+    return cache.get(expectedEpoch, options.denseAnnCandidateLimit > 0, options.bqPrefixDimension,
+                     toBinaryRotation(options.bqRotation));
 }
 
 TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader) {
@@ -1615,19 +1990,27 @@ TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(
 
 Result<TopologyRoutingSnapshotLookup>
 TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch, bool requireDenseAnnIndex,
-                                  std::size_t bqPrefixDimension) {
+                                  std::size_t bqPrefixDimension,
+                                  yams::vector::BinaryRotation bqRotation) {
+    const std::uint64_t bqRotationSeed = bqRotation == yams::vector::BinaryRotation::None
+                                             ? 0
+                                             : yams::vector::kDefaultBinaryRotationSeed;
     YAMS_ZONE_SCOPED_N("search::topology::snapshotCacheGet");
     // The lock is held through a build on purpose: concurrent misses wait for one build instead
     // of each constructing the route index.
     std::lock_guard lock(mutex_);
     if (cached_ && (expectedEpoch == 0 || cached_->artifacts->topologyEpoch == expectedEpoch)) {
         const bool needsDenseAnn = requireDenseAnnIndex && !cached_->denseAnnBuildAttempted;
-        if (needsDenseAnn || cached_->bqPrefixDimension != bqPrefixDimension) {
+        if (needsDenseAnn || cached_->bqPrefixDimension != bqPrefixDimension ||
+            cached_->bqRotation != bqRotation || cached_->bqRotationSeed != bqRotationSeed) {
             auto upgraded = std::make_shared<TopologyRoutingSnapshot>(*cached_);
             upgraded->denseAnnBuildAttempted = cached_->denseAnnBuildAttempted || needsDenseAnn;
             upgraded->bqPrefixDimension = bqPrefixDimension;
+            upgraded->bqRotation = bqRotation;
+            upgraded->bqRotationSeed = bqRotationSeed;
             upgraded->sparseRouteIndex = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
-                *upgraded->artifacts, upgraded->denseAnnBuildAttempted, true, bqPrefixDimension);
+                *upgraded->artifacts, upgraded->denseAnnBuildAttempted, true, bqPrefixDimension,
+                bqRotation);
             cached_ = std::move(upgraded);
         }
         return TopologyRoutingSnapshotLookup{.snapshot = cached_, .cacheHit = true};
@@ -1661,10 +2044,15 @@ TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch, bool requireDense
         topologyRoutingConstructionFingerprint(*snapshot->artifacts);
     snapshot->representationFingerprint =
         topologyRoutingRepresentationFingerprint(*snapshot->artifacts);
+    snapshot->roadFingerprint = topologyRoadFingerprint(*snapshot->artifacts);
+    snapshot->roadAdjacency = buildTopologyRoadAdjacency(*snapshot->artifacts);
+    snapshot->orderedMemberHashes = buildTopologyOrderedMemberHashes(*snapshot->artifacts);
     snapshot->sparseRouteIndex = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
-        *snapshot->artifacts, requireDenseAnnIndex, true, bqPrefixDimension);
+        *snapshot->artifacts, requireDenseAnnIndex, true, bqPrefixDimension, bqRotation);
     snapshot->denseAnnBuildAttempted = requireDenseAnnIndex;
     snapshot->bqPrefixDimension = bqPrefixDimension;
+    snapshot->bqRotation = bqRotation;
+    snapshot->bqRotationSeed = bqRotationSeed;
     snapshot->clustersById.reserve(snapshot->artifacts->clusters.size());
     for (std::size_t index = 0; index < snapshot->artifacts->clusters.size(); ++index) {
         snapshot->clustersById.emplace(snapshot->artifacts->clusters[index].clusterId, index);

@@ -80,7 +80,7 @@ struct MetadataDocumentRecord {
     std::int64_t indexedTime{0};
     bool contentExtracted = false;
     std::int32_t extractionStatus{0};
-    std::string extractionError;
+    std::string extractionError{};
     std::int32_t repairStatus{0};
     std::int64_t repairAttemptedAt{0};
     std::int32_t repairAttempts{0};
@@ -104,17 +104,17 @@ struct EmbeddingRecord {
     std::string model;
     std::uint32_t dimensions{0};
     std::vector<float> values;
-    std::string modelVersion;
-    std::string content;
+    std::string modelVersion{};
+    std::string content{};
     std::uint64_t startOffset{0};
     std::uint64_t endOffset{0};
-    std::map<std::string, std::string> metadata;
+    std::map<std::string, std::string> metadata{};
     std::uint32_t embeddingVersion{1};
-    std::string contentHashAtEmbedding;
+    std::string contentHashAtEmbedding{};
     std::int32_t level{0}; // EmbeddingLevel ordinal (CHUNK=0, DOCUMENT=1)
-    std::vector<std::string> sourceChunkIds;
-    std::string parentDocumentHash;
-    std::vector<std::string> childDocumentHashes;
+    std::vector<std::string> sourceChunkIds{};
+    std::string parentDocumentHash{};
+    std::vector<std::string> childDocumentHashes{};
 
     std::string_view id() const noexcept { return chunkId; }
     bool operator==(const EmbeddingRecord&) const = default;
@@ -133,7 +133,7 @@ struct TopologyNodeRecord {
     std::map<std::string, std::string> properties;
     std::int64_t createdTime{0};
     std::int64_t updatedTime{0};
-    std::string propertiesJson;
+    std::string propertiesJson{};
     bool hasCreatedTime = false;
     bool hasUpdatedTime = false;
     bool hasPropertiesJson = false;
@@ -153,7 +153,7 @@ struct TopologyEdgeRecord {
     std::string targetNodeKey;
     double weight{0.0};
     std::int64_t createdTime{0};
-    std::string propertiesJson;
+    std::string propertiesJson{};
     bool hasCreatedTime = false;
     bool hasPropertiesJson = false;
 

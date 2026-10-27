@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/cli/graph_scope_support.h>
 #include <yams/cli/graph_topology_support.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
@@ -11,6 +12,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 
 using namespace yams::cli;
@@ -150,20 +152,36 @@ TEST_CASE("GraphTopologySupport aggregates cluster stats directly", "[cli][graph
     CHECK(statsById.at("cluster-b").roleCounts.at("outlier") == 1);
 }
 
-TEST_CASE("GraphTopologySupport scopes cluster stats and membership views by resolved paths",
+TEST_CASE("GraphTopologySupport scopes cluster stats and membership views to the cwd",
           "[cli][graph][topology]") {
+    // --scope-cwd covers every path under the cwd, as `--list-type --scope-cwd` does (#280).
+    // It used to keep only <cwd>/src and <cwd>/include, so tests/ fell out of scope.
     GraphTopologySupportFixture fixture;
+    REQUIRE(fixture.metadataRepo->insertDocument(makeDocument("/elsewhere/notes.md", "hash-out"))
+                .has_value());
     GraphTopologySupport support(nullptr, "", fixture.metadataRepo);
-    const auto snapshot = makeSnapshot();
-    const std::unordered_set<std::string> scopedPaths = {"/repo/src/main.cpp",
-                                                         "/repo/include/main.h"};
+    auto snapshot = makeSnapshot();
+    snapshot.memberships.push_back(DocumentClusterMembership{
+        .documentHash = "hash-out",
+        .clusterId = "cluster-b",
+        .clusterLevel = 1,
+        .bridgeScore = 0.4,
+        .role = DocumentTopologyRole::Outlier,
+    });
     const std::filesystem::path cwd = "/repo";
+
+    auto scopeRes = support.buildCurrentScopePathSet(cwd);
+    REQUIRE(scopeRes.has_value());
+    const auto& scopedPaths = scopeRes.value();
+    CHECK(scopedPaths == std::unordered_set<std::string>{"/repo/src/main.cpp",
+                                                         "/repo/include/main.h",
+                                                         "/repo/tests/main_test.cpp"});
 
     const auto statsById = support.buildClusterStatsById(snapshot, scopedPaths, cwd);
     REQUIRE(statsById.contains("cluster-a"));
     REQUIRE(statsById.contains("cluster-b"));
     CHECK(statsById.at("cluster-a").scopedMemberCount == 2);
-    CHECK(statsById.at("cluster-b").scopedMemberCount == 0);
+    CHECK(statsById.at("cluster-b").scopedMemberCount == 1);
 
     const auto views =
         support.buildClusterMembershipViews(snapshot, snapshot.clusters.front(), scopedPaths, cwd);
@@ -175,10 +193,62 @@ TEST_CASE("GraphTopologySupport scopes cluster stats and membership views by res
     CHECK(views[1].resolvedPath == "/repo/include/main.h");
     CHECK(views[1].inScope);
 
+    const auto scopedViews =
+        support.buildClusterMembershipViews(snapshot, snapshot.clusters[1], scopedPaths, cwd);
+    REQUIRE(scopedViews.size() == 2);
+    CHECK(scopedViews[0].resolvedPath == "/repo/tests/main_test.cpp");
+    CHECK(scopedViews[0].inScope);
+    CHECK(scopedViews[1].resolvedPath == "/elsewhere/notes.md");
+    CHECK_FALSE(scopedViews[1].inScope);
+
     const auto unscopedViews = support.buildClusterMembershipViews(snapshot, snapshot.clusters[1]);
-    REQUIRE(unscopedViews.size() == 1);
+    REQUIRE(unscopedViews.size() == 2);
     CHECK(unscopedViews.front().resolvedPath == "/repo/tests/main_test.cpp");
     CHECK(unscopedViews.front().inScope);
+}
+
+TEST_CASE("Graph --scope-cwd path set covers a corpus without src/ or include/",
+          "[cli][graph][topology][scope]") {
+    // A corpus laid out as <lib>/include and <lib>/src (or not at all) had an empty scope, so
+    // `yams graph --topology-clusters --scope-cwd` reported no scoped members.
+    GraphTopologySupportFixture fixture;
+    const auto base = std::filesystem::path(makeTempDbPath()).replace_extension(".scope");
+    std::filesystem::create_directories(base);
+    const auto realRoot = std::filesystem::weakly_canonical(base) / "corpus";
+    const auto header = realRoot / "simeon" / "include" / "simeon" / "bm25.hpp";
+    const auto source = realRoot / "simeon" / "src" / "bm25.cpp";
+    const auto sibling = std::filesystem::weakly_canonical(base) / "corpus-other" / "x.md";
+    for (const auto& path : {header, source, sibling}) {
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << "x\n";
+    }
+    REQUIRE(fixture.metadataRepo->insertDocument(makeDocument(header.generic_string(), "h-hdr"))
+                .has_value());
+    REQUIRE(fixture.metadataRepo->insertDocument(makeDocument(source.generic_string(), "h-src"))
+                .has_value());
+    REQUIRE(fixture.metadataRepo->insertDocument(makeDocument(sibling.generic_string(), "h-sib"))
+                .has_value());
+
+    const std::unordered_set<std::string> expected{header.generic_string(),
+                                                   source.generic_string()};
+    auto checkScope = [&](const std::filesystem::path& cwd) {
+        auto scoped = buildGraphScopedPathSet(cwd, fixture.metadataRepo);
+        REQUIRE(scoped.has_value());
+        CHECK(scoped.value() == expected);
+    };
+
+    checkScope(realRoot);
+
+    // A cwd reached through a symlink still matches the resolved stored paths.
+    const auto linkRoot = base / "corpus-link";
+    std::error_code linkEc;
+    std::filesystem::create_directory_symlink(realRoot, linkRoot, linkEc);
+    if (!linkEc) {
+        checkScope(linkRoot);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(base, ec);
 }
 
 TEST_CASE("GraphTopologySupport returns null snapshot and empty path without CLI context",

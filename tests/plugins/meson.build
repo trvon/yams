@@ -24,7 +24,7 @@ zyp_pdf_metadata_test_exe = executable('yams_zyp_pdf_metadata_tests',
 )
 
 test('zyp_pdf_metadata', zyp_pdf_metadata_test_exe,
-  suite: ['plugins', 'zyp', 'catch2'],
+  suite: ['unit', 'plugins', 'zyp', 'catch2'],
   timeout: 30,
 )
 
@@ -49,16 +49,17 @@ if get_option('plugin-onnx') and onnx_plugin_runtime_deps.length() > 0
   )
 
   foreach onnx_case : [
-    ['onnx_request_no_inputs', 'OnnxRequestPluginTest.NoInputsError'],
-    ['onnx_request_mock_batch_shape', 'OnnxRequestPluginTest.EmbeddingMockBatchShape'],
-    ['onnx_provider_runtime_info', 'OnnxProviderPluginTest.RuntimeInfoIncludesHints'],
-    ['onnx_provider_missing_runtime', 'OnnxProviderPluginTest.MissingRuntimeReportedViaHealth'],
-    ['onnx_provider_config_preload', 'OnnxProviderPluginTest.ConfigPreloadParsingAndReady'],
-    ['onnx_provider_batch_errors', 'OnnxProviderPluginTest.GenerateEmbeddingBatchErrors'],
+    # Only model-free ABI/error contracts join the ordinary correctness lane.
+    ['onnx_request_no_inputs', 'OnnxRequestPluginTest.NoInputsError', 'unit'],
+    ['onnx_request_mock_batch_shape', 'OnnxRequestPluginTest.EmbeddingMockBatchShape', 'model'],
+    ['onnx_provider_runtime_info', 'OnnxProviderPluginTest.RuntimeInfoIncludesHints', 'unit'],
+    ['onnx_provider_missing_runtime', 'OnnxProviderPluginTest.MissingRuntimeReportedViaHealth', 'unit'],
+    ['onnx_provider_config_preload', 'OnnxProviderPluginTest.ConfigPreloadParsingAndReady', 'runtime'],
+    ['onnx_provider_batch_errors', 'OnnxProviderPluginTest.GenerateEmbeddingBatchErrors', 'unit'],
   ]
     test(onnx_case[0], onnx_plugin_exe,
-      suite: ['plugins', 'onnx', 'catch2'],
-      args: [onnx_case[1], '--allow-running-no-tests'],
+      suite: ['plugins', 'onnx', 'catch2', onnx_case[2]],
+      args: [onnx_case[1]],
       env: {
         'YAMS_SKIP_MODEL_LOADING': '1',
         'LD_LIBRARY_PATH': plugin_test_ld_library_path,
@@ -116,7 +117,7 @@ if plugin_export_deps.length() > 0 and host_machine.system() != 'windows'
     install: false,
   )
   test('plugin_export_surface', plugin_export_surface_exe,
-    suite: ['plugins', 'catch2'],
+    suite: ['unit', 'plugins', 'catch2'],
     env: {'LD_LIBRARY_PATH': plugin_test_ld_library_path},
     depends: plugin_export_deps,
     timeout: 30,
@@ -140,7 +141,7 @@ if get_option('plugin-zyp') and zyp_plugin_runtime_deps.length() > 0
   )
 
   test('zyp_plugin', zyp_test_exe,
-    suite: ['plugins', 'zyp', 'catch2'],
+    suite: ['unit', 'plugins', 'zyp', 'catch2'],
     env: {
       'YAMS_SKIP_MODEL_LOADING': '1',
       'LD_LIBRARY_PATH': plugin_test_ld_library_path,

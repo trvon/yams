@@ -72,13 +72,14 @@ struct PeerHandshakeConfig {
     std::uint64_t corpusEpoch{0};
     memory_sync::VersionVector localVersion;
     // pi-lens-ignore: no-bit-fields
-    std::map<memory_sync::NodeId, memory_sync::WriterHistoryCommitment> localCommitments; // NOLINT
-    std::set<memory_sync::NodeId> localQuarantinedWriters;
+    std::map<memory_sync::NodeId, memory_sync::WriterHistoryCommitment>
+        localCommitments{}; // NOLINT
+    std::set<memory_sync::NodeId> localQuarantinedWriters{};
     std::function<Result<memory_sync::WriterHistoryCommitment>(std::uint64_t)>
-        resolveLocalCommitment;
+        resolveLocalCommitment{};
     std::function<Result<memory_sync::WriterHistoryCommitment>(std::uint64_t, std::size_t,
                                                                std::size_t)>
-        resolveLocalWindow;
+        resolveLocalWindow{};
     /// Negotiated caps for one handshake-frozen local-writer delta window.
     std::size_t maxWriterAdvance{kMaxP2pWriterAdvance};
     std::size_t maxWriterWindowBytes{kMaxP2pWriterWindowBytes};

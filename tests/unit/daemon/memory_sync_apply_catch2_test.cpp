@@ -10,6 +10,7 @@
 
 // pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -22,6 +23,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "../../common/test_helpers_catch2.h"
@@ -35,6 +37,7 @@
 #include <yams/daemon/daemon.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/records.h>
+#include <yams/metadata/connection_pool.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/topology_sync_adapter.h>
 #include <yams/storage/storage_backend.h>
@@ -92,7 +95,13 @@ struct TempRoot {
 
 /// One daemon-shaped replica: real ServiceManager apply/backfill code over local stores.
 struct MeshNode {
-    MeshNode(const fs::path& root, const std::string& nodeId, const fs::path& sharedStore)
+    /// Counted: the graph store runs over a connection pool this node owns, so a test can count
+    /// every connection the store takes (one per query).
+    enum class KgReads { Uncounted, Counted };
+
+    MeshNode(const fs::path& root, const std::string& nodeId, const fs::path& sharedStore,
+             KgReads kgReads = KgReads::Uncounted, memory_sync::MemorySyncLimits syncLimits = {},
+             std::unique_ptr<storage::IStorageBackend> syncBackend = {})
         : name(nodeId) {
         const auto home = root / nodeId;
         fs::create_directories(home / "data");
@@ -112,14 +121,27 @@ struct MeshNode {
         manager->__test_setContentStore(
             std::shared_ptr<api::IContentStore>(std::move(content.value())));
 
-        auto graph = metadata::makeSqliteKnowledgeGraphStore((home / "kg.db").string());
+        const auto graphPath = (home / "kg.db").string();
+        auto graph = metadata::makeSqliteKnowledgeGraphStore(graphPath);
         REQUIRE(graph.has_value());
+        if (kgReads == KgReads::Counted) {
+            // The path factory migrated the schema; reopen the store over a pool of our own.
+            graph.value().reset();
+            kgPool_ = std::make_unique<metadata::ConnectionPool>(graphPath);
+            REQUIRE(kgPool_->initialize().has_value());
+            graph = metadata::makeSqliteKnowledgeGraphStore(*kgPool_,
+                                                            metadata::KnowledgeGraphStoreConfig{});
+            REQUIRE(graph.has_value());
+        }
         kgStore = std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(graph.value()));
-        manager->__test_setKgStore(kgStore);
+        manager->testing_setKgStore(kgStore);
 
+        if (!syncBackend) {
+            syncBackend = makeBackend(sharedStore);
+        }
         auto sync = std::make_unique<memory_sync::MemorySyncService>(
-            makeBackend(sharedStore),
-            memory_sync::MemorySyncConfig{nodeId, 60'000, std::string(kCorpus), 1});
+            std::move(syncBackend),
+            memory_sync::MemorySyncConfig{nodeId, 60'000, std::string(kCorpus), 1, syncLimits});
         sync_ = sync.get();
         manager->testingSetMemorySyncService(std::move(sync));
     }
@@ -228,11 +250,18 @@ struct MeshNode {
         return status.value().apply.deferredIn(memory_sync::ApplyStage::Topology);
     }
 
+    /// Connections the graph store has taken so far (KgReads::Counted only).
+    std::size_t kgStoreAcquisitions() const {
+        REQUIRE(kgPool_ != nullptr);
+        return kgPool_->getStats().totalAcquired;
+    }
+
     std::string name;
     yams::test::ScopedEnvVar disableWatcher{"YAMS_DISABLE_SESSION_WATCHER", std::string("1")};
     DaemonConfig config;
     StateComponent state;
     DaemonLifecycleFsm lifecycleFsm;
+    std::unique_ptr<metadata::ConnectionPool> kgPool_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore;
     memory_sync::MemorySyncService* sync_{nullptr};
     std::unique_ptr<ServiceManager> manager;
@@ -573,6 +602,95 @@ TEST_CASE("Memory sync vector backfill publishes good vectors past an unpublisha
     CHECK(status.value().apply.publishFailedCycles == 0);
 }
 
+TEST_CASE("Memory sync vector backfill progresses past a resident-limit rejection",
+          "[daemon][memory-sync][backfill][vector][limits]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    memory_sync::MemorySyncLimits limits;
+    const bool cacheBound = GENERATE(false, true);
+    if (cacheBound) {
+        limits.maxCacheBytes = 1024;
+    } else {
+        limits.maxValueBytes = 1024;
+    }
+    CAPTURE(cacheBound);
+    MeshNode origin{root.path, "origin", sharedStore, MeshNode::KgReads::Uncounted, limits};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+
+    auto oversized = makeVector("oversized-chunk", '1', "model");
+    oversized.content.assign(2048, 'x');
+    REQUIRE(vectors->insertVectorChecked(oversized).has_value());
+    REQUIRE(vectors->insertVectorChecked(makeVector("later-chunk", '2', "model")).has_value());
+
+    SECTION("catch-up sweep") {}
+    SECTION("committed vector queue") {
+        origin.manager->notifyMemorySyncEmbeddingsCommitted(
+            {std::string(64, '1'), std::string(64, '2')});
+    }
+
+    // The first value is valid vector data, but cannot fit this service's typed limit.
+    // Retrying it must not keep every later vector behind the sweep cursor.
+    origin.backfill(2);
+    view.refresh();
+    CHECK_FALSE(view.published("embedding/model/oversized-chunk"));
+    CHECK(view.published("embedding/model/later-chunk"));
+    REQUIRE(vectors->getVector("oversized-chunk").has_value());
+
+    // The local record is retained. A corrected value changes the vector generation and
+    // must be reached by a later sweep rather than permanently remembered as skipped.
+    REQUIRE(vectors->deleteVectorsByDocumentChecked(std::string(64, '1')).has_value());
+    REQUIRE(vectors->insertVectorChecked(makeVector("oversized-chunk", '1', "model")).has_value());
+    origin.backfill(4);
+    view.refresh();
+    CHECK(view.published("embedding/model/oversized-chunk"));
+}
+
+TEST_CASE("Memory sync vector backfill retries a backend validation failure without new vectors",
+          "[daemon][memory-sync][backfill][vector][retry]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    struct RejectingBackend final : storage::FilesystemBackend {
+        bool rejectBlobs{true};
+        Result<void> store(std::string_view key, std::span<const std::byte> value) override {
+            if (rejectBlobs && key.starts_with("blob/")) {
+                return Error{ErrorCode::InvalidArgument, "backend rejected the write"};
+            }
+            return FilesystemBackend::store(key, value);
+        }
+    };
+    auto backend = std::make_unique<RejectingBackend>();
+    storage::BackendConfig config;
+    config.localPath = sharedStore;
+    REQUIRE(backend->initialize(config).has_value());
+    auto* rejection = backend.get();
+    MeshNode origin{root.path, "origin",          sharedStore, MeshNode::KgReads::Uncounted,
+                    {},        std::move(backend)};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    REQUIRE(vectors->insertVectorChecked(makeVector("retry-chunk", '1', "model")).has_value());
+    REQUIRE(vectors->insertVectorChecked(makeVector("later-chunk", '2', "model")).has_value());
+
+    origin.backfill(2);
+    view.refresh();
+    CHECK_FALSE(view.published("embedding/model/retry-chunk"));
+    const auto status = origin.manager->getMemorySyncStatus();
+    REQUIRE(status.has_value());
+    CHECK(status.value().apply.publishFailedCycles > 0);
+
+    // The same error code is not enough to classify a row as unpublishable. Once the
+    // backend recovers, the unchanged source generation must still be retried.
+    rejection->rejectBlobs = false;
+    origin.backfill(4);
+    view.refresh();
+    CHECK(view.published("embedding/model/retry-chunk"));
+    CHECK(view.published("embedding/model/later-chunk"));
+}
+
 TEST_CASE("Memory sync vector apply stores good embeddings past a bad one",
           "[daemon][memory-sync][apply][vector]") {
     const VectorStoreEnv vectorEnv;
@@ -736,8 +854,9 @@ TEST_CASE("Memory sync topology backfill keeps progressing while the vector swee
         nodes.push_back(origin.addNode("doc:fair-" + std::to_string(i), "document").nodeKey);
     }
 
-    // A wrapping vector sweep always has work. These cycles are fewer than the two sweeps need
-    // back to back, but enough for each to publish its share when neither can take every item.
+    // The vector sweep has more items than these cycles can serve. They are fewer than the two
+    // sweeps need back to back, but enough for each to publish its share when neither can take
+    // every item.
     origin.backfill(2 * kNodes + 2);
 
     view.refresh();
@@ -750,4 +869,270 @@ TEST_CASE("Memory sync topology backfill keeps progressing while the vector swee
         vectorsPublished += view.published(embeddingKey("sweep-" + std::to_string(i))) ? 1 : 0;
     }
     CHECK(vectorsPublished >= kNodes);
+}
+
+namespace {
+
+/// Counts the items the outbound catch-up sweeps serve: one stage notification per node, edge,
+/// vector, or retraction the sweeps publish or re-check.
+struct SweepItemCounter {
+    explicit SweepItemCounter(MeshNode& node) {
+        node.manager->testingSetMemorySyncStageObserver([this](std::string_view stage) {
+            if (stage == "backfill.after_node" || stage == "backfill.after_edge" ||
+                stage == "backfill.after_vector" || stage == "backfill.after_retraction") {
+                ++count;
+            }
+        });
+    }
+    std::size_t count{0};
+};
+
+/// The operation identity of the committed winner for `key`: it changes only when the record
+/// is published again.
+std::string winnerOperation(const SharedStoreView& view, const std::string& key) {
+    const auto winners = view.sync.committedWinnersAfter(key, "", 1);
+    REQUIRE(winners.size() == 1);
+    REQUIRE(winners.front().first == key);
+    return winners.front().second.operationId;
+}
+
+/// A small corpus whose first sweep pass completes within a few cycles: two documents, an edge
+/// between them, and one vector.
+struct IdleCorpus {
+    explicit IdleCorpus(MeshNode& node, vector::VectorDatabase& vectors)
+        : first(node.addNode("doc:idle-first", "document")),
+          second(node.addNode("doc:idle-second", "document")) {
+        node.addEdge(first, second);
+        REQUIRE(vectors.insertVectorChecked(makeVector("idle-chunk", '4', "model")).has_value());
+    }
+
+    /// Enough cycles for both sweeps to finish a full pass over this corpus.
+    void publishFirstPass(MeshNode& node, SharedStoreView& view) const {
+        node.backfill(8);
+        view.refresh();
+        REQUIRE(view.published(topologyNodeKey(first.nodeKey)));
+        REQUIRE(view.published(topologyNodeKey(second.nodeKey)));
+        REQUIRE(view.published(topologyEdgeKey(first.nodeKey, second.nodeKey)));
+        REQUIRE(view.published(embeddingKey("idle-chunk")));
+    }
+
+    /// Finish the first pass, then verify further cycles serve nothing.
+    void settle(MeshNode& node, SharedStoreView& view, SweepItemCounter& items) const {
+        publishFirstPass(node, view);
+        REQUIRE(items.count > 0);
+        const auto served = items.count;
+        node.backfill(2);
+        REQUIRE(items.count == served);
+    }
+
+    metadata::KGNode first;
+    metadata::KGNode second;
+};
+
+} // namespace
+
+TEST_CASE("Memory sync catch-up sweeps stop once a pass finds the stores unchanged",
+          "[daemon][memory-sync][backfill][idle]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore, MeshNode::KgReads::Counted};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    SweepItemCounter items{origin};
+    const IdleCorpus corpus{origin, *vectors};
+    corpus.publishFirstPass(origin, view);
+    const auto itemsAfterPass = items.count;
+    const auto readsAfterPass = origin.kgStoreAcquisitions();
+    REQUIRE(itemsAfterPass > 0);
+
+    // Nothing changed: later cycles serve no sweep item and never touch the graph store.
+    origin.backfill(5);
+    CHECK(items.count == itemsAfterPass);
+    CHECK(origin.kgStoreAcquisitions() == readsAfterPass);
+}
+
+TEST_CASE("Memory sync catch-up sweeps resume for records written after a completed pass",
+          "[daemon][memory-sync][backfill][idle]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    SweepItemCounter items{origin};
+    const IdleCorpus corpus{origin, *vectors};
+    corpus.settle(origin, view, items);
+    const auto firstOperation = winnerOperation(view, topologyNodeKey(corpus.first.nodeKey));
+    const auto chunkOperation = winnerOperation(view, embeddingKey("idle-chunk"));
+
+    // A node, an edge to it, and a vector land behind the idle cursors.
+    const auto third = origin.addNode("doc:idle-third", "document");
+    origin.addEdge(corpus.first, third);
+    REQUIRE(vectors->insertVectorChecked(makeVector("added-later", '2', "model")).has_value());
+    origin.backfill(8);
+
+    view.refresh();
+    CHECK(view.published(topologyNodeKey(third.nodeKey)));
+    CHECK(view.published(topologyEdgeKey(corpus.first.nodeKey, third.nodeKey)));
+    CHECK(view.published(embeddingKey("added-later")));
+    // Records that did not change are not published again.
+    CHECK(winnerOperation(view, topologyNodeKey(corpus.first.nodeKey)) == firstOperation);
+    CHECK(winnerOperation(view, embeddingKey("idle-chunk")) == chunkOperation);
+}
+
+TEST_CASE("Memory sync retracts records deleted after the sweeps went idle",
+          "[daemon][memory-sync][backfill][idle][retraction]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    SweepItemCounter items{origin};
+    const IdleCorpus corpus{origin, *vectors};
+    corpus.settle(origin, view, items);
+
+    // Deleting the second node cascades the edge; both must be retracted by a new pass.
+    origin.deleteNode(corpus.second);
+    for (int round = 0; round < 3; ++round) {
+        origin.runCycle();
+    }
+
+    view.refresh();
+    CHECK(view.tombstoned(topologyNodeKey(corpus.second.nodeKey)));
+    CHECK(view.tombstoned(topologyEdgeKey(corpus.first.nodeKey, corpus.second.nodeKey)));
+    CHECK(view.published(topologyNodeKey(corpus.first.nodeKey)));
+}
+
+namespace {
+
+/// Publish `sourceKey -> targetKey` from `writer` with both endpoints, as its backfill would.
+void publishEdgeWithEndpoints(MeshNode& writer, const std::string& sourceKey,
+                              const std::string& targetKey) {
+    const auto source = writer.addNode(sourceKey, "alpha");
+    const auto target = writer.addNode(targetKey, "omega");
+    writer.addEdge(source, target);
+    const metadata::KGEdge edge{.srcNodeId = source.id,
+                                .dstNodeId = target.id,
+                                .relation = std::string(kRelation),
+                                .weight = 1.0F};
+    metadata::TopologySyncAdapter publisher{*writer.kgStore, *writer.sync_};
+    REQUIRE(publisher.publishEdgeWithEndpoints(source, edge, target).has_value());
+}
+
+/// Apply until `reader` holds the edge, then once more so a clean pass is on record.
+void applyUntilEdge(MeshNode& reader, const std::string& sourceKey, const std::string& targetKey) {
+    for (int round = 0; round < 4 && !reader.hasEdge(sourceKey, targetKey); ++round) {
+        reader.manager->testingApplyMemorySyncWinners();
+    }
+    REQUIRE(reader.hasEdge(sourceKey, targetKey));
+    reader.manager->testingApplyMemorySyncWinners();
+}
+
+std::uint64_t applyCycles(const MeshNode& node) {
+    const auto status = node.manager->getMemorySyncStatus();
+    REQUIRE(status.has_value());
+    return status.value().apply.applyCycles;
+}
+
+} // namespace
+
+TEST_CASE("Memory sync apply skips cycles whose replicated inputs have not changed",
+          "[daemon][memory-sync][apply][idle]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore, MeshNode::KgReads::Counted};
+    publishEdgeWithEndpoints(writer, "entity:idle:source", "entity:idle:target");
+    applyUntilEdge(reader, "entity:idle:source", "entity:idle:target");
+
+    const auto skipped = reader.manager->testingMemorySyncApplySkippedCycles();
+    const auto reads = reader.kgStoreAcquisitions();
+    const auto cycles = applyCycles(reader);
+    for (int round = 0; round < 4; ++round) {
+        reader.manager->testingApplyMemorySyncWinners();
+    }
+
+    // Unchanged inputs: the inbound stages never run and never touch the graph store, but each
+    // cycle still counts as a healthy apply cycle.
+    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == skipped + 4);
+    CHECK(reader.kgStoreAcquisitions() == reads);
+    CHECK(applyCycles(reader) == cycles + 4);
+    CHECK(reader.hasEdge("entity:idle:source", "entity:idle:target"));
+}
+
+TEST_CASE("Memory sync apply runs again as soon as a new winner arrives",
+          "[daemon][memory-sync][apply][idle]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore};
+    publishEdgeWithEndpoints(writer, "entity:first:source", "entity:first:target");
+    applyUntilEdge(reader, "entity:first:source", "entity:first:target");
+    reader.manager->testingApplyMemorySyncWinners();
+    const auto skipped = reader.manager->testingMemorySyncApplySkippedCycles();
+    REQUIRE(skipped > 0);
+
+    publishEdgeWithEndpoints(writer, "entity:second:source", "entity:second:target");
+    reader.manager->testingApplyMemorySyncWinners();
+
+    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == skipped);
+    CHECK(reader.hasEdge("entity:second:source", "entity:second:target"));
+    CHECK(reader.hasEdge("entity:first:source", "entity:first:target"));
+}
+
+TEST_CASE("Memory sync full apply repairs a replicated record deleted locally",
+          "[daemon][memory-sync][apply][idle]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore};
+    publishEdgeWithEndpoints(writer, "entity:drift:source", "entity:drift:target");
+    applyUntilEdge(reader, "entity:drift:source", "entity:drift:target");
+
+    // Local drift: the replicated source node (and, by cascade, its edge) disappears locally
+    // while its winner stays in the replicated index.
+    const auto local = reader.kgStore->getNodeByKey("entity:drift:source");
+    REQUIRE(local.has_value());
+    REQUIRE(local.value().has_value());
+    reader.deleteNode(*local.value());
+
+    // Before the full-pass deadline the cycle skips, so the drift stays.
+    reader.manager->testingApplyMemorySyncWinners();
+    CHECK_FALSE(reader.hasNode("entity:drift:source"));
+
+    // The next full pass restores it.
+    reader.manager->testingExpireMemorySyncFullApply();
+    reader.manager->testingApplyMemorySyncWinners();
+    CHECK(reader.hasNode("entity:drift:source"));
+    CHECK(reader.hasEdge("entity:drift:source", "entity:drift:target"));
+}
+
+TEST_CASE("Memory sync apply never skips a cycle that deferred records",
+          "[daemon][memory-sync][apply][idle]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore, MeshNode::KgReads::Counted};
+    // The writer's edge reaches the shared store ahead of its target node.
+    writer.seedEdgePublishedAheadOfTarget();
+
+    reader.manager->testingApplyMemorySyncWinners();
+    REQUIRE(reader.deferredTopology() == 1);
+    const auto reads = reader.kgStoreAcquisitions();
+    reader.manager->testingApplyMemorySyncWinners();
+    reader.manager->testingApplyMemorySyncWinners();
+
+    // A deferral waits on a local prerequisite, so every cycle keeps retrying it.
+    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == 0);
+    CHECK(reader.kgStoreAcquisitions() > reads);
+    CHECK(reader.deferredTopology() == 1);
 }

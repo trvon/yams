@@ -57,9 +57,19 @@ race:yams::daemon::detail::LifecycleMachine
 race:yams::daemon::detail::PluginHostMachine
 race:yams::daemon::detail::EmbeddingProviderMachine
 race:yams::daemon::detail::SearchEngineMachine
-race:yams::daemon::detail::ServiceManagerMachine
 race:yams::daemon::LifecycleSnapshot
 race:yams::daemon::ProviderSnapshot
 race:yams::daemon::PluginHostSnapshot
 race:yams::daemon::SearchEngineSnapshot
 race:yams::daemon::ServiceManagerSnapshot
+
+# gcc TSan does not model a standalone std::atomic_thread_fence. asio's executor refcount
+# drops with fetch_sub(release) and then fences acquire before the last delete, so gcc reports
+# the delete as racing the other thread's decrement. clang does not report it.
+race:boost::asio::detail::ref_count_down
+
+# SQLite reads and writes the WAL-index header in the -shm mapping without locks: double copy,
+# memory barrier, checksum, retry. SQLite marks both functions SQLITE_NO_TSAN, which is defined
+# for clang only, so gcc reports races between separate connections on the same database.
+race:walIndexTryHdr
+race:walIndexWriteHdr

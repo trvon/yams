@@ -422,7 +422,6 @@ void RepairService::stop() {
 // ============================================================================
 
 boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdownState) {
-    YAMS_ZONE_SCOPED_N("RepairSvc::backgroundLoop");
     using namespace std::chrono_literals;
     auto ex = co_await boost::asio::this_coro::executor;
     boost::asio::steady_timer timer(ex);
@@ -703,7 +702,6 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 }
 
 boost::asio::awaitable<void> RepairService::spawnInitialScan() {
-    YAMS_ZONE_SCOPED_N("RepairSvc::spawnInitialScan");
     try {
         auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
         if (!meta)
@@ -813,7 +811,6 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
 }
 
 boost::asio::awaitable<void> RepairService::processPathTreeRepair() {
-    YAMS_ZONE_SCOPED_N("RepairSvc::processPathTreeRepair");
     using namespace std::chrono_literals;
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 

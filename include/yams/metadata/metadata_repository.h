@@ -10,6 +10,7 @@
 #include <optional>
 #include <random>
 #include <shared_mutex>
+#include <source_location>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -189,25 +190,25 @@ struct PathTreeNode {
 
 struct DocumentQueryOptions {
     std::optional<std::string> exactPath;
-    std::optional<std::string> pathPrefix;
-    std::optional<std::string> containsFragment;
-    std::optional<std::string> fileName; // Exact match on file_name column
-    std::optional<std::string> extension;
-    std::vector<std::string> extensions;
-    std::optional<std::string> mimeType;
+    std::optional<std::string> pathPrefix{};
+    std::optional<std::string> containsFragment{};
+    std::optional<std::string> fileName{}; // Exact match on file_name column
+    std::optional<std::string> extension{};
+    std::vector<std::string> extensions{};
+    std::optional<std::string> mimeType{};
     bool textOnly{false};
     bool binaryOnly{false};
-    std::vector<std::string> tags;
-    std::optional<int64_t> createdAfter;
-    std::optional<int64_t> createdBefore;
-    std::optional<int64_t> modifiedAfter;
-    std::optional<int64_t> modifiedBefore;
-    std::optional<int64_t> indexedAfter;
-    std::optional<int64_t> indexedBefore;
-    std::optional<int64_t> changedSince;
+    std::vector<std::string> tags{};
+    std::optional<int64_t> createdAfter{};
+    std::optional<int64_t> createdBefore{};
+    std::optional<int64_t> modifiedAfter{};
+    std::optional<int64_t> modifiedBefore{};
+    std::optional<int64_t> indexedAfter{};
+    std::optional<int64_t> indexedBefore{};
+    std::optional<int64_t> changedSince{};
     /// Cursor pagination helper for long-running maintenance scans.
     /// When set, only documents with id > value are returned.
-    std::optional<int64_t> idGreaterThan;
+    std::optional<int64_t> idGreaterThan{};
     int limit{0};
     int offset{0};
     bool orderByIdAsc{false};
@@ -217,30 +218,30 @@ struct DocumentQueryOptions {
     bool prefixIsDirectory{false};
     bool includeSubdirectories{true};
     bool containsUsesFts{false};
-    std::optional<std::string> likePattern;
+    std::optional<std::string> likePattern{};
     // Generic metadata filtering (replaces findDocumentsByCollection)
-    std::vector<std::pair<std::string, std::string>> metadataFilters;
+    std::vector<std::pair<std::string, std::string>> metadataFilters{};
     // Optional OR group, combined with metadataFilters and all other filters using AND.
-    std::vector<std::pair<std::string, std::string>> metadataAnyFilters;
+    std::vector<std::pair<std::string, std::string>> metadataAnyFilters{};
 
     // --- Repair / health-check filters (added for targeted stuck-doc detection) ---
     /// Filter by extraction status (e.g., Failed, Pending). Multiple values → OR.
-    std::vector<ExtractionStatus> extractionStatuses;
+    std::vector<ExtractionStatus> extractionStatuses{};
     /// Filter by repair status (e.g., Processing). Multiple values → OR.
-    std::vector<RepairStatus> repairStatuses;
+    std::vector<RepairStatus> repairStatuses{};
     /// Only return docs whose repair_attempts < this value (0 = no filter).
     int32_t maxRepairAttempts{0};
     /// Filter by embedding status from document_embeddings_status.
     /// true => only docs with has_embedding=1.
     /// false => only docs without a has_embedding=1 row (missing or stale false rows).
-    std::optional<bool> hasEmbedding;
+    std::optional<bool> hasEmbedding{};
     /// Only return docs that have NO matching row in document_content.
     bool onlyMissingContent{false};
     /// Only return docs indexed/modified before this epoch-seconds value (for stalled detection).
     /// Uses COALESCE(NULLIF(indexed_time,0), modified_time) < stalledBefore.
-    std::optional<int64_t> stalledBefore;
+    std::optional<int64_t> stalledBefore{};
     /// Only return docs whose repair_attempted_at < this epoch-seconds value.
-    std::optional<int64_t> repairAttemptedBefore;
+    std::optional<int64_t> repairAttemptedBefore{};
 
     /// Exclude obviously-ungrepable MIME types (image/*, video/*, audio/*, archives, PDF, etc.)
     /// at the SQL level to reduce candidate set before C++ processing.
@@ -1425,11 +1426,14 @@ private:
         return executeQueryOnPool<T>(readPool, "read", func);
     }
 
+    // An untagged write is named after its calling method, so pool waits, traces and timeout
+    // holder lists say which repository operation queued for the single write connection.
     template <typename T>
-    Result<T> executeWriteQuery(const std::function<Result<T>(Database&)>& func) {
+    Result<T> executeWriteQuery(const std::function<Result<T>(Database&)>& func,
+                                std::source_location caller = std::source_location::current()) {
         ensureCountersInitialized();
         if (current_metadata_op().empty()) {
-            MetadataOpScope opScope("write_query");
+            MetadataOpScope opScope(caller.function_name());
             return executeQueryOnPool<T>(pool_, "write", func);
         }
         return executeQueryOnPool<T>(pool_, "write", func);
@@ -1505,8 +1509,10 @@ private:
         return Error{result.error()};
     }
 
-    template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
-        return executeWriteQuery<T>(std::move(func));
+    template <typename T>
+    Result<T> executeQuery(std::function<Result<T>(Database&)> func,
+                           std::source_location caller = std::source_location::current()) {
+        return executeWriteQuery<T>(std::move(func), caller);
     }
 };
 

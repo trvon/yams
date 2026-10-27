@@ -785,17 +785,17 @@ Result<WALManager::RecoveryStats> WALManager::recover(ApplyFunction applyEntry) 
 
             const auto& decompressed = decompressedResult.value();
             size_t offset = 0;
-            while (offset + sizeof(WALEntry::Header) <= decompressed.size()) {
-                WALEntry::Header header;
-                std::memcpy(&header, decompressed.data() + offset, sizeof(WALEntry::Header));
+            while (offset + WALEntry::Header::size() <= decompressed.size()) {
+                const auto header = WALEntry::decodeHeader(std::span<const std::byte>(
+                    decompressed.data() + offset, WALEntry::Header::size()));
 
-                if (!header.isValid()) {
+                if (!header || !header->isValid()) {
                     spdlog::error("Invalid WAL entry header encountered in {}", logPath.string());
                     stats.errorsEncountered++;
                     break;
                 }
 
-                const size_t entrySize = sizeof(WALEntry::Header) + header.dataSize;
+                const size_t entrySize = WALEntry::Header::size() + header->dataSize;
                 if (offset + entrySize > decompressed.size()) {
                     spdlog::error("Incomplete WAL entry detected in {}", logPath.string());
                     stats.errorsEncountered++;

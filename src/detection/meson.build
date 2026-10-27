@@ -14,8 +14,8 @@ endif
 yams_detection = static_library('yams_detection',
   [ 'file_type_detector.cpp' ],
   include_directories: [include_directories('../../include'), include_directories('.')],
-  dependencies: [spdlog_dep, json_dep, yams_core, yams_metadata, libmagic_dep],
-  cpp_args: yams_detection_cppargs,
+  dependencies: [spdlog_dep, json_dep, yams_core, yams_metadata, libmagic_dep] + yams_tracy_deps,
+  cpp_args: yams_detection_cppargs + yams_tracy_args,
   install: false,
 )
 

@@ -5,12 +5,14 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "common/test_helpers_catch2.h"
 
+#include <yams/api/content_store_builder.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/metadata/connection_pool.h>
@@ -343,6 +345,113 @@ void createGraphExploreFixture(const fs::path& root) {
     pool.reset();
 }
 
+// Content hashes of the document graph fixture's files.
+struct DocumentGraphFixture {
+    std::string xa, ya, n1, n2, xb, yb, nb, lone;
+};
+
+// Two checkouts that share relative paths, with semantic-neighbour edges between document
+// nodes as v0.20 ingestion writes them. root/a/include/x.hpp also has the path:file: node that
+// `yams doctor repair --graph` adds. root/a/src/lone.cpp has no graph edges.
+DocumentGraphFixture createDocumentGraphFixture(const fs::path& root) {
+    using namespace yams::metadata;
+
+    const fs::path dataDir = root / "data";
+    fs::create_directories(dataDir);
+    ConnectionPoolConfig poolConfig;
+    poolConfig.minConnections = 1;
+    poolConfig.maxConnections = 2;
+    auto pool = std::make_unique<ConnectionPool>((dataDir / "yams.db").string(), poolConfig);
+    REQUIRE(pool->initialize().has_value());
+
+    auto repository = std::make_shared<MetadataRepository>(*pool);
+    auto kgResult = makeSqliteKnowledgeGraphStore(*pool, KnowledgeGraphStoreConfig{});
+    REQUIRE(kgResult.has_value());
+    auto kgStore = std::shared_ptr<KnowledgeGraphStore>(kgResult.value().release());
+
+    // `get` checks the blob exists, so store the content where the daemon looks for it.
+    yams::api::ContentStoreConfig storeConfig;
+    storeConfig.storagePath = dataDir / "storage";
+    auto contentStore = yams::api::ContentStoreBuilder().withConfig(storeConfig).build();
+    REQUIRE(contentStore.has_value());
+
+    DocumentGraphFixture hashes;
+    auto addDoc = [&](const std::string& rel, std::string& hash, bool newer) {
+        const auto path = root / rel;
+        yams::test::write_file(path, "// " + rel + "\n");
+        auto stored = contentStore.value()->store(path, yams::api::ContentMetadata{});
+        REQUIRE(stored.has_value());
+        hash = stored.value().contentHash;
+        auto info = makeDocumentWithPath(path.string(), hash);
+        if (newer) {
+            info.indexedTime += std::chrono::hours(1);
+        }
+        REQUIRE(repository->insertDocument(info).has_value());
+        KGNode node;
+        node.nodeKey = "doc:" + hash;
+        node.label = info.filePath;
+        node.type = "document";
+        auto id = kgStore->upsertNode(node);
+        REQUIRE(id.has_value());
+        return std::pair{id.value(), info.filePath};
+    };
+    auto neighbour = [&](std::int64_t src, std::int64_t dst) {
+        KGEdge edge;
+        edge.srcNodeId = src;
+        edge.dstNodeId = dst;
+        edge.relation = "semantic_neighbor";
+        edge.weight = 0.9F;
+        REQUIRE(kgStore->addEdge(edge).has_value());
+    };
+
+    // The other checkout goes in first and is newer, so a suffix match would prefer it.
+    const auto xb = addDoc("b/include/x.hpp", hashes.xb, true).first;
+    const auto yb = addDoc("b/include/y.hpp", hashes.yb, true).first;
+    const auto nb = addDoc("b/src/nb.cpp", hashes.nb, true).first;
+    const auto [xa, xaPath] = addDoc("a/include/x.hpp", hashes.xa, false);
+    const auto ya = addDoc("a/include/y.hpp", hashes.ya, false).first;
+    const auto n1 = addDoc("a/src/n1.cpp", hashes.n1, false).first;
+    const auto n2 = addDoc("a/src/n2.cpp", hashes.n2, false).first;
+    addDoc("a/src/lone.cpp", hashes.lone, false);
+    neighbour(xa, n1);
+    neighbour(xa, n2);
+    neighbour(ya, n1);
+    neighbour(xb, nb);
+    neighbour(yb, nb);
+
+    KGNode blob;
+    blob.nodeKey = "blob:" + hashes.xa;
+    blob.label = hashes.xa.substr(0, 8);
+    blob.type = "blob";
+    auto blobId = kgStore->upsertNode(blob);
+    REQUIRE(blobId.has_value());
+    KGNode file;
+    file.nodeKey = "path:file:" + xaPath;
+    file.label = xaPath;
+    file.type = "file";
+    auto fileId = kgStore->upsertNode(file);
+    REQUIRE(fileId.has_value());
+    KGEdge version;
+    version.srcNodeId = fileId.value();
+    version.dstNodeId = blobId.value();
+    version.relation = "has_version";
+    REQUIRE(kgStore->addEdge(version).has_value());
+
+    kgStore.reset();
+    repository.reset();
+    pool->shutdown();
+    pool.reset();
+    return hashes;
+}
+
+std::set<std::string> relatedHashes(const nlohmann::json& payload) {
+    std::set<std::string> hashes;
+    for (const auto& rel : payload.at("related")) {
+        hashes.insert(rel.at("hash").get<std::string>());
+    }
+    return hashes;
+}
+
 } // namespace
 
 TEST_CASE("IntegrationSmoke.GraphCommandFallsBackToInProcessWhenDaemonUnavailable",
@@ -503,4 +612,70 @@ TEST_CASE("IntegrationSmoke.GraphTopologyModesReadStoredSnapshot", "[smoke][inte
     CHECK(clusterJson["cluster"].contains("role_counts"));
     REQUIRE(clusterJson["members"].is_array());
     REQUIRE_FALSE(clusterJson["members"].empty());
+}
+
+TEST_CASE("IntegrationSmoke.GraphNameResolvesRelativePathAgainstCwd", "[smoke][integrationsmoke]") {
+    // #280 follow-up: --name probed path:file:<path> keys first and, when one existed, printed a
+    // raw path-node traversal instead of the document's related documents. The in-process
+    // daemon shares the client cwd, so the relative-path case guards the cwd-relative contract
+    // here; a separate daemon resolved it by suffix to the newer copy in the other checkout.
+    const fs::path root = yams::test::make_temp_dir("yams_graph_name_");
+    const auto hashes = createDocumentGraphFixture(root);
+    ScopedCurrentPath cwdGuard(root / "a");
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
+    yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", (root / "data").string());
+    yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", (root / "data").string());
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::string("1"));
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::string("1"));
+    yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
+
+    auto lookup = [](const std::vector<std::string>& extra) {
+        std::vector<std::string> args{"yams", "graph"};
+        args.insert(args.end(), extra.begin(), extra.end());
+        args.push_back("--json");
+        std::string out;
+        const int rc = run_cli(args, &out);
+        INFO(out);
+        REQUIRE((rc == 0));
+        return nlohmann::json::parse(out);
+    };
+
+    SECTION("a path with a path:file: node still returns its related documents") {
+        const auto payload = lookup({"--name", "include/x.hpp", "--depth", "1"});
+        CHECK((payload.value("hash", "") == hashes.xa));
+        CHECK((relatedHashes(payload) == std::set<std::string>{hashes.n1, hashes.n2}));
+    }
+
+    SECTION("a relative path resolves under the cwd, not to a newer copy elsewhere") {
+        const auto payload = lookup({"--name", "include/y.hpp"});
+        CHECK((payload.value("hash", "") == hashes.ya));
+        CHECK((relatedHashes(payload) == std::set<std::string>{hashes.n1}));
+    }
+
+    SECTION("a bare file name still resolves by name") {
+        const auto payload = lookup({"--name", "n2.cpp"});
+        CHECK((payload.value("hash", "") == hashes.n2));
+    }
+
+    SECTION("--limit caps the related documents; without it the defaults apply") {
+        // #280 follow-up: the lookup ignored --limit (fixed at 100 graph nodes and 20
+        // same-directory fallbacks).
+        const auto full = lookup({"--name", "include/x.hpp"});
+        CHECK((relatedHashes(full) == std::set<std::string>{hashes.n1, hashes.n2}));
+
+        const auto limited = lookup({"--name", "include/x.hpp", "--limit", "1"});
+        CHECK((limited.at("related").size() == 1));
+        CHECK((full.at("related").front() == limited.at("related").front()));
+
+        const auto byHash = lookup({hashes.xa, "--limit", "1"});
+        CHECK((byHash.at("related").size() == 1));
+
+        // The same-directory fallback for a document without graph edges.
+        const auto fallback = lookup({"--name", "src/lone.cpp"});
+        CHECK((relatedHashes(fallback) == std::set<std::string>{hashes.n1, hashes.n2}));
+        const auto fallbackLimited = lookup({"--name", "src/lone.cpp", "--limit", "1"});
+        CHECK((fallbackLimited.at("related").size() == 1));
+    }
 }

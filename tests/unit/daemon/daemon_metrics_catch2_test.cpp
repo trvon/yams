@@ -2,10 +2,14 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/polling_completion.h>
 
+#include <chrono>
 #include <cstdint>
+#include <future>
 
 namespace yams::daemon::test {
 
@@ -134,6 +138,34 @@ TEST_CASE("computePhysicalWalkTtl returns clamping behavior", "[metrics][ttl]") 
     // Very slow walk → capped at max
     std::uint64_t maxTtl = computePhysicalWalkTtl(1'000'000);
     REQUIRE(maxTtl <= 1'800'000);
+}
+
+TEST_CASE("Polling completion stays unobservable until its final notifier finishes",
+          "[metrics][polling-shutdown]") {
+    detail::PollingCompletion completion;
+    completion.markStarted();
+    std::promise<void> beforeNotify;
+    auto paused = beforeNotify.get_future();
+    std::promise<void> allowNotify;
+    auto resume = allowNotify.get_future().share();
+    yams::compat::jthread publisher([&] {
+        completion.complete([&] {
+            beforeNotify.set_value();
+            resume.wait();
+        });
+    });
+
+    // The event fixes the exact publication window; the snapshot never waits or sleeps.
+    // Keep the owner alive and release/join the publisher before any failing assertion.
+    const bool reachedBoundary =
+        paused.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    const auto visible = reachedBoundary ? completion.tryStopped() : std::nullopt;
+    allowNotify.set_value();
+    publisher.join();
+    REQUIRE(reachedBoundary);
+    CHECK_FALSE(visible.value_or(false));
+    CHECK(completion.isStopped());
+    completion.wait();
 }
 
 } // namespace yams::daemon::test

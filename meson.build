@@ -125,6 +125,11 @@ if enable_tsan
   if cpp.has_argument('-fsanitize=thread')
     # Use additional flags for better stack traces
     tsan_extra_flags = ['-fno-omit-frame-pointer']
+    # gcov/llvm-cov counters are plain increments; under TSan every counter two threads touch is
+    # reported as a data race. Atomic updates keep a TSan + coverage build usable.
+    if get_option('b_coverage') and cpp.has_argument('-fprofile-update=atomic')
+      tsan_extra_flags += ['-fprofile-update=atomic']
+    endif
     add_project_arguments(tsan_extra_flags, language: 'cpp')
     add_project_arguments(tsan_extra_flags, language: 'c')
     message('ThreadSanitizer enabled - expect significant performance impact')
@@ -177,6 +182,55 @@ endif
 if get_option('enable-profiling') and cpp.get_id() not in ['msvc', 'clang-cl']
   _profiling_frame_args = cpp.get_supported_arguments('-fno-omit-frame-pointer', '-mno-omit-leaf-frame-pointer')
   add_project_arguments(_profiling_frame_args, language: ['cpp', 'c'])
+endif
+
+# Tracy for every yams library (optional, -Denable-profiling=true). Each library appends
+# yams_tracy_args to cpp_args and yams_tracy_deps to dependencies; both are empty when profiling
+# is off or Tracy is unavailable, and include/yams/profiling.h then compiles to nothing.
+yams_tracy_args = []
+yams_tracy_deps = []
+yams_tracy_enabled = false
+if get_option('enable-profiling')
+  _tracy_dep = dependency('tracy', modules: ['Tracy::TracyClient'], required: false, static: true)
+  if _tracy_dep.found()
+    # Link a real zone: an empty program never pulls TracyClient's objects and passes even
+    # when the client needs libraries that are missing.
+    _tracy_args = ['-DTRACY_ENABLE', '-DTRACY_ON_DEMAND']
+    _tracy_probe = '#include <tracy/Tracy.hpp>\nint main() { ZoneScopedN("yams-tracy-link-check"); return 0; }\n'
+    yams_tracy_deps = [_tracy_dep]
+    _tracy_links = cpp.links(_tracy_probe, args: _tracy_args, dependencies: yams_tracy_deps,
+                             name: 'tracy-link-check')
+    # A Tracy built against ROCm needs rocprofiler-sdk at link time. Add it only then, so
+    # builds that do not need it carry no ROCm runtime dependency.
+    _rocprof_opt = get_option('enable-rocprofiler-tracy')
+    _want_rocprof = (not _rocprof_opt.disabled()) and (_rocprof_opt.enabled() or (_rocprof_opt.auto() and fs.exists('/opt/rocm')))
+    if _want_rocprof and (_rocprof_opt.enabled() or not _tracy_links)
+      # rocprofiler-sdk ships a CMake config package; it is found through the prefix path.
+      _rocprof_dep = dependency(
+        'rocprofiler-sdk',
+        method: 'cmake',
+        cmake_args: ['-DCMAKE_PREFIX_PATH=/opt/rocm'],
+        required: _rocprof_opt.enabled(),
+      )
+      if _rocprof_dep.found()
+        yams_tracy_deps += _rocprof_dep
+        _tracy_links = cpp.links(_tracy_probe, args: _tracy_args, dependencies: yams_tracy_deps,
+                                 name: 'tracy-rocprofiler-link-check')
+      else
+        warning('Tracy needs rocprofiler-sdk, which was not found')
+      endif
+    endif
+    if _tracy_links
+      yams_tracy_args = _tracy_args
+      yams_tracy_enabled = true
+      message('Tracy profiling enabled for all yams libraries')
+    else
+      warning('Tracy dependency failed to link; disabling Tracy for this build')
+      yams_tracy_deps = []
+    endif
+  else
+    warning('enable-profiling set but Tracy was not found; zones will not emit')
+  endif
 endif
 
 if enable_dcheck

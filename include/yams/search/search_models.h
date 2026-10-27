@@ -16,7 +16,7 @@ using yams::metadata::SearchResult;
 
 struct ComponentResult {
     std::string documentHash;
-    std::string filePath;
+    std::string filePath{};
     float score = 0.0f;
     enum class Source {
         Text,
@@ -34,8 +34,11 @@ struct ComponentResult {
         Unknown
     } source = Source::Unknown;
     size_t rank = 0;
-    std::optional<std::string> snippet;
-    std::map<std::string, std::string> debugInfo;
+    std::optional<std::string> snippet{};
+    std::map<std::string, std::string> debugInfo{};
+    // Text/SimeonText only: the single-hit scale (-raw / bm25NormDivisor, same multipliers,
+    // clamped to [0, 1]) instead of per-batch min-max. Raw scores remain source-specific.
+    std::optional<float> absoluteLexicalScore{};
 };
 
 inline constexpr const char* componentSourceToString(ComponentResult::Source source) noexcept {

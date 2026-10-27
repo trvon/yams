@@ -641,7 +641,7 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
         for (const auto& fileResult : result.value().results) {
             totalMatches += fileResult.matchCount;
         }
-        CHECK(totalMatches >= 0u);
+        static_cast<void>(totalMatches);
     }
 }
 
@@ -728,7 +728,7 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
 
     auto grepResult = retrievalSvc.grep(grepOpts, retrievalOpts);
     REQUIRE(grepResult);
-    CHECK(grepResult.value().totalMatches >= 0u);
+    static_cast<void>(grepResult.value().totalMatches);
 }
 
 TEST_CASE_METHOD(GrepServiceExpectationsFixture,
@@ -765,7 +765,7 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
 
     auto grepResult = retrievalSvc.grep(grepOpts, retrievalOpts);
     REQUIRE(grepResult);
-    CHECK(grepResult.value().filesSearched >= 0u);
+    static_cast<void>(grepResult.value().filesSearched);
 }
 
 TEST_CASE_METHOD(GrepServiceExpectationsFixture,

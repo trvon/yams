@@ -4,11 +4,10 @@
 
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map> // IWYU pragma: keep
-#include <unordered_set>
 #include <vector>
 
 #include <yams/core/types.h>
@@ -47,6 +46,19 @@ public:
         if (record.chunk_id.empty() || record.model_id.empty()) {
             return Error{ErrorCode::InvalidArgument,
                          "embedding sync requires non-empty chunk_id and model_id"};
+        }
+        return {};
+    }
+
+    /// Distinguish a record-local size rejection from an unrelated backend failure.
+    /// Backfill uses this only after a failed publish, so healthy rows serialize once.
+    static Result<void> checkPublishable(const VectorRecord& record, std::size_t maxValueBytes) {
+        if (auto identity = checkPublishable(record); !identity) {
+            return identity.error();
+        }
+        if (nlohmann::json(toRecord(record)).dump().size() > maxValueBytes) {
+            return Error{ErrorCode::InvalidArgument,
+                         "embedding sync value exceeds configured resident limit"};
         }
         return {};
     }
@@ -95,9 +107,9 @@ public:
     Result<std::size_t> apply() {
         deferredKeys_.clear();
         failure_.reset();
-        auto merged = sync_.syncOnce();
-        if (!merged) {
-            return merged.error();
+        auto view = sync_.captureAdapterView();
+        if (!view) {
+            return view.error();
         }
         const auto recordFailure = [this](std::string_view key, const Error& error) {
             if (!failure_) {
@@ -108,102 +120,167 @@ public:
         const std::string prefix =
             std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::Embedding)) + "/";
         std::size_t applied = 0;
-        struct PendingDeletion {
-            std::string key;
-            std::string chunkId;
-        };
-        struct PendingRecord {
-            std::string key;
-            memory_sync::EmbeddingRecord record;
-        };
-        std::vector<PendingRecord> records;
-        std::vector<PendingDeletion> deletions;
-        for (const auto& [key, envelope] : merged.value()) {
-            if (!key.starts_with(prefix)) {
-                continue;
-            }
-            if (envelope.isTombstone()) {
-                if (!tombstoneMatchesKey(key, envelope.tombstonePayload)) {
-                    recordFailure(key,
-                                  Error{ErrorCode::InvalidData,
-                                        "embedding tombstone identity does not match logical key"});
-                    continue;
+        const auto targetDimension = database_.getConfig().embedding_dim;
+        std::shared_ptr<memory_sync::MemorySyncLoop::AdapterIndex> classification;
+        // Classify every eligible model before ANY target mutation, including deletes. The
+        // disposable point index holds identities only, never a corpus-sized payload plan.
+        auto classified = sync_.visitAdapterWinners(
+            view.value(), prefix,
+            [&](const std::string& key,
+                const memory_sync::MemoryIndexRecord& envelope) -> Result<void> {
+                if (envelope.isTombstone()) {
+                    if (!tombstoneMatchesKey(key, envelope.tombstonePayload)) {
+                        recordFailure(key, Error{ErrorCode::InvalidData,
+                                                 "embedding tombstone identity does not match "
+                                                 "logical key"});
+                    }
+                    return {};
                 }
-                deletions.push_back(PendingDeletion{key, envelope.tombstonePayload});
-                continue;
-            }
-            auto record = readRecord(key);
-            if (!record) {
-                recordFailure(key, record.error());
-                continue;
-            }
-            if (contentExists_) {
-                auto exists = contentExists_(record.value().documentId);
-                if (!exists) {
-                    recordFailure(key, exists.error());
-                    continue;
+                auto record = readRecord(view.value(), key);
+                if (!record) {
+                    recordFailure(key, record.error());
+                    return {};
                 }
-                if (!exists.value()) {
-                    deferredKeys_.push_back(key);
-                    continue;
+                if (targetDimension != 0 && record.value().dimensions != targetDimension) {
+                    recordFailure(key, Error{ErrorCode::InvalidArgument,
+                                             "replicated embedding dimensions do not match "
+                                             "vector database"});
+                    return {};
                 }
-            }
-            records.push_back(PendingRecord{key, std::move(record).value()});
+                if (contentExists_) {
+                    auto exists = contentExists_(record.value().documentId);
+                    if (!exists) {
+                        recordFailure(key, exists.error());
+                        return {};
+                    }
+                    if (!exists.value()) {
+                        deferredKeys_.push_back(key);
+                        return {};
+                    }
+                }
+                if (!classification) {
+                    auto created = sync_.createAdapterIndex(view.value());
+                    if (!created) {
+                        return created.error();
+                    }
+                    classification = std::move(created).value();
+                }
+                const auto groupKey = "chunk/" + record.value().chunkId;
+                const auto model = "model:" + record.value().model;
+                auto previous = classification->lookup(groupKey);
+                if (!previous) {
+                    return previous.error();
+                }
+                if (!previous.value()) {
+                    if (auto stored = classification->put(groupKey, model); !stored) {
+                        return stored.error();
+                    }
+                } else if (*previous.value() != "conflict") {
+                    if (!previous.value()->starts_with("model:")) {
+                        return Error{ErrorCode::InvalidData, "invalid embedding classification"};
+                    }
+                    if (*previous.value() != model) {
+                        if (auto stored = classification->put(groupKey, "conflict"); !stored) {
+                            return stored.error();
+                        }
+                    }
+                }
+                return classification->put("eligible/" + key, "1");
+            });
+        if (!classified) {
+            return classified.error();
         }
 
-        // The local store holds one model per chunk. Winners that disagree on a chunk's model
-        // are all skipped, so which one lands never depends on the order they arrived in.
-        std::unordered_map<std::string, std::string> modelsByChunk;
-        std::unordered_set<std::string> conflictingChunks;
-        for (const auto& pending : records) {
-            const auto [it, inserted] =
-                modelsByChunk.emplace(pending.record.chunkId, pending.record.model);
-            if (!inserted && it->second != pending.record.model) {
-                conflictingChunks.insert(pending.record.chunkId);
-            }
+        auto deleted = sync_.visitAdapterWinners(
+            view.value(), prefix,
+            [&](const std::string& key,
+                const memory_sync::MemoryIndexRecord& envelope) -> Result<void> {
+                if (!envelope.isTombstone() ||
+                    !tombstoneMatchesKey(key, envelope.tombstonePayload)) {
+                    return {};
+                }
+                const auto& chunkId = envelope.tombstonePayload;
+                const auto existing = database_.getVector(chunkId);
+                if (!existing) {
+                    return {};
+                }
+                if (embeddingKey(existing->model_id, chunkId) != key) {
+                    recordFailure(key, Error{ErrorCode::InvalidData,
+                                             "embedding tombstone model does not match local "
+                                             "vector identity"});
+                    return {};
+                }
+                if (auto removed = database_.deleteVectorChecked(chunkId); !removed) {
+                    recordFailure(key, removed.error());
+                    return {};
+                }
+                ++applied;
+                *rebuildDirty_ = true;
+                return {};
+            });
+        if (!deleted) {
+            return deleted.error();
         }
-
-        for (const auto& deletion : deletions) {
-            const auto existing = database_.getVector(deletion.chunkId);
-            if (!existing) {
-                continue;
-            }
-            if (embeddingKey(existing->model_id, deletion.chunkId) != deletion.key) {
-                recordFailure(deletion.key,
-                              Error{ErrorCode::InvalidData,
-                                    "embedding tombstone model does not match local vector "
-                                    "identity"});
-                continue;
-            }
-            if (auto deleted = database_.deleteVectorChecked(deletion.chunkId); !deleted) {
-                recordFailure(deletion.key, deleted.error());
-                continue;
-            }
-            ++applied;
-            *rebuildDirty_ = true;
-        }
-        for (const auto& pending : records) {
-            const auto& record = pending.record;
-            const auto existing = database_.getVector(record.chunkId);
-            if (conflictingChunks.contains(record.chunkId) ||
-                (existing && existing->model_id != record.model)) {
-                recordFailure(pending.key, Error{ErrorCode::NotSupported,
+        if (classification) {
+            auto written = sync_.visitAdapterWinners(
+                view.value(), prefix,
+                [&](const std::string& key,
+                    const memory_sync::MemoryIndexRecord& envelope) -> Result<void> {
+                    if (envelope.isTombstone()) {
+                        return {};
+                    }
+                    auto eligible = classification->lookup("eligible/" + key);
+                    if (!eligible) {
+                        return eligible.error();
+                    }
+                    if (!eligible.value()) {
+                        return {};
+                    }
+                    if (*eligible.value() != "1") {
+                        return Error{ErrorCode::InvalidData, "invalid embedding eligibility"};
+                    }
+                    // Read and verify one exact historical payload at a time; never substitute
+                    // a newer winner, and recheck current quarantine even after classification.
+                    auto selected = readRecord(view.value(), key);
+                    if (!selected) {
+                        recordFailure(key, selected.error());
+                        return {};
+                    }
+                    const auto& record = selected.value();
+                    auto group = classification->lookup("chunk/" + record.chunkId);
+                    if (!group) {
+                        return group.error();
+                    }
+                    if (!group.value() || (*group.value() != "conflict" &&
+                                           *group.value() != "model:" + record.model)) {
+                        return Error{ErrorCode::InvalidData,
+                                     "inconsistent embedding classification"};
+                    }
+                    const auto existing = database_.getVector(record.chunkId);
+                    if (*group.value() == "conflict" ||
+                        (existing && existing->model_id != record.model)) {
+                        recordFailure(key, Error{ErrorCode::NotSupported,
                                                  "vector database cannot represent multiple "
                                                  "models for one chunk"});
-                continue;
-            }
-            const auto rebuilt = toVectorRecord(record);
-            if (existing && vectorMatches(*existing, rebuilt)) {
-                continue;
-            }
-            auto written = existing ? database_.updateVectorChecked(record.chunkId, rebuilt)
-                                    : database_.insertVectorChecked(rebuilt);
+                        return {};
+                    }
+                    const auto rebuilt = toVectorRecord(record);
+                    if (existing && vectorMatches(*existing, rebuilt)) {
+                        return {};
+                    }
+                    auto stored = existing ? database_.updateVectorChecked(record.chunkId, rebuilt)
+                                           : database_.insertVectorChecked(rebuilt);
+                    if (!stored) {
+                        recordFailure(key, stored.error());
+                        return {};
+                    }
+                    ++applied;
+                    *rebuildDirty_ = true;
+                    return {};
+                });
             if (!written) {
-                recordFailure(pending.key, written.error());
-                continue;
+                return written.error();
             }
-            ++applied;
-            *rebuildDirty_ = true;
         }
 
         if (*rebuildDirty_) {
@@ -224,8 +301,9 @@ public:
 
 private:
     /// Read one winning embedding payload and validate it against its logical key.
-    Result<memory_sync::EmbeddingRecord> readRecord(const std::string& key) {
-        auto payload = sync_.readCached(key);
+    Result<memory_sync::EmbeddingRecord>
+    readRecord(const memory_sync::MemorySyncService::AdapterView& view, const std::string& key) {
+        auto payload = sync_.readAdapterPayload(view, key);
         if (!payload) {
             return payload.error();
         }

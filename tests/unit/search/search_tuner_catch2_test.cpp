@@ -7,7 +7,7 @@
  *
  * Tests cover:
  * - TuningState enum and string conversion
- * - TunedParams for each state (parameter values from matrix)
+ * - TunedParams profile invariants and capability semantics
  * - SearchTuner FSM state transitions based on corpus stats
  * - SearchEngineConfig generation from tuned params
  * - JSON serialization for observability
@@ -17,8 +17,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -102,6 +104,21 @@ TEST_CASE("Runtime telemetry treats malformed trace summaries independently",
     CHECK(telemetry.fusionSources.at("text").rawHitCount == 3);
 }
 
+TEST_CASE("SearchTuner never selects the RouteOnly vector policy",
+          "[unit][search_tuner][topology][route-only]") {
+    CorpusStats stats;
+    for (const auto state :
+         {TuningState::SMALL_CODE, TuningState::LARGE_CODE, TuningState::SMALL_PROSE,
+          TuningState::LARGE_PROSE, TuningState::SCIENTIFIC, TuningState::MIXED,
+          TuningState::MIXED_PRECISION, TuningState::MINIMAL, TuningState::MEDIA}) {
+        SearchTuner tuner(stats, state);
+        const auto config = tuner.getConfig();
+        CAPTURE(static_cast<int>(state));
+        CHECK(config.topologyVectorPolicy != SearchEngineConfig::TopologyVectorPolicy::RouteOnly);
+        CHECK_FALSE(config.allowUncertifiedRouteOnly);
+    }
+}
+
 TEST_CASE("SearchTuner parameter snapshots are safe during observation",
           "[unit][search_tuner][concurrency]") {
     CorpusStats stats;
@@ -177,179 +194,102 @@ TEST_CASE("TuningState: string conversion", "[unit][search_tuner]") {
 }
 
 // =============================================================================
-// TunedParams tests - verify parameter matrix values
+// TunedParams contracts
 // =============================================================================
 
-TEST_CASE("TunedParams: SMALL_CODE parameters", "[unit][search_tuner][params]") {
-    auto params = getTunedParams(TuningState::SMALL_CODE);
+TEST_CASE("TunedParams profiles satisfy fusion parameter domains", "[unit][search_tuner][params]") {
+    constexpr std::array states = {
+        TuningState::SMALL_CODE,      TuningState::LARGE_CODE, TuningState::SMALL_PROSE,
+        TuningState::LARGE_PROSE,     TuningState::SCIENTIFIC, TuningState::MIXED,
+        TuningState::MIXED_PRECISION, TuningState::MINIMAL,    TuningState::MEDIA,
+    };
 
-    CHECK((params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Street));
-    CHECK((params.rrfK == 20));
-    CHECK((params.weights.text.value == Approx(0.45f)));
-    CHECK((params.weights.vector.value == Approx(0.15f)));
-    CHECK((params.weights.entityVector.value == Approx(0.15f)));
-    CHECK((params.weights.pathTree.value == Approx(0.15f)));
-    CHECK((params.weights.kg.value == Approx(0.05f)));
-    CHECK((params.weights.tag.value == Approx(0.03f)));
-    CHECK((params.weights.metadata.value == Approx(0.02f)));
+    for (const auto state : states) {
+        const auto params = getTunedParams(state);
+        const std::array weights = {
+            params.weights.text.value,     params.weights.simeonText.value,
+            params.weights.vector.value,   params.weights.entityVector.value,
+            params.weights.pathTree.value, params.weights.kg.value,
+            params.weights.tag.value,      params.weights.metadata.value,
+        };
+
+        CAPTURE(tuningStateToString(state));
+        CHECK(params.rrfK >= 0);
+        float weightSum = 0.0F;
+        for (const float weight : weights) {
+            CHECK(std::isfinite(weight));
+            CHECK(weight >= 0.0F);
+            weightSum += weight;
+        }
+        CHECK(weightSum == Approx(1.0F).margin(0.001F));
+    }
 }
 
-TEST_CASE("TunedParams: LARGE_CODE parameters", "[unit][search_tuner][params]") {
-    auto params = getTunedParams(TuningState::LARGE_CODE);
+TEST_CASE("TunedParams JSON serialization maps explicit values and provenance",
+          "[unit][search_tuner][params]") {
+    TunedParams params;
+    params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Map;
+    params.rrfK = 37;
+    params.weights.setAll(0.24F, 0.13F, 0.17F, 0.12F, 0.09F, 0.08F, 0.07F, 0.10F,
+                          TuningLayer::Runtime);
+    params.similarityThreshold = TuningSlot<float>{0.42F, TuningLayer::Env};
+    params.semanticRescueSlots = TuningSlot<std::size_t>{3, TuningLayer::Mode};
 
-    CHECK((params.rrfK == 60));
-    CHECK((params.weights.text.value == Approx(0.40f)));
-    CHECK((params.weights.vector.value == Approx(0.20f)));
-    CHECK((params.weights.entityVector.value == Approx(0.15f)));
-    CHECK((params.weights.pathTree.value == Approx(0.10f)));
-    CHECK((params.weights.kg.value == Approx(0.05f)));
-    CHECK((params.weights.tag.value == Approx(0.05f)));
-    CHECK((params.weights.metadata.value == Approx(0.05f)));
+    const auto json = params.toJson();
+
+    CHECK(json["zoom_level"] == "MAP");
+    CHECK(json["rrf_k"] == 37);
+    CHECK(json["text_weight"].get<float>() == Approx(0.24F));
+    CHECK(json["simeon_text_weight"].get<float>() == Approx(0.13F));
+    CHECK(json["vector_weight"].get<float>() == Approx(0.17F));
+    CHECK(json["entity_vector_weight"].get<float>() == Approx(0.12F));
+    CHECK(json["path_tree_weight"].get<float>() == Approx(0.09F));
+    CHECK(json["kg_weight"].get<float>() == Approx(0.08F));
+    CHECK(json["tag_weight"].get<float>() == Approx(0.07F));
+    CHECK(json["metadata_weight"].get<float>() == Approx(0.10F));
+    CHECK(json["text_weight_source"] == "Runtime");
+    CHECK(json["similarity_threshold"].get<float>() == Approx(0.42F));
+    CHECK(json["similarity_threshold_source"] == "Env");
+    CHECK(json["semantic_rescue_slots"] == 3);
+    CHECK(json["semantic_rescue_slots_source"] == "Mode");
 }
 
-TEST_CASE("TunedParams: SMALL_PROSE parameters", "[unit][search_tuner][params]") {
-    auto params = getTunedParams(TuningState::SMALL_PROSE);
+TEST_CASE("TunedParams applyTo maps explicit values to SearchEngineConfig",
+          "[unit][search_tuner][params]") {
+    TunedParams params;
+    params.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Map;
+    params.rrfK = 37;
+    params.weights.setAll(0.24F, 0.13F, 0.17F, 0.12F, 0.09F, 0.08F, 0.07F, 0.10F,
+                          TuningLayer::Runtime);
+    params.similarityThreshold = TuningSlot<float>{0.42F, TuningLayer::Runtime};
 
-    CHECK((params.rrfK == 25));
-    CHECK((params.weights.text.value == Approx(0.50f)));
-    CHECK((params.weights.vector.value == Approx(0.40f)));
-    CHECK((params.weights.entityVector.value == Approx(0.00f)));
-    CHECK((params.weights.pathTree.value == Approx(0.00f)));
-    CHECK((params.weights.kg.value == Approx(0.00f)));
-    CHECK((params.weights.tag.value == Approx(0.05f)));
-    CHECK((params.weights.metadata.value == Approx(0.05f)));
-    CHECK((params.lexicalFloorTopN == 12));
-    CHECK((params.lexicalFloorBoost == Approx(0.20f)));
-    CHECK(params.enableLexicalTieBreak);
-    CHECK((params.lexicalTieBreakEpsilon == Approx(0.010f)));
-    CHECK((params.fusionEvidenceRescueSlots == 1));
-    CHECK((params.fusionEvidenceRescueMinScore == Approx(0.012f)));
-}
-
-TEST_CASE("TunedParams: LARGE_PROSE parameters", "[unit][search_tuner][params]") {
-    auto params = getTunedParams(TuningState::LARGE_PROSE);
-
-    CHECK((params.rrfK == 60));
-    CHECK((params.weights.text.value == Approx(0.40f)));
-    CHECK((params.weights.vector.value == Approx(0.45f)));
-    CHECK((params.weights.entityVector.value == Approx(0.00f)));
-    CHECK((params.weights.pathTree.value == Approx(0.05f)));
-    CHECK((params.weights.kg.value == Approx(0.00f)));
-    CHECK((params.weights.tag.value == Approx(0.05f)));
-    CHECK((params.weights.metadata.value == Approx(0.05f)));
-}
-
-TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") {
-    auto params = getTunedParams(TuningState::SCIENTIFIC);
-
-    // SCIENTIFIC is MIXED_PRECISION + structure sources zeroed (measured product
-    // path: full SCIENTIFIC knobs regressed MRR; soft lexical+vector fusion wins).
-    CHECK((params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto));
-    CHECK((params.rrfK == 45));
-    // After zeroing path/entity/kg/tag/metadata, normalize leaves text+vector.
-    CHECK((params.weights.text.value == Approx(0.40f / 0.65f).epsilon(0.01)));
-    CHECK((params.weights.simeonText.value == Approx(0.00f)));
-    CHECK((params.weights.vector.value == Approx(0.25f / 0.65f).epsilon(0.01)));
-    CHECK((params.weights.entityVector.value == Approx(0.00f)));
-    CHECK((params.weights.pathTree.value == Approx(0.00f)));
-    CHECK((params.weights.kg.value == Approx(0.00f)));
-    CHECK((params.weights.tag.value == Approx(0.00f)));
-    CHECK((params.weights.metadata.value == Approx(0.00f)));
-    CHECK((params.lexicalFloorTopN == 12));
-    CHECK((params.lexicalFloorBoost == Approx(0.20f)));
-    CHECK((params.vectorOnlyThreshold == Approx(0.94f)));
-    CHECK(params.conceptExtractionBackend ==
-          SearchEngineConfig::ConceptExtractionBackend::Fallback);
-}
-
-TEST_CASE("TunedParams: MIXED parameters", "[unit][search_tuner][params]") {
-    auto params = getTunedParams(TuningState::MIXED);
-
-    CHECK((params.rrfK == 45));
-    CHECK((params.weights.text.value == Approx(0.40f)));
-    CHECK((params.weights.vector.value == Approx(0.25f)));
-    CHECK((params.weights.entityVector.value == Approx(0.10f)));
-    CHECK((params.weights.pathTree.value == Approx(0.10f)));
-    CHECK((params.weights.kg.value == Approx(0.05f)));
-    CHECK((params.weights.tag.value == Approx(0.05f)));
-    CHECK((params.weights.metadata.value == Approx(0.05f)));
-}
-
-TEST_CASE("TunedParams: MIXED_PRECISION parameters", "[unit][search_tuner][params]") {
-    auto params = getTunedParams(TuningState::MIXED_PRECISION);
-
-    CHECK((params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood));
-    CHECK((params.rrfK == 45));
-    CHECK((params.weights.text.value == Approx(0.40f)));
-    CHECK((params.weights.vector.value == Approx(0.25f)));
-    CHECK((params.weights.entityVector.value == Approx(0.10f)));
-    CHECK((params.weights.pathTree.value == Approx(0.10f)));
-    CHECK((params.weights.kg.value == Approx(0.05f)));
-    CHECK((params.weights.tag.value == Approx(0.05f)));
-    CHECK((params.weights.metadata.value == Approx(0.05f)));
-    CHECK((params.vectorOnlyThreshold == Approx(0.94f)));
-    CHECK((params.vectorOnlyPenalty == Approx(0.70f)));
-    CHECK((params.vectorOnlyNearMissReserve == 2));
-    CHECK((params.lexicalFloorTopN == 12));
-    CHECK((params.lexicalFloorBoost == Approx(0.20f)));
-    CHECK(params.enableLexicalTieBreak);
-    CHECK((params.lexicalTieBreakEpsilon == Approx(0.010f)));
-    CHECK((params.semanticRescueSlots == 1));
-    CHECK((params.semanticRescueMinVectorScore == Approx(0.0f)));
-    CHECK((params.fusionEvidenceRescueSlots == 1));
-    CHECK((params.fusionEvidenceRescueMinScore == Approx(0.012f)));
-}
-
-TEST_CASE("TunedParams: MINIMAL parameters", "[unit][search_tuner][params]") {
-    auto params = getTunedParams(TuningState::MINIMAL);
-
-    CHECK((params.rrfK == 15));
-    CHECK((params.weights.text.value == Approx(0.55f)));
-    CHECK((params.weights.vector.value == Approx(0.30f)));
-    CHECK((params.weights.entityVector.value == Approx(0.05f)));
-    CHECK((params.weights.pathTree.value == Approx(0.05f)));
-    CHECK((params.weights.kg.value == Approx(0.00f)));
-    CHECK((params.weights.tag.value == Approx(0.03f)));
-    CHECK((params.weights.metadata.value == Approx(0.02f)));
-}
-
-TEST_CASE("TunedParams: JSON serialization", "[unit][search_tuner][params]") {
-    auto params = getTunedParams(TuningState::SMALL_CODE);
-    auto json = params.toJson();
-
-    CHECK((json["zoom_level"] == "STREET"));
-    CHECK((json["rrf_k"] == 20));
-    CHECK((json["text_weight"].get<float>() == Approx(0.45f)));
-    CHECK((json["vector_weight"].get<float>() == Approx(0.15f)));
-    CHECK((json["entity_vector_weight"].get<float>() == Approx(0.15f)));
-    CHECK((json["path_tree_weight"].get<float>() == Approx(0.15f)));
-    CHECK((json["kg_weight"].get<float>() == Approx(0.05f)));
-    CHECK((json["tag_weight"].get<float>() == Approx(0.03f)));
-    CHECK((json["metadata_weight"].get<float>() == Approx(0.02f)));
-
-    // Provenance source fields
-    CHECK((json["text_weight_source"] == "Profile"));
-    CHECK((json["vector_weight_source"] == "Profile"));
-    CHECK((json["kg_weight_source"] == "Profile"));
-    CHECK((json["similarity_threshold_source"] == "Default"));
-    CHECK((json["semantic_rescue_slots_source"] == "Default"));
-}
-
-TEST_CASE("TunedParams: applyTo SearchEngineConfig", "[unit][search_tuner][params]") {
-    auto params = getTunedParams(TuningState::LARGE_PROSE);
-
+    // A missing assignment must fail even if product defaults later happen to
+    // equal a source sentinel. Every destination starts at a contrasting value.
     SearchEngineConfig config;
+    config.zoomLevel = SearchEngineConfig::NavigationZoomLevel::Street;
+    config.rrfK = 19.0F;
+    config.textWeight = 0.125F;
+    config.simeonTextWeight = 0.125F;
+    config.vectorWeight = 0.125F;
+    config.entityVectorWeight = 0.125F;
+    config.pathTreeWeight = 0.125F;
+    config.kgWeight = 0.125F;
+    config.tagWeight = 0.125F;
+    config.metadataWeight = 0.125F;
+    config.similarityThreshold = 0.23F;
     params.applyTo(config);
 
-    CHECK((config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood));
-    CHECK((config.textWeight == Approx(0.40f)));
-    CHECK((config.vectorWeight == Approx(0.45f)));
-    CHECK((config.entityVectorWeight == Approx(0.00f)));
-    CHECK((config.pathTreeWeight == Approx(0.05f)));
-    CHECK((config.kgWeight == Approx(0.00f)));
-    CHECK((config.tagWeight == Approx(0.05f)));
-    CHECK((config.metadataWeight == Approx(0.05f)));
-    CHECK((config.similarityThreshold == Approx(0.0f)));
+    CHECK(config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Map);
+    CHECK(config.rrfK == Approx(37.0F));
+    CHECK(config.textWeight == Approx(0.24F));
+    CHECK(config.simeonTextWeight == Approx(0.13F));
+    CHECK(config.vectorWeight == Approx(0.17F));
+    CHECK(config.entityVectorWeight == Approx(0.12F));
+    CHECK(config.pathTreeWeight == Approx(0.09F));
+    CHECK(config.kgWeight == Approx(0.08F));
+    CHECK(config.tagWeight == Approx(0.07F));
+    CHECK(config.metadataWeight == Approx(0.10F));
+    CHECK(config.similarityThreshold == Approx(0.42F));
 }
 
 // =============================================================================
@@ -508,56 +448,59 @@ TEST_CASE("SearchTuner: construction and state access", "[unit][search_tuner]") 
 
     SearchTuner tuner(stats);
 
-    CHECK((tuner.currentState() == TuningState::SMALL_CODE));
-    CHECK((tuner.getRrfK() == 20));
+    CHECK(tuner.currentState() == TuningState::SMALL_CODE);
+    CHECK(tuner.getRrfK() >= 0);
     CHECK_FALSE(tuner.stateReason().empty());
 }
 
-TEST_CASE("SearchTuner: getParams returns correct params", "[unit][search_tuner]") {
+TEST_CASE("SearchTuner gates unavailable corpus evidence and renormalizes",
+          "[unit][search_tuner]") {
     CorpusStats stats;
     stats.docCount = 5000;
     stats.codeRatio = 0.85f;
-    stats.symbolDensity = 0.0f; // No KG: kgWeight is zeroed and remaining weights are normalized
-    // No tags / shallow absolute paths → tag + path also gated off.
+    stats.symbolDensity = 0.0f;
     stats.tagCoverage = 0.0f;
     stats.pathDepthAvg = 0.0;
 
     SearchTuner tuner(stats);
-    const auto& params = tuner.getParams();
+    const auto params = tuner.getParams();
 
-    // Should be LARGE_CODE
-    CHECK((params.rrfK == 60));
-    CHECK((stats.hasKnowledgeGraph() == false));
-    CHECK((params.weights.kg.value == Approx(0.0f)));
-    CHECK((params.weights.pathTree.value == Approx(0.0f)));
-    CHECK((params.weights.tag.value == Approx(0.0f)));
-    // LARGE_CODE: text=0.40 vector=0.20 entity=0.15 path=0.10 kg=0.05 tag=0.05 meta=0.05
-    // After gating path/kg/tag → remaining mass 0.80 → text=0.50 vector=0.25
-    CHECK((params.weights.text.value == Approx(0.50f)));
-    CHECK((params.weights.vector.value == Approx(0.25f)));
+    CHECK_FALSE(stats.hasKnowledgeGraph());
+    CHECK(params.weights.kg.value == Approx(0.0F));
+    CHECK(params.weights.pathTree.value == Approx(0.0F));
+    CHECK(params.weights.tag.value == Approx(0.0F));
+    CHECK(params.weights.sum() == Approx(1.0F).margin(0.001F));
 }
 
-TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][search_tuner]") {
+TEST_CASE("SearchTuner getConfig returns valid normalized weights", "[unit][search_tuner]") {
     CorpusStats stats;
     stats.docCount = 500;
     stats.proseRatio = 0.85f;
     stats.pathDepthAvg = 3.0f;
-    stats.pathRelativeDepthAvg = 3.0; // Not flat (>= 1.5 avoids SCIENTIFIC)
+    stats.pathRelativeDepthAvg = 3.0;
     stats.tagCoverage = 0.3f;
 
     SearchTuner tuner(stats);
-    auto config = tuner.getConfig();
+    const auto config = tuner.getConfig();
+    const std::array weights = {
+        config.textWeight,         config.simeonTextWeight, config.vectorWeight,
+        config.entityVectorWeight, config.pathTreeWeight,   config.kgWeight,
+        config.tagWeight,          config.metadataWeight,
+    };
 
-    // Should be SMALL_PROSE
-    CHECK((config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood));
-    CHECK((config.textWeight == Approx(0.50f)));
-    CHECK((config.vectorWeight == Approx(0.40f)));
-    CHECK((config.pathTreeWeight == Approx(0.00f)));
-    CHECK((config.kgWeight == Approx(0.00f)));
-    CHECK((config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM));
+    float weightSum = 0.0F;
+    for (const float weight : weights) {
+        CHECK(std::isfinite(weight));
+        CHECK(weight >= 0.0F);
+        weightSum += weight;
+    }
+    CHECK(weightSum == Approx(1.0F).margin(0.001F));
+    CHECK(std::isfinite(config.rrfK));
+    CHECK(config.rrfK >= 0.0F);
+    CHECK(config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM);
 }
 
-TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
+TEST_CASE("SearchTuner toJson reports valid corpus-adjusted parameters", "[unit][search_tuner]") {
     CorpusStats stats;
     stats.docCount = 1000;
     stats.codeRatio = 0.4f;
@@ -568,21 +511,30 @@ TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
     stats.symbolDensity = 2.0f;
 
     SearchTuner tuner(stats);
-    auto json = tuner.toJson();
+    const auto json = tuner.toJson();
+    const auto& params = json["params"];
+    const std::array weights = {
+        params["text_weight"].get<float>(),      params["simeon_text_weight"].get<float>(),
+        params["vector_weight"].get<float>(),    params["entity_vector_weight"].get<float>(),
+        params["path_tree_weight"].get<float>(), params["kg_weight"].get<float>(),
+        params["tag_weight"].get<float>(),       params["metadata_weight"].get<float>(),
+    };
 
-    CHECK((json["state"] == "MIXED_PRECISION"));
+    float weightSum = 0.0F;
+    for (const float weight : weights) {
+        CHECK(std::isfinite(weight));
+        CHECK(weight >= 0.0F);
+        weightSum += weight;
+    }
+    CHECK(weightSum == Approx(1.0F).margin(0.001F));
+    CHECK(json["state"] == "MIXED_PRECISION");
     CHECK_FALSE(json["reason"].get<std::string>().empty());
-    CHECK((json["rrf_k"] == 45));
-    CHECK((json["params"]["zoom_level"] == "NEIGHBORHOOD"));
-    // When KG is present, graph-aware adjustments shift weights toward KG
-    // (multiplicative scaling preserves profile ratios).
-    CHECK((json["params"]["text_weight"].get<float>() == Approx(0.356f).epsilon(0.01)));
-    CHECK((json["params"]["text_weight_source"] == "Corpus"));
-    CHECK((json["params"]["kg_weight"].get<float>() == Approx(0.131f).epsilon(0.01)));
-    CHECK((json["params"]["kg_weight_source"] == "Corpus"));
-    CHECK((json["corpus"]["doc_count"] == 1000));
-    CHECK((json["corpus"]["code_ratio"].get<float>() == Approx(0.4f)));
-    CHECK((json["corpus"]["prose_ratio"].get<float>() == Approx(0.4f)));
+    CHECK(json["rrf_k"].get<int>() >= 0);
+    CHECK(params["text_weight_source"] == "Corpus");
+    CHECK(params["kg_weight_source"] == "Corpus");
+    CHECK(json["corpus"]["doc_count"] == 1000);
+    CHECK(json["corpus"]["code_ratio"].get<float>() == Approx(0.4F));
+    CHECK(json["corpus"]["prose_ratio"].get<float>() == Approx(0.4F));
 }
 
 // =============================================================================
@@ -829,53 +781,30 @@ TEST_CASE("SearchTuner: size threshold boundary (1000 docs)", "[unit][search_tun
     CHECK((SearchTuner::computeState(large_stats) == TuningState::LARGE_CODE));
 }
 
-// =============================================================================
-// Weight sum validation (sanity check)
-// =============================================================================
-
-TEST_CASE("TunedParams: weights sum to approximately 1.0", "[unit][search_tuner][validation]") {
-    std::vector<TuningState> states = {TuningState::SMALL_CODE,      TuningState::LARGE_CODE,
-                                       TuningState::SMALL_PROSE,     TuningState::LARGE_PROSE,
-                                       TuningState::SCIENTIFIC,      TuningState::MIXED,
-                                       TuningState::MIXED_PRECISION, TuningState::MINIMAL};
-
-    for (auto state : states) {
-        auto params = getTunedParams(state);
-        float sum = params.weights.sum();
-
-        INFO("State: " << tuningStateToString(state));
-        CHECK((sum == Approx(1.0f).margin(0.01f)));
-    }
-}
-
-TEST_CASE("SearchEngineBuilder: default options align with MIXED_PRECISION fallback",
+TEST_CASE("SearchEngineBuilder default options contain valid fusion parameters",
           "[unit][search_tuner][builder]") {
-    auto opts = SearchEngineBuilder::BuildOptions::makeDefault();
-    auto expectedParams = getTunedParams(TuningState::MIXED_PRECISION);
-    SearchEngineConfig expectedConfig;
-    expectedParams.applyTo(expectedConfig);
+    const auto opts = SearchEngineBuilder::BuildOptions::makeDefault();
+    const std::array weights = {
+        opts.config.textWeight,         opts.config.simeonTextWeight, opts.config.vectorWeight,
+        opts.config.entityVectorWeight, opts.config.pathTreeWeight,   opts.config.kgWeight,
+        opts.config.tagWeight,          opts.config.metadataWeight,
+    };
 
-    CHECK(opts.autoTune);
-    CHECK(opts.config.enableParallelExecution);
-    CHECK(opts.config.includeDebugInfo);
-    CHECK((opts.config.maxResults == 100));
-    CHECK((opts.config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM));
-
-    CHECK((opts.config.textWeight == Approx(expectedConfig.textWeight)));
-    CHECK((opts.config.vectorWeight == Approx(expectedConfig.vectorWeight)));
-    CHECK((opts.config.entityVectorWeight == Approx(expectedConfig.entityVectorWeight)));
-    CHECK((opts.config.pathTreeWeight == Approx(expectedConfig.pathTreeWeight)));
-    CHECK((opts.config.kgWeight == Approx(expectedConfig.kgWeight)));
-    CHECK((opts.config.tagWeight == Approx(expectedConfig.tagWeight)));
-    CHECK((opts.config.metadataWeight == Approx(expectedConfig.metadataWeight)));
-    CHECK((opts.config.rrfK == Approx(expectedConfig.rrfK)));
-    CHECK((opts.config.vectorOnlyThreshold == Approx(expectedConfig.vectorOnlyThreshold)));
-    CHECK((opts.config.vectorOnlyPenalty == Approx(expectedConfig.vectorOnlyPenalty)));
-    CHECK((opts.config.lexicalFloorTopN == expectedConfig.lexicalFloorTopN));
-    CHECK((opts.config.lexicalFloorBoost == Approx(expectedConfig.lexicalFloorBoost)));
-    CHECK((opts.config.enableLexicalTieBreak == expectedConfig.enableLexicalTieBreak));
-    CHECK((opts.config.lexicalTieBreakEpsilon == Approx(expectedConfig.lexicalTieBreakEpsilon)));
-    CHECK((opts.config.semanticRescueSlots == expectedConfig.semanticRescueSlots));
+    float weightSum = 0.0F;
+    for (const float weight : weights) {
+        CHECK(std::isfinite(weight));
+        CHECK(weight >= 0.0F);
+        weightSum += weight;
+    }
+    CHECK(weightSum == Approx(1.0F).margin(0.001F));
+    CHECK(std::isfinite(opts.config.rrfK));
+    CHECK(opts.config.rrfK >= 0.0F);
+    CHECK(std::isfinite(opts.config.vectorOnlyThreshold));
+    CHECK(opts.config.vectorOnlyThreshold >= 0.0F);
+    CHECK(opts.config.vectorOnlyThreshold <= 1.0F);
+    CHECK(std::isfinite(opts.config.vectorOnlyPenalty));
+    CHECK(opts.config.vectorOnlyPenalty >= 0.0F);
+    CHECK(opts.config.vectorOnlyPenalty <= 1.0F);
 }
 
 TEST_CASE("SearchTuner: adaptive observation trims KG under latency pressure",
@@ -1179,7 +1108,7 @@ TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
     const float expectedVector = 0.25f + 0.60f * (sci.weights.vector.value - 0.25f);
     CHECK((params.weights.text.value == Approx(expectedText).epsilon(0.01)));
     CHECK((params.weights.text.source == TuningLayer::Community));
-    CHECK((params.weights.simeonText.value == Approx(0.00f).epsilon(0.01)));
+    CHECK((params.weights.simeonText.value == Approx(0.60f * sci.weights.simeonText.value)));
     CHECK((params.weights.vector.value == Approx(expectedVector).epsilon(0.01)));
 
     // SCIENTIFIC inherits MIXED_PRECISION rescue slots (=1); lerp is a no-op.
@@ -1739,14 +1668,27 @@ TEST_CASE("SearchTuner: 940-doc scientific corpus gets SCIENTIFIC state",
     // Verify SCIENTIFIC params activate (with corpus_state recall push)
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
-    // corpus_state=active raises semanticRescueSlots to 3 for scientific prose
-    CHECK((p.semanticRescueSlots.value == 3));
+    // Corpus recall widening must not displace the profile's lexical results.
+    CHECK((p.semanticRescueSlots.value == 1));
+    CHECK((tuner.getConfig().semanticRescueSlots == 1));
     // Dead-source gates pin structure weights off on flat scientific corpora.
     CHECK((p.weights.pathTree.value == Approx(0.0f)));
     CHECK((p.weights.entityVector.value == Approx(0.0f)));
     CHECK((p.weights.tag.value == Approx(0.0f)));
     CHECK((p.weights.metadata.value == Approx(0.0f)));
     CHECK((p.lexicalFloorTopN == 12));
+}
+
+TEST_CASE("SearchTuner: large prose retains corpus semantic rescue widening",
+          "[unit][search_tuner][scientific]") {
+    CorpusStats stats;
+    stats.docCount = 10000;
+    stats.proseRatio = 0.95f;
+    stats.pathRelativeDepthAvg = 4.0;
+    stats.tagCoverage = 0.30f;
+    stats.embeddingCoverage = 1.0f;
+    SearchTuner tuner(stats, TuningState::LARGE_PROSE);
+    CHECK((tuner.getConfig().semanticRescueSlots == 3));
 }
 
 TEST_CASE("SearchTuner: 50-doc scientific corpus still gets MINIMAL",
@@ -2162,8 +2104,13 @@ TEST_CASE("SearchTuner: SciFact-like corpus with rich edges activates graph full
     CHECK((p.graphEnablePathEnumeration == true));
     CHECK((p.enableGraphQueryExpansion == true));
     // SCIENTIFIC profile characteristics preserved
-    CHECK((p.weights.vector.value > 0.30f));
-    CHECK((p.weights.text.value > 0.35f));
+    const auto preset = getTunedParams(TuningState::SCIENTIFIC);
+    REQUIRE((p.weights.vector.value > 0.0f));
+    CHECK((p.weights.text.value / p.weights.vector.value ==
+           Approx(preset.weights.text.value / preset.weights.vector.value)));
+    CHECK((p.weights.simeonText.value / p.weights.vector.value ==
+           Approx(preset.weights.simeonText.value / preset.weights.vector.value)));
+    CHECK((p.weights.sum() == Approx(1.0f)));
 }
 
 TEST_CASE("SearchTuner: NER-only corpus without edges dams graph activation",

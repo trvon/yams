@@ -47,7 +47,6 @@ void EntityGraphService::stop() {
 }
 
 boost::asio::awaitable<void> EntityGraphService::channelPoller() {
-    YAMS_ZONE_SCOPED_N("EntityGraph::channelPoller");
     constexpr std::size_t kChannelCapacity = 4096;
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityGraphJob>(
@@ -188,6 +187,7 @@ bool EntityGraphService::process(Job& job) {
     auto repo = services_->getMetadataRepo();
     if (!repo)
         return false;
+    metadata::MetadataOpScope opScope("entity_graph_kg_acknowledgement");
     return repo->completeKnowledgeGraphEnrichment(job.documentDbId, job.knowledgeGraphToken)
         .has_value();
 }

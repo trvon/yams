@@ -7,19 +7,23 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <span>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
 // pi-lens-ignore: fatal error
 #include <yams/core/types.h>
+#include <yams/memory_sync/lifecycle_drain.h>
 #include <yams/memory_sync/memory_sync.h>
 #include <yams/storage/storage_backend.h>
 
@@ -37,6 +41,7 @@ struct MemorySyncConfig {
     bool cleanupOwnedNamespaceOnStop{false};
     std::shared_ptr<const WriterAuthenticator> writerAuth; /// optional schema-v4 signer/verifier
     std::string controlScope;                              /// authenticated local-store generation
+    bool exclusiveBackend{false}; /// only this service writes the backend (direct op store)
 
     MemorySyncConfig() = default;
     explicit MemorySyncConfig(std::string writerId, std::uint32_t intervalMs = 5000,
@@ -53,23 +58,177 @@ struct MemorySyncConfig {
 /// publish/read/syncOnce. Owns the backend; start/stop are idempotent and stop is
 /// noexcept-safe for the shutdown path.
 class MemorySyncService {
+    struct AdapterLifetime {
+        std::shared_mutex mutex;
+        MemorySyncService* owner;
+        explicit AdapterLifetime(MemorySyncService* service) : owner(service) {}
+    };
+
 public:
+    /// Defer checks every work unit and returns ResourceBusy for local pressure/contention
+    /// instead of sleeping. Target transactions can roll back and retry outside the batch.
+    /// Capacity and remote-admission errors retain their original codes.
+    enum class AdapterPressureMode : std::uint8_t { Wait, Defer };
+
+    /// Everything an adapter pass reads: the pinned winner set and the overlay rows. An
+    /// adapter sees an overlay row only when the winner store lacks its key; resident copies of
+    /// committed winners are invisible, so differing copies do not make the inputs differ.
+    struct AdapterInputs {
+        using Rows = std::map<std::string, MemoryIndexRecord>;
+        MemorySyncLoop::WinnerView::Identity winners;
+        std::shared_ptr<const Rows> overlays;
+        /// The pinned winners, for visibility lookups. Not needed to name the inputs; drop it
+        /// before keeping the value so an old store is not held open.
+        std::shared_ptr<const MemorySyncLoop::WinnerView> view;
+
+        /// True when an adapter pass would read the same records from both. `previous` may have
+        /// dropped its view: equal winner identities hold equal contents, so this view serves
+        /// both. Equal overlay rows need no lookup; otherwise only adapter-visible rows count.
+        [[nodiscard]] bool sameAs(const AdapterInputs& previous) const {
+            if (winners != previous.winners || !overlays || !previous.overlays) {
+                return false;
+            }
+            if (overlays == previous.overlays || *overlays == *previous.overlays) {
+                return true;
+            }
+            const auto current = visible(*overlays);
+            const auto earlier = visible(*previous.overlays);
+            return current && earlier && *current == *earlier;
+        }
+
+    private:
+        [[nodiscard]] std::optional<Rows> visible(const Rows& rows) const {
+            if (!view) {
+                return rows;
+            }
+            Rows out;
+            for (const auto& [key, record] : rows) {
+                auto committed = view->find(key);
+                if (committed) {
+                    continue;
+                }
+                if (committed.error().code != ErrorCode::NotFound) {
+                    return std::nullopt;
+                }
+                out.emplace(key, record);
+            }
+            return out;
+        }
+    };
+
+    /// An opaque pinned adapter generation. It owns its metadata, not a service/backend
+    /// reference; payload I/O always requires the still-live originating service.
+    class AdapterView {
+        friend class MemorySyncService;
+        using Rows = std::map<std::string, MemoryIndexRecord>;
+        std::shared_ptr<const MemorySyncLoop::CommittedState> state_;
+        std::shared_ptr<const Rows> overlays_;
+        std::shared_ptr<const std::byte> owner_;
+        AdapterPressureMode pressureMode_;
+
+        AdapterView(std::shared_ptr<const MemorySyncLoop::CommittedState> state,
+                    std::shared_ptr<const Rows> overlays, std::shared_ptr<const std::byte> owner,
+                    AdapterPressureMode pressureMode)
+            : state_(std::move(state)), overlays_(std::move(overlays)), owner_(std::move(owner)),
+              pressureMode_(pressureMode) {}
+
+    public:
+        /// Names everything an adapter pass reads through this view. nullopt when the pinned
+        /// winners cannot be named; callers must then treat the inputs as changed. A view with
+        /// no committed winner store reads overlays only (winner instance 0, never a store's).
+        [[nodiscard]] std::optional<AdapterInputs> inputs() const {
+            if (!state_ || !overlays_) {
+                return std::nullopt;
+            }
+            if (!state_->winners) {
+                return AdapterInputs{.winners = {}, .overlays = overlays_, .view = nullptr};
+            }
+            auto named = state_->winners->identity();
+            if (!named) {
+                return std::nullopt;
+            }
+            return AdapterInputs{.winners = *named, .overlays = overlays_, .view = state_->winners};
+        }
+
+    private:
+        Result<MemoryIndexRecord> find(std::string_view key) const {
+            if (state_->winners) {
+                auto record = state_->winners->find(key);
+                if (record || record.error().code != ErrorCode::NotFound) {
+                    return record;
+                }
+            }
+            const auto found = overlays_->find(std::string(key));
+            if (found == overlays_->end()) {
+                return Error{ErrorCode::NotFound, "no record in the pinned adapter view"};
+            }
+            return found->second;
+        }
+
+        Result<MemorySyncLoop::WinnerPage> page(std::string_view prefix, std::string_view afterKey,
+                                                std::size_t limit) const {
+            MemorySyncLoop::WinnerPage disk;
+            if (state_->winners) {
+                auto selected = state_->winners->page(prefix, afterKey, limit);
+                if (!selected) {
+                    return selected.error();
+                }
+                disk = std::move(selected.value());
+            }
+            const std::string start =
+                afterKey < prefix ? std::string(prefix) : std::string(afterKey);
+            auto overlay = overlays_->lower_bound(start);
+            if (overlay != overlays_->end() && overlay->first == afterKey) {
+                ++overlay;
+            }
+            auto hasOverlay = [&] {
+                return overlay != overlays_->end() && overlay->first.starts_with(prefix);
+            };
+            auto row = disk.begin();
+            MemorySyncLoop::WinnerPage out;
+            while (out.size() < limit && (row != disk.end() || hasOverlay())) {
+                if (row != disk.end() && (!hasOverlay() || row->first <= overlay->first)) {
+                    if (hasOverlay() && row->first == overlay->first) {
+                        ++overlay;
+                    }
+                    out.push_back(std::move(*row++));
+                } else {
+                    out.emplace_back(overlay->first, overlay->second);
+                    ++overlay;
+                }
+            }
+            return out;
+        }
+    };
+
+    /// Admission/pressure probes must be thread-safe: pinned readers and the worker may
+    /// cooperate concurrently. Probes never run under the cooperation-state mutex.
     MemorySyncService(std::unique_ptr<storage::IStorageBackend> backend, MemorySyncConfig config,
                       std::function<bool()> canAdmitRemoteWork = {},
                       bool allowLegacyUnbound = false,
                       std::unique_ptr<storage::IStorageBackend> sessionMaintenanceBackend = {},
-                      std::string sessionLeaseKey = {})
+                      std::string sessionLeaseKey = {},
+                      std::function<bool()> shouldYieldLocalWork = {})
         : backend_(std::move(backend)),
           sessionMaintenanceBackend_(std::move(sessionMaintenanceBackend)),
           sessionLeaseKey_(std::move(sessionLeaseKey)), config_(std::move(config)),
+          shouldYieldLocalWork_(std::move(shouldYieldLocalWork)),
           loop_(*backend_, config_.nodeId, config_.corpusId, config_.corpusEpoch,
                 allowLegacyUnbound, config_.limits,
                 MemorySyncControl{
                     .isCancelled = [this] { return stop_.load(std::memory_order_acquire); },
-                    .canAdmitRemoteWork = std::move(canAdmitRemoteWork)},
+                    .canAdmitRemoteWork = std::move(canAdmitRemoteWork),
+                    .exclusiveBackend = config_.exclusiveBackend,
+                    .cooperate = [this] { return cooperateWithPressure(); }},
                 {}, config_.writerAuth, config_.controlScope) {}
 
-    ~MemorySyncService() { stop(); }
+    ~MemorySyncService() {
+        stop();
+        // Index handles may outlive the service. Finish active admission checks, then
+        // revoke their owner before any referenced service members are destroyed.
+        std::unique_lock lifetimeLock(adapterLifetime_->mutex);
+        adapterLifetime_->owner = nullptr;
+    }
 
     MemorySyncService(const MemorySyncService&) = delete;
     MemorySyncService& operator=(const MemorySyncService&) = delete;
@@ -80,8 +239,15 @@ public:
             return Error{ErrorCode::InvalidState,
                          "memory sync cannot restart from its active callback"};
         }
-        std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
+        std::unique_lock<std::mutex> lifecycleLock(lifecycleMutex_);
         const bool restarting = stop_.load(std::memory_order_acquire);
+        std::unique_lock<std::recursive_mutex> callbackDrain(callbackExecutionMutex_,
+                                                             std::defer_lock);
+        if (restarting) {
+            callbackDrain = detail::acquireCallbackDrain(lifecycleLock, callbackExecutionMutex_);
+        }
+        // Draining temporarily releases lifecycle ownership. Another start may
+        // already have supplied a live worker; never overwrite its joinable thread.
         if (worker_.joinable()) {
             if (!stop_.load(std::memory_order_acquire)) {
                 return {};
@@ -91,11 +257,6 @@ public:
             } catch (const std::exception& e) {
                 return Error{ErrorCode::InternalError, e.what()};
             }
-        }
-        std::unique_lock<std::recursive_mutex> callbackDrain(callbackExecutionMutex_,
-                                                             std::defer_lock);
-        if (restarting) {
-            callbackDrain.lock();
         }
         if (config_.syncIntervalMs == 0) {
             return Error{ErrorCode::InvalidArgument,
@@ -131,22 +292,28 @@ public:
             // Leave joining to a non-callback owner to avoid a stop/join lock cycle.
             return;
         }
-        std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
-        // A concurrent start may have acquired the lifecycle lock after the first request.
-        // Reassert cancellation while holding the lock before joining that generation.
-        stop_.store(true, std::memory_order_release);
-        backend_->requestCancel();
-        sleepCv_.notify_all();
-        if (worker_.joinable()) {
-            try {
-                worker_.join();
-            } catch (...) {
-                shutdownFailures_.fetch_add(1, std::memory_order_relaxed);
+        std::unique_lock<std::mutex> lifecycleLock(lifecycleMutex_);
+        const auto cancelAndJoin = [this] {
+            stop_.store(true, std::memory_order_release);
+            backend_->requestCancel();
+            sleepCv_.notify_all();
+            if (worker_.joinable()) {
+                try {
+                    worker_.join();
+                } catch (...) {
+                    shutdownFailures_.fetch_add(1, std::memory_order_relaxed);
+                }
             }
-        }
-        // Direct-session callbacks do not belong to worker_. Drain the active callback before
-        // releasing lifecycleMutex_. Generation checks discard callbacks queued before stop().
-        std::lock_guard<std::recursive_mutex> callbackDrain(callbackExecutionMutex_);
+        };
+        // A concurrent start may have acquired lifecycle ownership after the first request.
+        cancelAndJoin();
+        // Direct-session callbacks do not belong to worker_. Release lifecycle ownership
+        // while draining them, then reclaim it under the process-wide callback gate.
+        auto callbackDrain = detail::acquireCallbackDrain(lifecycleLock, callbackExecutionMutex_);
+        // A restart may have linearized in that gap. Revoke its queued callbacks and
+        // cancel/join that generation as well before cleanup or returning to the owner.
+        callbackGeneration_.fetch_add(1, std::memory_order_acq_rel);
+        cancelAndJoin();
         if (config_.cleanupOwnedNamespaceOnStop && !namespaceCleaned_.exchange(true)) {
             backend_->resetCancel();
             if (!backend_->clear()) {
@@ -165,7 +332,22 @@ public:
     }
 
     bool stopRequested() const noexcept { return stop_.load(std::memory_order_acquire); }
+#ifdef YAMS_TESTING
+    /// Deterministic pressure-wait observation without changing the service instance layout.
+    static std::function<void()>*
+    testingSetPressurePauseObserver(std::function<void()>* observer) noexcept {
+        return std::exchange(testingPressurePauseObserver_, observer);
+    }
+    void testingExpireWorkQuantum() {
+        std::lock_guard<std::mutex> lock(cooperationMutex_);
+        nextCooperativeCheck_ = {};
+    }
+#endif
     [[nodiscard]] const std::string& localNodeId() const noexcept { return config_.nodeId; }
+    /// Immutable per-value bound; a single value must also fit the resident cache.
+    [[nodiscard]] std::size_t maxPublishValueBytes() const noexcept {
+        return std::min(config_.limits.maxValueBytes, config_.limits.maxCacheBytes);
+    }
     [[nodiscard]] bool writerAuthenticationReady() const noexcept {
         return config_.writerAuth && config_.writerAuth->required();
     }
@@ -225,6 +407,27 @@ public:
         return result;
     }
 
+    /// Atomic against SDK ingress/writes: an obsolete observation never reserves a
+    /// tombstone counter or deletes a newer winner. Existing erase intents are not stolen.
+    Result<bool> eraseIfCurrent(std::string_view key, const MemoryIndexRecord& expected,
+                                std::string tombstonePayload = {}) {
+        Result<bool> result;
+        bool quarantineChanged = false;
+        {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            const auto generation = loop_.durableQuarantineGeneration();
+            result = loop_.eraseIfCurrent(key, expected, std::move(tombstonePayload));
+            quarantineChanged = generation != loop_.durableQuarantineGeneration();
+            if ((result && result.value()) || quarantineChanged) {
+                refreshCommittedState();
+            }
+        }
+        if (quarantineChanged) {
+            invokeAfterSyncCallback();
+        }
+        return result;
+    }
+
     Result<void> stageErase(std::string_view key, std::string tombstonePayload, bool ready = false,
                             EraseReadinessProbe readinessProbe = EraseReadinessProbe::Explicit) {
         std::lock_guard<std::mutex> lock(loopMutex_);
@@ -265,15 +468,19 @@ public:
         return result;
     }
 
-    /// Publish only when the winning cached payload differs. This makes periodic
+    /// Publish only when the committed content digest differs, even after cache eviction.
+    /// This makes periodic
     /// corpus backfill safe without creating a new causal envelope every cycle.
     Result<bool> publishIfChanged(std::string_view key, std::span<const std::byte> content) {
         Result<bool> result;
         bool quarantineChanged = false;
         {
             std::lock_guard<std::mutex> lock(loopMutex_);
-            auto cached = loop_.readCached(key);
-            if (cached && std::ranges::equal(cached.value(), content)) {
+            auto matches = loop_.matchesCommittedValue(key, content);
+            if (!matches) {
+                return matches.error();
+            }
+            if (matches.value()) {
                 return false;
             }
             const auto generation = loop_.durableQuarantineGeneration();
@@ -312,6 +519,234 @@ public:
         return result;
     }
 
+    /// Explicit on-demand I/O against the last committed generation; never starts a sweep.
+    /// Cache warming does not copy/publish a service snapshot per item. Writes and the
+    /// periodic worker continue to publish the nonblocking cache-only IPC view.
+    Result<std::vector<std::byte>> readCommitted(std::string_view key) {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.readCommitted(key);
+    }
+
+    /// Point read without a sweep or service snapshot copy. An obsolete envelope is
+    /// represented by an empty optional; missing/corrupt payload and quarantine stay errors.
+    Result<std::optional<std::vector<std::byte>>>
+    readCommittedIfCurrent(std::string_view key, const MemoryIndexRecord& expected) {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        if (expected.logicalKey != key) {
+            return Error{ErrorCode::InvalidArgument,
+                         "conditional read key does not match envelope"};
+        }
+        if (auto ready = loop_.beforeRemoteWork(); !ready) {
+            return ready.error();
+        }
+        if (expected.isTombstone()) {
+            return std::optional<std::vector<std::byte>>{};
+        }
+        if (auto valid = loop_.validatePinnedPayloadRead(expected); !valid) {
+            return valid.error();
+        }
+        auto current = loop_.committedWinner(key);
+        if (!current) {
+            if (current.error().code == ErrorCode::NotFound) {
+                return std::optional<std::vector<std::byte>>{};
+            }
+            return current.error();
+        }
+        if (current.value() != expected) {
+            return std::optional<std::vector<std::byte>>{};
+        }
+        auto payload = loop_.readCommitted(key);
+        if (!payload) {
+            return payload.error();
+        }
+        return std::optional<std::vector<std::byte>>{std::move(payload.value())};
+    }
+
+    /// Reconcile once outside callbacks, or reuse the callback's pinned generation. Subsequent
+    /// pages and payload reads do not reconcile again or copy the service's value cache.
+    Result<AdapterView>
+    captureAdapterView(AdapterPressureMode pressureMode = AdapterPressureMode::Wait) {
+        if (pressureMode != AdapterPressureMode::Wait &&
+            pressureMode != AdapterPressureMode::Defer) {
+            return Error{ErrorCode::InvalidArgument, "invalid adapter pressure policy"};
+        }
+        if (pressureMode == AdapterPressureMode::Defer) {
+            if (auto ready = beforeAdapterWork(pressureMode); !ready) {
+                return ready.error();
+            }
+        }
+        for (auto* context = callbackContext_; context != nullptr; context = context->previous) {
+            if (context->owner == this) {
+                return AdapterView{context->state, context->snapshot, adapterIdentity_,
+                                   pressureMode};
+            }
+        }
+        if (auto recovered = syncFully(); !recovered) {
+            return recovered.error();
+        }
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return AdapterView{committedSnapshot(),
+                           std::make_shared<const AdapterView::Rows>(loop_.adapterState()),
+                           adapterIdentity_, pressureMode};
+    }
+
+    /// The inputs an adapter pass started now would read, or nullopt when they cannot be
+    /// named. Captured like captureAdapterView: inside an after-sync callback it names
+    /// the pinned snapshot the pass will read; otherwise the pass syncs again and can only see
+    /// the same or newer winners.
+    Result<std::optional<AdapterInputs>> adapterInputs() {
+        auto view = captureAdapterView(AdapterPressureMode::Defer);
+        if (!view) {
+            return view.error();
+        }
+        return view.value().inputs();
+    }
+
+    /// Check admission/cancellation for a pinned pass without starting a new sweep.
+    /// Defer callers can use this between target work units and immediately before commit.
+    Result<void> checkAdapterWork(const AdapterView& view) {
+        if (view.owner_ != adapterIdentity_) {
+            return Error{ErrorCode::InvalidArgument, "adapter view belongs to another service"};
+        }
+        return beforeAdapterWork(view.pressureMode_);
+    }
+
+    /// Allocate disposable, disk-backed bookkeeping for a pinned adapter pass. It shares
+    /// the native corpus scratch/lease quota but never changes winner or value-cache limits.
+    /// No mutable loop lock is held during admission, pressure waits or workspace creation.
+    /// Index operations remain admission/cancellation-bound to this service; escaped
+    /// handles safely return OperationCancelled after owner destruction.
+    Result<std::shared_ptr<MemorySyncLoop::AdapterIndex>>
+    createAdapterIndex(const AdapterView& view) {
+        if (auto ready = checkAdapterWork(view); !ready) {
+            return ready.error();
+        }
+        std::filesystem::path directory;
+        if (typeid(*backend_) == typeid(storage::FilesystemBackend)) {
+            directory = static_cast<storage::FilesystemBackend&>(*backend_).scratchDirectory();
+        }
+        const auto rowBytes =
+            std::max<std::size_t>(4096, std::min<std::size_t>(config_.limits.maxEnvelopeBytes,
+                                                              std::numeric_limits<int>::max() / 4) *
+                                            4);
+        auto workCheck = [lifetime = adapterLifetime_,
+                          mode = view.pressureMode_]() -> Result<void> {
+            std::shared_lock<std::shared_mutex> lock(lifetime->mutex, std::defer_lock);
+            if (mode == AdapterPressureMode::Defer) {
+                if (!lock.try_lock()) {
+                    return Error{ErrorCode::ResourceExhausted, "adapter owner is draining"};
+                }
+            } else {
+                lock.lock();
+            }
+            if (lifetime->owner == nullptr) {
+                return Error{ErrorCode::OperationCancelled, "adapter owner was destroyed"};
+            }
+            return lifetime->owner->beforeAdapterWork(mode);
+        };
+        return MemorySyncLoop::createAdapterIndex(directory, config_.limits.maxScanBytes, rowBytes,
+                                                  std::move(workCheck));
+    }
+
+    /// Stream bounded, ordered pages from one immutable generation. Visitor references are
+    /// valid only during that call. Local pressure/cancellation is checked between work units.
+    template <typename Visitor>
+    Result<void> visitAdapterWinners(const AdapterView& view, std::string_view prefix,
+                                     Visitor&& visitor) {
+        if (view.owner_ != adapterIdentity_) {
+            return Error{ErrorCode::InvalidArgument, "adapter view belongs to another service"};
+        }
+        const auto limit = std::min<std::size_t>(config_.limits.maxIndexObjectsPerSync, 64);
+        if (limit == 0) {
+            return Error{ErrorCode::ResourceExhausted, "adapter page budget is zero"};
+        }
+        const auto cooperate = [this, mode = view.pressureMode_]() -> Result<void> {
+            return cooperateWithPressure(mode);
+        };
+        std::string cursor;
+        for (;;) {
+            if (auto ready = cooperate(); !ready) {
+                return ready.error();
+            }
+            auto page = view.page(prefix, cursor, limit);
+            if (!page) {
+                return page.error();
+            }
+            if (page.value().empty()) {
+                return {};
+            }
+            for (const auto& [key, record] : page.value()) {
+                if (key <= cursor || !key.starts_with(prefix)) {
+                    return Error{ErrorCode::InvalidData, "adapter cursor did not advance"};
+                }
+                if (auto ready = cooperate(); !ready) {
+                    return ready.error();
+                }
+                if (auto visited = visitor(key, record); !visited) {
+                    return visited.error();
+                }
+                cursor = key;
+            }
+        }
+    }
+
+    /// Read exactly the selected generation, not whichever winner is current by the time a
+    /// later page applies. A missing/collected historical blob is an error, never a newer value.
+    Result<std::vector<std::byte>> readAdapterPayload(const AdapterView& view,
+                                                      std::string_view key) {
+        if (view.owner_ != adapterIdentity_) {
+            return Error{ErrorCode::InvalidArgument, "adapter view belongs to another service"};
+        }
+        // Cooperate before taking the mutable loop lock, including on cache hits.
+        if (auto ready = beforeAdapterWork(view.pressureMode_); !ready) {
+            return ready.error();
+        }
+        MemoryIndexRecord record;
+        {
+            auto lock = lockAdapterState(view.pressureMode_);
+            if (!lock) {
+                return lock.error();
+            }
+            auto selected = view.find(key);
+            if (!selected) {
+                return selected.error();
+            }
+            record = std::move(selected.value());
+            const auto cached = view.state_->cachedBlobs.find(record.entryHash);
+            auto prepared = loop_.preparePinnedPayload(
+                record, cached == view.state_->cachedBlobs.end() ? nullptr : &cached->second);
+            if (!prepared) {
+                return prepared.error();
+            }
+            if (prepared.value()) {
+                return std::move(*prepared.value());
+            }
+            // Only the built-in filesystem's independent streams and immutable base path
+            // have been audited for concurrent reads/writes. Preserve serialization for
+            // unknown wrappers/plugins rather than inventing a backend threading contract.
+            if (typeid(*backend_) != typeid(storage::FilesystemBackend)) {
+                auto fetched = loop_.fetchPinnedPayload(record);
+                if (auto valid = loop_.validatePinnedPayloadRead(record); !valid) {
+                    return valid.error();
+                }
+                return fetched;
+            }
+        }
+        auto fetched = loop_.fetchPinnedPayload(record);
+        {
+            auto lock = lockAdapterState(view.pressureMode_);
+            if (!lock) {
+                return lock.error();
+            }
+            // A durable quarantine or stop may have completed during native payload I/O.
+            // Never return bytes merely because the old pinned record was once authorized.
+            if (auto valid = loop_.validatePinnedPayloadRead(record); !valid) {
+                return valid.error();
+            }
+        }
+        return fetched;
+    }
+
     /// Return a value observed by the periodic worker without initiating sync.
     /// Reads the committed snapshot, so a slow reconciliation (e.g. a remote
     /// backend) can never stall IPC status or cached reads.
@@ -347,13 +782,16 @@ public:
     /// `afterKey`, in key order. The cursor is a logical key, not a position, so a caller paging
     /// through the winners neither skips nor repeats a key when records are published or merged
     /// between pages.
-    [[nodiscard]] std::vector<std::pair<std::string, MemoryIndexRecord>>
-    committedWinnersAfter(std::string_view prefix, std::string_view afterKey,
-                          std::size_t limit) const {
-        std::vector<std::pair<std::string, MemoryIndexRecord>> page;
+    [[nodiscard]] Result<MemorySyncLoop::WinnerPage>
+    readCommittedWinnersAfter(std::string_view prefix, std::string_view afterKey,
+                              std::size_t limit) const {
+        MemorySyncLoop::WinnerPage page;
         const auto state = committedSnapshot();
         if (!state || limit == 0) {
             return page;
+        }
+        if (state->winners) {
+            return state->winners->page(prefix, afterKey, limit);
         }
         const std::string start = afterKey < prefix ? std::string(prefix) : std::string(afterKey);
         auto it = state->merged.lower_bound(start);
@@ -369,9 +807,20 @@ public:
         return page;
     }
 
+    /// Compatibility wrapper: disk errors must not masquerade as an exhausted cursor.
+    [[nodiscard]] MemorySyncLoop::WinnerPage committedWinnersAfter(std::string_view prefix,
+                                                                   std::string_view afterKey,
+                                                                   std::size_t limit) const {
+        auto page = readCommittedWinnersAfter(prefix, afterKey, limit);
+        if (!page) {
+            throw std::runtime_error(page.error().message);
+        }
+        return std::move(page.value());
+    }
+
     std::size_t mergedRecordCount() const noexcept {
         const auto state = committedSnapshot();
-        return state ? state->merged.size() : 0;
+        return state ? (state->winners ? state->winners->size() : state->merged.size()) : 0;
     }
 
     std::size_t quarantinedRecordCount() const noexcept {
@@ -566,14 +1015,15 @@ public:
 private:
     struct CallbackContext {
         const MemorySyncService* owner;
-        const std::map<std::string, MemoryIndexRecord>* snapshot;
+        std::shared_ptr<const std::map<std::string, MemoryIndexRecord>> snapshot;
+        std::shared_ptr<const MemorySyncLoop::CommittedState> state;
         CallbackContext* previous;
     };
 
     const std::map<std::string, MemoryIndexRecord>* activeCallbackSnapshot() const noexcept {
         for (auto* context = callbackContext_; context != nullptr; context = context->previous) {
             if (context->owner == this) {
-                return context->snapshot;
+                return context->snapshot.get();
             }
         }
         return nullptr;
@@ -623,12 +1073,15 @@ private:
             if (!callback || stop_.load(std::memory_order_acquire)) {
                 return;
             }
-            std::map<std::string, MemoryIndexRecord> adapterSnapshot;
+            std::shared_ptr<const std::map<std::string, MemoryIndexRecord>> adapterSnapshot;
+            std::shared_ptr<const MemorySyncLoop::CommittedState> state;
             {
                 std::lock_guard<std::mutex> lock(loopMutex_);
-                adapterSnapshot = loop_.adapterState();
+                adapterSnapshot = std::make_shared<const AdapterView::Rows>(loop_.adapterState());
+                state = committedSnapshot();
             }
-            CallbackContext context{this, &adapterSnapshot, callbackContext_};
+            CallbackContext context{this, std::move(adapterSnapshot), std::move(state),
+                                    callbackContext_};
             callbackContext_ = &context;
             try {
                 callback();
@@ -644,6 +1097,83 @@ private:
         }
     }
 
+    Result<std::unique_lock<std::mutex>> lockAdapterState(AdapterPressureMode mode) {
+        std::unique_lock<std::mutex> lock(loopMutex_, std::defer_lock);
+        if (mode == AdapterPressureMode::Defer) {
+            if (auto ready = cooperateWithPressure(mode); !ready) {
+                return ready.error();
+            }
+            // Do not queue behind another caller's pressure-paced scan while a target
+            // transaction is open. Retry the entire atomic adapter pass outside it.
+            if (!lock.try_lock()) {
+                if (stop_.load(std::memory_order_acquire)) {
+                    return Error{ErrorCode::OperationCancelled, "adapter work cancelled"};
+                }
+                return Error{ErrorCode::ResourceBusy, "adapter mutable state is busy"};
+            }
+        } else {
+            lock.lock();
+        }
+        return lock;
+    }
+
+    Result<void> beforeAdapterWork(AdapterPressureMode mode) {
+        if (mode == AdapterPressureMode::Wait) {
+            return loop_.beforeRemoteWork();
+        }
+        if (auto ready = cooperateWithPressure(mode); !ready) {
+            return ready.error();
+        }
+        return loop_.checkWorkAdmission();
+    }
+
+    Result<void> cooperateWithPressure(AdapterPressureMode mode = AdapterPressureMode::Wait) {
+        if (stop_.load(std::memory_order_acquire)) {
+            return Error{ErrorCode::OperationCancelled, "memory sync background work cancelled"};
+        }
+        if (!shouldYieldLocalWork_) {
+            return {};
+        }
+        if (mode == AdapterPressureMode::Defer) {
+            if (shouldYieldLocalWork_()) {
+                return Error{ErrorCode::ResourceBusy, "adapter work deferred by local pressure"};
+            }
+            return {};
+        }
+        constexpr auto kWorkQuantum = std::chrono::milliseconds(2);
+        constexpr auto kPressurePause = std::chrono::milliseconds(20);
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(cooperationMutex_);
+            if (now < nextCooperativeCheck_) {
+                return {};
+            }
+            nextCooperativeCheck_ = now + kWorkQuantum;
+        }
+        if (!shouldYieldLocalWork_()) {
+            return {};
+        }
+        // Preserve the scan cursor and authenticated scratch identities across pressure.
+        // Bounded pauses admit useful progress without spinning or holding shutdown hostage.
+#ifdef YAMS_TESTING
+        if (testingPressurePauseObserver_ != nullptr) {
+            (*testingPressurePauseObserver_)();
+        }
+#endif
+        std::unique_lock<std::mutex> lock(sleepMutex_);
+        if (sleepCv_.wait_for(lock, kPressurePause,
+                              [this] { return stop_.load(std::memory_order_acquire); })) {
+            return Error{ErrorCode::OperationCancelled, "memory sync background work cancelled"};
+        }
+        lock.unlock();
+        {
+            std::lock_guard<std::mutex> stateLock(cooperationMutex_);
+            nextCooperativeCheck_ =
+                std::max(nextCooperativeCheck_, std::chrono::steady_clock::now() + kWorkQuantum);
+        }
+        return {};
+    }
+
     void workerLoop() {
         workerIdHash_.store(std::hash<std::thread::id>{}(std::this_thread::get_id()),
                             std::memory_order_release);
@@ -651,12 +1181,13 @@ private:
             Result<std::map<std::string, MemoryIndexRecord>> snapshot =
                 Error{ErrorCode::InternalError, "memory sync did not reconcile"};
             bool quarantineChanged = false;
+            bool completedSweep = false;
             {
                 std::lock_guard<std::mutex> lock(loopMutex_);
                 const auto generation = loop_.durableQuarantineGeneration();
                 try {
                     snapshot = loop_.sync();
-                    if (snapshot) {
+                    if (snapshot && !loop_.sweepInProgress()) {
                         auto replayed = loop_.replayReadyErases();
                         if (!replayed) {
                             snapshot = replayed.error();
@@ -671,12 +1202,15 @@ private:
                     snapshot = Error{ErrorCode::InternalError,
                                      "memory sync reconciliation threw an unknown exception"};
                 }
+                completedSweep = snapshot && !loop_.sweepInProgress();
                 if (loop_.legacyUnauthenticatedHistoryObserved()) {
                     legacyUnauthenticatedHistory_.store(true, std::memory_order_release);
                     fullRecoveryCompleted_.store(false, std::memory_order_release);
+                } else if (completedSweep) {
+                    fullRecoveryCompleted_.store(true, std::memory_order_release);
                 }
                 quarantineChanged = generation != loop_.durableQuarantineGeneration();
-                if (snapshot || quarantineChanged) {
+                if (completedSweep || quarantineChanged) {
                     refreshCommittedState();
                 }
             }
@@ -687,7 +1221,7 @@ private:
                     // An unrenewed temporary lease makes this cycle unhealthy. Do not expose
                     // winners or advance freshness while another peer may collect the namespace.
                     failedSyncCycles_.fetch_add(1, std::memory_order_relaxed);
-                } else {
+                } else if (completedSweep) {
                     successfulSyncCycles_.fetch_add(1, std::memory_order_relaxed);
                     lastSuccessfulSyncSteadyMs_.store(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -737,6 +1271,15 @@ private:
     std::unique_ptr<storage::IStorageBackend> sessionMaintenanceBackend_;
     std::string sessionLeaseKey_;
     MemorySyncConfig config_;
+    const std::shared_ptr<const std::byte> adapterIdentity_{std::make_shared<const std::byte>()};
+    const std::shared_ptr<AdapterLifetime> adapterLifetime_{
+        std::make_shared<AdapterLifetime>(this)};
+    std::function<bool()> shouldYieldLocalWork_;
+    std::mutex cooperationMutex_; // Protects the quantum only, never held across a probe/wait.
+    std::chrono::steady_clock::time_point nextCooperativeCheck_{};
+#ifdef YAMS_TESTING
+    inline static thread_local std::function<void()>* testingPressurePauseObserver_{nullptr};
+#endif
     MemorySyncLoop loop_;
     std::atomic<bool> stop_{false};
     std::thread worker_;

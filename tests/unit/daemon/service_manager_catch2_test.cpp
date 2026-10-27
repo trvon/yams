@@ -16,6 +16,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -35,6 +36,7 @@
 
 #include "../../../include/yams/daemon/components/db_integrity_stamp.h"
 #include "../../../src/daemon/components/service_manager/bootstrap_status.h"
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
@@ -469,9 +471,83 @@ struct ScopedCurrentPath {
     }
 };
 
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager data-directory snapshots survive publication",
+                 "[daemon][service_manager][data-dir-snapshot]") {
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+
+    // Holding a const reference must extend the lifetime of an owning snapshot,
+    // not expose the mutable path that early metrics and storage fallback publish.
+    const auto& beforePublication = manager.getResolvedDataDir();
+    REQUIRE(beforePublication.empty());
+    const auto primary = testDir_ / "primary-data";
+    manager.testingSetResolvedDataDir(primary);
+    CHECK(beforePublication.empty());
+
+    const auto& primarySnapshot = manager.getResolvedDataDir();
+    REQUIRE(primarySnapshot == primary);
+    const auto fallback = testDir_ / "fallback-data";
+    manager.testingSetResolvedDataDir(fallback);
+    CHECK(primarySnapshot == primary);
+    CHECK(manager.getResolvedDataDir() == fallback);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager snapshots remain whole during publication",
+                 "[daemon][service_manager][data-dir-snapshot][concurrency]") {
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    // These are path values only: no filesystem entry with a long component is created.
+    const auto primary = testDir_ / std::string(512, 'a');
+    const auto fallback = testDir_ / std::string(512, 'b');
+    manager.testingSetResolvedDataDir(primary);
+    const auto& initialSnapshot = manager.getResolvedDataDir();
+
+    std::promise<void> begin;
+    const auto ready = begin.get_future().share();
+    yams::compat::jthread writer([&] {
+        ready.wait();
+        for (unsigned i = 0; i < 256; ++i) {
+            manager.testingSetResolvedDataDir(i % 2 == 0 ? primary : fallback);
+        }
+    });
+    begin.set_value();
+    unsigned invalidSnapshots = 0;
+    for (unsigned i = 0; i < 256; ++i) {
+        const auto snapshot = manager.getResolvedDataDir();
+        if (snapshot != primary && snapshot != fallback) {
+            ++invalidSnapshots;
+        }
+    }
+    writer.join();
+    CHECK(invalidSnapshots == 0);
+    CHECK(initialSnapshot == primary);
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager construction succeeds",
                  "[daemon][service_manager]") {
     REQUIRE_NOTHROW(ServiceManager(config_, state_, lifecycleFsm_));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager marks the vector DB ready once its first vectors commit",
+                 "[daemon][components][service-manager][catch2][vector-readiness]") {
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    state_.readiness.vectorDbReady = false;
+
+    // Before the vector DB was opened, a commit callback proves nothing about it.
+    state_.readiness.vectorDbInitAttempted = false;
+    manager.testingMarkVectorDbReadyAfterCommit({"hash-a"});
+    CHECK_FALSE(state_.readiness.vectorDbReady.load());
+
+    // An initialized DB that started empty becomes ready on the first non-empty commit.
+    state_.readiness.vectorDbInitAttempted = true;
+    manager.testingMarkVectorDbReadyAfterCommit({});
+    CHECK_FALSE(state_.readiness.vectorDbReady.load());
+    manager.testingMarkVectorDbReadyAfterCommit({"hash-a", "hash-b"});
+    CHECK(state_.readiness.vectorDbReady.load());
 }
 
 TEST_CASE("Async initialization completion wait survives caller timeout",
@@ -1664,54 +1740,113 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     const auto readySnap = sm->waitForServiceManagerTerminalState(30);
     REQUIRE((readySnap.state == ServiceManagerState::Ready));
 
-    std::mutex gateMutex;
-    std::condition_variable gateCv;
-    bool allowWorkerExit = false;
-    std::atomic<bool> workerEntered{false};
-    std::atomic<bool> workerFinished{false};
-    std::atomic<bool> shutdownReturned{false};
+    struct SharedShutdownState {
+        std::mutex gateMutex;
+        std::condition_variable gateCv;
+        bool allowWorkerExit{false};
+        std::promise<void> workerEntered;
+        std::promise<void> workerFinished;
+        std::promise<void> shutdownFinished;
+        std::atomic<unsigned> completionSequence{0};
+        std::atomic<unsigned> workerCompletionOrder{0};
+        std::atomic<unsigned> shutdownCompletionOrder{0};
+    };
 
-    boost::asio::post(sm->getWorkerExecutor(), [&]() {
-        {
-            std::lock_guard<std::mutex> lk(gateMutex);
-            workerEntered.store(true, std::memory_order_release);
+    struct ShutdownCleanup {
+        explicit ShutdownCleanup(const std::shared_ptr<SharedShutdownState>& sharedState)
+            : state(sharedState) {}
+
+        void releaseWorker() noexcept {
+            {
+                std::lock_guard<std::mutex> lk(state->gateMutex);
+                state->allowWorkerExit = true;
+            }
+            state->gateCv.notify_all();
         }
-        gateCv.notify_all();
 
-        std::unique_lock<std::mutex> lk(gateMutex);
-        gateCv.wait(lk, [&] { return allowWorkerExit; });
-        workerFinished.store(true, std::memory_order_release);
+        void join() noexcept {
+            if (shutdownThread.joinable()) {
+                shutdownThread.join();
+            }
+        }
+
+        ~ShutdownCleanup() {
+            releaseWorker();
+            join();
+        }
+
+        std::shared_ptr<SharedShutdownState> state;
+        std::thread shutdownThread;
+    };
+
+    auto sharedState = std::make_shared<SharedShutdownState>();
+    auto workerEntered = sharedState->workerEntered.get_future();
+    auto workerFinished = sharedState->workerFinished.get_future();
+    auto shutdownFinished = sharedState->shutdownFinished.get_future();
+    ShutdownCleanup cleanup(sharedState);
+
+    boost::asio::post(sm->getWorkerExecutor(), [sharedState]() {
+        try {
+            sharedState->workerEntered.set_value();
+
+            std::unique_lock<std::mutex> lk(sharedState->gateMutex);
+            sharedState->gateCv.wait(lk, [sharedState] { return sharedState->allowWorkerExit; });
+            lk.unlock();
+
+            const auto order =
+                sharedState->completionSequence.fetch_add(1, std::memory_order_acq_rel) + 1;
+            sharedState->workerCompletionOrder.store(order, std::memory_order_release);
+            sharedState->workerFinished.set_value();
+        } catch (...) {
+            const auto error = std::current_exception();
+            try {
+                sharedState->workerEntered.set_exception(error);
+            } catch (...) {
+            }
+            try {
+                sharedState->workerFinished.set_exception(error);
+            } catch (...) {
+            }
+        }
     });
 
-    {
-        std::unique_lock<std::mutex> lk(gateMutex);
-        REQUIRE(gateCv.wait_for(lk, std::chrono::seconds(5),
-                                [&] { return workerEntered.load(std::memory_order_acquire); }));
-    }
+    REQUIRE((workerEntered.wait_for(std::chrono::seconds(5)) == std::future_status::ready));
+    REQUIRE_NOTHROW(workerEntered.get());
 
-    std::thread shutdownThread([&]() {
-        sm->shutdown();
-        shutdownReturned.store(true, std::memory_order_release);
+    cleanup.shutdownThread = std::thread([sm, sharedState]() {
+        try {
+            sm->shutdown();
+            const auto order =
+                sharedState->completionSequence.fetch_add(1, std::memory_order_acq_rel) + 1;
+            sharedState->shutdownCompletionOrder.store(order, std::memory_order_release);
+            sharedState->shutdownFinished.set_value();
+        } catch (...) {
+            try {
+                sharedState->shutdownFinished.set_exception(std::current_exception());
+            } catch (...) {
+            }
+        }
     });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    CHECK_FALSE(shutdownReturned.load(std::memory_order_acquire));
-    CHECK_FALSE(workerFinished.load(std::memory_order_acquire));
+    // ServiceManagerFsm has no wait API for this non-terminal state. Poll the synchronized
+    // public snapshot with a deadline so the assertion observes shutdown entry, not elapsed time.
+    REQUIRE(yams::test::wait_for_condition(
+        std::chrono::seconds(5), std::chrono::milliseconds(5), [sm]() {
+            return sm->getServiceManagerFsmSnapshot().state == ServiceManagerState::ShuttingDown;
+        }));
+    CHECK((workerFinished.wait_for(std::chrono::seconds(0)) == std::future_status::timeout));
+    CHECK((shutdownFinished.wait_for(std::chrono::seconds(0)) == std::future_status::timeout));
 
-    {
-        std::lock_guard<std::mutex> lk(gateMutex);
-        allowWorkerExit = true;
-    }
-    gateCv.notify_all();
+    cleanup.releaseWorker();
 
-    {
-        std::unique_lock<std::mutex> lk(gateMutex);
-        REQUIRE(gateCv.wait_for(lk, std::chrono::seconds(5),
-                                [&] { return workerFinished.load(std::memory_order_acquire); }));
-    }
+    REQUIRE((workerFinished.wait_for(std::chrono::seconds(5)) == std::future_status::ready));
+    REQUIRE_NOTHROW(workerFinished.get());
+    REQUIRE((shutdownFinished.wait_for(std::chrono::seconds(30)) == std::future_status::ready));
+    REQUIRE_NOTHROW(shutdownFinished.get());
+    cleanup.join();
 
-    shutdownThread.join();
-    CHECK(shutdownReturned.load(std::memory_order_acquire));
+    CHECK((sharedState->workerCompletionOrder.load(std::memory_order_acquire) <
+           sharedState->shutdownCompletionOrder.load(std::memory_order_acquire)));
     CHECK((sm->getServiceManagerFsmSnapshot().state == ServiceManagerState::Stopped));
 }
 

@@ -734,7 +734,9 @@ struct GraphDispatcherFixture {
             return true;
         }();
         (void)kSuppressInfoLogs;
-        testDir = makeTempDir("yams_graph_dispatcher_");
+        // Ingest stores resolved paths (populatePathDerivedFields); keys and labels built from
+        // testDir must match, including where the temp dir is behind a symlink (macOS /var).
+        testDir = std::filesystem::canonical(makeTempDir("yams_graph_dispatcher_"));
         dbPath = makeTempMetadataDbPath("yams_graph_dispatcher_db_");
         cfg.dataDir = testDir;
         state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
@@ -1018,7 +1020,7 @@ TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embeddi
 
     SECTION("Snapshot includes embedding backend information") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/test-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setAdoptedProviderPluginName("stub");
 
         // Model provider is now directly used - no need to ensure generator
@@ -1737,7 +1739,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model rejects missing name when provider exists") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         LoadModelRequest req;
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -1750,7 +1752,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model with options succeeds and records provider state") {
         auto provider = std::make_shared<StubModelProvider>(768, "/tmp/provider-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         LoadModelRequest req;
         req.modelName = "dispatcher-model";
@@ -1770,7 +1772,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("load model failure marks embedding degraded") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/failing-model.onnx");
         provider->setLoadError(Error{ErrorCode::InvalidState, "provider refused load"});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         lifecycle.resetDegradedState();
 
         LoadModelRequest req;
@@ -1803,7 +1805,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         invalidMessage.push_back(static_cast<char>(0xC0));
         invalidMessage.push_back(static_cast<char>(0xFF));
         provider->setLoadError(Error{ErrorCode::InvalidState, invalidMessage});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         LoadModelRequest req;
         req.modelName = "utf8-model";
@@ -1830,7 +1832,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("load model returns internal error when provider throws after load") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/throwing-model.onnx");
         provider->setThrowOnMemoryUsage(true);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         LoadModelRequest req;
         req.modelName = "throwing-model";
@@ -1846,7 +1848,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("load model skips rebuild when model is already loaded") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/already-loaded-model.onnx");
         REQUIRE(provider->loadModel("already-loaded-model").has_value());
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         LoadModelRequest req;
         req.modelName = "already-loaded-model";
@@ -1862,7 +1864,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model honors timeout env floor") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
         struct ShutdownBeforeEnvRestore {
             ServiceManager& svc;
@@ -1881,7 +1883,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model survives invalid timeout env value") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-invalid.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
         struct ShutdownBeforeEnvRestore {
             ServiceManager& svc;
@@ -1901,7 +1903,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("load model rebuilds when cached search engine reports missing embedding generator") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/rebuild-health.onnx");
         REQUIRE(provider->loadModel("already-loaded-health-model").has_value());
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         metadata::ConnectionPoolConfig poolCfg{};
         poolCfg.enableWAL = false;
@@ -1928,7 +1930,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model ignores isModelLoaded exceptions before loading") {
         auto provider = std::make_shared<StubModelProvider>(4, "/tmp/isloaded-throw.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         metadata::ConnectionPoolConfig poolCfg{};
         poolCfg.enableWAL = false;
@@ -1967,7 +1969,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("load model survives lifecycle degradation callback exceptions") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/lifecycle-throw.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         lifecycle.setThrowOnSetSubsystemDegraded(true);
 
         LoadModelRequest req;
@@ -1985,7 +1987,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("unload model rejects missing name") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         UnloadModelRequest req;
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -1998,7 +2000,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("unload model propagates provider missing-model error") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         UnloadModelRequest req;
         req.modelName = "missing-model";
@@ -2021,7 +2023,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
 
     SECTION("model status returns loaded model details and filters by name") {
         auto provider = std::make_shared<StubModelProvider>(512, "/tmp/status-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         REQUIRE(provider->loadModel("status-model").has_value());
 
         ModelStatusRequest req;
@@ -2041,7 +2043,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         auto provider = std::make_shared<StubModelProvider>(256, "/tmp/status-fallback.onnx");
         REQUIRE(provider->loadModel("status-fallback").has_value());
         provider->setFailModelInfo(true);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         auto resp = dispatchRequest(dispatcher, Request{ModelStatusRequest{}});
 
@@ -2057,7 +2059,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
     SECTION("model status returns empty response when provider unavailable") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
         provider->setAvailable(false);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         auto resp = dispatchRequest(dispatcher, Request{ModelStatusRequest{}});
 
@@ -2071,7 +2073,7 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
         REQUIRE(provider->loadModel("status-throw").has_value());
         provider->setThrowOnMemoryUsage(true);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         auto resp = dispatchRequest(dispatcher, Request{ModelStatusRequest{}});
 
@@ -2521,6 +2523,47 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(getResp.related.front().relationship == "same_content");
     }
 
+    SECTION("get request caps related documents at graphLimit") {
+        // #280 follow-up: GetRequest.graphLimit must reach DocumentService.
+        auto repoPath = makeTempMetadataDbPath("yams_get_graph_limit_repo_");
+        metadata::ConnectionPoolConfig poolCfg{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+        REQUIRE(pool->initialize().has_value());
+        auto repo = makeReadyMetadataRepo(pool);
+
+        auto store = std::make_shared<StubContentStore>();
+        auto graphQuery = std::make_shared<StubGraphQueryService>();
+        auto mainDoc = makeDoc(72, "/tmp/get-graph-limit/main.txt", std::string(64, 'e'));
+        REQUIRE(repo->insertDocument(mainDoc).has_value());
+        for (int i = 0; i < 3; ++i) {
+            auto related =
+                makeDoc(73 + i, "/tmp/get-graph-limit/related" + std::to_string(i) + ".txt",
+                        std::string(64, static_cast<char>('a' + i)));
+            REQUIRE(repo->insertDocument(related).has_value());
+            graphQuery->addConnectedDocument(related.sha256Hash, "semantic_neighbor", 1, 0.5);
+        }
+        store->setBlob(mainDoc.sha256Hash, "main content");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+        svc.__test_setGraphQueryService(graphQuery);
+
+        auto relatedCount = [&](std::uint32_t graphLimit) {
+            GetRequest req;
+            req.hash = mainDoc.sha256Hash;
+            req.metadataOnly = true;
+            req.showGraph = true;
+            req.graphDepth = 1;
+            req.graphLimit = graphLimit;
+            auto resp = dispatchRequest(dispatcher, Request{req});
+            REQUIRE(std::holds_alternative<GetResponse>(resp));
+            return std::get<GetResponse>(resp).related.size();
+        };
+
+        CHECK(relatedCount(0) == 3);
+        CHECK(relatedCount(2) == 2);
+        CHECK(relatedCount(10) == 3);
+    }
+
     SECTION("get request still succeeds without query trace env") {
         auto repoPath = makeTempMetadataDbPath("yams_get_query_trace_repo_");
         metadata::ConnectionPoolConfig poolCfg{};
@@ -2806,7 +2849,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
 
         REQUIRE(std::holds_alternative<ListResponse>(resp));
         const auto& listResp = std::get<ListResponse>(resp);
-        CHECK(listResp.totalCount >= 0);
+        static_cast<void>(listResp.totalCount);
     }
 
     SECTION("list request works when inflight limit is disabled") {
@@ -4507,7 +4550,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("generate embedding auto-loads unloaded model and returns vector") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-model.onnx");
         provider->setSingleEmbeddingResult({0.1f, 0.2f, 0.3f});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         GenerateEmbeddingRequest req{"hello world", "embed-model", true};
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -4524,7 +4567,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-error.onnx");
         provider->setGenerateEmbeddingError(
             Error{ErrorCode::InvalidState, "generator unavailable"});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         GenerateEmbeddingRequest req{"hello world", "embed-error", true};
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -4550,7 +4593,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         invalidMessage.push_back(static_cast<char>(0xC0));
         invalidMessage.push_back(static_cast<char>(0xFF));
         provider->setLoadError(Error{ErrorCode::InvalidState, invalidMessage});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         GenerateEmbeddingRequest req{"hello world", "embed-utf8", true};
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -4575,7 +4618,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("generate embedding honors timeout env floor while auto-loading") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-timeout.onnx");
         provider->setSingleEmbeddingResult({0.7f, 0.8f, 0.9f});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
 
         GenerateEmbeddingRequest req{"hello world", "embed-timeout", true};
@@ -4590,7 +4633,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("generate embedding converts isModelLoaded exceptions into internal errors") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/embed-throw.onnx");
         provider->setThrowOnIsModelLoadedCount(2);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         GenerateEmbeddingRequest req{"hello world", "embed-throw", true};
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -4606,7 +4649,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-fallback.onnx");
         provider->setGenerateBatchError(Error{ErrorCode::NotImplemented, "batch unsupported"});
         provider->setSingleEmbeddingResult({0.4f, 0.6f});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         BatchEmbeddingRequest req;
         req.texts = {"one", "two"};
@@ -4632,7 +4675,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         provider->setGenerateBatchError(Error{ErrorCode::NotImplemented, "batch unsupported"});
         provider->setSingleEmbeddingResult({0.9f, 0.1f});
         provider->setSingleTextError("bad", Error{ErrorCode::InternalError, "single failed"});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         BatchEmbeddingRequest req;
         req.texts = {"good", "bad", "good-again"};
@@ -4652,7 +4695,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("batch embedding forwards non-fallback errors") {
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-error.onnx");
         provider->setGenerateBatchError(Error{ErrorCode::InvalidState, "batch failed"});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         BatchEmbeddingRequest req;
         req.texts = {"one", "two"};
@@ -4669,7 +4712,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("batch embedding auto-loads model and returns direct batch results") {
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-direct.onnx");
         provider->setBatchEmbeddingResult({{0.2f, 0.8f}});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
 
         BatchEmbeddingRequest req;
@@ -4694,7 +4737,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("batch embedding returns load failures for unloaded models") {
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-load-fail.onnx");
         provider->setLoadError(Error{ErrorCode::InvalidState, "batch load refused"});
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         ScopedEnvVar timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
 
         BatchEmbeddingRequest req;
@@ -4712,7 +4755,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("batch embedding converts isModelLoaded exceptions into internal errors") {
         auto provider = std::make_shared<StubModelProvider>(2, "/tmp/batch-throw.onnx");
         provider->setThrowOnIsModelLoadedCount(2);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         BatchEmbeddingRequest req;
         req.texts = {"one"};
@@ -4740,7 +4783,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     SECTION("embed documents reports unavailable model provider") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-provider.onnx");
         provider->setAvailable(false);
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
 
         EmbedDocumentsRequest req;
         req.modelName = "repair-model";
@@ -4757,10 +4800,10 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         // Repair used to fall back to a relative "vectors.db" and create it in the working
         // directory when the data directory was not resolved.
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-empty.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
-        svc.__test_setResolvedDataDir({});
+        svc.testingSetResolvedDataDir({});
         const auto strayDb = std::filesystem::current_path() / "vectors.db";
         const bool existedBefore = std::filesystem::exists(strayDb);
 
@@ -4774,9 +4817,9 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     }
 
     SECTION("embed documents returns success when repair finds no work") {
-        svc.__test_setResolvedDataDir(cfg.dataDir);
+        svc.testingSetResolvedDataDir(cfg.dataDir);
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-empty.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
 
@@ -4796,9 +4839,9 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
     }
 
     SECTION("embed documents rejects non-empty hash lists that resolve to no daemon documents") {
-        svc.__test_setResolvedDataDir(cfg.dataDir);
+        svc.testingSetResolvedDataDir(cfg.dataDir);
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-missing-hashes.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
 
@@ -4818,8 +4861,8 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
     SECTION("embed documents rejects degraded providers") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-degraded.onnx");
-        svc.__test_setModelProvider(provider);
-        svc.__test_setModelProviderDegraded(true, "simulated degraded state");
+        svc.testing_setModelProvider(provider);
+        svc.testing_setModelProviderDegraded(true, "simulated degraded state");
 
         auto resp = dispatchRequest(dispatcher, Request{EmbedDocumentsRequest{}});
 
@@ -4828,12 +4871,12 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
         CHECK(err.code == ErrorCode::InvalidState);
         CHECK(err.message == "Embedding generation disabled: provider degraded");
 
-        svc.__test_setModelProviderDegraded(false);
+        svc.testing_setModelProviderDegraded(false);
     }
 
     SECTION("embed documents reports missing content store") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-content.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
 
         EmbedDocumentsRequest req;
@@ -4849,7 +4892,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
     SECTION("embed documents reports missing metadata repo") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-meta.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
 
         EmbedDocumentsRequest req;
@@ -4865,7 +4908,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
     SECTION("embed documents reports missing configured model name") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-empty-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
 
@@ -4882,7 +4925,7 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
     SECTION("embed documents uses daemon config resolver when request model is empty") {
         auto provider = std::make_shared<StubModelProvider>(3, "/tmp/repair-config-model.onnx");
-        svc.__test_setModelProvider(provider);
+        svc.testing_setModelProvider(provider);
         svc.__test_setContentStore(std::make_shared<StubContentStore>());
         svc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
 
@@ -4898,10 +4941,10 @@ TEST_CASE("RequestDispatcher: embedding handlers cover generation and repair bra
 
         DaemonLifecycleFsm configLifecycleFsm;
         ServiceManager configSvc(cfg, state, configLifecycleFsm);
-        configSvc.__test_setModelProvider(provider);
+        configSvc.testing_setModelProvider(provider);
         configSvc.__test_setContentStore(std::make_shared<StubContentStore>());
         configSvc.__test_setMetadataRepo(std::make_shared<StubPruneMetadataRepository>());
-        configSvc.__test_setResolvedDataDir(cfg.dataDir);
+        configSvc.testingSetResolvedDataDir(cfg.dataDir);
         RequestDispatcher configDispatcher(&lifecycle, &configSvc, &state);
 
         EmbedDocumentsRequest req;
@@ -5254,12 +5297,13 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK_FALSE(graphResp.connectedNodes[0].properties.empty());
     }
 
-    SECTION("graph query list by type scopes and paginates within current code roots") {
+    SECTION("graph query list by type scopes and paginates within the client cwd") {
         fixture.initMetadata();
 
-        const auto sourcePath = fixture.testDir / "src" / "inside.cpp";
-        const auto includePath = fixture.testDir / "include" / "inside.hpp";
-        const auto testPath = fixture.testDir / "tests" / "outside.cpp";
+        const auto scopeRoot = fixture.testDir / "repo";
+        const auto sourcePath = scopeRoot / "src" / "inside.cpp";
+        const auto includePath = scopeRoot / "include" / "inside.hpp";
+        const auto testPath = fixture.testDir / "elsewhere" / "outside.cpp";
         for (const auto& path : {sourcePath, includePath, testPath}) {
             std::filesystem::create_directories(path.parent_path());
             std::ofstream out(path);
@@ -5285,7 +5329,7 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         GraphQueryRequest firstPage;
         firstPage.listByType = true;
         firstPage.nodeType = "function";
-        firstPage.scopePathPrefix = fixture.testDir.string();
+        firstPage.scopePathPrefix = scopeRoot.string();
         firstPage.limit = 1;
 
         auto firstRaw = dispatchRequest(*fixture.dispatcher, Request{firstPage});
@@ -5305,6 +5349,76 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         REQUIRE(second.connectedNodes.size() == 1);
         CHECK(second.connectedNodes.front().label != "outsideTest");
         CHECK(second.connectedNodes.front().nodeId != first.connectedNodes.front().nodeId);
+    }
+
+    SECTION("graph query list by type scopes document and path nodes under the client cwd") {
+        // Issue #280: --scope-cwd returned nothing for a corpus outside src/ and include/,
+        // because document nodes carry their path only in the label and snapshot path nodes
+        // only in $.path.
+        fixture.initMetadata();
+
+        const auto realRoot = fixture.testDir / "corpus";
+        const auto insideHeader = realRoot / "simeon" / "include" / "simeon" / "bm25.hpp";
+        const auto insideSource = realRoot / "simeon" / "src" / "bm25.cpp";
+        const auto outside = fixture.testDir / "other" / "outside.hpp";
+        for (const auto& path : {insideHeader, insideSource, outside}) {
+            std::filesystem::create_directories(path.parent_path());
+            std::ofstream out(path);
+            REQUIRE(out.good());
+            out << "int value;\n";
+        }
+
+        const std::string snapshot = "2026-10-08T22:06:30.518048Z";
+        for (const auto& path : {insideHeader, insideSource, outside}) {
+            const auto p = path.generic_string();
+            fixture.upsertNode("doc:hash-" + path.filename().string(), p, "document");
+            fixture.upsertNode("path:" + snapshot + ":" + p, p, "path",
+                               R"({"snapshot_id":")" + snapshot + R"(","path":")" + p + R"("})");
+            fixture.upsertNode("path:logical:" + p, p, "path",
+                               R"({"path":")" + p + R"(","logical":true})");
+        }
+
+        auto listScoped = [&](const std::string& nodeType, const std::filesystem::path& scope) {
+            GraphQueryRequest req;
+            req.listByType = true;
+            req.nodeType = nodeType;
+            req.scopePathPrefix = scope.generic_string();
+            req.limit = 50;
+            auto raw = dispatchRequest(*fixture.dispatcher, Request{req});
+            REQUIRE(std::holds_alternative<GraphQueryResponse>(raw));
+            return std::get<GraphQueryResponse>(raw);
+        };
+
+        auto checkScoped = [&](const std::filesystem::path& scope) {
+            const auto docs = listScoped("document", scope);
+            CHECK(docs.totalNodesFound == 2);
+            REQUIRE(docs.connectedNodes.size() == 2);
+            for (const auto& node : docs.connectedNodes) {
+                CHECK(node.label.starts_with(realRoot.generic_string() + "/"));
+            }
+
+            const auto paths = listScoped("path", scope);
+            CHECK(paths.totalNodesFound == 4);
+            REQUIRE(paths.connectedNodes.size() == 4);
+            for (const auto& node : paths.connectedNodes) {
+                CHECK(node.label.starts_with(realRoot.generic_string() + "/"));
+            }
+        };
+
+        checkScoped(realRoot);
+
+        // A cwd reached through a symlink still matches the real stored paths.
+        const auto linkRoot = fixture.testDir / "corpus-link";
+        std::error_code linkEc;
+        std::filesystem::create_directory_symlink(realRoot, linkRoot, linkEc);
+        if (!linkEc) {
+            checkScoped(linkRoot);
+        }
+
+        // A sibling directory sharing the prefix is not in scope.
+        const auto siblingDocs = listScoped("document", fixture.testDir / "corp");
+        CHECK(siblingDocs.totalNodesFound == 0);
+        CHECK(siblingDocs.connectedNodes.empty());
     }
 
     SECTION("graph query list by type reports store errors") {
@@ -5759,7 +5873,7 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         auto svc = std::make_unique<ServiceManager>(cfg, *state, *lifecycleFsm);
         // The data directory is only resolved during initialize(); tests that place plugins
         // under it would otherwise write to the working directory.
-        svc->__test_setResolvedDataDir(cfg.dataDir);
+        svc->testingSetResolvedDataDir(cfg.dataDir);
         svc->__test_pluginScanComplete(0);
         REQUIRE(svc->getPluginHostFsmSnapshot().state == PluginHostState::Ready);
 
@@ -6827,6 +6941,22 @@ TEST_CASE("DaemonMetrics: cold snapshot refreshes synchronously", "[daemon][metr
     CHECK(snap->statusDetailAgeMs == 0);
     CHECK(snap->statusDetailStale);
     CHECK_FALSE(snap->statusDetailAvailable);
+}
+
+TEST_CASE("RequestDispatcher preserves failed lifecycle instead of reporting initialization",
+          "[daemon][status][memory-sync-recovery]") {
+    StateComponent state;
+    StubLifecycle lifecycle{LifecycleState::Failed};
+    // Lifecycle rendering is independent of services. Avoid bootstrapping plugins,
+    // background workers and checkpoint threads just to exercise this status seam.
+    RequestDispatcher dispatcher(&lifecycle, nullptr, &state);
+
+    const auto response = dispatchRequest(dispatcher, Request{StatusRequest{}});
+    REQUIRE(std::holds_alternative<StatusResponse>(response));
+    const auto& status = std::get<StatusResponse>(response);
+    CHECK(status.lifecycleState == "failed");
+    CHECK(status.overallStatus == "failed");
+    CHECK_FALSE(status.ready);
 }
 
 TEST_CASE("RequestDispatcher: status refreshes cold snapshot without retry hint",

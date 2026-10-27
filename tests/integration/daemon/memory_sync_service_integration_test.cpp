@@ -3,7 +3,12 @@
 
 // pi-lens-ignore: fatal error
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
+
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -22,10 +27,14 @@
 #include <yams/api/content_store.h>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/HostPressure.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/mcp/mcp_server.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/records.h>
+#include <yams/memory_sync/writer_auth.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/storage/storage_backend.h>
@@ -153,6 +162,36 @@ private:
     std::string poisonedHash_;
 };
 
+// Functional tests control the sampled host signal, not governor thresholds or admission.
+// The platform sampler is restored after the harness and all of its workers are destroyed.
+class ScopedHostPressureSample {
+public:
+    ScopedHostPressureSample() { setCalm(); }
+    ~ScopedHostPressureSample() {
+        auto& governor = yams::daemon::ResourceGovernor::instance();
+        governor.testing_setHostPressureSampler(nullptr);
+        governor.tick(nullptr);
+    }
+    ScopedHostPressureSample(const ScopedHostPressureSample&) = delete;
+    ScopedHostPressureSample& operator=(const ScopedHostPressureSample&) = delete;
+
+    void setCalm() { setIoPressure(0.0); }
+    void setBusy() { setIoPressure(100.0); }
+
+private:
+    static void setIoPressure(double ioPressure) {
+        yams::daemon::HostPressureSample sample;
+        sample.source = yams::daemon::HostPressureSource::Psi;
+        sample.cpuSomeAvg10 = 0.0;
+        sample.ioSomeAvg10 = ioPressure;
+        sample.memorySomeAvg10 = 0.0;
+        sample.loadPerCpu = 0.0;
+        auto& governor = yams::daemon::ResourceGovernor::instance();
+        governor.testing_setHostPressureSampler([sample] { return sample; });
+        governor.tick(nullptr);
+    }
+};
+
 yams::test::DaemonHarness::Options makeMemorySyncHarnessOptions(std::string nodeId,
                                                                 std::string corpusId) {
     yams::test::DaemonHarness::Options options;
@@ -203,6 +242,33 @@ template <typename Fn> void asTestStageCaller(Fn&& fn) {
     } reset;
     std::forward<Fn>(fn)();
 }
+
+// Stops a sync service from inside an apply or backfill stage observer. The observer runs
+// under ServiceManager's apply lock, and a blocking stop() there takes the service's callback
+// lock in the opposite order from the worker (TSan lock-order-inversion; the worker can also be
+// waiting on the apply lock while stop() joins it). stop() runs on a helper thread instead;
+// request() returns once the stop flag is visible, and join() runs after the stage call returns.
+class StopFromStage {
+public:
+    void request(yams::memory_sync::MemorySyncService& sync) {
+        if (stopper_.joinable()) {
+            return;
+        }
+        stopper_ = std::thread([&sync] { sync.stop(); });
+        while (!sync.stopRequested()) {
+            std::this_thread::yield();
+        }
+    }
+    void join() {
+        if (stopper_.joinable()) {
+            stopper_.join();
+        }
+    }
+    ~StopFromStage() { join(); }
+
+private:
+    std::thread stopper_;
+};
 
 std::unique_ptr<yams::storage::FilesystemBackend>
 makeFilesystemBackend(const std::filesystem::path& path) {
@@ -417,6 +483,9 @@ sync_interval_ms = 25
         if (!documentPublished || !blobPublished || !topologyNodePublished ||
             !topologyEdgePublished ||
             serviceManager->testingMemorySyncBackfillAttempts() <= backfillAttemptsBefore) {
+            // Backfill runs at most one 100 ms pass per 5 s. Let every periodic sync cycle run a
+            // pass, so a slow runner is bounded by publish cost rather than by that cadence.
+            serviceManager->testingExpireMemorySyncBackfillSchedule();
             std::this_thread::sleep_for(25ms);
         }
     }
@@ -721,15 +790,19 @@ TEST_CASE("Daemon memory sync stop during production apply prevents later adapte
 
     std::atomic<bool> afterContent{false};
     std::atomic<bool> afterMetadata{false};
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    serviceManager->testingDisableMemorySyncApplySkip();
+    StopFromStage stopFromStage;
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (stage == "apply.after_content") {
             afterContent.store(true, std::memory_order_release);
-            daemonSync->stop();
+            stopFromStage.request(*daemonSync);
         } else if (stage == "apply.after_metadata") {
             afterMetadata.store(true, std::memory_order_release);
         }
     });
     serviceManager->testingApplyMemorySyncWinners();
+    stopFromStage.join();
 
     CHECK(afterContent.load(std::memory_order_acquire));
     CHECK_FALSE(afterMetadata.load(std::memory_order_acquire));
@@ -766,6 +839,8 @@ TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
     auto secondEntered = secondEnteredPromise.get_future();
     std::promise<void> releaseFirstPromise;
     auto releaseFirst = releaseFirstPromise.get_future().share();
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    serviceManager->testingDisableMemorySyncApplySkip();
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (stage != "apply.after_content" || !tlsTestStageCaller) {
             return;
@@ -838,6 +913,8 @@ TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
     auto secondBackfillEntered = secondBackfillEnteredPromise.get_future();
     std::promise<void> releaseFirstBackfillPromise;
     auto releaseFirstBackfill = releaseFirstBackfillPromise.get_future().share();
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    serviceManager->testingDisableMemorySyncApplySkip();
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (!stage.starts_with("backfill.") || !tlsTestStageCaller) {
             return;
@@ -888,8 +965,515 @@ TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
     CHECK(harness.shutdownSucceeded());
 }
 
+TEST_CASE("Daemon topology status keeps exact deferred totals and retries local prerequisites",
+          "[integration][daemon][memory-sync][deferred-total]") {
+    ScopedHostPressureSample hostPressure;
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174022",
+                                                "apply-deferred-total-corpus");
+    options.isolateEnvironment = true;
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto* daemonSync = serviceManager->testingMemorySyncService();
+    REQUIRE(daemonSync != nullptr);
+    using yams::memory_sync::ApplyStage;
+    const auto applyHealth = [&] {
+        auto status = serviceManager->getMemorySyncStatus();
+        REQUIRE(status.has_value());
+        return status.value().apply;
+    };
+
+    // Clear before publishing into a separate peer backend, invisible to the daemon's scan.
+    // The first actual inbound merge dispatches through the callback execution lock, draining
+    // any callback copied before this clear; later dispatches find the cleared callback.
+    daemonSync->setAfterSyncCallback({});
+
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "deferred-total-peer-memory"),
+        yams::memory_sync::MemorySyncConfig{"deferred-total-peer", 60'000,
+                                            "apply-deferred-total-corpus", 1}};
+    constexpr std::size_t kEdgeCount = 70;
+    for (std::size_t i = 0; i < kEdgeCount; ++i) {
+        yams::memory_sync::TopologyEdgeRecord record;
+        record.sourceNodeKey = "status:source";
+        record.relation = "relation-" + std::to_string(i);
+        record.targetNodeKey = "status:target";
+        record.weight = 1.0;
+        const auto published =
+            peer.publish("topology-edge/" + record.id(), bytes(nlohmann::json(record).dump()));
+        INFO((published ? std::string{} : published.error().message));
+        REQUIRE(published.has_value());
+    }
+    const auto batch = peer.exportLocalDeltasAfter({}, 128);
+    REQUIRE(batch.has_value());
+    REQUIRE_FALSE(batch.value().hasMore);
+    const auto received = daemonSync->applyDeltas(batch.value().deltas);
+    INFO((received ? std::string{} : received.error().message));
+    REQUIRE(received.has_value());
+    REQUIRE(received.value().merged == kEdgeCount);
+    REQUIRE(daemonSync->syncOnce().has_value());
+    const auto winners = daemonSync->readCommittedWinnersAfter("topology-edge/", "", 128);
+    REQUIRE(winners.has_value());
+    REQUIRE(winners.value().size() == kEdgeCount);
+    yams::daemon::ClientConfig clientConfig;
+    clientConfig.socketPath = harness.socketPath();
+    clientConfig.connectTimeout = 5s;
+    clientConfig.requestTimeout = 10s;
+    clientConfig.autoStart = false;
+    yams::daemon::DaemonClient client{clientConfig};
+    REQUIRE(yams::cli::run_sync(client.connect(), 5s).has_value());
+    const auto ipcStatus = [&] {
+        yams::daemon::MemorySyncRequest request;
+        request.operation = yams::daemon::MemorySyncOperation::Status;
+        return yams::cli::run_sync(client.call<yams::daemon::MemorySyncRequest>(request), 10s);
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        const auto cyclesBefore = applyHealth().applyCycles;
+        serviceManager->testingApplyMemorySyncWinners();
+        const auto health = applyHealth();
+        CHECK(health.applyCycles == cyclesBefore + 1);
+        CHECK(health.deferredIn(ApplyStage::Topology) == kEdgeCount);
+        CHECK(health.deferredTotal() == kEdgeCount);
+        CHECK(health.failuresIn(ApplyStage::Topology) == 0);
+        CHECK(health.applyFailedCycles == 0);
+        const auto status = ipcStatus();
+        REQUIRE(status.has_value());
+        CHECK(status.value().deferredTopology == kEdgeCount);
+        CHECK(status.value().applyFailedCycles == 0);
+    }
+
+    // Only the local prerequisite changes: no peer node payload or new replicated winner is
+    // published before retry. The same edge winners must now apply, not be idle-suppressed.
+    auto kg = serviceManager->getKgStore();
+    REQUIRE(kg != nullptr);
+    yams::metadata::KGNode source;
+    source.nodeKey = "status:source";
+    source.type = "entity";
+    const auto sourceId = kg->upsertNode(source);
+    REQUIRE(sourceId.has_value());
+    yams::metadata::KGNode target;
+    target.nodeKey = "status:target";
+    target.type = "entity";
+    const auto targetId = kg->upsertNode(target);
+    REQUIRE(targetId.has_value());
+    const auto beforeRetry = daemonSync->readCommittedWinnersAfter("topology-edge/", "", 128);
+    REQUIRE(beforeRetry.has_value());
+    CHECK(beforeRetry.value().size() == kEdgeCount);
+    for (int pass = 0; pass < 2; ++pass) {
+        serviceManager->testingApplyMemorySyncWinners();
+        const auto health = applyHealth();
+        CHECK(health.deferredIn(ApplyStage::Topology) == 0);
+        CHECK(health.deferredTotal() == 0);
+        CHECK(health.failuresIn(ApplyStage::Topology) == 0);
+        CHECK(health.applyFailedCycles == 0);
+        std::size_t edgeCount = 0;
+        for (std::size_t i = 0; i < kEdgeCount; ++i) {
+            const auto edges = kg->getEdgesBetween(sourceId.value(), targetId.value(),
+                                                   "relation-" + std::to_string(i));
+            REQUIRE(edges.has_value());
+            CHECK(edges.value().size() == 1);
+            edgeCount += edges.value().size();
+        }
+        CHECK(edgeCount == kEdgeCount);
+        const auto status = ipcStatus();
+        REQUIRE(status.has_value());
+        CHECK(status.value().deferredTopology == 0);
+        CHECK(status.value().applyFailedCycles == 0);
+    }
+}
+
+TEST_CASE("Daemon memory sync IPC reads off-resident authenticated winners",
+          "[integration][daemon][memory-sync][offresident-read]") {
+    ScopedHostPressureSample hostPressure;
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174024",
+                                                "offresident-read-corpus");
+    auto configure = std::move(options.configureDaemon);
+    options.configureDaemon = [configure =
+                                   std::move(configure)](yams::daemon::DaemonConfig& config) {
+        configure(config);
+        auto keys = yams::memory_sync::generateWriterKeyPair();
+        REQUIRE(keys.has_value());
+        const auto directory = config.dataDir / "read-auth";
+        std::filesystem::create_directories(directory);
+        const auto privateKey = directory / "writer-private.pem";
+        const auto publicKey = directory / "writer-public.pem";
+        const auto manifest = directory / "writers.json";
+        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
+                    privateKey, keys.value().privateKeyPem)
+                    .has_value());
+        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
+                    publicKey, keys.value().publicKeyPem)
+                    .has_value());
+        const nlohmann::json content{
+            {"schema_version", 1},
+            {"corpus_id", config.memorySync.corpusId},
+            {"corpus_epoch", config.memorySync.corpusEpoch},
+            {"local_key",
+             {{"writer_id", config.memorySync.nodeId},
+              {"key_id", "cold-read-v1"},
+              {"private_key_path", privateKey.string()}}},
+            {"trusted_writers",
+             nlohmann::json::array({{{"writer_id", config.memorySync.nodeId},
+                                     {"key_id", "cold-read-v1"},
+                                     {"public_key_path", publicKey.string()}}})}};
+        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(manifest,
+                                                                                 content.dump())
+                    .has_value());
+        // The listener parser requires a real port; reserve an OS-selected local endpoint
+        // briefly instead of using the live daemon's default listener or weakening parsing.
+        boost::asio::io_context io;
+        boost::asio::ip::tcp::acceptor reserved{io, {boost::asio::ip::address_v4::loopback(), 0}};
+        const auto port = reserved.local_endpoint().port();
+        reserved.close();
+        config.memorySync.transport = "direct";
+        config.memorySync.listen = "127.0.0.1:" + std::to_string(port);
+        config.memorySync.writerAuthRequired = true;
+        config.memorySync.writerAuthManifestPath = manifest.string();
+        config.memorySync.limits.maxCacheBytes = 8;
+    };
+    options.isolateEnvironment = true;
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+    auto* manager = harness.daemon()->getServiceManager();
+    REQUIRE(manager != nullptr);
+    auto* sync = manager->testingMemorySyncService();
+    REQUIRE(sync != nullptr);
+    REQUIRE(manager->getWorkCoordinator() != nullptr);
+    sync->setAfterSyncCallback({});
+
+    yams::daemon::ClientConfig clientConfig;
+    clientConfig.socketPath = harness.socketPath();
+    clientConfig.connectTimeout = 5s;
+    clientConfig.requestTimeout = 10s;
+    clientConfig.autoStart = false;
+    yams::daemon::DaemonClient client{clientConfig};
+    REQUIRE(yams::cli::run_sync(client.connect(), 5s).has_value());
+    const auto call = [&](yams::daemon::MemorySyncOperation operation, const std::string& key,
+                          const std::string& value = {}) {
+        yams::daemon::MemorySyncRequest request{operation, key, value};
+        return yams::cli::run_sync(client.call<yams::daemon::MemorySyncRequest>(request), 10s);
+    };
+    const auto first = call(yams::daemon::MemorySyncOperation::Publish, "read-a", "aaaaaaaa");
+    INFO((first ? std::string{} : first.error().message));
+    REQUIRE(first.has_value());
+    const auto second = call(yams::daemon::MemorySyncOperation::Publish, "read-b", "bbbbbbbb");
+    INFO((second ? std::string{} : second.error().message));
+    REQUIRE(second.has_value());
+    const auto warmA = manager->readMemorySyncCached("read-a");
+    const std::string cold = warmA ? "read-b" : "read-a";
+    const auto cached = manager->readMemorySyncCached(cold);
+    REQUIRE_FALSE(cached.has_value());
+    REQUIRE(cached.error().code == yams::ErrorCode::NotFound);
+    const auto read = call(yams::daemon::MemorySyncOperation::Read, cold);
+    INFO((read ? std::string{} : read.error().message));
+    CHECK(read.has_value());
+    if (read) {
+        CHECK(read.value().value == (cold == "read-a" ? "aaaaaaaa" : "bbbbbbbb"));
+    }
+    hostPressure.setBusy();
+    // Admission to explicit I/O may defer, but cache-only consumers must not start
+    // a recovery scan, enter the worker queue, or wait for local pressure to clear.
+    const auto cachedDuringPressure = manager->readMemorySyncCached(warmA ? "read-a" : "read-b");
+    CHECK(cachedDuringPressure.has_value());
+    const auto deferred = call(yams::daemon::MemorySyncOperation::Read, cold);
+    CHECK_FALSE(deferred.has_value());
+    if (!deferred) {
+        CHECK(deferred.error().code == yams::ErrorCode::ResourceBusy);
+    }
+    hostPressure.setCalm();
+    const auto missing = call(yams::daemon::MemorySyncOperation::Read, "never-published");
+    REQUIRE_FALSE(missing.has_value());
+    CHECK(missing.error().code == yams::ErrorCode::NotFound);
+}
+
+TEST_CASE("MCP get serves authenticated replicated cold documents after content prerequisites",
+          "[integration][daemon][memory-sync][mcp][replicated-cold-document]") {
+    ScopedHostPressureSample hostPressure;
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
+    std::vector<std::string> stages;
+    const std::string localId = "123e4567-e89b-42d3-a456-426614174025";
+    const std::string peerId = "123e4567-e89b-42d3-a456-426614174026";
+    const std::string corpus = "authenticated-mcp-cold-corpus";
+    constexpr std::size_t kCacheBytes = 4096;
+    auto localKeys = yams::memory_sync::generateWriterKeyPair();
+    auto peerKeys = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(localKeys.has_value());
+    REQUIRE(peerKeys.has_value());
+    yams::memory_sync::WriterAuthConfig peerTrust;
+    peerTrust.required = true;
+    peerTrust.localWriterId = peerId;
+    peerTrust.localKeyId = "peer-v1";
+    peerTrust.localPrivateKeyPem = peerKeys.value().privateKeyPem;
+    peerTrust.trustedKeys = {{localId, "local-v1", localKeys.value().publicKeyPem, false},
+                             {peerId, "peer-v1", peerKeys.value().publicKeyPem, false}};
+    auto peerAuth = yams::memory_sync::WriterAuthenticator::create(std::move(peerTrust), corpus, 1);
+    REQUIRE(peerAuth.has_value());
+    REQUIRE(peerAuth.value()->required());
+
+    auto options = makeMemorySyncHarnessOptions(localId, corpus);
+    auto configure = std::move(options.configureDaemon);
+    options.configureDaemon = [configure = std::move(configure), localKey = localKeys.value(),
+                               peerPublic = peerKeys.value().publicKeyPem, peerId,
+                               cacheBytes = kCacheBytes](yams::daemon::DaemonConfig& config) {
+        configure(config);
+        const auto directory = config.dataDir / "mcp-read-auth";
+        std::filesystem::create_directories(directory);
+        const auto privateKey = directory / "local-private.pem";
+        const auto publicKey = directory / "local-public.pem";
+        const auto peerKey = directory / "peer-public.pem";
+        const auto manifest = directory / "writers.json";
+        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
+                    privateKey, localKey.privateKeyPem)
+                    .has_value());
+        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
+                    publicKey, localKey.publicKeyPem)
+                    .has_value());
+        REQUIRE(
+            yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(peerKey, peerPublic)
+                .has_value());
+        const nlohmann::json content{
+            {"schema_version", 1},
+            {"corpus_id", config.memorySync.corpusId},
+            {"corpus_epoch", config.memorySync.corpusEpoch},
+            {"local_key",
+             {{"writer_id", config.memorySync.nodeId},
+              {"key_id", "local-v1"},
+              {"private_key_path", privateKey.string()}}},
+            {"trusted_writers", nlohmann::json::array({{{"writer_id", config.memorySync.nodeId},
+                                                        {"key_id", "local-v1"},
+                                                        {"public_key_path", publicKey.string()}},
+                                                       {{"writer_id", peerId},
+                                                        {"key_id", "peer-v1"},
+                                                        {"public_key_path", peerKey.string()}}})}};
+        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(manifest,
+                                                                                 content.dump())
+                    .has_value());
+        boost::asio::io_context io;
+        boost::asio::ip::tcp::acceptor reserved{io, {boost::asio::ip::address_v4::loopback(), 0}};
+        const auto port = reserved.local_endpoint().port();
+        reserved.close();
+        config.memorySync.transport = "direct";
+        config.memorySync.listen = "127.0.0.1:" + std::to_string(port);
+        config.memorySync.writerAuthRequired = true;
+        config.memorySync.writerAuthManifestPath = manifest.string();
+        config.memorySync.limits.maxCacheBytes = cacheBytes;
+    };
+    options.isolateEnvironment = true;
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+    auto* manager = harness.daemon()->getServiceManager();
+    REQUIRE(manager != nullptr);
+    auto* sync = manager->testingMemorySyncService();
+    REQUIRE(sync != nullptr);
+    auto repository = manager->getMetadataRepo();
+    auto contentStore = manager->getContentStore();
+    REQUIRE(repository != nullptr);
+    REQUIRE(contentStore != nullptr);
+    sync->setAfterSyncCallback({});
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    manager->testingDisableMemorySyncApplySkip();
+    manager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (tlsTestStageCaller) {
+            stages.emplace_back(stage);
+        }
+    });
+
+    yams::memory_sync::MemorySyncConfig peerConfig{peerId, 60'000, corpus, 1};
+    peerConfig.writerAuth = peerAuth.value();
+    peerConfig.exclusiveBackend = true;
+    peerConfig.limits.maxCacheBytes = kCacheBytes;
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "authenticated-mcp-peer"), peerConfig};
+    const std::string text = "Authenticated replicated document served through real MCP get.";
+    const auto payload = bytes(text);
+    const auto hash = digest(payload);
+    const auto documentKey = "document/" + hash;
+    const auto blobKey = "content-blob/" + hash;
+    yams::memory_sync::MetadataDocumentRecord record;
+    record.documentId = hash;
+    record.contentHash = hash;
+    record.filePath = "/peer/replicated-cold.txt";
+    record.fileName = "replicated-cold.txt";
+    record.fileExtension = ".txt";
+    record.fileSize = static_cast<std::int64_t>(payload.size());
+    record.mimeType = "text/plain";
+    REQUIRE(peer.publish(documentKey, bytes(nlohmann::json(record).dump())).has_value());
+    auto metadata = peer.exportLocalDeltasAfter({});
+    REQUIRE(metadata.has_value());
+    REQUIRE(metadata.value().deltas.size() == 1);
+    auto first = sync->applyDeltas(metadata.value().deltas);
+    REQUIRE(first.has_value());
+    REQUIRE(sync->publish("user/mcp-cache-fill", bytes(std::string(kCacheBytes, 'a'))).has_value());
+    REQUIRE_FALSE(sync->readCached(documentKey).has_value());
+    asTestStageCaller([&] { manager->testingApplyMemorySyncWinners(); });
+    CHECK(stages == std::vector<std::string>{"apply.after_content", "apply.after_metadata",
+                                             "apply.after_vector", "apply.after_topology"});
+    auto beforeContent = repository->getDocumentByHash(hash);
+    REQUIRE(beforeContent.has_value());
+    CHECK_FALSE(beforeContent.value().has_value());
+    auto absent = contentStore->exists(hash);
+    REQUIRE(absent.has_value());
+    CHECK_FALSE(absent.value());
+
+    // Exercise the supported in-process HTTP bridge to the actual MCP registry and
+    // get handler. Only the unused framing transport is inert: daemon IPC/CAS are real.
+    class InProcessTransport final : public yams::mcp::ITransport {
+    public:
+        void send(const nlohmann::json&) override {}
+        yams::mcp::MessageResult receive() override {
+            return yams::Error{yams::ErrorCode::NotImplemented, "HTTP bridge has no framing loop"};
+        }
+        bool isConnected() const override { return false; }
+        void close() override {}
+        yams::mcp::TransportState getState() const override {
+            return yams::mcp::TransportState::Disconnected;
+        }
+    };
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::make_unique<InProcessTransport>(),
+                                                         nullptr, harness.socketPath());
+    const nlohmann::json get{{"hash", hash}, {"include_content", true}};
+    const auto missing = server->callToolPublic("get", get);
+    INFO(missing.dump());
+    CHECK((missing.value("isError", false) || missing.contains("error")));
+
+    // Only the missing content arrives: the deferred metadata envelope is unchanged.
+    REQUIRE(peer.publish(blobKey, payload).has_value());
+    auto content = peer.exportLocalDeltasAfter(first.value().version);
+    REQUIRE(content.has_value());
+    REQUIRE(content.value().deltas.size() == 1);
+    REQUIRE(sync->applyDeltas(content.value().deltas).has_value());
+    REQUIRE(sync->publish("user/mcp-cache-fill", bytes(std::string(kCacheBytes, 'b'))).has_value());
+    REQUIRE_FALSE(sync->readCached(documentKey).has_value());
+    REQUIRE_FALSE(sync->readCached(blobKey).has_value());
+    stages.clear();
+    asTestStageCaller([&] { manager->testingApplyMemorySyncWinners(); });
+    CHECK(stages == std::vector<std::string>{"apply.after_content", "apply.after_metadata",
+                                             "apply.after_vector", "apply.after_topology"});
+    auto imported = repository->getDocumentByHash(hash);
+    REQUIRE(imported.has_value());
+    REQUIRE(imported.value().has_value());
+    CHECK(imported.value()->sha256Hash == hash);
+    auto stored = contentStore->retrieveBytes(hash);
+    REQUIRE(stored.has_value());
+    CHECK(stored.value() == payload);
+    REQUIRE(sync->publish("user/mcp-cache-fill", bytes(std::string(kCacheBytes, 'c'))).has_value());
+    REQUIRE_FALSE(sync->readCached(documentKey).has_value());
+    REQUIRE_FALSE(sync->readCached(blobKey).has_value());
+    const auto result = server->callToolPublic("get", get);
+    INFO(result.dump());
+    REQUIRE_FALSE(result.contains("error"));
+    REQUIRE_FALSE(result.value("isError", false));
+    REQUIRE(result.contains("content"));
+    REQUIRE_FALSE(result.at("content").empty());
+    const auto response =
+        nlohmann::json::parse(result.at("content").at(0).at("text").get<std::string>());
+    CHECK(response.at("hash").get<std::string>() == hash);
+    CHECK(response.at("content").get<std::string>() == text);
+    CHECK_FALSE(response.value("content_truncated", false));
+    manager->testingSetMemorySyncStageObserver({});
+    server->stop();
+    server.reset();
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+}
+
+TEST_CASE("Daemon memory sync pressure defers topology without reporting a hard failure",
+          "[integration][daemon][memory-sync][pressure-health]") {
+    ScopedHostPressureSample hostPressure;
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174023",
+                                                "apply-pressure-health-corpus");
+    options.isolateEnvironment = true;
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto* daemonSync = serviceManager->testingMemorySyncService();
+    REQUIRE(daemonSync != nullptr);
+    auto kg = serviceManager->getKgStore();
+    REQUIRE(kg != nullptr);
+    const auto applyHealth = [&] {
+        const auto status = serviceManager->getMemorySyncStatus();
+        REQUIRE(status.has_value());
+        return status.value().apply;
+    };
+    daemonSync->setAfterSyncCallback({});
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "pressure-health-peer-memory"),
+        yams::memory_sync::MemorySyncConfig{"pressure-health-peer", 60'000,
+                                            "apply-pressure-health-corpus", 1}};
+    const auto receivePeer = [&] {
+        const auto batch = peer.exportLocalDeltasAfter({}, 128);
+        REQUIRE(batch.has_value());
+        REQUIRE_FALSE(batch.value().hasMore);
+        const auto received = daemonSync->applyDeltas(batch.value().deltas);
+        INFO((received ? std::string{} : received.error().message));
+        REQUIRE(received.has_value());
+        REQUIRE(received.value().merged == 1);
+    };
+    yams::memory_sync::TopologyNodeRecord record;
+    record.nodeKey = "pressure:node";
+    record.type = "symbol";
+    const auto nodeKey =
+        "topology-node/" + yams::memory_sync::escapeRecordKeySegment(record.nodeKey);
+    record.label = "before-pressure";
+    REQUIRE(peer.publish(nodeKey, bytes(nlohmann::json(record).dump())).has_value());
+    receivePeer();
+    serviceManager->testingApplyMemorySyncWinners();
+    const auto original = kg->getNodeByKey(record.nodeKey);
+    REQUIRE(original.has_value());
+    REQUIRE(original.value().has_value());
+    CHECK(original.value()->label.value_or("") == "before-pressure");
+    const auto before = applyHealth();
+    REQUIRE(before.applyFailedCycles == 0);
+    CHECK(before.scannedAllIn(yams::memory_sync::ApplyStage::Topology));
+
+    // A second real winner arrives after the first inbound dispatch drained startup work.
+    // No automatic callback can apply it ahead of this explicitly controlled busy-host pass.
+    record.label = "after-pressure";
+    REQUIRE(peer.publish(nodeKey, bytes(nlohmann::json(record).dump())).has_value());
+    receivePeer();
+    hostPressure.setBusy();
+    REQUIRE(yams::daemon::ResourceGovernor::instance().hostPressureElevated());
+    serviceManager->testingApplyMemorySyncWinners();
+    using yams::memory_sync::ApplyStage;
+    const auto deferred = applyHealth();
+    CHECK_FALSE(deferred.scannedAllIn(ApplyStage::Topology));
+    CHECK(deferred.applyFailedCycles == before.applyFailedCycles);
+    CHECK(deferred.failuresIn(ApplyStage::Topology) == before.failuresIn(ApplyStage::Topology));
+    CHECK(deferred.lastFailureStage == before.lastFailureStage);
+    const auto untouched = kg->getNodeByKey(record.nodeKey);
+    REQUIRE(untouched.has_value());
+    REQUIRE(untouched.value().has_value());
+    CHECK(untouched.value()->label.value_or("") == "before-pressure");
+
+    hostPressure.setCalm();
+    REQUIRE_FALSE(yams::daemon::ResourceGovernor::instance().hostPressureElevated());
+    serviceManager->testingApplyMemorySyncWinners();
+    const auto repaired = kg->getNodeByKey(record.nodeKey);
+    REQUIRE(repaired.has_value());
+    REQUIRE(repaired.value().has_value());
+    CHECK(repaired.value()->label.value_or("") == "after-pressure");
+    CHECK(applyHealth().scannedAllIn(ApplyStage::Topology));
+    CHECK(applyHealth().applyFailedCycles == before.applyFailedCycles);
+    CHECK(applyHealth().failuresIn(ApplyStage::Topology) ==
+          before.failuresIn(ApplyStage::Topology));
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+}
+
 TEST_CASE("Daemon memory sync stage failures neither skip later stages nor block retry",
           "[integration][daemon][memory-sync][prerequisite]") {
+    ScopedHostPressureSample hostPressure;
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
     auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174012",
                                                 "apply-prerequisite-corpus");
     yams::test::DaemonHarness harness{std::move(options)};
@@ -903,8 +1487,13 @@ TEST_CASE("Daemon memory sync stage failures neither skip later stages nor block
         makeFilesystemBackend(harness.dataDir() / "shared-memory"),
         yams::memory_sync::MemorySyncConfig{"apply-peer", 60'000, "apply-prerequisite-corpus", 1}};
     std::vector<std::string> stages;
-    serviceManager->testingSetMemorySyncStageObserver(
-        [&](std::string_view stage) { stages.emplace_back(stage); });
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    serviceManager->testingDisableMemorySyncApplySkip();
+    serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (tlsTestStageCaller) {
+            stages.emplace_back(stage);
+        }
+    });
     const auto applyHealth = [&] {
         auto status = serviceManager->getMemorySyncStatus();
         REQUIRE(status.has_value());
@@ -916,7 +1505,7 @@ TEST_CASE("Daemon memory sync stage failures neither skip later stages nor block
     const auto hash = digest(payload);
     REQUIRE(peer.publish("content-blob/" + hash, bytes("wrong-content")).has_value());
     REQUIRE(daemonSync->syncOnce().has_value());
-    serviceManager->testingApplyMemorySyncWinners();
+    asTestStageCaller([&] { serviceManager->testingApplyMemorySyncWinners(); });
     // A corrupt content blob fails the content stage, yet every later stage still runs.
     CHECK(stages == std::vector<std::string>{"apply.after_content", "apply.after_metadata",
                                              "apply.after_vector", "apply.after_topology"});
@@ -932,7 +1521,7 @@ TEST_CASE("Daemon memory sync stage failures neither skip later stages nor block
     REQUIRE(peer.publish("content-blob/" + hash, payload).has_value());
     REQUIRE(daemonSync->syncOnce().has_value());
     stages.clear();
-    serviceManager->testingApplyMemorySyncWinners();
+    asTestStageCaller([&] { serviceManager->testingApplyMemorySyncWinners(); });
     CHECK(stages == std::vector<std::string>{"apply.after_content", "apply.after_metadata",
                                              "apply.after_vector", "apply.after_topology"});
     REQUIRE(contentStore->exists(hash).has_value());
@@ -944,7 +1533,7 @@ TEST_CASE("Daemon memory sync stage failures neither skip later stages nor block
     REQUIRE(peer.publish("document/" + metadataHash, bytes("not-json")).has_value());
     REQUIRE(daemonSync->syncOnce().has_value());
     stages.clear();
-    serviceManager->testingApplyMemorySyncWinners();
+    asTestStageCaller([&] { serviceManager->testingApplyMemorySyncWinners(); });
     // A malformed document fails only the metadata stage.
     CHECK(stages == std::vector<std::string>{"apply.after_content", "apply.after_metadata",
                                              "apply.after_vector", "apply.after_topology"});
@@ -963,7 +1552,7 @@ TEST_CASE("Daemon memory sync stage failures neither skip later stages nor block
         peer.publish("document/" + metadataHash, bytes(nlohmann::json(record).dump())).has_value());
     REQUIRE(daemonSync->syncOnce().has_value());
     stages.clear();
-    serviceManager->testingApplyMemorySyncWinners();
+    asTestStageCaller([&] { serviceManager->testingApplyMemorySyncWinners(); });
     CHECK(stages == std::vector<std::string>{"apply.after_content", "apply.after_metadata",
                                              "apply.after_vector", "apply.after_topology"});
     auto repository = serviceManager->getMetadataRepo();
@@ -981,7 +1570,7 @@ TEST_CASE("Daemon memory sync stage failures neither skip later stages nor block
             .has_value());
     REQUIRE(daemonSync->syncOnce().has_value());
     stages.clear();
-    serviceManager->testingApplyMemorySyncWinners();
+    asTestStageCaller([&] { serviceManager->testingApplyMemorySyncWinners(); });
     // A topology identity mismatch fails the topology stage after the others completed.
     CHECK(stages == std::vector<std::string>{"apply.after_content", "apply.after_metadata",
                                              "apply.after_vector", "apply.after_topology"});
@@ -1000,7 +1589,7 @@ TEST_CASE("Daemon memory sync stage failures neither skip later stages nor block
             .has_value());
     REQUIRE(daemonSync->syncOnce().has_value());
     stages.clear();
-    serviceManager->testingApplyMemorySyncWinners();
+    asTestStageCaller([&] { serviceManager->testingApplyMemorySyncWinners(); });
     CHECK(stages == std::vector<std::string>{"apply.after_content", "apply.after_metadata",
                                              "apply.after_vector", "apply.after_topology"});
     auto kgStore = serviceManager->getKgStore();
@@ -1101,13 +1690,17 @@ TEST_CASE("Daemon memory sync stop during production backfill bounds published d
     REQUIRE(repository->batchInsertDocumentsWithMetadata(inserts).has_value());
 
     std::atomic<std::size_t> completedDocuments{0};
+    // Stages are observed per call; never let an unchanged-input cycle skip them.
+    serviceManager->testingDisableMemorySyncApplySkip();
+    StopFromStage stopFromStage;
     serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
         if (stage == "backfill.after_document") {
             completedDocuments.fetch_add(1, std::memory_order_relaxed);
-            daemonSync->stop();
+            stopFromStage.request(*daemonSync);
         }
     });
     serviceManager->testingPublishMemorySyncBackfill();
+    stopFromStage.join();
     CHECK(completedDocuments.load(std::memory_order_relaxed) == 1);
 
     yams::memory_sync::MemorySyncService peer{
@@ -1136,6 +1729,9 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
 
     auto* serviceManager = harness.daemon()->getServiceManager();
     REQUIRE(serviceManager != nullptr);
+    // The test counts one published item per cycle it drives. A background apply cycle running
+    // its own backfill in between would publish an extra item.
+    serviceManager->testingDeferMemorySyncBackfillSchedule();
     auto repository = serviceManager->getMetadataRepo();
     auto contentStore = serviceManager->getContentStore();
     auto kgStore = serviceManager->getKgStore();

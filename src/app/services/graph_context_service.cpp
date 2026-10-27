@@ -83,7 +83,9 @@ bool relationEndpointWithinScope(std::string_view nodeKey, std::string_view scop
 }
 
 bool isWordChar(unsigned char c) {
-    return std::isalnum(c) != 0 || c == '_' || c == ':' || c == '.' || c == '/' || c == '-';
+    // '\\' and '~' keep native Windows paths, including 8.3 short names, as one query term.
+    return std::isalnum(c) != 0 || c == '_' || c == ':' || c == '.' || c == '/' || c == '-' ||
+           c == '\\' || c == '~';
 }
 
 bool isIdentifierChar(unsigned char c) {
@@ -328,8 +330,11 @@ GraphContextSymbol makeContextSymbol(const metadata::KGNode& node, const std::st
     out.filePath = filePath.value_or(std::string{});
     out.startLine = tryExtractIntProperty(node, "start_line");
     out.endLine = tryExtractIntProperty(node, "end_line");
-    out.exactMatch = lowerAscii(out.label) == lowerAscii(query) ||
-                     lowerAscii(out.qualifiedName) == lowerAscii(query);
+    out.exactMatch =
+        lowerAscii(out.label) == lowerAscii(query) ||
+        lowerAscii(out.qualifiedName) == lowerAscii(query) ||
+        (!out.filePath.empty() &&
+         lowerAscii(std::filesystem::path(out.filePath).filename().string()) == lowerAscii(query));
     out.generatedOrCache = isGeneratedOrCachePath(out.filePath);
     out.testFile = isTestPath(out.filePath);
     out.score = baseScore;
@@ -489,6 +494,11 @@ lookupFallbackNodeSymbols(metadata::KnowledgeGraphStore& kgStore,
     return symbols;
 }
 
+bool isWholeFileContext(const GraphContextSymbol& symbol) {
+    return (symbol.kind == "file" || symbol.kind == "path" || symbol.kind == "document") &&
+           !symbol.startLine.has_value() && !symbol.endLine.has_value();
+}
+
 // Candidate pool for explore relative to the symbol budget, before coverage ranking.
 constexpr std::size_t kExploreCandidatePoolFactor = 8;
 constexpr std::size_t kExploreMinCandidatePool = 64;
@@ -592,8 +602,56 @@ public:
             return matched.error();
         }
         auto symbols = std::move(matched.value());
+        // Global label/alias limits can be exhausted by foreign mentions before scope
+        // filtering. An explicit file query can resolve its stable path key directly.
+        const std::filesystem::path queryPath(req.query);
+        if (terms.size() == 1 && terms.front() == req.query &&
+            (queryPath.has_extension() || queryPath.has_parent_path()) &&
+            (queryPath.is_absolute() || !req.scopePathPrefix.empty())) {
+            const auto target =
+                (queryPath.is_absolute() ? queryPath
+                                         : std::filesystem::path(req.scopePathPrefix) / queryPath)
+                    .lexically_normal();
+            if (pathWithinScope(target.generic_string(), req.scopePathPrefix)) {
+                for (const auto* prefix : {"path:file:", "path:logical:"}) {
+                    auto node = kgStore_->getNodeByKey(prefix + target.generic_string());
+                    if (!node) {
+                        return node.error();
+                    }
+                    if (!node.value()) {
+                        continue;
+                    }
+                    auto symbol = makeContextSymbol(*node.value(), req.query, 95.0);
+                    if (std::filesystem::path(symbol.filePath).lexically_normal() != target ||
+                        (!req.includeTests && symbol.testFile && !queryMentionsTests(req.query))) {
+                        continue;
+                    }
+                    if (!symbol.exactMatch) {
+                        symbol.exactMatch = true;
+                        symbol.score += 20.0;
+                    }
+                    symbols.insert(symbols.begin(), std::move(symbol));
+                    break;
+                }
+            }
+        }
         std::erase_if(symbols, [&](const auto& symbol) {
             return !pathWithinScope(symbol.filePath, req.scopePathPrefix);
+        });
+        std::stable_sort(symbols.begin(), symbols.end(),
+                         [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
+        // Deduplicate hydration, not graph identity: historical file nodes can have
+        // different incident edges. Segments and explicit source spans stay distinct.
+        std::unordered_map<std::string, std::vector<std::string>> fileNodeKeys;
+        std::unordered_set<std::string> seenFiles;
+        std::erase_if(symbols, [&](const auto& symbol) {
+            if (!isWholeFileContext(symbol)) {
+                return false;
+            }
+            if (req.budget.includeRelationships) {
+                fileNodeKeys[symbol.filePath].push_back(symbol.nodeKey);
+            }
+            return !seenFiles.insert(symbol.filePath).second;
         });
         rankByQueryCoverage(symbols, terms);
         response.totalSymbolsConsidered = symbols.size();
@@ -609,7 +667,25 @@ public:
         YAMS_DCHECK(response.entrySymbols.size() <= req.budget.maxSymbols,
                     "graph explore entry symbols must respect maxSymbols budget");
 
-        addRelationships(symbols, response, req.budget);
+        std::vector<std::string> relationshipNodeKeys;
+        std::unordered_set<std::string> seenNodeKeys;
+        if (req.budget.includeRelationships) {
+            const auto addKey = [&](const std::string& key) {
+                if (!key.empty() && seenNodeKeys.insert(key).second) {
+                    relationshipNodeKeys.push_back(key);
+                }
+            };
+            for (const auto& symbol : symbols) {
+                if (isWholeFileContext(symbol)) {
+                    for (const auto& key : fileNodeKeys.at(symbol.filePath)) {
+                        addKey(key);
+                    }
+                } else {
+                    addKey(symbol.nodeKey);
+                }
+            }
+        }
+        addRelationships(relationshipNodeKeys, response, req.budget);
         if (!req.scopePathPrefix.empty()) {
             std::erase_if(response.relationships, [&](const auto& relation) {
                 return !relationEndpointWithinScope(relation.sourceNodeKey, req.scopePathPrefix) ||
@@ -809,23 +885,12 @@ public:
     }
 
 private:
-    void addRelationships(const std::vector<GraphContextSymbol>& symbols,
-                          GraphExploreResponse& response, const GraphContextBudget& budget) {
+    void addRelationships(const std::vector<std::string>& nodeKeys, GraphExploreResponse& response,
+                          const GraphContextBudget& budget) {
         YAMS_ZONE_SCOPED_N("graph_context::addRelationships");
         YAMS_PRECONDITION(kgStore_ != nullptr,
                           "GraphContextService::addRelationships requires a knowledge graph store");
-        if (!budget.includeRelationships || symbols.empty()) {
-            return;
-        }
-
-        std::vector<std::string> nodeKeys;
-        nodeKeys.reserve(symbols.size());
-        for (const auto& symbol : symbols) {
-            if (!symbol.nodeKey.empty()) {
-                nodeKeys.push_back(symbol.nodeKey);
-            }
-        }
-        if (nodeKeys.empty()) {
+        if (!budget.includeRelationships || nodeKeys.empty()) {
             return;
         }
 
@@ -843,7 +908,7 @@ private:
             return;
         }
 
-        const auto symbolCount = symbols.size();
+        const auto symbolCount = nodeKeys.size();
         YAMS_PRECONDITION(symbolCount > 0,
                           "GraphContextService::addRelationships requires at least one symbol");
         if (symbolCount == 0) {
@@ -869,8 +934,8 @@ private:
         hydratedEdges.reserve(relationshipBudget);
         bool relationshipLimitHit = false;
 
-        for (const auto& symbol : symbols) {
-            const auto nodeIt = nodeIdsByKey.find(symbol.nodeKey);
+        for (const auto& nodeKey : nodeKeys) {
+            const auto nodeIt = nodeIdsByKey.find(nodeKey);
             if (nodeIt == nodeIdsByKey.end()) {
                 continue;
             }
@@ -1024,6 +1089,7 @@ private:
             if (lines.empty()) {
                 snippet.mode = GraphContextSnippetMode::Omitted;
                 snippet.truncated = true;
+                truncated = true;
                 warnings.push_back("Could not read source file: " + file);
                 outFiles.push_back(std::move(snippet));
                 continue;
@@ -1094,7 +1160,10 @@ private:
             }
             const auto maxEndLine = std::min(lines.size(), startLine + snippetLineSpan);
             if (endLine == 0 || endLine < startLine) {
-                endLine = maxEndLine;
+                endLine = lines.size();
+            }
+            if (endLine > maxEndLine) {
+                snippet.truncated = true;
             }
             endLine = std::min(endLine, maxEndLine);
             endLine = std::min(endLine, lines.size());

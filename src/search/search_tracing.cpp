@@ -225,7 +225,39 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebug(debug, metrics::kTopologyRouteAnnDistanceEvaluations,
              std::to_string(session.routeAnnDistanceEvaluations));
     setDebugBool(debug, metrics::kTopologyRouteBqUsed, session.routeBqUsed);
+    setDebug(debug, metrics::kTopologyRepresentativeRule,
+             std::string{yams::topology::representativeRuleName(session.representativeRule)});
+    if (!session.roadUnavailableReason.empty()) {
+        setDebug(debug, metrics::kTopologyRoadUnavailableReason, session.roadUnavailableReason);
+    }
+    if (!session.orderUnavailableReason.empty()) {
+        setDebug(debug, metrics::kTopologyOrderUnavailableReason, session.orderUnavailableReason);
+    }
+    // Road walk keys appear only when a window was requested; the stage adds the anchors, the
+    // applied window and topology_road_walk_candidates_added after the vector leg.
+    if (session.roadWalkWindowRequested > 0) {
+        setDebug(debug, metrics::kTopologyRoadWalkClustersUnordered,
+                 std::to_string(session.roadWalkClustersUnordered));
+    }
+    // Road beam keys appear only when the beam was requested, so road_hops = 0 leaves the debug
+    // surface unchanged. The stage adds topology_road_candidates_added after the vector leg.
+    if (session.roadHopsRequested > 0) {
+        setDebug(debug, metrics::kTopologyRoadHopsApplied, std::to_string(session.roadHopsApplied));
+        setDebug(debug, metrics::kTopologyRoadClustersAdded,
+                 std::to_string(session.roadExpandedClusterIds.size()));
+        setDebug(debug, metrics::kTopologyRoadWorkCentroidEvaluations,
+                 std::to_string(session.roadWorkCentroidEvaluations));
+        if (!session.roadSkipReason.empty()) {
+            setDebug(debug, metrics::kTopologyRoadSkipReason, session.roadSkipReason);
+        }
+        if (options.includeDetailedTrace) {
+            setDebug(debug, metrics::kTopologyRoadExpandedClusterIds,
+                     joinWithTab(session.roadExpandedClusterIds));
+        }
+    }
     setDebug(debug, metrics::kTopologyRouteBqCandidates, std::to_string(session.routeBqCandidates));
+    setDebug(debug, metrics::kTopologyRouteBqRotation,
+             SearchEngineConfig::topologyBqRotationToString(config.topologyRoutingBqRotation));
     setDebug(debug, metrics::kTopologyRouteExactRepresentativeDistanceEvaluations,
              std::to_string(session.routeExactRepresentativeDistanceEvaluations));
     setDebug(debug, metrics::kTopologyRouteEvidenceCount,

@@ -56,6 +56,14 @@ public:
         return {};
     }
 
+    /// Serialized size of the record publish() would write. Lets a caller classify a
+    /// resident-limit rejection from the actual bytes instead of backend error text.
+    static std::size_t
+    serializedRecordBytes(const DocumentInfo& info,
+                          const std::vector<std::pair<std::string, MetadataValue>>& tags) {
+        return nlohmann::json(toRecord(info, tags)).dump().size();
+    }
+
     Result<void> publishDelete(std::string_view contentHash) {
         if (!memory_sync::isSha256Digest(contentHash)) {
             return Error{ErrorCode::InvalidArgument,
@@ -73,41 +81,67 @@ public:
     /// winner in the replicated index, so the next apply() retries it once the bytes land.
     Result<std::size_t> apply() {
         deferredKeys_.clear();
-        auto merged = sync_.syncOnce();
-        if (!merged) {
-            return merged.error();
+        auto view = sync_.captureAdapterView();
+        if (!view) {
+            return view.error();
         }
-
         const std::string prefix =
             std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::Document)) + "/";
-        std::vector<BatchDocumentInsert> items;
+        // Validate the entire pinned input before mutating an earlier page. Retain neither
+        // document payloads nor full-corpus insert plans between passes.
+        auto validated = sync_.visitAdapterWinners(
+            view.value(), prefix, [&](const auto& key, const auto& envelope) -> Result<void> {
+                if (envelope.isTombstone()) {
+                    if (!memory_sync::isSha256Digest(envelope.tombstonePayload) ||
+                        documentKey(envelope.tombstonePayload) != key) {
+                        return Error{ErrorCode::InvalidData,
+                                     "metadata tombstone identity does not match logical key"};
+                    }
+                    if (auto document = repository_.getDocumentByHash(envelope.tombstonePayload);
+                        !document) {
+                        return document.error();
+                    }
+                } else {
+                    auto record = readDocument(view.value(), key);
+                    if (!record) {
+                        return record.error();
+                    }
+                    const auto& identity = record.value().contentHash.empty()
+                                               ? record.value().documentId
+                                               : record.value().contentHash;
+                    if (contentExists_) {
+                        auto exists = contentExists_(identity);
+                        if (!exists) {
+                            return exists.error();
+                        }
+                    }
+                }
+                return {};
+            });
+        if (!validated) {
+            return validated.error();
+        }
+        // Keep only numeric row IDs for the existing atomic delete batch, not document
+        // snapshots. All deletes still precede values, including across page boundaries.
         std::vector<std::int64_t> deletedIds;
-        for (const auto& [key, envelope] : merged.value()) {
-            if (!key.starts_with(prefix)) {
-                continue;
-            }
-            if (envelope.isTombstone()) {
-                if (!memory_sync::isSha256Digest(envelope.tombstonePayload) ||
-                    documentKey(envelope.tombstonePayload) != key) {
-                    return Error{ErrorCode::InvalidData,
-                                 "metadata tombstone identity does not match logical key"};
+        auto deletes = sync_.visitAdapterWinners(
+            view.value(), prefix, [&](const auto&, const auto& envelope) -> Result<void> {
+                if (!envelope.isTombstone()) {
+                    return {};
                 }
                 const auto document = repository_.getDocumentByHash(envelope.tombstonePayload);
                 if (!document) {
                     return document.error();
                 }
                 if (document.value() && envelope.origin == sync_.localNodeId()) {
-                    // A local tombstone whose exact commitment crossed the point of no return can
-                    // race a later local re-add. Preserve the present local row and publish it as
-                    // the causally-later value instead of deleting the newer local state.
                     auto metadata = repository_.getAllMetadata(document.value()->id);
                     if (!metadata) {
                         return metadata.error();
                     }
                     std::vector<std::pair<std::string, MetadataValue>> tags;
                     tags.reserve(metadata.value().size());
-                    for (const auto& [metadataKey, value] : metadata.value()) {
-                        tags.emplace_back(metadataKey, value);
+                    for (const auto& [key, value] : metadata.value()) {
+                        tags.emplace_back(key, value);
                     }
                     if (auto republished = publish(*document.value(), tags); !republished) {
                         return republished.error();
@@ -115,39 +149,10 @@ public:
                 } else if (document.value()) {
                     deletedIds.push_back(document.value()->id);
                 }
-                continue;
-            }
-            auto payload = sync_.readCached(key);
-            if (!payload) {
-                return payload.error();
-            }
-            memory_sync::MetadataDocumentRecord record;
-            try {
-                const std::string_view text(reinterpret_cast<const char*>(payload.value().data()),
-                                            payload.value().size());
-                record = nlohmann::json::parse(text).get<memory_sync::MetadataDocumentRecord>();
-            } catch (const std::exception& e) {
-                return Error{ErrorCode::InvalidData, e.what()};
-            }
-            const auto identity =
-                record.contentHash.empty() ? record.documentId : record.contentHash;
-            if (!memory_sync::isSha256Digest(identity) || documentKey(identity) != key ||
-                (!record.documentId.empty() && !record.contentHash.empty() &&
-                 record.documentId != record.contentHash)) {
-                return Error{ErrorCode::InvalidData,
-                             "metadata record identity does not match logical key"};
-            }
-            if (contentExists_) {
-                auto exists = contentExists_(identity);
-                if (!exists) {
-                    return exists.error();
-                }
-                if (!exists.value()) {
-                    deferredKeys_.push_back(key);
-                    continue;
-                }
-            }
-            items.push_back(toInsert(record));
+                return {};
+            });
+        if (!deletes) {
+            return deletes.error();
         }
 
         std::size_t applied = 0;
@@ -158,42 +163,68 @@ public:
             }
             applied += deleted.value();
         }
-        for (auto& item : items) {
-            auto existing = repository_.getDocumentByHash(item.info.sha256Hash);
-            if (!existing) {
-                return existing.error();
-            }
-            if (!existing.value()) {
-                std::vector<BatchDocumentInsert> insert{item};
-                auto result = repository_.batchInsertDocumentsWithMetadata(insert);
-                if (!result) {
-                    return result.error();
+        auto values = sync_.visitAdapterWinners(
+            view.value(), prefix, [&](const auto& key, const auto& envelope) -> Result<void> {
+                if (envelope.isTombstone()) {
+                    return {};
+                }
+                auto record = readDocument(view.value(), key);
+                if (!record) {
+                    return record.error();
+                }
+                const auto& identity = record.value().contentHash.empty()
+                                           ? record.value().documentId
+                                           : record.value().contentHash;
+                if (contentExists_) {
+                    auto exists = contentExists_(identity);
+                    if (!exists) {
+                        return exists.error();
+                    }
+                    if (!exists.value()) {
+                        deferredKeys_.push_back(key);
+                        return {};
+                    }
+                }
+                auto item = toInsert(record.value());
+                auto existing = repository_.getDocumentByHash(item.info.sha256Hash);
+                if (!existing) {
+                    return existing.error();
+                }
+                if (!existing.value()) {
+                    std::vector<BatchDocumentInsert> insert{item};
+                    auto result = repository_.batchInsertDocumentsWithMetadata(insert);
+                    if (!result) {
+                        return result.error();
+                    }
+                    ++applied;
+                    if (appliedObserver_) {
+                        appliedObserver_(item.info);
+                    }
+                    return {};
+                }
+
+                item.info.id = existing.value()->id;
+                auto currentMetadata = repository_.getAllMetadata(item.info.id);
+                if (!currentMetadata) {
+                    return currentMetadata.error();
+                }
+                currentMetadata.value().erase("yams:kg_enrichment");
+                if (documentMatches(*existing.value(), item.info) &&
+                    metadataMatches(currentMetadata.value(), item.tags)) {
+                    return {};
+                }
+
+                // The selected winner is durable in memory-sync; a failed atomic replacement is
+                // retryable on the next apply without exposing a mixed document/metadata winner.
+                if (auto replaced = repository_.replaceDocumentAndMetadata(item.info, item.tags);
+                    !replaced) {
+                    return replaced.error();
                 }
                 ++applied;
-                if (appliedObserver_) {
-                    appliedObserver_(item.info);
-                }
-                continue;
-            }
-
-            item.info.id = existing.value()->id;
-            auto currentMetadata = repository_.getAllMetadata(item.info.id);
-            if (!currentMetadata) {
-                return currentMetadata.error();
-            }
-            currentMetadata.value().erase("yams:kg_enrichment");
-            if (documentMatches(*existing.value(), item.info) &&
-                metadataMatches(currentMetadata.value(), item.tags)) {
-                continue;
-            }
-
-            // The selected winner is durable in memory-sync; a failed atomic replacement is
-            // retryable on the next apply without exposing a mixed document/metadata winner.
-            if (auto replaced = repository_.replaceDocumentAndMetadata(item.info, item.tags);
-                !replaced) {
-                return replaced.error();
-            }
-            ++applied;
+                return {};
+            });
+        if (!values) {
+            return values.error();
         }
         return applied;
     }
@@ -202,6 +233,30 @@ public:
     const std::vector<std::string>& deferredKeys() const noexcept { return deferredKeys_; }
 
 private:
+    Result<memory_sync::MetadataDocumentRecord>
+    readDocument(const memory_sync::MemorySyncService::AdapterView& view, std::string_view key) {
+        auto payload = sync_.readAdapterPayload(view, key);
+        if (!payload) {
+            return payload.error();
+        }
+        memory_sync::MetadataDocumentRecord record;
+        try {
+            const std::string_view text(reinterpret_cast<const char*>(payload.value().data()),
+                                        payload.value().size());
+            record = nlohmann::json::parse(text).get<memory_sync::MetadataDocumentRecord>();
+        } catch (const std::exception& error) {
+            return Error{ErrorCode::InvalidData, error.what()};
+        }
+        const auto& identity = record.contentHash.empty() ? record.documentId : record.contentHash;
+        if (!memory_sync::isSha256Digest(identity) || documentKey(identity) != key ||
+            (!record.documentId.empty() && !record.contentHash.empty() &&
+             record.documentId != record.contentHash)) {
+            return Error{ErrorCode::InvalidData,
+                         "metadata record identity does not match logical key"};
+        }
+        return record;
+    }
+
     static bool documentMatches(const DocumentInfo& lhs, const DocumentInfo& rhs) {
         return lhs.filePath == rhs.filePath && lhs.fileName == rhs.fileName &&
                lhs.fileExtension == rhs.fileExtension && lhs.fileSize == rhs.fileSize &&

@@ -94,6 +94,21 @@ parseTopologyVectorPolicy(std::string raw) {
     if (raw == "shadow" || raw == "observe" || raw == "calibrate") {
         return Policy::Shadow;
     }
+    if (raw == "route_only" || raw == "routed_only" || raw == "routeonly") {
+        return Policy::RouteOnly;
+    }
+    return std::nullopt;
+}
+std::optional<yams::search::SearchEngineConfig::TopologyBqRotation>
+parseTopologyBqRotation(std::string raw) {
+    raw = normalizeTopologyToken(std::move(raw));
+    using Rotation = yams::search::SearchEngineConfig::TopologyBqRotation;
+    if (raw == "none") {
+        return Rotation::None;
+    }
+    if (raw == "fwht") {
+        return Rotation::Fwht;
+    }
     return std::nullopt;
 }
 } // namespace
@@ -470,6 +485,15 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                              *tp.vectorPolicy);
             }
         }
+        if (tp.allowUncertifiedRouteOnly) {
+            opts.config.allowUncertifiedRouteOnly = *tp.allowUncertifiedRouteOnly;
+        }
+        if (opts.config.topologyVectorPolicy ==
+                yams::search::SearchEngineConfig::TopologyVectorPolicy::RouteOnly &&
+            !opts.config.allowUncertifiedRouteOnly) {
+            spdlog::warn("search.topology.vector_policy=route_only without "
+                         "search.evaluation.allow_uncertified_routes=true runs as shadow");
+        }
         if (tp.enableWeakQueryRouting && !tp.mode) {
             opts.config.topologyRoutingMode =
                 yams::search::resolveTopologyRoutingMode(opts.config, tp.enableWeakQueryRouting);
@@ -495,6 +519,15 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.bqPrefixDimension) {
             opts.config.topologyRoutingBqPrefixDimension = *tp.bqPrefixDimension;
         }
+        if (tp.bqRotation) {
+            if (auto rotation = parseTopologyBqRotation(*tp.bqRotation); rotation.has_value()) {
+                opts.config.topologyRoutingBqRotation = *rotation;
+            } else {
+                spdlog::warn("Ignoring unknown search.topology.bq_rotation='{}': expected none or "
+                             "fwht",
+                             *tp.bqRotation);
+            }
+        }
         if (tp.graphCommunitySource) {
             if (*tp.graphCommunitySource == "topology_snapshot" ||
                 *tp.graphCommunitySource == "topology") {
@@ -518,6 +551,15 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
         if (tp.maxDocs) {
             opts.config.topologyMaxDocs = *tp.maxDocs;
+        }
+        if (tp.roadHops) {
+            opts.config.topologyRoadHops = *tp.roadHops;
+        }
+        if (tp.roadBeamWidth) {
+            opts.config.topologyRoadBeamWidth = std::max<std::size_t>(1, *tp.roadBeamWidth);
+        }
+        if (tp.roadWalkWindow) {
+            opts.config.topologyRoadWalkWindow = *tp.roadWalkWindow;
         }
         if (tp.expansionOutputLimit) {
             opts.config.topologyExpansionOutputLimit = *tp.expansionOutputLimit;
@@ -688,6 +730,24 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                         }
 
                         result = RetT(newEngine);
+                        // Build the topology route index now, off the query path, so the first
+                        // routed query does not. Posted separately: readiness does not wait.
+                        boost::asio::post(workerExecutor, [newEngine]() {
+                            try {
+                                if (auto warmed = newEngine->prewarmTopologyRouting(); !warmed) {
+                                    spdlog::debug("[SearchEngineManager] topology route warm-up "
+                                                  "failed: {}",
+                                                  warmed.error().message);
+                                }
+                            } catch (const std::exception& e) {
+                                spdlog::debug("[SearchEngineManager] topology route warm-up "
+                                              "threw: {}",
+                                              e.what());
+                            } catch (...) {
+                                spdlog::debug("[SearchEngineManager] topology route warm-up "
+                                              "threw (unknown)");
+                            }
+                        });
                     } else {
                         try {
                             SearchEngineRebuildFailedEvent ev;

@@ -272,8 +272,15 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
                         std::string_view callerTag, std::source_location callerLocation) {
     YAMS_ZONE_SCOPED_N("MetadataPool::acquire");
     const auto acquireRequestStart = std::chrono::steady_clock::now();
-    const std::string effectiveTag = effectiveCallerTag(callerTag, callerLocation);
-    std::unique_lock<std::mutex> lock(mutex_);
+    const std::string effectiveTag = [&] {
+        YAMS_ZONE_SCOPED_N("MetadataPool::callerTag");
+        return effectiveCallerTag(callerTag, callerLocation);
+    }();
+    std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+    {
+        YAMS_ZONE_SCOPED_N("MetadataPool::lock");
+        lock.lock();
+    }
 
     if (shutdown_) {
         return Error{ErrorCode::InvalidState, "Pool is shut down"};
@@ -404,11 +411,22 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
             }
 
             waitingGuard.activate();
-            if (!cv_.wait_until(lock, deadline, [this, effectiveMaxConnections] {
+            bool woke = false;
+            {
+                YAMS_ZONE_SCOPED_N("MetadataPool::wait");
+#if defined(TRACY_ENABLE)
+                // Name the wait by pool and caller so a profile says who queues for which pool.
+                const std::string waitZoneName =
+                    "MetadataPool::wait[" + std::string(pool_role(config_)) + "] " + effectiveTag;
+                YAMS_ZONE_TRANSIENT_N(callerWaitZone, waitZoneName.c_str());
+#endif
+                woke = cv_.wait_until(lock, deadline, [this, effectiveMaxConnections] {
                     return !available_.empty() ||
                            totalConnections_ + pendingCreations_ < effectiveMaxConnections ||
                            shutdown_ || acquireInterrupted_.load(std::memory_order_acquire);
-                })) {
+                });
+            }
+            if (!woke) {
                 waitingGuard.markTimeout();
                 waitingGuard.finish();
                 failedAcquisitions_++;
@@ -962,6 +980,7 @@ void ConnectionPool::refreshAll() {
 }
 
 bool ConnectionPool::isConnectionValid(const Database& db) const {
+    YAMS_ZONE_SCOPED_N("MetadataPool::validate");
     if (!db.isOpen()) {
         return false;
     }

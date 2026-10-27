@@ -470,7 +470,7 @@ TEST_CASE("WorkCoordinator load handling", "[daemon][work_coordinator][load]") {
         for (int i = 0; i < heavy_load; ++i) {
             boost::asio::post(coordinator.getExecutor(), [&]() {
                 // Simulate light work
-                volatile int x = 0;
+                [[maybe_unused]] volatile int x = 0;
                 for (int j = 0; j < 100; ++j) {
                     x += j;
                 }

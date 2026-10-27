@@ -4,6 +4,7 @@
 #define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 // pi-lens-ignore: fatal error
 #include <yams/daemon/p2p/p2p_manager.h>
+#include <yams/profiling.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
 // pi-lens-ignore: fatal error
@@ -619,6 +620,7 @@ private:
 #if YAMS_DAEMON_TEST_HOOKS_ENABLED
                 invokeReconnectLoopHook();
 #endif
+                YAMS_ZONE_SCOPED_N("p2p.reconnect.cycle");
                 auto records = registry_->listPeers();
                 if (records) {
                     for (const auto& peer : records.value()) {

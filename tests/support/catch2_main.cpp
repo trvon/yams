@@ -1,8 +1,25 @@
 #include <catch2/catch_session.hpp>
+#include <catch2/catch_test_case_info.hpp>
+#include <catch2/reporters/catch_reporter_event_listener.hpp>
+#include <catch2/reporters/catch_reporter_registrars.hpp>
+
+#include "test_rusage.hpp"
+
+#include <algorithm>
+#include <filesystem>
+#include <system_error>
+#include <cstdio>
+#include <cstdlib>
 
 #include <string>
 #include <string_view>
 #include <vector>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 #if defined(_MSC_VER)
 #include <crtdbg.h>
@@ -75,12 +92,105 @@ std::vector<std::string> normalizeArgs(int argc, char* argv[]) {
     return args;
 }
 
+// Per-test-case CPU and run-peak RSS accounting for every Catch2 binary. Lives in this TU so the
+// static-library linker cannot drop the registrar. Summary goes to stderr; YAMS_TEST_RUSAGE=1 adds
+// one line per case (test-only knob).
+class ResourceAccountingListener final : public Catch::EventListenerBase {
+public:
+    using Catch::EventListenerBase::EventListenerBase;
+
+    void testRunStarting(const Catch::TestRunInfo&) override {
+        const char* env = std::getenv("YAMS_TEST_RUSAGE");
+        perCase_ = env && env[0] == '1';
+        cases_.clear();
+    }
+
+    void testCaseStarting(const Catch::TestCaseInfo&) override {
+        start_ = yams::test::rusage::sampleSelf();
+    }
+
+    void testCaseEnded(const Catch::TestCaseStats& stats) override {
+        const auto end = yams::test::rusage::sampleSelf();
+        const auto cpu = yams::test::rusage::cpuDeltaMicros(start_, end);
+        cases_.push_back({stats.testInfo->name, cpu});
+        if (perCase_) {
+            std::fprintf(stderr, "[rusage] case: %s cpu=%llums peak_rss=%lluMB\n",
+                         yams::test::rusage::clampName(stats.testInfo->name).c_str(),
+                         static_cast<unsigned long long>(cpu / 1000ULL),
+                         static_cast<unsigned long long>(end.peakRssBytes / (1024ULL * 1024ULL)));
+        }
+    }
+
+    void testRunEnded(const Catch::TestRunStats&) override {
+        if (cases_.empty()) {
+            return;
+        }
+        const auto top = yams::test::rusage::topByCpu(cases_, 5);
+        std::fprintf(
+            stderr, "%s\n%s\n", yams::test::rusage::formatTopCpu(top).c_str(),
+            yams::test::rusage::formatPeakRss(yams::test::rusage::sampleSelf().peakRssBytes)
+                .c_str());
+    }
+
+private:
+    bool perCase_{false};
+    yams::test::rusage::Sample start_{};
+    std::vector<yams::test::rusage::CaseCost> cases_;
+};
+
+CATCH_REGISTER_LISTENER(ResourceAccountingListener)
+
 } // namespace
+
+// Every test process gets its own session-state directory. SessionService reads the current
+// session (and its watch directories) from XDG_STATE_HOME, so without this a developer's or
+// build host's live session leaks into any test that boots a ServiceManager: the session watcher
+// then walks the pinned trees during init and the test times out. A caller that already set
+// XDG_STATE_HOME keeps it.
+class IsolatedStateHome {
+public:
+    IsolatedStateHome() {
+        if (const char* existing = std::getenv("XDG_STATE_HOME"); existing && existing[0] != '\0') {
+            return;
+        }
+        std::error_code ec;
+        auto base = std::filesystem::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+#if defined(_WIN32)
+        const auto pid = static_cast<unsigned long long>(::_getpid());
+#else
+        const auto pid = static_cast<unsigned long long>(::getpid());
+#endif
+        dir_ = base / ("yams-test-state-" + std::to_string(pid));
+        std::filesystem::create_directories(dir_, ec);
+        if (ec) {
+            dir_.clear();
+            return;
+        }
+#if defined(_WIN32)
+        _putenv_s("XDG_STATE_HOME", dir_.string().c_str());
+#else
+        ::setenv("XDG_STATE_HOME", dir_.c_str(), 1);
+#endif
+    }
+    ~IsolatedStateHome() {
+        if (!dir_.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(dir_, ec);
+        }
+    }
+
+private:
+    std::filesystem::path dir_;
+};
 
 int main(int argc, char* argv[]) {
 #if defined(_MSC_VER)
     reportCrtFailuresToStderr();
 #endif
+    IsolatedStateHome isolatedState;
     auto args = normalizeArgs(argc, argv);
     std::vector<char*> normalizedArgv;
     normalizedArgv.reserve(args.size());

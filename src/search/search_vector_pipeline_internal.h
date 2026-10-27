@@ -3,8 +3,10 @@
 #include <yams/core/types.h>
 #include <yams/search/search_engine_config.h>
 #include <yams/search/search_models.h>
+#include <yams/search/topology_routing_session.h>
 #include <yams/vector/vector_types.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -26,6 +28,21 @@ namespace yams::search::detail {
 
 void mergeVectorSearchDiagnostics(vector::VectorSearchDiagnostics& total,
                                   const vector::VectorSearchDiagnostics& sample);
+
+/// Check observed routed-vector work against the declared budget. Unavailable when the budget is
+/// not fully declared or the backend did not observe every counter.
+[[nodiscard]] TopologyProofObligationStatus
+evaluateTopologyRouteWork(const vector::VectorSearchDiagnostics& diagnostics,
+                          const SearchEngineConfig::TopologyRouteWorkBudget& budget) noexcept;
+
+/// Snapshot routed-vector work from backend diagnostics for the route certificate.
+[[nodiscard]] TopologyRouteWorkObservation
+observeTopologyRouteWork(const vector::VectorSearchDiagnostics& diagnostics) noexcept;
+
+/// Round-robin `limit` result slots across route groups, never exceeding a group's membership.
+[[nodiscard]] std::vector<std::size_t>
+allocateBalancedRouteQuotas(const std::vector<std::unordered_set<std::string>>& routeGroups,
+                            std::size_t limit);
 
 Result<std::vector<ComponentResult>>
 queryVectorIndexPipeline(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,

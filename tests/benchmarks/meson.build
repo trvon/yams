@@ -2,48 +2,6 @@
 # tests; CI invokes them directly to generate JSON/MD reports.
 
 fs = import('fs')
-# Tracy profiling support (optional, off unless enable-profiling is set)
-enable_profiling = get_option('enable-profiling')
-enable_rocprofiler_tracy = get_option('enable-rocprofiler-tracy')
-tracy_args = []
-tracy_deps = []
-if enable_profiling
-  tracy_dep = dependency('tracy', modules: ['Tracy::TracyClient'], required: true, static: true)
-  tracy_args += ['-DTRACY_ENABLE', '-DTRACY_ON_DEMAND']
-  tracy_deps += tracy_dep
-  rocm_hint = '/opt/rocm'
-  rocm_present = fs.exists(rocm_hint)
-  want_rocprofiler = (not enable_rocprofiler_tracy.disabled()) and (enable_rocprofiler_tracy.enabled() or (enable_rocprofiler_tracy.auto() and rocm_present))
-  if want_rocprofiler
-    rocprofiler_dep = dependency(
-      'rocprofiler-sdk',
-      method: 'cmake',
-      cmake_module_path: [join_paths(rocm_hint, 'lib', 'cmake'), join_paths(rocm_hint, 'lib64', 'cmake')],
-      required: enable_rocprofiler_tracy.enabled(),
-    )
-    if rocprofiler_dep.found()
-      tracy_deps += rocprofiler_dep
-    elif enable_rocprofiler_tracy.enabled()
-      error('enable-rocprofiler-tracy=enabled but rocprofiler-sdk was not found')
-    else
-      warning('Tracy present but rocprofiler-sdk missing; disabling Tracy ROCm hooks for benchmarks')
-      tracy_deps = []
-      tracy_args = []
-    endif
-  endif
-  if tracy_deps.length() > 0
-    cpp = meson.get_compiler('cpp')
-    tracy_link_ok = cpp.links('int main(){ return 0; }', dependencies: tracy_deps, name: 'tracy-bench-link-check', required: false)
-    if tracy_link_ok
-      message('Tracy profiling enabled for benchmarks')
-    else
-      warning('Tracy dependency failed to link; disabling Tracy for benchmarks')
-      tracy_deps = []
-      tracy_args = []
-    endif
-  endif
-endif
-
 # Benchmarks compile with -DYAMS_TESTING; link TuneAdvisor's testing bodies first (see
 # tests/meson.build).
 tune_advisor_testing_link = [dependency('yams_tune_advisor_testing')]
@@ -58,22 +16,22 @@ endif
 
 api_bench = executable('yams_api_benchmarks', files('api_benchmarks.cpp'),
   include_directories: incs,
-  dependencies: [test_deps, dependency('yams_benchmarks')] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  dependencies: [test_deps, dependency('yams_benchmarks')] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
 search_bench = executable('yams_search_benchmarks', files('search_benchmarks.cpp'),
   include_directories: incs,
-  dependencies: [test_deps, dependency('yams_benchmarks')] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  dependencies: [test_deps, dependency('yams_benchmarks')] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
 core_bench = executable('yams_core_benchmarks', files('core_benchmarks.cpp'),
   include_directories: incs,
-  dependencies: [test_deps, dependency('yams_benchmarks')] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  dependencies: [test_deps, dependency('yams_benchmarks')] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
@@ -82,16 +40,16 @@ topology_build_bench = executable('topology_build_bench', files('topology_build_
   dependencies: tune_advisor_testing_link + [
     dependency('yams_topology'),
     dependency('nlohmann_json'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  ] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 alias_target('bench_topology_build', topology_build_bench)
 
 grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
   include_directories: incs,
-  dependencies: [test_deps, dependency('yams_benchmarks')] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  dependencies: [test_deps, dependency('yams_benchmarks')] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
@@ -101,8 +59,8 @@ vector_backend_engine_compare = executable('vector_backend_engine_compare',
   dependencies: tune_advisor_testing_link + [
     dependency('yams_vector'),
     dependency('spdlog'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  ] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
@@ -114,8 +72,8 @@ vector_memory_scaling_bench = executable('vector_memory_scaling_bench',
   dependencies: tune_advisor_testing_link + [
     dependency('yams_vector'),
     dependency('spdlog'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  ] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
@@ -127,8 +85,8 @@ vector_persistence_warm_start_bench = executable('vector_persistence_warm_start_
   dependencies: tune_advisor_testing_link + [
     dependency('yams_vector'),
     dependency('spdlog'),
-  ] + tracy_deps,
-  cpp_args: tracy_args,
+  ] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 
@@ -140,13 +98,13 @@ if benchmark_dep.found()
     test_deps,
     dependency('yams_benchmarks'),
     benchmark_dep,
-  ] + tracy_deps
+  ] + yams_tracy_deps
 
   large_scale_ingestion_bench = executable('yams_large_scale_ingestion_bench',
     files('large_scale_ingestion_bench.cpp'),
     include_directories: incs,
     dependencies: large_scale_ingestion_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -156,13 +114,13 @@ else
 endif
 
 if benchmark_dep.found()
-  storage_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_dep] + tracy_deps
+  storage_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_dep] + yams_tracy_deps
 
   storage_bench = executable('yams_storage_throughput_benchmarks',
     files('storage_throughput_bench.cpp'),
     include_directories: incs,
     dependencies: storage_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 else
@@ -170,13 +128,13 @@ else
 endif
 
 if benchmark_dep.found()
-  retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps + [benchmark_dep]
+  retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + yams_tracy_deps + [benchmark_dep]
 
   retrieval_bench = executable('yams_retrieval_service_benchmarks',
     files('retrieval_service_benchmarks.cpp'),
     include_directories: incs,
     dependencies: retrieval_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 else
@@ -184,12 +142,12 @@ else
 endif
 
 if benchmark_dep.found()
-  metadata_query_bench_deps = tune_advisor_testing_link + [dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog')] + tracy_deps + [benchmark_dep]
+  metadata_query_bench_deps = tune_advisor_testing_link + [dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog')] + yams_tracy_deps + [benchmark_dep]
 
   metadata_query_bench = executable('metadata_path_query_bench', files('metadata_path_query_bench.cpp'),
     include_directories: incs,
     dependencies: metadata_query_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -197,7 +155,7 @@ if benchmark_dep.found()
   tree_list_filter_bench = executable('tree_list_filter_bench', files('tree_list_filter_bench.cpp'),
     include_directories: incs,
     dependencies: metadata_query_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -211,7 +169,7 @@ if benchmark_dep.found()
     dependency('yams_daemon'),
     dependency('yams_app_services'),
     dependency('spdlog')
-  ] + tracy_deps + [benchmark_dep]
+  ] + yams_tracy_deps + [benchmark_dep]
 
   # RAG retrieval quality benchmark
   retrieval_quality_bench_deps = search_bench_deps + [test_deps, dependency('libcurl'), dependency('nlohmann_json')]
@@ -227,7 +185,7 @@ if benchmark_dep.found()
     ),
     include_directories: incs,
     dependencies: retrieval_quality_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     build_rpath: ':'.join(retrieval_quality_bench_rpath),
     install: false,
   )
@@ -243,7 +201,7 @@ if benchmark_dep.found()
     ),
     include_directories: incs,
     dependencies: search_bench_deps + [test_deps, dependency('nlohmann_json')],
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -252,8 +210,8 @@ if benchmark_dep.found()
   entity_extraction_bench = executable('entity_extraction_bench',
     files('entity_extraction_bench.cpp'),
     include_directories: incs,
-    dependencies: [benchmark_main_dep, benchmark_dep, dependency('spdlog')] + tracy_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    dependencies: [benchmark_main_dep, benchmark_dep, dependency('spdlog')] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -273,8 +231,8 @@ if benchmark_dep.found()
       dependency('spdlog'),
       benchmark_main_dep,
       benchmark_dep,
-    ] + tracy_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    ] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -291,8 +249,8 @@ if benchmark_dep.found()
       dependency('spdlog'),
       benchmark_main_dep,
       benchmark_dep,
-    ] + tracy_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    ] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -300,6 +258,33 @@ if benchmark_dep.found()
 
 else
   message('Google Benchmark not found; skipping service and metadata benchmark executables')
+endif
+
+# Isolated builder publication vs asynchronous Simeon lexical readiness. This
+# target provides its own main and does not depend on optional Google Benchmark.
+# getrusage is needed for CPU/RSS metrics; the Windows lane has no equivalent here.
+if host_machine.system() != 'windows'
+  search_build_phase_bench = executable('search_build_phase_bench',
+    files('search/search_build_phase_bench.cpp'),
+    include_directories: incs,
+    dependencies: tune_advisor_testing_link + [
+      dependency('yams_metadata'),
+      dependency('yams_search'),
+      dependency('yams_vector'),
+      dependency('yams_daemon'),
+      dependency('spdlog'),
+      dependency('nlohmann_json'),
+    ] + yams_tracy_deps,
+    cpp_args: yams_tracy_args,
+    install: false,
+  )
+  alias_target('bench_search_build_phase', search_build_phase_bench)
+  test('search_build_phase_smoke', search_build_phase_bench,
+    args: ['--docs', '5', '--deadline-ms', '15000'],
+    suite: ['bench', 'search-build'],
+    is_parallel: false,
+    timeout: 60,
+  )
 endif
 
 # PBI-004: End-to-end ingestion pipeline benchmark. It provides its own main
@@ -316,8 +301,8 @@ ingestion_e2e_bench = executable('ingestion_e2e_bench',
     dependency('yams_app_services'),
     dependency('spdlog'),
     dependency('nlohmann_json'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  ] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
@@ -331,8 +316,8 @@ repair_ability_bench = executable('repair_ability_bench',
     test_deps,
     dependency('nlohmann_json'),
     dependency('spdlog'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  ] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 alias_target('bench_repair_ability', repair_ability_bench)
@@ -349,8 +334,8 @@ ingestion_bench = executable('ingestion_throughput_bench', files('ingestion_thro
     dependency('yams_storage_engine'),
     dependency('nlohmann_json'),
     dependency('spdlog'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  ] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
@@ -364,8 +349,8 @@ tree_diff_bench = executable('tree_diff_benchmarks', files('tree_diff_benchmarks
     dependency('yams_metadata'),
     dependency('yams_storage_engine'),
     dependency('nlohmann_json'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  ] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
@@ -379,8 +364,8 @@ tree_build_bench = executable('tree_build_bench', files('tree_build_bench.cpp'),
     dependency('yams_storage_engine'),
     dependency('nlohmann_json'),
     dependency('spdlog'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  ] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
@@ -393,8 +378,8 @@ ipc_stream_bench = executable('ipc_stream_bench', files('ipc_streaming_bench.cpp
     dependency('yams_daemon'),
     dependency('nlohmann_json'),
     dependency('tl-expected'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  ] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
@@ -411,8 +396,8 @@ if _catch2_with_main_dep_bench.found()
       dependency('yams_benchmarks'),
       dependency('yams_daemon'),
       dependency('nlohmann_json'),
-    ] + tracy_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    ] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -432,8 +417,8 @@ if catch2_with_main_dep.found()
       test_deps,
       dependency('nlohmann_json'),
       dependency('spdlog'),
-    ] + tracy_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    ] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -460,8 +445,8 @@ if catch2_with_main_dep.found()
       test_deps,
       dependency('nlohmann_json'),
       dependency('spdlog'),
-    ] + tracy_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    ] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
   alias_target('bench_simeon_lexical_score', simeon_lexical_score_bench)
@@ -483,8 +468,8 @@ if catch2_with_main_dep.found()
       test_deps,
       dependency('nlohmann_json'),
       dependency('spdlog'),
-    ] + tracy_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    ] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -515,8 +500,8 @@ if catch2_with_main_dep.found()
       dependency('nlohmann_json'),
       dependency('yams_vector'),
       dependency('spdlog'),
-    ] + tracy_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    ] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -545,8 +530,8 @@ if catch2_with_main_dep.found()
       test_deps,
       dependency('nlohmann_json'),
       dependency('spdlog'),
-    ] + tracy_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    ] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -561,8 +546,8 @@ if catch2_with_main_dep.found()
       test_deps,
       dependency('nlohmann_json'),
       dependency('spdlog'),
-    ] + tracy_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    ] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
   alias_target('bench_single_client_pipeline', single_client_pipeline_bench)
@@ -582,7 +567,7 @@ if catch2_with_main_dep.found()
 
   test('multi_client_ingestion_bench', multi_client_ingestion_bench,
        args: ['--allow-running-no-tests'],
-       suite: ['bench', 'multi-client'],
+       suite: ['bench', 'multi-client', 'concurrency'],
        is_parallel: false,
        timeout: 600,
        env: multi_client_bench_env)
@@ -599,8 +584,8 @@ if catch2_with_main_dep.found()
       catch2_with_main_dep,
       dependency('yams_topology'),
       dependency('nlohmann_json'),
-    ] + tracy_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    ] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
 
@@ -615,6 +600,40 @@ if catch2_with_main_dep.found()
        })
 
   alias_target('bench_topology_ablation', topology_ablation_bench)
+
+  # Memory-sync listing cost: one scenario per process, driven by
+  # scripts/run_memory_sync_listing_ab.py. Not registered as a Meson test.
+  memory_sync_listing_bench = executable('memory_sync_listing_bench',
+    files('memory_sync_listing_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      dependency('nlohmann_json'),
+      dependency('yams_storage_engine'),
+      dependency('yams_crypto'),
+      dependency('yams_memory_sync'),
+      dependency('yams_core'),
+    ],
+    cpp_args: ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  alias_target('bench_memory_sync_listing', memory_sync_listing_bench)
+
+  # Direct-quarantine staging cost; run explicitly, never in the default test lane.
+  memory_sync_quarantine_bench = executable('memory_sync_quarantine_bench',
+    files('memory_sync_quarantine_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      dependency('nlohmann_json'),
+      dependency('yams_storage_engine'),
+      dependency('yams_crypto'),
+      dependency('yams_memory_sync'),
+      dependency('yams_core'),
+    ],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
 else
   message('Catch2 not found, skipping hnsw_entity_search_bench and multi_client_ingestion_bench')
 endif

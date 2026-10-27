@@ -96,7 +96,7 @@ OracleUrl splitOracleUrl(const std::string& url) {
 // Replicates the SigV4 string-to-sign with canonicalURI = the wire path exactly as the caller
 // supplied it (already RFC3986-encoded). This is the MinIO/AWS-SDK behavior the signer must match.
 std::string expectedSignature(const std::string& method, const std::string& url,
-                              std::string_view payloadHex, const std::string& accessKey,
+                              std::string_view payloadHex, const std::string& /*accessKey*/,
                               const std::string& secretKey, const std::string& region,
                               const std::string& amzDate) {
     const std::string ymd = amzDate.substr(0, 8);

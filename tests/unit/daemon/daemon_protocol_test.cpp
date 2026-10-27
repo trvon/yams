@@ -10,6 +10,7 @@
 #include <random>
 #include <thread>
 #include <type_traits>
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <yams/common/utf8_utils.h>
@@ -1569,6 +1570,82 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
         checkSanitizedField("GetResponse.name", decodedResponse->name, resp.name);
         checkSanitizedField("GetResponse.path", decodedResponse->path, resp.path);
         REQUIRE_FALSE(decodedResponse->hasContent);
+    }
+}
+
+TEST_CASE("GetRequest: graph depth and limit survive the wire", "[daemon][protocol][graph]") {
+    // #280 follow-up: `yams graph --limit` needs a GetRequest field (graph_limit = 27).
+    GetRequest req;
+    req.name = "/corpus/simeon/include/simeon/bm25.hpp";
+    req.byName = true;
+    req.metadataOnly = true;
+    req.showGraph = true;
+    req.graphDepth = 2;
+    req.graphLimit = 3;
+
+    auto encoded = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 26));
+    REQUIRE(encoded);
+    auto decoded = ProtoSerializer::decode_payload(encoded.value());
+    REQUIRE(decoded);
+
+    auto* out = std::get_if<GetRequest>(&std::get<Request>(decoded.value().payload));
+    REQUIRE(out != nullptr);
+    CHECK(out->showGraph);
+    CHECK(out->graphDepth == 2);
+    CHECK(out->graphLimit == 3);
+
+    GetRequest unset;
+    unset.hash = "12be4dc5";
+    auto unsetEncoded = ProtoSerializer::encode_payload(makeMessageWith(Request{unset}, 27));
+    REQUIRE(unsetEncoded);
+    auto unsetDecoded = ProtoSerializer::decode_payload(unsetEncoded.value());
+    REQUIRE(unsetDecoded);
+    auto* unsetOut = std::get_if<GetRequest>(&std::get<Request>(unsetDecoded.value().payload));
+    REQUIRE(unsetOut != nullptr);
+    CHECK(unsetOut->graphLimit == 0);
+}
+
+TEST_CASE("GetResponse: document graph fields survive the wire", "[daemon][protocol][graph]") {
+    // Issue #280: `yams graph <hash>` / `--name` reported graphEnabled=false with no related
+    // documents because the proto binding dropped the graph fields and the file name.
+    GetResponse resp;
+    resp.hash = "12be4dc5f2d4a975852a09acce9f1ab303ee8138c47c13283f094001840ca86c";
+    resp.name = "bm25.hpp";
+    resp.fileName = "bm25.hpp";
+    resp.path = "/corpus/simeon/include/simeon/bm25.hpp";
+    resp.hasContent = false;
+    resp.graphEnabled = true;
+    resp.related.push_back(RelatedDocumentEntry{.hash = "559cd590",
+                                                .path = "/corpus/simeon/include/query_router.hpp",
+                                                .name = "query_router.hpp",
+                                                .relationship = "semantic_neighbor",
+                                                .distance = 1,
+                                                .relevanceScore = 0.85});
+    resp.related.push_back(RelatedDocumentEntry{.hash = "fd6d8e75",
+                                                .path = "/corpus/simeon/src/tokenizer.cpp",
+                                                .name = "tokenizer.cpp",
+                                                .relationship = "semantic_neighbor",
+                                                .distance = 2,
+                                                .relevanceScore = 0.0});
+
+    auto encoded = ProtoSerializer::encode_payload(makeMessageWith(Response{resp}, 25));
+    REQUIRE(encoded);
+    auto decoded = ProtoSerializer::decode_payload(encoded.value());
+    REQUIRE(decoded);
+
+    auto* out = std::get_if<GetResponse>(&std::get<Response>(decoded.value().payload));
+    REQUIRE(out != nullptr);
+    CHECK(out->hash == resp.hash);
+    CHECK(out->fileName == resp.fileName);
+    CHECK(out->graphEnabled);
+    REQUIRE(out->related.size() == resp.related.size());
+    for (std::size_t i = 0; i < resp.related.size(); ++i) {
+        CHECK(out->related[i].hash == resp.related[i].hash);
+        CHECK(out->related[i].path == resp.related[i].path);
+        CHECK(out->related[i].name == resp.related[i].name);
+        CHECK(out->related[i].relationship == resp.related[i].relationship);
+        CHECK(out->related[i].distance == resp.related[i].distance);
+        CHECK(out->related[i].relevanceScore == Catch::Approx(resp.related[i].relevanceScore));
     }
 }
 

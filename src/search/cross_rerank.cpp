@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <limits>
 #include <cmath>
 #include <string_view>
 #include <unordered_map>
@@ -144,6 +145,23 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
     const double blend = std::clamp(static_cast<double>(config.rerankBlendWeight), 0.0, 1.0);
     outcome.blendWeight = blend;
 
+    // Map the normalized window score back onto the window's original score range, kept strictly
+    // above every tail score for later raw-score sorts. Lexical tie-breaking can still reorder
+    // results within its configured epsilon bucket.
+    double mappedLow = origMin;
+    if (results.size() > window) {
+        const double tailMax =
+            std::max_element(
+                results.begin() + static_cast<std::ptrdiff_t>(window), results.end(),
+                [](const SearchResult& a, const SearchResult& b) { return a.score < b.score; })
+                ->score;
+        if (tailMax >= mappedLow) {
+            mappedLow = std::nextafter(tailMax, std::numeric_limits<double>::infinity());
+        }
+    }
+    // No usable original spread (flat window, or the tail reaches it): use a unit span.
+    const double mappedSpan = origMax > mappedLow ? origMax - mappedLow : 1.0;
+
     outcome.components.reserve(window);
     outcome.docTraces.reserve(window);
     for (size_t i = 0; i < window; ++i) {
@@ -153,9 +171,10 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
             originalRange > 0.0
                 ? std::clamp((originalScores[i] - origMin) / originalRange, 0.0, 1.0)
                 : 1.0;
-        const double finalScore = config.rerankReplaceScores
-                                      ? rerankNorm
-                                      : blend * rerankNorm + (1.0 - blend) * originalNorm;
+        const double finalNorm = config.rerankReplaceScores
+                                     ? rerankNorm
+                                     : blend * rerankNorm + (1.0 - blend) * originalNorm;
+        const double finalScore = mappedLow + finalNorm * mappedSpan;
 
         outcome.docTraces.push_back(CrossRerankDocTrace{
             .filePath = results[i].document.filePath,

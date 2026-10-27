@@ -1069,21 +1069,23 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             }
         } job_guard{std::move(job_cleanup)};
 
-        // Track health-check/ping requests so TuningManager can exclude them from idle detection.
-        // Increment counter when a liveness request is identified; RAII guard decrements on exit.
         const bool is_health_check = std::holds_alternative<PingRequest>(request) ||
                                      std::holds_alternative<StatusRequest>(request);
-        struct HealthCheckGuard {
-            std::atomic<uint64_t>* counter;
-            ~HealthCheckGuard() {
+        struct RequestCounterGuard {
+            explicit RequestCounterGuard(std::atomic<uint64_t>* requestCounter)
+                : counter(requestCounter) {
+                if (counter)
+                    counter->fetch_add(1, std::memory_order_relaxed);
+            }
+            ~RequestCounterGuard() {
                 if (counter)
                     counter->fetch_sub(1, std::memory_order_relaxed);
             }
-        } health_guard{nullptr};
-        if (is_health_check && config_.health_check_counter) {
-            config_.health_check_counter->fetch_add(1, std::memory_order_relaxed);
-            health_guard.counter = config_.health_check_counter;
-        }
+            std::atomic<uint64_t>* counter;
+        };
+        RequestCounterGuard health_guard{is_health_check ? config_.health_check_counter : nullptr};
+        RequestCounterGuard non_health_guard{
+            is_health_check ? nullptr : config_.active_non_health_request_counter};
 
         // Use a request-scoped processor instance for streaming paths.
         // The shared handler-level StreamingRequestProcessor stores mutable per-request state
@@ -1848,7 +1850,6 @@ boost::asio::awaitable<void>
 RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket,
                              ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
-    YAMS_ZONE_SCOPED_N("RequestHandler::writer_drain");
 
     // Guard: if connection is already closing, don't attempt writes on a dead socket.
     // This prevents the SIGSEGV when a concurrent request coroutine restarts drain

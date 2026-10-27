@@ -8,14 +8,10 @@ spdlog_dep = dependency('spdlog', required: true)
 # (onnx_registry_spdlog_sink.h), so no spdlog copy lives in this library.
 onnx_resource_deps = []
 
-# Ensure TSAN runtime is linked for this shared library when sanitizer is enabled
-if yams_sanitize_thread and host_machine.system() == 'linux'
-  cpp_compiler = meson.get_compiler('cpp')
-  tsan_dep = cpp_compiler.find_library('tsan', required: false)
-  if tsan_dep.found()
-    onnx_resource_deps += tsan_dep
-  endif
-endif
+# Let the compiler driver select its sanitizer runtime. A bare -ltsan finds
+# GCC's runtime on Linux and mixes it with Clang's executable runtime, causing
+# recursive TLS interception. Clang shared objects resolve their instrumented
+# hooks from the sanitized host; GCC's driver links its matching runtime.
 
 onnx_resource_sources = [
   'OnnxConcurrencyRegistry.cpp',
@@ -41,8 +37,8 @@ endif
 yams_onnx_resource_lib = shared_library('yams_onnx_resource',
   onnx_resource_sources,
   include_directories: include_directories('../../../include'),
-  dependencies: onnx_resource_deps,
-  cpp_args: onnx_resource_args,
+  dependencies: onnx_resource_deps + yams_tracy_deps,
+  cpp_args: onnx_resource_args + yams_tracy_args,
   gnu_symbol_visibility: 'hidden',
   link_args: meson.get_compiler('cpp').get_supported_link_arguments('-Wl,--exclude-libs,ALL'),
   install: true,
@@ -75,7 +71,8 @@ yams_plugin_runtime_lib = static_library('yams_plugin_runtime',
     yams_onnx_resource_dep,
     dependency('nlohmann_json'),
     spdlog_dep,
-  ],
+  ] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

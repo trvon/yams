@@ -46,6 +46,14 @@ constexpr std::string_view kTopologyConstructionFingerprint = "topology_construc
 
 constexpr std::string_view kTopologyRoutingMode = "topology_routing_mode";
 constexpr std::string_view kTopologyVectorPolicy = "topology_vector_policy";
+/// Present only when the configured policy could not run as configured (route_only without the
+/// evaluation gate: "uncertified").
+constexpr std::string_view kTopologyVectorPolicyDowngraded = "topology_vector_policy_downgraded";
+/// Whether the route certificate admits a hard route once the observed vector work is applied.
+constexpr std::string_view kTopologyRouteCertified = "topology_route_certified";
+/// Where the vector leg's candidates came from: ann | route_only | augment | narrow | unavailable
+/// (route_only requested on a backend without routed candidates) | none (no vector leg).
+constexpr std::string_view kVectorCandidateSourceEffective = "vector_candidate_source_effective";
 constexpr std::string_view kTopologyRouteScoringMode = "topology_route_scoring_mode";
 constexpr std::string_view kTopologySparseDenseAlpha = "topology_sparse_dense_alpha";
 constexpr std::string_view kTopologyMinRouteScore = "topology_min_route_score";
@@ -69,6 +77,35 @@ constexpr std::string_view kTopologyRouteRepresentativeCountMax =
     "topology_route_representative_count_max";
 constexpr std::string_view kTopologyRouteAnnUsed = "topology_route_ann_used";
 constexpr std::string_view kTopologyRouteBqUsed = "topology_route_bq_used";
+/// Representative rule recorded in the routed topology snapshot (degree|medoid).
+constexpr std::string_view kTopologyRepresentativeRule = "topology_representative_rule";
+/// Why the routed snapshot carries no roads although a sidecar existed; emitted only when set.
+constexpr std::string_view kTopologyRoadUnavailableReason = "topology_road_unavailable_reason";
+/// Road beam (search.topology.road_hops > 0 under RouteOnly / Augment); absent when roads are off.
+constexpr std::string_view kTopologyRoadHopsApplied = "topology_road_hops_applied";
+constexpr std::string_view kTopologyRoadClustersAdded = "topology_road_clusters_added";
+/// Road-expanded documents the vector stage appended to the routed candidate set.
+constexpr std::string_view kTopologyRoadCandidatesAdded = "topology_road_candidates_added";
+constexpr std::string_view kTopologyRoadWorkCentroidEvaluations =
+    "topology_road_work_centroid_evaluations";
+constexpr std::string_view kTopologyRoadSkipReason = "topology_road_skip_reason";
+/// Trace only: beam-ordered ids of the road-expanded clusters.
+constexpr std::string_view kTopologyRoadExpandedClusterIds = "topology_road_expanded_cluster_ids";
+/// Why one or more cluster walk orders were dropped on load
+/// (`TopologyArtifactBatch::orderUnavailableReason`); emitted only when set.
+constexpr std::string_view kTopologyOrderUnavailableReason = "topology_order_unavailable_reason";
+/// Road walk (search.topology.road_walk_window > 0 under RouteOnly / Augment); absent when off.
+/// `window_applied` is the window the stage walked with (0 when no walkable order existed).
+constexpr std::string_view kTopologyRoadWalkWindowApplied = "topology_road_walk_window_applied";
+/// Routed hits that anchored a window (hits inside a cluster with an order).
+constexpr std::string_view kTopologyRoadWalkAnchors = "topology_road_walk_anchors";
+/// Walked documents the vector stage appended to the routed candidate set.
+constexpr std::string_view kTopologyRoadWalkCandidatesAdded = "topology_road_walk_candidates_added";
+/// Walkable clusters (selected routes and road-expanded clusters) that carry no order.
+constexpr std::string_view kTopologyRoadWalkClustersUnordered =
+    "topology_road_walk_clusters_unordered";
+/// Rotation applied before BQ centroid sign bits (none|fwht).
+constexpr std::string_view kTopologyRouteBqRotation = "topology_route_bq_rotation";
 constexpr std::string_view kTopologyRouteBqCandidates = "topology_route_bq_candidates";
 constexpr std::string_view kTopologyRouteAnnCandidates = "topology_route_ann_candidates";
 constexpr std::string_view kTopologyRouteAnnDistanceEvaluations =

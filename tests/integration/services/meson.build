@@ -19,7 +19,7 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
   )
 
   test('retrieval_ingestion_catch2', catch2_retrieval_ingestion_exe,
-    suite: ['catch2', 'integration', 'services', 'isolated'],
+    suite: ['catch2', 'integration', 'services', 'isolated', 'concurrency'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'YAMS_STRESS_ITERS': services_stress_iters,
@@ -39,7 +39,7 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
     files('sync_indexing_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: ['-DYAMS_TESTING=1'],
+    cpp_args: ['-DYAMS_TESTING=1', _test_timeout_cpp_arg],
     install: false,
   )
 

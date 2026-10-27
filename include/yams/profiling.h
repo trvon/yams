@@ -11,6 +11,21 @@
 #ifdef TRACY_ENABLE
 #include <tracy/Tracy.hpp>
 
+#include <cstdint>
+#include <optional>
+#include <type_traits>
+
+namespace yams::profiling_detail {
+// Tracy's PlotData is overloaded on int64_t/float/double only; an int, size_t or bool argument is
+// ambiguous. Normalize arithmetic values so YAMS_PLOT accepts any numeric type.
+template <typename T> constexpr auto plotValue(T v) {
+    if constexpr (std::is_floating_point_v<T>)
+        return static_cast<double>(v);
+    else
+        return static_cast<int64_t>(v);
+}
+} // namespace yams::profiling_detail
+
 // Zone macros. Use a line-unique zone variable so multiple zones can live in
 // the same scope — Tracy's ZoneScoped* all reuse one fixed variable name
 // (___tracy_scoped_zone), which is a redefinition error when two appear in one
@@ -26,6 +41,22 @@
 #define YAMS_ZONE_SCOPED_DYN(ptr, len)                                                             \
     ZoneNamed(YAMS_ZONE_CONCAT(__yamsZoneDyn_, __LINE__), true);                                   \
     YAMS_ZONE_CONCAT(__yamsZoneDyn_, __LINE__).Name(ptr, len)
+
+// A zone must begin and end on the same thread, in stack order. In a coroutine, a
+// scoped zone must not stay open across co_await/co_yield: the coroutine can resume
+// on another thread and the profiler drops the capture ("Zone is ended twice").
+// Scope zones to synchronous code. YAMS_ZONE_SYNC_N opens a zone that
+// YAMS_ZONE_END closes early, at the same scope, before the first suspension point.
+// tests/scripts/check_tracy_zones.py enforces this.
+#define YAMS_ZONE_SYNC_N(var, name)                                                                \
+    static constexpr ::tracy::SourceLocationData YAMS_ZONE_CONCAT(__yamsSyncLoc_, var){            \
+        name, TracyFunction, TracyFile, (uint32_t)TracyLine, 0};                                   \
+    std::optional<::tracy::ScopedZone> var;                                                        \
+    var.emplace(&YAMS_ZONE_CONCAT(__yamsSyncLoc_, var), TRACY_CALLSTACK, true)
+#define YAMS_ZONE_END(var) var.reset()
+// Zone with a runtime name (a C string). The profiler groups zones by name, so this attributes
+// time per runtime key (for example a caller). It allocates per call; keep it off hot paths.
+#define YAMS_ZONE_TRANSIENT_N(var, name) ZoneTransientN(var, name, true)
 
 // Frame marking
 #define YAMS_FRAME_MARK() FrameMark
@@ -45,7 +76,7 @@
 #define YAMS_MESSAGE_L(txt) TracyMessageL(txt)
 
 // Plot values
-#define YAMS_PLOT(name, val) TracyPlot(name, val)
+#define YAMS_PLOT(name, val) TracyPlot(name, ::yams::profiling_detail::plotValue(val))
 #define YAMS_PLOT_F(name, val) TracyPlot(name, static_cast<float>(val))
 
 // Locks
@@ -84,6 +115,9 @@
 #define YAMS_ZONE_SCOPED_C(color)
 #define YAMS_ZONE_SCOPED_NC(name, color)
 #define YAMS_ZONE_SCOPED_DYN(ptr, len)
+#define YAMS_ZONE_SYNC_N(var, name)
+#define YAMS_ZONE_END(var)
+#define YAMS_ZONE_TRANSIENT_N(var, name)
 
 #define YAMS_FRAME_MARK()
 #define YAMS_FRAME_MARK_NAMED(name)

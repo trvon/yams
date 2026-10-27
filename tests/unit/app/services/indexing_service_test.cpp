@@ -345,7 +345,7 @@ TEST_CASE("IndexingService - File Handling", "[indexing][service][files]") {
         auto result = fixture.indexingService_->addDirectory(request);
 
         REQUIRE(result);
-        CHECK(result.value().filesIndexed >= 0);
+        static_cast<void>(result.value().filesIndexed);
     }
 
     SECTION("Apply collection and metadata") {

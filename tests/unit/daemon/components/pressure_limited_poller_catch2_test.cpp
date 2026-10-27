@@ -246,6 +246,128 @@ private:
     std::chrono::steady_clock::time_point startedAt_{};
 };
 
+enum class BlockedPollerReason { Paused, ZeroConcurrency, AdmissionPaused };
+
+void checkRegisteredWakeResumesBlockedPoller(BlockedPollerReason reason,
+                                             bool stopInsteadOfResume = false,
+                                             bool enqueueAfterRegistration = false) {
+    boost::asio::io_context ioc;
+    std::atomic<bool> stopFlag{false};
+    std::atomic<bool> startedFlag{false};
+    std::atomic<bool> pauseFlag{reason == BlockedPollerReason::Paused};
+    std::atomic<bool> blocked{true};
+    std::atomic<bool> wasActive{false};
+    std::atomic<std::size_t> inFlight{0};
+    std::atomic<std::size_t> callbacksInFlight{0};
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
+    wakeTimer->expires_at(boost::asio::steady_timer::time_point::max());
+    auto watchdog = std::make_shared<boost::asio::steady_timer>(ioc);
+    auto channel = std::make_shared<SpscQueue<int>>(16);
+    if (!enqueueAfterRegistration) {
+        REQUIRE(channel->try_push(42));
+    }
+
+    std::vector<int> observed;
+    std::size_t drainChecks = 0;
+    std::size_t lifecycleNotifications = 0;
+    std::size_t cancelledWaits = 0;
+    bool timedOut = false;
+
+    PressureLimitedPollerConfig<int> cfg;
+    cfg.stageName = "test-registered-blocked-wake";
+    cfg.stopFlag = &stopFlag;
+    cfg.startedFlag = &startedFlag;
+    cfg.pauseFlag = &pauseFlag;
+    cfg.wasActiveFlag = &wasActive;
+    cfg.inFlightCounter = &inFlight;
+    cfg.callbackInFlightCounter = &callbacksInFlight;
+    cfg.maxConcurrentFn = [&blocked, reason]() -> std::size_t {
+        return reason == BlockedPollerReason::ZeroConcurrency &&
+                       blocked.load(std::memory_order_acquire)
+                   ? 0
+                   : 1;
+    };
+    cfg.admissionPausedFn = [&blocked, reason]() {
+        return reason == BlockedPollerReason::AdmissionPaused &&
+               blocked.load(std::memory_order_acquire);
+    };
+    cfg.tryAcquireFn = [](GradientLimiter*, const std::string&, const std::string&) {
+        return true;
+    };
+    cfg.completeJobFn = [](const std::string&, bool) {};
+    cfg.checkDrainFn = [&drainChecks]() { ++drainChecks; };
+    cfg.notifyLifecycleFn = [&lifecycleNotifications]() { ++lifecycleNotifications; };
+    cfg.getHashFn = [](const int& task) { return std::to_string(task); };
+    cfg.processFn = [&observed, &stopFlag, &wakeTimer, &wakeMutex, &watchdog](int& task) {
+        observed.push_back(task);
+        stopFlag.store(true, std::memory_order_release);
+        watchdog->cancel();
+        std::lock_guard<std::mutex> lock(wakeMutex);
+        wakeTimer->cancel();
+    };
+    cfg.executor = ioc.get_executor();
+    cfg.enableCpuThrottling = false;
+    cfg.wakeTimer = wakeTimer;
+    cfg.wakeTimerMutex = &wakeMutex;
+
+    boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(channel, std::move(cfg)),
+                          boost::asio::detached);
+
+    // Drain ready startup handlers without assuming co_spawn uses exactly one handler.
+    // The old coroutine-local timer leaves our explicitly initialized sentinel unchanged.
+    REQUIRE(ioc.poll() > 0);
+    REQUIRE(startedFlag.load(std::memory_order_acquire));
+    CHECK(observed.empty());
+    CHECK(channel->size_approx() == (enqueueAfterRegistration ? 0U : 1U));
+    CHECK(wakeTimer->expiry() != boost::asio::steady_timer::time_point::max());
+    if (enqueueAfterRegistration) {
+        REQUIRE(channel->try_push(42));
+    }
+
+    if (stopInsteadOfResume) {
+        stopFlag.store(true, std::memory_order_release);
+    } else {
+        blocked.store(false, std::memory_order_release);
+        pauseFlag.store(false, std::memory_order_release);
+    }
+    auto wakeExecutor = wakeTimer->get_executor();
+    boost::asio::post(wakeExecutor, [wakeTimer, watchdog, &cancelledWaits, stopInsteadOfResume]() {
+        cancelledWaits = wakeTimer->cancel();
+        if (stopInsteadOfResume) {
+            watchdog->cancel();
+        }
+    });
+
+    watchdog->expires_after(500ms);
+    watchdog->async_wait([&](const boost::system::error_code& error) {
+        if (!error) {
+            timedOut = true;
+            stopFlag.store(true, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(wakeMutex);
+            wakeTimer->cancel();
+        }
+    });
+    ioc.run();
+
+    CHECK_FALSE(timedOut);
+    CHECK(cancelledWaits == 1);
+    if (stopInsteadOfResume) {
+        CHECK(observed.empty());
+        CHECK(channel->size_approx() == 1);
+        CHECK(drainChecks == 0);
+        CHECK(lifecycleNotifications >= 2);
+    } else {
+        CHECK((observed == std::vector<int>{42}));
+        CHECK(channel->size_approx() == 0);
+        CHECK(drainChecks == 1);
+        CHECK(lifecycleNotifications >= 3);
+    }
+    CHECK(inFlight.load(std::memory_order_acquire) == 0);
+    CHECK(callbacksInFlight.load(std::memory_order_acquire) == 0);
+    CHECK_FALSE(startedFlag.load(std::memory_order_acquire));
+}
+
 } // namespace
 
 TEST_CASE("PressureLimitedPoller coalesces normal-priority trickle into a bounded batch",
@@ -357,6 +479,31 @@ TEST_CASE("PressureLimitedPoller single-item path skips identities without a lim
     CHECK((observed == std::vector<int>{9}));
     CHECK((hashCalls == 0));
     CHECK((completedCalls == 0));
+}
+
+TEST_CASE("PressureLimitedPoller blocked branches arm and honor the registered wake timer",
+          "[daemon][poller][wake-timer][blocked][catch2]") {
+    SECTION("paused") {
+        checkRegisteredWakeResumesBlockedPoller(BlockedPollerReason::Paused);
+    }
+    SECTION("zero concurrency") {
+        checkRegisteredWakeResumesBlockedPoller(BlockedPollerReason::ZeroConcurrency);
+    }
+    SECTION("admission paused") {
+        checkRegisteredWakeResumesBlockedPoller(BlockedPollerReason::AdmissionPaused);
+    }
+    SECTION("enqueue after registered wait") {
+        checkRegisteredWakeResumesBlockedPoller(BlockedPollerReason::Paused, false, true);
+    }
+    SECTION("stop while paused preserves queued work") {
+        checkRegisteredWakeResumesBlockedPoller(BlockedPollerReason::Paused, true);
+    }
+    SECTION("stop while concurrency is zero preserves queued work") {
+        checkRegisteredWakeResumesBlockedPoller(BlockedPollerReason::ZeroConcurrency, true);
+    }
+    SECTION("stop while admission is paused preserves queued work") {
+        checkRegisteredWakeResumesBlockedPoller(BlockedPollerReason::AdmissionPaused, true);
+    }
 }
 
 TEST_CASE("PressureLimitedPoller leaves source work queued while downstream admission is paused",

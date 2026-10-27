@@ -904,7 +904,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: verbose hybrid includes resul
 
     auto searchRes = yams::test_async::res(searchSvc->search(searchReq), 2s);
     REQUIRE(searchRes);
-    CHECK(searchRes.value().results.size() >= 0u);
+    static_cast<void>(searchRes.value().results.size());
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: paths-only with pattern and tags",
@@ -1440,7 +1440,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: filename path queries prefer 
         request.limit = 10;
         auto result = yams::test_async::res(searchSvc->search(request), 2s);
         REQUIRE(result);
-        CHECK(result.value().paths.size() >= 0u);
+        static_cast<void>(result.value().paths.size());
     }
 }
 

@@ -34,13 +34,14 @@ namespace yams::app::services {
 // ===========================
 
 enum class GraphRelationType {
-    All,             // All relation types
-    SameContent,     // Documents with identical content (blob edges)
-    RenamedFrom,     // Rename/move history
-    RenamedTo,       // Forward rename edges
-    DirectoryChild,  // Directory containment
-    SymbolReference, // Symbol/entity cross-references
-    PathVersion,     // Path node to blob version edges
+    All,              // All relation types
+    SameContent,      // Documents with identical content (blob edges)
+    RenamedFrom,      // Rename/move history
+    RenamedTo,        // Forward rename edges
+    DirectoryChild,   // Directory containment
+    SymbolReference,  // Symbol/entity cross-references
+    PathVersion,      // Path node to blob version edges
+    SemanticNeighbor, // Embedding nearest-neighbour edges between documents
 };
 
 struct GraphNodeDescriptor {

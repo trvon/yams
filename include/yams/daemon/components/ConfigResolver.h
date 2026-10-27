@@ -104,8 +104,10 @@ public:
 
     struct TopologyRoutingPolicy {
         std::optional<std::string> mode;
-        // shadow | narrow
+        // augment | narrow | shadow | route_only
         std::optional<std::string> vectorPolicy;
+        /// search.evaluation.allow_uncertified_routes: lets route_only serve uncertified routes.
+        std::optional<bool> allowUncertifiedRouteOnly;
         std::optional<bool> enableWeakQueryRouting;
         std::optional<std::size_t> minClusters;
         std::optional<std::size_t> maxClusters;
@@ -114,11 +116,20 @@ public:
         std::optional<std::size_t> annCandidateLimit;
         std::optional<std::size_t> bqCandidateLimit;
         std::optional<std::size_t> bqPrefixDimension;
+        /// none | fwht
+        std::optional<std::string> bqRotation;
         // reciprocal_edges | topology_snapshot: source of the graph-rerank community signal.
         std::optional<std::string> graphCommunitySource;
         std::optional<float> adaptiveProbeScoreGap;
         std::optional<float> narrowMinBoundaryMargin;
         std::optional<std::size_t> maxDocs;
+        /// `search.topology.road_hops` / `road_beam_width`: road beam for route_only and augment.
+        /// Unset or 0 hops is off; the width is read only when hops > 0.
+        std::optional<std::size_t> roadHops;
+        std::optional<std::size_t> roadBeamWidth;
+        /// `search.topology.road_walk_window`: positions walked on each side of a routed hit along
+        /// its cluster's walk order (route_only and augment). Unset or 0 is off.
+        std::optional<std::size_t> roadWalkWindow;
         std::optional<std::size_t> expansionOutputLimit;
         std::optional<float> medoidBoost;
         std::optional<float> evidenceWeight;
@@ -153,6 +164,8 @@ public:
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
         std::optional<std::size_t> routingRepresentativeCount;
+        /// `topology.representative_rule` = degree|medoid. Unset keeps Degree.
+        std::optional<topology::RepresentativeRule> representativeRule;
         /// SGC feature-smoothing hops before clustering (0 disables).
         std::optional<std::size_t> sgcHops;
         std::optional<bool> sgcNormalize;
@@ -160,6 +173,12 @@ public:
         std::optional<std::size_t> boundarySpillLimit;
         std::optional<double> boundarySpillDistanceRatio;
         std::optional<double> boundarySpillResidualPenalty;
+        /// `topology.road_max_per_cluster`: cluster roads kept per cluster at build time. Unset
+        /// or 0 computes no roads.
+        std::optional<std::size_t> roadMaxPerCluster;
+        /// `topology.road_order` = none|time|session|similarity_chain: walk order stored on every
+        /// cluster at build time. Unset keeps None (no order).
+        std::optional<topology::RoadOrderKind> roadOrder;
         std::optional<bool> featureEntityFusion;
         std::optional<std::size_t> featureEntitySignatureK;
         std::optional<float> featureEntityFusionAlpha;
@@ -493,15 +512,23 @@ public:
      * Config keys:
      * - search.topology.mode = disabled|weak_query_only|hybrid_assist
      * - search.topology.enable_weak_query_routing = true|false
-     * - search.topology.vector_policy = augment|narrow|shadow
+     * - search.topology.vector_policy = augment|narrow|shadow|route_only
+     * - search.evaluation.allow_uncertified_routes = true|false (route_only evaluation gate)
      * - search.topology.min_clusters = int
      * - search.topology.max_clusters = int
      * - search.topology.max_seed_documents = int
      * - search.topology.representative_limit = int
      * - search.topology.ann_candidate_limit = int
+     * - search.topology.bq_candidate_limit = int
+     * - search.topology.bq_prefix_dim = int
+     * - search.topology.bq_rotation = none|fwht
      * - search.topology.adaptive_probe_score_gap = float
      * - search.topology.narrow_min_boundary_margin = float
      * - search.topology.max_docs = int
+     * - search.topology.road_hops = int (0 = off; route_only and augment only)
+     * - search.topology.road_beam_width = int (clusters kept per hop; read when road_hops > 0)
+     * - search.topology.road_walk_window = int (0 = off; positions walked on each side of a
+     *   routed hit along the cluster walk order; route_only and augment only)
      * - search.topology.expansion_output_limit = int (0 inherits global vector output)
      * - search.topology.medoid_boost = float
      * - search.topology.evidence_weight = float in [0,1]
@@ -541,6 +568,7 @@ public:
      * Config keys:
      * - topology.engine = connected|louvain|kmeans
      * - topology.routing_representatives = int
+     * - topology.representative_rule = degree|medoid
      * - topology.boundary_spill = bool
      * - topology.boundary_spill_limit = int
      * - topology.boundary_spill_distance_ratio = float

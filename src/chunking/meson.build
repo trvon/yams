@@ -11,7 +11,8 @@ crypto_dep = dependency('yams_crypto', required: true)
 yams_chunking = static_library('yams_chunking',
   chunking_src,
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, yams_core, crypto_dep],
+  dependencies: [spdlog_dep, yams_core, crypto_dep] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

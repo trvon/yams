@@ -1040,6 +1040,59 @@ TEST_CASE("SOAR boundary spill covers a singleton with a nearby observed chart r
     CHECK_FALSE(containsHash(artifacts.clusters[2].memberDocumentHashes, "singleton"));
 }
 
+TEST_CASE("SOAR boundary spill on unit centroids follows angular distance",
+          "[unit][topology][construction][overlap][soar][centroid]") {
+    // Cosine routing ranks clusters by centroid direction. With unit centroids and a unit
+    // document, the SOAR residual |x - c|^2 = 2 (1 - cos) is a monotone function of that
+    // angle, so the spill goes to the angularly nearest secondary cluster. A shorter mean
+    // centroid (a loose cluster) adds a radial term that can reorder candidates.
+    constexpr double kDegree = std::numbers::pi / 180.0;
+    const auto direction = [&](double degrees, double radius = 1.0) {
+        return std::vector<float>{static_cast<float>(radius * std::cos(degrees * kDegree)),
+                                  static_cast<float>(radius * std::sin(degrees * kDegree))};
+    };
+    const std::vector<TopologyDocumentInput> documents{
+        TopologyDocumentInput{.documentHash = "x", .embedding = direction(0.0)},
+    };
+    const auto artifactsWithLooseRadius = [&](double looseRadius) {
+        TopologyArtifactBatch artifacts;
+        artifacts.clusters = {
+            ClusterArtifact{.clusterId = "loose",
+                            .memberCount = 1,
+                            .memberDocumentHashes = {"loose-member"},
+                            .centroidEmbedding = direction(-50.0, looseRadius)},
+            ClusterArtifact{.clusterId = "primary",
+                            .memberCount = 1,
+                            .memberDocumentHashes = {"x"},
+                            .centroidEmbedding = direction(10.0)},
+            ClusterArtifact{.clusterId = "tight",
+                            .memberCount = 1,
+                            .memberDocumentHashes = {"tight-member"},
+                            .centroidEmbedding = direction(52.0)},
+        };
+        artifacts.memberships = {
+            DocumentClusterMembership{.documentHash = "x", .clusterId = "primary"},
+        };
+        return artifacts;
+    };
+
+    TopologyBuildConfig config;
+    config.allowOverlap = true;
+    config.overlapLimit = 1;
+    config.overlapBoundaryDistanceRatio = 6.0;
+    config.overlapResidualPenalty = 0.0;
+
+    // "loose" is 50 degrees from x, "tight" is 52 degrees.
+    auto unit = artifactsWithLooseRadius(1.0);
+    CHECK(applyOrthogonalBoundarySpill(documents, config, unit) == 1);
+    CHECK(unit.memberships.front().overlapClusterIds == std::vector<std::string>{"loose"});
+
+    // The same cluster stored as a short arithmetic mean loses the spill to "tight".
+    auto shortMean = artifactsWithLooseRadius(0.2);
+    CHECK(applyOrthogonalBoundarySpill(documents, config, shortMean) == 1);
+    CHECK(shortMean.memberships.front().overlapClusterIds == std::vector<std::string>{"tight"});
+}
+
 TEST_CASE("Sparse-guided routing scores the closest bounded cluster representative",
           "[unit][topology][routing][representatives]") {
     TopologyArtifactBatch batch;
@@ -1778,4 +1831,54 @@ TEST_CASE("Topology extractor keeps a hub's own neighbours despite many incoming
     REQUIRE(hubNeighbors.size() == 1U);
     CHECK(hubNeighbors[0].documentHash == "target");
     CHECK_FALSE(hubNeighbors[0].reciprocal);
+}
+
+TEST_CASE("Sparse-guided topology routing can rotate the BQ centroid shortlist",
+          "[unit][topology][routing][bq][rotation]") {
+    TopologyArtifactBatch batch;
+    constexpr std::size_t clusterCount = 96;
+    for (std::size_t index = 0; index < clusterCount; ++index) {
+        const auto angle = static_cast<float>(index) * 2.0F * std::numbers::pi_v<float> /
+                           static_cast<float>(clusterCount);
+        // Anisotropic centroids: two dominant coordinates plus a weak constant tail.
+        std::vector<float> centroid(24, 0.02F);
+        centroid[0] = std::cos(angle);
+        centroid[1] = std::sin(angle);
+        batch.clusters.push_back(ClusterArtifact{
+            .clusterId = "cluster-" + std::to_string(index),
+            .memberCount = 1,
+            .memberDocumentHashes = {"doc-" + std::to_string(index)},
+            .centroidEmbedding = std::move(centroid),
+        });
+    }
+    const auto plainIndex = SparseGuidedClusterRouter::buildRouteIndex(batch, false, true);
+    const auto rotatedIndex = SparseGuidedClusterRouter::buildRouteIndex(
+        batch, false, true, 0, yams::vector::BinaryRotation::Fwht);
+    REQUIRE(plainIndex.centroidBqIndex != nullptr);
+    REQUIRE(rotatedIndex.centroidBqIndex != nullptr);
+    CHECK(plainIndex.centroidBqIndex->rotation() == yams::vector::BinaryRotation::None);
+    CHECK(rotatedIndex.centroidBqIndex->rotation() == yams::vector::BinaryRotation::Fwht);
+    CHECK(rotatedIndex.centroidBqIndex->rotationSeed() == yams::vector::kDefaultBinaryRotationSeed);
+    CHECK(rotatedIndex.centroidBqIndex->dimension() == 32U);
+
+    SparseGuidedClusterRouter router;
+    TopologyRouteRequest request;
+    request.limit = 1;
+    request.queryEmbedding = batch.clusters.front().centroidEmbedding;
+    request.sparseDenseAlpha = 0.0F;
+    request.bqCandidateLimit = 8;
+    SparseRouteWork work;
+    auto routed = router.route(request, batch, rotatedIndex, &work);
+    REQUIRE(routed.has_value());
+    REQUIRE(routed.value().size() == 1U);
+    CHECK(routed.value().front().clusterId == "cluster-0");
+    CHECK(work.bqUsed);
+    CHECK(work.bqCandidates <= 8U);
+
+    // The convenience overload builds its index from the request's rotation.
+    request.bqRotation = yams::vector::BinaryRotation::Fwht;
+    auto convenience = router.route(request, batch);
+    REQUIRE(convenience.has_value());
+    REQUIRE(convenience.value().size() == 1U);
+    CHECK(convenience.value().front().clusterId == "cluster-0");
 }

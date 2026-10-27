@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <yams/topology/topology_alternate_engines.h>
 #include <yams/topology/topology_artifacts.h>
@@ -76,8 +77,7 @@ TEST_CASE("KMeansTopologyEngine separates two embedding blobs into two clusters"
     CHECK(clusterOf("a0") != clusterOf("b0"));
 }
 
-TEST_CASE("KMeansTopologyEngine is deterministic across rebuilds",
-          "[topology][kmeans][catch2]") {
+TEST_CASE("KMeansTopologyEngine is deterministic across rebuilds", "[topology][kmeans][catch2]") {
     KMeansTopologyEngine engine;
     TopologyBuildConfig cfg;
     cfg.kmeansK = 2;
@@ -156,8 +156,8 @@ TEST_CASE("KMeansTopologyEngine keeps every doc when embedding dimensions differ
     TopologyBuildConfig cfg;
     cfg.kmeansK = 2;
 
-    auto docs = twoBlobs();                                // dim 2
-    docs.push_back(mk("odd", {0.1f, 0.2f, 0.3f, 0.4f}));   // dim 4 -> excluded from clustering
+    auto docs = twoBlobs();                              // dim 2
+    docs.push_back(mk("odd", {0.1f, 0.2f, 0.3f, 0.4f})); // dim 4 -> excluded from clustering
 
     auto result = engine.buildArtifacts(docs, cfg);
     REQUIRE(result);
@@ -168,8 +168,7 @@ TEST_CASE("KMeansTopologyEngine keeps every doc when embedding dimensions differ
     CHECK(members == docs.size());
 }
 
-TEST_CASE("KMeansTopologyEngine handles a single usable document",
-          "[topology][kmeans][catch2]") {
+TEST_CASE("KMeansTopologyEngine handles a single usable document", "[topology][kmeans][catch2]") {
     KMeansTopologyEngine engine;
     TopologyBuildConfig cfg;
     cfg.kmeansK = 2;
@@ -212,4 +211,45 @@ TEST_CASE("KMeansTopologyEngine update path falls back to a full rebuild",
     REQUIRE(updated);
     CHECK(stats.fallbackFullRebuilds == 1);
     CHECK(updated.value().clusters.size() == 2);
+}
+
+TEST_CASE("KMeansTopologyEngine stores the unit-length spherical centroid",
+          "[topology][kmeans][centroid][catch2]") {
+    // Spherical k-means assigns by cosine against unit centroids. The stored centroid
+    // must be that same unit centroid, not the shorter arithmetic mean of unit members,
+    // so Euclidean consumers (SOAR residuals) measure in the space the clusters were built.
+    KMeansTopologyEngine engine;
+    TopologyBuildConfig cfg;
+    cfg.kmeansK = 2;
+    const bool overlap = GENERATE(false, true);
+    cfg.allowOverlap = overlap;
+    cfg.overlapLimit = 1;
+
+    const auto docs = twoBlobs();
+    auto result = engine.buildArtifacts(docs, cfg);
+    REQUIRE(result);
+    REQUIRE(result.value().clusters.size() == 2);
+
+    for (const auto& cluster : result.value().clusters) {
+        REQUIRE(cluster.centroidEmbedding.size() == 2);
+        // Direction of the arithmetic mean of the primary members.
+        std::vector<double> mean(2, 0.0);
+        for (const auto& membership : result.value().memberships) {
+            if (membership.clusterId != cluster.clusterId) {
+                continue;
+            }
+            for (const auto& doc : docs) {
+                if (doc.documentHash == membership.documentHash) {
+                    mean[0] += doc.embedding[0];
+                    mean[1] += doc.embedding[1];
+                }
+            }
+        }
+        const double meanNorm = std::hypot(mean[0], mean[1]);
+        REQUIRE(meanNorm > 0.0);
+        const double norm = std::hypot(cluster.centroidEmbedding[0], cluster.centroidEmbedding[1]);
+        CHECK(std::abs(norm - 1.0) < 1e-5);
+        CHECK(std::abs(cluster.centroidEmbedding[0] - mean[0] / meanNorm) < 1e-5);
+        CHECK(std::abs(cluster.centroidEmbedding[1] - mean[1] / meanNorm) < 1e-5);
+    }
 }

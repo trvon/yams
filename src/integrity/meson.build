@@ -15,7 +15,8 @@ yams_integrity = static_library('yams_integrity',
     'chunk_validator.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, threads_dep, yams_core, yams_storage_engine, yams_crypto, yams_manifest, yams_chunking, yams_metadata_dep],
+  dependencies: [spdlog_dep, threads_dep, yams_core, yams_storage_engine, yams_crypto, yams_manifest, yams_chunking, yams_metadata_dep] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

@@ -1475,9 +1475,51 @@ std::vector<TestQuery> BEIRCorpusLoader::generateTestQueries() {
 std::vector<std::string> BEIRCorpusLoader::getDocumentPaths() const {
     std::vector<std::string> paths;
     for (const auto& [id, _] : dataset.documents) {
-        paths.push_back((corpusDir / (id + ".txt")).string());
+        paths.push_back(documentPath(id).string());
     }
     return paths;
+}
+
+fs::path BEIRCorpusLoader::documentPath(const std::string& docId) const {
+    return corpusDir / (docId + ".txt");
+}
+
+std::size_t applyBenchmarkDocumentMetadata(yams::metadata::IMetadataRepository& repo,
+                                           const BEIRCorpusLoader& loader,
+                                           std::size_t* missingDocuments) {
+    std::size_t applied = 0;
+    std::size_t missing = 0;
+    for (const auto& [id, doc] : loader.dataset.documents) {
+        if (doc.metadata.empty()) {
+            continue;
+        }
+        const std::string path = loader.documentPath(id).string();
+        auto found = repo.findDocumentByExactPath(path);
+        if (!found) {
+            spdlog::warn("[Bench] metadata lookup failed for {}: {}", path, found.error().message);
+            ++missing;
+            continue;
+        }
+        if (!found.value().has_value()) {
+            ++missing;
+            continue;
+        }
+        std::vector<std::tuple<int64_t, std::string, yams::metadata::MetadataValue>> entries;
+        entries.reserve(doc.metadata.size());
+        for (const auto& [key, value] : doc.metadata) {
+            entries.emplace_back(found.value()->id, key, yams::metadata::MetadataValue(value));
+        }
+        if (auto set = repo.setMetadataBatch(entries); !set) {
+            spdlog::warn("[Bench] metadata write failed for {}: {}", path, set.error().message);
+            ++missing;
+            continue;
+        }
+        ++applied;
+    }
+    if (missingDocuments != nullptr) {
+        *missingDocuments = missing;
+    }
+    return applied;
 }
 
 Result<BEIRDataset> loadBenchmarkManifestDataset(const std::string& datasetName,
@@ -1756,6 +1798,43 @@ stageRetrievalMetricsToJson(const std::map<std::string, StageMetricAccumulator>&
     }
 
     return out;
+}
+
+std::vector<SemanticNeighborSeedEdge> buildSemanticNeighborSeedEdges(
+    const std::unordered_map<std::string, std::unordered_map<std::string, float>>& neighborScores,
+    float weightFloor, SemanticNeighborSeeding mode) {
+    std::vector<SemanticNeighborSeedEdge> edges;
+    for (const auto& [sourceHash, neighbors] : neighborScores) {
+        for (const auto& [targetHash, forwardScore] : neighbors) {
+            if (sourceHash == targetHash) {
+                continue;
+            }
+            const auto reverseIt = neighborScores.find(targetHash);
+            const bool mutual =
+                reverseIt != neighborScores.end() && reverseIt->second.contains(sourceHash);
+            if (mutual) {
+                const float reverseScore = reverseIt->second.at(sourceHash);
+                edges.push_back(
+                    {.sourceHash = sourceHash,
+                     .targetHash = targetHash,
+                     .weight = std::max(weightFloor, (forwardScore + reverseScore) * 0.5F),
+                     .mutual = true});
+            } else if (mode == SemanticNeighborSeeding::DirectedKnn) {
+                edges.push_back({.sourceHash = sourceHash,
+                                 .targetHash = targetHash,
+                                 .weight = std::max(weightFloor, forwardScore),
+                                 .mutual = false});
+            }
+        }
+    }
+    std::ranges::sort(edges,
+                      [](const SemanticNeighborSeedEdge& lhs, const SemanticNeighborSeedEdge& rhs) {
+                          if (lhs.sourceHash != rhs.sourceHash) {
+                              return lhs.sourceHash < rhs.sourceHash;
+                          }
+                          return lhs.targetHash < rhs.targetHash;
+                      });
+    return edges;
 }
 
 } // namespace yams::bench

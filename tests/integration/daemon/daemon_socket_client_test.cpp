@@ -1001,7 +1001,7 @@ TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][m
 
     auto injectedProvider = std::make_shared<StubModelProvider>();
     REQUIRE(injectedProvider != nullptr);
-    serviceManager->__test_setModelProvider(injectedProvider);
+    serviceManager->testing_setModelProvider(injectedProvider);
 
     LoadModelRequest emptyLoadWithProviderReq;
     auto emptyLoadWithProviderResult =
@@ -1417,8 +1417,8 @@ TEST_CASE("Daemon client graph maintenance request execution",
     auto graphValidateResult = yams::cli::run_sync(client.graphValidate(validateReq), 30s);
 
     REQUIRE(graphValidateResult.has_value());
-    CHECK(graphValidateResult.value().totalNodes >= 0);
-    CHECK(graphValidateResult.value().totalEdges >= 0);
+    static_cast<void>(graphValidateResult.value().totalNodes);
+    static_cast<void>(graphValidateResult.value().totalEdges);
     CHECK(graphValidateResult.value().issues.empty());
 
     AddDocumentRequest addReq;
@@ -1919,7 +1919,7 @@ TEST_CASE("Daemon client repair request execution", "[daemon][socket][requests][
 
     auto injectedProvider = std::make_shared<StubModelProvider>();
     REQUIRE(injectedProvider != nullptr);
-    serviceManager->__test_setModelProvider(injectedProvider);
+    serviceManager->testing_setModelProvider(injectedProvider);
     REQUIRE(injectedProvider->loadModel("repair-embed-model").has_value());
 
     EmbedDocumentsRequest embedReq;

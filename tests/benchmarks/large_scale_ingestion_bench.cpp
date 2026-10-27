@@ -710,7 +710,7 @@ void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, bool ena
         }
         auto sharedProvider =
             std::make_shared<BenchmarkMockModelProvider>(std::max<std::size_t>(dim, 1));
-        serviceManager->__test_setModelProvider(sharedProvider);
+        serviceManager->testing_setModelProvider(sharedProvider);
     }
 
     auto ready =
@@ -832,7 +832,8 @@ bool SetupHarness(const IngestionBenchConfig& config) {
             if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
                 harnessOptions.pluginDir = std::filesystem::path(envPluginDir);
             } else {
-                harnessOptions.pluginDir = std::filesystem::current_path() / "build/debug" / "plugins";
+                harnessOptions.pluginDir =
+                    std::filesystem::current_path() / "build/debug" / "plugins";
             }
         }
     }

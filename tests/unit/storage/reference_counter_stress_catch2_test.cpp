@@ -77,8 +77,8 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent get
                 if (stats.has_value()) {
                     successCount++;
                     // Verify stats make sense
-                    CHECK((stats.value().totalBlocks >= 0u));
-                    CHECK((stats.value().totalReferences >= 0u));
+                    static_cast<void>(stats.value().totalBlocks);
+                    static_cast<void>(stats.value().totalReferences);
                 } else {
                     errorCount++;
                 }

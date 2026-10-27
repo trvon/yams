@@ -3,6 +3,7 @@
 
 #define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <yams/daemon/p2p/p2p_transport.h>
+#include <yams/profiling.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
 #include "p2p_frame_source.h"
@@ -179,13 +180,16 @@ Result<Cert> makeSelfSignedCertificate(EVP_PKEY* key, std::string_view nodeId) {
         X509_set_pubkey(cert.get(), key) != 1) {
         return Error{ErrorCode::InternalError, "failed to initialize X509 certificate"};
     }
-    X509_NAME* name = X509_get_subject_name(cert.get());
+    const auto name =
+        std::unique_ptr<X509_NAME, decltype(&X509_NAME_free)>(X509_NAME_new(), X509_NAME_free);
     const std::string node(nodeId);
     if (name == nullptr ||
-        X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+        X509_NAME_add_entry_by_txt(name.get(), "CN", MBSTRING_ASC,
                                    reinterpret_cast<const unsigned char*>(node.c_str()), -1, -1,
                                    0) != 1 ||
-        X509_set_issuer_name(cert.get(), name) != 1 || X509_sign(cert.get(), key, nullptr) <= 0) {
+        X509_set_subject_name(cert.get(), name.get()) != 1 ||
+        X509_set_issuer_name(cert.get(), name.get()) != 1 ||
+        X509_sign(cert.get(), key, nullptr) <= 0) {
         return Error{ErrorCode::InternalError, "failed to self-sign X509 certificate"};
     }
     return cert;
@@ -581,6 +585,7 @@ public:
 
     Result<std::vector<std::byte>> readFrame(std::chrono::milliseconds timeout,
                                              std::size_t maxFrameBytes) {
+        YAMS_ZONE_SCOPED_N("p2p.session.recv");
         std::lock_guard<std::mutex> lock(operationMutex);
         if (closed.load(std::memory_order_acquire)) {
             return Error{ErrorCode::OperationCancelled, "p2p channel is closed"};
@@ -918,6 +923,7 @@ public:
     }
 
     void acceptLoop() {
+        YAMS_ZONE_SCOPED_N("p2p.accept_loop");
         while (running.load(std::memory_order_acquire)) {
             invokeAcceptLoopHook();
             reapCompletedSessions();
@@ -964,7 +970,9 @@ public:
                                   gSessionWorkerOwner = nullptr;
                               }),
                               .completed = std::move(completed)});
-            retainedSessionCount.fetch_add(1, std::memory_order_relaxed);
+            [[maybe_unused]] const auto retained =
+                retainedSessionCount.fetch_add(1, std::memory_order_relaxed) + 1;
+            YAMS_PLOT("p2p.retained_sessions", static_cast<int64_t>(retained));
         }
     }
 
@@ -981,6 +989,7 @@ public:
 
     void handleSession(const std::shared_ptr<P2pConnection::Impl>& session,
                        const std::shared_ptr<std::atomic<bool>>& completed) noexcept {
+        YAMS_ZONE_SCOPED_N("p2p.session");
         bool inPreAuthPool = true;
         bool inAuthenticatedPool = false;
         try {

@@ -1,6 +1,5 @@
 #include <yams/app/services/graph_scope_service.hpp>
 
-#include <yams/core/magic_numbers.hpp>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 
@@ -19,18 +18,6 @@ metadata::KGPathRange directoryRange(std::string path) {
     return {.lower = std::move(path), .upper = std::move(upper)};
 }
 
-bool shouldPruneGraphPath(std::string_view path) {
-    std::string_view extension;
-    if (const auto dot = path.find_last_of('.'); dot != std::string_view::npos) {
-        extension = path.substr(dot + 1);
-    }
-    const auto category = yams::magic::getPruneCategory(path, extension);
-    return category == yams::magic::PruneCategory::GitArtifacts ||
-           yams::magic::matchesPruneGroup(category, "build") ||
-           yams::magic::matchesPruneGroup(category, "packages") ||
-           yams::magic::matchesPruneGroup(category, "ide-all");
-}
-
 } // namespace
 
 std::string normalizeGraphScopePath(const std::filesystem::path& path,
@@ -43,33 +30,47 @@ std::string normalizeGraphScopePath(const std::filesystem::path& path,
         .normalizedPath;
 }
 
-std::vector<metadata::KGPathRange>
-buildGraphCodeScopePathRanges(const std::filesystem::path& scopeRoot) {
-    std::vector<metadata::KGPathRange> ranges;
-    ranges.reserve(4);
-    for (const auto* directory : {"src", "include"}) {
-        const auto lexicalPath = (scopeRoot / directory).lexically_normal().generic_string();
-        const auto canonicalPath = normalizeGraphScopePath(scopeRoot / directory, scopeRoot);
-        for (const auto& path : {lexicalPath, canonicalPath}) {
-            auto range = directoryRange(path);
-            const auto duplicate = std::ranges::any_of(ranges, [&](const auto& existing) {
-                return existing.lower == range.lower && existing.upper == range.upper;
-            });
-            if (!duplicate) {
-                ranges.push_back(std::move(range));
-            }
+namespace {
+
+std::vector<std::string> graphCwdScopeRoots(const std::filesystem::path& scopeRoot) {
+    std::vector<std::string> roots;
+    auto add = [&](const std::filesystem::path& root) {
+        auto normalized = normalizeGraphScopePath(root, scopeRoot);
+        while (normalized.size() > 1 && normalized.ends_with('/')) {
+            normalized.pop_back();
         }
+        if (!normalized.empty() && std::ranges::find(roots, normalized) == roots.end()) {
+            roots.push_back(std::move(normalized));
+        }
+    };
+    add(scopeRoot);
+    // Stored paths are resolved; a cwd reached through a symlink must still match them.
+    std::error_code ec;
+    if (auto canonical = std::filesystem::weakly_canonical(scopeRoot, ec); !ec) {
+        add(canonical);
+    }
+    return roots;
+}
+
+} // namespace
+
+std::vector<metadata::KGPathRange>
+buildGraphCwdScopePathRanges(const std::filesystem::path& scopeRoot) {
+    std::vector<metadata::KGPathRange> ranges;
+    for (auto& root : graphCwdScopeRoots(scopeRoot)) {
+        ranges.push_back(directoryRange(std::move(root)));
     }
     return ranges;
 }
 
 Result<std::unordered_set<std::string>>
-buildGraphCodeScopePathSet(const std::filesystem::path& scopeRoot,
-                           metadata::IMetadataRepository& repo) {
+buildGraphCwdScopePathSet(const std::filesystem::path& scopeRoot,
+                          metadata::IMetadataRepository& repo) {
     std::unordered_set<std::string> paths;
-    for (const auto* directory : {"src", "include"}) {
+    for (auto& root : graphCwdScopeRoots(scopeRoot)) {
+        const auto range = directoryRange(root);
         metadata::DocumentQueryOptions options;
-        options.pathPrefix = normalizeGraphScopePath(scopeRoot / directory, scopeRoot);
+        options.pathPrefix = std::move(root);
         options.prefixIsDirectory = true;
         options.includeSubdirectories = true;
         options.limit = 0;
@@ -80,7 +81,8 @@ buildGraphCodeScopePathSet(const std::filesystem::path& scopeRoot,
         }
         for (const auto& document : result.value()) {
             auto path = normalizeGraphScopePath(document.filePath, scopeRoot);
-            if (!shouldPruneGraphPath(path)) {
+            // The prefix query matches with LIKE; keep only paths really under the root.
+            if (path >= range.lower && path < range.upper) {
                 paths.insert(std::move(path));
             }
         }

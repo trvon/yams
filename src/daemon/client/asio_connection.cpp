@@ -151,6 +151,12 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             writing = false;
             co_return Result<void>();
         }
+        // close() resets the socket on this strand; frames still queued behind it cannot be sent.
+        if (!socket || !socket->is_open()) {
+            write_queue.clear();
+            writing = false;
+            co_return Error{ErrorCode::NetworkError, "Transport socket closed"};
+        }
 
         // Check cancellation at each iteration
         cs = co_await this_coro::cancellation_state;
@@ -254,9 +260,11 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             writing = false;
             alive = false;
             boost::system::error_code close_ec;
-            // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via
-            // close_ec.
-            (void)socket->close(close_ec);
+            if (socket) {
+                // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via
+                // close_ec.
+                (void)socket->close(close_ec);
+            }
             if (close_ec) {
                 spdlog::debug("AsioConnection::async_write_frame: close after timeout failed: {}",
                               close_ec.message());

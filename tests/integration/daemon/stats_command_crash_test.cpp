@@ -25,9 +25,9 @@ using namespace std::chrono_literals;
 namespace {
 
 void startHarnessWithRetry(DaemonHarness& harness, std::size_t maxRetries = 3) {
-    if (!harness.startWithRetry(30s, maxRetries)) {
-        SKIP("Skipping stats integration section due to daemon startup instability");
-    }
+    INFO("The stats integration fixture requires a running daemon");
+    CAPTURE(harness.socketPath());
+    REQUIRE(harness.startWithRetry(30s, maxRetries));
 }
 
 bool connectWithRetry(DaemonClient& client, int maxRetries = 3,

@@ -425,7 +425,7 @@ TEST_CASE("GrepService - Basic Functionality", "[grep][service][basic]") {
         auto res = fixture.grep(req);
 
         REQUIRE(res);
-        CHECK(res.value().semanticMatches >= 0);
+        static_cast<void>(res.value().semanticMatches);
         REQUIRE(res.value().searchStats.contains("retrieval_mode"));
         CHECK(res.value().searchStats.at("retrieval_mode") == "semantic");
     }
@@ -517,7 +517,7 @@ TEST_CASE("GrepService - Output Modes", "[grep][service][modes]") {
         auto res = fixture.grep(req);
 
         REQUIRE(res);
-        CHECK(res.value().semanticMatches >= 0);
+        static_cast<void>(res.value().semanticMatches);
     }
 
     SECTION("Files-only mode allows semantic suggestions") {
@@ -539,7 +539,7 @@ TEST_CASE("GrepService - Output Modes", "[grep][service][modes]") {
         auto res = fixture.grep(req);
 
         REQUIRE(res);
-        CHECK(res.value().semanticMatches >= 0);
+        static_cast<void>(res.value().semanticMatches);
     }
 
     SECTION("Paths-only mode allows semantic suggestions") {
@@ -561,7 +561,7 @@ TEST_CASE("GrepService - Output Modes", "[grep][service][modes]") {
         auto res = fixture.grep(req);
 
         REQUIRE(res);
-        CHECK(res.value().semanticMatches >= 0);
+        static_cast<void>(res.value().semanticMatches);
     }
 }
 

@@ -530,6 +530,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                 }
                 continue;
             }
+            metadata::MetadataOpScope opScope("wc_kg_batch_completion");
             auto completed = meta_->completeKnowledgeGraphEnrichment(
                 batch->knowledgeGraphDocumentId, batch->knowledgeGraphToken);
             if (!completed && !firstCompletionError)

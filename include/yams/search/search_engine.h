@@ -70,6 +70,11 @@ public:
     const Statistics& getStatistics() const;
     void resetStatistics();
     Result<void> healthCheck();
+    /// Load the latest topology routing snapshot and build its route index now, with the
+    /// options a routed query uses, so the first routed query after startup or a topology
+    /// rebuild does not build it inline. Blocks for the build; call it off the query path.
+    /// Returns false when routing is disabled or no snapshot is published.
+    Result<bool> prewarmTopologyRouting();
     void setExecutor(std::optional<boost::asio::any_io_executor> executor);
     void setConceptExtractor(EntityExtractionFunc extractor);
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner);

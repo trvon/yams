@@ -92,7 +92,9 @@ It installs per machine to `%ProgramFiles%\YAMS` and adds `bin` to `PATH`.
 
 The MSI installs `yams.exe`, `yams-daemon.exe` and `yams-mcp-server.exe` in
 `bin`. It registers no Windows service; the CLI starts the daemon on demand.
-MSIs up to 0.20.3 lack the daemon and the MCP server.
+MSIs up to 0.20.3 lack the daemon and the MCP server. The 0.20.3 MSI also
+installed a `yams.exe` that could not start because `yams_onnx_resource-0.dll`
+was missing. Reinstall from the 0.20.5 MSI.
 
 ### Release archives and source
 
@@ -172,7 +174,10 @@ with the same paths as the CLI:
 - socket `$XDG_RUNTIME_DIR/yams-daemon.sock` (or `daemon.socket_path`)
 - log `$XDG_STATE_HOME/yams/daemon.log` (default `~/.local/state/yams/daemon.log`)
 
-It starts with your next login session. To start it now, or after an upgrade:
+When upgrading from 0.20.3, follow the [upgrade steps](#upgrading-from-0203)
+before starting the unit.
+
+It starts with your next login session. To start it now:
 
 ```bash
 systemctl --user daemon-reload
@@ -218,11 +223,35 @@ Upgrading reloads running user managers and restarts running user daemons.
 Removing the package stops running user daemons and disables the unit; it
 never touches `~/.local/share/yams`.
 
-Releases up to 0.20.3 installed a *system* service instead. Upgrading stops,
-disables and removes it. Its corpus in `/var/lib/yams` was effectively unused
-(the CLI never connected to that daemon); delete it with
-`sudo rm -rf /var/lib/yams /var/log/yams /var/lib/private/yams /var/log/private/yams`
-once you are sure it holds nothing you need.
+### Upgrading from 0.20.3
+
+Linux package upgrades stop, disable and remove the old system unit. The corpus
+in `/var/lib/yams` is kept. The CLI corpus stays in your configured data
+directory (default `~/.local/share/yams`).
+
+Configs written by 0.20.3 `yams init` may pin shared `/tmp` paths. In
+`~/.config/yams/config.toml`, remove only these two settings from `[daemon]`
+if they have the values below:
+
+```toml
+socket_path = "/tmp/yams-daemon.sock"
+pid_file = "/tmp/yams-daemon.pid"
+```
+
+These are lines to remove, not add. A shared socket at `/tmp/yams-daemon.sock`
+collides between accounts on the same host. Keep any custom `socket_path` or
+`pid_file` you set on purpose.
+
+Then reload and start the user unit:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now yams-daemon.service
+systemctl --user restart yams-daemon.service
+```
+
+`restart` applies the revised config if the daemon is already active. The
+default socket is `$XDG_RUNTIME_DIR/yams-daemon.sock`.
 
 ### Per-user systemd service without the packages
 

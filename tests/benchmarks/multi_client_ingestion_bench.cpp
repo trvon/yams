@@ -784,7 +784,7 @@ std::optional<fs::path> findExecutableInPath(const std::string& name) {
 }
 
 struct CliBinarySelection {
-    std::optional<fs::path> path;
+    std::optional<fs::path> path{};
     std::string source{"missing"};
     std::string note;
     bool explicitSelection{false};
@@ -849,7 +849,8 @@ CliBinarySelection findYamsBinary(const BenchConfig& cfg) {
     }
 
     for (const auto& relative :
-         {fs::path("build/debug/tools/yams-cli/yams-cli"), fs::path("build/tools/yams-cli/yams-cli"),
+         {fs::path("build/debug/tools/yams-cli/yams-cli"),
+          fs::path("build/tools/yams-cli/yams-cli"),
           fs::path("build/debug/tools/yams-cli/yams-cli"),
           fs::path("build/release/tools/yams-cli/yams-cli"),
           fs::path("build/asan/tools/yams-cli/yams-cli"),
@@ -2912,6 +2913,7 @@ DaemonHarnessOptions benchHarnessOptions() {
         .autoLoadPlugins = false,
         .enableAutoRepair = true,
         .isolateState = true,
+        .isolateEnvironment = true,
     };
 }
 
@@ -2922,6 +2924,7 @@ DaemonHarnessOptions benchHarnessOptions(const BenchConfig& cfg) {
         .autoLoadPlugins = cfg.enablePlugins,
         .enableAutoRepair = true,
         .isolateState = true,
+        .isolateEnvironment = true,
         .pluginDir = cfg.pluginDir,
         .dataDir = cfg.dataDir,
         .configPath = cfg.configPath,

@@ -290,6 +290,7 @@ RequestHandler::Config SocketServer::makeHandlerConfig(bool isProxy,
 
     if (state_) {
         handlerConfig.health_check_counter = &state_->stats.healthCheckConnections;
+        handlerConfig.active_non_health_request_counter = &state_->stats.activeNonHealthRequests;
     }
     return handlerConfig;
 }
@@ -712,8 +713,6 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
     uint32_t noSlotRejectStreak = 0;
 
     while (running_ && !stopping_) {
-        YAMS_ZONE_SCOPED_N("SocketServer::accept_loop");
-
         // IMPORTANT: Accept first, then try to acquire a slot.
         // If we acquire slots before accept(), we can starve the acceptor/backlog under load.
         // Shared so a connection handler that outlives stop() can still release its slot.
@@ -735,11 +734,11 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 }
 
                 // Handle platform-specific errors
-                static int einval_streak = 0;
                 bool need_delay = false;
                 auto backoff_ms = config_.acceptBackoffMs;
 
 #if defined(__APPLE__)
+                static int einval_streak = 0;
                 if (ec.value() == EINVAL) {
                     ++einval_streak;
                     spdlog::debug("Accept error (EINVAL): {} (streak={})", ec.message(),
@@ -804,7 +803,9 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 } else
 #endif
                 {
+#if defined(__APPLE__)
                     einval_streak = 0;
+#endif
                     spdlog::warn("Accept error: {} ({})", ec.message(), ec.value());
                     need_delay = true;
                 }
@@ -938,7 +939,6 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
 
 awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,
                                                 uint64_t conn_token, bool isProxy) {
-    YAMS_ZONE_SCOPED_N("SocketServer::handle_connection");
     static const bool trace = stream_trace_enabled();
     const auto handler_start_time = std::chrono::steady_clock::now();
 

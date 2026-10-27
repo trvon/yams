@@ -23,6 +23,7 @@
 #include <fstream>
 #include <string>
 #include <tuple>
+#include <utility>
 
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
@@ -107,6 +108,38 @@ std::vector<EnvGuard> unsetEnvironment(std::initializer_list<const char*> names)
     return guards;
 }
 
+TuningConfig makeExplicitTuningBaseline() {
+    TuningConfig baseline;
+    baseline.targetCpuPercent = 173;
+    baseline.postIngestCapacity = 2345;
+    baseline.postIngestThreadsMin = 3;
+    baseline.postIngestThreadsMax = 11;
+    baseline.postIngestCoalesceMs = 7;
+    baseline.ingestStoreBatchSize = 31;
+    baseline.admitWarnThreshold = 1701;
+    baseline.admitStopThreshold = 2201;
+    baseline.controlIntervalMs = 777;
+    baseline.holdMs = 2222;
+    baseline.topologyAlgorithm = "multiscale";
+    baseline.tuneAdvisorOverridesResolved = false;
+    baseline.provenance.clear();
+    return baseline;
+}
+
+class RuntimeTuningResetGuard {
+public:
+    RuntimeTuningResetGuard() = default;
+    ~RuntimeTuningResetGuard() {
+        // Clear fixture overrides rather than publishing its arbitrary baseline
+        // into subsequent cases. Keep the normal coherent publication protocol.
+        const auto update = TuneAdvisor::beginConfiguredOverrideUpdate();
+        TuneAdvisor::resetConfiguredOverrides();
+    }
+
+    RuntimeTuningResetGuard(const RuntimeTuningResetGuard&) = delete;
+    RuntimeTuningResetGuard& operator=(const RuntimeTuningResetGuard&) = delete;
+};
+
 } // namespace
 
 TEST_CASE("TuneAdvisor bounded override readers share env and override behavior",
@@ -161,22 +194,43 @@ TEST_CASE("Fresh typed tuning lifecycle does not inherit prior process overrides
     EnvGuard resourceCompatibility{"YAMS_MEMORY_WARNING_PCT", ""};
     EnvGuard rpcCompatibility{"YAMS_POST_INGEST_RPC_QUEUE_MAX", ""};
     EnvGuard governorCompatibility{"YAMS_ENABLE_RESOURCE_GOVERNOR", ""};
+    const auto baseline = makeExplicitTuningBaseline();
+    const RuntimeTuningResetGuard reset;
 
-    TuneAdvisor::setIpcTimeoutMs(4321);
-    TuneAdvisor::setMemoryWarningThreshold(0.88);
-    TuneAdvisor::setPostIngestRpcQueueMax(333);
-    TuneAdvisor::setEnableResourceGovernor(false);
+    (void)ConfigResolver::applyRuntimeTuning({}, baseline);
+    const auto baselineIpcTimeout = TuneAdvisor::ipcTimeoutMs();
+    const auto baselineMemoryWarning = TuneAdvisor::memoryWarningThreshold();
+    const auto baselineRpcQueueMax = TuneAdvisor::postIngestRpcQueueMax();
+    const auto baselineGovernorEnabled = TuneAdvisor::enableResourceGovernor();
+    const auto overriddenIpcTimeout = baselineIpcTimeout == 4321u ? 4322u : 4321u;
+    const auto overriddenMemoryWarning = baselineMemoryWarning > 0.8 ? 0.61 : 0.91;
+    const auto overriddenRpcQueueMax = baselineRpcQueueMax == 333u ? 334u : 333u;
+
+    TuneAdvisor::setIpcTimeoutMs(overriddenIpcTimeout);
+    TuneAdvisor::setMemoryWarningThreshold(overriddenMemoryWarning);
+    TuneAdvisor::setPostIngestRpcQueueMax(overriddenRpcQueueMax);
+    TuneAdvisor::setEnableResourceGovernor(!baselineGovernorEnabled);
+    REQUIRE(TuneAdvisor::ipcTimeoutMs() == overriddenIpcTimeout);
+    REQUIRE(TuneAdvisor::memoryWarningThreshold() == Catch::Approx(overriddenMemoryWarning));
+    REQUIRE(TuneAdvisor::postIngestRpcQueueMax() == overriddenRpcQueueMax);
+    REQUIRE(TuneAdvisor::enableResourceGovernor() != baselineGovernorEnabled);
     const auto versionBefore = TuneAdvisor::configuredOverridesVersion();
     REQUIRE_FALSE(versionBefore & 1U);
 
-    const auto fresh = ConfigResolver::applyRuntimeTuning({}, TuningConfig{});
+    const auto fresh = ConfigResolver::applyRuntimeTuning({}, baseline);
 
-    CHECK((TuneAdvisor::configuredOverridesVersion() == versionBefore + 2));
+    CHECK(TuneAdvisor::configuredOverridesVersion() == versionBefore + 2);
+    CHECK(fresh.targetCpuPercent == baseline.targetCpuPercent);
+    CHECK(fresh.postIngestCapacity == baseline.postIngestCapacity);
+    CHECK(fresh.ingestStoreBatchSize == baseline.ingestStoreBatchSize);
+    CHECK(fresh.controlIntervalMs == baseline.controlIntervalMs);
+    CHECK(fresh.topologyAlgorithm == baseline.topologyAlgorithm);
+    CHECK(fresh.tuneAdvisorOverridesResolved);
     CHECK(fresh.provenance.empty());
-    CHECK((TuneAdvisor::ipcTimeoutMs() == 15000u));
-    CHECK((TuneAdvisor::memoryWarningThreshold() == Catch::Approx(0.75)));
-    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 256u));
-    CHECK(TuneAdvisor::enableResourceGovernor());
+    CHECK(TuneAdvisor::ipcTimeoutMs() == baselineIpcTimeout);
+    CHECK(TuneAdvisor::memoryWarningThreshold() == Catch::Approx(baselineMemoryWarning));
+    CHECK(TuneAdvisor::postIngestRpcQueueMax() == baselineRpcQueueMax);
+    CHECK(TuneAdvisor::enableResourceGovernor() == baselineGovernorEnabled);
 }
 
 TEST_CASE("Fresh runtime tuning resolution revokes removed configured overrides",
@@ -185,31 +239,52 @@ TEST_CASE("Fresh runtime tuning resolution revokes removed configured overrides"
     EnvGuard admissionCompatibility{"YAMS_ADMISSION_CONTROL", ""};
     EnvGuard memoryCompatibility{"YAMS_MEMORY_WARNING_PCT", ""};
     EnvGuard postIngestCompatibility{"YAMS_POST_INGEST_RPC_QUEUE_MAX", ""};
+    const auto baseline = makeExplicitTuningBaseline();
+    const RuntimeTuningResetGuard reset;
+
+    (void)ConfigResolver::applyRuntimeTuning({}, baseline);
+    const auto baselineIpcTimeout = TuneAdvisor::ipcTimeoutMs();
+    const auto baselineAdmissionControl = TuneAdvisor::enableAdmissionControl();
+    const auto baselineMemoryWarning = TuneAdvisor::memoryWarningThreshold();
+    const auto baselineRpcQueueMax = TuneAdvisor::postIngestRpcQueueMax();
+    const auto overriddenIpcTimeout = baselineIpcTimeout == 4321u ? 4322u : 4321u;
+    const auto overriddenMemoryWarning = baselineMemoryWarning > 0.8 ? 0.61 : 0.91;
+    const auto overriddenRpcQueueMax = baselineRpcQueueMax == 333u ? 334u : 333u;
 
     ConfigResolver::ConfigSections configured;
-    configured["tuning"] = {{"target_cpu_percent", "321"}};
-    configured["tuning.ipc"] = {{"timeout_ms", "4321"}};
-    configured["tuning.resource"] = {{"admission_control", "false"},
-                                     {"memory_warning_threshold", "0.91"}};
-    configured["tuning.post_ingest"] = {{"rpc_queue_max", "333"}};
+    configured["tuning"] = {{"target_cpu_percent", "321"}, {"post_ingest_capacity", "4096"}};
+    configured["tuning.ipc"] = {{"timeout_ms", std::to_string(overriddenIpcTimeout)}};
+    configured["tuning.resource"] = {
+        {"admission_control", baselineAdmissionControl ? "false" : "true"},
+        {"memory_warning_threshold", std::to_string(overriddenMemoryWarning)}};
+    configured["tuning.post_ingest"] = {{"rpc_queue_max", std::to_string(overriddenRpcQueueMax)}};
 
-    const auto applied = ConfigResolver::applyRuntimeTuning(configured, TuningConfig{});
-    REQUIRE((applied.provenance.at("tuning.ipc.timeout_ms") == "config:tuning.ipc.timeout_ms"));
-    CHECK((TuneAdvisor::ipcTimeoutMs() == 4321u));
-    CHECK_FALSE(TuneAdvisor::enableAdmissionControl());
-    CHECK((TuneAdvisor::memoryWarningThreshold() == Catch::Approx(0.91)));
-    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 333u));
+    const auto applied = ConfigResolver::applyRuntimeTuning(configured, baseline);
+    CHECK(applied.targetCpuPercent == 321u);
+    CHECK(applied.postIngestCapacity == 4096u);
+    REQUIRE(applied.provenance.at("tuning.target_cpu_percent") ==
+            "config:tuning.target_cpu_percent");
+    REQUIRE(applied.provenance.at("tuning.ipc.timeout_ms") == "config:tuning.ipc.timeout_ms");
+    CHECK(TuneAdvisor::ipcTimeoutMs() == overriddenIpcTimeout);
+    CHECK(TuneAdvisor::enableAdmissionControl() != baselineAdmissionControl);
+    CHECK(TuneAdvisor::memoryWarningThreshold() == Catch::Approx(overriddenMemoryWarning));
+    CHECK(TuneAdvisor::postIngestRpcQueueMax() == overriddenRpcQueueMax);
 
     const auto versionBeforeRemoval = TuneAdvisor::configuredOverridesVersion();
-    const auto reverted = ConfigResolver::applyRuntimeTuning({}, TuningConfig{});
+    const auto reverted = ConfigResolver::applyRuntimeTuning({}, baseline);
 
-    CHECK((TuneAdvisor::configuredOverridesVersion() == versionBeforeRemoval + 2));
-    CHECK((reverted.targetCpuPercent == 200u));
+    CHECK(TuneAdvisor::configuredOverridesVersion() == versionBeforeRemoval + 2);
+    CHECK(reverted.targetCpuPercent == baseline.targetCpuPercent);
+    CHECK(reverted.postIngestCapacity == baseline.postIngestCapacity);
+    CHECK(reverted.ingestStoreBatchSize == baseline.ingestStoreBatchSize);
+    CHECK(reverted.controlIntervalMs == baseline.controlIntervalMs);
+    CHECK(reverted.topologyAlgorithm == baseline.topologyAlgorithm);
+    CHECK(reverted.tuneAdvisorOverridesResolved);
     CHECK(reverted.provenance.empty());
-    CHECK((TuneAdvisor::ipcTimeoutMs() == 15000u));
-    CHECK(TuneAdvisor::enableAdmissionControl());
-    CHECK((TuneAdvisor::memoryWarningThreshold() == Catch::Approx(0.75)));
-    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 256u));
+    CHECK(TuneAdvisor::ipcTimeoutMs() == baselineIpcTimeout);
+    CHECK(TuneAdvisor::enableAdmissionControl() == baselineAdmissionControl);
+    CHECK(TuneAdvisor::memoryWarningThreshold() == Catch::Approx(baselineMemoryWarning));
+    CHECK(TuneAdvisor::postIngestRpcQueueMax() == baselineRpcQueueMax);
 }
 
 TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and reload",
@@ -1123,6 +1198,8 @@ boundary_spill = true
 boundary_spill_limit = 1
 boundary_spill_distance_ratio = +1.2
 boundary_spill_residual_penalty = 1.5e0
+road_max_per_cluster = 3
+road_order = "session"
 
 [topology.features]
 entity_fusion = true
@@ -1155,6 +1232,10 @@ minhash_alpha = 0.15
     CHECK((*policy.boundarySpillDistanceRatio == Catch::Approx(1.2)));
     REQUIRE(policy.boundarySpillResidualPenalty.has_value());
     CHECK((*policy.boundarySpillResidualPenalty == Catch::Approx(1.5)));
+    REQUIRE(policy.roadMaxPerCluster.has_value());
+    CHECK((*policy.roadMaxPerCluster == 3));
+    REQUIRE(policy.roadOrder.has_value());
+    CHECK((*policy.roadOrder == yams::topology::RoadOrderKind::Session));
     CHECK(*policy.featureEntityFusion);
     CHECK((*policy.featureEntitySignatureK == 12));
     CHECK((*policy.featureEntityFusionAlpha == Catch::Approx(0.2F)));
@@ -1199,6 +1280,37 @@ engine = "connected"
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
         auto policy = ConfigResolver::resolveTopologyEnginePolicy();
         CHECK_FALSE(policy.dirtyRegionExpansion.has_value());
+        // Roads and the road order stay off unless the keys are present.
+        CHECK_FALSE(policy.roadMaxPerCluster.has_value());
+        CHECK_FALSE(policy.roadOrder.has_value());
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyEnginePolicy reads the road order",
+                 "[daemon][components][config][topology][roads][catch2]") {
+    SECTION("every spelling resolves") {
+        for (const auto [spelling, expected] :
+             {std::pair{"none", yams::topology::RoadOrderKind::None},
+              std::pair{"time", yams::topology::RoadOrderKind::Time},
+              std::pair{"Session", yams::topology::RoadOrderKind::Session},
+              std::pair{"similarity_chain", yams::topology::RoadOrderKind::SimilarityChain}}) {
+            auto configPath = writeToml("config.toml", std::string("[topology]\nroad_order = \"") +
+                                                           spelling + "\"\n");
+            EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+            auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+            REQUIRE(policy.roadOrder.has_value());
+            CHECK((*policy.roadOrder == expected));
+        }
+    }
+    SECTION("an unrecognized order is ignored, not guessed") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+road_order = "alphabetical"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        CHECK_FALSE(policy.roadOrder.has_value());
     }
 }
 
@@ -1216,6 +1328,7 @@ representative_limit = 2
 ann_candidate_limit = 16
 bq_candidate_limit = 12
 bq_prefix_dim = 64
+bq_rotation = fwht
 graph_community_source = topology_snapshot
 adaptive_probe_score_gap = 0.07
 narrow_min_boundary_margin = 0.03
@@ -1260,6 +1373,8 @@ rrf_k = 33
     CHECK((*policy.bqCandidateLimit == 12U));
     REQUIRE(policy.bqPrefixDimension.has_value());
     CHECK((*policy.bqPrefixDimension == 64U));
+    REQUIRE(policy.bqRotation.has_value());
+    CHECK((*policy.bqRotation == "fwht"));
     REQUIRE(policy.graphCommunitySource.has_value());
     CHECK((*policy.graphCommunitySource == "topology_snapshot"));
     REQUIRE(policy.adaptiveProbeScoreGap.has_value());
@@ -1290,6 +1405,95 @@ rrf_k = 33
     CHECK((*policy.routeWorkMaxAnnCandidates == 48U));
     REQUIRE(policy.rrfK.has_value());
     CHECK((*policy.rrfK == 33.0f));
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyRoutingPolicy reads the RouteOnly evaluation gate",
+                 "[daemon][components][config][topology_routing][route-only][catch2]") {
+    SECTION("both keys populated") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+vector_policy = "route_only"
+
+[search.evaluation]
+allow_uncertified_routes = true
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+        REQUIRE(policy.vectorPolicy.has_value());
+        CHECK((*policy.vectorPolicy == "route_only"));
+        REQUIRE(policy.allowUncertifiedRouteOnly.has_value());
+        CHECK(*policy.allowUncertifiedRouteOnly);
+    }
+
+    SECTION("gate explicitly closed") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[search.evaluation]
+allow_uncertified_routes = false
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+        CHECK_FALSE(policy.vectorPolicy.has_value());
+        REQUIRE(policy.allowUncertifiedRouteOnly.has_value());
+        CHECK_FALSE(*policy.allowUncertifiedRouteOnly);
+    }
+
+    SECTION("absent keys stay unset") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+max_clusters = 2
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+        CHECK_FALSE(policy.vectorPolicy.has_value());
+        CHECK_FALSE(policy.allowUncertifiedRouteOnly.has_value());
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyRoutingPolicy reads the road beam keys",
+                 "[daemon][components][config][topology_routing][road-beam][catch2]") {
+    SECTION("both keys populated") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+road_hops = 2
+road_beam_width = 3
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+        REQUIRE(policy.roadHops.has_value());
+        CHECK((*policy.roadHops == 2U));
+        REQUIRE(policy.roadBeamWidth.has_value());
+        CHECK((*policy.roadBeamWidth == 3U));
+    }
+
+    SECTION("absent keys stay unset") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+max_clusters = 2
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+        CHECK_FALSE(policy.roadHops.has_value());
+        CHECK_FALSE(policy.roadBeamWidth.has_value());
+        CHECK_FALSE(policy.roadWalkWindow.has_value());
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyRoutingPolicy reads the road walk window",
+                 "[daemon][components][config][topology_routing][road-walk][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+road_walk_window = 4
+)TOML");
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
+    REQUIRE(policy.roadWalkWindow.has_value());
+    CHECK((*policy.roadWalkWindow == 4U));
+    // The walk window travels alone: the beam keys stay unset.
+    CHECK_FALSE(policy.roadHops.has_value());
+    CHECK_FALSE(policy.roadBeamWidth.has_value());
 }
 
 TEST_CASE("Generated config keeps topology-assisted hybrid search as the product default",
@@ -1871,6 +2075,7 @@ TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][m
           {"max_merged_keys", "23"},
           {"max_cache_bytes", "8192"},
           {"max_tracked_identities", "31"},
+          {"max_scan_bytes", "16384"},
           {"mode", "temporary"},
           {"session_id", "run-123"},
           {"writer_auth_required", "true"},
@@ -1893,10 +2098,24 @@ TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][m
     CHECK(config.memorySync.limits.maxMergedKeys == 23);
     CHECK(config.memorySync.limits.maxCacheBytes == 8192);
     CHECK(config.memorySync.limits.maxTrackedIdentities == 31);
+    CHECK(config.memorySync.limits.maxScanBytes == 16384);
     CHECK(config.memorySync.mode == "temporary");
     CHECK(config.memorySync.sessionId == "run-123");
     CHECK(config.memorySync.writerAuthRequired);
     CHECK(config.memorySync.writerAuthManifestPath == "/secure/writers.json");
+}
+
+TEST_CASE("ConfigResolver rejects invalid complete-sweep byte budgets",
+          "[daemon][config][memory-sync][scan-safety]") {
+    for (const auto* value : {"0", "-1", "1.5", "184467440737095516160"}) {
+        CAPTURE(value);
+        ConfigResolver::ConfigSections sections = {
+            {"memory_sync", {{"enabled", "false"}, {"max_scan_bytes", value}}},
+        };
+        DaemonConfig config;
+        CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+        CHECK_FALSE(config.memorySync.enabled);
+    }
 }
 
 TEST_CASE("ConfigResolver requires explicit shared corpus scope for replication",
@@ -2295,4 +2514,47 @@ TEST_CASE("ConfigResolver reports out-of-range values for the ranged [tuning] se
     CHECK((TuneAdvisor::connectionLifetimeSeconds() <= 86400u));
     sections["tuning"] = {};
     (void)ConfigResolver::applyRuntimeTuning(sections, base);
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyEnginePolicy reads the representative rule",
+                 "[daemon][components][config][topology][catch2]") {
+    SECTION("medoid is resolved") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+representative_rule = "medoid"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        REQUIRE(policy.representativeRule.has_value());
+        CHECK((*policy.representativeRule == yams::topology::RepresentativeRule::Medoid));
+    }
+    SECTION("degree is resolved case-insensitively") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+representative_rule = "Degree"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        REQUIRE(policy.representativeRule.has_value());
+        CHECK((*policy.representativeRule == yams::topology::RepresentativeRule::Degree));
+    }
+    SECTION("an unrecognized rule is ignored") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+representative_rule = "centroid"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        CHECK_FALSE(policy.representativeRule.has_value());
+    }
+    SECTION("absent keeps the engine default") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+engine = "connected"
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        CHECK_FALSE(policy.representativeRule.has_value());
+    }
 }

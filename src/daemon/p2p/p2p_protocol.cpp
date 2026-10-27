@@ -34,20 +34,20 @@ struct WireHello {
 struct WireState {
     memory_sync::VersionVector version;
     std::map<memory_sync::NodeId, std::uint64_t> seen;
-    std::map<memory_sync::NodeId, memory_sync::WriterHistoryCommitment> commitments;
-    std::set<memory_sync::NodeId> quarantinedWriters;
+    std::map<memory_sync::NodeId, memory_sync::WriterHistoryCommitment> commitments{};
+    std::set<memory_sync::NodeId> quarantinedWriters{};
 };
 
 struct WireWindowFrontier {
     std::string writerId;
     std::uint64_t counter{0};
-    std::string digest;
+    std::string digest{};
 };
 
 struct WireHistoryProof {
     std::string writerId;
     std::uint64_t counter{0};
-    std::string digest;
+    std::string digest{};
 };
 
 struct ValidatedHistoryProof {

@@ -6,7 +6,8 @@
 yams_tune_advisor_lib = static_library('yams_tune_advisor',
   files('../components/TuneAdvisor.cpp'),
   include_directories: include_directories('../../../include'),
-  dependencies: [dependency('yams_config'), dependency('yams_metadata')],
+  dependencies: [dependency('yams_config'), dependency('yams_metadata')] + yams_tracy_deps,
+  cpp_args: yams_tracy_args,
   install: false,
 )
 
@@ -30,8 +31,8 @@ if get_option('build-tests') or get_option('build-benchmarks') or (get_option('b
   yams_tune_advisor_testing_lib = static_library('yams_tune_advisor_testing',
     files('../components/TuneAdvisor.cpp'),
     include_directories: include_directories('../../../include'),
-    dependencies: [dependency('yams_config'), dependency('yams_metadata')],
-    cpp_args: ['-DYAMS_TESTING=1'],
+    dependencies: [dependency('yams_config'), dependency('yams_metadata')] + yams_tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
     install: false,
   )
   yams_tune_advisor_testing_dep = declare_dependency(

@@ -37,10 +37,31 @@ struct TopologyCandidateStructureEvidence {
     float densitySupport{0.0F};
 };
 
+/// One undirected road step: the neighbouring cluster (index into `artifacts->clusters`) and the
+/// road weight shared by both endpoints.
+struct TopologyRoadNeighbor {
+    std::size_t clusterIndex{0};
+    double weight{0.0};
+
+    friend bool operator==(const TopologyRoadNeighbor&, const TopologyRoadNeighbor&) = default;
+};
+
 struct TopologyRoutingSnapshot {
     std::shared_ptr<const yams::topology::TopologyArtifactBatch> artifacts;
     std::string constructionFingerprint;
     std::string representationFingerprint;
+    /// Identity of the loaded road set (`topologyRoadFingerprint`). Provenance and cache
+    /// identity for road consumers only; not part of the construction or policy fingerprints.
+    std::string roadFingerprint;
+    /// Road adjacency by cluster index (`buildTopologyRoadAdjacency`): the union of both stored
+    /// orientations, each source sorted by weight desc then target cluster id asc. Empty when the
+    /// batch carries no roads (never built, or dropped with `roadUnavailableReason`).
+    std::vector<std::vector<TopologyRoadNeighbor>> roadAdjacency;
+    /// Walk order per cluster index (`buildTopologyOrderedMemberHashes`): the cluster's
+    /// `orderedMembers` resolved to member hashes, in walk order;
+    /// `artifacts->clusters[i].orderKind` names the kind. Empty for a cluster without an order or
+    /// with an invalid permutation. Read by the road walk only; never part of any fingerprint.
+    std::vector<std::vector<std::string_view>> orderedMemberHashes;
     std::unordered_map<std::string_view, std::size_t> clustersById;
     std::unordered_map<std::string_view, std::size_t> membershipsByDocumentHash;
     yams::topology::ProtectedRelationCoverIndex protectedRelationCover;
@@ -48,12 +69,44 @@ struct TopologyRoutingSnapshot {
     bool denseAnnBuildAttempted = false;
     /// Coordinate prefix the centroid BQ index was built over (0 = full dimension).
     std::size_t bqPrefixDimension = 0;
+    /// Rotation and seed the centroid BQ index was built with; queries reuse the index's own
+    /// rotation, so both sides always share this seed. Part of the cache key.
+    yams::vector::BinaryRotation bqRotation = yams::vector::BinaryRotation::None;
+    std::uint64_t bqRotationSeed = 0;
 };
 
 struct TopologyRoutingSnapshotLookup {
     std::shared_ptr<const TopologyRoutingSnapshot> snapshot;
     bool cacheHit = false;
 };
+
+/// Walk orders of the clusters a routed query draws from, built by the session when
+/// `TopologyRoutingOptions::roadWalkWindow` > 0: the selected routes first, then the road-expanded
+/// clusters, keeping only the clusters that carry an order. The vector stage expands every routed
+/// hit along these orders (`walkTopologyRoadOrders`). Immutable once built; the member views
+/// borrow from `snapshot`, which the index keeps alive.
+struct TopologyRoadWalkIndex {
+    std::shared_ptr<const TopologyRoutingSnapshot> snapshot;
+    /// Indices into `snapshot->artifacts->clusters` of the walkable clusters, routes first.
+    std::vector<std::size_t> clusterIndices;
+    /// Member hash -> every (slot into `clusterIndices`, position along that cluster's order).
+    std::unordered_map<std::string_view, std::vector<std::pair<std::size_t, std::size_t>>>
+        positions;
+
+    /// The walk order of `clusterIndices[slot]`.
+    [[nodiscard]] const std::vector<std::string_view>& order(std::size_t slot) const {
+        return snapshot->orderedMemberHashes[clusterIndices[slot]];
+    }
+};
+
+/// Expand every anchor by `window` positions on each side along each order it belongs to, bounded
+/// to that order. Returns the walked hashes that are not anchors and not in `exclude`,
+/// deduplicated. `anchorsExpanded`, when given, receives the number of anchors found in at least
+/// one order. A window of 0 walks nothing.
+[[nodiscard]] std::unordered_set<std::string>
+walkTopologyRoadOrders(const TopologyRoadWalkIndex& index, std::span<const std::string> anchors,
+                       std::size_t window, const std::unordered_set<std::string>& exclude,
+                       std::size_t* anchorsExpanded = nullptr);
 
 using TopologyRoutingSnapshotLoader =
     std::function<Result<std::optional<yams::topology::TopologyArtifactBatch>>()>;
@@ -67,9 +120,10 @@ public:
     explicit TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader);
     explicit TopologyRoutingSnapshotCache(TopologyRoutingSharedSnapshotLoader loader);
 
-    [[nodiscard]] Result<TopologyRoutingSnapshotLookup> get(std::uint64_t expectedEpoch = 0,
-                                                            bool requireDenseAnnIndex = true,
-                                                            std::size_t bqPrefixDimension = 0);
+    [[nodiscard]] Result<TopologyRoutingSnapshotLookup>
+    get(std::uint64_t expectedEpoch = 0, bool requireDenseAnnIndex = true,
+        std::size_t bqPrefixDimension = 0,
+        yams::vector::BinaryRotation bqRotation = yams::vector::BinaryRotation::None);
 
 private:
     TopologyRoutingSharedSnapshotLoader loader_;
@@ -108,11 +162,24 @@ struct TopologyRoutingOptions {
     /// Leading coordinate prefix for the BQ index; only meaningful for Matryoshka-trained
     /// embeddings. Zero uses the full dimension.
     std::size_t bqPrefixDimension = 0;
+    SearchEngineConfig::TopologyBqRotation bqRotation =
+        SearchEngineConfig::TopologyBqRotation::None;
     float adaptiveProbeScoreGap = 0.0F;
     float narrowMinBoundaryMargin = 0.0F;
     /// Maximum documents in a materialized route allowed set or expansion result.
     /// Zero explicitly means unbounded full membership.
     std::size_t maxDocs = 0;
+    /// Road beam: hops along cluster roads from the selected routes and the clusters kept per
+    /// hop (`search.topology.road_hops`, `road_beam_width`). Zero hops is off. The expansion is
+    /// reported beside the certificate (`TopologyRoutingSessionResult::roadExpanded*`), so both
+    /// knobs are excluded from `topologyRoutingPolicyFingerprint` and never touch admission.
+    std::size_t roadHops = 0;
+    std::size_t roadBeamWidth = 4;
+    /// Road walk (`search.topology.road_walk_window`): positions taken on each side of a routed
+    /// hit along its cluster's walk order. Zero is off. The session only indexes the walkable
+    /// orders (`TopologyRoutingSessionResult::roadWalkIndex`); the vector stage walks around the
+    /// hits it observed. Excluded from `topologyRoutingPolicyFingerprint` like the beam knobs.
+    std::size_t roadWalkWindow = 0;
     float sparseDenseAlpha = 0.5F;
     float minRouteScore = 0.0F;
     SearchEngineConfig::TopologyRouteRiskCalibration routeRiskCalibration;
@@ -120,6 +187,10 @@ struct TopologyRoutingOptions {
     /// Materialize full membership for confidently selected clusters so callers can gate an
     /// existing candidate stream without query-scoring every member.
     bool collectRouteMembership = false;
+    /// Augment policy: report materialized route members absent from the request's existing
+    /// candidates as added candidates (present ones as duplicates). Accounting only; the allowed
+    /// set and the routing policy fingerprint are unchanged. Narrow and Shadow leave this off.
+    bool countRouteMemberAdditions = false;
     float graphNeighborMinScore = 0.25F;
     bool graphNeighborReciprocalOnly = true;
     bool graphWeightedSeedRanking = false;
@@ -133,6 +204,12 @@ struct TopologyRoutingOptions {
 makeTopologyRoutingOptions(const SearchEngineConfig& config,
                            SearchEngineConfig::TopologyRoutingMode routingMode, bool weakTier1Query,
                            bool collectRouteMembership = false);
+
+/// The snapshot (with its route index) that a routed query with `options` reads. Queries and
+/// warm-ups share this so a warmed entry is the one the next query looks up.
+[[nodiscard]] Result<TopologyRoutingSnapshotLookup>
+getRoutingSnapshot(TopologyRoutingSnapshotCache& cache, std::uint64_t expectedEpoch,
+                   const TopologyRoutingOptions& options);
 
 struct TopologyRoutingSessionRequest {
     std::string query;
@@ -149,7 +226,7 @@ struct TopologyRoutingSessionRequest {
 /// Query-to-cover evidence retained before the router scalarizes it into routeScore.
 struct TopologyRouteEvidence {
     std::string clusterId;
-    std::optional<float> semanticCost;
+    std::optional<float> semanticCost{};
     std::optional<float> sparseCost;
     float persistencePenalty{1.0F};
     float cohesionPenalty{1.0F};
@@ -291,7 +368,41 @@ struct TopologyRoutingSessionResult {
     bool artifactsFresh = false;
     bool snapshotCacheHit = false;
     std::uint64_t topologyEpoch = 0;
+    /// Representative rule recorded in the loaded snapshot (Degree when nothing loaded).
+    yams::topology::RepresentativeRule representativeRule =
+        yams::topology::RepresentativeRule::Degree;
     std::string skipReason;
+    /// Why the loaded snapshot carries no roads although a sidecar existed (store diagnostic,
+    /// `TopologyArtifactBatch::roadUnavailableReason`). Empty when roads loaded or were never
+    /// written. Informational: a set reason never changes routing.
+    std::string roadUnavailableReason;
+    /// Road beam (`TopologyRoutingOptions::roadHops`). The clusters reached along roads and their
+    /// members are kept apart from the certificate: they never widen `allowedDocumentHashes`,
+    /// admission or the policy fingerprint. RouteOnly and Augment query the groups as extra routes.
+    /// `roadHopsRequested` echoes the option so consumers can tell "off" from "nothing reached";
+    /// `roadSkipReason` says why hops > 0 expanded nothing (roads_absent, no_selected_routes).
+    std::size_t roadHopsRequested = 0;
+    std::size_t roadHopsApplied = 0;
+    std::vector<std::string> roadExpandedClusterIds;
+    /// One member group per expanded cluster, in beam order, excluding certificate members and
+    /// members already listed by an earlier road group.
+    std::vector<std::unordered_set<std::string>> roadExpandedDocumentHashGroups;
+    /// Centroid evaluations the beam performed; also counted in the representative distance
+    /// evaluations below so routed work stays comparable with the no-road arm.
+    std::size_t roadWorkCentroidEvaluations = 0;
+    std::string roadSkipReason;
+    /// Why one or more walk orders were dropped when the snapshot loaded (store diagnostic,
+    /// `TopologyArtifactBatch::orderUnavailableReason`). Empty when every order loaded or none
+    /// was written. Informational: a set reason never changes routing.
+    std::string orderUnavailableReason;
+    /// Road walk (`TopologyRoutingOptions::roadWalkWindow`). `roadWalkWindowRequested` echoes the
+    /// option; `roadWalkIndex` holds the walk orders of the selected routes and road-expanded
+    /// clusters (null when the window is 0 or no walkable cluster has an order);
+    /// `roadWalkClustersUnordered` counts the walkable clusters without one. The stage reports the
+    /// anchors and the appended documents; nothing here touches the certificate.
+    std::size_t roadWalkWindowRequested = 0;
+    std::size_t roadWalkClustersUnordered = 0;
+    std::shared_ptr<const TopologyRoadWalkIndex> roadWalkIndex;
     std::size_t routedClusters = 0;
     std::size_t availableRoutes = 0;
     std::size_t routedDocs = 0;
@@ -368,7 +479,30 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
 [[nodiscard]] std::string
 topologyRoutingRepresentationFingerprint(const yams::topology::TopologyArtifactBatch& batch);
 
-/// Identity of the allowed-set selection policy; excludes query values and diagnostics.
+/// Identity of `batch.roads` alone (order-independent). Separate from the construction
+/// fingerprint, which stays road-free so road changes never invalidate construction-bound
+/// calibrations; an empty road set has a fixed, non-empty fingerprint.
+[[nodiscard]] std::string
+topologyRoadFingerprint(const yams::topology::TopologyArtifactBatch& batch);
+
+/// Undirected road adjacency by cluster index from `batch.roads`: both orientations of every road
+/// are listed once each, a pair stored twice collapses to its heavier weight, and each source is
+/// sorted by weight desc then target cluster id asc. Roads with an unknown endpoint, a self loop or
+/// a non-finite/negative weight are skipped. Empty when the batch has no roads.
+[[nodiscard]] std::vector<std::vector<TopologyRoadNeighbor>>
+buildTopologyRoadAdjacency(const yams::topology::TopologyArtifactBatch& batch);
+
+/// Walk order per cluster index: `ClusterArtifact::orderedMembers` resolved to views of the
+/// cluster's `memberDocumentHashes`, in walk order. A cluster with `orderKind` None, an empty order
+/// or a permutation that fails `validateMemberPermutation` resolves to an empty list. The views
+/// borrow from `batch`.
+[[nodiscard]] std::vector<std::vector<std::string_view>>
+buildTopologyOrderedMemberHashes(const yams::topology::TopologyArtifactBatch& batch);
+
+/// Identity of the allowed-set selection policy; excludes query values and diagnostics. The road
+/// beam knobs (`roadHops`, `roadBeamWidth`) and the road walk window (`roadWalkWindow`) are
+/// deliberately left out: roads and the walk expand beside the certificate, so calibrations bound
+/// to this fingerprint stay valid with roads on or off.
 [[nodiscard]] std::string
 topologyRoutingPolicyFingerprint(std::string_view representationFingerprint,
                                  const TopologyRoutingOptions& options);

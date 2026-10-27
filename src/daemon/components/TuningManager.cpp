@@ -224,7 +224,6 @@ boost::asio::awaitable<void> TuningManager::tuningLoop() {
     spdlog::debug("TuningManager loop started");
 
     while (running_.load()) {
-        YAMS_ZONE_SCOPED_N("TuningManager::loop");
         try {
             (void)tick_once();
         } catch (const std::exception& e) {
@@ -544,10 +543,8 @@ bool TuningManager::tick_once() {
 
     // Gather minimal metrics
     const std::uint64_t activeConns = state_->stats.activeConnections.load();
-    const std::uint64_t healthConns = state_->stats.healthCheckConnections.load();
-    // Non-health connections are the ones that count for idle detection
-    const std::uint64_t nonHealthConns =
-        (activeConns > healthConns) ? (activeConns - healthConns) : 0;
+    const std::uint64_t activeNonHealthRequests =
+        state_->stats.activeNonHealthRequests.load(std::memory_order_relaxed);
     const std::uint64_t workerThreads = sm_->getWorkerThreads();
     const std::uint64_t workerQueued = sm_->getWorkerQueueDepth();
     const auto msnap = MuxMetricsRegistry::instance().snapshot();
@@ -594,7 +591,7 @@ bool TuningManager::tick_once() {
     }
 
     const bool daemonIdle =
-        (nonHealthConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0) &&
+        (activeNonHealthRequests == 0) && (workerQueued == 0) && (muxQueuedBytes == 0) &&
         (searchLoad.active == 0) && (searchLoad.queued == 0) && (deferredQueued == 0) &&
         (fts5Queued == 0) && (postIngestQueuedForIdle == 0) && (postIngestInFlightForIdle == 0) &&
         (kgQueuedForIdle == 0) && (symbolQueuedForIdle == 0) && (entityQueuedForIdle == 0) &&
@@ -675,8 +672,9 @@ bool TuningManager::tick_once() {
             } catch (...) {
                 logIgnoredTuningException("maxMuxBytes probe failed");
             }
-            bool busy = (nonHealthConns > 0) || workerQHigh || muxHigh;
-            bool idle = (nonHealthConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
+            bool busy = (activeNonHealthRequests > 0) || workerQHigh || muxHigh;
+            bool idle =
+                (activeNonHealthRequests == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
             if (busy) {
                 uint32_t next = clampMs(static_cast<uint32_t>(currentMs * 0.5));
                 if (next < currentMs) {
@@ -952,7 +950,7 @@ bool TuningManager::tick_once() {
                 applyActiveMask(1u << 4u, titleTarget);
                 applyActiveMask(1u << 5u, embedTarget);
                 const bool daemonIdle =
-                    (nonHealthConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
+                    (activeNonHealthRequests == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
                 const bool postIngestBusy = (queuedItems > 0) || (currentInFlight > 0) ||
                                             (kgQueued > 0) || (symbolQueued > 0) ||
                                             (entityQueued > 0) || (titleQueued > 0) ||

@@ -25,8 +25,9 @@ yams_api_lib = static_library('yams_api',
     dependency('zlib'),
     dependency('spdlog'),
     boost_dep,
-  ],
+  ] + yams_tracy_deps,
   include_directories: include_directories('../../include'),
+  cpp_args: yams_tracy_args,
   install: false,
 )
 

@@ -92,6 +92,51 @@ TEST_CASE_METHOD(KGStoreFixture, "KG Store scopes typed nodes before pagination"
     CHECK((second.value().front().label.value_or("") == "beta"));
 }
 
+TEST_CASE_METHOD(KGStoreFixture, "KG Store scopes document and path nodes by their stored paths",
+                 "[unit][metadata][kg][scope]") {
+    // Document nodes carry their path only as the label; snapshot path nodes key on the snapshot
+    // id and carry the path in $.path. Both must match a path range (issue #280).
+    std::vector<KGNode> nodes{
+        {.nodeKey = "doc:inside", .label = "/repo/lib/include/a.hpp", .type = "document"},
+        {.nodeKey = "doc:outside", .label = "/other/lib/b.hpp", .type = "document"},
+        {.nodeKey = "doc:unlabelled", .label = "c0ffee...", .type = "document"},
+        {.nodeKey = "path:2026-01-01T00:00:00Z:/repo/lib/include/a.hpp",
+         .label = "/repo/lib/include/a.hpp",
+         .type = "path",
+         .properties =
+             R"({"snapshot_id":"2026-01-01T00:00:00Z","path":"/repo/lib/include/a.hpp"})"},
+        {.nodeKey = "path:logical:/repo/lib/include/a.hpp",
+         .label = "/repo/lib/include/a.hpp",
+         .type = "path",
+         .properties = R"({"path":"/repo/lib/include/a.hpp","logical":true})"},
+        {.nodeKey = "path:2026-01-01T00:00:00Z:/other/lib/b.hpp",
+         .label = "/other/lib/b.hpp",
+         .type = "path",
+         .properties = R"({"snapshot_id":"2026-01-01T00:00:00Z","path":"/other/lib/b.hpp"})"},
+    };
+    REQUIRE((store_->upsertNodes(nodes).has_value()));
+
+    const std::vector<KGPathRange> ranges{{.lower = "/repo/", .upper = "/repo0"}};
+
+    auto docCount = store_->countNodesByTypeInPathRanges("document", ranges);
+    REQUIRE((docCount.has_value()));
+    CHECK((docCount.value() == 1));
+    auto docs = store_->findNodesByTypeInPathRanges("document", ranges, 10, 0);
+    REQUIRE((docs.has_value()));
+    REQUIRE((docs.value().size() == 1));
+    CHECK((docs.value().front().nodeKey == "doc:inside"));
+
+    auto pathCount = store_->countNodesByTypeInPathRanges("path", ranges);
+    REQUIRE((pathCount.has_value()));
+    CHECK((pathCount.value() == 2));
+    auto paths = store_->findNodesByTypeInPathRanges("path", ranges, 10, 0);
+    REQUIRE((paths.has_value()));
+    REQUIRE((paths.value().size() == 2));
+    for (const auto& node : paths.value()) {
+        CHECK((node.label.value_or("") == "/repo/lib/include/a.hpp"));
+    }
+}
+
 template <typename Seeder>
 Result<void> seedWithoutForeignKeys(const std::filesystem::path& dbPath, Seeder&& seeder) {
     Database db;
@@ -369,6 +414,47 @@ TEST_CASE("KG Store: getNodesByKeys batches stable node-key lookup", "[unit][met
     }
     CHECK((byKey.at("doc:a") == ids.value()[0]));
     CHECK((byKey.at("doc:b") == ids.value()[1]));
+}
+
+TEST_CASE_METHOD(KGStoreFixture, "KG Store change generation moves on writes and not on reads",
+                 "[unit][metadata][kg][generation]") {
+    const auto initial = store_->changeGeneration();
+
+    KGNode node{.nodeKey = "generation:a", .type = "document"};
+    auto id = store_->upsertNode(node);
+    REQUIRE(id.has_value());
+    node.id = id.value();
+    const auto afterNode = store_->changeGeneration();
+    CHECK(afterNode > initial);
+
+    // Reads leave the generation where it is.
+    REQUIRE(store_->getNodeById(node.id).has_value());
+    REQUIRE(store_->getNodesAfterId(0, 16).has_value());
+    REQUIRE(store_->getEdgesAfterId(0, 16).has_value());
+    CHECK(store_->changeGeneration() == afterNode);
+
+    KGNode other{.nodeKey = "generation:b", .type = "document"};
+    auto otherId = store_->upsertNode(other);
+    REQUIRE(otherId.has_value());
+    const auto afterOther = store_->changeGeneration();
+    CHECK(afterOther > afterNode);
+    REQUIRE(store_->addEdge({.srcNodeId = node.id, .dstNodeId = otherId.value(), .relation = "r"})
+                .has_value());
+    const auto afterEdge = store_->changeGeneration();
+    CHECK(afterEdge > afterOther);
+
+    // A write batch moves it once, on commit.
+    auto batch = store_->beginWriteBatch();
+    REQUIRE(batch.has_value());
+    REQUIRE(batch.value()->upsertNode({.nodeKey = "generation:c", .type = "document"}).has_value());
+    CHECK(store_->changeGeneration() == afterEdge);
+    REQUIRE(batch.value()->commit().has_value());
+    const auto afterBatch = store_->changeGeneration();
+    CHECK(afterBatch > afterEdge);
+
+    // Deletes move it too: a sweep that retracts deleted records depends on this.
+    REQUIRE(store_->deleteNodeById(otherId.value()).has_value());
+    CHECK(store_->changeGeneration() > afterBatch);
 }
 
 TEST_CASE("KG Store: addEdgesUnique deduplicates edges", "[unit][metadata][kg]") {

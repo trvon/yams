@@ -1,11 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <utility>
@@ -39,7 +41,7 @@ struct TempCorpus {
     std::vector<std::int64_t> docIds;
 };
 
-TempCorpus makeCorpus(const std::vector<std::pair<std::string, std::string>>& docs) {
+TempCorpus makeCorpus(const std::array<std::pair<std::string_view, std::string_view>, 4>& docs) {
     TempCorpus corpus;
     corpus.dbPath = tempDbPath("search_simeon_lex_");
     ConnectionPoolConfig pcfg;
@@ -49,8 +51,8 @@ TempCorpus makeCorpus(const std::vector<std::pair<std::string, std::string>>& do
 
     for (const auto& [hash, content] : docs) {
         DocumentInfo d;
-        d.filePath = "/tmp/" + hash + ".txt";
-        d.fileName = hash + ".txt";
+        d.filePath = "/tmp/" + std::string(hash) + ".txt";
+        d.fileName = std::string(hash) + ".txt";
         d.fileExtension = ".txt";
         d.fileSize = static_cast<int64_t>(content.size());
         d.sha256Hash = hash;
@@ -62,7 +64,9 @@ TempCorpus makeCorpus(const std::vector<std::pair<std::string, std::string>>& do
         REQUIRE(did.has_value());
         corpus.docIds.push_back(did.value());
 
-        REQUIRE(corpus.repo->indexDocumentContent(did.value(), hash, content, "text/plain")
+        REQUIRE(corpus.repo
+                    ->indexDocumentContent(did.value(), std::string(hash), std::string(content),
+                                           "text/plain")
                     .has_value());
 
         DocumentContent dc;
@@ -116,12 +120,12 @@ bool waitReady(const SimeonLexicalBackend& backend, std::chrono::milliseconds ti
     return backend.ready();
 }
 
-const std::vector<std::pair<std::string, std::string>> kCorpus = {
+constexpr std::array<std::pair<std::string_view, std::string_view>, 4> kCorpus{{
     {"hash_a", "alpha beta gamma delta"},
     {"hash_b", "beta gamma epsilon"},
     {"hash_c", "omega sigma tau"},
     {"hash_d", "beta beta beta filler content"},
-};
+}};
 
 } // namespace
 
@@ -167,6 +171,33 @@ TEST_CASE("SearchEngine injected with Simeon backend returns results while still
     for (const auto& r : result.value()) {
         CHECK(r.score >= 0.0);
     }
+}
+
+TEST_CASE("SearchEngine lexical status exposes details only after build publication",
+          "[search][simeon][status][catch2]") {
+    auto corpus = makeCorpus(kCorpus);
+    auto engine = makeEngine(corpus, makeLexicalOnlyConfig());
+    engine->setSimeonLexicalBackend(
+        std::make_unique<SimeonLexicalBackend>(SimeonLexicalBackend::Config{}));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    auto status = engine->getSimeonLexicalStatus();
+    while (!status.ready && std::chrono::steady_clock::now() < deadline) {
+        CHECK(status.configured);
+        CHECK(status.docCount == 0);
+        CHECK(status.conceptCount == 0);
+        CHECK_FALSE(status.fragmentGeometryReady);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        status = engine->getSimeonLexicalStatus();
+    }
+    REQUIRE(status.ready);
+    // ready_ is published before building_ clears; wait for the published status view.
+    while (status.building && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        status = engine->getSimeonLexicalStatus();
+    }
+    REQUIRE_FALSE(status.building);
+    CHECK(status.docCount == kCorpus.size());
 }
 
 TEST_CASE("SearchEngine with ready Simeon backend rescores the FTS5 candidate pool",

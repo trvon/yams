@@ -853,6 +853,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.vector_policy"); it != kv.end()) {
                 policy.vectorPolicy = std::string(trimView(it->second));
             }
+            if (auto it = kv.find("search.evaluation.allow_uncertified_routes"); it != kv.end()) {
+                policy.allowUncertifiedRouteOnly = parseBoolValue(it->second);
+            }
             if (auto it = kv.find("search.topology.enable_weak_query_routing"); it != kv.end()) {
                 policy.enableWeakQueryRouting = parseBoolValue(it->second);
             }
@@ -877,6 +880,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.bq_prefix_dim"); it != kv.end()) {
                 policy.bqPrefixDimension = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.bq_rotation"); it != kv.end()) {
+                policy.bqRotation = std::string(trimView(it->second));
+            }
             if (auto it = kv.find("search.topology.graph_community_source");
                 it != kv.end() && !it->second.empty()) {
                 policy.graphCommunitySource = it->second;
@@ -889,6 +895,15 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             }
             if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {
                 policy.maxDocs = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.road_hops"); it != kv.end()) {
+                policy.roadHops = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.road_beam_width"); it != kv.end()) {
+                policy.roadBeamWidth = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.road_walk_window"); it != kv.end()) {
+                policy.roadWalkWindow = parseSize(it->second);
             }
             if (auto it = kv.find("search.topology.expansion_output_limit"); it != kv.end()) {
                 policy.expansionOutputLimit = parseSize(it->second);
@@ -1047,6 +1062,15 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         if (auto it = kv.find("topology.routing_representatives"); it != kv.end()) {
             policy.routingRepresentativeCount = parseSize(it->second);
         }
+        if (auto it = kv.find("topology.representative_rule"); it != kv.end()) {
+            policy.representativeRule =
+                topology::parseRepresentativeRule(std::string(trimView(it->second)));
+            if (!policy.representativeRule) {
+                spdlog::warn("Ignoring topology.representative_rule='{}': expected degree or "
+                             "medoid",
+                             it->second);
+            }
+        }
         if (auto it = kv.find("topology.sgc_hops"); it != kv.end()) {
             policy.sgcHops = parseSize(it->second);
         }
@@ -1072,6 +1096,17 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         }
         if (auto it = kv.find("topology.boundary_spill_residual_penalty"); it != kv.end()) {
             policy.boundarySpillResidualPenalty = parseDouble(it->second);
+        }
+        if (auto it = kv.find("topology.road_max_per_cluster"); it != kv.end()) {
+            policy.roadMaxPerCluster = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.road_order"); it != kv.end()) {
+            policy.roadOrder = topology::parseRoadOrderKind(std::string(trimView(it->second)));
+            if (!policy.roadOrder) {
+                spdlog::warn("Ignoring topology.road_order='{}': expected none, time, session or "
+                             "similarity_chain",
+                             it->second);
+            }
         }
         if (auto it = kv.find("topology.features.entity_fusion"); it != kv.end()) {
             policy.featureEntityFusion = parseBoolValue(it->second);
@@ -2068,7 +2103,8 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
         !applyLimit("max_value_bytes", policy.limits.maxValueBytes) ||
         !applyLimit("max_merged_keys", policy.limits.maxMergedKeys) ||
         !applyLimit("max_cache_bytes", policy.limits.maxCacheBytes) ||
-        !applyLimit("max_tracked_identities", policy.limits.maxTrackedIdentities)) {
+        !applyLimit("max_tracked_identities", policy.limits.maxTrackedIdentities) ||
+        !applyLimit("max_scan_bytes", policy.limits.maxScanBytes)) {
         config.memorySync.enabled = false;
         return false;
     }

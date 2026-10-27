@@ -31,11 +31,11 @@ inline bool isRemovedInterfaceRefusal(const Error& error) {
 
 struct PluginDescriptor {
     std::string name;
-    std::string version;
+    std::string version{};
     uint32_t abiVersion{0};
-    std::filesystem::path path;
-    std::string manifestJson;
-    std::vector<std::string> interfaces;
+    std::filesystem::path path{};
+    std::string manifestJson{};
+    std::vector<std::string> interfaces{};
 };
 
 class IPluginHost {

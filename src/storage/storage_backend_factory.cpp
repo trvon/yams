@@ -1,4 +1,4 @@
-#include "windows_path.h"
+#include "windows_path.h" // IWYU pragma: keep -- used by _WIN32 path handling
 
 #include <yams/common/fs_utils.h>
 #include <yams/crypto/hasher.h>
@@ -11,12 +11,24 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <limits>
 #include <regex>
 #include <unordered_map>
+#include <utility>
 
 namespace yams::storage {
 
 namespace {
+
+#ifdef YAMS_TESTING
+thread_local FilesystemListingStats* listingStats = nullptr;
+thread_local std::function<void(std::string_view)>* readObserver = nullptr;
+
+FilesystemListingStats* listingStatsFor(std::string_view prefix) {
+    return listingStats && (!listingStats->prefix || *listingStats->prefix == prefix) ? listingStats
+                                                                                      : nullptr;
+}
+#endif
 
 #ifdef _WIN32
 // Add the extended-length prefix only when the path actually needs it. Keeping short paths in the
@@ -71,7 +83,106 @@ std::filesystem::path traversalPath(const std::filesystem::path& path) {
 }
 #endif
 
+void observePeakRetainedKeys(std::string_view prefix, std::size_t retainedKeys) {
+#ifdef YAMS_TESTING
+    if (auto* observed = listingStatsFor(prefix)) {
+        observed->peakRetainedKeys = std::max(observed->peakRetainedKeys, retainedKeys);
+    }
+#else
+    (void)prefix;
+    (void)retainedKeys;
+#endif
+}
+
+template <typename Visitor>
+Result<void> visitFilesystemKeys(const std::filesystem::path& basePath, std::string_view prefix,
+                                 const std::atomic<bool>& cancelled,
+                                 const std::function<Result<void>()>& cooperate,
+                                 Visitor&& visitor) {
+    const auto checkCancelled = [&]() -> Result<void> {
+        if (cancelled.load(std::memory_order_relaxed)) {
+            return Error{ErrorCode::OperationCancelled, "filesystem listing cancelled"};
+        }
+        return cooperate ? cooperate() : Result<void>{};
+    };
+    if (auto ready = checkCancelled(); !ready) {
+        return ready.error();
+    }
+#ifdef YAMS_TESTING
+    auto* observed = listingStatsFor(prefix);
+    if (observed) {
+        ++observed->walks;
+    }
+#endif
+
+    const auto objectsDir = basePath / "objects";
+    if (!std::filesystem::exists(longPath(objectsDir))) {
+        return checkCancelled();
+    }
+
+    try {
+        for (const auto& entry :
+             std::filesystem::recursive_directory_iterator(traversalPath(objectsDir))) {
+#ifdef YAMS_TESTING
+            if (observed) {
+                ++observed->entriesVisited;
+                if (observed->onEntry) {
+                    observed->onEntry();
+                }
+            }
+#endif
+            // Check even directories and non-matching prefixes. A blocked filesystem
+            // syscall is not interruptible, but traversal stops between entries.
+            if (auto ready = checkCancelled(); !ready) {
+                return ready.error();
+            }
+            if (!entry.is_regular_file()) {
+                continue;
+            }
+
+            // Derive the key lexically from the de-prefixed entry path. filesystem::relative()
+            // canonicalises both operands, which is unsafe when one carries the extended
+            // Win32 prefix and the other does not.
+            auto relativePath = plainPath(entry.path()).lexically_relative(objectsDir);
+            std::string pathStr = relativePath.string();
+            std::replace(pathStr.begin(), pathStr.end(), '\\', '/');
+
+            // Hash sharding creates HH/HH/original_key. Non-sharded paths remain valid.
+            std::string key;
+            if (pathStr.length() > 5 && pathStr[2] == '/' && pathStr[5] == '/') {
+                key = pathStr.substr(6);
+            } else {
+                key = std::move(pathStr);
+            }
+
+            if (!prefix.empty() && !key.starts_with(prefix)) {
+                continue;
+            }
+#ifdef YAMS_TESTING
+            if (observed) {
+                ++observed->matchingKeys;
+            }
+#endif
+            visitor(std::move(key));
+        }
+    } catch (const std::filesystem::filesystem_error& e) {
+        return Error{ErrorCode::PermissionDenied, e.what()};
+    }
+    return checkCancelled();
+}
+
 } // namespace
+
+#ifdef YAMS_TESTING
+FilesystemListingStats* testing_setFilesystemListingStats(FilesystemListingStats* stats) noexcept {
+    return std::exchange(listingStats, stats);
+}
+
+std::function<void(std::string_view)>*
+testing_setFilesystemReadObserver(std::function<void(std::string_view)>* observer) noexcept {
+    return std::exchange(readObserver, observer);
+}
+#endif
 
 Result<void> IStorageBackend::clear() {
     auto keys = list("");
@@ -497,6 +608,11 @@ Result<void> FilesystemBackend::store(std::string_view key, std::span<const std:
 
 Result<std::vector<std::byte>> FilesystemBackend::retrieve(std::string_view key) const {
     YAMS_ZONE_SCOPED_N("storage_backend::filesystem_retrieve");
+#ifdef YAMS_TESTING
+    if (readObserver) {
+        (*readObserver)(key);
+    }
+#endif
     auto resolvedPath = getObjectPath(key);
     if (!resolvedPath) {
         return resolvedPath.error();
@@ -567,75 +683,91 @@ Result<void> FilesystemBackend::clear() {
 
 Result<std::vector<std::string>> FilesystemBackend::list(std::string_view prefix) const {
     std::vector<std::string> results;
-
-    // Check if objects directory exists
-    auto objectsDir = basePath_ / "objects";
-    if (!std::filesystem::exists(longPath(objectsDir))) {
-        return results; // Return empty list if no objects stored yet
+    auto visited =
+        visitFilesystemKeys(basePath_, prefix, cancelled_, listingWorkCheck_, [&](std::string key) {
+            results.push_back(std::move(key));
+            observePeakRetainedKeys(prefix, results.size());
+        });
+    if (!visited) {
+        return visited.error();
     }
-
-    try {
-        for (const auto& entry :
-             std::filesystem::recursive_directory_iterator(traversalPath(objectsDir))) {
-            if (entry.is_regular_file()) {
-                // Derive the key lexically from the de-prefixed entry path. filesystem::relative()
-                // canonicalises both operands, which is unsafe when one carries the extended
-                // Win32 prefix and the other does not.
-                auto relativePath = plainPath(entry.path()).lexically_relative(objectsDir);
-                std::string pathStr = relativePath.string();
-
-                // Normalize path separators to forward slashes first
-                std::replace(pathStr.begin(), pathStr.end(), '\\', '/');
-
-                // Extract the original key from the hash-sharded path
-                // Hash-based sharding creates: HH/HH/original_key
-                // where HH/HH are hex chars from the key's SHA256 hash
-                std::string key;
-
-                // Check if this is a sharded path (XX/YY/...)
-                // Hash sharding always uses 2-char hex directories
-                if (pathStr.length() > 5 && pathStr[2] == '/' && pathStr[5] == '/') {
-                    // This is a sharded path - everything after "HH/HH/" is the original key
-                    key = pathStr.substr(6); // Skip "HH/HH/"
-                } else {
-                    // Not sharded - use the whole path as the key
-                    key = pathStr;
-                }
-
-                if (prefix.empty() || key.starts_with(prefix)) {
-                    results.push_back(key);
-                }
-            }
-        }
-    } catch (const std::filesystem::filesystem_error& e) {
-        return Result<std::vector<std::string>>(Error{ErrorCode::PermissionDenied, e.what()});
-    }
-
     return results;
+}
+
+Result<std::optional<std::vector<std::string>>>
+FilesystemBackend::listBoundedSnapshot(std::string_view prefix, std::size_t maxKeys,
+                                       std::size_t maxKeyBytes) const {
+    std::vector<std::string> keys;
+    std::size_t retainedBytes = 0;
+    bool oversized = false;
+    auto visited =
+        visitFilesystemKeys(basePath_, prefix, cancelled_, listingWorkCheck_, [&](std::string key) {
+            if (oversized) {
+                return;
+            }
+            if (keys.size() >= maxKeys || key.size() > maxKeyBytes - retainedBytes) {
+                oversized = true;
+                return;
+            }
+            retainedBytes += key.size();
+            keys.push_back(std::move(key));
+            observePeakRetainedKeys(prefix, keys.size());
+        });
+    if (!visited) {
+        return visited.error();
+    }
+    if (oversized) {
+        return std::optional<std::vector<std::string>>{};
+    }
+    std::ranges::sort(keys);
+    return std::optional<std::vector<std::string>>{std::move(keys)};
 }
 
 Result<ObjectListPage> FilesystemBackend::listPage(std::string_view prefix,
                                                    std::optional<std::string_view> cursor,
                                                    std::size_t limit) const {
+#ifdef YAMS_TESTING
+    if (auto* observed = listingStatsFor(prefix)) {
+        ++observed->pageCalls;
+    }
+#endif
     if (limit == 0) {
         return Error{ErrorCode::InvalidArgument, "object-list page limit must be positive"};
     }
-    // Filesystem listings are local. Keep only the requested page resident while
-    // walking hash shards; remote implementations override with native tokens.
-    auto listed = list(prefix);
-    if (!listed) {
-        return listed.error();
+    // Retain the smallest eligible page plus one look-ahead key in a max-heap. The
+    // directory walk remains complete so traversal failures never return partial success.
+    const auto retainedLimit = limit == std::numeric_limits<std::size_t>::max() ? limit : limit + 1;
+    std::vector<std::string> keys;
+    auto visited =
+        visitFilesystemKeys(basePath_, prefix, cancelled_, listingWorkCheck_, [&](std::string key) {
+            if (cursor && std::string_view{key} <= *cursor) {
+                return;
+            }
+            if (keys.size() < retainedLimit) {
+                keys.push_back(std::move(key));
+                std::push_heap(keys.begin(), keys.end());
+            } else if (key < keys.front()) {
+                std::pop_heap(keys.begin(), keys.end());
+                keys.back() = std::move(key);
+                std::push_heap(keys.begin(), keys.end());
+            }
+            observePeakRetainedKeys(prefix, keys.size());
+        });
+    if (!visited) {
+        return visited.error();
     }
-    auto keys = std::move(listed.value());
-    std::ranges::sort(keys);
-    auto begin = cursor ? std::ranges::upper_bound(keys, *cursor) : keys.begin();
-    const auto remaining = static_cast<std::size_t>(std::distance(begin, keys.end()));
-    const auto count = std::min(limit, remaining);
+
+    std::sort_heap(keys.begin(), keys.end());
+    const bool hasMore = keys.size() > limit;
+    if (hasMore) {
+        keys.pop_back();
+    }
+
     ObjectListPage page;
-    page.keys.assign(begin, std::next(begin, static_cast<std::ptrdiff_t>(count)));
-    if (count < remaining) {
-        page.nextCursor = page.keys.back();
+    if (hasMore) {
+        page.nextCursor = keys.back();
     }
+    page.keys = std::move(keys);
     return page;
 }
 

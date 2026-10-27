@@ -928,7 +928,7 @@ TEST_CASE("KeywordSearch - CamelCase partial no match", "[search][keyword][camel
 
     // Should match documents with standalone "Request" words but not CamelCase parts
     // The query should work, just documenting tokenization behavior
-    REQUIRE(resp.results.size() >= 0);
+    static_cast<void>(resp.results.size());
 }
 
 TEST_CASE("KeywordSearch - CamelCase lowercase match", "[search][keyword][camelcase]") {
@@ -945,7 +945,7 @@ TEST_CASE("KeywordSearch - CamelCase lowercase match", "[search][keyword][camelc
 
     // FTS5 is case-insensitive, but CamelCase is one token
     // "handler" won't match "ApiRequestHandler" (it's a substring, not a token)
-    REQUIRE(resp.results.size() >= 0);
+    static_cast<void>(resp.results.size());
 }
 
 TEST_CASE("KeywordSearch - snake_case as single token", "[search][keyword][snakecase]") {
@@ -1036,7 +1036,7 @@ TEST_CASE("SemanticSearch - Graceful fallback to keyword", "[search][semantic][f
     // Should succeed via keyword fallback
     REQUIRE(result);
     // Results may be empty if no matches, but search should not error
-    REQUIRE(result.value().total >= 0);
+    static_cast<void>(result.value().total);
 }
 
 TEST_CASE("SemanticSearch - Fallback with similarity threshold", "[search][semantic][fallback]") {
@@ -1054,7 +1054,7 @@ TEST_CASE("SemanticSearch - Fallback with similarity threshold", "[search][seman
 
     // Should succeed via keyword fallback
     REQUIRE(result);
-    REQUIRE(result.value().total >= 0);
+    static_cast<void>(result.value().total);
 }
 
 TEST_CASE("SemanticSearch - Empty query", "[search][semantic][validation]") {
@@ -1093,7 +1093,7 @@ TEST_CASE("SemanticSearch - Long query fallback", "[search][semantic][fallback]"
 
     // Should succeed via keyword fallback (handles gracefully)
     REQUIRE(result);
-    REQUIRE(result.value().total >= 0);
+    static_cast<void>(result.value().total);
 }
 
 TEST_CASE("SemanticSearch - Low similarity fallback", "[search][semantic][fallback]") {
@@ -1111,7 +1111,7 @@ TEST_CASE("SemanticSearch - Low similarity fallback", "[search][semantic][fallba
 
     // Should succeed via keyword fallback
     REQUIRE(result);
-    REQUIRE(result.value().total >= 0);
+    static_cast<void>(result.value().total);
 }
 
 TEST_CASE("SemanticSearch - Conceptual query fallback", "[search][semantic][fallback]") {
@@ -1128,7 +1128,7 @@ TEST_CASE("SemanticSearch - Conceptual query fallback", "[search][semantic][fall
 
     // Should succeed via keyword fallback
     REQUIRE(result);
-    REQUIRE(result.value().total >= 0);
+    static_cast<void>(result.value().total);
 }
 
 TEST_CASE("SemanticSearch - Multilingual fallback", "[search][semantic][fallback]") {
@@ -1145,7 +1145,7 @@ TEST_CASE("SemanticSearch - Multilingual fallback", "[search][semantic][fallback
 
     // Should succeed via keyword fallback
     REQUIRE(result);
-    REQUIRE(result.value().total >= 0);
+    static_cast<void>(result.value().total);
 }
 
 // ============================================================================
@@ -1331,7 +1331,7 @@ TEST_CASE("Filter - Combined path and tags", "[search][filter][combined]") {
     for (const auto& result : resp.results) {
         REQUIRE(result.path.find(".cpp") != std::string::npos);
     }
-    REQUIRE(resp.results.size() >= 0);
+    static_cast<void>(resp.results.size());
 }
 
 TEST_CASE("Filter - Empty path pattern", "[search][filter][path]") {
@@ -1382,7 +1382,7 @@ TEST_CASE("EdgeCase - Very long query", "[search][edge]") {
     auto resp = fixture.executeSearch(req);
 
     // Should handle gracefully
-    REQUIRE(resp.total >= 0);
+    static_cast<void>(resp.total);
 }
 
 TEST_CASE("EdgeCase - Unicode document search", "[search][edge][unicode]") {
@@ -1436,7 +1436,7 @@ TEST_CASE("EdgeCase - Limit zero", "[search][edge][limit]") {
     auto resp = fixture.executeSearch(req);
 
     // Zero limit means unlimited
-    REQUIRE(resp.total >= 0);
+    static_cast<void>(resp.total);
     if (resp.total > 0) {
         REQUIRE(resp.results.size() > 0);
     }
@@ -1545,7 +1545,7 @@ TEST_CASE("HybridSearch - RRF fusion fallback", "[search][hybrid][fallback]") {
 
     // Without vector engine, hybrid search should gracefully fall back to keyword search
     REQUIRE(result);
-    REQUIRE(result.value().total >= 0);
+    static_cast<void>(result.value().total);
 }
 
 TEST_CASE("HybridSearch - Engine unavailable fallback", "[search][hybrid][fallback]") {
@@ -1561,7 +1561,7 @@ TEST_CASE("HybridSearch - Engine unavailable fallback", "[search][hybrid][fallba
 
     // Without hybrid engine, should fall back to keyword search successfully
     REQUIRE(result);
-    REQUIRE(result.value().total >= 0);
+    static_cast<void>(result.value().total);
 }
 
 // ============================================================================
@@ -1672,7 +1672,7 @@ TEST_CASE("Concurrency - Different search queries", "[search][concurrency][queri
 
     // Validate all searches succeeded
     for (const auto& resp : responses) {
-        REQUIRE(resp.results.size() >= 0);
+        static_cast<void>(resp.results.size());
     }
     REQUIRE(responses.size() == 3);
 }
@@ -1722,7 +1722,7 @@ TEST_CASE("Concurrency - Same query different filters", "[search][concurrency][f
 
     // Validate all searches succeeded
     for (const auto& resp : responses) {
-        REQUIRE(resp.results.size() >= 0);
+        static_cast<void>(resp.results.size());
     }
     REQUIRE(responses.size() == 4);
 }
@@ -1744,7 +1744,7 @@ TEST_CASE("Concurrency - High load stress test", "[search][concurrency][stress][
 
         auto resp = fixture.executeSearch(req);
         responses.push_back(resp);
-        REQUIRE(resp.results.size() >= 0);
+        static_cast<void>(resp.results.size());
     }
 
     // Validate all searches completed successfully
@@ -1866,7 +1866,7 @@ TEST_CASE("EdgeCase - Very high limit (under threshold)", "[search][edge]") {
 
     auto resp = fixture.executeSearch(req);
     // Should succeed (not fail validation)
-    REQUIRE(resp.results.size() >= 0);
+    static_cast<void>(resp.results.size());
 }
 
 TEST_CASE("EdgeCase - Limit exactly at maximum", "[search][edge]") {
@@ -1880,7 +1880,7 @@ TEST_CASE("EdgeCase - Limit exactly at maximum", "[search][edge]") {
 
     auto resp = fixture.executeSearch(req);
     // Should succeed (not fail validation)
-    REQUIRE(resp.results.size() >= 0);
+    static_cast<void>(resp.results.size());
 }
 
 TEST_CASE("EdgeCase - Query with special regex characters", "[search][edge][regex]") {
@@ -1894,7 +1894,7 @@ TEST_CASE("EdgeCase - Query with special regex characters", "[search][edge][rege
 
     // Should handle gracefully without regex errors
     auto resp = fixture.executeSearch(req);
-    REQUIRE(resp.results.size() >= 0);
+    static_cast<void>(resp.results.size());
 }
 
 TEST_CASE("Filtering - Path pattern with wildcards", "[search][filtering][path]") {
@@ -1931,7 +1931,7 @@ TEST_CASE("Filtering - Multiple tags with matchAll=true", "[search][filtering][t
 
     auto resp = fixture.executeSearch(req);
     // Results should have both tags
-    REQUIRE(resp.results.size() >= 0);
+    static_cast<void>(resp.results.size());
 }
 
 TEST_CASE("Filtering - Extension filter", "[search][filtering][extension]") {
@@ -1963,7 +1963,7 @@ TEST_CASE("Filtering - MIME type filter", "[search][filtering][mime]") {
 
     auto resp = fixture.executeSearch(req);
     // Should only return text files
-    REQUIRE(resp.results.size() >= 0);
+    static_cast<void>(resp.results.size());
 }
 
 TEST_CASE("Filtering - File type filter (text only)", "[search][filtering][filetype]") {
@@ -1978,7 +1978,7 @@ TEST_CASE("Filtering - File type filter (text only)", "[search][filtering][filet
 
     auto resp = fixture.executeSearch(req);
     // Should only return text files (not binary)
-    REQUIRE(resp.results.size() >= 0);
+    static_cast<void>(resp.results.size());
 }
 
 TEST_CASE("Filtering - File type filter (binary only)", "[search][filtering][filetype]") {
@@ -1993,7 +1993,7 @@ TEST_CASE("Filtering - File type filter (binary only)", "[search][filtering][fil
 
     auto resp = fixture.executeSearch(req);
     // Should only return binary files
-    REQUIRE(resp.results.size() >= 0);
+    static_cast<void>(resp.results.size());
 }
 
 TEST_CASE("Facets - File type distribution", "[search][facets]") {

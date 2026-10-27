@@ -312,7 +312,7 @@ TEST_CASE("PluginProcess stderr capture", "[extraction][plugin]") {
     REQUIRE(response.has_value());
 
     // Allow the independent stderr reader to publish the already-written bytes.
-    std::span<const std::byte> stderr_data;
+    std::vector<std::byte> stderr_data;
     auto start = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - start < std::chrono::seconds{5}) {
         std::this_thread::sleep_for(std::chrono::milliseconds{100});

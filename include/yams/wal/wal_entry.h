@@ -97,6 +97,9 @@ struct WALEntry {
     // Deserialization
     [[nodiscard]] static std::optional<WALEntry> deserialize(std::span<const std::byte> buffer);
 
+    // Decode the fixed-layout on-disk header at the start of buffer (no validation).
+    [[nodiscard]] static std::optional<Header> decodeHeader(std::span<const std::byte> buffer);
+
     // Checksum calculation
     void updateChecksum();
     [[nodiscard]] bool verifyChecksum() const;

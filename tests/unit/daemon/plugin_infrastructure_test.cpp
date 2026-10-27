@@ -603,11 +603,11 @@ TEST_CASE("RequestDispatcher - Plugin Integration", "[plugin][dispatcher][integr
         auto mp = fixture.svc_->getModelProvider();
         REQUIRE(mp != nullptr);
 
-        fixture.svc_->__test_setModelProviderDegraded(true, "simulated error");
+        fixture.svc_->testing_setModelProviderDegraded(true, "simulated error");
         auto degraded_subsystems = fixture.lifecycleFsm_->degradedSubsystems();
         CHECK(degraded_subsystems.find("ModelProvider") != degraded_subsystems.end());
 
-        fixture.svc_->__test_setModelProviderDegraded(false);
+        fixture.svc_->testing_setModelProviderDegraded(false);
         degraded_subsystems = fixture.lifecycleFsm_->degradedSubsystems();
         CHECK(degraded_subsystems.find("ModelProvider") == degraded_subsystems.end());
     }
@@ -631,19 +631,19 @@ TEST_CASE("RequestDispatcher - Plugin Integration", "[plugin][dispatcher][integr
         auto initial_degraded = fixture.lifecycleFsm_->degradedSubsystems();
         CHECK(initial_degraded.find("ModelProvider") == initial_degraded.end());
 
-        fixture.svc_->__test_setModelProviderDegraded(true, "test error 1");
+        fixture.svc_->testing_setModelProviderDegraded(true, "test error 1");
         auto after_degrade = fixture.lifecycleFsm_->degradedSubsystems();
         CHECK(after_degrade.find("ModelProvider") != after_degrade.end());
 
-        fixture.svc_->__test_setModelProviderDegraded(false);
+        fixture.svc_->testing_setModelProviderDegraded(false);
         auto after_recover = fixture.lifecycleFsm_->degradedSubsystems();
         CHECK(after_recover.find("ModelProvider") == after_recover.end());
 
-        fixture.svc_->__test_setModelProviderDegraded(true, "test error 2");
+        fixture.svc_->testing_setModelProviderDegraded(true, "test error 2");
         auto after_degrade_again = fixture.lifecycleFsm_->degradedSubsystems();
         CHECK(after_degrade_again.find("ModelProvider") != after_degrade_again.end());
 
-        fixture.svc_->__test_setModelProviderDegraded(false);
+        fixture.svc_->testing_setModelProviderDegraded(false);
         auto final_state = fixture.lifecycleFsm_->degradedSubsystems();
         CHECK(final_state.find("ModelProvider") == final_state.end());
     }
@@ -874,7 +874,7 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress][slow]") {
         REQUIRE(std::holds_alternative<PluginLoadResponse>(lr));
 
         for (int cycle = 0; cycle < 3; ++cycle) {
-            fixture.svc_->__test_setModelProviderDegraded(true, "cycle " + std::to_string(cycle));
+            fixture.svc_->testing_setModelProviderDegraded(true, "cycle " + std::to_string(cycle));
 
             auto snapshot = fixture.svc_->getPluginStatusSnapshot();
             bool found_degraded = false;
@@ -886,7 +886,7 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress][slow]") {
             }
             CHECK(found_degraded);
 
-            fixture.svc_->__test_setModelProviderDegraded(false);
+            fixture.svc_->testing_setModelProviderDegraded(false);
 
             snapshot = fixture.svc_->getPluginStatusSnapshot();
             for (const auto& rec : snapshot.records) {
@@ -962,7 +962,8 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress][slow]") {
         auto lr = fixture.dispatcher_->handlePluginLoadRequest(lreq);
         REQUIRE(std::holds_alternative<PluginLoadResponse>(lr));
 
-        fixture.svc_->__test_setModelProviderDegraded(true, "testing health during degraded state");
+        fixture.svc_->testing_setModelProviderDegraded(true,
+                                                       "testing health during degraded state");
 
         auto snapshot_degraded = fixture.svc_->getPluginStatusSnapshot();
         bool found_degraded_with_error = false;
@@ -974,7 +975,7 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress][slow]") {
         }
         CHECK(found_degraded_with_error);
 
-        fixture.svc_->__test_setModelProviderDegraded(false);
+        fixture.svc_->testing_setModelProviderDegraded(false);
 
         auto snapshot_healthy = fixture.svc_->getPluginStatusSnapshot();
         for (const auto& rec : snapshot_healthy.records) {

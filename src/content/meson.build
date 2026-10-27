@@ -39,8 +39,8 @@ endif
 yams_content = static_library('yams_content',
   content_src,
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, threads_dep, yams_core, yams_detection, yams_extraction, yams_crypto, taglib_dep, libarchive_dep, yams_metadata_dep],
-  cpp_args: yams_content_cppargs,
+  dependencies: [spdlog_dep, threads_dep, yams_core, yams_detection, yams_extraction, yams_crypto, taglib_dep, libarchive_dep, yams_metadata_dep] + yams_tracy_deps,
+  cpp_args: yams_content_cppargs + yams_tracy_args,
   install: false,
 )
 

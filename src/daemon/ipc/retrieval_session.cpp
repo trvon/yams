@@ -1,3 +1,4 @@
+#include <cstring>
 #include <yams/daemon/ipc/retrieval_session.h>
 
 namespace yams::daemon {

@@ -33,6 +33,11 @@ void ServiceManager::configureTopologyRuntime() {
             spdlog::info("Topology routing representatives applied via config: {}",
                          topologyManager_.routingRepresentativeCount());
         }
+        if (enginePolicy.representativeRule) {
+            topologyManager_.setRepresentativeRule(*enginePolicy.representativeRule);
+            spdlog::info("Topology representative rule applied via config: {}",
+                         topology::representativeRuleName(topologyManager_.representativeRule()));
+        }
         if (enginePolicy.sgcHops || enginePolicy.sgcNormalize) {
             topologyManager_.setSgcPolicy(
                 enginePolicy.sgcHops.value_or(topologyManager_.sgcHops()),
@@ -53,6 +58,16 @@ void ServiceManager::configureTopologyRuntime() {
                 enginePolicy.boundarySpillResidualPenalty.value_or(1.0));
             spdlog::info("Topology SOAR boundary spill applied via config: enabled={}",
                          topologyManager_.boundarySpillEnabled());
+        }
+        if (enginePolicy.roadMaxPerCluster) {
+            topologyManager_.setRoadMaxPerCluster(*enginePolicy.roadMaxPerCluster);
+            spdlog::info("Topology cluster roads applied via config: max_per_cluster={}",
+                         topologyManager_.roadMaxPerCluster());
+        }
+        if (enginePolicy.roadOrder) {
+            topologyManager_.setRoadOrder(*enginePolicy.roadOrder);
+            spdlog::info("Topology road order applied via config: {}",
+                         topology::roadOrderKindName(topologyManager_.roadOrder()));
         }
         topology::FeatureComposition featureComposition;
         featureComposition.enableEntityFusion =

@@ -5,16 +5,24 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
+#include <barrier>
+#include <chrono>
+#include <exception>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <future>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <random>
 #include <set>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/reference_counter_writer.h>
@@ -159,6 +167,106 @@ struct SqliteHandle {
     SqliteHandle& operator=(const SqliteHandle&) = delete;
 
     sqlite3* db = nullptr;
+};
+
+// Observe the next real counter connection, not a parallel SQL implementation. Declare this
+// guard before the fixture so its callback context outlives the database, including restore.
+struct SqliteStatsObserver {
+    SqliteStatsObserver() {
+        REQUIRE(active_ == nullptr);
+        std::cout << "REF_STATS_SQLITE_IDENTITY version=" << sqlite3_libversion()
+                  << " sourceid=" << sqlite3_sourceid() << '\n';
+        active_ = this;
+        // An unsupported provider is a failed observer control, never behavioral cache RED.
+        const int rc = sqlite3_auto_extension(reinterpret_cast<void (*)()>(&initialize));
+        if (rc != SQLITE_OK) {
+            active_ = nullptr;
+        }
+        REQUIRE(rc == SQLITE_OK);
+    }
+
+    ~SqliteStatsObserver() {
+        sqlite3_cancel_auto_extension(reinterpret_cast<void (*)()>(&initialize));
+        active_ = nullptr;
+    }
+
+    SqliteStatsObserver(const SqliteStatsObserver&) = delete;
+    SqliteStatsObserver& operator=(const SqliteStatsObserver&) = delete;
+
+    static int initialize(sqlite3* db, char**, const sqlite3_api_routines*) {
+        auto* observer = active_;
+        if (observer == nullptr || !observer->observeNextConnection_.exchange(false)) {
+            return SQLITE_OK;
+        }
+        const int rc = sqlite3_set_authorizer(db, &authorize, observer);
+        if (rc != SQLITE_OK) {
+            return rc;
+        }
+        const int traceRc =
+            sqlite3_trace_v2(db, SQLITE_TRACE_STMT | SQLITE_TRACE_PROFILE, &trace, observer);
+        if (traceRc == SQLITE_OK) {
+            observer->observedDb_ = db;
+            observer->attachments_.fetch_add(1);
+        }
+        return traceRc;
+    }
+
+    static int authorize(void* context, int action, const char* argument, const char*, const char*,
+                         const char*) {
+        auto& observer = *static_cast<SqliteStatsObserver*>(context);
+        if (action == SQLITE_PRAGMA && observer.denyDataVersion_.load() && argument != nullptr &&
+            sqlite3_stricmp(argument, "data_version") == 0) {
+            return SQLITE_DENY;
+        }
+        if (action == SQLITE_READ && observer.denyBlockReads_.load() && argument != nullptr &&
+            sqlite3_stricmp(argument, "block_references") == 0) {
+            observer.deniedBlockReads_.fetch_add(1);
+            return SQLITE_DENY;
+        }
+        return SQLITE_OK;
+    }
+
+    static int trace(unsigned event, void* context, void* statement, void*) {
+        const char* text = sqlite3_sql(static_cast<sqlite3_stmt*>(statement));
+        if (text == nullptr) {
+            return 0;
+        }
+        // Counts only the preserved getStats aggregate SQL. The independent SQLITE_READ
+        // authorizer also detects reads through views/CTEs without a COUNT expression.
+        const std::string_view sql(text);
+        if (sql.find("FROM block_references") == std::string_view::npos ||
+            sql.find("COUNT(") == std::string_view::npos) {
+            return 0;
+        }
+        auto& observer = *static_cast<SqliteStatsObserver*>(context);
+        if (event == SQLITE_TRACE_STMT) {
+            observer.aggregateQueries_.fetch_add(1);
+        } else if (event == SQLITE_TRACE_PROFILE &&
+                   observer.injectExternalCommit_.exchange(false)) {
+            // No Catch2 assertions or exceptions across SQLite's C callback. In WAL mode the
+            // separate writer can commit after the aggregate result, before a cache is stamped.
+            observer.externalCommitResult_.store(sqlite3_exec(observer.externalWriter_,
+                                                              observer.externalWrite_.c_str(),
+                                                              nullptr, nullptr, nullptr));
+        }
+        return 0;
+    }
+
+    // Constructor/rearm opens on this thread. Unrelated-thread opens cannot select the
+    // context, and this thread's destructor cannot race an in-flight initializer.
+    static inline thread_local SqliteStatsObserver* active_ = nullptr;
+    std::atomic<bool> observeNextConnection_{true};
+    std::atomic<size_t> attachments_{0};
+    std::atomic<bool> denyBlockReads_{false};
+    std::atomic<size_t> deniedBlockReads_{0};
+    std::atomic<bool> denyDataVersion_{false};
+    std::atomic<size_t> aggregateQueries_{0};
+    // Borrowed only while the observed fixture owns this connection; no production handle API.
+    sqlite3* observedDb_ = nullptr;
+    sqlite3* externalWriter_ = nullptr;
+    std::string externalWrite_;
+    std::atomic<bool> injectExternalCommit_{false};
+    std::atomic<int> externalCommitResult_{SQLITE_MISUSE};
 };
 
 void execSql(sqlite3* db, std::string_view sql) {
@@ -703,6 +811,509 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter statistics reconcile
     CHECK(stats.totalUncompressedBytes == 5120u);
     CHECK(stats.unreferencedBlocks == 1u);
     CHECK(stats.unreferencedBytes == 2048u);
+}
+
+// Run this control successfully before accepting any cache test as behavioral RED. It checks
+// provider attachment, the preserved cold-query trace, and real-table authorizer enforcement.
+TEST_CASE("ReferenceCounter statistics observer control",
+          "[storage][refcount][stats][observer-control]") {
+    SqliteStatsObserver observer;
+    int unrelatedOpen = SQLITE_MISUSE;
+    std::thread unrelated([&] {
+        sqlite3* db = nullptr;
+        unrelatedOpen = sqlite3_open(":memory:", &db);
+        if (db != nullptr) {
+            sqlite3_close(db);
+        }
+    });
+    unrelated.join();
+    REQUIRE(unrelatedOpen == SQLITE_OK);
+    REQUIRE(observer.attachments_.load() == 0u);
+    ReferenceCounterFixture fixture;
+    REQUIRE(observer.attachments_.load() == 1u);
+    const auto hash = fixture.generateHash(659);
+    REQUIRE(fixture.refCounter->increment(hash, 512, 1024).has_value());
+    observer.aggregateQueries_.store(0);
+    const auto first = fixture.refCounter->getStats();
+    REQUIRE(first.has_value());
+    CHECK(first.value().totalReferences == 1u);
+    REQUIRE(observer.aggregateQueries_.load() == 1u);
+
+    REQUIRE(fixture.refCounter->increment(hash, 512, 1024).has_value());
+    observer.denyBlockReads_.store(true);
+    const auto denied = fixture.refCounter->getStats();
+    REQUIRE_FALSE(denied.has_value());
+    CHECK(denied.error().code == yams::ErrorCode::DatabaseError);
+    REQUIRE(observer.deniedBlockReads_.load() > 0u);
+    observer.denyBlockReads_.store(false);
+    const auto recovered = fixture.refCounter->getStats();
+    REQUIRE(recovered.has_value());
+    CHECK(recovered.value().totalReferences == 2u);
+}
+
+TEST_CASE("ReferenceCounter unchanged statistics polls perform only one aggregate",
+          "[storage][refcount][stats][cache][noscan]") {
+    SqliteStatsObserver observer;
+    ReferenceCounterFixture fixture;
+    REQUIRE(observer.attachments_.load() == 1u);
+    REQUIRE(fixture.refCounter->increment(fixture.generateHash(660), 512, 1024).has_value());
+    observer.aggregateQueries_.store(0);
+
+    for (int poll = 0; poll < 6; ++poll) {
+        const auto stats = fixture.refCounter->getStats();
+        REQUIRE(stats.has_value());
+        CHECK(stats.value().totalBlocks == 1u);
+        CHECK(stats.value().totalReferences == 1u);
+        CHECK(stats.value().totalBytes == 512u);
+        CHECK(stats.value().totalUncompressedBytes == 1024u);
+        CHECK(stats.value().unreferencedBlocks == 0u);
+        CHECK(stats.value().unreferencedBytes == 0u);
+        CHECK(stats.value().transactions == 0u);
+        CHECK(stats.value().rollbacks == 0u);
+    }
+    CHECK(observer.aggregateQueries_.load() == 1u);
+}
+
+TEST_CASE("ReferenceCounter cached statistics do not read block_references",
+          "[storage][refcount][stats][cache][noscan]") {
+    SqliteStatsObserver observer;
+    ReferenceCounterFixture fixture;
+    REQUIRE(observer.attachments_.load() == 1u);
+    const auto hash = fixture.generateHash(661);
+    REQUIRE(fixture.refCounter->increment(hash, 512, 1024).has_value());
+    REQUIRE(fixture.refCounter->getStats().has_value());
+
+    observer.denyBlockReads_.store(true);
+    const auto cached = fixture.refCounter->getStats();
+    REQUIRE(cached.has_value());
+    CHECK(cached.value().totalReferences == 1u);
+
+    // Writes themselves read this table; disable the test policy for the increment only.
+    // The next denied refresh must report an error, not return an old cached success.
+    observer.denyBlockReads_.store(false);
+    REQUIRE(fixture.refCounter->increment(hash, 512, 1024).has_value());
+    observer.denyBlockReads_.store(true);
+    const auto denied = fixture.refCounter->getStats();
+    REQUIRE_FALSE(denied.has_value());
+    CHECK(denied.error().code == yams::ErrorCode::DatabaseError);
+    CHECK(observer.deniedBlockReads_.load() > 0u);
+    observer.denyBlockReads_.store(false);
+    const auto fresh = fixture.refCounter->getStats();
+    REQUIRE(fresh.has_value());
+    CHECK(fresh.value().totalReferences == 2u);
+}
+
+TEST_CASE("ReferenceCounter uncertain generation falls back without caching success",
+          "[storage][refcount][stats][cache][generation-error]") {
+    SqliteStatsObserver observer;
+    ReferenceCounterFixture fixture;
+    REQUIRE(observer.attachments_.load() == 1u);
+    REQUIRE(fixture.refCounter->increment(fixture.generateHash(669), 512, 1024).has_value());
+    REQUIRE(fixture.refCounter->getStats().has_value());
+    observer.aggregateQueries_.store(0);
+    observer.denyDataVersion_.store(true);
+    for (int poll = 0; poll < 2; ++poll) {
+        const auto fallback = fixture.refCounter->getStats();
+        REQUIRE(fallback.has_value());
+        CHECK(fallback.value().totalBlocks == 1u);
+        CHECK(fallback.value().totalReferences == 1u);
+        CHECK(fallback.value().totalBytes == 512u);
+        CHECK(fallback.value().totalUncompressedBytes == 1024u);
+        CHECK(fallback.value().unreferencedBlocks == 0u);
+        CHECK(fallback.value().unreferencedBytes == 0u);
+        CHECK(fallback.value().transactions == 0u);
+        CHECK(fallback.value().rollbacks == 0u);
+    }
+    CHECK(observer.aggregateQueries_.load() == 2u);
+    // Probe failure alone is not an aggregate error. If fallback itself fails, no cached
+    // success may hide it, even though this connection previously returned valid statistics.
+    observer.denyBlockReads_.store(true);
+    const auto denied = fixture.refCounter->getStats();
+    REQUIRE_FALSE(denied.has_value());
+    CHECK(denied.error().code == yams::ErrorCode::DatabaseError);
+    CHECK(observer.deniedBlockReads_.load() > 0u);
+    observer.denyBlockReads_.store(false);
+    observer.denyDataVersion_.store(false);
+    const auto recovered = fixture.refCounter->getStats();
+    REQUIRE(recovered.has_value());
+    CHECK(recovered.value().totalReferences == 1u);
+}
+
+TEST_CASE("ReferenceCounter null local generation requires an authoritative fallback",
+          "[storage][refcount][stats][cache][generation-null]") {
+    SqliteStatsObserver observer;
+    ReferenceCounterFixture fixture;
+    REQUIRE(observer.attachments_.load() == 1u);
+    REQUIRE(observer.observedDb_ != nullptr);
+    REQUIRE(fixture.refCounter->increment(fixture.generateHash(674), 512, 1024).has_value());
+    REQUIRE(fixture.refCounter->getStats().has_value());
+    REQUIRE(
+        sqlite3_create_function_v2(
+            observer.observedDb_, "total_changes", 0, SQLITE_UTF8, nullptr,
+            [](sqlite3_context* context, int, sqlite3_value**) { sqlite3_result_null(context); },
+            nullptr, nullptr, nullptr) == SQLITE_OK);
+    // Execute a provider control first. Unsupported registration/execution is not cache RED.
+    {
+        sqlite3_stmt* raw = nullptr;
+        REQUIRE(sqlite3_prepare_v2(observer.observedDb_, "SELECT total_changes()", -1, &raw,
+                                   nullptr) == SQLITE_OK);
+        auto probe =
+            std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(raw, &sqlite3_finalize);
+        REQUIRE(sqlite3_step(probe.get()) == SQLITE_ROW);
+        REQUIRE(sqlite3_column_type(probe.get(), 0) == SQLITE_NULL);
+    }
+    observer.aggregateQueries_.store(0);
+    for (int poll = 0; poll < 2; ++poll) {
+        const auto fallback = fixture.refCounter->getStats();
+        REQUIRE(fallback.has_value());
+        CHECK(fallback.value().totalBlocks == 1u);
+        CHECK(fallback.value().totalReferences == 1u);
+        CHECK(fallback.value().totalBytes == 512u);
+        CHECK(fallback.value().totalUncompressedBytes == 1024u);
+        CHECK(fallback.value().unreferencedBlocks == 0u);
+        CHECK(fallback.value().unreferencedBytes == 0u);
+        CHECK(fallback.value().transactions == 0u);
+        CHECK(fallback.value().rollbacks == 0u);
+    }
+    CHECK(observer.aggregateQueries_.load() == 2u);
+    observer.denyBlockReads_.store(true);
+    const auto denied = fixture.refCounter->getStats();
+    REQUIRE_FALSE(denied.has_value());
+    CHECK(denied.error().code == yams::ErrorCode::DatabaseError);
+    CHECK(observer.deniedBlockReads_.load() > 0u);
+}
+
+TEST_CASE("ReferenceCounter restored statistics discard the previous connection snapshot",
+          "[storage][refcount][stats][cache][restore]") {
+    SqliteStatsObserver observer;
+    ReferenceCounterFixture fixture;
+    REQUIRE(observer.attachments_.load() == 1u);
+    const auto backupPath = std::filesystem::path(fixture.testDbPath.string() + ".stats-backup");
+    REQUIRE(fixture.refCounter->increment(fixture.generateHash(670), 512, 1024).has_value());
+    REQUIRE(fixture.refCounter->backup(backupPath).has_value());
+    REQUIRE(fixture.refCounter->increment(fixture.generateHash(671), 256, 512).has_value());
+    const auto changed = fixture.refCounter->getStats();
+    REQUIRE(changed.has_value());
+    CHECK(changed.value().totalBlocks == 2u);
+
+    observer.observeNextConnection_.store(true);
+    REQUIRE(fixture.refCounter->restore(backupPath).has_value());
+    REQUIRE(observer.attachments_.load() == 2u);
+    observer.aggregateQueries_.store(0);
+    for (int poll = 0; poll < 2; ++poll) {
+        const auto restored = fixture.refCounter->getStats();
+        REQUIRE(restored.has_value());
+        CHECK(restored.value().totalBlocks == 1u);
+        CHECK(restored.value().totalReferences == 1u);
+        CHECK(restored.value().totalBytes == 512u);
+        CHECK(restored.value().totalUncompressedBytes == 1024u);
+    }
+    CHECK(observer.aggregateQueries_.load() == 1u);
+    std::filesystem::remove(backupPath);
+}
+
+// Run this baseline RED separately: legacy restore closes the handle before copy_file throws,
+// and the current getStats dereferences that null handle. Do not lose other baseline artifacts
+// by combining this known crash characterization with the polling benchmark process.
+TEST_CASE_METHOD(ReferenceCounterFixture,
+                 "ReferenceCounter statistics fail safely after failed restore",
+                 "[storage][refcount][stats][cache][restore-failure]") {
+    REQUIRE(refCounter->increment(generateHash(672), 512, 1024).has_value());
+    REQUIRE(refCounter->getStats().has_value());
+    const auto missingBackup = std::filesystem::path(testDbPath.string() + ".does-not-exist");
+    REQUIRE_FALSE(refCounter->restore(missingBackup).has_value());
+    const auto stats = refCounter->getStats();
+    REQUIRE_FALSE(stats.has_value());
+    CHECK(stats.error().code == yams::ErrorCode::DatabaseError);
+}
+
+TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter statistics track local mutations",
+                 "[storage][refcount][stats][cache]") {
+    REQUIRE(refCounter->getStats().has_value());
+    const auto checkReferences = [&](uint64_t expected) {
+        const auto stats = refCounter->getStats();
+        REQUIRE(stats.has_value());
+        CHECK(stats.value().totalReferences == expected);
+    };
+    const auto firstHash = generateHash(662);
+    const auto secondHash = generateHash(663);
+    REQUIRE(refCounter->increment(firstHash, 512, 1024).has_value());
+    checkReferences(1);
+    REQUIRE(refCounter->increment(firstHash, 512, 1024).has_value());
+    checkReferences(2);
+    REQUIRE(refCounter->decrement(firstHash).has_value());
+    checkReferences(1);
+
+    auto batch = refCounter->beginTransaction();
+    batch->increment(secondHash, 256, 512);
+    batch->decrement(firstHash);
+    REQUIRE(batch->commit().has_value());
+    auto stats = refCounter->getStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().totalBlocks == 2u);
+    CHECK(stats.value().totalReferences == 1u);
+    CHECK(stats.value().totalBytes == 768u);
+    CHECK(stats.value().totalUncompressedBytes == 1536u);
+    CHECK(stats.value().unreferencedBlocks == 1u);
+    CHECK(stats.value().unreferencedBytes == 512u);
+    CHECK(stats.value().transactions == 1u);
+
+    auto rolledBack = refCounter->beginTransaction();
+    rolledBack->increment(generateHash(664), 128, 256);
+    rolledBack->rollback();
+    stats = refCounter->getStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().totalBlocks == 2u);
+    CHECK(stats.value().rollbacks == 1u);
+
+    auto prune = refCounter->beginTransaction();
+    prune->pruneReference(firstHash);
+    REQUIRE(prune->commit().has_value());
+    stats = refCounter->getStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().totalBlocks == 1u);
+    CHECK(stats.value().totalReferences == 1u);
+    CHECK(stats.value().totalBytes == 256u);
+    CHECK(stats.value().totalUncompressedBytes == 512u);
+    CHECK(stats.value().unreferencedBlocks == 0u);
+    CHECK(stats.value().unreferencedBytes == 0u);
+    CHECK(stats.value().transactions == 2u);
+    CHECK(stats.value().rollbacks == 1u);
+
+    // The first operation writes, but the zero-size insert violates the schema. SQLite must
+    // roll it back; total_changes still changes, so invalidation must remain conservative.
+    auto failed = refCounter->beginTransaction();
+    failed->increment(secondHash, 256, 512);
+    failed->increment(generateHash(665), 0, 0);
+    REQUIRE_FALSE(failed->commit().has_value());
+    stats = refCounter->getStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().totalBlocks == 1u);
+    CHECK(stats.value().totalReferences == 1u);
+    CHECK(stats.value().totalBytes == 256u);
+}
+
+TEST_CASE_METHOD(
+    ReferenceCounterFixture,
+    "ReferenceCounter statistics overlap supported writes without stale completed rounds",
+    "[storage][refcount][stats][cache][concurrent]") {
+    constexpr size_t kRounds = 20;
+    const auto hash = generateHash(673);
+    REQUIRE(refCounter->getStats().has_value());
+    std::barrier<> roundSync(2);
+    std::array<bool, kRounds> writes{};
+    std::array<std::optional<RefCountStats>, kRounds * 2> reads{};
+    std::exception_ptr writerException;
+    std::exception_ptr readerException;
+
+    std::thread writer([&] {
+        for (size_t round = 0; round < kRounds; ++round) {
+            roundSync.arrive_and_wait();
+            try {
+                if (round % 2 == 0) {
+                    writes[round] = refCounter->increment(hash, 512, 1024).has_value();
+                } else {
+                    auto transaction = refCounter->beginTransaction();
+                    transaction->increment(hash, 512, 1024);
+                    writes[round] = transaction->commit().has_value();
+                }
+            } catch (...) {
+                writerException = std::current_exception();
+            }
+            roundSync.arrive_and_wait();
+        }
+    });
+    // This thread is the reader, so creating a second worker cannot strand the first at a
+    // two-party barrier on a thread-creation failure. Record failures, then join before asserting.
+    const auto record = [&](size_t index) {
+        try {
+            const auto stats = refCounter->getStats();
+            if (stats.has_value()) {
+                reads[index] = stats.value();
+            }
+        } catch (...) {
+            readerException = std::current_exception();
+        }
+    };
+    for (size_t round = 0; round < kRounds; ++round) {
+        roundSync.arrive_and_wait();
+        record(round * 2); // Can precede or follow this round's commit.
+        roundSync.arrive_and_wait();
+        record(round * 2 + 1); // Writer completed; next write waits at the next start barrier.
+    }
+    writer.join();
+
+    // No Catch2 assertions/exceptions cross the worker entry points. Joined results are stable.
+    if (writerException) {
+        std::rethrow_exception(writerException);
+    }
+    if (readerException) {
+        std::rethrow_exception(readerException);
+    }
+    for (size_t round = 0; round < kRounds; ++round) {
+        INFO("round=" << round);
+        REQUIRE(writes[round]);
+        for (size_t phase = 0; phase < 2; ++phase) {
+            const auto& observation = reads[round * 2 + phase];
+            REQUIRE(observation.has_value());
+            const auto references = observation->totalReferences;
+            if (phase == 0) {
+                CHECK((references == round || references == round + 1));
+            } else {
+                CHECK(references == round + 1);
+            }
+            CHECK(observation->totalBlocks == (references == 0 ? 0u : 1u));
+            CHECK(observation->totalBytes == (references == 0 ? 0u : 512u));
+            CHECK(observation->totalUncompressedBytes == (references == 0 ? 0u : 1024u));
+            CHECK(observation->unreferencedBlocks == 0u);
+            CHECK(observation->unreferencedBytes == 0u);
+            CHECK(observation->transactions == references / 2);
+            CHECK(observation->rollbacks == 0u);
+        }
+    }
+}
+
+TEST_CASE_METHOD(ReferenceCounterFixture,
+                 "ReferenceCounter statistics detect external repair and preserve reconciliation",
+                 "[storage][refcount][stats][cache][external]") {
+    const auto hash = generateHash(666);
+    REQUIRE(refCounter->increment(hash, 512, 1024).has_value());
+    REQUIRE(refCounter->getStats().has_value());
+    SqliteHandle writer(testDbPath);
+    execSql(writer.db, "BEGIN IMMEDIATE");
+    execSql(writer.db, std::format("UPDATE block_references SET ref_count=0, block_size=2048, "
+                                   "uncompressed_size=4096 WHERE block_hash='{}'",
+                                   hash));
+    // An uncommitted external write does not change the committed statistics snapshot.
+    auto stats = refCounter->getStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().totalReferences == 1u);
+    CHECK(stats.value().totalBytes == 512u);
+    execSql(writer.db, "COMMIT");
+    stats = refCounter->getStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().totalBlocks == 1u);
+    CHECK(stats.value().totalReferences == 0u);
+    CHECK(stats.value().totalBytes == 2048u);
+    CHECK(stats.value().totalUncompressedBytes == 4096u);
+    CHECK(stats.value().unreferencedBlocks == 1u);
+    CHECK(stats.value().unreferencedBytes == 2048u);
+
+    execSql(writer.db, "UPDATE ref_statistics SET stat_value=-321 WHERE stat_name='total_blocks'");
+    for (int poll = 0; poll < 3; ++poll) {
+        stats = refCounter->getStats();
+        REQUIRE(stats.has_value());
+        CHECK(stats.value().totalBlocks == 1u);
+        CHECK(stats.value().totalReferences == 0u);
+        CHECK(stats.value().totalBytes == 2048u);
+        CHECK(stats.value().totalUncompressedBytes == 4096u);
+        CHECK(stats.value().unreferencedBlocks == 1u);
+        CHECK(stats.value().unreferencedBytes == 2048u);
+        CHECK(stats.value().transactions == 0u);
+        CHECK(stats.value().rollbacks == 0u);
+    }
+    CHECK(queryInt64(testDbPath,
+                     "SELECT stat_value FROM ref_statistics WHERE stat_name='total_blocks'") ==
+          -321);
+}
+
+TEST_CASE("ReferenceCounter does not cache an aggregate under a later external commit",
+          "[storage][refcount][stats][cache][external][race]") {
+    SqliteStatsObserver observer;
+    ReferenceCounterFixture fixture;
+    REQUIRE(observer.attachments_.load() == 1u);
+    const auto hash = fixture.generateHash(667);
+    REQUIRE(fixture.refCounter->increment(hash, 512, 1024).has_value());
+    SqliteHandle writer(fixture.testDbPath);
+    observer.aggregateQueries_.store(0);
+    observer.externalWriter_ = writer.db;
+    observer.externalWrite_ = std::format(
+        "UPDATE block_references SET ref_count=ref_count+1 WHERE block_hash='{}'", hash);
+    observer.injectExternalCommit_.store(true);
+
+    const auto beforeCommit = fixture.refCounter->getStats();
+    REQUIRE(beforeCommit.has_value());
+    CHECK(beforeCommit.value().totalReferences == 1u);
+    REQUIRE(observer.externalCommitResult_.load() == SQLITE_OK);
+    const auto afterCommit = fixture.refCounter->getStats();
+    REQUIRE(afterCommit.has_value());
+    CHECK(afterCommit.value().totalReferences == 2u);
+    CHECK(observer.aggregateQueries_.load() == 2u);
+}
+
+TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter cached statistics expose schema errors",
+                 "[storage][refcount][stats][cache][external][edge]") {
+    REQUIRE(refCounter->increment(generateHash(668), 512, 1024).has_value());
+    REQUIRE(refCounter->getStats().has_value());
+    SqliteHandle writer(testDbPath);
+    execSql(writer.db, "DROP TABLE ref_statistics");
+    const auto stats = refCounter->getStats();
+    REQUIRE_FALSE(stats.has_value());
+    CHECK(stats.error().code == yams::ErrorCode::DatabaseError);
+}
+
+TEST_CASE("ReferenceCounter statistics polling benchmark", "[.stats-benchmark]") {
+    // Component-only, unchanged-database polls: not an ingest-throughput or daemon CPU claim.
+    // The first read is a cold stats snapshot, not cold disk/cache: setup already touches pages.
+    // Execute this same case three times per frozen binary and retain each REF_STATS_BENCH line.
+    constexpr size_t kPolls = 50;
+    for (const size_t rows : {1000u, 100000u}) {
+        SqliteStatsObserver observer;
+        ReferenceCounterFixture fixture;
+        REQUIRE(observer.attachments_.load() == 1u);
+        SqliteHandle writer(fixture.testDbPath);
+        execSql(writer.db, std::format(R"(
+            WITH RECURSIVE blocks(i) AS (
+                VALUES(1) UNION ALL SELECT i+1 FROM blocks WHERE i < {}
+            )
+            INSERT INTO block_references(block_hash, ref_count, block_size, uncompressed_size,
+                                         created_at, last_accessed)
+            SELECT printf('%064x', i), CASE WHEN i % 3 = 0 THEN 0 ELSE 2 END, 4096, 8192,
+                   1700000000, 1700000000
+            FROM blocks
+        )",
+                                       rows));
+        uint64_t expectedReferences = 2 * (rows - rows / 3);
+        observer.aggregateQueries_.store(0);
+        const auto poll = [&] {
+            const auto start = std::chrono::steady_clock::now();
+            const auto stats = fixture.refCounter->getStats();
+            const double elapsedMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                    .count();
+            REQUIRE(stats.has_value());
+            CHECK(stats.value().totalBlocks == rows);
+            CHECK(stats.value().totalReferences == expectedReferences);
+            CHECK(stats.value().totalBytes == rows * 4096u);
+            CHECK(stats.value().totalUncompressedBytes == rows * 8192u);
+            CHECK(stats.value().unreferencedBlocks == rows / 3);
+            CHECK(stats.value().unreferencedBytes == (rows / 3) * 4096u);
+            CHECK(stats.value().transactions == 0u);
+            CHECK(stats.value().rollbacks == 0u);
+            return elapsedMs;
+        };
+        const double coldMs = poll();
+        REQUIRE(observer.aggregateQueries_.load() == 1u);
+        std::vector<double> warmMs;
+        warmMs.reserve(kPolls);
+        for (size_t i = 0; i < kPolls; ++i) {
+            warmMs.push_back(poll());
+        }
+        const size_t warmPinnedQueries = observer.aggregateQueries_.load() - 1;
+        std::sort(warmMs.begin(), warmMs.end());
+        execSql(writer.db, "UPDATE block_references SET ref_count=ref_count+1 "
+                           "WHERE block_hash=printf('%064x', 1)");
+        ++expectedReferences;
+        const double invalidationMs = poll();
+        std::cout << std::format(
+            "REF_STATS_BENCH {{\"rows\":{},\"polls\":{},\"cold_snapshot_ms\":{:.6f},"
+            "\"warm_p50_ms\":{:.6f},\"warm_p95_ms\":{:.6f},\"warm_pinned_aggregate_queries\":{},"
+            "\"external_invalidation_ms\":{:.6f},\"total_pinned_aggregate_queries\":{}}}\n",
+            rows, kPolls, coldMs, (warmMs[(kPolls - 1) / 2] + warmMs[kPolls / 2]) / 2,
+            warmMs[(kPolls * 95 + 99) / 100 - 1], warmPinnedQueries, invalidationMs,
+            observer.aggregateQueries_.load());
+        std::cout.flush();
+    }
 }
 
 TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter concurrent operations",
@@ -1484,7 +2095,7 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector get last stats",
 
     // Get updated stats
     stats = gc->getLastStats();
-    CHECK(stats.blocksScanned >= 0u);
+    static_cast<void>(stats.blocksScanned);
     CHECK(stats.duration.count() >= 0); // Duration can be 0 for very fast operations
 }
 

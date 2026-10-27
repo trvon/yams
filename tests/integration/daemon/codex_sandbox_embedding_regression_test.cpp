@@ -203,7 +203,7 @@ void injectProviderWithoutConfiguredModel(ServiceManager* serviceManager,
     auto loadResult = provider->loadModel(loadedModelName);
     REQUIRE(loadResult.has_value());
 
-    serviceManager->__test_setModelProvider(provider);
+    serviceManager->testing_setModelProvider(provider);
 
     auto currentProvider = serviceManager->getModelProvider();
     REQUIRE(currentProvider != nullptr);
