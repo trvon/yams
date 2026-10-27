@@ -61,6 +61,14 @@ check() { # check <id> <detail> <command...>
 token() { printf 'yamsval%s%s' "$1" "$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"; }
 remember() { printf '%s=%s\n' "$1" "$2" >>"${TOKEN_FILE}"; }
 recall() { sed -n "s/^$1=//p" "${TOKEN_FILE}" 2>/dev/null | tail -n1; }
+# same_bytes <a> <b>: true when both files have the same contents. Uses sha256sum, not cmp:
+# minimal images (Arch base) ship coreutils but not diffutils.
+same_bytes() {
+	local a b
+	a="$(sha256sum "$1" 2>/dev/null | awk '{print $1}')" || return 1
+	b="$(sha256sum "$2" 2>/dev/null | awk '{print $1}')" || return 1
+	[ -n "${a}" ] && [ "${a}" = "${b}" ]
+}
 
 # Run a command as <user> through a login shell (pam_systemd sets
 # XDG_RUNTIME_DIR like a real login); no YAMS_* variable leaks in.
@@ -608,7 +616,7 @@ phase_seed() {
 		return
 	fi
 	if ! as_user "${TUSER}" "timeout 120 yams cat --hash '${hash}'" >"${UPGRADE_NOTE}.before" ||
-		! cmp -s "${UPGRADE_NOTE}" "${UPGRADE_NOTE}.before"; then
+		! same_bytes "${UPGRADE_NOTE}" "${UPGRADE_NOTE}.before"; then
 		fail upgrade-seed-body "pre-transition body does not match original bytes"
 		return
 	fi
@@ -697,7 +705,7 @@ phase_upgraded() {
 		return
 	fi
 	if as_user "${TUSER}" "timeout 120 yams cat --hash '${hash}'" >"${UPGRADE_NOTE}.after" &&
-		cmp -s "${UPGRADE_NOTE}" "${UPGRADE_NOTE}.after"; then
+		same_bytes "${UPGRADE_NOTE}" "${UPGRADE_NOTE}.after"; then
 		pass upgrade-seeded-body "pre-transition body retains its SHA256 and exact bytes"
 	else
 		fail upgrade-seeded-body "pre-transition document missing or changed"
