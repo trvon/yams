@@ -1,6 +1,7 @@
 /// @file grep_regex_test.cpp
-/// @brief Catch2 unit tests for the GrepRegex wrapper (RE2 + std::regex fallback).
+/// @brief Catch2 unit tests for the GrepRegex wrapper (RE2 + bounded Boost.Regex fallback).
 
+#include <chrono>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -231,7 +232,7 @@ TEST_CASE("GrepRegex::usesRe2: reflects backend", "[grep_regex]") {
     auto re = GrepRegex::compile("simple", false);
     REQUIRE(re.has_value());
     // When built with YAMS_HAS_RE2=1, a simple pattern should compile via RE2.
-    // When built without RE2, it should use std::regex.
+    // When built without RE2, it uses the backtracker.
     // We can't know at test-compile time, but the flag should be consistent.
 #if YAMS_HAS_RE2
 #if defined(YAMS_GREP_REGEX_TEST_ASAN)
@@ -247,7 +248,7 @@ TEST_CASE("GrepRegex::usesRe2: reflects backend", "[grep_regex]") {
 }
 
 // ---------------------------------------------------------------------------
-// RE2 fallback to std::regex for unsupported features
+// RE2 fallback to the backtracker for unsupported features
 // ---------------------------------------------------------------------------
 
 #if YAMS_HAS_RE2
@@ -255,11 +256,11 @@ TEST_CASE("GrepRegex: RE2 fallback for backreferences", "[grep_regex][re2_fallba
     // Backreferences are not supported by RE2 but are valid ECMAScript.
     auto re = GrepRegex::compile("(abc)\\1", false);
     REQUIRE(re.has_value());
-    // Should have fallen back to std::regex.
+    // Should have fallen back to the backtracker.
     REQUIRE(re->usesRe2() == false);
     REQUIRE_FALSE(re->fallbackReason().empty());
 
-    // Verify it actually works via std::regex.
+    // Verify it actually works via the backtracker.
     auto m = re->findFirst("abcabc");
     REQUIRE(m.has_value());
     REQUIRE(m->position == 0);
@@ -374,6 +375,90 @@ TEST_CASE("GrepRegex: multiline-like text (no dot-nl)", "[grep_regex]") {
     REQUIRE(re.has_value());
     auto m = re->findFirst("a\nb");
     // '.' should NOT match '\n' → no match.
-    // Note: std::regex with ECMAScript also doesn't match \n with '.' by default.
+    // The backtracker runs with match_not_dot_newline for the same behaviour.
     REQUIRE_FALSE(m.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// Bounded backtracking
+// ---------------------------------------------------------------------------
+
+TEST_CASE("GrepRegex: catastrophic backtracking is abandoned within budget",
+          "[grep_regex][re2_fallback][redos]") {
+    // Nested quantifiers with no possible match take 2^n steps in a backtracker. The
+    // backreference keeps the pattern off RE2.
+    auto re = GrepRegex::compile("(x+x+)+y\\1", false);
+    REQUIRE(re.has_value());
+    REQUIRE_FALSE(re->usesRe2());
+
+    const std::string line(64, 'x');
+    const auto start = std::chrono::steady_clock::now();
+    const auto m = re->findFirst(line);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    CHECK_FALSE(m.has_value());
+    CHECK(re->budgetExceededCount() == 1);
+    // Unbounded, this search does not finish. Bounded, it stops after at most ~1e7 states.
+    CHECK(elapsed < std::chrono::seconds(10));
+}
+
+TEST_CASE("GrepRegex: backtracker keeps matching after an abandoned line",
+          "[grep_regex][re2_fallback][redos]") {
+    auto re = GrepRegex::compile("(x+x+)+y\\1", false);
+    REQUIRE(re.has_value());
+    REQUIRE_FALSE(re->findFirst(std::string(64, 'x')).has_value());
+    REQUIRE(re->budgetExceededCount() == 1);
+
+    // (x+x+) captures "xx", then y, then \1 repeats "xx".
+    const auto m = re->findFirst("xxyxx");
+    REQUIRE(m.has_value());
+    CHECK(m->position == 0);
+    CHECK(m->length == 5);
+}
+
+TEST_CASE("GrepRegex: backreference match position", "[grep_regex][re2_fallback]") {
+    auto re = GrepRegex::compile("(ab)\\1", false);
+    REQUIRE(re.has_value());
+    const auto m = re->findFirst("xxabab");
+    REQUIRE(m.has_value());
+    CHECK(m->position == 2);
+    CHECK(m->length == 4);
+    CHECK(re->budgetExceededCount() == 0);
+}
+
+TEST_CASE("GrepRegex: lookbehind uses the backtracker", "[grep_regex][re2_fallback]") {
+    auto re = GrepRegex::compile("(?<=foo)bar", false);
+    REQUIRE(re.has_value());
+    REQUIRE_FALSE(re->usesRe2());
+    const auto m = re->findFirst("foobar bar");
+    REQUIRE(m.has_value());
+    CHECK(m->position == 3);
+    CHECK(re->countMatches("foobar bar", 10) == 1);
+}
+
+TEST_CASE("GrepRegex: anchors see text before the search offset", "[grep_regex]") {
+    // Resuming at an offset must not treat the offset as the start of the line.
+    auto caret = GrepRegex::compile("^a", false);
+    REQUIRE(caret.has_value());
+    CHECK(caret->countMatches("aa", 2) == 1);
+
+    auto word = GrepRegex::compile("\\bfoo", false);
+    REQUIRE(word.has_value());
+    // "xfoo" has no word boundary before foo; the second foo does.
+    const std::string text = "xfoo foo";
+    CHECK(word->countMatches(text.data(), text.size()) == 1);
+    const auto m = word->findNext(text.data(), text.size(), 1);
+    REQUIRE(m.has_value());
+    CHECK(m->position == 5);
+}
+
+TEST_CASE("GrepRegex: backtracker anchors see text before the search offset",
+          "[grep_regex][re2_fallback]") {
+    // Same contract on the backtracker. The backreference forces the fallback.
+    auto caret = GrepRegex::compile("^(a)\\1?", false);
+    REQUIRE(caret.has_value());
+    REQUIRE_FALSE(caret->usesRe2());
+    CHECK(caret->countMatches("ab", 2) == 1);
+    const auto m = caret->findNext("ba", 2, 1);
+    CHECK_FALSE(m.has_value());
 }
