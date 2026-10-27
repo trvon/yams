@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.1](https://github.com/trvon/yams/compare/v0.21.0...v0.21.1) (2026-10-27)
+
+
+### Fixed
+
+* **packaging:** compare upgrade bodies without cmp ([#378](https://github.com/trvon/yams/issues/378)) ([6d26203](https://github.com/trvon/yams/commit/6d26203140ffac4dfe0a3e36e9f0d49957eb4531))
+
 ## [0.21.0](https://github.com/trvon/yams/compare/v0.20.5...v0.21.0) (2026-10-27)
 
 
