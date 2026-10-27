@@ -30,6 +30,11 @@ _test_thread_sanitizer = yams_sanitize_thread
 # reach only a few suites. The default setup applies it to every test in a TSan build.
 if _test_thread_sanitizer
   add_test_setup('tsan', env: {'TSAN_OPTIONS': _test_tsan_options}, is_default: true)
+  # Audit setup: narrowed suppressions plus deadlock/history diagnostics (lt-safety A1).
+  add_test_setup('tsan_narrow', env: {
+    'TSAN_OPTIONS': 'suppressions=' + (meson.project_source_root() / 'tsan.narrow.suppressions')
+      + ':second_deadlock_stack=1:history_size=7',
+  })
 endif
 _test_address_sanitizer = yams_sanitize_address
 # ASan builds: keep meson's default ASAN_OPTIONS, add stack-use-after-return detection (it finds
@@ -1214,6 +1219,16 @@ if catch2_dep.found()
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'service-manager'],
     'timeout': 120,
+    'is_parallel': false,
+  }]
+
+#lt-safety red tests(local audit lane; not part of 'unit')
+  catch2_test_table += [{
+    'name': 'lt_safety_red',
+    'sources': files('unit/daemon/lt_safety_red_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'lt-red', 'daemon', 'service-manager'],
+    'timeout': 300,
     'is_parallel': false,
   }]
 
