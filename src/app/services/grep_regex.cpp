@@ -1,6 +1,17 @@
+// Boost.Regex abandons a search after max(N·S², min(N², cap)) + 100000 states, where N is the
+// input length and S the compiled pattern size. The default cap is 1e8; grep lines are short,
+// so 1e7 keeps a pathological line to tens of milliseconds. No other translation unit in YAMS
+// includes Boost.Regex, so this definition cannot disagree with another one.
+#ifndef BOOST_REGEX_MAX_STATE_COUNT
+#define BOOST_REGEX_MAX_STATE_COUNT 10000000
+#endif
+
 #include <yams/app/services/grep_regex.hpp>
 
+#include <boost/regex.hpp>
 #include <spdlog/spdlog.h>
+
+#include <stdexcept>
 
 namespace yams::app::services {
 
@@ -20,6 +31,13 @@ constexpr bool kDisableRe2UnderAsan = false;
 
 } // namespace
 
+struct GrepRegex::Backtracker {
+    boost::regex re;
+};
+
+GrepRegex::GrepRegex() = default;
+GrepRegex::~GrepRegex() = default;
+
 // ---------------------------------------------------------------------------
 // Pattern translation: ECMAScript → RE2-compatible
 // ---------------------------------------------------------------------------
@@ -37,7 +55,7 @@ std::string GrepRegex::translateForRe2(std::string_view pattern) {
     //
     // For the patterns grep typically handles, no translation is needed.
     // We return the pattern as-is and let RE2 reject unsupported constructs
-    // (the caller will fall back to std::regex).
+    // (the caller will fall back to the backtracker).
     return std::string(pattern);
 }
 
@@ -50,9 +68,9 @@ std::optional<GrepRegex> GrepRegex::compile(std::string_view pattern, bool ignor
 
 #if YAMS_HAS_RE2
     // RE2 trips ASan container-overflow reports in libc++ vector relocation on this toolchain.
-    // Keep sanitizer builds on the std::regex path so the grep stack remains testable.
+    // Keep sanitizer builds on the backtracker so the grep stack remains testable.
     if (!kDisableRe2UnderAsan) {
-        // Try RE2 first — 10-50x faster for most patterns.
+        // Try RE2 first: linear time, 10-50x faster for most patterns.
         re2::RE2::Options opts;
         opts.set_case_sensitive(!ignoreCase);
         opts.set_log_errors(false); // Don't spam stderr on unsupported patterns.
@@ -69,9 +87,9 @@ std::optional<GrepRegex> GrepRegex::compile(std::string_view pattern, bool ignor
             return result;
         }
 
-        // RE2 rejected the pattern — fall back to std::regex.
+        // RE2 rejected the pattern: fall back to the backtracker.
         result.fallbackReason_ = re->error();
-        spdlog::debug("[GrepRegex] RE2 rejected '{}': {}; falling back to std::regex", pattern,
+        spdlog::debug("[GrepRegex] RE2 rejected '{}': {}; falling back to Boost.Regex", pattern,
                       result.fallbackReason_);
     } else {
         result.fallbackReason_ = "RE2 disabled under AddressSanitizer";
@@ -79,15 +97,17 @@ std::optional<GrepRegex> GrepRegex::compile(std::string_view pattern, bool ignor
     }
 #endif
 
-    // std::regex fallback.
+    // Bounded backtracker. ECMAScript is Perl syntax in Boost: a superset of std::regex
+    // ECMAScript that also accepts lookbehind.
     try {
-        std::regex_constants::syntax_option_type flags = std::regex::ECMAScript;
+        boost::regex::flag_type flags = boost::regex::ECMAScript;
         if (ignoreCase)
-            flags |= std::regex::icase;
-        result.stdRegex_.emplace(std::string(pattern), flags);
+            flags |= boost::regex::icase;
+        result.backtracker_ =
+            std::make_unique<Backtracker>(Backtracker{boost::regex(std::string(pattern), flags)});
         result.usesRe2_ = false;
         return result;
-    } catch (const std::regex_error& e) {
+    } catch (const std::exception& e) {
         spdlog::warn("[GrepRegex] Invalid regex '{}': {}", pattern, e.what());
         return std::nullopt;
     }
@@ -104,10 +124,10 @@ std::optional<GrepRegexMatch> GrepRegex::findNext(const char* data, size_t len,
 
 #if YAMS_HAS_RE2
     if (usesRe2_ && re2_) {
-        re2::StringPiece input(data + offset, len - offset);
+        // Pass the whole buffer with a start position so ^ and \b see the preceding bytes.
+        re2::StringPiece input(data, len);
         re2::StringPiece match;
-        if (re2_->Match(input, 0, static_cast<int>(input.size()), re2::RE2::UNANCHORED, &match,
-                        1)) {
+        if (re2_->Match(input, offset, len, re2::RE2::UNANCHORED, &match, 1)) {
             return GrepRegexMatch{
                 .position = static_cast<size_t>(match.data() - data),
                 .length = match.size(),
@@ -117,13 +137,22 @@ std::optional<GrepRegexMatch> GrepRegex::findNext(const char* data, size_t len,
     }
 #endif
 
-    if (stdRegex_) {
-        std::cmatch cm;
-        if (std::regex_search(data + offset, data + len, cm, *stdRegex_)) {
-            return GrepRegexMatch{
-                .position = static_cast<size_t>(cm.position(0)) + offset,
-                .length = static_cast<size_t>(cm.length(0)),
-            };
+    if (backtracker_) {
+        boost::match_flag_type flags = boost::match_default | boost::match_not_dot_newline;
+        if (offset > 0) {
+            flags |= boost::match_prev_avail;
+        }
+        boost::cmatch cm;
+        try {
+            if (boost::regex_search(data + offset, data + len, cm, backtracker_->re, flags)) {
+                return GrepRegexMatch{
+                    .position = static_cast<size_t>(cm[0].first - data),
+                    .length = static_cast<size_t>(cm[0].second - cm[0].first),
+                };
+            }
+        } catch (const std::runtime_error&) {
+            // State budget or match stack exhausted. Report no match and count it.
+            budgetExceeded_.fetch_add(1, std::memory_order_relaxed);
         }
     }
     return std::nullopt;
@@ -164,8 +193,9 @@ GrepRegex::GrepRegex(GrepRegex&& other) noexcept
 #if YAMS_HAS_RE2
       re2_(std::move(other.re2_)),
 #endif
-      stdRegex_(std::move(other.stdRegex_)), usesRe2_(other.usesRe2_),
-      fallbackReason_(std::move(other.fallbackReason_)) {
+      backtracker_(std::move(other.backtracker_)), usesRe2_(other.usesRe2_),
+      fallbackReason_(std::move(other.fallbackReason_)),
+      budgetExceeded_(other.budgetExceeded_.load(std::memory_order_relaxed)) {
     other.usesRe2_ = false;
 }
 
@@ -174,9 +204,11 @@ GrepRegex& GrepRegex::operator=(GrepRegex&& other) noexcept {
 #if YAMS_HAS_RE2
         re2_ = std::move(other.re2_);
 #endif
-        stdRegex_ = std::move(other.stdRegex_);
+        backtracker_ = std::move(other.backtracker_);
         usesRe2_ = other.usesRe2_;
         fallbackReason_ = std::move(other.fallbackReason_);
+        budgetExceeded_.store(other.budgetExceeded_.load(std::memory_order_relaxed),
+                              std::memory_order_relaxed);
         other.usesRe2_ = false;
     }
     return *this;
