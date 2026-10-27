@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.21.0](https://github.com/trvon/yams/compare/v0.20.5...v0.21.0) (2026-10-27)
+
+
+### Added
+
+* **memory-sync:** add pinned adapter views and callback drains ([#329](https://github.com/trvon/yams/issues/329)) ([3b5d4cb](https://github.com/trvon/yams/commit/3b5d4cbc12e44a293a396ba0bf4b792610f1b5cc))
+* **memory-sync:** apply paged winners through bounded adapters ([#330](https://github.com/trvon/yams/issues/330)) ([604e68e](https://github.com/trvon/yams/commit/604e68e17baab76867a33c5b42b56779f68c3561))
+* **memory-sync:** serve complete winners from bounded disk generations ([#328](https://github.com/trvon/yams/issues/328)) ([43adae9](https://github.com/trvon/yams/commit/43adae99911bda2d0ee441081a9d305c49bfcec4))
+* **profiling:** Tracy for every library, zones on p2p and memory-sync, per-test CPU/RSS ([#294](https://github.com/trvon/yams/issues/294)) ([777e35a](https://github.com/trvon/yams/commit/777e35adae837d72ecce3bd3bdc1ff8be8114134))
+* **search:** road beam in RouteOnly/Augment ([#304](https://github.com/trvon/yams/issues/304)) ([f91cd85](https://github.com/trvon/yams/commit/f91cd85e1321919cd10737840c630ba29ac67c6a))
+* **search:** RouteOnly policy behind an evaluation gate ([#300](https://github.com/trvon/yams/issues/300)) ([db53357](https://github.com/trvon/yams/commit/db5335746283871280c03c30ebe684a886960ea7))
+* **search:** walk along roads ([#307](https://github.com/trvon/yams/issues/307)) ([81a051f](https://github.com/trvon/yams/commit/81a051fc2e783ef024d9be800aa8227c6ef018e8))
+* **topology:** accumulate roads at build (in memory) ([#301](https://github.com/trvon/yams/issues/301)) ([dcdeaa8](https://github.com/trvon/yams/commit/dcdeaa81d0173fb61659b511570c6ffc7196a045))
+* **topology:** incremental roads ([#303](https://github.com/trvon/yams/issues/303)) ([f7f1a09](https://github.com/trvon/yams/commit/f7f1a098659f81cdfcebc212accb6756de2d0679))
+* **topology:** opt-in medoid representative and BQ rotation ([#277](https://github.com/trvon/yams/issues/277)) ([c26294a](https://github.com/trvon/yams/commit/c26294a93877654f3bb6b131fdc81d364d81667d))
+* **topology:** ordered members ([#306](https://github.com/trvon/yams/issues/306)) ([cfb70f7](https://github.com/trvon/yams/commit/cfb70f7bb9a14c573b17021e071ab7bfc78f9058))
+* **topology:** road sidecar persistence ([#302](https://github.com/trvon/yams/issues/302)) ([e84ced2](https://github.com/trvon/yams/commit/e84ced261bfdf866fc27f2453fc8f3f3fe991ef5))
+* **topology:** typed event time and session for topology inputs ([#305](https://github.com/trvon/yams/issues/305)) ([111988c](https://github.com/trvon/yams/commit/111988c6e4d01dcd4f1fb24b2add32830dceffed))
+
+
+### Fixed
+
+* **build:** build libsql into the meson build tree ([#324](https://github.com/trvon/yams/issues/324)) ([a1cb2ed](https://github.com/trvon/yams/commit/a1cb2ed643671f785ea9f5823eb2dc71a6fe2762))
+* **build:** let the compiler select the TSan runtime ([#326](https://github.com/trvon/yams/issues/326)) ([95fb407](https://github.com/trvon/yams/commit/95fb407c0c8fa433114caceb28cd28265d41186d))
+* **build:** OpenSSL 4 certificate names and Boost 1.92 timer cancel ([#337](https://github.com/trvon/yams/issues/337)) ([731c1f5](https://github.com/trvon/yams/commit/731c1f5c0ffa96876963f3b986602f3b6ae7de77))
+* **client:** drop a retried attempt's EOF from streaming handlers ([#315](https://github.com/trvon/yams/issues/315)) ([9984c5b](https://github.com/trvon/yams/commit/9984c5bf5d0008d65cf6e3734aec3210badc2668))
+* **core:** correct feature-test detection in cpp23_features.hpp ([#278](https://github.com/trvon/yams/issues/278)) ([c248863](https://github.com/trvon/yams/commit/c248863b769ef66c9ec50af838e9dbe55d3c97fd))
+* **daemon:** admit cold reads and preserve sync deferral accounting ([#331](https://github.com/trvon/yams/issues/331)) ([60dd2c9](https://github.com/trvon/yams/commit/60dd2c9afefda7e2b509a2f7df835f119c869dfd))
+* **daemon:** bound semantic neighbor scores and report startup phase ([#334](https://github.com/trvon/yams/issues/334)) ([211db15](https://github.com/trvon/yams/commit/211db156069b4b4d5b2288318dad839648b2c339))
+* **daemon:** count active requests, not connections, for idle detection ([#289](https://github.com/trvon/yams/issues/289)) ([2d16279](https://github.com/trvon/yams/commit/2d162793cba6670a0a413a9acaa8f3fa16c016cb))
+* **daemon:** give each ServiceManagerFsm its own state ([0ebe9c5](https://github.com/trvon/yams/commit/0ebe9c5c9aff87c4e7b110a11380274d6bfbb45b))
+* **daemon:** mark the vector DB ready once its first vectors commit ([#348](https://github.com/trvon/yams/issues/348)) ([4f6534f](https://github.com/trvon/yams/commit/4f6534f65a9efb7dab1354f9742957ee889f76e8))
+* **daemon:** run memory_sync catch-up sweeps only when a store changed ([#295](https://github.com/trvon/yams/issues/295)) ([f7ca954](https://github.com/trvon/yams/commit/f7ca95427d7a7acf619dc90e70000eaa41bd5706))
+* **daemon:** synchronize metrics completion and data-root snapshots ([#327](https://github.com/trvon/yams/issues/327)) ([59d11a1](https://github.com/trvon/yams/commit/59d11a1504fb00c75fef8c7e452346f5399f4862))
+* **daemon:** take the cancellation slot before moving its signal ([#350](https://github.com/trvon/yams/issues/350)) ([774cba8](https://github.com/trvon/yams/commit/774cba8b0da8472cd3204c490c9e73f25ffaba15))
+* **daemon:** wake paused post-ingest pollers on resume and capability changes ([#290](https://github.com/trvon/yams/issues/290)) ([de84edd](https://github.com/trvon/yams/commit/de84edde1a8975b8984053a4f71fafbea915ef2f))
+* **graph:** --scope-cwd clusters, --name lookup, --limit ([#280](https://github.com/trvon/yams/issues/280) follow-ups) ([#284](https://github.com/trvon/yams/issues/284)) ([52aa700](https://github.com/trvon/yams/commit/52aa700144ca8b9147e6e65260c800de81d0f265))
+* **graph:** document lookup and --scope-cwd ([#280](https://github.com/trvon/yams/issues/280)) ([#282](https://github.com/trvon/yams/issues/282)) ([44b2f4f](https://github.com/trvon/yams/commit/44b2f4f04639839fbae279968f69be12d8d5fb99))
+* **graph:** rank explore targets and stop version crowding ([#322](https://github.com/trvon/yams/issues/322)) ([c3acf80](https://github.com/trvon/yams/commit/c3acf80bc44d16eb4a4334954cf1872fea769ad6))
+* **ipc:** preserve search stats in streamed responses ([#287](https://github.com/trvon/yams/issues/287)) ([01fe25f](https://github.com/trvon/yams/commit/01fe25f1ab53143eed45f38c135fef772f13181d))
+* **memory-sync:** bound complete sweeps and cancel filesystem walks ([#321](https://github.com/trvon/yams/issues/321)) ([31c9e57](https://github.com/trvon/yams/commit/31c9e574476ffb56a37c3c986e815294b966a8bb))
+* **memory-sync:** bound direct quarantine invalidations ([#338](https://github.com/trvon/yams/issues/338)) ([21ddb19](https://github.com/trvon/yams/commit/21ddb19cf7f5564175deb0a0063d9bcfd19bcfe4))
+* **memory-sync:** stop re-walking the op store on every publish ([#319](https://github.com/trvon/yams/issues/319)) ([33243d8](https://github.com/trvon/yams/commit/33243d8472a175105f31d4bb0b1070c7dfc7d4af))
+* **memory-sync:** stop re-walking the op store when a sweep cannot fit ([#325](https://github.com/trvon/yams/issues/325)) ([11b8443](https://github.com/trvon/yams/commit/11b8443bc4a6501d6f3917dd52db7e428b5a6320))
+* **profiling:** keep Tracy zones off coroutine suspension points ([#343](https://github.com/trvon/yams/issues/343)) ([ea8120b](https://github.com/trvon/yams/commit/ea8120bb5a4b867b9d895fa3a97ae38ddc399608))
+* **search:** count augment route members as added candidates ([#276](https://github.com/trvon/yams/issues/276)) ([1d1e8de](https://github.com/trvon/yams/commit/1d1e8def4defa5293d0f7bc537a0e947cd557bf4))
+* **search:** gate lexical status and fragment state on publication ([#340](https://github.com/trvon/yams/issues/340)) ([8bb6f39](https://github.com/trvon/yams/commit/8bb6f397489f06005d5ed61b2a84108c723a5d01))
+* **search:** restore measured scientific ranking ([#318](https://github.com/trvon/yams/issues/318)) ([3272367](https://github.com/trvon/yams/commit/3272367ea2d00a72f6e1c6ad9ab2e7e26e0eb51f))
+* **search:** skip per-hash score lists under MAX chunk aggregation ([#293](https://github.com/trvon/yams/issues/293)) ([d225287](https://github.com/trvon/yams/commit/d2252877ad4c3404c7943b402ab931ca573576ef))
+* **search:** vector-stage lifetime on component timeout ([#299](https://github.com/trvon/yams/issues/299)) ([2ba8cb4](https://github.com/trvon/yams/commit/2ba8cb4a86be694a9f1718eb9f4c0add05922309))
+* **storage:** cache reference counter stats per SQLite generation ([#291](https://github.com/trvon/yams/issues/291)) ([6039a36](https://github.com/trvon/yams/commit/6039a3695bd15b781f2462291067d0d46db9d05d))
+* **tests:** replace frozen expectations and harden release gates ([#323](https://github.com/trvon/yams/issues/323)) ([d398556](https://github.com/trvon/yams/commit/d398556ee554d2c2afa999660ac70b70fa8f58fe))
+* **test:** use the daemon timeout variable for the harness isolation test ([#273](https://github.com/trvon/yams/issues/273)) ([e48d9f8](https://github.com/trvon/yams/commit/e48d9f8d1f29a6a3382616aa1ff427a4220a38bd))
+* **topology:** full rebuild when louvain/kmeans need a wider region ([#285](https://github.com/trvon/yams/issues/285)) ([3f3f3b6](https://github.com/trvon/yams/commit/3f3f3b613eaf2912cf3ae6bedaa3df78a3228cd1))
+* **topology:** make louvain moves independent of hash order ([#313](https://github.com/trvon/yams/issues/313)) ([b6e6cd3](https://github.com/trvon/yams/commit/b6e6cd38f8f087f05b3e668be40f9a657a960235))
+* **vector:** prepare backend statements only once per connection ([#351](https://github.com/trvon/yams/issues/351)) ([47f14f5](https://github.com/trvon/yams/commit/47f14f509396b51ce3794b9a048139635a17fde5))
+* **vector:** rank vec0 by cosine on unit-normalized copies ([#275](https://github.com/trvon/yams/issues/275)) ([4ec044a](https://github.com/trvon/yams/commit/4ec044afd69d878b7d69c372083ccf3df744d483))
+* **wal:** encode the entry header field by field, never via padding ([#274](https://github.com/trvon/yams/issues/274)) ([8000226](https://github.com/trvon/yams/commit/8000226a4cf217391b045c4f27c15d3b10dcc98c))
+* Windows and macOS CI failures on experimental ([#370](https://github.com/trvon/yams/issues/370)) ([5b0985f](https://github.com/trvon/yams/commit/5b0985f0a7e56b539a376a8b77675fc574492810))
+
+
+### Performance
+
+* **memory_sync:** skip idle rescans and listings of a direct op store ([#311](https://github.com/trvon/yams/issues/311)) ([8881e0b](https://github.com/trvon/yams/commit/8881e0b3e9630baed76c24fd2f56db6d03ff0c3e))
+* **memory-sync:** reuse certified filesystem listings during recovery ([#339](https://github.com/trvon/yams/issues/339)) ([a8bf856](https://github.com/trvon/yams/commit/a8bf85613c0bd432368b6b28984ff4db525b7d75))
+* **memory-sync:** skip inbound apply when replicated inputs are unchanged ([#344](https://github.com/trvon/yams/issues/344)) ([d59db71](https://github.com/trvon/yams/commit/d59db71d868c665e91c50c969661c9d06d815043))
+* **memory-sync:** stop the idle re-verify loop ([#320](https://github.com/trvon/yams/issues/320)) ([8d439db](https://github.com/trvon/yams/commit/8d439db6082ec12e38fcfad6a67808821ed4c47c))
+* **profiling:** name metadata write-pool waits by caller ([#347](https://github.com/trvon/yams/issues/347)) ([4f5241c](https://github.com/trvon/yams/commit/4f5241c085ffd49704d054bfad1c54745204fd59))
+* **search:** build the topology route index off the query path ([#346](https://github.com/trvon/yams/issues/346)) ([6ea1135](https://github.com/trvon/yams/commit/6ea11353ecf11e8083eb62b6a34d5e302e4f5ed8))
+
+
+### Changed
+
+* **search:** extract runVectorCandidateStage ([#298](https://github.com/trvon/yams/issues/298)) ([78b5440](https://github.com/trvon/yams/commit/78b5440186a2cf30b20d608602a8b308647ec18a))
+
 ## [0.20.5](https://github.com/trvon/yams/compare/v0.20.4...v0.20.5) (2026-10-03)
 
 
