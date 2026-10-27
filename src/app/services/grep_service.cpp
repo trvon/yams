@@ -1392,6 +1392,13 @@ public:
             std::to_string(bmhPrefilterSkips.load(std::memory_order_relaxed));
         response.searchStats["regex_search_calls"] =
             std::to_string(regexSearchCalls.load(std::memory_order_relaxed));
+        if (const auto abandoned = re.budgetExceededCount(); abandoned > 0) {
+            // Lines whose backtracking search ran out of budget were reported as non-matching.
+            response.searchStats["regex_budget_exceeded"] = std::to_string(abandoned);
+            spdlog::warn("[GrepService] regex '{}' exceeded its backtracking budget on {} "
+                         "line(s); those lines were treated as non-matching",
+                         regexPattern, abandoned);
+        }
         response.searchStats["regex_scan_ms"] = std::to_string(regexScanMs);
         response.searchStats["match_render_us"] = std::to_string(matchRenderUs);
         response.searchStats["matches_rendered"] =
