@@ -125,6 +125,8 @@ package_identity_from_file() { printf '%s' 'yams 0.20.5+nightly.20261005+g5406c3
 rm() { :; }
 apt-get() { return "${INSTALL_RC:-0}"; }
 sha256sum() { python3 "$TEST_ROOT/hash.py" "$@"; }
+# Minimal Arch images have no diffutils; the checks must not need cmp.
+cmp() { echo "cmp: command not found" >&2; return 127; }
 '''
         (self.root / "hash.py").write_text('''import hashlib, pathlib, sys
 args = [a for a in sys.argv[1:] if a != "--quiet"]
