@@ -101,6 +101,8 @@ inline bool applyCpuThrottlingForPoller(boost::asio::steady_timer& timer) {
     return false;
 }
 
+/// Re-poll delay while queued work is blocked (paused, admission closed, limiter or
+/// concurrency saturated). Job completion does not signal the wake timer, so this stays short.
 inline std::chrono::milliseconds pollerMaxIdleDelay() {
     if (auto snap = TuningSnapshotRegistry::instance().get()) {
         if (snap->daemonIdle) {
@@ -111,6 +113,22 @@ inline std::chrono::milliseconds pollerMaxIdleDelay() {
             std::max<uint32_t>(2u, std::min<uint32_t>(snap->workerPollMs, 10u)));
     }
     return std::chrono::milliseconds(2);
+}
+
+/// Safety-net wait while the channel is empty. Enqueue paths cancel the wake timer; the cancel
+/// is posted to the timer's executor, which is the poller's strand, so it can only run while the
+/// poller is suspended on a registered wait. No wake is lost, and this wait only bounds the
+/// latency of a missing signal. It follows the tuning cadence: the idle tick while the daemon is
+/// idle, otherwise the worker poll period. A fixed 10 ms here cost ~100 wakeups/s per poller on
+/// an idle daemon.
+inline std::chrono::milliseconds pollerIdleWait() {
+    if (auto snap = TuningSnapshotRegistry::instance().get()) {
+        if (snap->daemonIdle) {
+            return std::chrono::milliseconds(std::max<uint32_t>(1u, TuneAdvisor::idleTickMs()));
+        }
+        return std::chrono::milliseconds(std::max<uint32_t>(1u, snap->workerPollMs));
+    }
+    return std::chrono::milliseconds(std::max<uint32_t>(1u, TuneAdvisor::workerPollMs()));
 }
 
 } // namespace detail
@@ -162,8 +180,10 @@ template <typename Task> struct PressureLimitedPollerConfig {
     bool enableCpuThrottling = true;
 
     // Event-driven wake: the enqueuer cancels this timer to wake the poller.
-    // The timer is always armed with a safety-net expiry so that even if a
-    // cancel races past, the poller resumes promptly.
+    // The timer is armed with a safety-net expiry (detail::pollerIdleWait on an empty
+    // channel, detail::pollerMaxIdleDelay when queued work is blocked). Create it on the
+    // poller's executor: the posted cancel is then serialized with the poller and cannot
+    // run between the empty-channel check and the registered wait.
     std::shared_ptr<boost::asio::steady_timer> wakeTimer;
     std::mutex* wakeTimerMutex = nullptr;
 };
@@ -498,8 +518,14 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                 continue;
             }
 
-            co_await detail::awaitPressureLimitedPollerWake(cfg, std::chrono::milliseconds(10),
-                                                            "idle");
+            // Nothing was taken. An empty channel sleeps until the next enqueue signal or the
+            // tuning cadence. Queued work the poller could not admit (limiter, maxConcurrent,
+            // requeue) is re-polled promptly: completion does not signal the wake timer.
+            const bool channelsEmpty =
+                channel->empty() && (!cfg.highPriorityChannel || cfg.highPriorityChannel->empty());
+            co_await detail::awaitPressureLimitedPollerWake(
+                cfg, channelsEmpty ? detail::pollerIdleWait() : detail::pollerMaxIdleDelay(),
+                channelsEmpty ? "idle" : "blocked");
         } catch (const std::exception& e) {
             spdlog::error("[PostIngestQueue] {} poller exception: {}", cfg.stageName, e.what());
         }

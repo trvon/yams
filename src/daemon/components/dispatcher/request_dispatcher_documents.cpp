@@ -30,6 +30,7 @@
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/grep_result_window.h>
+#include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -691,6 +692,7 @@ tryEnqueueStoreDocumentTaskWithBackoff(const AddDocumentRequest& req,
         }
         if (pushed) {
             TuningManager::notifyWakeup();
+            IngestService::notifyWakeup();
             if (attempt > 0) {
                 spdlog::debug("[RequestDispatcher] AddDocument enqueue succeeded after {} retries",
                               attempt);
