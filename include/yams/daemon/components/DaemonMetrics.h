@@ -462,6 +462,10 @@ public:
     [[nodiscard]] bool isPollingActive() const noexcept {
         return pollingActive_.load(std::memory_order_acquire);
     }
+    /// Number of completed polling iterations (observability; tests use it to check cadence).
+    [[nodiscard]] std::uint64_t pollingIterations() const noexcept {
+        return pollingIterations_.load(std::memory_order_acquire);
+    }
 
     // Retrieve metrics snapshot. When detailed is true, include deep store stats
     // (may perform additional I/O) without poisoning the basic cache.
@@ -542,6 +546,11 @@ private:
 
     // Background polling control
     std::atomic<bool> pollingActive_{false};
+    std::atomic<std::uint64_t> pollingIterations_{0};
+    // Poll period for the next iteration: cacheMs_ while the daemon is busy or a status
+    // client is reading, the tuning idle tick otherwise. A stale status read cancels the
+    // timer (scheduleBackgroundRefresh), so values are never older than one idle tick.
+    std::chrono::milliseconds nextPollDelay() const;
     // Timer pointer for cancellation from stopPolling()
     boost::asio::steady_timer* pollingTimer_{nullptr};
     // Shutdown synchronization - signaled when polling loop exits

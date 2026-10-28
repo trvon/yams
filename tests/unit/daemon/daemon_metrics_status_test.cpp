@@ -37,6 +37,8 @@
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/daemon_lifecycle.h>
@@ -1044,6 +1046,59 @@ TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embeddi
         REQUIRE(snap != nullptr);
         REQUIRE(!snap->embeddingBackend.empty());
     }
+}
+
+TEST_CASE("DaemonMetrics polling follows the idle tick while the daemon is idle",
+          "[daemon][metrics][idle]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_metrics_idle_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+
+    const auto savedSnapshot = TuningSnapshotRegistry::instance().get();
+    struct SnapshotRestore {
+        std::shared_ptr<const TuningSnapshot> saved;
+        ~SnapshotRestore() { TuningSnapshotRegistry::instance().set(saved); }
+    } snapshotRestore{savedSnapshot};
+    auto idle = std::make_shared<TuningSnapshot>();
+    idle->daemonIdle = true;
+    TuningSnapshotRegistry::instance().set(idle);
+    REQUIRE(TuneAdvisor::idleTickMs() >= 1000u);
+    REQUIRE(TuneAdvisor::metricsCacheMs() <= 500u);
+
+    // Owned by shared_ptr as in production: the off-strand collectors use shared_from_this.
+    auto metricsPtr =
+        std::make_shared<DaemonMetrics>(nullptr, &state, &svc, svc.getWorkCoordinator());
+    auto& metrics = *metricsPtr;
+    metrics.startPolling();
+    auto waitIterationsAbove = [&](std::uint64_t floor, std::chrono::milliseconds budget) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        while (metrics.pollingIterations() <= floor &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return metrics.pollingIterations() > floor;
+    };
+    REQUIRE(waitIterationsAbove(0, std::chrono::seconds(3)));
+
+    // Idle: at most one more iteration in 900 ms (the 250 ms default would make 3-4).
+    const auto base = metrics.pollingIterations();
+    std::this_thread::sleep_for(std::chrono::milliseconds(900));
+    CHECK(metrics.pollingIterations() - base <= 1);
+
+    // A status read on a stale cache still refreshes promptly, well within one idle tick:
+    // observe a tick, let the cache age past cacheMs_, then read.
+    const auto tickBase = metrics.pollingIterations();
+    REQUIRE(waitIterationsAbove(tickBase, std::chrono::milliseconds(1500)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(TuneAdvisor::metricsCacheMs() + 100));
+    const auto beforeRead = metrics.pollingIterations();
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+    CHECK(snap->statusSnapshotStale);
+    CHECK(waitIterationsAbove(beforeRead, std::chrono::milliseconds(500)));
+
+    metrics.stopPolling();
 }
 
 TEST_CASE("DaemonMetrics reports effective embedding policy before provider adoption",

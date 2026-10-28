@@ -38,6 +38,7 @@
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
@@ -912,8 +913,12 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
             spdlog::warn("DaemonMetrics: polling iteration failed (unknown exception)");
         }
 
-        // Sleep for cache interval using async timer
-        timer.expires_after(std::chrono::milliseconds(cacheMs_));
+        pollingIterations_.fetch_add(1, std::memory_order_acq_rel);
+
+        // Sleep until the next poll. While the daemon is idle this follows the tuning idle
+        // tick instead of cacheMs_ (250 ms by default, i.e. 4 wakeups/s on an idle daemon);
+        // a status request whose cache is stale cancels the timer to refresh at once.
+        timer.expires_after(nextPollDelay());
         auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
         // Timer cancel is used for two purposes:
         //   1. stopPolling() — sets pollingActive_=false first, then cancels.
@@ -930,6 +935,19 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
     pollingTimer_ = nullptr;
     pollingCompletion_.complete();
     spdlog::info("DaemonMetrics: polling loop stopped");
+}
+
+std::chrono::milliseconds DaemonMetrics::nextPollDelay() const {
+    const auto base = std::chrono::milliseconds(std::max<uint32_t>(cacheMs_, 1));
+    if (refreshQueued_.load(std::memory_order_acquire) ||
+        detailedRefreshQueued_.load(std::memory_order_acquire)) {
+        return base; // a client is waiting on this refresh
+    }
+    auto snap = TuningSnapshotRegistry::instance().get();
+    if (!snap || !snap->daemonIdle) {
+        return base;
+    }
+    return std::max(base, std::chrono::milliseconds(TuneAdvisor::idleTickMs()));
 }
 
 void DaemonMetrics::refresh() {
