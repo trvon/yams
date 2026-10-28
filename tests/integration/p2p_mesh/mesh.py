@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -434,12 +435,37 @@ class Mesh:
         return summary
 
     # -- idle -----------------------------------------------------------
-    def cmd_idle(self, a) -> int:
-        """Sample per-node CPU% and RSS while no client talks to the mesh.
+    @staticmethod
+    def mem_mib(text: str) -> float | None:
+        """Parse a complete `docker stats` memory value into MiB; malformed is missing."""
+        m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(B|kB|KB|KiB|MB|MiB|GB|GiB|TB|TiB)",
+                         text.strip())
+        if not m:
+            return None
+        unit = m.group(2)
+        scale = {"B": 1, "kB": 1e3, "KB": 1e3, "KiB": 2**10,
+                 "MB": 1e6, "MiB": 2**20, "GB": 1e9, "GiB": 2**30,
+                 "TB": 1e12, "TiB": 2**40}[unit]
+        return float(m.group(1)) * scale / 2**20
 
-        Writes idle.csv (one row per sample per node) and idle.json (mean/max per node) to
-        the artifacts dir. Exit 5 when a node's mean CPU% is above --max-cpu. The daemon is
-        the only process of note in a node, so `docker stats` is the node's daemon.
+    @staticmethod
+    def slope(xs: list[float], ys: list[float]) -> float | None:
+        """Descriptive OLS slope for three or more comparable samples."""
+        n = len(xs)
+        if n < 3 or n != len(ys):
+            return None
+        mx, my = sum(xs) / n, sum(ys) / n
+        sxx = sum((x - mx) ** 2 for x in xs)
+        if sxx == 0:
+            return None
+        return sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / sxx
+
+    def cmd_idle(self, a) -> int:
+        """Sample per-node CPU% and container memory usage while clients are idle.
+
+        `docker stats` reports container usage, not process RSS. Writes raw and parsed usage
+        plus a descriptive slope. Exit 5 retains the existing CPU-threshold behavior; exit 6
+        reports missing or malformed usage samples when CPU did not already fail.
         """
         self.need_state()
         if a.seconds < a.interval or a.interval < 1:
@@ -448,6 +474,7 @@ class Mesh:
         out.mkdir(parents=True, exist_ok=True)
         names = {self.ctr(n): n["name"] for n in self.nodes}
         rows: list[dict] = []
+        measurement_errors: dict[str, list[str]] = {name: [] for name in names.values()}
         hottest: dict[str, tuple[float, str]] = {}
         deadline = time.monotonic() + a.seconds
         fmt = "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"
@@ -458,32 +485,64 @@ class Mesh:
             t0 = time.monotonic()
             res = run(["docker", "stats", "--no-stream", "--format", fmt, *names], check=False)
             stamp = time.time()
+            sample_mono = time.monotonic()
             for line in (res.stdout or "").splitlines():
                 parts = line.split("\t")
                 if len(parts) != 3 or parts[0] not in names:
                     continue
-                cpu = float(parts[1].rstrip("%") or 0.0)
+                node = names[parts[0]]
+                try:
+                    cpu = float(parts[1].rstrip("%"))
+                except ValueError:
+                    cpu = float("nan")
+                if not math.isfinite(cpu):
+                    measurement_errors[node].append(f"invalid CPU value {parts[1]!r}")
+                    continue
                 mem = parts[2].split("/")[0].strip()
-                rows.append({"t": stamp, "node": names[parts[0]], "cpu_pct": cpu, "mem": mem})
+                mem_mib = self.mem_mib(mem)
+                rows.append({"t": stamp, "mono": sample_mono, "node": names[parts[0]],
+                             "cpu_pct": cpu, "mem": mem, "container_mem_mib": mem_mib})
                 prev = hottest.get(names[parts[0]], (-1.0, ""))
                 if cpu > prev[0]:
                     hottest[names[parts[0]]] = (cpu, parts[0])
             time.sleep(max(0.0, a.interval - (time.monotonic() - t0)))
         with (out / "idle.csv").open("w") as f:
-            f.write("t,node,cpu_pct,mem\n")
+            f.write("t,monotonic_s,node,cpu_pct,container_mem_raw,container_mem_mib\n")
             for r in rows:
-                f.write(f"{r['t']:.0f},{r['node']},{r['cpu_pct']:.2f},{r['mem']}\n")
+                parsed = "" if r["container_mem_mib"] is None else f'{r["container_mem_mib"]:.3f}'
+                f.write(f"{r['t']:.0f},{r['mono']:.6f},{r['node']},{r['cpu_pct']:.2f},"
+                        f"{r['mem']},{parsed}\n")
         summary: dict[str, dict] = {}
         for n in self.nodes:
-            cpus = [r["cpu_pct"] for r in rows if r["node"] == n["name"]]
+            mine = [r for r in rows if r["node"] == n["name"]]
+            cpus = [r["cpu_pct"] for r in mine]
+            errors = measurement_errors[n["name"]]
             if not cpus:
+                summary[n["name"]] = {
+                    "samples": 0,
+                    "measurement_error": "; ".join(errors) if errors else "no docker stats samples",
+                }
                 continue
+            valid_mem = [r for r in mine if r["container_mem_mib"] is not None]
+            mems = [r["container_mem_mib"] for r in valid_mem]
+            hours = ([(r["mono"] - valid_mem[0]["mono"]) / 3600.0 for r in valid_mem]
+                     if valid_mem else [])
             summary[n["name"]] = {
                 "samples": len(cpus),
                 "cpu_mean": round(sum(cpus) / len(cpus), 2),
                 "cpu_max": round(max(cpus), 2),
-                "mem_last": next(r["mem"] for r in reversed(rows) if r["node"] == n["name"]),
+                "container_mem_last_raw": mine[-1]["mem"],
+                "container_mem_samples": len(mems),
+                "container_mem_missing_samples": len(mine) - len(mems),
+                "container_mem_first_mib": round(mems[0], 1) if mems else None,
+                "container_mem_last_mib": round(mems[-1], 1) if mems else None,
+                "container_mem_max_mib": round(max(mems), 1) if mems else None,
+                "container_mem_slope_mib_per_h": (
+                    round(slope, 2) if (slope := self.slope(hours, mems)) is not None else None
+                ),
             }
+            if errors:
+                summary[n["name"]]["measurement_error"] = "; ".join(errors)
         # Per-thread view of the hottest node so the pinning thread is named, not guessed.
         if a.threads and hottest:
             node = max(hottest, key=lambda k: hottest[k][0])
@@ -493,16 +552,32 @@ class Mesh:
             (out / f"{node}-threads.txt").write_text(top)
             summary[node]["threads_file"] = f"{node}-threads.txt"
         (out / "idle.json").write_text(json.dumps(summary, indent=2))
-        rc = 0
+        cpu_failed = False
+        measurement_failed = False
         for name, s in summary.items():
             flag = ""
-            if a.max_cpu is not None and s["cpu_mean"] > a.max_cpu:
+            if (a.max_cpu is not None and s.get("cpu_mean") is not None
+                    and s["cpu_mean"] > a.max_cpu):
                 flag = f"  OVER --max-cpu {a.max_cpu}"
-                rc = 5
+                cpu_failed = True
+            if s.get("measurement_error"):
+                print(f"  {name}: INVALID measurement: {s['measurement_error']}{flag}")
+                measurement_failed = True
+                continue
+            if s["container_mem_missing_samples"]:
+                measurement_failed = True
+                flag += f"  MISSING MEMORY {s['container_mem_missing_samples']}"
             print(f"  {name}: cpu mean {s['cpu_mean']}% max {s['cpu_max']}% "
-                  f"mem {s['mem_last']} ({s['samples']} samples){flag}")
+                  f"container memory {s['container_mem_first_mib']}->"
+                  f"{s['container_mem_last_mib']} MiB "
+                  f"(slope {s['container_mem_slope_mib_per_h']} MiB/h, "
+                  f"{s['container_mem_samples']}/{s['samples']} valid samples){flag}")
         log(f"artifacts: {out}")
-        return rc
+        if cpu_failed:
+            return 5
+        if measurement_failed:
+            return 6
+        return 0
 
     # -- seed -----------------------------------------------------------
     def cmd_seed(self, a) -> None:
@@ -849,7 +924,9 @@ def build_parser() -> argparse.ArgumentParser:
     rn.add_argument("--out")
     rn.add_argument("--keep", action="store_true", help="leave the mesh up afterwards")
 
-    idl = sub.add_parser("idle", help="sample idle CPU and RSS per node; exit 5 over --max-cpu")
+    idl = sub.add_parser(
+        "idle", help="sample idle CPU and container memory per node; exit 5 over --max-cpu",
+        description="sample idle CPU and container memory per node")
     idl.add_argument("--seconds", type=int, default=300)
     idl.add_argument("--interval", type=int, default=5)
     idl.add_argument("--max-cpu", type=float, default=None,
