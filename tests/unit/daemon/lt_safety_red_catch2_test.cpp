@@ -22,10 +22,8 @@
 
 #include <spdlog/spdlog.h>
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include "../../common/test_helpers_catch2.h"
@@ -158,55 +156,11 @@ void retainMetricsOwnerGraph(const std::shared_ptr<SmFixture>& fixture,
     }
 }
 
-boost::asio::awaitable<void>
-runNeverSuspendingCoroutine(std::shared_ptr<std::atomic<bool>> entered,
-                            std::shared_ptr<std::atomic<bool>> sawCancel,
-                            std::shared_ptr<std::atomic<bool>> release) {
-    entered->store(true, std::memory_order_release);
-    const auto deadline = std::chrono::steady_clock::now() + 4s;
-    while (std::chrono::steady_clock::now() < deadline &&
-           !release->load(std::memory_order_acquire)) {
-        const auto cancellationState = co_await boost::asio::this_coro::cancellation_state;
-        if (cancellationState.cancelled() != boost::asio::cancellation_type::none) {
-            sawCancel->store(true, std::memory_order_release);
-            co_return;
-        }
-        std::this_thread::sleep_for(1ms);
-    }
-}
-
 } // namespace
 
-// B3 — request_dispatcher_prune.cpp:138-213 spawns a coroutine whose only "suspension" is
-// co_await this_coro::cancellation_state, which never suspends. WorkCoordinator::stop()
-// (WorkCoordinator.cpp:286-302) posts the cancel to that coroutine's strand and only calls
-// ioContext->stop() once every posted cancel has run, so one busy strand keeps every idle
-// worker inside run() past the join budget. Fix: lt-safety A2.1.
-TEST_CASE("lt_red_detached_never_suspends", "[lt-red][work_coordinator][shutdown]") {
-    constexpr std::size_t kWorkers = 4;
-    WorkCoordinator wc;
-    wc.start(kWorkers);
-
-    auto entered = std::make_shared<std::atomic<bool>>(false);
-    auto sawCancel = std::make_shared<std::atomic<bool>>(false);
-    auto release = std::make_shared<std::atomic<bool>>(false);
-
-    wc.spawnDetached(wc.getExecutor(), runNeverSuspendingCoroutine(entered, sawCancel, release));
-
-    REQUIRE(wait_for_condition(2000ms, 1ms, [&] { return entered->load(); }));
-
-    wc.stop();
-    (void)wc.joinWithTimeout(500ms);
-    const auto stillActive = wc.getActiveWorkerCount();
-    INFO("busy coroutine observed cancellation: " << sawCancel->load());
-
-    // Expected: stopping the context releases the three idle workers. The synchronous coroutine
-    // itself cannot be interrupted until it returns.
-    CHECK(stillActive <= 1);
-
-    release->store(true, std::memory_order_release);
-    REQUIRE(wc.joinWithTimeout(10s));
-}
+// B3 (a detached coroutine that never suspends held the whole pool past stop()) went green with
+// lt-safety A2.1; its regression test is "WorkCoordinator stop releases idle workers past a
+// detached strand that never suspends" in work_coordinator_test.cpp.
 
 // B4 — one assertion pins two failure modes of pressureLimitedPoll after WorkCoordinator::stop():
 // (a) ioContext->stop() runs as soon as the posted cancel handlers have run, so a poller suspended

@@ -1255,8 +1255,8 @@ if catch2_dep.found()
   #              TSan-sensitive]. A fix PR removes its entry here and re-registers the case as an
   # ordinary green test.
   _lt_red_cases = [
-    # red until WorkCoordinator::stop() stops the io_context past a busy strand (lt-safety A2.1)
-    ['lt_red_detached_never_suspends', 'stillActive <= 1', false],
+    # lt_red_detached_never_suspends went green with lt-safety A2.1; see work_coordinator_test.cpp
+    # "stop releases idle workers past a detached strand that never suspends".
     # red until pressureLimitedPoll exits on cancellation and clears startedFlag through an RAII
     # guard (lt-safety A2.2)
     ['lt_red_poller_started_flag', 'pollerStoppedCleanly', false],
