@@ -91,6 +91,31 @@ std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept {
 }
 
 namespace {
+
+// Logs snapshot sections that take more than a few milliseconds so the per-iteration cost
+// of the metrics polling loop can be attributed. Two steady_clock reads per section.
+class SnapshotSectionTimer {
+public:
+    explicit SnapshotSectionTimer(const char* name) noexcept
+        : name_(name), start_(std::chrono::steady_clock::now()) {}
+    ~SnapshotSectionTimer() {
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - start_)
+                            .count();
+        if (us >= kWarnUs) {
+            spdlog::debug("[DaemonMetrics] snapshot section {} took {:.1f} ms", name_,
+                          static_cast<double>(us) / 1000.0);
+        }
+    }
+    SnapshotSectionTimer(const SnapshotSectionTimer&) = delete;
+    SnapshotSectionTimer& operator=(const SnapshotSectionTimer&) = delete;
+
+private:
+    static constexpr long long kWarnUs = 2000;
+    const char* name_;
+    std::chrono::steady_clock::time_point start_;
+};
+
 std::uint64_t queryVolumeUsedBytes(const std::filesystem::path& path) noexcept {
     if (path.empty())
         return 0;
@@ -1232,6 +1257,7 @@ void DaemonMetrics::scheduleBackgroundRefresh(bool detailed) const {
 }
 
 MetricsSnapshot DaemonMetrics::collectSnapshot(bool detailed) const {
+    SnapshotSectionTimer timer(detailed ? "collect.detailed" : "collect.fast");
     MetricsSnapshot out;
     out.version = YAMS_VERSION_STRING;
     populateCommonSnapshot(out, detailed);
@@ -1475,6 +1501,7 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
 void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
     // Session watch status (best-effort)
     try {
+        SnapshotSectionTimer timer("runtime.session");
         if (services_) {
             auto appCtx = services_->getAppContext();
             auto sess = yams::app::services::makeSessionService(&appCtx);
@@ -1499,6 +1526,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
 
     // FSM transport metrics (best-effort)
     try {
+        SnapshotSectionTimer timer("runtime.fsm");
         auto fsnap = FsmMetricsRegistry::instance().snapshot();
         out.fsmTransitions = fsnap.transitions;
         out.fsmHeaderReads = fsnap.headerReads;
@@ -1517,6 +1545,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
 
     // ResourceGovernor metrics (direct query)
     try {
+        SnapshotSectionTimer timer("runtime.governor");
         auto govSnap = ResourceGovernor::instance().getSnapshot();
         out.governorRssBytes = govSnap.rssBytes;
         out.governorBudgetBytes = govSnap.memoryBudgetBytes;
@@ -1546,6 +1575,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
 
     // ONNX concurrency metrics (direct query)
     try {
+        SnapshotSectionTimer timer("runtime.onnx");
         auto onnxSnap = OnnxConcurrencyRegistry::instance().snapshot();
         out.onnxTotalSlots = onnxSnap.totalSlots;
         out.onnxUsedSlots = onnxSnap.usedSlots;
@@ -1559,6 +1589,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
     // DatabaseManager metrics
     try {
         if (services_) {
+            SnapshotSectionTimer timer("runtime.db_pools");
             if (auto* dbm = services_->getDatabaseManager()) {
                 const auto& dbStats = dbm->getStats();
                 out.dbOpenDurationMs = dbStats.openDurationMs.load();
@@ -1850,16 +1881,28 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
         out.version = preservedVersion;
     }
 
-    populateReadinessSnapshot(out);
+    {
+        SnapshotSectionTimer timer("readiness");
+        populateReadinessSnapshot(out);
+    }
+    {
+        SnapshotSectionTimer timer("lifecycle");
+        populateLifecycleSnapshot(out);
+    }
+    {
+        SnapshotSectionTimer timer("worker_pipeline");
+        populateWorkerPipelineSnapshot(out);
+    }
+    {
+        SnapshotSectionTimer timer("runtime_counters");
+        populateRuntimeCounterSnapshot(out);
+    }
+    {
+        SnapshotSectionTimer timer("resource_vector");
+        populateResourceVectorSnapshot(out, detailed);
+    }
 
-    populateLifecycleSnapshot(out);
-
-    populateWorkerPipelineSnapshot(out);
-
-    populateRuntimeCounterSnapshot(out);
-
-    populateResourceVectorSnapshot(out, detailed);
-
+    SnapshotSectionTimer tailTimer("service_states");
     // Centralized service states
     try {
         if (services_) {
