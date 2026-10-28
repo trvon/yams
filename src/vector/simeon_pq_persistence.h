@@ -36,6 +36,32 @@ inline bool loadVectorIndexGeneration(sqlite3* db, std::uint64_t& generation) {
     return true;
 }
 
+/// Both mutation counters in one read: `generation` moves on every insert, update and
+/// delete; `structuralGeneration` only on updates and deletes. Equal structural
+/// generations therefore mean that only inserts happened in between.
+inline bool loadVectorIndexGenerations(sqlite3* db, std::uint64_t& generation,
+                                       std::uint64_t& structuralGeneration) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "SELECT generation, structural_generation FROM vector_index_generation WHERE id = 1";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return false;
+    }
+    const auto stored = sqlite3_column_int64(stmt, 0);
+    const auto storedStructural = sqlite3_column_int64(stmt, 1);
+    sqlite3_finalize(stmt);
+    if (stored < 0 || storedStructural < 0) {
+        return false;
+    }
+    generation = static_cast<std::uint64_t>(stored);
+    structuralGeneration = static_cast<std::uint64_t>(storedStructural);
+    return true;
+}
+
 inline bool loadPersistedSimeonPqMeta(sqlite3* db, std::size_t dim, std::uint32_t& formatVersion,
                                       std::uint32_t& m, std::uint32_t& k, std::uint64_t& seed,
                                       std::size_t& trainLimit, std::uint64_t& sourceGeneration,

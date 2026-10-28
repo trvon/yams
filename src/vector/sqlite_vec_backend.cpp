@@ -53,6 +53,12 @@ struct SimeonPqIndexState {
     std::size_t rerank_factor = 2;
     std::size_t document_index_payload_bytes = 0;
     std::uint64_t source_generation = 0;
+    /// Update/delete counter at the time the codes were last known complete. If it has not
+    /// moved, every row in the live table that is missing here was appended later and can be
+    /// encoded with the existing codebook.
+    std::uint64_t source_structural_generation = 0;
+    /// Rows present when the codebook was trained; bounds incremental growth.
+    std::size_t trained_vector_count = 0;
     sqlite3_int64 persisted_total_changes = -1;
     sqlite3_int64 persisted_data_version = -1;
     bool exact_fallback = false;
@@ -384,27 +390,43 @@ CREATE TABLE IF NOT EXISTS simeon_pq_meta (
     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 ))sql";
 
+// `generation` counts every vector mutation. `structural_generation` counts only updates and
+// deletes, so an unchanged structural generation proves that the rows an in-memory PQ index
+// already holds are intact and only new rows were appended since it was built.
 constexpr const char* kCreateVectorIndexGeneration = R"sql(
 CREATE TABLE IF NOT EXISTS vector_index_generation (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    generation INTEGER NOT NULL DEFAULT 0
+    generation INTEGER NOT NULL DEFAULT 0,
+    structural_generation INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO vector_index_generation (id, generation) VALUES (1, 0);
 )sql";
+
+constexpr const char* kAddVectorIndexStructuralGeneration =
+    "ALTER TABLE vector_index_generation ADD COLUMN structural_generation INTEGER NOT NULL "
+    "DEFAULT 0";
 
 constexpr const char* kCreateVectorIndexGenerationTriggers = R"sql(
 CREATE TRIGGER IF NOT EXISTS vectors_index_generation_insert
 AFTER INSERT ON vectors BEGIN
     UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
 END;
-CREATE TRIGGER IF NOT EXISTS vectors_index_generation_update_v2
-AFTER UPDATE OF chunk_id, document_hash, embedding, embedding_dim ON vectors BEGIN
-    UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
-END;
 DROP TRIGGER IF EXISTS vectors_index_generation_update;
-CREATE TRIGGER IF NOT EXISTS vectors_index_generation_delete
+DROP TRIGGER IF EXISTS vectors_index_generation_update_v2;
+CREATE TRIGGER IF NOT EXISTS vectors_index_generation_update_v3
+AFTER UPDATE OF chunk_id, document_hash, embedding, embedding_dim ON vectors BEGIN
+    UPDATE vector_index_generation
+       SET generation = generation + 1,
+           structural_generation = structural_generation + 1
+     WHERE id = 1;
+END;
+DROP TRIGGER IF EXISTS vectors_index_generation_delete;
+CREATE TRIGGER IF NOT EXISTS vectors_index_generation_delete_v2
 AFTER DELETE ON vectors BEGIN
-    UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
+    UPDATE vector_index_generation
+       SET generation = generation + 1,
+           structural_generation = structural_generation + 1
+     WHERE id = 1;
 END;
 )sql";
 
@@ -693,6 +715,11 @@ public:
     bool hasReadyCurrentSimeonPqStateUnlocked(size_t dim) {
         return simeon_pq_ready_dims_.contains(dim) && !simeon_pq_dirty_dims_.contains(dim) &&
                hasCurrentSimeonPqStateUnlocked(dim);
+    }
+
+    SqliteVecBackend::SimeonPqIndexStats simeonPqIndexStats() const {
+        std::shared_lock lock(mutex_);
+        return simeon_pq_stats_;
     }
 
     Result<void> initialize(const std::string& db_path) {
@@ -1022,6 +1049,37 @@ public:
             !table) {
             rollbackOwnedGenerationSchemaTransaction();
             return table.error();
+        }
+        // Legacy files have the table without the structural counter. Add it before the
+        // triggers that maintain it are (re)installed in the same transaction.
+        {
+            bool hasStructural = false;
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db_, "PRAGMA table_info(vector_index_generation)", -1, &stmt,
+                                   nullptr) != SQLITE_OK) {
+                rollbackOwnedGenerationSchemaTransaction();
+                return Error{ErrorCode::DatabaseError,
+                             std::string("Failed to inspect vector_index_generation: ") +
+                                 sqlite3_errmsg(db_)};
+            }
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const auto* name = sqlite3_column_text(stmt, 1);
+                if (name != nullptr && std::string_view(reinterpret_cast<const char*>(name)) ==
+                                           "structural_generation") {
+                    hasStructural = true;
+                    break;
+                }
+            }
+            sqlite3_finalize(stmt);
+            if (!hasStructural) {
+                if (auto column = executeGenerationSchemaStep(
+                        kAddVectorIndexStructuralGeneration,
+                        "add vector index structural generation column");
+                    !column) {
+                    rollbackOwnedGenerationSchemaTransaction();
+                    return column.error();
+                }
+            }
         }
         if (auto triggers = executeGenerationSchemaStep(kCreateVectorIndexGenerationTriggers,
                                                         "ensure vector index generation triggers");
@@ -2408,9 +2466,20 @@ LIMIT ?2
                     spdlog::warn(
                         "[SPQ] persistIndex rebuild suppressed by memory instrumentation profile");
                 } else {
-                    auto rebuild = rebuildSimeonPqIndicesUnlocked();
-                    if (!rebuild) {
-                        return rebuild;
+                    // Periodic checkpoints run while ingestion appends rows. Dims with a
+                    // trained index take the append path; everything else rebuilds as before.
+                    auto dimsResult = queryVectorDimsUnlocked();
+                    if (!dimsResult) {
+                        return dimsResult.error();
+                    }
+                    for (size_t dim : dimsResult.value()) {
+                        if (hasReadyCurrentSimeonPqStateUnlocked(dim)) {
+                            continue;
+                        }
+                        auto refreshed = refreshSimeonPqDimUnlocked(dim);
+                        if (!refreshed) {
+                            return refreshed;
+                        }
                     }
                 }
             }
@@ -3339,10 +3408,13 @@ private:
     }
 
     Result<std::vector<std::pair<size_t, std::vector<float>>>>
-    queryVectorsForDimUnlocked(size_t dim) {
+    queryVectorsForDimUnlocked(size_t dim, std::optional<size_t> afterRowid = std::nullopt) {
         std::vector<std::pair<size_t, std::vector<float>>> rows;
         const char* sql =
-            "SELECT rowid, embedding FROM vectors WHERE embedding_dim = ? ORDER BY rowid";
+            afterRowid ? "SELECT rowid, embedding FROM vectors WHERE embedding_dim = ? AND "
+                         "rowid > ? ORDER BY rowid"
+                       : "SELECT rowid, embedding FROM vectors WHERE embedding_dim = ? ORDER BY "
+                         "rowid";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
             return Error{ErrorCode::DatabaseError, "Failed to prepare vector scan for dim " +
@@ -3352,6 +3424,9 @@ private:
         StmtFinalizeGuard finalize(stmt);
 
         sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
+        if (afterRowid) {
+            sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(*afterRowid));
+        }
         int rc = SQLITE_OK;
         while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
             if (auto decoded = decodeVectorForDimRowUnlocked(stmt, dim)) {
@@ -3370,22 +3445,40 @@ private:
         size_t dim, std::span<const std::size_t> rowids, std::vector<std::uint64_t>& keys,
         std::unordered_map<std::string, std::vector<std::size_t>>& documentIndices) const {
         keys.clear();
-        keys.reserve(rowids.size());
         documentIndices.clear();
+        if (!appendSimeonRowMetadataUnlocked(dim, rowids, 0, std::nullopt, keys, documentIndices)) {
+            keys.clear();
+            documentIndices.clear();
+            return false;
+        }
+        return true;
+    }
+
+    /// Append tie-break keys and document indices for `rowids` (ascending, all > `afterRowid`
+    /// when given). Index `i` of `rowids` is recorded as `indexOffset + i`. On failure the
+    /// outputs may hold a partial append; the caller discards the state.
+    bool appendSimeonRowMetadataUnlocked(
+        size_t dim, std::span<const std::size_t> rowids, std::size_t indexOffset,
+        std::optional<std::size_t> afterRowid, std::vector<std::uint64_t>& keys,
+        std::unordered_map<std::string, std::vector<std::size_t>>& documentIndices) const {
+        keys.reserve(keys.size() + rowids.size());
         sqlite3_stmt* stmt = nullptr;
-        constexpr const char* sql = "SELECT rowid, chunk_id, document_hash FROM vectors "
-                                    "WHERE embedding_dim = ? ORDER BY rowid";
+        const char* sql = afterRowid ? "SELECT rowid, chunk_id, document_hash FROM vectors "
+                                       "WHERE embedding_dim = ? AND rowid > ? ORDER BY rowid"
+                                     : "SELECT rowid, chunk_id, document_hash FROM vectors "
+                                       "WHERE embedding_dim = ? ORDER BY rowid";
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
             return false;
         }
         sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
+        if (afterRowid) {
+            sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(*afterRowid));
+        }
         std::size_t expected = 0;
         int stepRc = SQLITE_OK;
         while ((stepRc = sqlite3_step(stmt)) == SQLITE_ROW) {
             if (expected >= rowids.size()) {
                 sqlite3_finalize(stmt);
-                keys.clear();
-                documentIndices.clear();
                 return false;
             }
             const auto rowid = static_cast<std::size_t>(sqlite3_column_int64(stmt, 0));
@@ -3394,29 +3487,21 @@ private:
             }
             if (rowid != rowids[expected]) {
                 sqlite3_finalize(stmt);
-                keys.clear();
-                documentIndices.clear();
                 return false;
             }
             const auto* chunkId = sqlite3_column_text(stmt, 1);
             const auto* documentHash = sqlite3_column_text(stmt, 2);
             if (chunkId == nullptr || documentHash == nullptr) {
                 sqlite3_finalize(stmt);
-                keys.clear();
-                documentIndices.clear();
                 return false;
             }
             keys.push_back(stableStringKey(reinterpret_cast<const char*>(chunkId)));
-            documentIndices[reinterpret_cast<const char*>(documentHash)].push_back(expected);
+            documentIndices[reinterpret_cast<const char*>(documentHash)].push_back(indexOffset +
+                                                                                   expected);
             ++expected;
         }
         sqlite3_finalize(stmt);
-        if (stepRc != SQLITE_DONE || expected != rowids.size()) {
-            keys.clear();
-            documentIndices.clear();
-            return false;
-        }
-        return true;
+        return stepRc == SQLITE_DONE && expected == rowids.size();
     }
 
     // The vec0 table is a derived ranking index over `vectors.embedding`. vec0 ranks by L2
@@ -3591,8 +3676,11 @@ private:
     }
 
     Result<void> rebuildSimeonPqDimUnlocked(size_t dim) {
+        const auto buildStart = std::chrono::steady_clock::now();
         std::uint64_t sourceGeneration = 0;
-        if (!detail::loadVectorIndexGeneration(db_, sourceGeneration)) {
+        std::uint64_t sourceStructuralGeneration = 0;
+        if (!detail::loadVectorIndexGenerations(db_, sourceGeneration,
+                                                sourceStructuralGeneration)) {
             return Error{ErrorCode::DatabaseError,
                          "Failed to read vector mutation generation before Simeon PQ rebuild"};
         }
@@ -3713,6 +3801,8 @@ private:
                 return generationCurrent;
             }
             state->source_generation = sourceGeneration;
+            state->source_structural_generation = sourceStructuralGeneration;
+            state->trained_vector_count = state->rowids.size();
             simeon_pq_indices_[dim] = std::move(state);
             simeon_pq_dirty_dims_.erase(dim);
             simeon_pq_ready_dims_.insert(dim);
@@ -3721,6 +3811,9 @@ private:
                          dim, simeon_pq_indices_[dim]->rowids.size(), k);
             return Result<void>{};
         }
+        const auto trainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - buildStart)
+                                 .count();
         // Training buffer is no longer needed; release before encoding so
         // peak footprint during encode == size(rows) rather than size(rows)
         // + size(training).
@@ -3753,12 +3846,20 @@ private:
             return generationCurrent;
         }
         state->source_generation = sourceGeneration;
+        state->source_structural_generation = sourceStructuralGeneration;
+        state->trained_vector_count = state->rowids.size();
         simeon_pq_indices_[dim] = std::move(state);
         simeon_pq_dirty_dims_.erase(dim);
         simeon_pq_ready_dims_.insert(dim);
-        spdlog::info(
-            "[SPQ] Built in-memory PQ index for dim={} with {} vectors m={} k={} rerank={}", dim,
-            simeon_pq_indices_[dim]->rowids.size(), m, k, config_.simeon_pq_rerank_factor);
+        const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - buildStart)
+                                 .count();
+        simeon_pq_stats_.full_builds += 1;
+        simeon_pq_stats_.last_full_build_ms = static_cast<std::uint64_t>(totalMs);
+        spdlog::info("[SPQ] Built in-memory PQ index for dim={} with {} vectors m={} k={} "
+                     "rerank={} in {} ms (train {} ms, encode {} ms)",
+                     dim, simeon_pq_indices_[dim]->rowids.size(), m, k,
+                     config_.simeon_pq_rerank_factor, totalMs, trainMs, totalMs - trainMs);
         // Return the bulk training/encode scratch pages to the OS.
         // The SPQ rebuild churns up to ~1 GB of transient float buffers
         // (per-row vectors + codebook training set) which macOS's
@@ -3849,7 +3950,9 @@ private:
             return nullptr;
         }
         std::uint64_t generationAfterLoad = 0;
-        if (!detail::loadVectorIndexGeneration(db_, generationAfterLoad) ||
+        std::uint64_t structuralGenerationAfterLoad = 0;
+        if (!detail::loadVectorIndexGenerations(db_, generationAfterLoad,
+                                                structuralGenerationAfterLoad) ||
             generationAfterLoad != sourceGeneration) {
             return nullptr;
         }
@@ -3858,6 +3961,12 @@ private:
             return nullptr;
         }
         state->source_generation = sourceGeneration;
+        // The snapshot is only reusable when nothing changed since it was written, so the
+        // live structural counter is the one its codes correspond to. The snapshot does not
+        // record its training size; treating the loaded size as the baseline bounds growth
+        // per process lifetime.
+        state->source_structural_generation = structuralGenerationAfterLoad;
+        state->trained_vector_count = state->rowids.size();
         state->persisted_snapshot = true;
         state->persisted_total_changes = sqlite3_total_changes64(db_);
         state->persisted_data_version = *dataVersionAfter;
@@ -3922,6 +4031,141 @@ private:
         return loadPersistedSimeonPqDimUnlocked(dim);
     }
 
+    /// Bring a stale in-memory index up to date without retraining when only inserts
+    /// happened since it was built: encode the new rows with the existing codebook and
+    /// append them. Returns false when the fast path does not apply (no trained index, rows
+    /// were updated or deleted, the corpus outgrew the codebook, or a read failed); the
+    /// caller then rebuilds. On failure any partial append is discarded.
+    bool tryAppendSimeonPqDimUnlocked(size_t dim) {
+        auto it = simeon_pq_indices_.find(dim);
+        if (it == simeon_pq_indices_.end() || !it->second) {
+            return false;
+        }
+        auto& state = *it->second;
+        if (state.exact_fallback || !state.pq.is_trained() || state.rowids.empty() ||
+            state.trained_vector_count == 0) {
+            return false;
+        }
+        std::uint64_t generation = 0;
+        std::uint64_t structuralGeneration = 0;
+        if (!detail::loadVectorIndexGenerations(db_, generation, structuralGeneration)) {
+            return false;
+        }
+        if (structuralGeneration != state.source_structural_generation) {
+            spdlog::debug("[SPQ] dim={} rows were updated or deleted; retraining", dim);
+            return false;
+        }
+        if (generation == state.source_generation) {
+            // Nothing changed for this dim (the flag was set for another reason).
+            simeon_pq_dirty_dims_.erase(dim);
+            simeon_pq_ready_dims_.insert(dim);
+            return true;
+        }
+
+        const auto appendStart = std::chrono::steady_clock::now();
+        const std::size_t lastRowid = state.rowids.back();
+        auto rowsResult = queryVectorsForDimUnlocked(dim, lastRowid);
+        if (!rowsResult) {
+            return false;
+        }
+        auto rows = std::move(rowsResult.value());
+
+        std::vector<std::size_t> newRowids;
+        newRowids.reserve(rows.size());
+        for (auto& [rowid, embedding] : rows) {
+            if (!normalizeEmbeddingInPlace(embedding)) {
+                embedding.clear();
+                continue;
+            }
+            newRowids.push_back(rowid);
+        }
+
+        const double ratio = std::max(0.0, config_.simeon_pq_incremental_growth_ratio);
+        const auto growthLimit = static_cast<std::size_t>(
+            std::ceil(static_cast<double>(state.trained_vector_count) * (1.0 + ratio)));
+        if (state.rowids.size() + newRowids.size() > growthLimit) {
+            spdlog::debug("[SPQ] dim={} grew from {} to {} rows (limit {}); retraining", dim,
+                          state.trained_vector_count, state.rowids.size() + newRowids.size(),
+                          growthLimit);
+            return false;
+        }
+
+        const std::size_t previousCount = state.rowids.size();
+        const std::size_t m = state.pq.m();
+        auto discardPartialAppend = [&]() {
+            // Keep the pre-append rows and metadata intact. The caller rebuilds.
+            state.rowids.resize(previousCount);
+            state.codes.resize(previousCount * m);
+            state.tie_break_keys.resize(previousCount);
+            for (auto docIt = state.document_indices.begin();
+                 docIt != state.document_indices.end();) {
+                auto& indices = docIt->second;
+                std::erase_if(indices, [&](std::size_t index) { return index >= previousCount; });
+                if (indices.empty()) {
+                    docIt = state.document_indices.erase(docIt);
+                } else {
+                    ++docIt;
+                }
+            }
+            markSimeonPqDimDirtyUnlocked(dim);
+        };
+
+        state.rowids.reserve(previousCount + newRowids.size());
+        state.codes.resize((previousCount + newRowids.size()) * m);
+        std::size_t codeOffset = previousCount * m;
+        for (auto& [rowid, embedding] : rows) {
+            if (embedding.empty()) {
+                continue;
+            }
+            state.pq.encode(embedding.data(), state.codes.data() + codeOffset);
+            codeOffset += m;
+            state.rowids.push_back(rowid);
+            std::vector<float>().swap(embedding);
+        }
+        std::vector<std::pair<size_t, std::vector<float>>>().swap(rows);
+
+        if (!appendSimeonRowMetadataUnlocked(dim, newRowids, previousCount, lastRowid,
+                                             state.tie_break_keys, state.document_indices)) {
+            discardPartialAppend();
+            return false;
+        }
+        std::uint64_t generationAfter = 0;
+        std::uint64_t structuralAfter = 0;
+        if (!detail::loadVectorIndexGenerations(db_, generationAfter, structuralAfter) ||
+            generationAfter != generation || structuralAfter != structuralGeneration) {
+            // A concurrent commit landed while rows were being read; the rebuild path
+            // re-validates against the live table.
+            discardPartialAppend();
+            return false;
+        }
+        state.updateDocumentIndexPayloadBytes();
+        state.source_generation = generation;
+        state.persisted_snapshot = false;
+        simeon_pq_dirty_dims_.erase(dim);
+        simeon_pq_ready_dims_.insert(dim);
+        simeon_pq_stats_.incremental_appends += 1;
+        simeon_pq_stats_.appended_vectors += newRowids.size();
+        const auto appendMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - appendStart)
+                                  .count();
+        if (newRowids.empty()) {
+            spdlog::debug("[SPQ] dim={} index current at generation {} (no new rows)", dim,
+                          generation);
+        } else {
+            spdlog::info("[SPQ] Appended {} vectors to PQ index for dim={} ({} total) in {} ms",
+                         newRowids.size(), dim, state.rowids.size(), appendMs);
+        }
+        return true;
+    }
+
+    /// Make the index for `dim` current: append when only inserts happened, else rebuild.
+    Result<void> refreshSimeonPqDimUnlocked(size_t dim) {
+        if (tryAppendSimeonPqDimUnlocked(dim)) {
+            return Result<void>{};
+        }
+        return rebuildSimeonPqIndicesUnlocked(dim);
+    }
+
     Result<void> ensureSimeonPqReadyUnlocked(size_t dim) {
         if (hasReadyCurrentSimeonPqStateUnlocked(dim)) {
             return Result<void>{};
@@ -3943,7 +4187,7 @@ private:
         if (!simeon_pq_dirty_dims_.contains(dim) && loadPersistedSimeonPqDimUnlocked(dim)) {
             return Result<void>{};
         }
-        return rebuildSimeonPqIndicesUnlocked(dim);
+        return refreshSimeonPqDimUnlocked(dim);
     }
 
     Result<std::vector<VectorRecord>> simeonPqSearchUnlocked(
@@ -4652,6 +4896,7 @@ ORDER BY rowid
     std::unordered_map<size_t, std::unique_ptr<SimeonPqIndexState>> simeon_pq_indices_;
     std::unordered_set<size_t> simeon_pq_ready_dims_;
     std::unordered_set<size_t> simeon_pq_dirty_dims_;
+    SqliteVecBackend::SimeonPqIndexStats simeon_pq_stats_; // guarded by mutex_
     std::unordered_map<size_t, size_t> query_dim_counts_;
     std::unordered_set<size_t> vec0_ready_dims_;
     std::unordered_set<size_t> vec0_dirty_dims_;
@@ -4711,6 +4956,10 @@ bool SqliteVecBackend::tablesExist() const {
 
 Result<void> SqliteVecBackend::ensurePersistenceSchema() {
     return impl_->ensurePersistenceSchema();
+}
+
+SqliteVecBackend::SimeonPqIndexStats SqliteVecBackend::simeonPqIndexStats() const {
+    return impl_->simeonPqIndexStats();
 }
 
 Result<void> SqliteVecBackend::insertVector(const VectorRecord& record) {

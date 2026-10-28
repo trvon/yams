@@ -242,7 +242,7 @@ int updateDuringGenerationTriggerMigration(unsigned event, void* context, void* 
         return 0;
     }
     const std::string_view statementSql(sql);
-    if (statementSql.find("CREATE TRIGGER IF NOT EXISTS vectors_index_generation_update_v2") !=
+    if (statementSql.find("CREATE TRIGGER IF NOT EXISTS vectors_index_generation_update_v3") !=
         std::string_view::npos) {
         update.sawSafeReplacement = true;
         auto* statementDb = sqlite3_db_handle(static_cast<sqlite3_stmt*>(statement));
@@ -260,7 +260,7 @@ int updateDuringGenerationTriggerMigration(unsigned event, void* context, void* 
     const bool unsafeLegacyCreate =
         statementSql.find("CREATE TRIGGER vectors_index_generation_update") !=
             std::string_view::npos &&
-        statementSql.find("vectors_index_generation_update_v2") == std::string_view::npos;
+        statementSql.find("vectors_index_generation_update_v3") == std::string_view::npos;
     const bool safeLegacyDrop =
         update.sawSafeReplacement && !update.sawProtectedInstall &&
         statementSql.find("DROP TRIGGER IF EXISTS vectors_index_generation_update") !=
@@ -2546,8 +2546,10 @@ TEST_CASE_METHOD(
     char* error = nullptr;
     REQUIRE((sqlite3_exec(initializer.getDbHandle(),
                           "DROP TRIGGER IF EXISTS vectors_index_generation_insert;"
+                          "DROP TRIGGER IF EXISTS vectors_index_generation_update_v3;"
                           "DROP TRIGGER IF EXISTS vectors_index_generation_update_v2;"
                           "DROP TRIGGER IF EXISTS vectors_index_generation_update;"
+                          "DROP TRIGGER IF EXISTS vectors_index_generation_delete_v2;"
                           "DROP TRIGGER IF EXISTS vectors_index_generation_delete;"
                           "DROP TABLE vector_index_generation;",
                           nullptr, nullptr, &error) == SQLITE_OK));

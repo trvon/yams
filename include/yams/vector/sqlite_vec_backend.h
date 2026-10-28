@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -39,6 +40,14 @@ public:
         std::size_t metadata_backfilled = 0;
     };
 
+    /// Maintenance counters for the in-memory Simeon PQ index (all dims).
+    struct SimeonPqIndexStats {
+        std::uint64_t full_builds = 0;         ///< codebook trainings with a full re-encode
+        std::uint64_t incremental_appends = 0; ///< insert-only refreshes (encode new rows)
+        std::uint64_t appended_vectors = 0;    ///< rows encoded by incremental refreshes
+        std::uint64_t last_full_build_ms = 0;  ///< wall time of the most recent full build
+    };
+
     /// Configuration for backend
     struct Config {
         size_t embedding_dim = 1024;       ///< Embedding dimensions
@@ -62,6 +71,11 @@ public:
         /// Factor 2 is the conservative product default. Re-run the
         /// decision-grade vector_pq_rerank_quality plan before changing it.
         size_t simeon_pq_rerank_factor = 2;
+        /// Inserts since the last codebook training are encoded with the existing
+        /// codebook and appended. Once the index has grown past
+        /// trained_rows * (1 + ratio), the next refresh retrains instead so the
+        /// codebook follows the corpus. Updates and deletes always retrain.
+        double simeon_pq_incremental_growth_ratio = 0.5;
         uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
         bool suppress_search_index_builds =
             false; ///< Profiling mode: avoid vec0/SPQ rebuild allocation churn
@@ -208,6 +222,9 @@ public:
 
     /// No-op for V2 schema (unified table has no orphans)
     Result<OrphanCleanupStats> cleanupOrphanRows();
+
+    /// Snapshot of the Simeon PQ index maintenance counters.
+    SimeonPqIndexStats simeonPqIndexStats() const;
 
     /// Explicitly ensure sqlite-vec module is loaded (for doctor command)
     Result<void> ensureVecLoaded();
