@@ -846,6 +846,58 @@ TEST_CASE("IngestService suspends instead of blocking its WorkCoordinator worker
     CHECK(stored);
 }
 
+TEST_CASE("IngestService picks up a task enqueued while idle without waiting out the idle tick",
+          "[daemon][background][ingest][idle-wake]") {
+    // The idle back-off ceiling is the tuning idle tick (1 s) while the daemon is idle.
+    // notifyWakeup() must cancel that wait so an enqueue is stored within the back-off floor.
+    SpdlogCaptureGuard logGuard(spdlog::level::err);
+    StoreDocumentChannelGuard channelGuard;
+    WorkCoordinatorThreadsGuard threadsGuard(1);
+    yams::test::TempDirGuard testDir("yams_ingest_service_idle_wake_");
+
+    const auto savedSnapshot = TuningSnapshotRegistry::instance().get();
+    auto idleSnapshot = std::make_shared<TuningSnapshot>();
+    idleSnapshot->daemonIdle = true;
+    TuningSnapshotRegistry::instance().set(idleSnapshot);
+    struct SnapshotRestore {
+        std::shared_ptr<const TuningSnapshot> saved;
+        ~SnapshotRestore() { TuningSnapshotRegistry::instance().set(saved); }
+    } snapshotRestore{savedSnapshot};
+
+    auto contentStore = std::make_shared<StubContentStore>();
+    DaemonConfig config;
+    config.dataDir = testDir.path();
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager serviceManager(config, state, lifecycleFsm);
+    serviceManager.__test_setContentStore(contentStore);
+
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+            "store_document_tasks", 64);
+
+    IngestService ingestService(&serviceManager, serviceManager.getWorkCoordinator());
+    ingestService.start();
+    // Let the back-off climb to its ceiling (5 ms doubling reaches 1 s after ~1.3 s).
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+    InternalEventBus::StoreDocumentTask task;
+    task.request.name = "idle-wake.txt";
+    task.request.content = "enqueued while idle";
+    const auto pushedAt = std::chrono::steady_clock::now();
+    REQUIRE(channel->try_push(std::move(task)));
+    IngestService::notifyWakeup();
+
+    const bool stored =
+        contentStore->waitForStoredItems(1, pushedAt + std::chrono::milliseconds(300));
+    const auto stopRequestedAt = std::chrono::steady_clock::now();
+    ingestService.stop();
+    const auto stopTook = std::chrono::steady_clock::now() - stopRequestedAt;
+    CHECK(stored);
+    // stop() wakes the poller too; it must not wait out the idle tick either.
+    CHECK(stopTook < std::chrono::milliseconds(500));
+}
+
 // =============================================================================
 // PostIngestQueue Tests
 // =============================================================================
