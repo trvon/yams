@@ -11,12 +11,15 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <random>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -427,4 +430,61 @@ TEST_CASE_METHOD(SpqIncrementalFixture,
     CHECK((g3.first > g2.first));
     CHECK((g3.second == g2.second + 1));
     sqlite3_close(db);
+}
+
+TEST_CASE_METHOD(SpqIncrementalFixture,
+                 "SPQ: concurrent searches during inserts see every appended row",
+                 "[unit][vector][spq][incremental][concurrency][catch2]") {
+    skipIfNeeded();
+
+    const auto dbPath = createTempDbPath();
+    SqliteVecBackend backend(smallPqConfig());
+    REQUIRE((backend.initialize(dbPath).has_value()));
+    REQUIRE((backend.createTables(kDim).has_value()));
+    REQUIRE((backend.insertVectorsBatch(corpus(300)).has_value()));
+    REQUIRE((topIds(backend, embedding(1.0f), 3).front() == "chunk_1"));
+
+    // Readers pause between searches: the backend's shared_mutex is reader-preferring on
+    // glibc, and a tight reader loop under TSan can starve the inserting writer for minutes.
+    constexpr size_t kReaders = 4;
+    constexpr size_t kSearchesPerReader = 60;
+    constexpr size_t kInserts = 40;
+    std::atomic<size_t> searches{0};
+    std::atomic<size_t> failures{0};
+    std::vector<std::thread> readers;
+    for (size_t r = 0; r < kReaders; ++r) {
+        readers.emplace_back([&, r]() {
+            for (size_t i = 0; i < kSearchesPerReader; ++i) {
+                const auto q = embedding(static_cast<float>(1 + ((r * 97 + i) % 300)));
+                auto result = backend.searchSimilar(q, 3, -1.0f, std::nullopt, {});
+                if (!result.has_value() || result.value().empty()) {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                }
+                searches.fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        });
+    }
+    for (size_t n = 0; n < kInserts; ++n) {
+        const size_t id = 8000 + n;
+        REQUIRE((backend.insertVector(record(std::to_string(id), embedding(static_cast<float>(id))))
+                     .has_value()));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    for (auto& t : readers) {
+        t.join();
+    }
+
+    CHECK((failures.load() == 0));
+    CHECK((searches.load() == kReaders * kSearchesPerReader));
+    for (size_t n = 0; n < kInserts; n += 5) {
+        const size_t id = 8000 + n;
+        CHECK((topIds(backend, embedding(static_cast<float>(id)), 3).front() ==
+               "chunk_" + std::to_string(id)));
+    }
+    const auto stats = backend.simeonPqIndexStats();
+    INFO("searches=" << searches.load() << " full_builds=" << stats.full_builds
+                     << " appends=" << stats.incremental_appends);
+    CHECK((stats.full_builds == 1));
+    CHECK((stats.appended_vectors == kInserts));
 }
