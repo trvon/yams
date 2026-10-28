@@ -1135,6 +1135,15 @@ if [[ "${ENABLE_TSAN}" == "true" ]]; then
 	echo "ThreadSanitizer enabled (race detection)"
 elif [[ "${ENABLE_ASAN}" == "true" ]]; then
 	MESON_OPTIONS+=("-Db_sanitize=address,undefined")
+	cc_tool="${CC##* }"
+	cxx_tool="${CXX##* }"
+	if [[ "${cc_tool}" == clang* ]] || [[ "${cxx_tool}" == clang++* ]]; then
+		# Clang shared objects resolve __asan_*/__ubsan_* from the sanitized executable, so
+		# they must not be linked with --no-undefined (libyams_onnx_resource.so otherwise fails
+		# to link). CI's asan lane passes the same option explicitly.
+		MESON_OPTIONS+=("-Db_lundef=false")
+		echo "AddressSanitizer on Clang: forcing b_lundef=false so sanitized shared objects link"
+	fi
 	echo "AddressSanitizer enabled (memory safety checks)"
 else
 	# Ensure any previous sanitizer setting doesn't persist across reconfigure.
