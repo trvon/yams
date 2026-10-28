@@ -23,6 +23,8 @@
 #include <boost/asio/steady_timer.hpp>
 
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/pressure_limited_poller.h>
 
 using namespace yams::daemon;
@@ -681,7 +683,7 @@ TEST_CASE("PressureLimitedPoller exits on stop when idling on wake-timer",
     REQUIRE(startedFlag.load(std::memory_order_acquire));
 
     // The poller is now in the event-driven idle loop, waiting on wakeTimer
-    // (10ms expiry).  Cancel the timer to simulate signalAllWakeTimers(),
+    // (tuning-cadence expiry).  Cancel the timer to simulate signalAllWakeTimers(),
     // then request stop.
     {
         std::lock_guard<std::mutex> lock(wakeMutex);
@@ -723,8 +725,9 @@ TEST_CASE("PressureLimitedPoller exits when wake-timer expires naturally during 
     }
     REQUIRE(startedFlag.load(std::memory_order_acquire));
 
-    // Set stopFlag WITHOUT explicitly cancelling the timer — the 10ms
-    // wake-timer should expire naturally, the poller sees stopFlag, and exits.
+    // Set stopFlag WITHOUT explicitly cancelling the timer — the wake-timer
+    // (worker poll period without a tuning snapshot) should expire naturally,
+    // the poller sees stopFlag, and exits.
     stopFlag.store(true, std::memory_order_release);
 
     boost::asio::steady_timer deadline(ioc, 500ms);
@@ -795,4 +798,193 @@ TEST_CASE("PressureLimitedPoller survives start-stop-restart cycle",
         ioc.run();
     }
     CHECK_FALSE(startedFlag.load(std::memory_order_acquire));
+}
+
+// ---------------------------------------------------------------------------
+// Idle cadence (B2.2): an empty channel must not wake the poller every 10 ms
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Restores the process-wide tuning snapshot a test replaced.
+struct TuningSnapshotScope {
+    std::shared_ptr<const TuningSnapshot> saved{TuningSnapshotRegistry::instance().get()};
+    ~TuningSnapshotScope() { TuningSnapshotRegistry::instance().set(saved); }
+};
+
+void setIdleSnapshot(bool daemonIdle) {
+    auto snap = std::make_shared<TuningSnapshot>();
+    snap->daemonIdle = daemonIdle;
+    TuningSnapshotRegistry::instance().set(snap);
+}
+
+/// Runs an idle single-item poller for `window` and returns how many loop iterations it made.
+/// maxConcurrentFn runs exactly once per iteration, so it doubles as the counter.
+std::size_t countIdlePollerIterations(std::chrono::milliseconds window) {
+    boost::asio::io_context ioc;
+    std::atomic<bool> stopFlag{false};
+    std::atomic<bool> startedFlag{false};
+    std::atomic<bool> pauseFlag{false};
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
+    auto cfg = makeWakeTimerConfig<int>(stopFlag, startedFlag, pauseFlag, wakeTimer, wakeMutex);
+    cfg.executor = ioc.get_executor();
+    cfg.enableCpuThrottling = false;
+    std::size_t iterations = 0;
+    cfg.maxConcurrentFn = [&iterations]() -> std::size_t {
+        ++iterations;
+        return 1;
+    };
+    auto channel = std::make_shared<SpscQueue<int>>(16);
+    boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(channel, std::move(cfg)),
+                          boost::asio::detached);
+
+    boost::asio::steady_timer deadline(ioc, window);
+    deadline.async_wait([&](boost::system::error_code) {
+        stopFlag.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(wakeMutex);
+        wakeTimer->cancel();
+    });
+    ioc.run();
+    return iterations;
+}
+
+} // namespace
+
+TEST_CASE("PressureLimitedPoller idle wait follows the tuning cadence",
+          "[daemon][poller][idle][catch2]") {
+    TuningSnapshotScope scope;
+    constexpr auto window = 400ms;
+
+    SECTION("without a snapshot the empty-channel wait is the worker poll period") {
+        TuningSnapshotRegistry::instance().set(nullptr);
+        const auto pollMs = TuneAdvisor::workerPollMs();
+        REQUIRE(pollMs >= 50u);
+        // Start iteration, one per poll period, and slack for timer jitter. The former fixed
+        // 10 ms safety net made about 40 iterations in this window.
+        const std::size_t bound = 2 + static_cast<std::size_t>(window.count() / pollMs) + 1;
+        const auto iterations = countIdlePollerIterations(window);
+        CHECK(iterations >= 1);
+        CHECK(iterations <= bound);
+    }
+
+    SECTION("while the daemon is idle the empty-channel wait is the idle tick") {
+        setIdleSnapshot(true);
+        REQUIRE(TuneAdvisor::idleTickMs() >= 2 * static_cast<uint32_t>(window.count()));
+        CHECK(countIdlePollerIterations(window) <= 2);
+    }
+}
+
+TEST_CASE("PressureLimitedPoller wakes promptly for an enqueue signalled while idle",
+          "[daemon][poller][idle][wake-timer][catch2]") {
+    TuningSnapshotScope scope;
+    setIdleSnapshot(true); // empty-channel wait is the idle tick (1 s)
+
+    boost::asio::io_context ioc;
+    std::atomic<bool> stopFlag{false};
+    std::atomic<bool> startedFlag{false};
+    std::atomic<bool> pauseFlag{false};
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
+    auto cfg = makeWakeTimerConfig<int>(stopFlag, startedFlag, pauseFlag, wakeTimer, wakeMutex);
+    cfg.executor = ioc.get_executor();
+    cfg.enableCpuThrottling = false;
+
+    boost::asio::steady_timer deadline(ioc, 3000ms);
+    std::optional<std::chrono::steady_clock::time_point> pushedAt;
+    std::optional<std::chrono::steady_clock::time_point> processedAt;
+    cfg.processFn = [&](int&) {
+        processedAt = std::chrono::steady_clock::now();
+        stopFlag.store(true, std::memory_order_release);
+        deadline.cancel();
+        std::lock_guard<std::mutex> lock(wakeMutex);
+        wakeTimer->cancel();
+    };
+    auto channel = std::make_shared<SpscQueue<int>>(16);
+    boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(channel, std::move(cfg)),
+                          boost::asio::detached);
+
+    // Enqueue once the poller is parked on its idle wait, signalling the way
+    // PostIngestQueue::signalWakeTimer does: cancel posted to the timer's executor.
+    boost::asio::steady_timer arrival(ioc, 60ms);
+    arrival.async_wait([&](boost::system::error_code ec) {
+        if (ec) {
+            return;
+        }
+        pushedAt = std::chrono::steady_clock::now();
+        REQUIRE(channel->try_push(7));
+        boost::asio::post(wakeTimer->get_executor(), [wakeTimer, &wakeMutex]() {
+            std::lock_guard<std::mutex> lock(wakeMutex);
+            wakeTimer->cancel();
+        });
+    });
+    deadline.async_wait([&](boost::system::error_code ec) {
+        if (!ec) {
+            stopFlag.store(true, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(wakeMutex);
+            wakeTimer->cancel();
+        }
+    });
+    ioc.run();
+
+    REQUIRE(pushedAt.has_value());
+    REQUIRE(processedAt.has_value());
+    CHECK(*processedAt - *pushedAt < 100ms);
+}
+
+TEST_CASE("PressureLimitedPoller re-polls blocked work on the short cadence",
+          "[daemon][poller][idle][catch2]") {
+    // Queued work that cannot be admitted (here: maxConcurrent saturated by an in-flight job)
+    // must not sleep the idle tick, because job completion does not signal the wake timer.
+    TuningSnapshotScope scope;
+    setIdleSnapshot(true);
+
+    boost::asio::io_context ioc;
+    std::atomic<bool> stopFlag{false};
+    std::atomic<bool> startedFlag{false};
+    std::atomic<bool> pauseFlag{false};
+    std::atomic<bool> wasActive{false};
+    std::atomic<std::size_t> inFlight{1}; // one phantom job occupies the single slot
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
+    auto cfg = makeWakeTimerConfig<int>(stopFlag, startedFlag, pauseFlag, wakeTimer, wakeMutex);
+    cfg.executor = ioc.get_executor();
+    cfg.enableCpuThrottling = false;
+    cfg.wasActiveFlag = &wasActive;
+    cfg.inFlightCounter = &inFlight;
+
+    boost::asio::steady_timer deadline(ioc, 3000ms);
+    const auto startedAt = std::chrono::steady_clock::now();
+    std::optional<std::chrono::steady_clock::time_point> processedAt;
+    cfg.processFn = [&](int&) {
+        processedAt = std::chrono::steady_clock::now();
+        stopFlag.store(true, std::memory_order_release);
+        deadline.cancel();
+        std::lock_guard<std::mutex> lock(wakeMutex);
+        wakeTimer->cancel();
+    };
+    auto channel = std::make_shared<SpscQueue<int>>(16);
+    REQUIRE(channel->try_push(1));
+    boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(channel, std::move(cfg)),
+                          boost::asio::detached);
+
+    // Release the slot without any wake signal, as completeJob does in production.
+    boost::asio::steady_timer release(ioc, 100ms);
+    release.async_wait([&](boost::system::error_code ec) {
+        if (!ec) {
+            inFlight.store(0, std::memory_order_release);
+        }
+    });
+    deadline.async_wait([&](boost::system::error_code ec) {
+        if (!ec) {
+            stopFlag.store(true, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(wakeMutex);
+            wakeTimer->cancel();
+        }
+    });
+    ioc.run();
+
+    REQUIRE(processedAt.has_value());
+    // Blocked re-poll is at most 50 ms while idle; the idle tick would be 1 s.
+    CHECK(*processedAt - startedAt < 400ms);
 }
