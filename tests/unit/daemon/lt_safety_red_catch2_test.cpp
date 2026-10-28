@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2024-2025 YAMS Project Contributors
 //
-// lt-safety track A, phase A1: red tests.
+// lt-safety: shutdown and lifetime races pinned as expected failures.
 //
-// Each test asserts the behaviour the shutdown design promises and fails on the current
-// code. They live in their own suite ('lt-red') so the unit lane is unaffected. Two of
-// them (abandoned worker, WriteCoordinator provider) are only conclusive under TSan/ASan.
+// Each functional case asserts the behaviour the shutdown design promises and fails on current
+// code. A strict XML wrapper accepts only its named CHECK failure. Every wait is bounded; the
+// hidden sanitizer-only historical reproducer is manual and unvalidated in this lane.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -18,8 +18,9 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 
-#include <boost/asio/as_tuple.hpp>
+#include <spdlog/spdlog.h>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/post.hpp>
@@ -31,6 +32,7 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/MetricsSnapshotRegistry.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/WorkCoordinator.h>
@@ -42,6 +44,56 @@ using namespace yams::daemon;
 using yams::test::wait_for_condition;
 
 namespace {
+
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
+constexpr bool kSanitizerBuild = true;
+#else
+constexpr bool kSanitizerBuild = false;
+#endif
+#elif defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+constexpr bool kSanitizerBuild = true;
+#else
+constexpr bool kSanitizerBuild = false;
+#endif
+
+template <typename Function> class ScopeExit {
+public:
+    explicit ScopeExit(Function function) : function_(std::move(function)) {}
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+    ~ScopeExit() noexcept {
+        if (!active_) {
+            return;
+        }
+        try {
+            function_();
+        } catch (...) {
+        }
+    }
+
+    void dismiss() noexcept { active_ = false; }
+
+private:
+    Function function_;
+    bool active_{true};
+};
+
+template <typename Function> ScopeExit<Function> makeScopeExit(Function function) {
+    return ScopeExit<Function>(std::move(function));
+}
+
+/// Raises the default logger's level for one case and restores it.
+class QuietLogs {
+public:
+    QuietLogs() : previous_(spdlog::get_level()) { spdlog::set_level(spdlog::level::critical); }
+    ~QuietLogs() { spdlog::set_level(previous_); }
+    QuietLogs(const QuietLogs&) = delete;
+    QuietLogs& operator=(const QuietLogs&) = delete;
+
+private:
+    spdlog::level::level_enum previous_;
+};
 
 struct ReleaseGate {
     std::mutex m;
@@ -69,9 +121,8 @@ struct SmFixture {
 
     SmFixture() {
         testDir_ = std::filesystem::temp_directory_path() /
-                   ("lt_red_" + std::to_string(std::chrono::steady_clock::now()
-                                                   .time_since_epoch()
-                                                   .count()));
+                   ("lt_red_" +
+                    std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(testDir_);
         config_.dataDir = testDir_ / "data";
         config_.socketPath = testDir_ / "daemon.sock";
@@ -89,15 +140,49 @@ struct SmFixture {
     }
 };
 
+struct RetainedMetricsOwnerGraph {
+    std::shared_ptr<SmFixture> fixture;
+    std::shared_ptr<ServiceManager> serviceManager;
+    std::shared_ptr<DaemonMetrics> metrics;
+};
+
+void retainMetricsOwnerGraph(const std::shared_ptr<SmFixture>& fixture,
+                             const std::shared_ptr<ServiceManager>& serviceManager,
+                             const std::shared_ptr<DaemonMetrics>& metrics) {
+    // Deliberately never destroyed. The red branch has a thread blocked inside metrics and each
+    // registered case runs in its own process. Retaining the complete graph avoids racing teardown
+    // or leaving ServiceManager's fixture references dangling before process exit.
+    static RetainedMetricsOwnerGraph* retained = nullptr;
+    if (!retained) {
+        retained = new RetainedMetricsOwnerGraph{fixture, serviceManager, metrics};
+    }
+}
+
+boost::asio::awaitable<void>
+runNeverSuspendingCoroutine(std::shared_ptr<std::atomic<bool>> entered,
+                            std::shared_ptr<std::atomic<bool>> sawCancel,
+                            std::shared_ptr<std::atomic<bool>> release) {
+    entered->store(true, std::memory_order_release);
+    const auto deadline = std::chrono::steady_clock::now() + 4s;
+    while (std::chrono::steady_clock::now() < deadline &&
+           !release->load(std::memory_order_acquire)) {
+        const auto cancellationState = co_await boost::asio::this_coro::cancellation_state;
+        if (cancellationState.cancelled() != boost::asio::cancellation_type::none) {
+            sawCancel->store(true, std::memory_order_release);
+            co_return;
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+}
+
 } // namespace
 
-// Bug 3 class: request_dispatcher_prune.cpp:138-213 spawns a coroutine whose only
-// "suspension" is co_await this_coro::cancellation_state, which never suspends. The cancel
-// that WorkCoordinator::stop() posts to that coroutine's strand cannot run until the
-// coroutine returns, and stop() (WorkCoordinator.cpp:286-302) only calls ioContext->stop()
-// once every posted cancel has run. One busy coroutine therefore holds every idle worker.
-TEST_CASE("RED: a detached coroutine that never suspends holds the whole pool past stop()",
-          "[lt-red][work_coordinator][shutdown][prune]") {
+// B3 — request_dispatcher_prune.cpp:138-213 spawns a coroutine whose only "suspension" is
+// co_await this_coro::cancellation_state, which never suspends. WorkCoordinator::stop()
+// (WorkCoordinator.cpp:286-302) posts the cancel to that coroutine's strand and only calls
+// ioContext->stop() once every posted cancel has run, so one busy strand keeps every idle
+// worker inside run() past the join budget. Fix: lt-safety A2.1.
+TEST_CASE("lt_red_detached_never_suspends", "[lt-red][work_coordinator][shutdown]") {
     constexpr std::size_t kWorkers = 4;
     WorkCoordinator wc;
     wc.start(kWorkers);
@@ -106,151 +191,161 @@ TEST_CASE("RED: a detached coroutine that never suspends holds the whole pool pa
     auto sawCancel = std::make_shared<std::atomic<bool>>(false);
     auto release = std::make_shared<std::atomic<bool>>(false);
 
-    wc.spawnDetached(wc.getExecutor(), [entered, sawCancel, release]() -> boost::asio::awaitable<void> {
-        entered->store(true, std::memory_order_release);
-        const auto deadline = std::chrono::steady_clock::now() + 4s;
-        while (std::chrono::steady_clock::now() < deadline &&
-               !release->load(std::memory_order_acquire)) {
-            const auto cs = co_await boost::asio::this_coro::cancellation_state;
-            if (cs.cancelled() != boost::asio::cancellation_type::none) {
-                sawCancel->store(true, std::memory_order_release);
-                co_return;
-            }
-            std::this_thread::sleep_for(1ms); // one "candidate" of synchronous work
-        }
-        co_return;
-    }());
+    wc.spawnDetached(wc.getExecutor(), runNeverSuspendingCoroutine(entered, sawCancel, release));
 
     REQUIRE(wait_for_condition(2000ms, 1ms, [&] { return entered->load(); }));
 
     wc.stop();
-    const bool joined = wc.joinWithTimeout(500ms);
+    (void)wc.joinWithTimeout(500ms);
     const auto stillActive = wc.getActiveWorkerCount();
+    INFO("busy coroutine observed cancellation: " << sawCancel->load());
 
-    // Expected: the three idle workers exit and the busy one observes cancellation.
-    CHECK(joined);
-    CHECK(sawCancel->load());
-    CHECK((stillActive <= 1));
+    // Expected: stopping the context releases the three idle workers. The synchronous coroutine
+    // itself cannot be interrupted until it returns.
+    CHECK(stillActive <= 1);
 
     release->store(true, std::memory_order_release);
     REQUIRE(wc.joinWithTimeout(10s));
 }
 
-// Bug 4 (re-scoped): WorkCoordinator::stop() (WorkCoordinator.cpp:290-302) calls
-// ioContext->stop() as soon as the posted cancel handlers have run, so a poller suspended on
-// its wake timer is abandoned at that suspension point. pressureLimitedPoll's exit path
-// (pressure_limited_poller.h:506-512: startedFlag=false, notifyLifecycleFn) is not RAII, so
-// the owner's stageStarted_ flag stays true and PostIngestQueue::stop()/~PostIngestQueue burn
-// their full quiesce budgets. (The original "swallowed operation_aborted causes a hot spin"
-// hypothesis is refuted by the iteration count this test records.)
-TEST_CASE("RED: pressureLimitedPoll clears startedFlag when the WorkCoordinator stops",
-          "[lt-red][poller][shutdown]") {
-    WorkCoordinator wc;
-    wc.start(2);
-
+// B4 — one assertion pins two failure modes of pressureLimitedPoll after WorkCoordinator::stop():
+// (a) ioContext->stop() runs as soon as the posted cancel handlers have run, so a poller suspended
+//     on its wake timer is abandoned there. Its exit path (pressure_limited_poller.h:506-512:
+//     startedFlag=false, notifyLifecycleFn) is not RAII, so the owner's stageStarted_ flag stays
+//     true and PostIngestQueue::stop() / ~PostIngestQueue burn their full quiesce budgets.
+// (b) When another worker dispatches the cancelled wait's completion inline (strand already free,
+//     blocking.possibly) the poller resumes: awaitPressureLimitedPollerWake swallows
+//     operation_aborted (:206-223), the loop continues, every later co_await throws at once
+//     (throw_if_cancelled) into the catch at :504, and the poller spins on its worker without
+//     suspending. The join never completes (gdb stacks: grim artifacts/s1-hang, 2026-10-28).
+// Fix: lt-safety A2.2 (exit on cancellation, RAII exit path).
+TEST_CASE("lt_red_poller_started_flag", "[lt-red][poller][shutdown]") {
     struct Shared {
         std::atomic<bool> stop{false};
         std::atomic<bool> started{false};
         std::atomic<bool> pause{false};
         std::atomic<bool> wasActive{false};
         std::atomic<std::size_t> inFlight{0};
-        std::atomic<std::uint64_t> capabilityChecks{0};
+        std::atomic<std::uint64_t> iterations{0};
         std::mutex wakeMutex;
     };
     auto sh = std::make_shared<Shared>();
-    auto channel = std::make_shared<SpscQueue<int>>(16);
+    // Failure mode (b) logs one error per spin iteration; keep the captured output small.
+    QuietLogs quiet;
 
-    PressureLimitedPollerConfig<int> cfg{};
-    cfg.stageName = "lt-red";
-    cfg.stopFlag = &sh->stop;
-    cfg.startedFlag = &sh->started;
-    cfg.pauseFlag = &sh->pause;
-    cfg.wasActiveFlag = &sh->wasActive;
-    cfg.inFlightCounter = &sh->inFlight;
-    // Count loop iterations through the capability hook; it runs once per iteration.
-    cfg.isCapableFn = [sh]() {
-        sh->capabilityChecks.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    };
-    cfg.maxConcurrentFn = []() -> std::size_t { return 1; };
-    cfg.tryAcquireFn = [](GradientLimiter*, const std::string&, const std::string&) {
-        return true;
-    };
-    cfg.getHashFn = [](const int&) -> std::string { return ""; };
-    cfg.completeJobFn = [](const std::string&, bool) {};
-    cfg.processFn = [](int&) {};
-    cfg.enableCpuThrottling = false;
-    cfg.wakeTimer = std::make_shared<boost::asio::steady_timer>(*wc.getIOContext());
-    cfg.wakeTimerMutex = &sh->wakeMutex;
+    bool joined = false;
+    {
+        WorkCoordinator wc;
+        wc.start(2);
+        auto channel = std::make_shared<SpscQueue<int>>(16);
 
-    wc.spawnDetached(wc.getExecutor(), pressureLimitedPoll<int>(channel, cfg));
+        PressureLimitedPollerConfig<int> cfg{};
+        cfg.stageName = "lt-red";
+        cfg.stopFlag = &sh->stop;
+        cfg.startedFlag = &sh->started;
+        cfg.pauseFlag = &sh->pause;
+        cfg.wasActiveFlag = &sh->wasActive;
+        cfg.inFlightCounter = &sh->inFlight;
+        cfg.isCapableFn = [sh]() {
+            sh->iterations.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        };
+        cfg.maxConcurrentFn = []() -> std::size_t { return 1; };
+        cfg.tryAcquireFn = [](GradientLimiter*, const std::string&, const std::string&) {
+            return true;
+        };
+        cfg.getHashFn = [](const int&) -> std::string { return ""; };
+        cfg.completeJobFn = [](const std::string&, bool) {};
+        cfg.processFn = [](int&) {};
+        cfg.enableCpuThrottling = false;
+        cfg.wakeTimer = std::make_shared<boost::asio::steady_timer>(*wc.getIOContext());
+        cfg.wakeTimerMutex = &sh->wakeMutex;
 
-    REQUIRE(wait_for_condition(2000ms, 1ms, [&] { return sh->started.load(); }));
-    std::this_thread::sleep_for(100ms);
-    const auto before = sh->capabilityChecks.load();
+        wc.spawnDetached(wc.getExecutor(), pressureLimitedPoll<int>(channel, cfg));
 
-    wc.stop();
-    std::this_thread::sleep_for(300ms);
-    const auto after = sh->capabilityChecks.load();
-    const bool joined = wc.joinWithTimeout(500ms);
+        REQUIRE(wait_for_condition(2000ms, 1ms, [&] { return sh->iterations.load() != 0; }));
+        wc.stop();
+        joined = wc.joinWithTimeout(2s);
+        if (!joined) {
+            // Failure mode (b): the stop flag is the only thing a spinning poller still reads.
+            // Recovery so the coordinator can be destroyed; the verdict was taken above.
+            sh->stop.store(true, std::memory_order_release);
+            REQUIRE(wc.joinWithTimeout(10s));
+        }
+    }
 
-    // Observed: 0 iterations (the coroutine is abandoned, not spinning) and a fast join.
-    INFO("iterations during 300ms after stop(): " << (after - before));
-    CHECK((after - before) < 200);
-    CHECK(joined);
-
-    // Expected: the poller's exit path ran and the owner can observe it. Fails today.
-    sh->stop.store(true);
-    REQUIRE(wc.joinWithTimeout(10s));
-    CHECK(wait_for_condition(2000ms, 1ms, [&] { return !sh->started.load(); }));
+    // Mode (a): the stopped io_context has now destroyed the abandoned coroutine frame, and an
+    // RAII exit guard in that frame must have published that the poller is gone. Mode (b): the
+    // workers must have been joinable without outside help.
+    const bool pollerStoppedCleanly = joined && !sh->started.load();
+    CHECK(pollerStoppedCleanly);
 }
 
-// Bug 2: DaemonMetrics::pollingLoop stores pollingTimer_ = &timer (DaemonMetrics.cpp:767)
-// and only clears it / completes pollingCompletion_ on the normal exit path (:930-931).
-// When the WorkCoordinator stops first (ioContext->stop() runs as soon as the posted cancel
-// handlers have run) the loop is abandoned at its co_await and never reaches that cleanup;
-// stopPolling() then waits forever on a completion that never arrives (polling_completion.h:32-35
-// has no timeout).
-TEST_CASE_METHOD(SmFixture,
-                 "RED: DaemonMetrics::stopPolling returns after the WorkCoordinator cancelled it",
-                 "[lt-red][metrics][shutdown]") {
-    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+// B2 — DaemonMetrics::pollingLoop stores pollingTimer_ = &timer (DaemonMetrics.cpp:767) and
+// completes pollingCompletion_ only on its normal exit path (:930-931). When the WorkCoordinator
+// stops first the loop is abandoned at its co_await and never reaches that cleanup, so
+// stopPolling() blocks in PollingCompletion::wait() (polling_completion.h:32-35, no timeout).
+// Fix: lt-safety A2.2.
+TEST_CASE("lt_red_metrics_stop_after_cancel", "[lt-red][metrics][shutdown]") {
+    auto fixture = std::make_shared<SmFixture>();
+    auto sm =
+        std::make_shared<ServiceManager>(fixture->config_, fixture->state_, fixture->lifecycleFsm_);
     REQUIRE(sm->initialize());
     auto* wc = sm->getWorkCoordinator();
     REQUIRE((wc != nullptr));
     REQUIRE(wc->isRunning());
 
-    // Heap-allocated on purpose: if stopPolling() hangs, ~DaemonMetrics would hang too.
-    auto* metrics = new DaemonMetrics(nullptr, &state_, sm.get(), wc);
+    auto& registry = MetricsSnapshotRegistry::instance();
+    const auto priorSnapshot = registry.get();
+    bool retainGraph = false;
+    auto restoreRegistry = makeScopeExit([&] {
+        if (!retainGraph) {
+            registry.set(priorSnapshot);
+        }
+    });
+
+    // shared_from_this() is used by off-strand collectors. Shared ownership is required even on
+    // the green path; the red path retains this object together with every referenced owner.
+    auto metrics = std::make_shared<DaemonMetrics>(nullptr, &fixture->state_, sm.get(), wc);
     metrics->startPolling();
-    std::this_thread::sleep_for(200ms);
+    REQUIRE(wait_for_condition(5s, 1ms, [&] {
+        const auto published = registry.get();
+        return published && published != priorSnapshot;
+    }));
 
     wc->stop();
     REQUIRE(wc->joinWithTimeout(10s));
 
-    std::atomic<bool> stopped{false};
-    std::thread stopper([&] {
+    auto stopped = std::make_shared<std::atomic<bool>>(false);
+    std::thread stopper([metrics, stopped] {
         metrics->stopPolling();
-        stopped.store(true, std::memory_order_release);
+        stopped->store(true, std::memory_order_release);
     });
-    const bool done = wait_for_condition(3000ms, 10ms, [&] { return stopped.load(); });
-    CHECK(done);
+    const bool done =
+        wait_for_condition(3s, 10ms, [&] { return stopped->load(std::memory_order_acquire); });
     if (done) {
         stopper.join();
-        delete metrics;
+        sm->shutdown();
     } else {
-        stopper.detach(); // leaks metrics; the wait is unbounded by design
+        // stopPolling() has an unbounded wait. Do not concurrently destroy any owner it can reach.
+        retainGraph = true;
+        retainMetricsOwnerGraph(fixture, sm, metrics);
+        stopper.detach();
     }
-    sm->shutdown();
+    CHECK(done);
 }
 
-// Bug 6: the worker lambda (WorkCoordinator.cpp:175-240) captures `this` and, after
-// io_context::run() returns, writes workerRunEnd_/workerExited_, activeWorkers_ and
-// joinCV_. abandonWorkersForShutdown() detaches the thread and clears started_, so the
-// destructor neither stops nor joins; the abandoned worker then touches freed memory.
-// Conclusive only under TSan/ASan (free vs. later access).
-TEST_CASE("RED: an abandoned worker outlives its WorkCoordinator",
-          "[lt-red][work_coordinator][abandon][sanitizer]") {
+// B6 — the worker lambda (WorkCoordinator.cpp:175-240) captures `this` and, after
+// io_context::run() returns, writes workerRunEnd_/workerExited_, activeWorkers_ and joinCV_.
+// abandonWorkersForShutdown() (:575-595) detaches the thread and clears started_, so the
+// destructor (:109-135) neither stops nor joins; the abandoned worker then runs against freed
+// memory. There is no UB-free observation of that, so this case is hidden and has no Meson
+// registration. It remains historical source only and is unvalidated here. Fix: lt-safety A2.5.
+TEST_CASE("lt_red_abandoned_worker_uaf",
+          "[.manual-unvalidated][lt-red][work_coordinator][abandon][sanitizer]") {
+    if (!kSanitizerBuild) {
+        SKIP("only conclusive under ThreadSanitizer or AddressSanitizer");
+    }
     auto wc = std::make_unique<WorkCoordinator>();
     wc->start(2);
 
@@ -273,55 +368,69 @@ TEST_CASE("RED: an abandoned worker outlives its WorkCoordinator",
 
     gate->release();
     REQUIRE(wait_for_condition(2000ms, 1ms, [&] { return exited->load(); }));
-    // The detached worker now runs lines 228-239 against the freed coordinator.
+    // The detached worker now runs WorkCoordinator.cpp:228-239 against the freed coordinator;
+    // the sanitizer reports it and the process exits non-zero.
     std::this_thread::sleep_for(200ms);
-    SUCCEED("completed; look for a heap-use-after-free / race-with-free report above");
+    SUCCEED("functional path complete; the sanitizer report is the failure");
 }
 
-// Bug 1: Phase 3.9.5 (ServiceManager.cpp:1188-1190) resets writeCoordinator_ while the
-// WorkCoordinator is still running (Phase 4/5) and before RepairService stops (Phase
-// 6.0.5, :1360-1363). AppContext::writeCoordinatorProvider (:3923) and RepairService
-// (RepairService.cpp:1595,1710,1945,2065,2473,2523) read the raw pointer from other
-// threads. A worker that is still running must never observe the provider going null.
-TEST_CASE_METHOD(SmFixture,
-                 "RED: WriteCoordinator stays alive while worker threads can still reach it",
+// B1 — Phase 3.9.5 (ServiceManager.cpp:1188-1190) resets writeCoordinator_ while the
+// WorkCoordinator is still running (stop/join are Phase 4/5, :1216-1248) and before RepairService
+// stops (Phase 6.0.5, :1360-1363). AppContext::writeCoordinatorProvider (:3923) and
+// RepairService.cpp:1595,1710,1945,2065,2473,2523 read the raw pointer from other threads. A
+// coroutine still running on the worker pool must never observe the provider going null.
+// Fix: lt-safety A2.3.
+// This case drives a full ServiceManager::shutdown() with live PostIngestQueue pollers. Under
+// TSan it intermittently (2 of 24 runs) reports "unlock of an unlocked mutex" in
+// PostIngestQueue::notifyLifecycle() called from a poller's notifyLifecycleFn after the queue is
+// gone (B5 class, lt-safety A2.2/A2.4), which the strict wrapper rightly rejects. Until that fix
+// lands, a TSan build registers this case outside the lt-red and unit suites (tests/meson.build).
+TEST_CASE_METHOD(SmFixture, "lt_red_write_coordinator_lifetime",
                  "[lt-red][service_manager][shutdown][write_coordinator]") {
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
     REQUIRE(sm->initialize());
+    auto gate = std::make_shared<ReleaseGate>();
+    std::thread shutdownThread;
+    auto releaseAndJoin = makeScopeExit([&] {
+        gate->release();
+        if (shutdownThread.joinable()) {
+            shutdownThread.join();
+        }
+    });
+
     sm->startAsyncInit();
     const auto ready = sm->waitForServiceManagerTerminalState(60);
     REQUIRE((ready.state == ServiceManagerState::Ready));
 
     auto ctx = sm->getAppContext();
     REQUIRE(ctx.writeCoordinatorProvider);
-    if (ctx.writeCoordinatorProvider() == nullptr) {
-        SKIP("no WriteCoordinator in this configuration");
+    REQUIRE((ctx.writeCoordinatorProvider() != nullptr));
+    REQUIRE(ctx.cancellationSignal);
+
+    auto* wc = sm->getWorkCoordinator();
+    REQUIRE((wc != nullptr));
+    auto workerEntered = std::make_shared<std::atomic<bool>>(false);
+    boost::asio::post(sm->getWorkerExecutor(), [gate, workerEntered] {
+        workerEntered->store(true, std::memory_order_release);
+        gate->wait();
+    });
+    REQUIRE(wait_for_condition(2s, 1ms,
+                               [&] { return workerEntered->load(std::memory_order_acquire); }));
+
+    shutdownThread = std::thread([sm] { sm->shutdown(); });
+
+    const bool cancellationObserved = wait_for_condition(
+        30s, 1ms, [&] { return ctx.cancellationSignal->load(std::memory_order_acquire); });
+    if (!cancellationObserved) {
+        FAIL("setup failure: shutdown did not publish AppContext cancellation");
     }
 
-    auto sawNullWhileRunning = std::make_shared<std::atomic<bool>>(false);
-    auto probeDone = std::make_shared<std::atomic<bool>>(false);
-    auto probeEntered = std::make_shared<std::atomic<bool>>(false);
-
-    boost::asio::post(sm->getWorkerExecutor(), [ctx, sawNullWhileRunning, probeDone,
-                                                probeEntered] {
-        probeEntered->store(true);
-        const auto deadline = std::chrono::steady_clock::now() + 20s;
-        while (std::chrono::steady_clock::now() < deadline) {
-            auto* wcoord = ctx.writeCoordinatorProvider();
-            if (wcoord == nullptr) {
-                sawNullWhileRunning->store(true);
-                break;
-            }
-            (void)wcoord->queuedBatches(); // the deref RepairService performs
-            std::this_thread::sleep_for(1ms);
-        }
-        probeDone->store(true);
-    });
-    REQUIRE(wait_for_condition(2000ms, 1ms, [&] { return probeEntered->load(); }));
-
-    std::thread shutdownThread([sm] { sm->shutdown(); });
+    // Phase 3.9.5 currently resets writeCoordinator_ before Phase 4 publishes cancellation.
+    // The blocked worker proves the worker pool is still live at this observation point.
+    const bool providerNonnullBeforeWorkerRelease = ctx.writeCoordinatorProvider() != nullptr;
+    gate->release();
     shutdownThread.join();
-    REQUIRE(wait_for_condition(25s, 5ms, [&] { return probeDone->load(); }));
+    releaseAndJoin.dismiss();
 
-    CHECK_FALSE(sawNullWhileRunning->load());
+    CHECK(providerNonnullBeforeWorkerRelease);
 }
