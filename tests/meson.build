@@ -30,6 +30,11 @@ _test_thread_sanitizer = yams_sanitize_thread
 # reach only a few suites. The default setup applies it to every test in a TSan build.
 if _test_thread_sanitizer
   add_test_setup('tsan', env: {'TSAN_OPTIONS': _test_tsan_options}, is_default: true)
+  # Audit setup: narrowed suppressions plus deadlock/history diagnostics (lt-safety A1).
+  add_test_setup('tsan_narrow', env: {
+    'TSAN_OPTIONS': 'suppressions=' + (meson.project_source_root() / 'tsan.narrow.suppressions')
+      + ':second_deadlock_stack=1:history_size=7',
+  })
 endif
 _test_address_sanitizer = yams_sanitize_address
 # ASan builds: keep meson's default ASAN_OPTIONS, add stack-use-after-return detection (it finds
@@ -1216,6 +1221,71 @@ if catch2_dep.found()
     'timeout': 120,
     'is_parallel': false,
   }]
+
+#lt-safety expected failures: each functional case runs in its own subprocess outside the
+#default unit suite. The wrapper accepts only the named CHECK expression in Catch2 XML; generic
+#Meson should_fail and Catch2 !shouldfail would incorrectly accept setup crashes or exceptions.
+  catch2_lt_safety_red_exe = executable('catch2_lt_safety_red',
+    files('unit/daemon/lt_safety_red_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  lt_expected_failure_runner = files('common/lt_expected_failure_runner.py')
+  test('lt_expected_failure_runner_unit', python_exe,
+    args: [files('common/test_lt_expected_failure_runner.py')],
+    suite: ['unit', 'test-harness'],
+    timeout: 30,
+  )
+  # CI's generic lane runs --suite unit. Expose the wrapped cases there on Linux only: the red
+  # assertions are pinned on Linux (gcc, clang TSan, clang ASan); macOS and Windows runners have
+  # not been measured, and a non-reproducing red case fails the strict wrapper.
+  _lt_red_suite = ['catch2', 'daemon', 'lt-red']
+  if host_machine.system() == 'linux'
+    _lt_red_suite += ['unit']
+  endif
+  # A red case whose shutdown path trips a known, separately tracked TSan report is registered
+  # outside the lt-red and unit suites in a TSan build (still runnable by name). The strict
+  # wrapper rejects any sanitizer output, and a setup's exclude_suites does not apply when the
+  # run names a suite. Not a suppression: the report stays visible when the case runs.
+  _lt_red_tsan_sensitive_suite = ['catch2', 'daemon', 'lt-red-tsan-sensitive']
+  # Each entry: [Catch2 case, exact CHECK expression that must be the single failure,
+  #              TSan-sensitive]. A fix PR removes its entry here and re-registers the case as an
+  # ordinary green test.
+  _lt_red_cases = [
+    # lt_red_detached_never_suspends went green with lt-safety A2.1; see work_coordinator_test.cpp
+    # "stop releases idle workers past a detached strand that never suspends".
+    # red until pressureLimitedPoll exits on cancellation and clears startedFlag through an RAII
+    # guard (lt-safety A2.2)
+    ['lt_red_poller_started_flag', 'pollerStoppedCleanly', false],
+    # red until DaemonMetrics::pollingLoop completes pollingCompletion_ via RAII (lt-safety A2.2)
+    ['lt_red_metrics_stop_after_cancel', 'done', false],
+    # red until ServiceManager resets writeCoordinator_ after the worker join (lt-safety A2.3).
+    # TSan-sensitive: its full shutdown intermittently trips the PostIngestQueue lifecycle-mutex
+    # race (B5 class, lt-safety A2.2/A2.4), an unrelated diagnostic for this case.
+    ['lt_red_write_coordinator_lifetime', 'providerNonnullBeforeWorkerRelease', true],
+  ]
+  foreach _case : _lt_red_cases
+    _case_suite = (_case[2] and _test_thread_sanitizer) ? _lt_red_tsan_sensitive_suite : _lt_red_suite
+    test(_case[0], python_exe,
+      args: [
+        lt_expected_failure_runner,
+        '--binary', catch2_lt_safety_red_exe,
+        '--case', _case[0],
+        '--expression', _case[1],
+        '--timeout', '170',
+      ],
+      depends: [catch2_lt_safety_red_exe],
+      suite: _case_suite,
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 180,
+      is_parallel: false,
+    )
+  endforeach
+  # lt_red_abandoned_worker_uaf remains as a hidden manual/unvalidated historical reproducer.
+  # It has no Meson registration and must not run in this ordinary harness lane.
 
   catch2_test_table += [{
     'name': 'repair_binary_filter',

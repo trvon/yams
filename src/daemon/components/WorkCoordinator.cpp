@@ -97,6 +97,41 @@ struct WorkCoordinator::DetachedCancellationState {
     std::vector<DetachedCancellationRequest> requests;
 };
 
+/// Counts the cancellation handlers stop() posted that have not run yet. Shared with the posted
+/// handlers, which may outlive stop() (and the coordinator) when their strand never frees up.
+struct WorkCoordinator::DetachedCancellationDrain {
+    explicit DetachedCancellationDrain(std::size_t count) : pending_(count) {}
+
+    /// Records one handler run. Returns true for the last one.
+    bool acknowledge() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (pending_ > 0) {
+            --pending_;
+        }
+        const bool last = pending_ == 0;
+        if (last) {
+            cv_.notify_all();
+        }
+        return last;
+    }
+
+    /// Waits until every handler has run or `budget` elapses. Returns true when all ran.
+    bool waitAll(std::chrono::milliseconds budget) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, budget, [this] { return pending_ == 0; });
+    }
+
+    std::size_t pending() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pending_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    std::size_t pending_;
+};
+
 struct WorkCoordinator::ProgressProbeState {
     std::atomic<uint64_t> posted{0};
     std::atomic<uint64_t> completed{0};
@@ -263,7 +298,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
     }
 }
 
-void WorkCoordinator::stop() {
+void WorkCoordinator::stop(std::chrono::milliseconds cancelDrainBudget) {
     if (!started_) {
         try {
             spdlog::debug("[WorkCoordinator] stop() called but not started (no-op)");
@@ -287,22 +322,49 @@ void WorkCoordinator::stop() {
     if (detachedCancellationRequests.empty()) {
         ioContext_->stop();
     } else {
-        auto remaining =
-            std::make_shared<std::atomic<std::size_t>>(detachedCancellationRequests.size());
-        auto ioContext = ioContext_;
+        auto drain =
+            std::make_shared<DetachedCancellationDrain>(detachedCancellationRequests.size());
+        // Weak: a handler stranded on a busy strand is destroyed with the io_context's queue; a
+        // strong reference from inside that queue would keep the io_context alive forever.
+        std::weak_ptr<boost::asio::io_context> ioContext = ioContext_;
         for (auto& request : detachedCancellationRequests) {
             boost::asio::post(request.executor,
-                              [signal = std::move(request.signal), remaining, ioContext]() {
+                              [signal = std::move(request.signal), drain, ioContext]() {
                                   signal->emit(boost::asio::cancellation_type::all);
-                                  if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                                      ioContext->stop();
+                                  if (drain->acknowledge()) {
+                                      if (auto context = ioContext.lock()) {
+                                          context->stop();
+                                      }
                                   }
                               });
+        }
+        // Every strand with a suspended coroutine runs its handler almost at once; one that is
+        // busy in synchronous work cannot. Do not let it hold the idle workers inside run().
+        if (!drain->waitAll(cancelDrainBudget)) {
+            logBusyDetachedStrands(drain->pending(), detachedCancellationRequests.size(),
+                                   cancelDrainBudget);
+            ioContext_->stop();
         }
     }
     workGuard_.reset();
     try {
         spdlog::info("[WorkCoordinator] Cancellation requested and work guard reset");
+    } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
+    }
+}
+
+void WorkCoordinator::logBusyDetachedStrands(std::size_t pending, std::size_t posted,
+                                             std::chrono::milliseconds budget) const noexcept {
+    try {
+        spdlog::warn("[WorkCoordinator] stop(): {} of {} detached coroutine(s) did not run their "
+                     "cancellation within {}ms (strand busy in synchronous work); stopping the "
+                     "io_context anyway. Busy workers keep running until their handler returns.",
+                     pending, posted, budget.count());
+        for (const auto& job : activeJobs()) {
+            spdlog::warn("[WorkCoordinator] stop(): busy worker={} job={} job_age={}ms",
+                         job.workerIndex, job.name, job.age.count());
+        }
     } catch (...) {
         // Intentional best-effort path; keep the primary operation unaffected.
     }

@@ -1,0 +1,39 @@
+# Narrowed ThreadSanitizer suppressions (lt-safety A1 audit).
+# Keeps only entries with a documented upstream cause. Dropped from tsan.suppressions:
+#   race:any_executor*             matches any coroutine frame dispatched through any_io_executor
+#   mutex:boost::asio::strand      hides strand-executor lifetime bugs in YAMS shutdown
+#   mutex:boost::asio::detail::posix_mutex / strand_executor_service   same
+#   race:TuningManager, race:unique_ptr*TuningManager                 YAMS code, no rationale
+#   race:yams::daemon::detail::*Machine, race:yams::daemon::*Snapshot  stale tinyfsm entries
+
+# Boost.Asio experimental channel uses null_mutex even with channel_traits<std::mutex> (< 1.85).
+race:boost::asio::experimental::detail::channel_service
+race:channel_service.hpp
+
+# Boost.Asio thread_info_base thread-local cleanup on thread exit.
+race:boost::asio::detail::thread_info_base::deallocate
+
+# kqueue reactor (macOS only; harmless on Linux).
+race:boost::asio::detail::conditionally_enabled_mutex
+race:boost::asio::detail::conditionally_enabled_mutex::scoped_lock
+race:conditionally_enabled_mutex.hpp
+race:kqueue_reactor.ipp
+race:kqueue_reactor.hpp
+race:boost::asio::detail::kqueue_reactor::descriptor_state
+race:boost::asio::detail::kqueue_reactor::allocate_descriptor_state
+race:boost::asio::detail::kqueue_reactor::register_descriptor
+race:boost::asio::detail::kqueue_reactor::run
+race:object_pool.hpp
+
+# reactive socket service descriptor registration (upstream).
+race:boost::asio::detail::reactive_socket_service_base::construct
+race:boost::asio::detail::reactive_socket_service_base::do_assign
+race:reactive_socket_service_base.ipp
+race:reactive_socket_accept_op.hpp
+
+# gcc TSan does not model std::atomic_thread_fence in asio's refcount drop.
+race:boost::asio::detail::ref_count_down
+
+# SQLite WAL-index header (SQLITE_NO_TSAN is clang-only).
+race:walIndexTryHdr
+race:walIndexWriteHdr
