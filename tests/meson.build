@@ -1271,11 +1271,11 @@ if catch2_dep.found()
   _lt_red_cases = [
     # lt_red_detached_never_suspends went green with lt-safety A2.1; see work_coordinator_test.cpp
     # "stop releases idle workers past a detached strand that never suspends".
-    # red until pressureLimitedPoll exits on cancellation and clears startedFlag through an RAII
-    # guard (lt-safety A2.2)
-    ['lt_red_poller_started_flag', 'pollerStoppedCleanly', false],
-    # red until DaemonMetrics::pollingLoop completes pollingCompletion_ via RAII (lt-safety A2.2)
-    ['lt_red_metrics_stop_after_cancel', 'done', false],
+    # lt_red_poller_started_flag and lt_red_metrics_stop_after_cancel went green with lt-safety
+    # A2.2; see pressure_limited_poller_catch2_test.cpp ("exits when its cancellation slot fires",
+    # "clears startedFlag when an abandoned frame is destroyed", "stops cleanly with
+    # WorkCoordinator::stop") and daemon_metrics_status_test.cpp ("stopPolling returns after the
+    # WorkCoordinator cancelled the loop").
     # red until ServiceManager resets writeCoordinator_ after the worker join (lt-safety A2.3).
     # TSan-sensitive: its full shutdown intermittently trips the PostIngestQueue lifecycle-mutex
     # race (B5 class, lt-safety A2.2/A2.4), an unrelated diagnostic for this case.

@@ -551,10 +551,17 @@ private:
     // client is reading, the tuning idle tick otherwise. A stale status read cancels the
     // timer (scheduleBackgroundRefresh), so values are never older than one idle tick.
     std::chrono::milliseconds nextPollDelay() const;
-    // Timer pointer for cancellation from stopPolling()
-    boost::asio::steady_timer* pollingTimer_{nullptr};
-    // Shutdown synchronization - signaled when polling loop exits
-    detail::PollingCompletion pollingCompletion_;
+    // State the polling loop's frame shares with stopPolling(). Heap-allocated and held by the
+    // frame as well: when the WorkCoordinator stops first the frame is abandoned at its co_await
+    // and destroyed only with the io_context, possibly after this object, so the frame's exit
+    // guard must not touch `this` (lt-safety A2.2).
+    struct PollingLifecycle {
+        // Timer to cancel from stopPolling()/scheduleBackgroundRefresh(); strand-serialized.
+        std::atomic<boost::asio::steady_timer*> timer{nullptr};
+        // Shutdown synchronization - signaled when polling loop exits
+        detail::PollingCompletion completion;
+    };
+    std::shared_ptr<PollingLifecycle> polling_ = std::make_shared<PollingLifecycle>();
 
     // CPU utilization sampling state (Linux): deltas over /proc since last snapshot
     mutable std::uint64_t lastProcJiffies_{0};

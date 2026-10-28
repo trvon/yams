@@ -545,8 +545,23 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> startGuard_{false};
 
+    // Poller lifecycle state shared with the poller frames. A frame abandoned by a stopped
+    // io_context is destroyed only with that io_context, possibly after this object; its exit
+    // guard clears its started flag and notifies through this heap object, never through
+    // `this` (lt-safety A2.2). The reference members keep the existing names.
+    struct StageLifecycle {
+        std::array<std::atomic<bool>, kStageCount> started{};
+        std::mutex mutex;
+        std::condition_variable cv;
+        void notify() {
+            std::lock_guard<std::mutex> lock(mutex);
+            cv.notify_all();
+        }
+    };
+    std::shared_ptr<StageLifecycle> lifecycle_ = std::make_shared<StageLifecycle>();
+
     // Per-stage arrays indexed by Stage enum (0..4)
-    std::array<std::atomic<bool>, kStageCount> stageStarted_{};
+    std::array<std::atomic<bool>, kStageCount>& stageStarted_ = lifecycle_->started;
     std::array<std::atomic<bool>, kStageCount> stagePaused_{};
     std::mutex stageActivityMutex_;
     std::array<bool, kStageCount> stageActivityPublished_{};
@@ -591,12 +606,9 @@ private:
         return pendingKgJobs_.empty() && !pendingKgDrainScheduled_.load(std::memory_order_acquire);
     }
 
-    mutable std::mutex lifecycleMutex_;
-    std::condition_variable lifecycleCv_;
-    void notifyLifecycle() {
-        std::lock_guard<std::mutex> lock(lifecycleMutex_);
-        lifecycleCv_.notify_all();
-    }
+    std::mutex& lifecycleMutex_ = lifecycle_->mutex;
+    std::condition_variable& lifecycleCv_ = lifecycle_->cv;
+    void notifyLifecycle() { lifecycle_->notify(); }
 
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};

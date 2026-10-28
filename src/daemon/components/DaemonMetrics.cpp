@@ -725,26 +725,39 @@ void DaemonMetrics::startPolling() {
         return; // Already running
     }
     // Mark as not stopped before spawning the coroutine
-    pollingCompletion_.markStarted();
+    polling_->completion.markStarted();
     coordinator_->spawnDetached(strand_, pollingLoop());
 }
 
+namespace {
+// How long stopPolling() waits for the loop to publish its exit. The loop completes within one
+// iteration while its io_context runs; it never completes when the WorkCoordinator stopped first
+// (the frame is abandoned at its co_await until the io_context is destroyed).
+constexpr auto kPollingStopBudget = std::chrono::milliseconds(2000);
+} // namespace
+
 void DaemonMetrics::stopPolling() {
-    const bool shouldStopPolling = !pollingCompletion_.isStopped();
+    const bool shouldStopPolling = !polling_->completion.isStopped();
 
     if (shouldStopPolling) {
         // Signal the polling loop to stop
         pollingActive_.store(false, std::memory_order_release);
 
-        // Cancel the timer via the strand to wake up the coroutine
-        // This must be done on the strand to avoid racing with async_wait
-        boost::asio::post(strand_, [this]() {
-            if (pollingTimer_) {
-                pollingTimer_->cancel();
+        // Cancel the timer via the strand to wake up the coroutine. This must be done on the
+        // strand to avoid racing with async_wait. The handler holds the lifecycle state, not
+        // `this`: it may run (or be destroyed unrun) after this object is gone.
+        boost::asio::post(strand_, [lifecycle = polling_]() {
+            if (auto* timer = lifecycle->timer.load(std::memory_order_acquire)) {
+                timer->cancel();
             }
         });
 
-        pollingCompletion_.wait();
+        if (!polling_->completion.waitFor(kPollingStopBudget)) {
+            spdlog::warn("DaemonMetrics: polling loop did not complete within {}ms; its "
+                         "WorkCoordinator has most likely stopped and the frame is abandoned "
+                         "until the io_context is destroyed",
+                         kPollingStopBudget.count());
+        }
     }
 
     // getSnapshot()/refresh() may dispatch off-strand collectors even when the
@@ -764,8 +777,19 @@ void DaemonMetrics::stopPolling() {
 
 boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-    // Store timer pointer for cancellation from stopPolling()
-    pollingTimer_ = &timer;
+    // Publish the timer for cancellation and the exit for stopPolling() through the shared
+    // lifecycle state. The guard runs on every exit: normal, exception, or frame destruction
+    // after the io_context stopped with the loop suspended (then possibly after ~DaemonMetrics,
+    // which is why it holds the state and not `this`).
+    const auto lifecycle = polling_;
+    lifecycle->timer.store(&timer, std::memory_order_release);
+    struct PollingExitGuard {
+        std::shared_ptr<PollingLifecycle> lifecycle;
+        ~PollingExitGuard() {
+            lifecycle->timer.store(nullptr, std::memory_order_release);
+            lifecycle->completion.complete();
+        }
+    } exitGuard{lifecycle};
     spdlog::info("DaemonMetrics: polling loop started (interval={}ms)", cacheMs_);
 
     while (pollingActive_.load(std::memory_order_relaxed)) {
@@ -931,9 +955,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
             break;
         }
     }
-    // Clear timer pointer and signal that polling has stopped
-    pollingTimer_ = nullptr;
-    pollingCompletion_.complete();
+    // exitGuard clears the timer pointer and completes the lifecycle on return.
     spdlog::info("DaemonMetrics: polling loop stopped");
 }
 
@@ -1202,9 +1224,9 @@ void DaemonMetrics::scheduleBackgroundRefresh(bool detailed) const {
     if (queued.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
-    boost::asio::post(strand_, [this]() {
-        if (pollingTimer_) {
-            pollingTimer_->cancel();
+    boost::asio::post(strand_, [lifecycle = polling_]() {
+        if (auto* timer = lifecycle->timer.load(std::memory_order_acquire)) {
+            timer->cancel();
         }
     });
 }
