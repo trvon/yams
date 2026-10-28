@@ -208,6 +208,20 @@ test('retrieval_contract_unit',
   suite: ['unit', 'policy', 'benchmark'],
   timeout: 30,
 )
+# Measurement-harness tests use synthetic samples and mocks, not live workloads.
+test('soak_measurement_unit',
+  python_exe,
+  args: files('benchmarks/soak/test_soak.py'),
+  suite: ['unit', 'test-harness', 'measurement'],
+  timeout: 30,
+)
+test('mesh_measurement_unit',
+  python_exe,
+  args: files('integration/p2p_mesh/test_mesh_measurement.py'),
+  suite: ['unit', 'test-harness', 'measurement'],
+  timeout: 30,
+)
+
 test('meson_failure_reporter_unit',
   python_exe,
   args: files('scripts/test_report_meson_failures.py'),
