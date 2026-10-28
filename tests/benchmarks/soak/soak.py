@@ -33,6 +33,7 @@ import math
 import os
 import random
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -108,6 +109,41 @@ def task_stat(path: str) -> dict | None:
         }
     except (IndexError, ValueError):
         return None
+
+
+def daemon_command(daemon_bin: str, config: str, sock: str, data_dir: str, pid_file: str,
+                   log_file: str, log_level: str, no_plugins: bool, prefix: str | None) -> list[str]:
+    """Daemon argv. `prefix` (shell-split) runs in front, e.g. `taskset -c 2-5` or
+    `systemd-run --user --scope -p CPUQuota=400% taskset -c 2-5`; it must exec the daemon in
+    place or write the daemon's pid file, which start_daemon prefers over the launched pid."""
+    cmd = [daemon_bin, "--foreground", "--config", config, "--socket", sock, "--data-dir",
+           data_dir, "--pid-file", pid_file, "--log-file", log_file, "--log-level", log_level]
+    if no_plugins:
+        cmd.append("--no-plugins")
+    return shlex.split(prefix) + cmd if prefix else cmd
+
+
+def placement_from(status_text: str, cgroup_text: str, read) -> dict:
+    """CPU affinity and cgroup v2 limits of a process, from its /proc status and cgroup text.
+    `read(path)` returns file text or '' (cpu.max is 'quota period' or 'max period')."""
+    cpus = None
+    for line in status_text.splitlines():
+        if line.startswith("Cpus_allowed_list:"):
+            cpus = line.split(":", 1)[1].strip()
+    cgroup = None
+    for line in cgroup_text.splitlines():
+        if line.startswith("0::"):
+            cgroup = line[3:].strip()
+    out = {"cpus_allowed_list": cpus, "cgroup": cgroup, "cpu_max": None, "memory_max": None}
+    if cgroup:
+        out["cpu_max"] = read(f"/sys/fs/cgroup{cgroup}/cpu.max").strip() or None
+        out["memory_max"] = read(f"/sys/fs/cgroup{cgroup}/memory.max").strip() or None
+    return out
+
+
+def placement(pid: int) -> dict:
+    return placement_from(read_text(f"/proc/{pid}/status"), read_text(f"/proc/{pid}/cgroup"),
+                          read_text)
 
 
 def sample_threads(pid: int) -> dict[str, dict]:
@@ -369,12 +405,11 @@ class Soak:
         if self.sock.exists():
             self.sock.unlink()
         logf = self.work / "log" / "daemon.log"
-        cmd = [self.daemon_bin, "--foreground", "--config", str(self.work / "xdg/config/yams/config.toml"),
-               "--socket", str(self.sock), "--data-dir", str(self.data_dir),
-               "--pid-file", str(self.work / "run" / "yams-daemon.pid"),
-               "--log-file", str(logf), "--log-level", self.a.log_level]
-        if self.a.no_plugins:
-            cmd.append("--no-plugins")
+        pid_file = self.work / "run" / "yams-daemon.pid"
+        cmd = daemon_command(self.daemon_bin, str(self.work / "xdg/config/yams/config.toml"),
+                             str(self.sock), str(self.data_dir), str(pid_file), str(logf),
+                             self.a.log_level, self.a.no_plugins,
+                             getattr(self.a, "daemon_prefix", None))
         (self.out / "daemon_cmd.txt").write_text(" ".join(cmd) + "\n")
         stdout = (self.work / "log" / "daemon.stdout").open("ab")
         self.daemon = subprocess.Popen(cmd, env=self.env, stdout=stdout, stderr=subprocess.STDOUT,
@@ -389,6 +424,12 @@ class Soak:
             if st and (st.get("ready") or st.get("lifecycle_state") in ("ready", "Ready", "degraded")):
                 log(f"daemon ready: lifecycle={st.get('lifecycle_state')} version={st.get('version')}")
                 (self.out / "status_initial.json").write_text(json.dumps(st, indent=2))
+                # A launch prefix that forks (rather than execs) leaves the daemon in a child;
+                # the daemon's own pid file names the process to sample.
+                written = read_text(str(pid_file)).strip()
+                if written.isdigit() and int(written) != self.pid:
+                    log(f"daemon pid from pid file {written} (launched {self.pid})")
+                    self.pid = int(written)
                 return
             time.sleep(2)
         die("daemon not ready in time")
@@ -579,8 +620,8 @@ class Soak:
             samples_f.flush()
             self.stop.wait(max(0.0, iv - (time.monotonic() - t0)))
 
-    def snapshot_stacks(self, tag: str) -> None:
-        if self.a.stacks_per_phase <= 0:
+    def snapshot_stacks(self, tag: str, force: bool = False) -> None:
+        if self.a.stacks_per_phase <= 0 and not force:
             return
         p = self.out / "stacks" / f"{tag}.txt"
         st = gdb_stacks(self.pid, p, depth=self.a.stack_depth)
@@ -656,8 +697,10 @@ class Soak:
         meta = {"schema_version": 2, "argv": sys.argv, "start": time.time(),
                 "host": os.uname().nodename, "phases": phases, "interval_s": self.a.interval,
                 "yams": self.yams, "daemon": self.daemon_bin, "clk_tck": CLK_TCK,
+                "daemon_prefix": getattr(self.a, "daemon_prefix", None),
                 "observer_probes": {"status_every_s": self.a.status_every,
-                                    "gdb_snapshots_per_phase": self.a.stacks_per_phase},
+                                    "gdb_snapshots_per_phase": self.a.stacks_per_phase,
+                                    "gdb_snapshot_at_end": bool(getattr(self.a, "stacks_at_end", False))},
                 "run": {"completed": False, "sampler_error": None, "workload_errors": []}}
         th = None
         run_completed = False
@@ -671,6 +714,8 @@ class Soak:
             meta["pid"] = self.pid
             pst = task_stat(f"/proc/{self.pid}/stat")
             meta["process_identity"] = {"pid": self.pid, "starttime_ticks": (pst or {}).get("starttime")}
+            meta["launched_pid"] = self.daemon.pid if hasattr(self.daemon, "pid") else None
+            meta["placement"] = placement(self.pid)
             try:
                 meta["daemon_version"] = self.cli("--version", timeout=20).stdout.strip()
             except Exception:
@@ -722,6 +767,10 @@ class Soak:
                 if self.sampler_error or self.workload_errors:
                     break
             self.set_phase("end")
+            if getattr(self.a, "stacks_at_end", False) and not (self.sampler_error or self.workload_errors):
+                # One snapshot after the timed phases labels threads without touching the
+                # measured window.
+                self.snapshot_stacks("end", force=True)
             st = self.status_json() if self.a.status_every > 0 else None
             if st:
                 (self.out / "status_final.json").write_text(json.dumps(st, indent=2))
@@ -1124,7 +1173,12 @@ def main() -> int:
     r.add_argument("--settle-poll", type=int, default=15)
     r.add_argument("--settle-cpu", type=float, default=5.0, help="daemon CPU%% below which seeding counts as settled")
     r.add_argument("--stacks-per-phase", type=int, default=0, help="opt-in gdb stack snapshots per phase (0 disables, default)")
+    r.add_argument("--stacks-at-end", action="store_true",
+                   help="one gdb stack snapshot after the timed phases, to label threads")
     r.add_argument("--stack-depth", type=int, default=20)
+    r.add_argument("--daemon-prefix",
+                   help="command prefix for the daemon, e.g. 'taskset -c 2-5' or "
+                        "'systemd-run --user --scope -p CPUQuota=400%% -p MemoryMax=8G taskset -c 2-5'")
     r.add_argument("--ready-timeout", type=int, default=300)
     r.add_argument("--log-level", default="info")
     r.add_argument("--no-plugins", action="store_true")

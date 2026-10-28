@@ -38,6 +38,7 @@ def run_args(work, **overrides):
         "add_batch": 100, "settle_max": 1, "settle_poll": 1, "settle_cpu": 5.0,
         "phases": "idle:0", "interval": 1.0, "status_every": 0.0, "load_period": 0.0,
         "warmup": 0, "stacks_per_phase": 0, "stack_depth": 1, "keep_daemon": True,
+        "stacks_at_end": False, "daemon_prefix": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -187,6 +188,46 @@ class SoakSummaryTests(unittest.TestCase):
         self.assertNotIn("secret", redacted)
         self.assertNotIn('password="p"', redacted)
         self.assertIn('mode = "safe"', redacted)
+
+
+class DaemonPlacementTests(unittest.TestCase):
+    def test_daemon_command_prepends_shell_split_prefix(self):
+        base = soak.daemon_command("yams-daemon", "c.toml", "s.sock", "data", "p.pid", "d.log",
+                                   "info", True, None)
+        self.assertEqual(base[0], "yams-daemon")
+        self.assertEqual(base[-1], "--no-plugins")
+        wrapped = soak.daemon_command("yams-daemon", "c.toml", "s.sock", "data", "p.pid", "d.log",
+                                      "info", False,
+                                      "systemd-run --user --scope -p 'CPUQuota=400%' taskset -c 2-5")
+        self.assertEqual(wrapped[:8], ["systemd-run", "--user", "--scope", "-p", "CPUQuota=400%",
+                                       "taskset", "-c", "2-5"])
+        self.assertEqual(wrapped[8:], base[:-1])
+
+    def test_placement_reads_affinity_and_cgroup_limits(self):
+        files = {"/sys/fs/cgroup/user.slice/x.scope/cpu.max": "400000 100000\n",
+                 "/sys/fs/cgroup/user.slice/x.scope/memory.max": "8589934592\n"}
+        got = soak.placement_from("Name:\tyams-daemon\nCpus_allowed_list:\t2-5,26-29\n",
+                                  "0::/user.slice/x.scope\n", lambda path: files.get(path, ""))
+        self.assertEqual(got, {"cpus_allowed_list": "2-5,26-29", "cgroup": "/user.slice/x.scope",
+                               "cpu_max": "400000 100000", "memory_max": "8589934592"})
+        # Missing cgroup files (cgroup v1, or no delegation) are recorded as unknown, not errors.
+        bare = soak.placement_from("Cpus_allowed_list:\t0-47\n", "0::/\n", lambda path: "")
+        self.assertEqual(bare["cpu_max"], None)
+        self.assertEqual(bare["cpus_allowed_list"], "0-47")
+
+    def test_stacks_at_end_snapshots_once_after_timed_phases(self):
+        with tempfile.TemporaryDirectory() as td:
+            harness, _stopped = fake_run_harness(Path(td) / "work", stacks_at_end=True,
+                                                 phases="idle:0")
+            harness.seed = lambda: None
+            snapshots = []
+            harness.snapshot_stacks = lambda tag, force=False: snapshots.append((tag, force))
+            with mock.patch.object(soak, "placement", return_value={"cpus_allowed_list": "0"}):
+                harness.run()
+            self.assertEqual(snapshots, [("end", True)])
+            meta = json.loads((harness.out / "meta.json").read_text())
+            self.assertTrue(meta["observer_probes"]["gdb_snapshot_at_end"])
+            self.assertEqual(meta["placement"], {"cpus_allowed_list": "0"})
 
 
 class SoakCommandPathTests(unittest.TestCase):
