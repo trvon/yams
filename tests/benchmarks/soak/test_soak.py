@@ -38,7 +38,7 @@ def run_args(work, **overrides):
         "add_batch": 100, "settle_max": 1, "settle_poll": 1, "settle_cpu": 5.0,
         "phases": "idle:0", "interval": 1.0, "status_every": 0.0, "load_period": 0.0,
         "warmup": 0, "stacks_per_phase": 0, "stack_depth": 1, "keep_daemon": True,
-        "stacks_at_end": False, "daemon_prefix": None,
+        "stacks_at_end": False, "daemon_prefix": None, "settle_active_max": 1,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -188,6 +188,20 @@ class SoakSummaryTests(unittest.TestCase):
         self.assertNotIn("secret", redacted)
         self.assertNotIn('password="p"', redacted)
         self.assertIn('mode = "safe"', redacted)
+
+
+class SettleGateTests(unittest.TestCase):
+    def test_settle_admits_the_probes_own_active_request(self):
+        # worker.active counts the status request itself when the snapshot refreshes while
+        # the request is in flight; one active job must not block settling.
+        self.assertTrue(soak.settle_quiet(0, 1, 2.0, 15.0, 1))
+        self.assertTrue(soak.settle_quiet(0, 0, 2.0, 15.0, 1))
+        self.assertTrue(soak.settle_quiet(0, None, 2.0, 15.0, 1))
+        self.assertFalse(soak.settle_quiet(0, 2, 2.0, 15.0, 1))
+        self.assertFalse(soak.settle_quiet(3, 0, 2.0, 15.0, 1))
+        self.assertFalse(soak.settle_quiet(0, 0, 20.0, 15.0, 1))
+        self.assertFalse(soak.settle_quiet(0, 0, None, 15.0, 1))
+        self.assertFalse(soak.settle_quiet(0, 1, 2.0, 15.0, 0))
 
 
 class DaemonPlacementTests(unittest.TestCase):

@@ -91,6 +91,19 @@ def parse_kv_kb(text: str) -> dict[str, int]:
     return out
 
 
+def settle_quiet(queued, active, cpu, settle_cpu: float, active_max: int) -> bool:
+    """Settle gate: post-ingest drained and the daemon quiet.
+
+    `active` is the daemon's worker.active from `yams status`, which counts in-flight IPC
+    requests including the status request that produced it when the metrics snapshot is
+    refreshed while the request is in flight (a fast refresh makes that the common case). The
+    probe's own job is therefore allowed: active_max defaults to 1.
+    """
+    if queued not in (0, None) or cpu is None or cpu >= settle_cpu:
+        return False
+    return active is None or active <= active_max
+
+
 def task_stat(path: str) -> dict | None:
     s = read_text(path)
     if not s:
@@ -564,7 +577,8 @@ class Soak:
             prev = (cur, time.monotonic())
             log(f"settle: queued={queued} active={active} cpu={cpu if cpu is None else round(cpu, 1)}% "
                 f"docs={(st or {}).get('totalDocuments')} indexed={(st or {}).get('indexedDocuments')}")
-            if queued == 0 and (active in (0, None)) and cpu is not None and cpu < self.a.settle_cpu:
+            if settle_quiet(queued, active, cpu, self.a.settle_cpu,
+                            getattr(self.a, "settle_active_max", 1)):
                 quiet += 1
                 if quiet >= 3:
                     log("settled")
@@ -1182,6 +1196,8 @@ def main() -> int:
     r.add_argument("--settle-max", type=int, default=1800)
     r.add_argument("--settle-poll", type=int, default=15)
     r.add_argument("--settle-cpu", type=float, default=5.0, help="daemon CPU%% below which seeding counts as settled")
+    r.add_argument("--settle-active-max", type=int, default=1,
+                   help="worker.active allowed while settling; 1 admits the status probe's own request (default)")
     r.add_argument("--stacks-per-phase", type=int, default=0, help="opt-in gdb stack snapshots per phase (0 disables, default)")
     r.add_argument("--stacks-at-end", action="store_true",
                    help="one gdb stack snapshot after the timed phases, to label threads")
