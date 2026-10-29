@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -446,6 +447,21 @@ struct MetricsSnapshot {
     bool statusDetailAvailable{false};
 };
 
+/// Cached proportional-set-size probe. /proc/self/smaps_rollup walks every VMA of the process
+/// and costs 10-20 ms of kernel time on a daemon with hundreds of MiB mapped; read on every
+/// metrics poll it was most of the daemon's idle CPU. PSS only feeds status (memoryUsageMb,
+/// pss_bytes), so it is re-read at most once per `ttl`; RSS (/proc/self/status, O(1)) is read
+/// on every poll as before.
+struct PssSampleState {
+    std::chrono::steady_clock::time_point lastAt{};
+    std::uint64_t lastKb{0};
+};
+std::uint64_t sampleProcessPssKb(PssSampleState& state, std::chrono::steady_clock::time_point now,
+                                 std::chrono::milliseconds ttl,
+                                 const std::function<std::uint64_t()>& readPss);
+/// 5 s while the daemon is busy, 10 s while idle.
+std::chrono::milliseconds pssSampleTtl(bool daemonIdle) noexcept;
+
 class SocketServer; // Forward declaration
 
 class DaemonMetrics : public std::enable_shared_from_this<DaemonMetrics> {
@@ -620,6 +636,12 @@ private:
     mutable std::map<std::string, double> cachedTuningParams_;
     mutable std::uint64_t cachedTunerDocCount_{0}; // docCount when tuner was cached
     uint32_t tunerStateTtlMs_{30000}; // 30s TTL for tuner state (matches CorpusStats cache)
+
+    // Rate-limited PSS probe (see sampleProcessPssKb); shared by the polling loop and
+    // request-time collection, hence the mutex.
+    std::uint64_t cachedPssKb() const;
+    mutable std::mutex pssMutex_;
+    mutable PssSampleState pssState_;
 };
 
 std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept;

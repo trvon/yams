@@ -78,6 +78,22 @@
 
 namespace yams::daemon {
 
+std::uint64_t sampleProcessPssKb(PssSampleState& state, std::chrono::steady_clock::time_point now,
+                                 std::chrono::milliseconds ttl,
+                                 const std::function<std::uint64_t()>& readPss) {
+    const bool never = state.lastAt.time_since_epoch().count() == 0;
+    const bool due = never || now < state.lastAt || (now - state.lastAt) >= ttl;
+    if (due) {
+        state.lastKb = readPss();
+        state.lastAt = now;
+    }
+    return state.lastKb;
+}
+
+std::chrono::milliseconds pssSampleTtl(bool daemonIdle) noexcept {
+    return std::chrono::milliseconds(daemonIdle ? 10000 : 5000);
+}
+
 std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept {
     constexpr std::uint64_t kMinTtlMs = 60'000;
     constexpr std::uint64_t kMaxTtlMs = 1'800'000;
@@ -286,11 +302,11 @@ static std::uint64_t readRssKb() {
 #endif
 }
 
-static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown) {
+// `pss_kb` comes from the rate-limited probe (DaemonMetrics::cachedPssKb); 0 means unknown.
+static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown, std::uint64_t pss_kb) {
     MemoryUsageSample sample;
     const auto sampleStart = std::chrono::steady_clock::now();
 
-    const std::uint64_t pss_kb = readPssKb();
     const std::uint64_t rss_kb = readRssKb();
     if (pss_kb > 0) {
         sample.memoryUsageMb = static_cast<double>(pss_kb) / 1024.0;
@@ -547,6 +563,19 @@ std::uint64_t age_ms(std::chrono::steady_clock::time_point now,
 }
 
 } // namespace
+
+std::uint64_t DaemonMetrics::cachedPssKb() const {
+    bool idle = false;
+    try {
+        if (auto snap = TuningSnapshotRegistry::instance().get()) {
+            idle = snap->daemonIdle;
+        }
+    } catch (...) {
+    }
+    std::lock_guard<std::mutex> lock(pssMutex_);
+    return sampleProcessPssKb(pssState_, std::chrono::steady_clock::now(), pssSampleTtl(idle),
+                              readPssKb);
+}
 
 DaemonMetrics::DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateComponent* state,
                              const ServiceManager* services, WorkCoordinator* coordinator,
@@ -824,7 +853,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                 double cpu = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
                 const bool includeAllocatorBreakdown =
                     allocatorBreakdownEnabled() || mallocStackLoggingEnabled();
-                auto memSample = sampleMemoryUsage(includeAllocatorBreakdown);
+                auto memSample = sampleMemoryUsage(includeAllocatorBreakdown, cachedPssKb());
 
                 std::unique_lock lock(cacheMutex_);
                 cached_.cpuUsagePercent = cpu;
@@ -1771,7 +1800,7 @@ void DaemonMetrics::populateResourceVectorSnapshot(MetricsSnapshot& out, bool de
         if (needMemoryFallback) {
             const bool includeAllocatorBreakdown =
                 (detailed && allocatorBreakdownEnabled()) || mallocStackLoggingEnabled();
-            auto memSample = sampleMemoryUsage(includeAllocatorBreakdown);
+            auto memSample = sampleMemoryUsage(includeAllocatorBreakdown, cachedPssKb());
             out.memoryUsageMb = memSample.memoryUsageMb;
             out.memoryBreakdownBytes = std::move(memSample.breakdownBytes);
             out.diagnosticCounters = std::move(memSample.diagnosticCounters);
