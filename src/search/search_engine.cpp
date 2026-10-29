@@ -1795,28 +1795,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         traceCollector.markStageSkipped("entity_vector", vectorTierSkipReason);
     };
 
-    auto computeLexicalEvidence = [&](const std::vector<ComponentResult>& componentResults) {
-        size_t lexicalHits = 0;
-        float topTextScore = 0.0f;
-        for (const auto& componentResult : componentResults) {
-            if (componentResult.source == ComponentResult::Source::Text ||
-                componentResult.source == ComponentResult::Source::SimeonText) {
-                ++lexicalHits;
-                topTextScore = std::max(topTextScore, componentResult.score);
-            } else if (componentResult.source == ComponentResult::Source::PathTree) {
-                ++lexicalHits;
-            }
-        }
-        return std::pair<size_t, float>{lexicalHits, topTextScore};
-    };
-
+    // Raw-scale lexical evidence for the semantic-budget KG skip. The fused score is batch
+    // normalized (top is always 1.0), so it cannot judge strength.
     auto recordSemanticBudgetLexicalEvidence =
         [&](const std::vector<ComponentResult>& componentResults) {
-            const auto [lexicalHits, topTextScore] = computeLexicalEvidence(componentResults);
-            response.debugStats["semantic_budget_lexical_hits"] = std::to_string(lexicalHits);
+            const auto signal = detail::classifyTier1TextSignal(
+                componentResults, detail::kSemanticBudgetMinTextHits,
+                detail::kSemanticBudgetMinTopTextScore);
+            response.debugStats["semantic_budget_lexical_hits"] = std::to_string(signal.textHits);
             response.debugStats["semantic_budget_top_text_score"] =
-                fmt::format("{:.4f}", topTextScore);
-            return std::pair<size_t, float>{lexicalHits, topTextScore};
+                fmt::format("{:.4f}", signal.topTextScore);
+            return signal.strong;
         };
 
     auto materializeConcepts = [&](bool waitIfConfigured) {
@@ -2668,11 +2657,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             "metadata", workingConfig.metadataWeight, stats_.metadataQueries,
             stats_.avgMetadataTimeMicros);
 
-        const auto [budgetLexicalHits, budgetTopTextScore] =
-            semanticBudgetActive ? recordSemanticBudgetLexicalEvidence(allComponentResults)
-                                 : std::pair<size_t, float>{0, 0.0f};
         const bool strongBudgetLexical =
-            semanticBudgetActive && (budgetLexicalHits >= 5 || budgetTopTextScore >= 0.20f);
+            semanticBudgetActive && recordSemanticBudgetLexicalEvidence(allComponentResults);
         if (semanticBudgetActive && strongBudgetLexical) {
             semanticTierSkipReason = "budget_guard_strong_lexical";
             response.debugStats["semantic_budget_skip_reason"] = semanticTierSkipReason;
