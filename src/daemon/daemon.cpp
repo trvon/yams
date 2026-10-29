@@ -1,6 +1,7 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 
 #include <cstdio>
 #include <fstream>
@@ -689,6 +690,20 @@ Result<void> YamsDaemon::start() {
     return Result<void>();
 }
 
+uint32_t YamsDaemon::runLoopWaitMs(bool daemonIdle, bool externalShutdownFlag, uint32_t tickMs,
+                                   uint32_t idleTickMs) noexcept {
+    // The external shutdown flag is set from a signal handler and only polled here, so the
+    // wait bounds SIGTERM latency: 50 ms while busy. While idle the loop ran at 20 wakes/s for
+    // nothing; cap the idle wait at kIdleShutdownPollMs instead (2 wakes/s, half a second of
+    // worst-case shutdown latency on an idle daemon).
+    constexpr uint32_t kShutdownPollMs = 50;
+    constexpr uint32_t kIdleShutdownPollMs = 500;
+    if (externalShutdownFlag) {
+        return daemonIdle ? std::min(idleTickMs, kIdleShutdownPollMs) : kShutdownPollMs;
+    }
+    return daemonIdle ? idleTickMs : tickMs;
+}
+
 void YamsDaemon::runLoop() {
     set_current_thread_name("yams-daemon-main");
     runLoopStarted_.store(true, std::memory_order_release);
@@ -824,9 +839,10 @@ void YamsDaemon::runLoop() {
         // yams-qe6r fix: Use shorter poll interval when external shutdown flag is bound
         // This ensures prompt SIGTERM response since CV only checks predicate on timeout
         // Default statusTickMs is 250ms, but for SIGTERM we want ~50ms responsiveness
-        constexpr uint32_t kShutdownPollMs = 50;
         auto* extFlag = externalShutdownFlag_.load(std::memory_order_acquire);
-        uint32_t effective_tick_ms = extFlag ? kShutdownPollMs : tick_ms;
+        const bool daemonIdle = (tick_ms == TuneAdvisor::idleTickMs());
+        const uint32_t effective_tick_ms =
+            runLoopWaitMs(daemonIdle, extFlag != nullptr, tick_ms, TuneAdvisor::idleTickMs());
         spdlog::debug("runLoop: waiting on cv for {}ms (external_flag={})", effective_tick_ms,
                       extFlag != nullptr);
         std::unique_lock<std::mutex> lock(stop_mutex_);

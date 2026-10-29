@@ -67,11 +67,26 @@ constexpr std::string_view pressureLevelName(ResourcePressureLevel level) noexce
 
 /// Snapshot of ALL managed scaling dimensions at a point in time.
 /// Uses designated initializers for clarity at construction sites.
+/// Process memory as reported by /proc/self/status (bytes). File-backed RSS (SQLite mmap,
+/// page cache) is reclaimable and warms up after load; anonymous RSS is what a leak or
+/// allocator retention moves, so memory pressure is judged on anon when the kernel reports it.
+struct ProcessMemory {
+    std::uint64_t rssBytes{0};
+    std::uint64_t anonBytes{0}; // RssAnon; 0 when the kernel does not report it
+    std::uint64_t fileBytes{0}; // RssFile + RssShmem
+};
+/// Parse VmRSS / RssAnon / RssFile / RssShmem (kB lines) from /proc/self/status text.
+ProcessMemory parseProcStatusMemory(std::string_view text) noexcept;
+/// Pressure ratio: anon over budget when anon is known, else rss over budget; 0 when no budget.
+double memoryPressureRatio(std::uint64_t rssBytes, std::uint64_t anonBytes,
+                           std::uint64_t budgetBytes) noexcept;
+
 struct ResourceSnapshot {
     // Memory metrics
-    std::uint64_t rssBytes{0};          // Current resident set size
+    std::uint64_t rssBytes{0};          // Current resident set size (anon + file-backed)
+    std::uint64_t anonBytes{0};         // Anonymous RSS (heap, anonymous mmap); 0 if unknown
     std::uint64_t memoryBudgetBytes{0}; // Configured memory budget
-    double memoryPressure{0.0};         // rssBytes / memoryBudgetBytes (0.0-1.0+)
+    double memoryPressure{0.0};         // anonBytes (rssBytes if unknown) / memoryBudgetBytes
 
     // CPU metrics
     double cpuUsagePercent{0.0}; // Process CPU % across all cores
@@ -416,6 +431,7 @@ private:
     // Cached /proc read state to throttle filesystem I/O
     std::chrono::steady_clock::time_point lastProcReadTime_{};
     std::uint64_t cachedRssBytes_{0};
+    std::uint64_t cachedAnonBytes_{0};
     double cachedCpuPercent_{0.0};
 
     // Host pressure sampling state. PSI avg10 only moves every 2s, so sample at most once a

@@ -3,7 +3,8 @@
 #include <cstdlib>
 #include <filesystem>
 #if !defined(_WIN32) && !defined(__APPLE__)
-#include <fstream> // NOLINT(misc-include-cleaner) -- used by the POSIX /proc probes below.
+#include <fstream>
+#include <iterator> // NOLINT(misc-include-cleaner) -- used by the POSIX /proc probes below.
 #endif
 #include <iomanip>
 #include <sstream>
@@ -314,6 +315,20 @@ static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown, std::
     } else if (rss_kb > 0) {
         sample.memoryUsageMb = static_cast<double>(rss_kb) / 1024.0;
     }
+#if !defined(_WIN32) && !defined(__APPLE__)
+    // Anonymous vs file-backed split (RssAnon / RssFile+RssShmem, O(1) from /proc/self/status):
+    // leaks and allocator retention move anon_bytes; file_bytes is reclaimable mmap/page cache.
+    {
+        std::ifstream status("/proc/self/status");
+        std::string text((std::istreambuf_iterator<char>(status)),
+                         std::istreambuf_iterator<char>());
+        const auto mem = parseProcStatusMemory(text);
+        if (mem.anonBytes > 0) {
+            sample.breakdownBytes["anon_bytes"] = mem.anonBytes;
+            sample.breakdownBytes["file_bytes"] = mem.fileBytes;
+        }
+    }
+#endif
     if (rss_kb > 0) {
         sample.breakdownBytes["rss_bytes"] = rss_kb * 1024ull;
     }

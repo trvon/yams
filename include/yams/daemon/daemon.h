@@ -181,6 +181,10 @@ public:
     /// Run the daemon main loop on the calling thread. Call after start().
     /// Returns when stopRequested_ becomes true or requestStop() is called.
     void runLoop();
+    /// Wait between main-loop ticks: 50 ms while an external shutdown flag is bound and the
+    /// daemon is busy; while idle the tuning idle tick, capped at 500 ms when a flag is bound.
+    static uint32_t runLoopWaitMs(bool daemonIdle, bool externalShutdownFlag, uint32_t tickMs,
+                                  uint32_t idleTickMs) noexcept;
     /// Test helper: trigger deferred async initialization and the init waiter
     /// without entering the long-lived runLoop wait loop.
     void testingStartAsyncInitWithoutRunLoop();

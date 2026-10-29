@@ -886,6 +886,15 @@ if catch2_dep.found()
     'timeout': 60,
   }]
 
+#ResourceGovernor memory accounting (anon vs file-backed RSS)
+  catch2_test_table += [{
+    'name': 'resource_governor_memory',
+    'sources': files('unit/daemon/resource_governor_memory_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'governor'],
+    'timeout': 30,
+  }]
+
 #PressureLimitedPoller shutdown unit tests(capability - sleep / stop paths)
   catch2_test_table += [{
     'name': 'pressure_limited_poller',

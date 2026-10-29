@@ -49,44 +49,36 @@ static inline std::uint64_t now_ns() {
 }
 
 /// Read current process RSS in bytes (cross-platform)
-std::uint64_t readRssBytes() {
+ProcessMemory readProcessMemory() {
+    ProcessMemory mem;
 #if defined(_WIN32)
-    PROCESS_MEMORY_COUNTERS pmc{};
-    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
-        return pmc.WorkingSetSize;
+    PROCESS_MEMORY_COUNTERS_EX pmc{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                             sizeof(pmc))) {
+        mem.rssBytes = pmc.WorkingSetSize;
     }
-    return 0;
-
 #elif defined(__APPLE__)
-    mach_task_basic_info info{};
-    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info),
-                  &count) == KERN_SUCCESS) {
-        return info.resident_size;
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
+        mem.rssBytes = info.resident_size;
     }
-    return 0;
-
 #else
-    // Linux: read /proc/self/status for VmRSS
+    // Linux: VmRSS / RssAnon / RssFile from /proc/self/status (O(1); no VMA walk)
     std::FILE* file = std::fopen("/proc/self/status", "r");
     if (!file) {
-        return 0;
+        return mem;
     }
-
-    std::uint64_t rssKb = 0;
-    char line[256];
-    while (std::fgets(line, sizeof(line), file)) {
-        if (std::strncmp(line, "VmRSS:", 6) == 0) {
-            unsigned long kb = 0;
-            if (std::sscanf(line + 6, " %lu", &kb) == 1) {
-                rssKb = kb;
-            }
-            break;
-        }
+    std::string text;
+    char buf[4096];
+    size_t n = 0;
+    while ((n = std::fread(buf, 1, sizeof(buf), file)) > 0) {
+        text.append(buf, n);
     }
     std::fclose(file);
-    return rssKb * 1024;
+    mem = parseProcStatusMemory(text);
 #endif
+    return mem;
 }
 
 /// Read CPU usage percent for the current process using delta-based calculation.
@@ -241,6 +233,49 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
 // Singleton
 // ============================================================================
 
+ProcessMemory parseProcStatusMemory(std::string_view text) noexcept {
+    ProcessMemory mem;
+    auto value = [&](std::string_view key) -> std::uint64_t {
+        std::size_t pos = 0;
+        while (pos < text.size()) {
+            const std::size_t eol = text.find('\n', pos);
+            const std::string_view line = text.substr(
+                pos, eol == std::string_view::npos ? std::string_view::npos : eol - pos);
+            if (line.substr(0, key.size()) == key) {
+                std::uint64_t kb = 0;
+                bool digits = false;
+                for (char ch : line.substr(key.size())) {
+                    if (ch >= '0' && ch <= '9') {
+                        kb = kb * 10 + static_cast<std::uint64_t>(ch - '0');
+                        digits = true;
+                    } else if (digits) {
+                        break;
+                    }
+                }
+                return kb * 1024ull;
+            }
+            if (eol == std::string_view::npos) {
+                break;
+            }
+            pos = eol + 1;
+        }
+        return 0;
+    };
+    mem.rssBytes = value("VmRSS:");
+    mem.anonBytes = value("RssAnon:");
+    mem.fileBytes = value("RssFile:") + value("RssShmem:");
+    return mem;
+}
+
+double memoryPressureRatio(std::uint64_t rssBytes, std::uint64_t anonBytes,
+                           std::uint64_t budgetBytes) noexcept {
+    if (budgetBytes == 0) {
+        return 0.0;
+    }
+    const std::uint64_t used = anonBytes > 0 ? anonBytes : rssBytes;
+    return static_cast<double>(used) / static_cast<double>(budgetBytes);
+}
+
 ResourceGovernor& ResourceGovernor::instance() noexcept {
     static ResourceGovernor inst;
     return inst;
@@ -389,19 +424,21 @@ void ResourceGovernor::collectMetrics(ServiceManager* sm, ResourceSnapshot& snap
     constexpr auto kMinProcInterval = std::chrono::milliseconds(100);
 
     if (now - lastProcReadTime_ >= kMinProcInterval) {
-        cachedRssBytes_ = readRssBytes();
+        const auto mem = readProcessMemory();
+        cachedRssBytes_ = mem.rssBytes;
+        cachedAnonBytes_ = mem.anonBytes;
         cachedCpuPercent_ = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
         lastProcReadTime_ = now;
     }
 
     snap.rssBytes = cachedRssBytes_;
+    snap.anonBytes = cachedAnonBytes_;
     snap.memoryBudgetBytes = TuneAdvisor::memoryBudgetBytes();
     snap.cpuUsagePercent = cachedCpuPercent_;
 
-    if (snap.memoryBudgetBytes > 0) {
-        snap.memoryPressure =
-            static_cast<double>(snap.rssBytes) / static_cast<double>(snap.memoryBudgetBytes);
-    }
+    // Pressure is judged on anonymous memory: file-backed RSS is reclaimable page cache.
+    snap.memoryPressure =
+        memoryPressureRatio(snap.rssBytes, snap.anonBytes, snap.memoryBudgetBytes);
 
     // Compute scaling headroom (inverse of pressure, clamped 0-1)
     snap.scalingHeadroom = std::clamp(1.0 - snap.memoryPressure, 0.0, 1.0);
