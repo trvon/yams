@@ -190,6 +190,38 @@ class SoakSummaryTests(unittest.TestCase):
         self.assertIn('mode = "safe"', redacted)
 
 
+class LeakSignalTests(unittest.TestCase):
+    def test_summary_leak_signal_uses_anonymous_memory(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            rows = []
+            for i in range(130):
+                r = sample(i * 10, "0-idle", i, i)
+                r["rss_kb"] = (500 + i) * 1024      # file-backed warm-up: RSS grows
+                r["anon_kb"] = 300 * 1024            # anon flat
+                r["pss_kb"] = (400 + i) * 1024
+                rows.append(r)
+            (out / "samples.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+            (out / "ops.jsonl").write_text("")
+            summary = soak.summarize(out)
+            sig = summary["leak_signal"]
+            self.assertEqual(sig["series"], "anon")
+            self.assertEqual(sig["phase"], "0-idle")
+            self.assertAlmostEqual(sig["anon_slope_mib_h"], 0.0, places=1)
+            self.assertGreater(sig["file_backed_last_mib"], 200.0)
+            self.assertIn("anon", sig["note"])
+
+
+class PidFileTests(unittest.TestCase):
+    def test_parse_pid_file_accepts_json_and_bare(self):
+        self.assertEqual(soak.parse_pid_file('{"exe":"/x/yams-daemon","pid":3901327,"v":1}\n'), 3901327)
+        self.assertEqual(soak.parse_pid_file(" 4242\n"), 4242)
+        self.assertIsNone(soak.parse_pid_file(""))
+        self.assertIsNone(soak.parse_pid_file("{\"exe\":\"x\"}"))
+        self.assertIsNone(soak.parse_pid_file("not a pid"))
+        self.assertIsNone(soak.parse_pid_file('{"pid": 0}'))
+
+
 class SettleGateTests(unittest.TestCase):
     def test_settle_admits_the_probes_own_active_request(self):
         # worker.active counts the status request itself when the snapshot refreshes while
