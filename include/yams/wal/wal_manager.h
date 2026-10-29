@@ -15,6 +15,11 @@
 
 namespace yams::wal {
 
+/// Sync-thread wait: syncTimeout while entries are pending, otherwise the (longer) idle wait.
+std::chrono::milliseconds nextSyncWait(std::size_t pendingEntries,
+                                       std::chrono::milliseconds syncTimeout,
+                                       std::chrono::milliseconds idleSyncTimeout) noexcept;
+
 // Forward declarations
 class WALFile;
 class Transaction;
@@ -39,9 +44,12 @@ public:
         size_t maxLogSize = 100 * 1024 * 1024;      // 100MB per log file
         size_t syncInterval = 1000;                 // Sync every N entries
         std::chrono::milliseconds syncTimeout{100}; // Max time between syncs
-        bool compressOldLogs = true;                // Compress rotated logs
-        size_t maxOpenFiles = 10;                   // Max concurrent log files
-        bool enableGroupCommit = true;              // Batch commits for performance
+        // Wait of the sync thread while no entry is pending (append() wakes it); bounds how
+        // long a stray entry could wait if a notify were ever missed.
+        std::chrono::milliseconds idleSyncTimeout{5000};
+        bool compressOldLogs = true;   // Compress rotated logs
+        size_t maxOpenFiles = 10;      // Max concurrent log files
+        bool enableGroupCommit = true; // Batch commits for performance
     };
 
     // Recovery statistics
