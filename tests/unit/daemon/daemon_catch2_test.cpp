@@ -1515,3 +1515,16 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon async init barrier stress test",
 }
 
 } // namespace yams::daemon::test
+
+TEST_CASE("runLoopWaitMs follows the idle tick instead of polling the shutdown flag at 20 Hz",
+          "[daemon][runloop][idle]") {
+    using yams::daemon::YamsDaemon;
+    // busy, external shutdown flag bound: keep the 50 ms SIGTERM bound
+    CHECK(YamsDaemon::runLoopWaitMs(false, true, 5, 1000) == 50u);
+    // idle, flag bound: idle tick capped at 500 ms (2 wakes/s instead of 20)
+    CHECK(YamsDaemon::runLoopWaitMs(true, true, 5, 1000) == 500u);
+    CHECK(YamsDaemon::runLoopWaitMs(true, true, 5, 200) == 200u);
+    // no external flag: tuning cadence as before
+    CHECK(YamsDaemon::runLoopWaitMs(false, false, 5, 1000) == 5u);
+    CHECK(YamsDaemon::runLoopWaitMs(true, false, 5, 1000) == 1000u);
+}
