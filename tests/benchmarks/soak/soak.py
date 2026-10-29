@@ -31,6 +31,7 @@ import glob
 import json
 import math
 import os
+import platform
 import random
 import re
 import shlex
@@ -695,7 +696,7 @@ class Soak:
         phases = self.parse_phases()
         self.prepare_dirs()
         meta = {"schema_version": 2, "argv": sys.argv, "start": time.time(),
-                "host": os.uname().nodename, "phases": phases, "interval_s": self.a.interval,
+                "host": platform.node(), "phases": phases, "interval_s": self.a.interval,
                 "yams": self.yams, "daemon": self.daemon_bin, "clk_tck": CLK_TCK,
                 "daemon_prefix": getattr(self.a, "daemon_prefix", None),
                 "observer_probes": {"status_every_s": self.a.status_every,
