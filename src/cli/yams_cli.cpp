@@ -125,7 +125,12 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
     }
 
     app_ = std::make_unique<CLI::App>("YAMS", "yams");
-    app_->prefix_command(); // Allow global options before and after subcommands
+    // Fallthrough permits global options after subcommands. prefix_command instead
+    // accepts unparsed trailing arguments, silently hiding misspelled options.
+    app_->fallthrough();
+    // A later token that happens to name a command is an argument to the selected
+    // command, not a second top-level invocation (e.g. `grep completion`).
+    app_->require_subcommand(0, 1);
     // Prefer generated effective version if present; otherwise fallback to existing macros.
 #if __has_include(<version_generated.h>)
     {

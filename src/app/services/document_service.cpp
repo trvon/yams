@@ -2029,8 +2029,21 @@ public:
         if (foundDoc) {
             doc.path = foundDoc->filePath;
             doc.name = foundDoc->fileName;
+            doc.fileName = foundDoc->fileName;
             doc.size = foundDoc->fileSize > 0 ? static_cast<uint64_t>(foundDoc->fileSize) : 0;
             doc.mimeType = foundDoc->mimeType;
+            doc.fileType = utils::classifyFileType(foundDoc->mimeType, foundDoc->fileExtension);
+            doc.created = toEpochSeconds(foundDoc->createdTime);
+            doc.modified = toEpochSeconds(foundDoc->modifiedTime);
+            doc.indexed = toEpochSeconds(foundDoc->indexedTime);
+            auto metadata = ctx_.metadataRepo->getAllMetadata(foundDoc->id);
+            if (!metadata) {
+                return metadata.error();
+            }
+            for (const auto& [key, value] : metadata.value()) {
+                doc.metadata.emplace(key, value.asString());
+            }
+            doc.tags = extractTags(metadata.value());
         } else {
             // Fallback: path unknown; mime default
             doc.path = req.outputPath.empty() ? resolvedHash : req.outputPath;
