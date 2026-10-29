@@ -84,13 +84,13 @@ class Mesh:
         self.compose_path = work / "docker-compose.yml"
         self.state: dict = {}
         if self.state_path.exists():
-            self.state = json.loads(self.state_path.read_text())
+            self.state = json.loads(self.state_path.read_text(encoding="utf-8"))
             self.project = self.state.get("project", self.project)
 
     # -- state ---------------------------------------------------------
     def save(self) -> None:
         self.work.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(self.state, indent=2))
+        self.state_path.write_text(json.dumps(self.state, indent=2), encoding="utf-8")
 
     def need_state(self) -> None:
         if not self.state.get("nodes"):
@@ -223,7 +223,7 @@ class Mesh:
             ]
         lines += ["networks:", "  mesh:", "    driver: bridge", "volumes:"]
         lines += [f"  {n['name']}-data:" for n in nodes]
-        self.compose_path.write_text("\n".join(lines) + "\n")
+        self.compose_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def cmd_up(self, a) -> None:
         if self.state.get("nodes") and not a.force:
@@ -410,20 +410,20 @@ class Mesh:
             nd = out / n["name"]
             nd.mkdir(exist_ok=True)
             entry = {"status": self.node_status(n), "peers": self.p2p_json(n, "peers")}
-            (nd / "p2p-status.json").write_text(json.dumps(entry["status"], indent=2))
-            (nd / "p2p-peers.json").write_text(json.dumps(entry["peers"], indent=2))
+            (nd / "p2p-status.json").write_text(json.dumps(entry["status"], indent=2), encoding="utf-8")
+            (nd / "p2p-peers.json").write_text(json.dumps(entry["peers"], indent=2), encoding="utf-8")
             text = self.yams(n, "p2p", "status").stdout
-            (nd / "p2p-status.txt").write_text(text)
+            (nd / "p2p-status.txt").write_text(text, encoding="utf-8")
             logs = self.exec(n, "sh", "-c", "cat /node/log/daemon.log 2>/dev/null", check=False).stdout
-            (nd / "daemon.log").write_text(logs)
+            (nd / "daemon.log").write_text(logs, encoding="utf-8")
             (nd / "container.log").write_text(
-                run(["docker", "logs", self.ctr(n)], check=False).stdout or ""
+                run(["docker", "logs", self.ctr(n)], check=False).stdout or "", encoding="utf-8"
             )
             entry["failures"] = {p: logs.count(p) for p in FAILURE_PATTERNS if logs.count(p)}
             entry["status_line"] = text.strip().splitlines()[0] if text.strip() else ""
             entry["apply"] = (entry["status"] or {}).get("apply")
             summary[n["name"]] = entry
-        (out / "summary.json").write_text(json.dumps(summary, indent=2))
+        (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         for name, e in summary.items():
             print(f"  {name}: {e['status_line']}")
             for p, c in e["failures"].items():
@@ -506,7 +506,7 @@ class Mesh:
                 if cpu > prev[0]:
                     hottest[names[parts[0]]] = (cpu, parts[0])
             time.sleep(max(0.0, a.interval - (time.monotonic() - t0)))
-        with (out / "idle.csv").open("w") as f:
+        with (out / "idle.csv").open("w", encoding="utf-8") as f:
             f.write("t,monotonic_s,node,cpu_pct,container_mem_raw,container_mem_mib\n")
             for r in rows:
                 parsed = "" if r["container_mem_mib"] is None else f'{r["container_mem_mib"]:.3f}'
@@ -549,9 +549,9 @@ class Mesh:
             n = next(x for x in self.nodes if x["name"] == node)
             top = self.exec(n, "sh", "-c", "top -H -b -n 1 -o %CPU 2>/dev/null | head -40",
                             check=False).stdout or ""
-            (out / f"{node}-threads.txt").write_text(top)
+            (out / f"{node}-threads.txt").write_text(top, encoding="utf-8")
             summary[node]["threads_file"] = f"{node}-threads.txt"
-        (out / "idle.json").write_text(json.dumps(summary, indent=2))
+        (out / "idle.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         cpu_failed = False
         measurement_failed = False
         for name, s in summary.items():
@@ -729,7 +729,7 @@ class Mesh:
         self.state["last_converge"] = result
         self.save()
         self.work.mkdir(parents=True, exist_ok=True)
-        (self.work / "converge.json").write_text(json.dumps(result, indent=2))
+        (self.work / "converge.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
         # Builds without the field report it on no node; once any node reports it, every node
         # must report an explicit zero (a failed status read does not pass).
         quarantined = {}
@@ -737,7 +737,7 @@ class Mesh:
             quarantined = {k: s.get("quarantined_writers") for k, s in result["final"].items()
                            if not self.is_zero(s.get("quarantined_writers"))}
         result["quarantined_writers"] = quarantined
-        (self.work / "converge.json").write_text(json.dumps(result, indent=2))
+        (self.work / "converge.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
         if converged:
             log(f"CONVERGED in {result['seconds']}s: every document hash is readable on every node")
             if quarantined:
@@ -801,8 +801,8 @@ class Mesh:
         self.cmd_seed(a)
         rc = self.cmd_converge(a)
         summary = self.collect(out)
-        conv = json.loads((self.work / "converge.json").read_text())
-        (out / "converge.json").write_text(json.dumps(conv, indent=2))
+        conv = json.loads((self.work / "converge.json").read_text(encoding="utf-8"))
+        (out / "converge.json").write_text(json.dumps(conv, indent=2), encoding="utf-8")
         lines = [
             f"# Scenario {label}",
             "",
@@ -827,7 +827,7 @@ class Mesh:
             )
         lines += ["", "Status lines:", ""]
         lines += [f"    {n}: {e['status_line']}" for n, e in summary.items()]
-        (out / "REPORT.md").write_text("\n".join(lines) + "\n")
+        (out / "REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         log(f"report: {out / 'REPORT.md'}")
         if not a.keep:
             self.cmd_down(argparse.Namespace(keep_image=False, purge=False))

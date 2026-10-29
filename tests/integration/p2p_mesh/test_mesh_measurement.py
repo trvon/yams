@@ -84,9 +84,9 @@ class MemoryMeasurementTests(unittest.TestCase):
 
             with mock.patch.object(mesh, "time", clock), mock.patch.object(mesh, "run", fake_run):
                 self.assertEqual(instance.cmd_idle(self.idle_args(Path(td) / "out")), 0)
-            summary = json.loads((Path(td) / "out" / "idle.json").read_text())
+            summary = json.loads((Path(td) / "out" / "idle.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["n1"]["container_mem_slope_mib_per_h"], 3600.0)
-            header = (Path(td) / "out" / "idle.csv").read_text().splitlines()[0]
+            header = (Path(td) / "out" / "idle.csv").read_text(encoding="utf-8").splitlines()[0]
             self.assertIn("monotonic_s", header)
 
     def test_invalid_cpu_sample_is_an_explicit_measurement_failure(self):
@@ -101,7 +101,7 @@ class MemoryMeasurementTests(unittest.TestCase):
             with mock.patch.object(mesh, "time", clock), mock.patch.object(mesh, "run", fake_run):
                 rc = instance.cmd_idle(self.idle_args(Path(td) / "out", seconds=1))
             self.assertEqual(rc, 6)
-            summary = json.loads((Path(td) / "out" / "idle.json").read_text())
+            summary = json.loads((Path(td) / "out" / "idle.json").read_text(encoding="utf-8"))
             self.assertIn("invalid CPU value", summary["n1"]["measurement_error"])
 
     def test_cpu_failure_precedes_missing_node_in_both_node_orders(self):
@@ -135,7 +135,7 @@ class MemoryMeasurementTests(unittest.TestCase):
                         rc = instance.cmd_idle(self.idle_args(
                             Path(td) / "out", seconds=2, max_cpu=10.0))
                     self.assertEqual(rc, 5 if "20%" in values else 6)
-                    summary = json.loads((Path(td) / "out" / "idle.json").read_text())
+                    summary = json.loads((Path(td) / "out" / "idle.json").read_text(encoding="utf-8"))
                     self.assertIn("invalid CPU value", summary["hot"]["measurement_error"])
                     self.assertEqual(summary["hot"]["cpu_mean"], 20.0 if "20%" in values else 1.0)
 

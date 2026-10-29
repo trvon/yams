@@ -59,7 +59,7 @@ def die(msg: str, code: int = 2) -> None:
 # ---------------------------------------------------------------- /proc readers
 def read_text(p: str) -> str:
     try:
-        with open(p) as f:
+        with open(p, encoding="utf-8") as f:
             return f.read()
     except OSError:
         return ""
@@ -232,9 +232,9 @@ def gdb_stacks(pid: int, out_path: Path, depth: int = 20, timeout: int = 120) ->
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        out_path.write_text(f"gdb failed: {e}\n")
+        out_path.write_text(f"gdb failed: {e}\n", encoding="utf-8")
         return {}
-    out_path.write_text(res.stdout + "\n--- stderr ---\n" + res.stderr)
+    out_path.write_text(res.stdout + "\n--- stderr ---\n" + res.stderr, encoding="utf-8")
     stacks: dict[str, list[str]] = {}
     cur = None
     for line in res.stdout.splitlines():
@@ -396,10 +396,10 @@ class Soak:
                 die(f"yams init failed: {res.stdout}{res.stderr}")
             log(f"wrote {cfg}")
         if self.a.config_append:
-            with cfg.open("a") as f:
-                f.write("\n" + Path(self.a.config_append).read_text() + "\n")
+            with cfg.open("a", encoding="utf-8") as f:
+                f.write("\n" + Path(self.a.config_append).read_text(encoding="utf-8") + "\n")
             log(f"appended {self.a.config_append}")
-        (self.out / "config.redacted.toml").write_text(redact_config(cfg.read_text()))
+        (self.out / "config.redacted.toml").write_text(redact_config(cfg.read_text(encoding="utf-8")), encoding="utf-8")
 
     def start_daemon(self) -> None:
         if self.sock.exists():
@@ -410,7 +410,7 @@ class Soak:
                              str(self.sock), str(self.data_dir), str(pid_file), str(logf),
                              self.a.log_level, self.a.no_plugins,
                              getattr(self.a, "daemon_prefix", None))
-        (self.out / "daemon_cmd.txt").write_text(" ".join(cmd) + "\n")
+        (self.out / "daemon_cmd.txt").write_text(" ".join(cmd) + "\n", encoding="utf-8")
         stdout = (self.work / "log" / "daemon.stdout").open("ab")
         self.daemon = subprocess.Popen(cmd, env=self.env, stdout=stdout, stderr=subprocess.STDOUT,
                                        start_new_session=True)
@@ -423,7 +423,7 @@ class Soak:
             st = self.status_json(timeout=15)
             if st and (st.get("ready") or st.get("lifecycle_state") in ("ready", "Ready", "degraded")):
                 log(f"daemon ready: lifecycle={st.get('lifecycle_state')} version={st.get('version')}")
-                (self.out / "status_initial.json").write_text(json.dumps(st, indent=2))
+                (self.out / "status_initial.json").write_text(json.dumps(st, indent=2), encoding="utf-8")
                 # A launch prefix that forks (rather than execs) leaves the daemon in a child;
                 # the daemon's own pid file names the process to sample.
                 written = read_text(str(pid_file)).strip()
@@ -458,7 +458,7 @@ class Soak:
     def load_corpus(self) -> list[tuple[str, str]]:
         """[(doc_id, text)] from a BEIR corpus.jsonl (title + text) limited to --docs."""
         docs = []
-        with open(self.a.corpus) as f:
+        with open(self.a.corpus, encoding="utf-8") as f:
             for line_number, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
@@ -516,7 +516,7 @@ class Soak:
         paths = []
         for did, body in docs:
             p = cdir / f"{did}.md"
-            p.write_text(body)
+            p.write_text(body, encoding="utf-8")
             paths.append(str(p))
         log(f"seeding {len(paths)} docs from {self.a.corpus}")
         t0 = time.monotonic()
@@ -567,7 +567,7 @@ class Soak:
                 quiet += 1
                 if quiet >= 3:
                     log("settled")
-                    (self.out / "status_settled.json").write_text(json.dumps(st, indent=2))
+                    (self.out / "status_settled.json").write_text(json.dumps(st, indent=2), encoding="utf-8")
                     self.settle_completed = True
                     return
             else:
@@ -632,7 +632,7 @@ class Soak:
                 continue
             identity = lifetime_key(process["starttime"], tid, thread["starttime"])
             self.stack_labels.setdefault(identity, label_from_frames(frames))
-        (self.out / "stack_labels.json").write_text(json.dumps(self.stack_labels, indent=2))
+        (self.out / "stack_labels.json").write_text(json.dumps(self.stack_labels, indent=2), encoding="utf-8")
         log(f"stacks: {len(st)} threads -> {p.name}")
 
     # -- load
@@ -670,7 +670,7 @@ class Soak:
             body = f"# soak load note {n}\n\n" + " ".join(rnd.choice(words) for _ in range(120)) + \
                    f"\n\nwritten at {time.time():.0f} seq {n}\n"
             p = ldir / f"load-{n:06d}.md"
-            p.write_text(body)
+            p.write_text(body, encoding="utf-8")
             self.load_op("add", lambda: self.cli("add", str(p), "--tags", "soak,load", timeout=120))
             q = rnd.choice(self.queries) if self.queries else " ".join(rnd.sample(words, 3))
             self.load_op("search", lambda: self.cli("search", q, "--limit", "10", timeout=120))
@@ -707,9 +707,9 @@ class Soak:
         pending_error: BaseException | None = None
         try:
             self.init_config()
-            self.samples_f = (self.out / "samples.jsonl").open("a")
-            self.status_f = (self.out / "status.jsonl").open("a")
-            self.ops_f = (self.out / "ops.jsonl").open("a")
+            self.samples_f = (self.out / "samples.jsonl").open("a", encoding="utf-8")
+            self.status_f = (self.out / "status.jsonl").open("a", encoding="utf-8")
+            self.ops_f = (self.out / "ops.jsonl").open("a", encoding="utf-8")
             self.start_daemon()
             meta["pid"] = self.pid
             pst = task_stat(f"/proc/{self.pid}/stat")
@@ -720,7 +720,7 @@ class Soak:
                 meta["daemon_version"] = self.cli("--version", timeout=20).stdout.strip()
             except Exception:
                 meta["daemon_version"] = None
-            (self.out / "meta.json").write_text(json.dumps(meta, indent=2))
+            (self.out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
             def sampler_target():
                 try:
@@ -773,7 +773,7 @@ class Soak:
                 self.snapshot_stacks("end", force=True)
             st = self.status_json() if self.a.status_every > 0 else None
             if st:
-                (self.out / "status_final.json").write_text(json.dumps(st, indent=2))
+                (self.out / "status_final.json").write_text(json.dumps(st, indent=2), encoding="utf-8")
             run_completed = not self.sampler_error and not self.workload_errors
         except BaseException as exc:
             pending_error = exc
@@ -794,7 +794,7 @@ class Soak:
             meta["run"] = {"completed": run_completed, "sampler_error": self.sampler_error,
                            "workload_errors": self.workload_errors}
             meta["end"] = time.time()
-            (self.out / "meta.json").write_text(json.dumps(meta, indent=2))
+            (self.out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
         summary = None
         summary_error: BaseException | None = None
@@ -806,7 +806,7 @@ class Soak:
             meta["run"] = {"completed": False, "sampler_error": self.sampler_error,
                            "workload_errors": self.workload_errors}
             meta["end"] = time.time()
-            (self.out / "meta.json").write_text(json.dumps(meta, indent=2))
+            (self.out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
         valid = summary is not None and summary["validation"]["valid"] is True
         if self.daemon is not None and not (self.a.keep_daemon and valid):
@@ -982,11 +982,11 @@ def summarize(out: Path) -> dict:
     artifact_errors = [*sample_errors, *op_errors]
     labels = {}
     if (out / "stack_labels.json").exists():
-        labels = json.loads((out / "stack_labels.json").read_text())
+        labels = json.loads((out / "stack_labels.json").read_text(encoding="utf-8"))
     phases: dict[str, list[dict]] = defaultdict(list)
     for s in samples:
         phases[s.get("phase", "?")].append(s)
-    meta = json.loads((out / "meta.json").read_text()) if (out / "meta.json").exists() else {}
+    meta = json.loads((out / "meta.json").read_text(encoding="utf-8")) if (out / "meta.json").exists() else {}
     summary: dict = {"n_samples": len(samples), "phases": {}}
 
 
@@ -1111,10 +1111,19 @@ def summarize(out: Path) -> dict:
         }
     summary["regression_assumptions"] = "OLS intervals assume iid residuals and are exploratory, not leak proof; inspect block slopes and raw time series"
     summary["validation"] = validate_summary(meta, samples, ops, phases, artifact_errors)
-    (out / "summary.json").write_text(json.dumps(summary, indent=2))
-    (out / "summary.md").write_text(render_md(summary))
-    print(render_md(summary))
+    (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (out / "summary.md").write_text(render_md(summary), encoding="utf-8")
+    print_console(render_md(summary))
     return summary
+
+
+def print_console(text: str) -> None:
+    """Print text the console may not be able to encode (cp1252 on Windows, ascii under LC_ALL=C)."""
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
 
 
 def render_md(s: dict) -> str:

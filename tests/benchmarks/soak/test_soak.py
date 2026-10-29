@@ -63,9 +63,9 @@ def fake_run_harness(work, **overrides):
 class SoakSummaryTests(unittest.TestCase):
     def write_run(self, out, meta, samples, ops=()):
         out.mkdir(parents=True)
-        (out / "meta.json").write_text(json.dumps(meta))
-        (out / "samples.jsonl").write_text("".join(json.dumps(x) + "\n" for x in samples))
-        (out / "ops.jsonl").write_text("".join(json.dumps(x) + "\n" for x in ops))
+        (out / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        (out / "samples.jsonl").write_text("".join(json.dumps(x) + "\n" for x in samples), encoding="utf-8")
+        (out / "ops.jsonl").write_text("".join(json.dumps(x) + "\n" for x in ops), encoding="utf-8")
 
     def test_legacy_artifact_is_unknown_not_valid(self):
         with tempfile.TemporaryDirectory() as td:
@@ -125,7 +125,7 @@ class SoakSummaryTests(unittest.TestCase):
                     sample(15, "0-idle", 7, 3, tid_start=20)]
             self.write_run(out, meta, rows)
             later = soak.lifetime_key(1, "7", 20)
-            (out / "stack_labels.json").write_text(json.dumps({later: "later lifetime"}))
+            (out / "stack_labels.json").write_text(json.dumps({later: "later lifetime"}), encoding="utf-8")
             summary = soak.summarize(out)
             labels = summary["phases"]["0-idle"]["by_label"]
             self.assertEqual(labels["later lifetime"]["observed_lifetimes"], 1)
@@ -140,7 +140,7 @@ class SoakSummaryTests(unittest.TestCase):
             rows = [sample(0, "0-idle", 0, 0), sample(5, "0-idle", 5, 1),
                     sample(10, "0-idle", 10, 2)]
             self.write_run(out, meta, rows)
-            with (out / "samples.jsonl").open("a") as f:
+            with (out / "samples.jsonl").open("a", encoding="utf-8") as f:
                 f.write("{not-json}\n")
             summary = soak.summarize(out)
             self.assertFalse(summary["validation"]["valid"])
@@ -173,12 +173,12 @@ class SoakSummaryTests(unittest.TestCase):
                         sample(10, "0-idle", 10, 2)]
                 self.write_run(work / "out", meta, rows)
                 if status == "invalid":
-                    with (work / "out" / "samples.jsonl").open("a") as stream:
+                    with (work / "out" / "samples.jsonl").open("a", encoding="utf-8") as stream:
                         stream.write("{invalid-json}\n")
                 result = subprocess.run([sys.executable, str(HERE / "soak.py"),
                                          "summarize", "--work", str(work)],
                                         capture_output=True, text=True, timeout=10)
-                summary = json.loads((work / "out" / "summary.json").read_text())
+                summary = json.loads((work / "out" / "summary.json").read_text(encoding="utf-8"))
                 self.assertEqual(summary["validation"]["status"], status)
                 self.assertEqual(result.returncode, expected_rc, result.stderr)
 
@@ -225,7 +225,7 @@ class DaemonPlacementTests(unittest.TestCase):
             with mock.patch.object(soak, "placement", return_value={"cpus_allowed_list": "0"}):
                 harness.run()
             self.assertEqual(snapshots, [("end", True)])
-            meta = json.loads((harness.out / "meta.json").read_text())
+            meta = json.loads((harness.out / "meta.json").read_text(encoding="utf-8"))
             self.assertTrue(meta["observer_probes"]["gdb_snapshot_at_end"])
             self.assertEqual(meta["placement"], {"cpus_allowed_list": "0"})
 
@@ -241,7 +241,7 @@ class SoakCommandPathTests(unittest.TestCase):
     def test_settle_timeout_aborts_before_warmup_and_timed_phases(self):
         with tempfile.TemporaryDirectory() as td:
             corpus = Path(td) / "corpus.jsonl"
-            corpus.write_text(json.dumps({"_id": "one", "text": "body"}) + "\n")
+            corpus.write_text(json.dumps({"_id": "one", "text": "body"}) + "\n", encoding="utf-8")
             harness, stopped = fake_run_harness(Path(td) / "work", corpus=str(corpus),
                                                 docs=1, settle_max=0, warmup=1)
             with mock.patch.object(harness, "set_phase", wraps=harness.set_phase) as phases, \
@@ -250,7 +250,7 @@ class SoakCommandPathTests(unittest.TestCase):
             self.assertEqual(rc, 3)
             self.assertEqual([call.args[0] for call in phases.call_args_list], ["seed"])
             self.assertEqual(stopped, [True])
-            meta = json.loads((harness.out / "meta.json").read_text())
+            meta = json.loads((harness.out / "meta.json").read_text(encoding="utf-8"))
             self.assertIs(meta["settle"]["completed"], False)
             self.assertFalse(meta["run"]["completed"])
             self.assertIn("settle", " ".join(meta["run"]["workload_errors"]))
@@ -258,7 +258,7 @@ class SoakCommandPathTests(unittest.TestCase):
     def test_seed_add_failure_is_recorded_and_aborts_before_timed_phase(self):
         with tempfile.TemporaryDirectory() as td:
             corpus = Path(td) / "corpus.jsonl"
-            corpus.write_text(json.dumps({"_id": "one", "text": "body"}) + "\n")
+            corpus.write_text(json.dumps({"_id": "one", "text": "body"}) + "\n", encoding="utf-8")
             harness, stopped = fake_run_harness(Path(td) / "work", corpus=str(corpus), docs=1)
             phases = []
             original_set_phase = harness.set_phase
@@ -268,7 +268,7 @@ class SoakCommandPathTests(unittest.TestCase):
 
             self.assertEqual(harness.run(), 3)
             self.assertNotIn("0-idle", phases)
-            meta = json.loads((harness.out / "meta.json").read_text())
+            meta = json.loads((harness.out / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["seed"]["requested_docs"], 1)
             self.assertEqual(meta["seed"]["successful_docs"], 0)
             self.assertEqual(len(meta["seed"]["failed_batches"]), 1)
@@ -277,7 +277,7 @@ class SoakCommandPathTests(unittest.TestCase):
     def test_partial_requested_corpus_is_recorded_and_aborts_before_timed_phase(self):
         with tempfile.TemporaryDirectory() as td:
             corpus = Path(td) / "corpus.jsonl"
-            corpus.write_text(json.dumps({"_id": "one", "text": "body"}) + "\n")
+            corpus.write_text(json.dumps({"_id": "one", "text": "body"}) + "\n", encoding="utf-8")
             harness, stopped = fake_run_harness(Path(td) / "work", corpus=str(corpus), docs=2)
             phases = []
             original_set_phase = harness.set_phase
@@ -286,7 +286,7 @@ class SoakCommandPathTests(unittest.TestCase):
 
             self.assertEqual(harness.run(), 3)
             self.assertNotIn("0-idle", phases)
-            meta = json.loads((harness.out / "meta.json").read_text())
+            meta = json.loads((harness.out / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["seed"]["requested_docs"], 2)
             self.assertEqual(meta["seed"]["loaded_docs"], 1)
             self.assertEqual(meta["seed"]["successful_docs"], 0)
@@ -295,7 +295,7 @@ class SoakCommandPathTests(unittest.TestCase):
     def test_empty_requested_corpus_is_recorded_and_aborts_before_timed_phase(self):
         with tempfile.TemporaryDirectory() as td:
             corpus = Path(td) / "corpus.jsonl"
-            corpus.write_text("")
+            corpus.write_text("", encoding="utf-8")
             harness, stopped = fake_run_harness(Path(td) / "work", corpus=str(corpus), docs=2)
             phases = []
             original_set_phase = harness.set_phase
@@ -303,7 +303,7 @@ class SoakCommandPathTests(unittest.TestCase):
 
             self.assertEqual(harness.run(), 3)
             self.assertNotIn("0-idle", phases)
-            meta = json.loads((harness.out / "meta.json").read_text())
+            meta = json.loads((harness.out / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["seed"]["requested_docs"], 2)
             self.assertEqual(meta["seed"]["loaded_docs"], 0)
             self.assertEqual(meta["seed"]["successful_docs"], 0)
