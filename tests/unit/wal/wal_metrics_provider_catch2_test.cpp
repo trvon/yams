@@ -112,3 +112,12 @@ TEST_CASE("WalMetricsProvider passes through WALManager stats", "[unit][daemon][
 
     REQUIRE(manager->shutdown());
 }
+
+TEST_CASE("WAL sync thread waits the idle timeout when nothing is pending",
+          "[wal][sync][idle][catch2]") {
+    using namespace std::chrono_literals;
+    CHECK(yams::wal::nextSyncWait(1, 100ms, 5000ms) == 100ms);
+    CHECK(yams::wal::nextSyncWait(0, 100ms, 5000ms) == 5000ms);
+    CHECK(yams::wal::nextSyncWait(0, 100ms, 10ms) ==
+          100ms); // idle wait never shorter than syncTimeout
+}
