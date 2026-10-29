@@ -33,10 +33,13 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/MetricsSnapshotRegistry.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/daemon_lifecycle.h>
@@ -1044,6 +1047,59 @@ TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embeddi
         REQUIRE(snap != nullptr);
         REQUIRE(!snap->embeddingBackend.empty());
     }
+}
+
+TEST_CASE("DaemonMetrics polling follows the idle tick while the daemon is idle",
+          "[daemon][metrics][idle]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_metrics_idle_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+
+    const auto savedSnapshot = TuningSnapshotRegistry::instance().get();
+    struct SnapshotRestore {
+        std::shared_ptr<const TuningSnapshot> saved;
+        ~SnapshotRestore() { TuningSnapshotRegistry::instance().set(saved); }
+    } snapshotRestore{savedSnapshot};
+    auto idle = std::make_shared<TuningSnapshot>();
+    idle->daemonIdle = true;
+    TuningSnapshotRegistry::instance().set(idle);
+    REQUIRE(TuneAdvisor::idleTickMs() >= 1000u);
+    REQUIRE(TuneAdvisor::metricsCacheMs() <= 500u);
+
+    // Owned by shared_ptr as in production: the off-strand collectors use shared_from_this.
+    auto metricsPtr =
+        std::make_shared<DaemonMetrics>(nullptr, &state, &svc, svc.getWorkCoordinator());
+    auto& metrics = *metricsPtr;
+    metrics.startPolling();
+    auto waitIterationsAbove = [&](std::uint64_t floor, std::chrono::milliseconds budget) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        while (metrics.pollingIterations() <= floor &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return metrics.pollingIterations() > floor;
+    };
+    REQUIRE(waitIterationsAbove(0, std::chrono::seconds(3)));
+
+    // Idle: at most one more iteration in 900 ms (the 250 ms default would make 3-4).
+    const auto base = metrics.pollingIterations();
+    std::this_thread::sleep_for(std::chrono::milliseconds(900));
+    CHECK(metrics.pollingIterations() - base <= 1);
+
+    // A status read on a stale cache still refreshes promptly, well within one idle tick:
+    // observe a tick, let the cache age past cacheMs_, then read.
+    const auto tickBase = metrics.pollingIterations();
+    REQUIRE(waitIterationsAbove(tickBase, std::chrono::milliseconds(1500)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(TuneAdvisor::metricsCacheMs() + 100));
+    const auto beforeRead = metrics.pollingIterations();
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+    CHECK(snap->statusSnapshotStale);
+    CHECK(waitIterationsAbove(beforeRead, std::chrono::milliseconds(500)));
+
+    metrics.stopPolling();
 }
 
 TEST_CASE("DaemonMetrics reports effective embedding policy before provider adoption",
@@ -7650,4 +7706,55 @@ TEST_CASE("FsmMetricsRegistry: Metrics collection", "[daemon][metrics][fsm]") {
         auto snap = FsmMetricsRegistry::instance().snapshot();
         REQUIRE(snap.transitions == 0);
     }
+}
+
+// =============================================================================
+// lt-safety A2.2: stopPolling after the WorkCoordinator cancelled the loop
+// =============================================================================
+
+TEST_CASE("DaemonMetrics: stopPolling returns after the WorkCoordinator cancelled the loop",
+          "[daemon][metrics][shutdown]") {
+    // Was lt_red_metrics_stop_after_cancel. A stopped WorkCoordinator abandons the polling loop at
+    // its co_await; stopPolling() must return within its budget instead of waiting forever for a
+    // completion that only the frame's exit guard can deliver (when the io_context is destroyed).
+    using namespace std::chrono_literals;
+    const auto dataDir = makeTempDir("yams_metrics_stop_after_cancel_");
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = dataDir;
+    cfg.enableModelProvider = false;
+    cfg.autoLoadPlugins = false;
+    cfg.enableAutoRepair = false;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    REQUIRE(svc.initialize().has_value());
+    auto* wc = svc.getWorkCoordinator();
+    REQUIRE((wc != nullptr));
+    REQUIRE(wc->isRunning());
+
+    auto& registry = MetricsSnapshotRegistry::instance();
+    const auto priorSnapshot = registry.get();
+
+    // Off-strand collectors use shared_from_this(), so the object needs shared ownership.
+    auto metrics = std::make_shared<DaemonMetrics>(nullptr, &state, &svc, wc);
+    metrics->startPolling();
+    REQUIRE(yams::test::wait_for_condition(5s, 1ms, [&] {
+        const auto published = registry.get();
+        return published && published != priorSnapshot;
+    }));
+
+    wc->stop();
+    REQUIRE(wc->joinWithTimeout(10s));
+
+    const auto stopStart = std::chrono::steady_clock::now();
+    metrics->stopPolling();
+    const auto stopElapsed = std::chrono::steady_clock::now() - stopStart;
+    CHECK((stopElapsed < 6s)); // bounded wait (2 s budget) plus slack for sanitizer builds
+
+    // Destroying the metrics object before the ServiceManager (and so before the io_context that
+    // still holds the abandoned frame) must be safe: the frame's exit guard only touches state it
+    // shares with the object, never the object itself.
+    metrics.reset();
+    svc.shutdown();
+    registry.set(priorSnapshot);
 }

@@ -97,6 +97,9 @@ struct VectorDatabaseConfig {
     /// score them exactly, then return the exact top-k. Factor 2 is the conservative
     /// product default; re-run vector_pq_rerank_quality before changing it.
     size_t simeon_pq_rerank_factor = 2;
+    /// Insert-only changes append to the trained PQ index until it has grown past
+    /// trained_rows * (1 + ratio); then the next refresh retrains the codebook.
+    double simeon_pq_incremental_growth_ratio = 0.5;
     uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
     bool suppress_search_index_builds = false;
 };

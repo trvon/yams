@@ -238,15 +238,21 @@ TEST_CASE("VectorSchemaMigration retires unused V2.2 quantized schema atomically
                     "'idx_vectors_model','idx_vectors_embedding_dim','idx_vectors_level')") == 5);
     CHECK(countRows(db.db, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND "
                            "name IN ('vectors_index_generation_insert',"
-                           "'vectors_index_generation_update_v2',"
-                           "'vectors_index_generation_delete')") == 3);
+                           "'vectors_index_generation_update_v3',"
+                           "'vectors_index_generation_delete_v2')") == 3);
+    CHECK(countRows(db.db, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND "
+                           "name LIKE 'vectors_index_generation_%'") == 3);
     CHECK(countRows(db.db, "SELECT generation FROM vector_index_generation WHERE id=1") == 17);
+    CHECK(countRows(db.db,
+                    "SELECT structural_generation FROM vector_index_generation WHERE id=1") == 0);
 
     exec(db.db, "INSERT INTO vectors(chunk_id, document_hash, embedding, embedding_dim) "
                 "VALUES ('chunk_b','doc_b',X'0000803F',1)");
     exec(db.db, "UPDATE vectors SET document_hash='doc_b2' WHERE chunk_id='chunk_b'");
     exec(db.db, "DELETE FROM vectors WHERE chunk_id='chunk_b'");
     CHECK(countRows(db.db, "SELECT generation FROM vector_index_generation WHERE id=1") == 20);
+    CHECK(countRows(db.db,
+                    "SELECT structural_generation FROM vector_index_generation WHERE id=1") == 2);
 }
 
 TEST_CASE("VectorSchemaMigration rejects nonzero quantized format without mutation",

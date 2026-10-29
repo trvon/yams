@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -446,6 +447,21 @@ struct MetricsSnapshot {
     bool statusDetailAvailable{false};
 };
 
+/// Cached proportional-set-size probe. /proc/self/smaps_rollup walks every VMA of the process
+/// and costs 10-20 ms of kernel time on a daemon with hundreds of MiB mapped; read on every
+/// metrics poll it was most of the daemon's idle CPU. PSS only feeds status (memoryUsageMb,
+/// pss_bytes), so it is re-read at most once per `ttl`; RSS (/proc/self/status, O(1)) is read
+/// on every poll as before.
+struct PssSampleState {
+    std::chrono::steady_clock::time_point lastAt{};
+    std::uint64_t lastKb{0};
+};
+std::uint64_t sampleProcessPssKb(PssSampleState& state, std::chrono::steady_clock::time_point now,
+                                 std::chrono::milliseconds ttl,
+                                 const std::function<std::uint64_t()>& readPss);
+/// 5 s while the daemon is busy, 10 s while idle.
+std::chrono::milliseconds pssSampleTtl(bool daemonIdle) noexcept;
+
 class SocketServer; // Forward declaration
 
 class DaemonMetrics : public std::enable_shared_from_this<DaemonMetrics> {
@@ -461,6 +477,10 @@ public:
     void stopPolling();
     [[nodiscard]] bool isPollingActive() const noexcept {
         return pollingActive_.load(std::memory_order_acquire);
+    }
+    /// Number of completed polling iterations (observability; tests use it to check cadence).
+    [[nodiscard]] std::uint64_t pollingIterations() const noexcept {
+        return pollingIterations_.load(std::memory_order_acquire);
     }
 
     // Retrieve metrics snapshot. When detailed is true, include deep store stats
@@ -542,10 +562,22 @@ private:
 
     // Background polling control
     std::atomic<bool> pollingActive_{false};
-    // Timer pointer for cancellation from stopPolling()
-    boost::asio::steady_timer* pollingTimer_{nullptr};
-    // Shutdown synchronization - signaled when polling loop exits
-    detail::PollingCompletion pollingCompletion_;
+    std::atomic<std::uint64_t> pollingIterations_{0};
+    // Poll period for the next iteration: cacheMs_ while the daemon is busy or a status
+    // client is reading, the tuning idle tick otherwise. A stale status read cancels the
+    // timer (scheduleBackgroundRefresh), so values are never older than one idle tick.
+    std::chrono::milliseconds nextPollDelay() const;
+    // State the polling loop's frame shares with stopPolling(). Heap-allocated and held by the
+    // frame as well: when the WorkCoordinator stops first the frame is abandoned at its co_await
+    // and destroyed only with the io_context, possibly after this object, so the frame's exit
+    // guard must not touch `this` (lt-safety A2.2).
+    struct PollingLifecycle {
+        // Timer to cancel from stopPolling()/scheduleBackgroundRefresh(); strand-serialized.
+        std::atomic<boost::asio::steady_timer*> timer{nullptr};
+        // Shutdown synchronization - signaled when polling loop exits
+        detail::PollingCompletion completion;
+    };
+    std::shared_ptr<PollingLifecycle> polling_ = std::make_shared<PollingLifecycle>();
 
     // CPU utilization sampling state (Linux): deltas over /proc since last snapshot
     mutable std::uint64_t lastProcJiffies_{0};
@@ -604,6 +636,12 @@ private:
     mutable std::map<std::string, double> cachedTuningParams_;
     mutable std::uint64_t cachedTunerDocCount_{0}; // docCount when tuner was cached
     uint32_t tunerStateTtlMs_{30000}; // 30s TTL for tuner state (matches CorpusStats cache)
+
+    // Rate-limited PSS probe (see sampleProcessPssKb); shared by the polling loop and
+    // request-time collection, hence the mutex.
+    std::uint64_t cachedPssKb() const;
+    mutable std::mutex pssMutex_;
+    mutable PssSampleState pssState_;
 };
 
 std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept;

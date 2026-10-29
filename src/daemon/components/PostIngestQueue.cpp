@@ -849,7 +849,10 @@ PressureLimitedPollerConfig<Job> PostIngestQueue::makePollerConfig(
     };
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
-    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
+    // The frame's exit guard may run after this object is destroyed: notify through the shared
+    // lifecycle state and keep it alive from the frame.
+    cfg.notifyLifecycleFn = [lifecycle = lifecycle_]() { lifecycle->notify(); };
+    cfg.lifecycleKeepAlive = lifecycle_;
     cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor = std::move(executor);
     cfg.getHashFn = std::move(getHash);

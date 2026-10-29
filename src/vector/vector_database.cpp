@@ -41,6 +41,8 @@ public:
         backend_config.simeon_pq_centroids = config_.simeon_pq_centroids;
         backend_config.simeon_pq_train_limit = config_.simeon_pq_train_limit;
         backend_config.simeon_pq_rerank_factor = config_.simeon_pq_rerank_factor;
+        backend_config.simeon_pq_incremental_growth_ratio =
+            config_.simeon_pq_incremental_growth_ratio;
         backend_config.simeon_pq_seed = config_.simeon_pq_seed;
         backend_config.suppress_search_index_builds = config_.suppress_search_index_builds;
         backend_ = std::make_unique<SqliteVecBackend>(backend_config);

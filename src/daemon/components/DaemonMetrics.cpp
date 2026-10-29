@@ -38,6 +38,7 @@
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
@@ -77,6 +78,22 @@
 
 namespace yams::daemon {
 
+std::uint64_t sampleProcessPssKb(PssSampleState& state, std::chrono::steady_clock::time_point now,
+                                 std::chrono::milliseconds ttl,
+                                 const std::function<std::uint64_t()>& readPss) {
+    const bool never = state.lastAt.time_since_epoch().count() == 0;
+    const bool due = never || now < state.lastAt || (now - state.lastAt) >= ttl;
+    if (due) {
+        state.lastKb = readPss();
+        state.lastAt = now;
+    }
+    return state.lastKb;
+}
+
+std::chrono::milliseconds pssSampleTtl(bool daemonIdle) noexcept {
+    return std::chrono::milliseconds(daemonIdle ? 10000 : 5000);
+}
+
 std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept {
     constexpr std::uint64_t kMinTtlMs = 60'000;
     constexpr std::uint64_t kMaxTtlMs = 1'800'000;
@@ -90,6 +107,31 @@ std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept {
 }
 
 namespace {
+
+// Logs snapshot sections that take more than a few milliseconds so the per-iteration cost
+// of the metrics polling loop can be attributed. Two steady_clock reads per section.
+class SnapshotSectionTimer {
+public:
+    explicit SnapshotSectionTimer(const char* name) noexcept
+        : name_(name), start_(std::chrono::steady_clock::now()) {}
+    ~SnapshotSectionTimer() {
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - start_)
+                            .count();
+        if (us >= kWarnUs) {
+            spdlog::debug("[DaemonMetrics] snapshot section {} took {:.1f} ms", name_,
+                          static_cast<double>(us) / 1000.0);
+        }
+    }
+    SnapshotSectionTimer(const SnapshotSectionTimer&) = delete;
+    SnapshotSectionTimer& operator=(const SnapshotSectionTimer&) = delete;
+
+private:
+    static constexpr long long kWarnUs = 2000;
+    const char* name_;
+    std::chrono::steady_clock::time_point start_;
+};
+
 std::uint64_t queryVolumeUsedBytes(const std::filesystem::path& path) noexcept {
     if (path.empty())
         return 0;
@@ -260,11 +302,11 @@ static std::uint64_t readRssKb() {
 #endif
 }
 
-static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown) {
+// `pss_kb` comes from the rate-limited probe (DaemonMetrics::cachedPssKb); 0 means unknown.
+static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown, std::uint64_t pss_kb) {
     MemoryUsageSample sample;
     const auto sampleStart = std::chrono::steady_clock::now();
 
-    const std::uint64_t pss_kb = readPssKb();
     const std::uint64_t rss_kb = readRssKb();
     if (pss_kb > 0) {
         sample.memoryUsageMb = static_cast<double>(pss_kb) / 1024.0;
@@ -522,6 +564,19 @@ std::uint64_t age_ms(std::chrono::steady_clock::time_point now,
 
 } // namespace
 
+std::uint64_t DaemonMetrics::cachedPssKb() const {
+    bool idle = false;
+    try {
+        if (auto snap = TuningSnapshotRegistry::instance().get()) {
+            idle = snap->daemonIdle;
+        }
+    } catch (...) {
+    }
+    std::lock_guard<std::mutex> lock(pssMutex_);
+    return sampleProcessPssKb(pssState_, std::chrono::steady_clock::now(), pssSampleTtl(idle),
+                              readPssKb);
+}
+
 DaemonMetrics::DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateComponent* state,
                              const ServiceManager* services, WorkCoordinator* coordinator,
                              const SocketServer* socketServer)
@@ -724,26 +779,39 @@ void DaemonMetrics::startPolling() {
         return; // Already running
     }
     // Mark as not stopped before spawning the coroutine
-    pollingCompletion_.markStarted();
+    polling_->completion.markStarted();
     coordinator_->spawnDetached(strand_, pollingLoop());
 }
 
+namespace {
+// How long stopPolling() waits for the loop to publish its exit. The loop completes within one
+// iteration while its io_context runs; it never completes when the WorkCoordinator stopped first
+// (the frame is abandoned at its co_await until the io_context is destroyed).
+constexpr auto kPollingStopBudget = std::chrono::milliseconds(2000);
+} // namespace
+
 void DaemonMetrics::stopPolling() {
-    const bool shouldStopPolling = !pollingCompletion_.isStopped();
+    const bool shouldStopPolling = !polling_->completion.isStopped();
 
     if (shouldStopPolling) {
         // Signal the polling loop to stop
         pollingActive_.store(false, std::memory_order_release);
 
-        // Cancel the timer via the strand to wake up the coroutine
-        // This must be done on the strand to avoid racing with async_wait
-        boost::asio::post(strand_, [this]() {
-            if (pollingTimer_) {
-                pollingTimer_->cancel();
+        // Cancel the timer via the strand to wake up the coroutine. This must be done on the
+        // strand to avoid racing with async_wait. The handler holds the lifecycle state, not
+        // `this`: it may run (or be destroyed unrun) after this object is gone.
+        boost::asio::post(strand_, [lifecycle = polling_]() {
+            if (auto* timer = lifecycle->timer.load(std::memory_order_acquire)) {
+                timer->cancel();
             }
         });
 
-        pollingCompletion_.wait();
+        if (!polling_->completion.waitFor(kPollingStopBudget)) {
+            spdlog::warn("DaemonMetrics: polling loop did not complete within {}ms; its "
+                         "WorkCoordinator has most likely stopped and the frame is abandoned "
+                         "until the io_context is destroyed",
+                         kPollingStopBudget.count());
+        }
     }
 
     // getSnapshot()/refresh() may dispatch off-strand collectors even when the
@@ -763,8 +831,19 @@ void DaemonMetrics::stopPolling() {
 
 boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-    // Store timer pointer for cancellation from stopPolling()
-    pollingTimer_ = &timer;
+    // Publish the timer for cancellation and the exit for stopPolling() through the shared
+    // lifecycle state. The guard runs on every exit: normal, exception, or frame destruction
+    // after the io_context stopped with the loop suspended (then possibly after ~DaemonMetrics,
+    // which is why it holds the state and not `this`).
+    const auto lifecycle = polling_;
+    lifecycle->timer.store(&timer, std::memory_order_release);
+    struct PollingExitGuard {
+        std::shared_ptr<PollingLifecycle> lifecycle;
+        ~PollingExitGuard() {
+            lifecycle->timer.store(nullptr, std::memory_order_release);
+            lifecycle->completion.complete();
+        }
+    } exitGuard{lifecycle};
     spdlog::info("DaemonMetrics: polling loop started (interval={}ms)", cacheMs_);
 
     while (pollingActive_.load(std::memory_order_relaxed)) {
@@ -774,7 +853,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                 double cpu = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
                 const bool includeAllocatorBreakdown =
                     allocatorBreakdownEnabled() || mallocStackLoggingEnabled();
-                auto memSample = sampleMemoryUsage(includeAllocatorBreakdown);
+                auto memSample = sampleMemoryUsage(includeAllocatorBreakdown, cachedPssKb());
 
                 std::unique_lock lock(cacheMutex_);
                 cached_.cpuUsagePercent = cpu;
@@ -912,8 +991,12 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
             spdlog::warn("DaemonMetrics: polling iteration failed (unknown exception)");
         }
 
-        // Sleep for cache interval using async timer
-        timer.expires_after(std::chrono::milliseconds(cacheMs_));
+        pollingIterations_.fetch_add(1, std::memory_order_acq_rel);
+
+        // Sleep until the next poll. While the daemon is idle this follows the tuning idle
+        // tick instead of cacheMs_ (250 ms by default, i.e. 4 wakeups/s on an idle daemon);
+        // a status request whose cache is stale cancels the timer to refresh at once.
+        timer.expires_after(nextPollDelay());
         auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
         // Timer cancel is used for two purposes:
         //   1. stopPolling() — sets pollingActive_=false first, then cancels.
@@ -926,10 +1009,21 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
             break;
         }
     }
-    // Clear timer pointer and signal that polling has stopped
-    pollingTimer_ = nullptr;
-    pollingCompletion_.complete();
+    // exitGuard clears the timer pointer and completes the lifecycle on return.
     spdlog::info("DaemonMetrics: polling loop stopped");
+}
+
+std::chrono::milliseconds DaemonMetrics::nextPollDelay() const {
+    const auto base = std::chrono::milliseconds(std::max<uint32_t>(cacheMs_, 1));
+    if (refreshQueued_.load(std::memory_order_acquire) ||
+        detailedRefreshQueued_.load(std::memory_order_acquire)) {
+        return base; // a client is waiting on this refresh
+    }
+    auto snap = TuningSnapshotRegistry::instance().get();
+    if (!snap || !snap->daemonIdle) {
+        return base;
+    }
+    return std::max(base, std::chrono::milliseconds(TuneAdvisor::idleTickMs()));
 }
 
 void DaemonMetrics::refresh() {
@@ -1184,14 +1278,15 @@ void DaemonMetrics::scheduleBackgroundRefresh(bool detailed) const {
     if (queued.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
-    boost::asio::post(strand_, [this]() {
-        if (pollingTimer_) {
-            pollingTimer_->cancel();
+    boost::asio::post(strand_, [lifecycle = polling_]() {
+        if (auto* timer = lifecycle->timer.load(std::memory_order_acquire)) {
+            timer->cancel();
         }
     });
 }
 
 MetricsSnapshot DaemonMetrics::collectSnapshot(bool detailed) const {
+    SnapshotSectionTimer timer(detailed ? "collect.detailed" : "collect.fast");
     MetricsSnapshot out;
     out.version = YAMS_VERSION_STRING;
     populateCommonSnapshot(out, detailed);
@@ -1435,6 +1530,7 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
 void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
     // Session watch status (best-effort)
     try {
+        SnapshotSectionTimer timer("runtime.session");
         if (services_) {
             auto appCtx = services_->getAppContext();
             auto sess = yams::app::services::makeSessionService(&appCtx);
@@ -1459,6 +1555,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
 
     // FSM transport metrics (best-effort)
     try {
+        SnapshotSectionTimer timer("runtime.fsm");
         auto fsnap = FsmMetricsRegistry::instance().snapshot();
         out.fsmTransitions = fsnap.transitions;
         out.fsmHeaderReads = fsnap.headerReads;
@@ -1477,6 +1574,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
 
     // ResourceGovernor metrics (direct query)
     try {
+        SnapshotSectionTimer timer("runtime.governor");
         auto govSnap = ResourceGovernor::instance().getSnapshot();
         out.governorRssBytes = govSnap.rssBytes;
         out.governorBudgetBytes = govSnap.memoryBudgetBytes;
@@ -1506,6 +1604,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
 
     // ONNX concurrency metrics (direct query)
     try {
+        SnapshotSectionTimer timer("runtime.onnx");
         auto onnxSnap = OnnxConcurrencyRegistry::instance().snapshot();
         out.onnxTotalSlots = onnxSnap.totalSlots;
         out.onnxUsedSlots = onnxSnap.usedSlots;
@@ -1519,6 +1618,7 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
     // DatabaseManager metrics
     try {
         if (services_) {
+            SnapshotSectionTimer timer("runtime.db_pools");
             if (auto* dbm = services_->getDatabaseManager()) {
                 const auto& dbStats = dbm->getStats();
                 out.dbOpenDurationMs = dbStats.openDurationMs.load();
@@ -1700,7 +1800,7 @@ void DaemonMetrics::populateResourceVectorSnapshot(MetricsSnapshot& out, bool de
         if (needMemoryFallback) {
             const bool includeAllocatorBreakdown =
                 (detailed && allocatorBreakdownEnabled()) || mallocStackLoggingEnabled();
-            auto memSample = sampleMemoryUsage(includeAllocatorBreakdown);
+            auto memSample = sampleMemoryUsage(includeAllocatorBreakdown, cachedPssKb());
             out.memoryUsageMb = memSample.memoryUsageMb;
             out.memoryBreakdownBytes = std::move(memSample.breakdownBytes);
             out.diagnosticCounters = std::move(memSample.diagnosticCounters);
@@ -1810,16 +1910,28 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
         out.version = preservedVersion;
     }
 
-    populateReadinessSnapshot(out);
+    {
+        SnapshotSectionTimer timer("readiness");
+        populateReadinessSnapshot(out);
+    }
+    {
+        SnapshotSectionTimer timer("lifecycle");
+        populateLifecycleSnapshot(out);
+    }
+    {
+        SnapshotSectionTimer timer("worker_pipeline");
+        populateWorkerPipelineSnapshot(out);
+    }
+    {
+        SnapshotSectionTimer timer("runtime_counters");
+        populateRuntimeCounterSnapshot(out);
+    }
+    {
+        SnapshotSectionTimer timer("resource_vector");
+        populateResourceVectorSnapshot(out, detailed);
+    }
 
-    populateLifecycleSnapshot(out);
-
-    populateWorkerPipelineSnapshot(out);
-
-    populateRuntimeCounterSnapshot(out);
-
-    populateResourceVectorSnapshot(out, detailed);
-
+    SnapshotSectionTimer tailTimer("service_states");
     // Centralized service states
     try {
         if (services_) {
