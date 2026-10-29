@@ -91,6 +91,22 @@ def parse_kv_kb(text: str) -> dict[str, int]:
     return out
 
 
+def parse_pid_file(text: str) -> int | None:
+    """yams-daemon writes a JSON pid file ({"exe": ..., "pid": N, ...}); accept a bare integer too."""
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        if text.startswith("{"):
+            value = json.loads(text).get("pid")
+        else:
+            value = text
+        pid = int(value)
+        return pid if pid > 0 else None
+    except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
+        return None
+
+
 def settle_quiet(queued, active, cpu, settle_cpu: float, active_max: int) -> bool:
     """Settle gate: post-ingest drained and the daemon quiet.
 
@@ -440,10 +456,10 @@ class Soak:
                 (self.out / "status_initial.json").write_text(json.dumps(st, indent=2), encoding="utf-8")
                 # A launch prefix that forks (rather than execs) leaves the daemon in a child;
                 # the daemon's own pid file names the process to sample.
-                written = read_text(str(pid_file)).strip()
-                if written.isdigit() and int(written) != self.pid:
+                written = parse_pid_file(read_text(str(pid_file)))
+                if written and written != self.pid:
                     log(f"daemon pid from pid file {written} (launched {self.pid})")
-                    self.pid = int(written)
+                    self.pid = written
                 return
             time.sleep(2)
         die("daemon not ready in time")
@@ -706,8 +722,22 @@ class Soak:
             out.append((name, int(secs or 600)))
         return out
 
+    def install_signal_handlers(self) -> None:
+        """SIGTERM/SIGINT end the run through the normal error path, which stops the daemon.
+        The daemon is started in its own session, so killing the harness alone would orphan it."""
+        def on_signal(signum, _frame):
+            self.workload_errors.append(f"harness received signal {signum}")
+            self.stop.set()
+            raise KeyboardInterrupt(f"signal {signum}")
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, on_signal)
+            except (ValueError, OSError):
+                pass  # not the main thread, or unsupported platform
+
     def run(self) -> int:
         phases = self.parse_phases()
+        self.install_signal_handlers()
         self.prepare_dirs()
         meta = {"schema_version": 2, "argv": sys.argv, "start": time.time(),
                 "host": platform.node(), "phases": phases, "interval_s": self.a.interval,
@@ -1123,6 +1153,23 @@ def summarize(out: Path) -> dict:
             "retained_mib": round(b["rss_mib"]["last"] - a["rss_mib"]["last"], 1),
             "load_peak_mib": max(ph["rss_mib"]["max"] for n, ph in summary["phases"].items() if n.endswith("-load")) if any(
                 n.endswith("-load") for n in summary["phases"]) else None,
+        }
+    # Leak signal: anonymous memory is the only series a C++ leak or allocator retention can
+    # move; file-backed RSS (SQLite mmap, page cache) warms up after load and is reclaimable.
+    idle_phases = [p for p in summary["phases"] if p.endswith("-idle")]
+    if idle_phases:
+        last = summary["phases"][idle_phases[-1]]
+        anon = last.get("anon_mib", {})
+        rss = last.get("rss_mib", {})
+        blocks = anon.get("block_slopes") or []
+        summary["leak_signal"] = {
+            "series": "anon",
+            "phase": idle_phases[-1],
+            "anon_slope_mib_h": anon.get("slope_mib_h"),
+            "anon_last_block_slope_mib_h": blocks[-1] if blocks else None,
+            "file_backed_last_mib": (round(rss.get("last", 0.0) - anon.get("last", 0.0), 1)
+                                     if rss.get("last") is not None and anon.get("last") is not None else None),
+            "note": "RSS minus anon is file-backed (mmap/page cache), reclaimable; judge leaks on anon",
         }
     summary["regression_assumptions"] = "OLS intervals assume iid residuals and are exploratory, not leak proof; inspect block slopes and raw time series"
     summary["validation"] = validate_summary(meta, samples, ops, phases, artifact_errors)
