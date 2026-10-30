@@ -225,6 +225,7 @@ TEST_CASE("applyCrossRerank fetches window text as one preview batch", "[search]
         REQUIRE(repo->insertContent(content).has_value());
         SearchResult r = makeResult(info.sha256Hash, 0.9F - 0.2F * static_cast<float>(i));
         r.document.id = id.value();
+        r.document.fileName = info.fileName;
         results.push_back(r);
     }
 
@@ -368,4 +369,29 @@ TEST_CASE("applyCrossRerank keeps reranked window above the unreranked tail",
             CHECK(results[i].document.sha256Hash == rerankedOrder[i]);
         }
     }
+}
+
+TEST_CASE("buildCrossRerankText spends the budget on content, not the directory path",
+          "[search][rerank][catch2]") {
+    using yams::search::detail::buildCrossRerankText;
+
+    SearchResult r;
+    r.document.fileName = "scifact__27453479.txt";
+    r.document.filePath =
+        "/private/var/folders/1b/mpgvv0q13lgf9cz5kzdp4yx00000gn/T/yams_it_78gahyqi/corpus/"
+        "scifact__27453479.txt";
+    const std::string content(400, 'q');
+
+    const auto text = buildCrossRerankText(r, content, 256);
+    CHECK(text.size() == 256);
+    CHECK(text.find("/private/var/folders") == std::string::npos);
+    CHECK(text.rfind("scifact__27453479.txt", 0) == 0);
+    // fileName + newline, then content fills the rest.
+    CHECK(std::count(text.begin(), text.end(), 'q') == 256 - 22);
+
+    SearchResult pathOnly;
+    pathOnly.document.filePath = r.document.filePath;
+    const auto fromPath = buildCrossRerankText(pathOnly, content, 256);
+    CHECK(fromPath.rfind("scifact__27453479.txt\n", 0) == 0);
+    CHECK(fromPath.find("/private/var/folders") == std::string::npos);
 }

@@ -29,8 +29,15 @@ void appendRerankTextPart(std::string& out, const std::string& part) {
 std::string buildCrossRerankText(const SearchResult& result, std::string_view contentPreview,
                                  std::size_t textLimit) {
     std::string text;
-    appendRerankTextPart(text, result.document.fileName);
-    appendRerankTextPart(text, result.document.filePath);
+    // The directory path is left out: it is shared noise across candidates and took about half
+    // of a 256-char budget on the retrieval bench. Engine results may carry only filePath.
+    if (!result.document.fileName.empty()) {
+        appendRerankTextPart(text, result.document.fileName);
+    } else {
+        const auto& path = result.document.filePath;
+        const auto slash = path.find_last_of("/\\");
+        appendRerankTextPart(text, slash == std::string::npos ? path : path.substr(slash + 1));
+    }
     appendRerankTextPart(text, result.snippet);
     if (!contentPreview.empty() && text.size() < textLimit) {
         const size_t remaining = textLimit > text.size() ? textLimit - text.size() : size_t{0};
