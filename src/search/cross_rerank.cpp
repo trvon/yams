@@ -126,7 +126,8 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
     auto [minIt, maxIt] = std::minmax_element(scores.begin(), scores.end());
     const float minScore = minIt != scores.end() && std::isfinite(*minIt) ? *minIt : 0.0F;
     const float maxScore = maxIt != scores.end() && std::isfinite(*maxIt) ? *maxIt : 0.0F;
-    float secondScore = 0.0F;
+    // Runner-up starts at minScore, not 0: scores may all be negative.
+    float secondScore = minScore;
     for (float score : scores) {
         if (!std::isfinite(score) || score >= maxScore) {
             continue;

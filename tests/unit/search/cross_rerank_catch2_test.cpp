@@ -108,6 +108,19 @@ TEST_CASE("applyCrossRerank skips when score gap below threshold", "[search][rer
     CHECK(outcome.skipReason == "score_gap_below_threshold");
 }
 
+TEST_CASE("applyCrossRerank measures the score gap when every score is negative",
+          "[search][rerank][catch2]") {
+    // Cosine scores can all be negative; the gap is top minus runner-up, here 0.1.
+    auto results = window3();
+    auto cfg = blendConfig();
+    cfg.rerankScoreGapThreshold = 0.05F;
+    auto outcome =
+        applyCrossRerank(results, "q", cfg, 3, fixedScorer({-0.5F, -0.2F, -0.1F}), nullptr);
+    CHECK(outcome.status == CrossRerankOutcome::Status::Applied);
+    CHECK(outcome.scoreGap > 0.099);
+    CHECK(outcome.scoreGap < 0.101);
+}
+
 TEST_CASE("applyCrossRerank fails on size mismatch", "[search][rerank][catch2]") {
     auto results = window3();
     auto outcome = applyCrossRerank(results, "q", blendConfig(), 3, fixedScorer({0.1F, 0.2F}),
