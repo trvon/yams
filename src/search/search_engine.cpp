@@ -1245,6 +1245,10 @@ public:
                                                                          : std::string("unknown");
     }
 
+    void setStaticEmbedding(std::shared_ptr<const simeon::StaticEmbedding> table) {
+        staticEmbedding_ = std::move(table);
+    }
+
     void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
         simeonLexical_ = std::move(backend);
         if (simeonLexical_ && metadataRepo_) {
@@ -1324,6 +1328,7 @@ private:
     EntityExtractionFunc conceptExtractor_; // GLiNER concept extractor (optional)
     std::shared_ptr<SearchTuner> tuner_;    // Adaptive runtime tuner (optional)
     SearchEngine::CrossRerankScorer crossReranker_;
+    std::shared_ptr<const simeon::StaticEmbedding> staticEmbedding_;
     std::string crossRerankScoringMode_ = "unknown";
     std::unique_ptr<SimeonLexicalBackend> simeonLexical_;
     // Per-profile simeon bandit arms. Each corpus profile learns independently
@@ -3732,11 +3737,20 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         YAMS_ZONE_SCOPED_N("search::lexical_rerank");
         const auto lexicalStart = std::chrono::steady_clock::now();
         auto repo = metadataRepo_;
+        detail::SemanticScorerFn semanticScorer;
+        if (auto table = staticEmbedding_) {
+            semanticScorer = [repo, table](const std::string& q,
+                                           const std::vector<std::string>& hashes)
+                -> Result<std::unordered_map<std::string, double>> {
+                return detail::staticEmbeddingScores(*table, *repo, q, hashes);
+            };
+        }
         auto lexical = detail::applyLexicalDeepRerank(
             response.results, query, workingConfig,
             [repo](const std::vector<std::string>& terms, const std::vector<std::string>& hashes) {
                 return repo->bm25ForDocuments(terms, hashes);
-            });
+            },
+            semanticScorer);
         componentTiming["lexical_rerank"] = std::chrono::duration_cast<std::chrono::microseconds>(
                                                 std::chrono::steady_clock::now() - lexicalStart)
                                                 .count();
@@ -3746,6 +3760,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             lexical.status == detail::LexicalRerankOutcome::Status::Applied ? "1" : "0";
         response.debugStats["lexical_rerank_us"] =
             std::to_string(componentTiming["lexical_rerank"]);
+        response.debugStats["static_rerank_applied"] = lexical.semanticApplied ? "1" : "0";
+        if (!lexical.semanticError.empty()) {
+            response.debugStats["static_rerank_error"] = lexical.semanticError;
+        }
         if (!lexical.skipReason.empty()) {
             response.debugStats["lexical_rerank_skip_reason"] = lexical.skipReason;
         }
@@ -5345,6 +5363,10 @@ void SearchEngine::setConceptExtractor(EntityExtractionFunc extractor) {
 
 void SearchEngine::setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
     pImpl_->setSimeonLexicalBackend(std::move(backend));
+}
+
+void SearchEngine::setStaticEmbedding(std::shared_ptr<const simeon::StaticEmbedding> table) {
+    pImpl_->setStaticEmbedding(std::move(table));
 }
 
 void SearchEngine::setCrossReranker(CrossRerankScorer scorer, std::string scoringMode) {

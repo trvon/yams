@@ -96,6 +96,10 @@ namespace yams::vector {
 class EmbeddingGenerator;
 class VectorDatabase;
 } // namespace yams::vector
+namespace simeon {
+class StaticEmbedding;
+}
+
 namespace yams::daemon {
 
 class ExternalPluginHost;
@@ -984,6 +988,11 @@ private:
     std::shared_ptr<app::services::IGraphQueryService> graphQueryServiceOverride_;
     std::shared_ptr<IModelProvider> modelProvider_;
     std::shared_ptr<IModelProvider> simeonRerankerProvider_;
+    // Static-embedding table from <dataDir>/models/static/*.smstat, loaded once (see
+    // loadStaticEmbeddingTable()).
+    std::shared_ptr<const simeon::StaticEmbedding> staticEmbeddingTable_;
+    std::once_flag staticEmbeddingTableOnce_;
+    std::shared_ptr<const simeon::StaticEmbedding> loadStaticEmbeddingTable();
 
     // ServiceManager owns the shared ABI host storage. PluginManager owns its
     // configuration, loading, interface adoption, and one-time shutdown lifecycle.

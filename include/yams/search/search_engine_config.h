@@ -461,6 +461,11 @@ struct SearchEngineConfig {
     // before the cross rerank. 0 disables it.
     size_t lexicalRerankDepth = 20;
     float lexicalRerankWeight = 0.5f;
+    // With a static embedding table loaded: rerank the fused top-N by
+    // (1 - wl - ws) * z(fused) + wl * z(bm25) + ws * z(static cosine). 0 disables the static part.
+    size_t staticRerankDepth = 50;
+    float staticRerankLexicalWeight = 0.33f;
+    float staticRerankWeight = 0.33f;
     size_t fusionCandidateLimit = 0;
     bool simeonRerankOuterMaxSim = false;
 

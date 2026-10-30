@@ -14,6 +14,10 @@
 
 #include <boost/asio/any_io_executor.hpp>
 
+namespace simeon {
+class StaticEmbedding;
+}
+
 namespace yams::metadata {
 class MetadataRepository;
 class KnowledgeGraphStore;
@@ -82,6 +86,8 @@ public:
     /// @param scoringMode label reported as the `cross_rerank_scoring_mode` debug stat; callers
     ///        that resolve the scorer's mode outside SearchEngineConfig must pass it here.
     void setCrossReranker(CrossRerankScorer scorer, std::string scoringMode = {});
+    /// Static-embedding table for the deep rerank's semantic term (nullptr disables it).
+    void setStaticEmbedding(std::shared_ptr<const simeon::StaticEmbedding> table);
     std::shared_ptr<SearchTuner> getSearchTuner() const;
     SimeonLexicalStatus getSimeonLexicalStatus() const;
     /// Ask background work owned by the engine (the simeon-lexical index build) to stop at its

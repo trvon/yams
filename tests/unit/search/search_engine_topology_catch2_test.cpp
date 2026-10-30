@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -16,6 +17,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <simeon/static_embedding.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -1422,6 +1424,72 @@ TEST_CASE("SearchEngine deep lexical rerank scores the fused pool from FTS5",
     const auto& debug = response.value().debugStats;
     CHECK(debug.at("lexical_rerank_applied") == "1");
     CHECK(debug.at("lexical_rerank_matched") == "2");
+}
+
+TEST_CASE("SearchEngine deep rerank adds the static-embedding term when a table is set",
+          "[search][rerank][lexical_rerank][catch2]") {
+    // Minimal SMSTAT01 table: 4 dims, int8 rows with scale 1.
+    const std::vector<std::string> tokens = {"[UNK]", "alpha", "one", "gamma", "two"};
+    const std::vector<std::array<std::int8_t, 4>> rows = {
+        {{0, 0, 0, 0}}, {{100, 0, 0, 0}}, {{0, 100, 0, 0}}, {{0, 0, 100, 0}}, {{0, 0, 0, 100}}};
+    std::string bytes = "SMSTAT01";
+    auto u32 = [&](std::uint32_t v) {
+        for (int k = 0; k < 4; ++k)
+            bytes.push_back(static_cast<char>((v >> (8 * k)) & 0xFF));
+    };
+    u32(1);             // version
+    u32(4);             // dim
+    u32(tokens.size()); // vocab
+    u32(3);             // lowercase | strip_accents
+    u32(0);             // unk id
+    u32(100);           // max word chars
+    for (const auto& t : tokens) {
+        bytes.push_back(static_cast<char>(t.size() & 0xFF));
+        bytes.push_back(static_cast<char>(t.size() >> 8));
+        bytes += t;
+    }
+    for (std::size_t i = 0; i < tokens.size(); ++i)
+        u32(0x3F800000u); // 1.0f
+    for (const auto& r : rows)
+        for (auto v : r)
+            bytes.push_back(static_cast<char>(v));
+    const std::vector<std::uint8_t> raw(bytes.begin(), bytes.end());
+    auto table =
+        std::make_shared<const simeon::StaticEmbedding>(simeon::StaticEmbedding::from_bytes(raw));
+
+    TopologySearchFixture fix;
+    fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
+    fix.addDocument("x2", "alpha alpha alpha gamma", {0.9F, 0.1F});
+
+    SearchEngineConfig config;
+    config.includeDebugInfo = true;
+    config.enableParallelExecution = false;
+    config.textWeight = 1.0F;
+    config.vectorWeight = 0.0F;
+    config.entityVectorWeight = 0.0F;
+    config.enableGraphRerank = false;
+    config.enableReranking = false;
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, nullptr, fix.kgStore, config);
+    engine.setStaticEmbedding(table);
+    SearchParams params;
+    params.limit = 5;
+    auto response = engine.searchWithResponse("alpha", params);
+    REQUIRE(response.has_value());
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("lexical_rerank_applied") == "1");
+    CHECK(debug.at("static_rerank_applied") == "1");
+    CHECK_FALSE(debug.contains("static_rerank_error"));
+
+    // Without a table the stage stays lexical-only.
+    engine.setStaticEmbedding(nullptr);
+    auto plain = engine.searchWithResponse("alpha", params);
+    REQUIRE(plain.has_value());
+    CHECK(plain.value().debugStats.at("static_rerank_applied") == "0");
 }
 
 TEST_CASE("SearchEngine reports the scoring mode of the wired cross reranker",

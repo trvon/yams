@@ -202,3 +202,97 @@ TEST_CASE("applyLexicalDeepRerank scores results that carry only a hash, no docu
     CHECK(seen.front() == "h1");
     CHECK(results.front().document.sha256Hash == "h7");
 }
+
+namespace {
+
+using yams::search::detail::SemanticScorerFn;
+
+SemanticScorerFn fixedSemantic(std::unordered_map<int64_t, double> scores,
+                               std::vector<std::string>* seenHashes = nullptr, bool fail = false) {
+    return [scores = std::move(scores), seenHashes, fail](const std::string&,
+                                                          const std::vector<std::string>& hashes)
+               -> Result<std::unordered_map<std::string, double>> {
+        if (seenHashes) {
+            *seenHashes = hashes;
+        }
+        if (fail) {
+            return yams::Error{ErrorCode::InternalError, "no table"};
+        }
+        std::unordered_map<std::string, double> out;
+        for (const auto& [id, score] : scores) {
+            out["h" + std::to_string(id)] = score;
+        }
+        return out;
+    };
+}
+
+SearchEngineConfig staticConfig() {
+    auto cfg = deepConfig(20, 0.5F);
+    cfg.staticRerankDepth = 50;
+    cfg.staticRerankLexicalWeight = 0.33F;
+    cfg.staticRerankWeight = 0.33F;
+    return cfg;
+}
+
+} // namespace
+
+TEST_CASE("applyLexicalDeepRerank with a semantic scorer reranks the deeper static pool",
+          "[search][rerank][lexical_rerank][catch2]") {
+    auto results = fusedList(60);
+    std::vector<std::string> lexicalSeen;
+    std::vector<std::string> semanticSeen;
+    // Doc 40 is outside the lexical depth (20) but inside the static depth (50).
+    auto outcome = applyLexicalDeepRerank(results, "q term", staticConfig(),
+                                          fixedScores({{40, 20.0}, {2, 5.0}}, &lexicalSeen),
+                                          fixedSemantic({{40, 0.9}, {1, 0.1}}, &semanticSeen));
+    REQUIRE(outcome.status == LexicalRerankOutcome::Status::Applied);
+    CHECK(outcome.semanticApplied);
+    CHECK(outcome.depth == 50);
+    CHECK(semanticSeen.size() == 50);
+    CHECK(lexicalSeen.size() == 50);
+    CHECK(results.front().document.sha256Hash == "h40");
+    // The tail beyond the static pool keeps fused order.
+    for (size_t i = 50; i < results.size(); ++i) {
+        CHECK(results[i].document.id == static_cast<int64_t>(i + 1));
+    }
+}
+
+TEST_CASE("applyLexicalDeepRerank falls back to lexical-only when the semantic scorer fails",
+          "[search][rerank][lexical_rerank][catch2]") {
+    auto results = fusedList(60);
+    std::vector<std::string> lexicalSeen;
+    auto outcome = applyLexicalDeepRerank(results, "q term", staticConfig(),
+                                          fixedScores({{15, 30.0}}, &lexicalSeen),
+                                          fixedSemantic({}, nullptr, /*fail=*/true));
+    REQUIRE(outcome.status == LexicalRerankOutcome::Status::Applied);
+    CHECK_FALSE(outcome.semanticApplied);
+    CHECK(outcome.semanticError == "no table");
+    CHECK(outcome.depth == 20);
+    CHECK(lexicalSeen.size() == 20);
+    CHECK(results.front().document.sha256Hash == "h15");
+}
+
+TEST_CASE("applyLexicalDeepRerank applies semantic scores without any lexical match",
+          "[search][rerank][lexical_rerank][catch2]") {
+    auto results = fusedList(30);
+    auto outcome = applyLexicalDeepRerank(results, "q term", staticConfig(), fixedScores({}),
+                                          fixedSemantic({{25, 0.95}}));
+    REQUIRE(outcome.status == LexicalRerankOutcome::Status::Applied);
+    CHECK(outcome.semanticApplied);
+    CHECK(outcome.matched == 0);
+    CHECK(outcome.depth == 30);
+}
+
+TEST_CASE("applyLexicalDeepRerank ignores the semantic scorer when static depth is 0",
+          "[search][rerank][lexical_rerank][catch2]") {
+    auto results = fusedList(30);
+    auto cfg = staticConfig();
+    cfg.staticRerankDepth = 0;
+    std::vector<std::string> semanticSeen;
+    auto outcome = applyLexicalDeepRerank(results, "q term", cfg, fixedScores({{3, 10.0}}),
+                                          fixedSemantic({{25, 0.95}}, &semanticSeen));
+    REQUIRE(outcome.status == LexicalRerankOutcome::Status::Applied);
+    CHECK_FALSE(outcome.semanticApplied);
+    CHECK(semanticSeen.empty());
+    CHECK(outcome.depth == 20);
+}
