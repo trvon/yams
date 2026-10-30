@@ -160,3 +160,127 @@ TEST_CASE("EmbeddingGenerator selects Daemon when configured directly", "[vector
     EmbeddingGenerator gen(cfg);
     REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
 }
+
+#include <simeon/static_embedding.hpp>
+#include <yams/config/static_embedding_table.h>
+
+#include <filesystem>
+#include <fstream>
+#include <random>
+
+namespace {
+
+// Minimal SMSTAT01 table: dim 4, rows with scale 1; `bump` changes one row so contents differ.
+void writeTinyStaticTable(const std::filesystem::path& path, std::int8_t bump = 0) {
+    const std::vector<std::string> tokens = {"[UNK]", "alpha", "beta", "gamma"};
+    const std::vector<std::array<std::int8_t, 4>> rows = {
+        {{0, 0, 0, 0}},
+        {{100, 0, 0, 0}},
+        {{0, 100, 0, 0}},
+        {{0, 0, static_cast<std::int8_t>(100 - bump), 0}}};
+    std::string bytes = "SMSTAT01";
+    auto u32 = [&](std::uint32_t v) {
+        for (int k = 0; k < 4; ++k)
+            bytes.push_back(static_cast<char>((v >> (8 * k)) & 0xFF));
+    };
+    u32(1);
+    u32(4);
+    u32(static_cast<std::uint32_t>(tokens.size()));
+    u32(3);
+    u32(0);
+    u32(100);
+    for (const auto& t : tokens) {
+        bytes.push_back(static_cast<char>(t.size()));
+        bytes.push_back(0);
+        bytes += t;
+    }
+    for (std::size_t i = 0; i < tokens.size(); ++i)
+        u32(0x3F800000u);
+    for (const auto& r : rows)
+        for (auto v : r)
+            bytes.push_back(static_cast<char>(v));
+    std::ofstream(path, std::ios::binary)
+        .write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+std::filesystem::path uniqueTempDir(const char* stem) {
+    auto dir = std::filesystem::temp_directory_path() /
+               (std::string(stem) + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+} // namespace
+
+TEST_CASE("SimeonBackend static profile encodes with the configured table",
+          "[vector][simeon][static]") {
+    const auto dir = uniqueTempDir("yams_static_profile_");
+    const auto table = dir / "tiny.smstat";
+    writeTinyStaticTable(table);
+    const auto cfgPath = dir / "config.toml";
+    std::ofstream(cfgPath) << "[embeddings.simeon]\nencoder_profile = \"static\"\nstatic_table = \""
+                           << table.string() << "\"\n";
+    yams::test::ScopedEnvVar cfgEnv{"YAMS_CONFIG", cfgPath.string()};
+    yams::test::ScopedEnvVar compatEnv{"YAMS_CONFIG_PATH", std::nullopt};
+
+    auto backend = makeSimeonBackend(EmbeddingConfig{});
+    REQUIRE(backend->initialize());
+    CHECK(backend->getEmbeddingDimension() == 4);
+    CHECK_THAT(backend->getEmbeddingSpaceIdentity(), StartsWith("simeon-static-v1:tiny.smstat:"));
+    CHECK(backend->getEmbeddingSpaceIdentity().ends_with(":dim=4"));
+
+    auto v = backend->generateEmbedding("alpha beta");
+    REQUIRE(v.has_value());
+    REQUIRE(v.value().size() == 4);
+    CHECK(std::abs(v.value()[0] - 0.70710677f) < 1e-5f);
+    CHECK(std::abs(v.value()[1] - 0.70710677f) < 1e-5f);
+    CHECK(v.value()[2] == 0.0f);
+
+    // A table with different contents has a different identity (it forces re-embedding).
+    const auto other = dir / "tiny2.smstat";
+    writeTinyStaticTable(other, /*bump=*/1);
+    CHECK(staticEmbeddingSpaceIdentity(other) != staticEmbeddingSpaceIdentity(table));
+    CHECK(loadSharedStaticEmbeddingTable(table) == loadSharedStaticEmbeddingTable(table));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("SimeonBackend static profile without a table falls back to the hash encoder",
+          "[vector][simeon][static]") {
+    const auto dir = uniqueTempDir("yams_static_missing_");
+    const auto cfgPath = dir / "config.toml";
+    std::ofstream(cfgPath) << "[embeddings.simeon]\nencoder_profile = \"static\"\nstatic_table = \""
+                           << (dir / "missing.smstat").string() << "\"\n";
+    yams::test::ScopedEnvVar cfgEnv{"YAMS_CONFIG", cfgPath.string()};
+    yams::test::ScopedEnvVar compatEnv{"YAMS_CONFIG_PATH", std::nullopt};
+    yams::test::ScopedEnvVar dataEnv{"YAMS_DATA_DIR", dir.string()};
+
+    auto backend = makeSimeonBackend(EmbeddingConfig{});
+    REQUIRE(backend->initialize());
+    CHECK_THAT(backend->getEmbeddingSpaceIdentity(), StartsWith("simeon-config-v1:"));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("findStaticEmbeddingTable prefers the configured path, then the data dir",
+          "[vector][simeon][static]") {
+    using yams::config::findStaticEmbeddingTable;
+    const auto dir = uniqueTempDir("yams_static_lookup_");
+    const auto models = dir / "models" / "static";
+    std::filesystem::create_directories(models);
+    writeTinyStaticTable(models / "b.smstat");
+    writeTinyStaticTable(models / "a.smstat");
+    std::ofstream(models / "notes.txt") << "not a table";
+    const auto configured = dir / "chosen.smstat";
+    writeTinyStaticTable(configured);
+
+    CHECK(findStaticEmbeddingTable(configured, dir) == configured);
+    CHECK(findStaticEmbeddingTable(std::nullopt, dir) == models / "a.smstat");
+    // A configured path that does not exist falls through to the data dir.
+    CHECK(findStaticEmbeddingTable(dir / "missing.smstat", dir) == models / "a.smstat");
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}

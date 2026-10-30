@@ -2266,6 +2266,8 @@ struct PersistedHnswState {
 static std::string g_benchmark_search_engine =
     yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::SimeonPqAdc);
 static std::string g_simeonEncoderProfile;
+// encoder_profile = "static": SMSTAT01 table written as embeddings.simeon.static_table.
+static std::string g_simeonStaticTable;
 static std::string g_simeonFragmentEncoderProfile;
 static std::optional<bool> g_simeonFragmentGeometryEnabled;
 static std::optional<bool> g_simeonBm25Enabled;
@@ -2286,6 +2288,10 @@ static void consumeXplanConfigArguments(int& argc, char** argv) {
         const std::string_view argument{argv[inputIndex]};
         if (auto value = takeValue(argument, "--yams-simeon-encoder-profile="); value.has_value()) {
             g_simeonEncoderProfile = std::move(*value);
+            continue;
+        }
+        if (auto value = takeValue(argument, "--yams-simeon-static-table="); value.has_value()) {
+            g_simeonStaticTable = std::move(*value);
             continue;
         }
         if (auto value = takeValue(argument, "--yams-simeon-fragment-encoder-profile=");
@@ -2346,6 +2352,10 @@ static yams::vector::VectorSearchEngine benchmarkVectorSearchEngine() {
 static std::string benchmarkEngineCacheLabel() {
     const auto engine = benchmarkVectorSearchEngine();
     std::string label = yams::vector::vectorSearchEngineName(engine);
+    // Vectors from different encoder spaces must not share a warm cache.
+    if (!g_simeonEncoderProfile.empty()) {
+        label += "-" + g_simeonEncoderProfile;
+    }
     return label;
 }
 
@@ -6561,11 +6571,26 @@ struct BenchFixture {
                     if (embedBackendSimeon) {
                         configOut << "preferred_model = \"simeon-default\"\n";
                         const bool fixedHash384 = g_simeonEncoderProfile == "fixed_hash_384";
-                        configOut << "embedding_dim = " << (fixedHash384 ? 384 : 1024) << "\n\n";
+                        std::size_t dim = fixedHash384 ? 384 : 1024;
+                        if (g_simeonEncoderProfile == "static" && !g_simeonStaticTable.empty()) {
+                            // SMSTAT01 header: magic(8) version(4) dim(4).
+                            std::ifstream table(g_simeonStaticTable, std::ios::binary);
+                            unsigned char header[16]{};
+                            if (table.read(reinterpret_cast<char*>(header), sizeof header)) {
+                                dim = static_cast<std::size_t>(header[12]) |
+                                      (static_cast<std::size_t>(header[13]) << 8) |
+                                      (static_cast<std::size_t>(header[14]) << 16) |
+                                      (static_cast<std::size_t>(header[15]) << 24);
+                            }
+                        }
+                        configOut << "embedding_dim = " << dim << "\n\n";
                         if (!g_simeonEncoderProfile.empty()) {
                             configOut << "[embeddings.simeon]\n";
-                            configOut << "encoder_profile = \"" << g_simeonEncoderProfile
-                                      << "\"\n\n";
+                            configOut << "encoder_profile = \"" << g_simeonEncoderProfile << "\"\n";
+                            if (!g_simeonStaticTable.empty()) {
+                                configOut << "static_table = \"" << g_simeonStaticTable << "\"\n";
+                            }
+                            configOut << "\n";
                         }
                         if (g_simeonBm25Enabled.has_value()) {
                             configOut << "[embeddings.simeon.bm25]\n";

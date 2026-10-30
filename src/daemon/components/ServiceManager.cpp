@@ -61,6 +61,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/config/config_helpers.h>
+#include <yams/config/static_embedding_table.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/CheckpointManager.h>
@@ -99,6 +100,7 @@
 #include <yams/metadata/migration.h>
 #include <yams/storage/corpus_stats.h>
 #include <yams/storage/storage_runtime_resolver.h>
+#include <yams/vector/simeon_embedding_backend.h>
 #include <yams/vector/vector_database.h>
 
 namespace {
@@ -3563,30 +3565,13 @@ boost::asio::any_io_executor ServiceManager::getCliExecutor() const {
 
 std::shared_ptr<const simeon::StaticEmbedding> ServiceManager::loadStaticEmbeddingTable() {
     std::call_once(staticEmbeddingTableOnce_, [this]() {
-        std::error_code ec;
-        const auto dir = resolvedDataDir_ / "models" / "static";
-        if (resolvedDataDir_.empty() || !std::filesystem::is_directory(dir, ec)) {
-            return;
+        const auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
+        std::optional<std::filesystem::path> configured;
+        if (policy.staticTable) {
+            configured = std::filesystem::path(*policy.staticTable);
         }
-        std::vector<std::filesystem::path> tables;
-        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-            if (entry.is_regular_file(ec) && entry.path().extension() == ".smstat") {
-                tables.push_back(entry.path());
-            }
-        }
-        if (tables.empty()) {
-            return;
-        }
-        std::sort(tables.begin(), tables.end());
-        try {
-            staticEmbeddingTable_ = std::make_shared<const simeon::StaticEmbedding>(
-                simeon::StaticEmbedding::load(tables.front().string()));
-            spdlog::info("[search] static embedding table {} (dim={}, vocab={})",
-                         tables.front().filename().string(), staticEmbeddingTable_->dim(),
-                         staticEmbeddingTable_->vocab_size());
-        } catch (const std::exception& e) {
-            spdlog::warn("[search] static embedding table {} not loaded: {}",
-                         tables.front().string(), e.what());
+        if (auto path = yams::config::findStaticEmbeddingTable(configured, resolvedDataDir_)) {
+            staticEmbeddingTable_ = vector::loadSharedStaticEmbeddingTable(*path);
         }
     });
     return staticEmbeddingTable_;

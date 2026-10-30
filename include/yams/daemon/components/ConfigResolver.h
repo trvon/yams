@@ -237,6 +237,8 @@ public:
         std::optional<std::string> projection;
         std::optional<bool> l2Normalize;
         std::optional<std::uint32_t> pqBytes;
+        // encoder_profile = "static": SMSTAT01 table path (embeddings.simeon.static_table).
+        std::optional<std::string> staticTable;
     };
 
     struct SimeonBm25Policy {
