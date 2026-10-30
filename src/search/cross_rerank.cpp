@@ -5,8 +5,8 @@
 
 #include <algorithm>
 #include <climits>
-#include <limits>
 #include <cmath>
+#include <limits>
 #include <string_view>
 #include <unordered_map>
 
@@ -71,6 +71,7 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
     // One bounded preview query for the whole window; the previous per-result getContent()
     // read every document's full text only to keep its first textLimit characters.
     std::unordered_map<int64_t, std::string> previews;
+    std::unordered_map<std::string, std::string> previewsByHash;
     if (metadataRepo) {
         std::vector<int64_t> ids;
         ids.reserve(window);
@@ -90,6 +91,27 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
             }
             previews = std::move(fetched.value());
         }
+        // Hits without a metadata id (Simeon-lexical, vector) are resolved by hash.
+        std::vector<std::string> hashes;
+        for (size_t i = 0; i < window; ++i) {
+            if (results[i].document.id <= 0 && !results[i].document.sha256Hash.empty() &&
+                textLimit > 0 &&
+                buildCrossRerankText(results[i], {}, textLimit).size() < textLimit) {
+                hashes.push_back(results[i].document.sha256Hash);
+            }
+        }
+        if (!hashes.empty()) {
+            auto fetched = metadataRepo->batchGetDocumentsWithContentPreview(
+                hashes, static_cast<int>(std::min<std::size_t>(textLimit, INT_MAX)));
+            if (!fetched) {
+                outcome.status = CrossRerankOutcome::Status::Failed;
+                outcome.errorMessage = fetched.error().message;
+                return outcome;
+            }
+            for (auto& [hash, docAndPreview] : fetched.value()) {
+                previewsByHash.emplace(hash, std::move(docAndPreview.second));
+            }
+        }
     }
     std::vector<std::string> rerankTexts;
     rerankTexts.reserve(window);
@@ -99,6 +121,9 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
         std::string_view preview;
         if (const auto it = previews.find(results[i].document.id); it != previews.end()) {
             preview = it->second;
+        } else if (const auto hit = previewsByHash.find(results[i].document.sha256Hash);
+                   hit != previewsByHash.end()) {
+            preview = hit->second;
         }
         rerankTexts.push_back(buildCrossRerankText(results[i], preview, textLimit));
         originalScores.push_back(results[i].score);

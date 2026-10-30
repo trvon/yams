@@ -333,6 +333,26 @@ TEST_CASE("applyCrossRerank fetches window text as one preview batch", "[search]
         CHECK(id != metadataOnlyId);
     }
 
+    // Fused hits from Simeon-lexical or vector legs carry a hash but no metadata id; the reranker
+    // must still see their content, not just the file name.
+    {
+        auto hashOnly = results;
+        for (auto& r : hashOnly) {
+            r.document.id = 0;
+            r.snippet.clear();
+        }
+        seenTexts.clear();
+        auto byHash = applyCrossRerank(hashOnly, "q", cfg, 3, scorer, repo);
+        CHECK(byHash.attempted);
+        REQUIRE(seenTexts.size() == 3);
+        for (const auto& text : seenTexts) {
+            const bool hasBody = text.find(std::string(16, 'a')) != std::string::npos ||
+                                 text.find(std::string(16, 'b')) != std::string::npos ||
+                                 text.find(std::string(16, 'c')) != std::string::npos;
+            CHECK(hasBody);
+        }
+    }
+
     repo.reset();
     pool->shutdown();
     pool.reset();
