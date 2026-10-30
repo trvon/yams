@@ -1392,6 +1392,38 @@ TEST_CASE("SearchEngine cross reranker promotes lower fused candidate",
     CHECK((debug.at("cross_rerank_replace_scores") == "1"));
 }
 
+TEST_CASE("SearchEngine deep lexical rerank scores the fused pool from FTS5",
+          "[search][rerank][lexical_rerank][catch2]") {
+    TopologySearchFixture fix;
+    fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
+    fix.addDocument("x2", "alpha alpha alpha gamma", {0.9F, 0.1F});
+
+    SearchEngineConfig config;
+    config.includeDebugInfo = true;
+    config.enableParallelExecution = false;
+    config.textWeight = 1.0F;
+    config.vectorWeight = 0.0F;
+    config.entityVectorWeight = 0.0F;
+    config.enableGraphRerank = false;
+    config.enableReranking = false;
+    config.lexicalRerankDepth = 20;
+    config.lexicalRerankWeight = 0.5F;
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, nullptr, fix.kgStore, config);
+    SearchParams params;
+    params.limit = 5;
+    auto response = engine.searchWithResponse("alpha", params);
+    REQUIRE(response.has_value());
+    REQUIRE_FALSE(response.value().results.empty());
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("lexical_rerank_applied") == "1");
+    CHECK(debug.at("lexical_rerank_matched") == "2");
+}
+
 TEST_CASE("SearchEngine reports the scoring mode of the wired cross reranker",
           "[search][rerank][catch2]") {
     TopologySearchFixture fix;

@@ -1811,6 +1811,7 @@ if catch2_dep.found()
       'unit/search/component_fanout_catch2_test.cpp',
       'unit/search/concept_boost_catch2_test.cpp',
       'unit/search/cross_rerank_catch2_test.cpp',
+      'unit/search/lexical_rerank_catch2_test.cpp',
       'unit/search/final_result_order_catch2_test.cpp',
       'unit/search/search_vector_pipeline_catch2_test.cpp',
       'unit/search/search_facets_catch2_test.cpp',

@@ -7,6 +7,7 @@
 #include "concept_boost_internal.h"
 #include "cross_rerank_internal.h"
 #include "final_result_order_internal.h"
+#include "lexical_rerank_internal.h"
 #include "search_component_fanout_internal.h"
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
@@ -3725,6 +3726,33 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     if (stageTraceEnabled) {
         postGraphSnapshot = response.results;
+    }
+
+    if (workingConfig.lexicalRerankDepth > 0 && metadataRepo_ && !response.results.empty()) {
+        YAMS_ZONE_SCOPED_N("search::lexical_rerank");
+        const auto lexicalStart = std::chrono::steady_clock::now();
+        auto repo = metadataRepo_;
+        auto lexical = detail::applyLexicalDeepRerank(
+            response.results, query, workingConfig,
+            [repo](const std::vector<std::string>& terms, const std::vector<std::string>& hashes) {
+                return repo->bm25ForDocuments(terms, hashes);
+            });
+        componentTiming["lexical_rerank"] = std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now() - lexicalStart)
+                                                .count();
+        response.debugStats["lexical_rerank_depth"] = std::to_string(lexical.depth);
+        response.debugStats["lexical_rerank_matched"] = std::to_string(lexical.matched);
+        response.debugStats["lexical_rerank_applied"] =
+            lexical.status == detail::LexicalRerankOutcome::Status::Applied ? "1" : "0";
+        response.debugStats["lexical_rerank_us"] =
+            std::to_string(componentTiming["lexical_rerank"]);
+        if (!lexical.skipReason.empty()) {
+            response.debugStats["lexical_rerank_skip_reason"] = lexical.skipReason;
+        }
+        if (lexical.status == detail::LexicalRerankOutcome::Status::Failed) {
+            response.debugStats["lexical_rerank_error"] = lexical.errorMessage;
+            spdlog::debug("[search] lexical rerank failed: {}", lexical.errorMessage);
+        }
     }
 
     if (rerankPlan.crossEnabled) {

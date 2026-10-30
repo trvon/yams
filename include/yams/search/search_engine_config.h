@@ -457,6 +457,10 @@ struct SearchEngineConfig {
     float rerankBlendWeight = 0.30f;
     float rerankScoreGapThreshold = 0.0f;
     size_t rerankSnippetMaxChars = 256;
+    // Deep lexical rerank: blend z(fused) with z(full-document FTS5 bm25) over the fused top-N
+    // before the cross rerank. 0 disables it.
+    size_t lexicalRerankDepth = 20;
+    float lexicalRerankWeight = 0.5f;
     size_t fusionCandidateLimit = 0;
     bool simeonRerankOuterMaxSim = false;
 
