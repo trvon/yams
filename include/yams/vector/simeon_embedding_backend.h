@@ -31,6 +31,10 @@ std::string simeonRecipeLabel();
 std::shared_ptr<const simeon::StaticEmbedding>
 loadSharedStaticEmbeddingTable(const std::filesystem::path& path);
 
+// Data dir the daemon resolved; the static-table lookup searches <dir>/models/static first. Empty
+// clears it (then the config/env data dir is used).
+void setStaticEmbeddingDataDirHint(const std::filesystem::path& dataDir);
+
 // Coordinate-space identity of a static table: "simeon-static-v1:<file>:<fnv1a64>:dim=<n>".
 std::string staticEmbeddingSpaceIdentity(const std::filesystem::path& path);
 

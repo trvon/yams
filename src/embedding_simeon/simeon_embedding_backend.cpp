@@ -136,7 +136,28 @@ const CachedStaticTable* cachedStaticTable(const std::filesystem::path& path) {
     return it->second.table ? &it->second : nullptr;
 }
 
-bool usesStaticProfile(const daemon::ConfigResolver::SimeonEncoderPolicy& policy) {
+std::mutex& dataDirHintMutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+std::filesystem::path& dataDirHint() {
+    static std::filesystem::path hint;
+    return hint;
+}
+
+// "static" explicitly, or no profile configured: the static table is the default when one is
+// found. Any other explicit profile keeps the hash encoder.
+bool wantsStaticProfile(const EmbeddingConfig& yamsConfig,
+                        const daemon::ConfigResolver::SimeonEncoderPolicy& policy) {
+    if (yamsConfig.simeon_encoder_profile == EmbeddingConfig::SimeonEncoderProfile::FixedHash384) {
+        return false;
+    }
+    return !policy.encoderProfile.has_value() || policy.encoderProfile->empty() ||
+           *policy.encoderProfile == "static";
+}
+
+bool explicitStaticProfile(const daemon::ConfigResolver::SimeonEncoderPolicy& policy) {
     return policy.encoderProfile.has_value() && *policy.encoderProfile == "static";
 }
 
@@ -147,8 +168,18 @@ resolveStaticTablePath(const daemon::ConfigResolver::SimeonEncoderPolicy& policy
         configured = std::filesystem::path(*policy.staticTable);
     }
     std::filesystem::path dataDir;
-    if (auto env = yams::config::getenv_nonempty("YAMS_DATA_DIR")) {
-        dataDir = *env;
+    {
+        std::lock_guard<std::mutex> lock(dataDirHintMutex());
+        dataDir = dataDirHint();
+    }
+    if (dataDir.empty()) {
+        try {
+            dataDir = yams::config::resolve_data_dir_from_config();
+        } catch (const std::exception&) {
+            if (auto env = yams::config::getenv_nonempty("YAMS_DATA_DIR")) {
+                dataDir = *env;
+            }
+        }
     }
     return yams::config::findStaticEmbeddingTable(configured, dataDir);
 }
@@ -191,15 +222,17 @@ std::string configurableSpaceIdentity(const simeon::EncoderConfig& config) {
 
 ResolvedSimeonEncoder resolveEncoder(const EmbeddingConfig& yamsConfig) {
     const auto policy = daemon::ConfigResolver::resolveSimeonEncoderPolicy();
-    if (usesStaticProfile(policy)) {
+    if (wantsStaticProfile(yamsConfig, policy)) {
         if (auto path = resolveStaticTablePath(policy)) {
             if (const auto* cached = cachedStaticTable(*path)) {
                 return ResolvedSimeonEncoder{
                     .config = {}, .spaceIdentity = cached->identity, .staticTable = cached->table};
             }
         }
-        spdlog::warn("embeddings.simeon.encoder_profile='static' but no static table was found; "
-                     "using the configurable hash encoder");
+        if (explicitStaticProfile(policy)) {
+            spdlog::warn("embeddings.simeon.encoder_profile='static' but no static table was "
+                         "found; using the configurable hash encoder");
+        }
     }
     if (usesFixedHash384Profile(yamsConfig, policy)) {
         return ResolvedSimeonEncoder{.config = simeon::simeon_v1_384_config(),
@@ -375,6 +408,11 @@ private:
 
 std::unique_ptr<IEmbeddingBackend> makeSimeonBackend(const EmbeddingConfig& config) {
     return std::make_unique<SimeonBackend>(config);
+}
+
+void setStaticEmbeddingDataDirHint(const std::filesystem::path& dataDir) {
+    std::lock_guard<std::mutex> lock(dataDirHintMutex());
+    dataDirHint() = dataDir;
 }
 
 std::shared_ptr<const simeon::StaticEmbedding>

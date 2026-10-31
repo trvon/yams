@@ -15,6 +15,8 @@
 #include <yams/downloader/downloader.hpp>
 #include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/dim_resolver.h>
+#include <yams/vector/embedding_generator.h>
+#include <yams/vector/simeon_embedding_backend.h>
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
@@ -65,6 +67,12 @@ std::string formatInitSummary(const fs::path& configPath, const fs::path& dataPa
 
 size_t resolveModelDimension(std::string_view modelName) {
     if (modelName.empty() || modelName == "simeon-default" || modelName == "simeon") {
+        // The Simeon backend uses the static-embedding table when one is installed (its
+        // dimension), otherwise the 1024-dim hash encoder.
+        auto backend = vector::makeSimeonBackend(vector::EmbeddingConfig{});
+        if (backend && backend->initialize() && backend->getEmbeddingDimension() > 0) {
+            return backend->getEmbeddingDimension();
+        }
         return 1024;
     }
     for (const auto& model : init_assets::embeddingModels()) {
@@ -187,6 +195,9 @@ public:
 
             // Ensure we use the resolved dataPath in CLI
             cli_->setDataPath(dataPath);
+            // Simeon picks up a static-embedding table under this data dir (or the install's
+            // share/yams/models/static) when sizing the vector store.
+            vector::setStaticEmbeddingDataDirHint(dataPath);
 
             // 2) Create base directories
             createDirectoryIfMissing(dataPath);

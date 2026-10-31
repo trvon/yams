@@ -6,8 +6,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
+#include <random>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -21,6 +23,7 @@
 #include <yams/config/config_migration.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/daemon.h>
+#include <yams/vector/simeon_embedding_backend.h>
 
 #include "../../common/test_helpers_catch2.h"
 
@@ -271,8 +274,65 @@ TEST_CASE("InitCommand - post-setup guidance is formatted per branch", "[cli][in
     }
 }
 
+namespace {
+
+// Scratch data dir + config so Simeon dimension resolution does not see the developer's tables.
+struct ScratchDataDir {
+    std::filesystem::path dir;
+    std::optional<yams::test::ScopedEnvVar> cfg, compat, data;
+    ScratchDataDir() {
+        dir = std::filesystem::temp_directory_path() /
+              ("yams_init_dim_" + std::to_string(std::random_device{}()));
+        std::filesystem::create_directories(dir);
+        std::ofstream(dir / "config.toml") << "[core]\ndata_dir = \"" << dir.string() << "\"\n";
+        cfg.emplace("YAMS_CONFIG", (dir / "config.toml").string());
+        compat.emplace("YAMS_CONFIG_PATH", std::nullopt);
+        data.emplace("YAMS_DATA_DIR", dir.string());
+        yams::vector::setStaticEmbeddingDataDirHint(dir);
+    }
+    ~ScratchDataDir() {
+        yams::vector::setStaticEmbeddingDataDirHint({});
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+};
+
+} // namespace
+
+TEST_CASE("InitCommand: resolveModelDimension uses the static table's dimension when one exists",
+          "[cli][init][models]") {
+    ScratchDataDir scratch;
+    std::filesystem::create_directories(scratch.dir / "models" / "static");
+    // Minimal SMSTAT01 table, dim 4.
+    std::string bytes = "SMSTAT01";
+    auto u32 = [&](std::uint32_t v) {
+        for (int k = 0; k < 4; ++k)
+            bytes.push_back(static_cast<char>((v >> (8 * k)) & 0xFF));
+    };
+    u32(1);
+    u32(4);
+    u32(2);
+    u32(3);
+    u32(0);
+    u32(100);
+    for (const std::string t : {"[UNK]", "alpha"}) {
+        bytes.push_back(static_cast<char>(t.size()));
+        bytes.push_back(0);
+        bytes += t;
+    }
+    u32(0x3F800000u);
+    u32(0x3F800000u);
+    bytes.append(8, '\x01');
+    std::ofstream(scratch.dir / "models" / "static" / "t.smstat", std::ios::binary) << bytes;
+
+    CHECK(yams::cli::resolveModelDimension("simeon-default") == 4);
+    CHECK(yams::cli::resolveModelDimension("") == 4);
+    CHECK(yams::cli::resolveModelDimension("all-MiniLM-L6-v2") == 384);
+}
+
 TEST_CASE("InitCommand: resolveModelDimension maps model names to expected dimensions",
           "[cli][init][models]") {
+    ScratchDataDir scratch;
     CHECK(yams::cli::resolveModelDimension("simeon-default") == 1024);
     CHECK(yams::cli::resolveModelDimension("simeon") == 1024);
     CHECK(yams::cli::resolveModelDimension("") == 1024);

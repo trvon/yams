@@ -784,6 +784,8 @@ ServiceManager::~ServiceManager() {
 void ServiceManager::publishResolvedDataDir(std::filesystem::path dir) {
     std::lock_guard lock(resolvedDataDirMutex_);
     resolvedDataDir_ = std::move(dir);
+    // Static-embedding tables are found under this data dir by the embedding backend too.
+    vector::setStaticEmbeddingDataDirHint(resolvedDataDir_);
 }
 
 yams::Result<void> ServiceManager::initialize() {
