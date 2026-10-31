@@ -44,6 +44,9 @@ public:
     struct MigrationTarget {
         size_t dim{0};
         std::string identity; // empty: compare dimension only
+        /// The provider fell back to this space (e.g. the configured static table is missing),
+        /// so it is not a space the user chose.
+        bool fallback{false};
     };
 
     struct Dependencies {

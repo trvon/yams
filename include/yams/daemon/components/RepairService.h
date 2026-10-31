@@ -21,6 +21,11 @@
 #include <unordered_set>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
+#ifdef YAMS_TESTING
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/io_context.hpp>
+#endif
 
 namespace yams::metadata {
 class KnowledgeGraphStore;
@@ -291,6 +296,26 @@ public:
     std::optional<app::services::SessionExpiryResult> testing_runSessionExpiryMaintenance() {
         return runSessionExpiryMaintenance();
     }
+    /// Runs one startup-scan pass to completion, then drains the queue as the embedding consumer
+    /// would. Returns the hashes the pass queued, in order.
+    std::vector<std::string> testing_runStartupScanPass() {
+        running_.store(true);
+        boost::asio::io_context io;
+        const std::size_t start = scanCursor_.begin();
+        boost::asio::co_spawn(io, spawnInitialScan(start), boost::asio::detached);
+        io.run();
+        running_.store(false);
+        std::vector<std::string> queued;
+        std::lock_guard<std::mutex> lk(queueMutex_);
+        while (!pendingDocuments_.empty()) {
+            queued.push_back(pendingDocuments_.front());
+            pendingDocuments_.pop();
+        }
+        pendingSet_.clear();
+        return queued;
+    }
+    /// Whether the background loop would start another scan once the queue is empty.
+    bool testing_startupScanDue() const { return scanCursor_.shouldStart(); }
 #endif
 
 private:

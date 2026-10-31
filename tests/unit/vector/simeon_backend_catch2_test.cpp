@@ -264,6 +264,42 @@ TEST_CASE("SimeonBackend static profile without a table falls back to the hash e
     std::filesystem::remove_all(dir, ec);
 }
 
+// Auto-migrate keys off this: a missing table must read as a fallback, not as a chosen space.
+TEST_CASE("SimeonBackend reports a fallback space when the static table is missing",
+          "[vector][simeon][static][migrate]") {
+    const auto dir = uniqueTempDir("yams_static_fallback_");
+    const auto cfgPath = dir / "config.toml";
+    yams::test::ScopedEnvVar cfgEnv{"YAMS_CONFIG", cfgPath.string()};
+    yams::test::ScopedEnvVar compatEnv{"YAMS_CONFIG_PATH", std::nullopt};
+    yams::test::ScopedEnvVar dataEnv{"YAMS_DATA_DIR", dir.string()};
+    setStaticEmbeddingDataDirHint(dir);
+
+    SECTION("explicit static profile, table missing") {
+        std::ofstream(cfgPath) << "[embeddings.simeon]\nencoder_profile = \"static\"\n"
+                               << "static_table = \"" << (dir / "missing.smstat").string()
+                               << "\"\n";
+        auto backend = makeSimeonBackend(EmbeddingConfig{});
+        REQUIRE(backend->initialize());
+        CHECK(backend->isFallbackEmbeddingSpace());
+    }
+    SECTION("profile unset (static by default), no table installed") {
+        std::ofstream(cfgPath) << "[embeddings.simeon]\n";
+        auto backend = makeSimeonBackend(EmbeddingConfig{});
+        REQUIRE(backend->initialize());
+        CHECK(backend->isFallbackEmbeddingSpace());
+    }
+    SECTION("hash profile chosen explicitly") {
+        std::ofstream(cfgPath) << "[embeddings.simeon]\nencoder_profile = \"hash\"\n";
+        auto backend = makeSimeonBackend(EmbeddingConfig{});
+        REQUIRE(backend->initialize());
+        CHECK_FALSE(backend->isFallbackEmbeddingSpace());
+    }
+
+    setStaticEmbeddingDataDirHint({});
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 TEST_CASE("findStaticEmbeddingTable prefers the configured path, then the data dir",
           "[vector][simeon][static]") {
     using yams::config::findStaticEmbeddingTable;

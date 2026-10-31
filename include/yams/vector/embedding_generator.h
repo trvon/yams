@@ -182,6 +182,9 @@ public:
     // Versioned identity of the coordinate system, not merely the provider.
     // Empty means that the backend cannot support construction-bound routing.
     virtual std::string getEmbeddingSpaceIdentity() const { return {}; }
+    // True when the backend runs a fallback space instead of the one configured (for example the
+    // static table is missing). Vectors must not be migrated into a fallback space.
+    virtual bool isFallbackEmbeddingSpace() const { return false; }
     virtual bool isAvailable() const = 0;
     virtual GenerationStats getStats() const = 0;
     virtual void resetStats() = 0;

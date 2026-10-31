@@ -388,6 +388,7 @@ TEST_CASE("VectorSystemManager getName returns component name",
     CHECK((std::string(mgr.getName()) == "VectorSystemManager"));
 }
 
+#include <sqlite3.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/vector/vector_types.h>
 
@@ -414,6 +415,40 @@ void seedVectorDb(const std::filesystem::path& dataDir, std::size_t dim,
 
 VectorSystemManager::MigrationTarget target(std::size_t dim, std::string identity) {
     return VectorSystemManager::MigrationTarget{dim, std::move(identity)};
+}
+
+// Adds one more document vector to an existing vectors.db.
+void addVector(const std::filesystem::path& dataDir, std::size_t dim, const std::string& hash,
+               const std::string& modelId) {
+    yams::vector::VectorDatabaseConfig cfg;
+    cfg.database_path = (dataDir / "vectors.db").string();
+    cfg.embedding_dim = dim;
+    yams::vector::VectorDatabase db(cfg);
+    REQUIRE(db.initialize());
+    yams::vector::VectorRecord rec;
+    rec.chunk_id = hash + "-chunk";
+    rec.document_hash = hash;
+    rec.embedding.assign(dim, 0.0F);
+    rec.embedding[1] = 1.0F;
+    rec.level = yams::vector::EmbeddingLevel::DOCUMENT;
+    rec.model_id = modelId;
+    REQUIRE(db.insertVector(rec));
+}
+
+std::int64_t countVectorsWithModel(const std::filesystem::path& dataDir, const std::string& modelId) {
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open_v2((dataDir / "vectors.db").string().c_str(), &db, SQLITE_OPEN_READONLY,
+                            nullptr) == SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(db, "SELECT count(*) FROM vectors WHERE model_id = ?", -1, &stmt,
+                               nullptr) == SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, modelId.c_str(), -1, SQLITE_TRANSIENT);
+    std::int64_t n = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        n = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return n;
 }
 
 } // namespace
@@ -476,4 +511,66 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
     REQUIRE(mgr.initializeOnce(tempDir).value());
     CHECK(mgr.getEmbeddingDimension() == 384U);
     CHECK(mgr.getVectorDatabase()->getVectorCount() == 0U);
+}
+
+// A missing or unreadable static table makes the Simeon backend fall back to the hash encoder.
+// That fallback is not a space the user chose: auto-migrate must not wipe the static vectors.
+TEST_CASE_METHOD(VectorSystemManagerFixture,
+                 "VectorSystemManager does not migrate a static store to a fallback encoder",
+                 "[daemon][components][vector][migrate][catch2]") {
+    const std::string staticSpace = "simeon-static-v1:yams-static-bge-c4-256.smstat:abc:dim=256";
+    seedVectorDb(tempDir, 256, staticSpace);
+
+    auto deps = makeDeps();
+    deps.getEmbeddingDimension = [] { return static_cast<size_t>(1024); };
+    deps.migrationTarget = [] {
+        auto t = target(1024U, "simeon-config-v1:char_and_word:3-5:sketch=4096:output=1024");
+        t.fallback = true;
+        return std::optional{t};
+    };
+    VectorSystemManager mgr(std::move(deps));
+    REQUIRE(mgr.initializeOnce(tempDir).value());
+    CHECK_FALSE(mgr.migratedEmbeddingSpace());
+    CHECK(mgr.getEmbeddingDimension() == 256U);
+    CHECK(countVectorsWithModel(tempDir, staticSpace) == 1);
+}
+
+// The post-migration work (drop semantic_neighbor edges, rebuild topology, re-embed) runs after
+// initializeOnce. A crash before it completes must not lose it: the next start still reports a
+// pending migration.
+TEST_CASE_METHOD(VectorSystemManagerFixture,
+                 "VectorSystemManager keeps a migration pending across a restart",
+                 "[daemon][components][vector][migrate][catch2]") {
+    seedVectorDb(tempDir, 1024);
+    auto makeMigratingDeps = [this] {
+        auto deps = makeDeps();
+        deps.getEmbeddingDimension = [] { return static_cast<size_t>(256); };
+        deps.migrationTarget = [] { return std::optional{target(256U, "new-space")}; };
+        return deps;
+    };
+    {
+        VectorSystemManager first(makeMigratingDeps());
+        REQUIRE(first.initializeOnce(tempDir).value());
+        REQUIRE(first.migratedEmbeddingSpace());
+        // daemon dies here, before ServiceManager runs the post-migration steps
+    }
+    VectorSystemManager second(makeMigratingDeps());
+    REQUIRE(second.initializeOnce(tempDir).value());
+    CHECK(second.migratedEmbeddingSpace());
+}
+
+// A store holding vectors from two spaces (auto-migrate was off, or an older bug) must not keep
+// the foreign rows just because the first row happens to match the target.
+TEST_CASE_METHOD(VectorSystemManagerFixture,
+                 "VectorSystemManager removes vectors from other spaces when identities are mixed",
+                 "[daemon][components][vector][migrate][catch2]") {
+    seedVectorDb(tempDir, 384, "new-space");
+    addVector(tempDir, 384, "hash-b", "old-space");
+    REQUIRE(countVectorsWithModel(tempDir, "old-space") == 1);
+
+    auto deps = makeDeps();
+    deps.migrationTarget = [] { return std::optional{target(384U, "new-space")}; };
+    VectorSystemManager mgr(std::move(deps));
+    REQUIRE(mgr.initializeOnce(tempDir).value());
+    CHECK(countVectorsWithModel(tempDir, "old-space") == 0);
 }
