@@ -1136,6 +1136,17 @@ jobs:
           fi
           meson --version
           meson compile -C build/release
+          # Ship the static-embedding table: fetch it with the built CLI (sha256-pinned in
+          # src/cli/commands/model_command.cpp), point the install rule at it, and let meson
+          # regenerate the install plan (no recompilation).
+          FETCH_DIR="$RUNNER_TEMP/yams-static-fetch"
+          rm -rf "$FETCH_DIR" && mkdir -p "$FETCH_DIR/data"
+          YAMS_NON_INTERACTIVE=1 YAMS_DATA_DIR="$FETCH_DIR/data" YAMS_CONFIG="$FETCH_DIR/config.toml" \
+            ./build/release/tools/yams-cli/yams-cli model download yams-static-bge-c4-256 \
+            --output "$PWD/build/static-embedding" < /dev/null
+          meson configure build/release \
+            -Dstatic-embedding-table="$PWD/build/static-embedding/yams-static-bge-c4-256.smstat"
+          meson compile -C build/release
           echo "BUILD_DIR=build/release" >> "$GITHUB_ENV"
 
       - name: Upload build logs (artifacts)
@@ -1342,6 +1353,23 @@ jobs:
                   meson setup $buildDir --buildtype=release
               }
           }
+
+          # Ship the static-embedding table (sha256-pinned in model_command.cpp): fetch it with
+          # the built CLI, point the install rule at it, regenerate the install plan.
+          $fetchDir = Join-Path $env:RUNNER_TEMP "yams-static-fetch"
+          if (Test-Path $fetchDir) { Remove-Item -Recurse -Force $fetchDir }
+          New-Item -ItemType Directory -Path (Join-Path $fetchDir "data") -Force | Out-Null
+          $tableDir = Join-Path (Resolve-Path "build").Path "static-embedding"
+          $env:YAMS_NON_INTERACTIVE = "1"
+          $env:YAMS_DATA_DIR = Join-Path $fetchDir "data"
+          $env:YAMS_CONFIG = Join-Path $fetchDir "config.toml"
+          & (Join-Path $buildDir "tools\yams-cli\yams-cli.exe") model download yams-static-bge-c4-256 --output $tableDir
+          if ($LASTEXITCODE -ne 0) { Write-Error "static table download failed"; exit 1 }
+          Remove-Item Env:YAMS_DATA_DIR, Env:YAMS_CONFIG, Env:YAMS_NON_INTERACTIVE
+          meson configure $buildDir "-Dstatic-embedding-table=$(Join-Path $tableDir 'yams-static-bge-c4-256.smstat')"
+          if ($LASTEXITCODE -ne 0) { Write-Error "meson configure failed"; exit 1 }
+          meson compile -C $buildDir
+          if ($LASTEXITCODE -ne 0) { Write-Error "meson regenerate failed"; exit 1 }
 
           # Install to stage directory.
           # --no-rebuild: setup.ps1's release build already compiled; this
