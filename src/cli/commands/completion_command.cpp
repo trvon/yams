@@ -140,6 +140,15 @@ std::vector<CompletionOption> collectDirectOptions(const CLI::App* app) {
         options.push_back(std::move(completionOption));
     }
 
+    // CLI11 option groups are unnamed apps, not command paths. Flatten their
+    // options so selectors such as get --hash are discoverable too.
+    for (const auto* child : app->get_subcommands([](const CLI::App*) { return true; })) {
+        if (child != nullptr && child->get_name().empty()) {
+            for (auto& option : collectDirectOptions(child)) {
+                options.push_back(std::move(option));
+            }
+        }
+    }
     return options;
 }
 
@@ -412,7 +421,10 @@ std::string CompletionCommand::generateBashCompletion() const {
     oss << "    local i word subcommands\n";
     oss << "    for ((i=1; i<limit; ++i)); do\n";
     oss << "        word=\"${words[i]}\"\n";
-    oss << "        [[ \"$word\" == -* ]] && continue\n";
+    oss << "        case \"$word\" in\n";
+    oss << "            --data-dir|--storage) ((++i)); continue ;;\n";
+    oss << "            -*) continue ;;\n";
+    oss << "        esac\n";
     oss << "        subcommands=\"$(_yams_subcommands_for \"$(_yams_normalize_path \"$path\")\" | "
            "tr '\\n' ' ')\"\n";
     oss << "        [[ -z \"$subcommands\" ]] && break\n";
@@ -662,9 +674,9 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "}\n\n";
 
     oss << "_yams_describe_subcommands() {\n";
-    oss << "    local path=\"$1\"\n";
+    oss << "    local cmd_path=\"$1\"\n";
     oss << "    local -a commands\n";
-    oss << "    case \"$path\" in\n";
+    oss << "    case \"$cmd_path\" in\n";
     for (const auto& entry : commandTree) {
         if (entry.children.empty()) {
             continue;
@@ -686,9 +698,9 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "}\n\n";
 
     oss << "_yams_describe_options() {\n";
-    oss << "    local path=\"$1\"\n";
+    oss << "    local cmd_path=\"$1\"\n";
     oss << "    local -a options\n";
-    oss << "    case \"$path\" in\n";
+    oss << "    case \"$cmd_path\" in\n";
     for (const auto& entry : commandTree) {
         if (entry.options.empty()) {
             continue;
@@ -712,10 +724,10 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "}\n\n";
 
     oss << "_yams_describe_values() {\n";
-    oss << "    local path=\"$1\"\n";
+    oss << "    local cmd_path=\"$1\"\n";
     oss << "    local trigger=\"$2\"\n";
     oss << "    local -a values\n";
-    oss << "    case \"$path:$trigger\" in\n";
+    oss << "    case \"$cmd_path:$trigger\" in\n";
     for (const auto& hint : manualValueHints()) {
         oss << "        '" << hint.path << ":" << hint.trigger << "')\n";
         oss << "            values=(";
@@ -734,23 +746,27 @@ std::string CompletionCommand::generateZshCompletion() const {
 
     oss << "_yams_command_path() {\n";
     oss << "    local limit=\"$1\"\n";
-    oss << "    local path=\"\"\n";
+    // `path` is tied to PATH in zsh; using it as a scratch local hides executables.
+    oss << "    local cmd_path=\"\"\n";
     oss << "    local -a path_parts subcommands\n";
     oss << "    local i word\n";
     oss << "    for ((i = 2; i < limit; ++i)); do\n";
     oss << "        word=\"$words[i]\"\n";
-    oss << "        [[ \"$word\" == -* ]] && continue\n";
-    oss << "        subcommands=(${(f)$(_yams_subcommand_names_for \"$(_yams_normalize_path "
-           "\"$path\")\")})\n";
+    oss << "        case \"$word\" in\n";
+    oss << "            --data-dir|--storage) ((++i)); continue ;;\n";
+    oss << "            -*) continue ;;\n";
+    oss << "        esac\n";
+    oss << "        subcommands=(\"${(@f)$(_yams_subcommand_names_for \"$(_yams_normalize_path "
+           "\"$cmd_path\")\")}\")\n";
     oss << "        (( ${#subcommands[@]} == 0 )) && break\n";
     oss << "        if (( ${subcommands[(Ie)$word]} )); then\n";
     oss << "            path_parts+=(\"$word\")\n";
-    oss << "            path=\"${(j: :)path_parts}\"\n";
+    oss << "            cmd_path=\"${(j: :)path_parts}\"\n";
     oss << "        else\n";
     oss << "            break\n";
     oss << "        fi\n";
     oss << "    done\n";
-    oss << "    print -r -- \"$(_yams_normalize_path \"$path\")\"\n";
+    oss << "    print -r -- \"$(_yams_normalize_path \"$cmd_path\")\"\n";
     oss << "}\n\n";
 
     oss << "_yams() {\n";
@@ -777,16 +793,18 @@ std::string CompletionCommand::generateZshCompletion() const {
     }
     oss << "    )\n\n";
 
-    oss << "    _arguments -C \\\n";
-    oss << "        \"$global_flags[@]\" \\\n";
-    oss << "        '*:: :->args'\n\n";
-
+    // _arguments rebases words/CURRENT for the *:: action. Resolve the command
+    // against the original editor buffer, not that rewritten argument array.
     oss << "    local command_path\n";
     oss << "    command_path=\"$(_yams_command_path $CURRENT)\"\n";
     oss << "    local prev_word=\"\"\n";
     oss << "    if (( CURRENT > 2 )); then\n";
     oss << "        prev_word=\"$words[CURRENT-1]\"\n";
     oss << "    fi\n";
+    oss << "    _arguments -C \\\n";
+    oss << "        \"$global_flags[@]\" \\\n";
+    oss << "        '*:: :->args'\n\n";
+    oss << "    [[ \"$state\" == args ]] || return 0\n";
     oss << "    if [[ -n \"$prev_word\" ]]; then\n";
     oss << "        if _yams_describe_values \"$command_path\" \"$prev_word\"; then\n";
     oss << "            return 0\n";
@@ -802,7 +820,10 @@ std::string CompletionCommand::generateZshCompletion() const {
     oss << "            return 0\n";
     oss << "        fi\n";
     oss << "    fi\n\n";
-
+    oss << "    if [[ \"$PREFIX\" == -* ]]; then\n";
+    oss << "        _yams_describe_options \"$command_path\"\n";
+    oss << "        return\n";
+    oss << "    fi\n\n";
     oss << "    case \"$command_path\" in\n";
     oss << "        add)\n";
     oss << "            _arguments \\\n";

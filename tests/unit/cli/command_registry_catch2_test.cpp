@@ -87,6 +87,33 @@ TEST_CASE("CommandRegistry - minimal fast path names stay registered", "[cli][re
     CHECK_FALSE(yams::cli::CommandRegistry::registerMinimalCommandSet(&cli, "missing"));
 }
 
+TEST_CASE("YamsCLI rejects unknown arguments instead of silently ignoring them",
+          "[cli][parser][audit]") {
+    CliTestHelper helper;
+    CaptureStdout capture;
+    SECTION("Unknown global option") {
+        CHECK(helper.runCommand({"yams", "--definitely-invalid", "completion", "bash"}) != 0);
+    }
+    SECTION("Unknown command option") {
+        CHECK(helper.runCommand({"yams", "completion", "bash", "--definitely-invalid"}) != 0);
+    }
+    SECTION("Multiple top-level commands") {
+        CHECK(helper.runCommand({"yams", "completion", "bash", "completion", "zsh"}) != 0);
+    }
+    CHECK(capture.str().empty());
+}
+
+TEST_CASE("YamsCLI treats command names as retrieval arguments", "[cli][parser][audit]") {
+    CliTestHelper helper;
+    for (const std::string command : {"grep", "get", "cat", "list", "search"}) {
+        INFO(command);
+        CaptureStdout capture;
+        const auto result = helper.runCommand({"yams", "--json", command, "completion", "--help"});
+        CHECK(result == 0);
+        CHECK(capture.str().find("Usage: yams " + command) != std::string::npos);
+    }
+}
+
 TEST_CASE("YamsCLI - command registration preserves help entrypoints", "[cli][registry][catch2]") {
     CliTestHelper helper;
 
