@@ -45,7 +45,7 @@ struct CrossRerankOutcome {
 using CrossRerankScorerFn =
     std::function<Result<std::vector<float>>(const std::string&, const std::vector<std::string>&)>;
 
-// Rerank input text for one candidate: fileName + filePath + snippet + (bounded) content.
+// Rerank input text for one candidate: fileName + snippet + (bounded) content.
 std::string buildCrossRerankText(const SearchResult& result, std::string_view contentPreview,
                                  std::size_t textLimit);
 

@@ -69,4 +69,10 @@ struct Tier1TextSignal {
 Tier1TextSignal classifyTier1TextSignal(std::span<const ComponentResult> components,
                                         size_t minTextHits, float minTopTextScore);
 
+// Semantic-budget guard: lexical evidence strong enough to skip the KG tier. Uses the raw-scale
+// tier-1 signal (>= 5 Text/SimeonText hits and top absolute score >= 0.20, i.e. bm25 <= -5).
+inline constexpr size_t kSemanticBudgetMinTextHits = 5;
+inline constexpr float kSemanticBudgetMinTopTextScore = 0.20f;
+bool isStrongSemanticBudgetLexical(std::span<const ComponentResult> components);
+
 } // namespace yams::search::detail

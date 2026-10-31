@@ -7,6 +7,7 @@
 #include "concept_boost_internal.h"
 #include "cross_rerank_internal.h"
 #include "final_result_order_internal.h"
+#include "lexical_rerank_internal.h"
 #include "search_component_fanout_internal.h"
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
@@ -1244,6 +1245,10 @@ public:
                                                                          : std::string("unknown");
     }
 
+    void setStaticEmbedding(std::shared_ptr<const simeon::StaticEmbedding> table) {
+        staticEmbedding_ = std::move(table);
+    }
+
     void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
         simeonLexical_ = std::move(backend);
         if (simeonLexical_ && metadataRepo_) {
@@ -1323,6 +1328,7 @@ private:
     EntityExtractionFunc conceptExtractor_; // GLiNER concept extractor (optional)
     std::shared_ptr<SearchTuner> tuner_;    // Adaptive runtime tuner (optional)
     SearchEngine::CrossRerankScorer crossReranker_;
+    std::shared_ptr<const simeon::StaticEmbedding> staticEmbedding_;
     std::string crossRerankScoringMode_ = "unknown";
     std::unique_ptr<SimeonLexicalBackend> simeonLexical_;
     // Per-profile simeon bandit arms. Each corpus profile learns independently
@@ -1795,28 +1801,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         traceCollector.markStageSkipped("entity_vector", vectorTierSkipReason);
     };
 
-    auto computeLexicalEvidence = [&](const std::vector<ComponentResult>& componentResults) {
-        size_t lexicalHits = 0;
-        float topTextScore = 0.0f;
-        for (const auto& componentResult : componentResults) {
-            if (componentResult.source == ComponentResult::Source::Text ||
-                componentResult.source == ComponentResult::Source::SimeonText) {
-                ++lexicalHits;
-                topTextScore = std::max(topTextScore, componentResult.score);
-            } else if (componentResult.source == ComponentResult::Source::PathTree) {
-                ++lexicalHits;
-            }
-        }
-        return std::pair<size_t, float>{lexicalHits, topTextScore};
-    };
-
+    // Raw-scale lexical evidence for the semantic-budget KG skip. The fused score is batch
+    // normalized (top is always 1.0), so it cannot judge strength.
     auto recordSemanticBudgetLexicalEvidence =
         [&](const std::vector<ComponentResult>& componentResults) {
-            const auto [lexicalHits, topTextScore] = computeLexicalEvidence(componentResults);
-            response.debugStats["semantic_budget_lexical_hits"] = std::to_string(lexicalHits);
+            const auto signal = detail::classifyTier1TextSignal(
+                componentResults, detail::kSemanticBudgetMinTextHits,
+                detail::kSemanticBudgetMinTopTextScore);
+            response.debugStats["semantic_budget_lexical_hits"] = std::to_string(signal.textHits);
             response.debugStats["semantic_budget_top_text_score"] =
-                fmt::format("{:.4f}", topTextScore);
-            return std::pair<size_t, float>{lexicalHits, topTextScore};
+                fmt::format("{:.4f}", signal.topTextScore);
+            return signal.strong;
         };
 
     auto materializeConcepts = [&](bool waitIfConfigured) {
@@ -2668,11 +2663,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             "metadata", workingConfig.metadataWeight, stats_.metadataQueries,
             stats_.avgMetadataTimeMicros);
 
-        const auto [budgetLexicalHits, budgetTopTextScore] =
-            semanticBudgetActive ? recordSemanticBudgetLexicalEvidence(allComponentResults)
-                                 : std::pair<size_t, float>{0, 0.0f};
         const bool strongBudgetLexical =
-            semanticBudgetActive && (budgetLexicalHits >= 5 || budgetTopTextScore >= 0.20f);
+            semanticBudgetActive && recordSemanticBudgetLexicalEvidence(allComponentResults);
         if (semanticBudgetActive && strongBudgetLexical) {
             semanticTierSkipReason = "budget_guard_strong_lexical";
             response.debugStats["semantic_budget_skip_reason"] = semanticTierSkipReason;
@@ -3739,6 +3731,46 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     if (stageTraceEnabled) {
         postGraphSnapshot = response.results;
+    }
+
+    if (workingConfig.lexicalRerankDepth > 0 && metadataRepo_ && !response.results.empty()) {
+        YAMS_ZONE_SCOPED_N("search::lexical_rerank");
+        const auto lexicalStart = std::chrono::steady_clock::now();
+        auto repo = metadataRepo_;
+        detail::SemanticScorerFn semanticScorer;
+        if (auto table = staticEmbedding_) {
+            semanticScorer = [repo, table](const std::string& q,
+                                           const std::vector<std::string>& hashes)
+                -> Result<std::unordered_map<std::string, double>> {
+                return detail::staticEmbeddingScores(*table, *repo, q, hashes);
+            };
+        }
+        auto lexical = detail::applyLexicalDeepRerank(
+            response.results, query, workingConfig,
+            [repo](const std::vector<std::string>& terms, const std::vector<std::string>& hashes) {
+                return repo->bm25ForDocuments(terms, hashes);
+            },
+            semanticScorer);
+        componentTiming["lexical_rerank"] = std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now() - lexicalStart)
+                                                .count();
+        response.debugStats["lexical_rerank_depth"] = std::to_string(lexical.depth);
+        response.debugStats["lexical_rerank_matched"] = std::to_string(lexical.matched);
+        response.debugStats["lexical_rerank_applied"] =
+            lexical.status == detail::LexicalRerankOutcome::Status::Applied ? "1" : "0";
+        response.debugStats["lexical_rerank_us"] =
+            std::to_string(componentTiming["lexical_rerank"]);
+        response.debugStats["static_rerank_applied"] = lexical.semanticApplied ? "1" : "0";
+        if (!lexical.semanticError.empty()) {
+            response.debugStats["static_rerank_error"] = lexical.semanticError;
+        }
+        if (!lexical.skipReason.empty()) {
+            response.debugStats["lexical_rerank_skip_reason"] = lexical.skipReason;
+        }
+        if (lexical.status == detail::LexicalRerankOutcome::Status::Failed) {
+            response.debugStats["lexical_rerank_error"] = lexical.errorMessage;
+            spdlog::debug("[search] lexical rerank failed: {}", lexical.errorMessage);
+        }
     }
 
     if (rerankPlan.crossEnabled) {
@@ -5331,6 +5363,10 @@ void SearchEngine::setConceptExtractor(EntityExtractionFunc extractor) {
 
 void SearchEngine::setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
     pImpl_->setSimeonLexicalBackend(std::move(backend));
+}
+
+void SearchEngine::setStaticEmbedding(std::shared_ptr<const simeon::StaticEmbedding> table) {
+    pImpl_->setStaticEmbedding(std::move(table));
 }
 
 void SearchEngine::setCrossReranker(CrossRerankScorer scorer, std::string scoringMode) {

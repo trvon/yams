@@ -228,6 +228,8 @@ SearchEngineConfig cellConfig(StagePolicy policy, vector::VectorSearchEngine bac
     config.similarityThreshold = -1.0F;
     config.enableWeakQueryFanoutBoost = false;
     config.topologyExpansionOutputLimit = 2;
+    // The golden fused scores characterize the vector stage; keep later rescoring out of them.
+    config.lexicalRerankDepth = 0;
 
     const bool simeon = backend == vector::VectorSearchEngine::SimeonPqAdc;
     // Simeon's allowed-set ANN visits only the two routed rows; the other backends scan the whole

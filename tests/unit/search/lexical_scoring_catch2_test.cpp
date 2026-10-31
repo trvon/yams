@@ -330,3 +330,57 @@ TEST_CASE("classifyTier1TextSignal judges strength on the raw bm25 scale",
         CHECK_FALSE(classifyTier1TextSignal(components, 5, 0.45f).strong);
     }
 }
+
+TEST_CASE("semantic budget lexical guard judges strength on the raw bm25 scale",
+          "[search][lexical][semantic_budget][catch2]") {
+    using yams::search::detail::isStrongSemanticBudgetLexical;
+
+    const auto scoreBatch = [](const std::vector<SearchResult>& rows) {
+        LexicalScoringInputs inputs;
+        inputs.candidates = std::span<const SearchResult>{rows};
+        inputs.query = "q";
+        inputs.applyFilenameBoost = false;
+        inputs.bm25NormDivisor = 25.0f;
+        std::vector<ComponentResult> components;
+        for (auto& cr : scoreLexicalBatch(inputs).results) {
+            if (cr) {
+                components.push_back(*cr);
+            }
+        }
+        return components;
+    };
+
+    SECTION("many weak hits do not skip the KG tier") {
+        // Common term, bm25 near -1.4: the batch-normalized top is still 1.0.
+        std::vector<SearchResult> rows;
+        for (int i = 0; i < 8; ++i) {
+            rows.push_back(
+                makeSearchResult("w" + std::to_string(i), "w.txt", "w.txt", -1.40 + 0.02 * i));
+        }
+        auto components = scoreBatch(rows);
+        REQUIRE_FALSE(components.empty());
+        CHECK(components.front().score == Approx(1.0f));
+        ComponentResult path;
+        path.source = ComponentResult::Source::PathTree;
+        path.score = 1.0f;
+        components.insert(components.end(), 4, path);
+        CHECK_FALSE(isStrongSemanticBudgetLexical(components));
+    }
+
+    SECTION("a strong raw match with enough hits skips the KG tier") {
+        std::vector<SearchResult> rows;
+        for (int i = 0; i < 6; ++i) {
+            rows.push_back(
+                makeSearchResult("s" + std::to_string(i), "s.txt", "s.txt", -30.0 + 3.0 * i));
+        }
+        CHECK(isStrongSemanticBudgetLexical(scoreBatch(rows)));
+    }
+
+    SECTION("path-tree rows alone are not lexical strength") {
+        ComponentResult path;
+        path.source = ComponentResult::Source::PathTree;
+        path.score = 1.0f;
+        const std::vector<ComponentResult> components(6, path);
+        CHECK_FALSE(isStrongSemanticBudgetLexical(components));
+    }
+}

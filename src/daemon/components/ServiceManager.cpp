@@ -44,6 +44,7 @@
 #endif
 
 #include "../../../include/yams/daemon/components/ServiceManager.h"
+
 #include "service_manager/bootstrap_status.h"
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -54,6 +55,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
+#include <simeon/static_embedding.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
@@ -3559,11 +3561,44 @@ boost::asio::any_io_executor ServiceManager::getCliExecutor() const {
     return getWorkerExecutor();
 }
 
+std::shared_ptr<const simeon::StaticEmbedding> ServiceManager::loadStaticEmbeddingTable() {
+    std::call_once(staticEmbeddingTableOnce_, [this]() {
+        std::error_code ec;
+        const auto dir = resolvedDataDir_ / "models" / "static";
+        if (resolvedDataDir_.empty() || !std::filesystem::is_directory(dir, ec)) {
+            return;
+        }
+        std::vector<std::filesystem::path> tables;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (entry.is_regular_file(ec) && entry.path().extension() == ".smstat") {
+                tables.push_back(entry.path());
+            }
+        }
+        if (tables.empty()) {
+            return;
+        }
+        std::sort(tables.begin(), tables.end());
+        try {
+            staticEmbeddingTable_ = std::make_shared<const simeon::StaticEmbedding>(
+                simeon::StaticEmbedding::load(tables.front().string()));
+            spdlog::info("[search] static embedding table {} (dim={}, vocab={})",
+                         tables.front().filename().string(), staticEmbeddingTable_->dim(),
+                         staticEmbeddingTable_->vocab_size());
+        } catch (const std::exception& e) {
+            spdlog::warn("[search] static embedding table {} not loaded: {}",
+                         tables.front().string(), e.what());
+        }
+    });
+    return staticEmbeddingTable_;
+}
+
 void ServiceManager::wireSearchEngineRuntimeAdapters(
     const std::shared_ptr<search::SearchEngine>& engine, const char* contextLabel) {
     if (!engine) {
         return;
     }
+
+    engine->setStaticEmbedding(loadStaticEmbeddingTable());
 
     cachedQueryConceptExtractor_ = createGlinerExtractionFunc(getEntityExtractors());
     engine->setConceptExtractor(cachedQueryConceptExtractor_);

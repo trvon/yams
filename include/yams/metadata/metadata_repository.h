@@ -909,6 +909,13 @@ public:
     virtual Result<std::unordered_map<int64_t, std::string>>
     batchGetContentPreview(const std::vector<int64_t>& documentIds, int maxChars, int maxDocs = 0);
 
+    // Full-document FTS5 relevance for a fixed set of documents: -bm25(documents_fts, 1, 10) keyed
+    // by sha256 hash, for each document matching any of `terms` (OR). Documents without a match
+    // are absent. Terms are bare tokens.
+    virtual Result<std::unordered_map<std::string, double>>
+    bm25ForDocuments(const std::vector<std::string>& terms,
+                     const std::vector<std::string>& documentHashes);
+
     /// Batch fetch documents with content previews in a single JOIN query.
     /// Combines batchGetDocumentsByHash + batchGetContentPreview into one DB round-trip.
     Result<std::unordered_map<std::string, std::pair<DocumentInfo, std::string>>>
