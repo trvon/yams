@@ -90,7 +90,14 @@ struct StaticTableInfo {
     std::string description;
 };
 
-static const std::vector<StaticTableInfo> STATIC_TABLES = {};
+static const std::vector<StaticTableInfo> STATIC_TABLES = {
+    {"yams-static-bge-c4-256",
+     "https://github.com/trvon/simeon/releases/download/static-tables-v1/"
+     "yams-static-bge-c4-256.smstat",
+     "cd7ade87d3bb360eca94792561bafb9b8ffd43eeb0739826e02642a848120d74", 17,
+     "WordPiece static embeddings, 256 dims (tokenlearn: bge-base-en-v1.5 teacher, MIT; "
+     "1M C4 passages, ODC-BY)"},
+};
 
 static const StaticTableInfo* findStaticTable(const std::string& name) {
     auto it = std::find_if(STATIC_TABLES.begin(), STATIC_TABLES.end(),
