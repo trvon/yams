@@ -3,6 +3,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/init_assets.hpp>
 #include <yams/cli/prompt_util.h>
+#include <yams/cli/static_tables.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
@@ -10,6 +11,7 @@
 #include <yams/common/string_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/config/static_embedding_table.h>
 #include <yams/core/uuid.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/downloader/downloader.hpp>
@@ -104,6 +106,8 @@ public:
         cmd->add_flag("--auto", autoInit_, "Run setup with defaults for headless environments");
         cmd->add_flag("--force", force_, "Overwrite existing config/keys if already initialized");
         cmd->add_flag("--no-keygen", noKeygen_, "Skip authentication key generation");
+        cmd->add_flag("--no-static-table", noStaticTable_,
+                      "Do not download the static-embedding table for semantic search");
         cmd->add_flag("--print", printConfig_,
                       "Print resulting configuration to stdout (secrets masked)");
         cmd->add_flag("--enable-plugins", enablePlugins_,
@@ -269,6 +273,13 @@ public:
             } else {
                 enableVectorDB = true;
                 selectedModel = "simeon-default";
+            }
+
+            // 6b) Static-embedding table: Simeon embeds with it when installed (256 dims instead of
+            // the 1024-dim hash encoder). Fetch it before the vector DB is created so the store
+            // starts in the right space.
+            if (enableVectorDB && !colbertSelected && !noStaticTable_) {
+                ensureStaticTable(dataPath);
             }
 
             // 6a) S3 Storage Setup
@@ -463,6 +474,41 @@ private:
 
     static void printLaterCommand(const std::string& command) {
         std::cout << formatLaterCommand(command);
+    }
+
+    // Interactive: ask (default yes). --auto: download. --non-interactive: skip, so scripted
+    // setups stay offline. A table already installed (data dir or a release package's share dir)
+    // is used as is. A failed download leaves the hash encoder in place.
+    void ensureStaticTable(const fs::path& dataPath) {
+        if (auto found = config::findStaticEmbeddingTable(std::nullopt, dataPath)) {
+            spdlog::info("Static embedding table: {}", found->string());
+            return;
+        }
+        const auto* table = cli::findStaticTable(cli::kDefaultStaticTable);
+        if (!table) {
+            return;
+        }
+        bool download = autoInit_;
+        if (!autoInit_ && !nonInteractive_) {
+            std::cout << "\nThe static embedding table (" << table->size_mb
+                      << " MB) improves semantic search and reranking.\n";
+            download = prompt_yes_no("Download it now? [Y/n]: ", YesNoOptions{.defaultYes = true});
+        }
+        if (!download) {
+            std::cout << "Skipping the static table. Install it later with:\n  yams model download "
+                      << table->name << "\n";
+            return;
+        }
+        auto out = cli::downloadStaticTable(table->name, table->url, table->sha256, dataPath, {},
+                                            /*force=*/false);
+        if (!out) {
+            spdlog::warn("Static table download failed: {}", out.error().message);
+            std::cout << "Semantic search uses the built-in hash encoder for now. Retry with:\n"
+                         "  yams model download "
+                      << table->name << "\n";
+            return;
+        }
+        std::cout << "Static table installed: " << out.value().string() << "\n";
     }
 
     static void printInitSummary(const fs::path& configPath, const fs::path& dataPath) {
@@ -2023,6 +2069,7 @@ private:
     bool autoInit_ = false;
     bool force_ = false;
     bool noKeygen_ = false;
+    bool noStaticTable_ = false;
     bool printConfig_ = false;
     bool enablePlugins_ = false;
     std::string tuningProfile_{"balanced"};

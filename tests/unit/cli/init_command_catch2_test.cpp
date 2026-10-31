@@ -231,6 +231,7 @@ TEST_CASE("InitCommand - help shows non-interactive setup options", "[cli][init]
     CHECK(output.find("headless environments") != std::string::npos);
     CHECK(output.find("--non-interactive") != std::string::npos);
     CHECK(output.find("--no-keygen") != std::string::npos);
+    CHECK(output.find("--no-static-table") != std::string::npos);
     CHECK(output.find("--print") != std::string::npos);
 }
 
@@ -615,4 +616,17 @@ TEST_CASE("InitCommand: declining semantic search disables both sections and wri
         CHECK(*dims.embeddings == *dims.vectorDb);
         CHECK(*dims.embeddings == *dims.index);
     }
+}
+
+// --non-interactive is the scripted path (CI, test harnesses): it must not reach the network.
+TEST_CASE("InitCommand: non-interactive init does not download the static table",
+          "[cli][init][catch2]") {
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    CliTestHelper helper;
+    CaptureStdout capture;
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+    const auto staticDir = helper.dataDir / "models" / "static";
+    std::error_code ec;
+    CHECK_FALSE(fs::exists(staticDir / "yams-static-bge-c4-256.smstat", ec));
+    CHECK(capture.str().find("yams model download yams-static-bge-c4-256") != std::string::npos);
 }
