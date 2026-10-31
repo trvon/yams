@@ -17,7 +17,9 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <filesystem>
 #include <map>
+#include <optional>
 #include <mutex>
 #include <string>
 
@@ -94,6 +96,9 @@ struct ResolvedSimeonEncoder {
 struct CachedStaticTable {
     std::shared_ptr<const simeon::StaticEmbedding> table;
     std::string identity;
+    // File state the entry was loaded from; a replaced file (re-download) reloads.
+    std::uintmax_t size{0};
+    std::filesystem::file_time_type mtime{};
 };
 
 std::mutex& staticTableMutex() {
@@ -106,14 +111,27 @@ std::map<std::string, CachedStaticTable>& staticTableCache() {
     return cache;
 }
 
-const CachedStaticTable* cachedStaticTable(const std::filesystem::path& path) {
+// Returns a copy so a reload for a replaced file never invalidates what a caller holds. A load
+// failure is cached too, until the file changes.
+std::optional<CachedStaticTable> cachedStaticTable(const std::filesystem::path& path) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec)
+        return std::nullopt;
+    const auto mtime = std::filesystem::last_write_time(path, ec);
+    if (ec)
+        return std::nullopt;
+
     std::lock_guard<std::mutex> lock(staticTableMutex());
     auto& cache = staticTableCache();
     const std::string key = path.string();
-    if (auto it = cache.find(key); it != cache.end()) {
-        return it->second.table ? &it->second : nullptr;
+    if (auto it = cache.find(key);
+        it != cache.end() && it->second.size == size && it->second.mtime == mtime) {
+        return it->second.table ? std::optional{it->second} : std::nullopt;
     }
     CachedStaticTable entry;
+    entry.size = size;
+    entry.mtime = mtime;
     try {
         std::ifstream in(path, std::ios::binary);
         std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)),
@@ -134,8 +152,8 @@ const CachedStaticTable* cachedStaticTable(const std::filesystem::path& path) {
     } catch (const std::exception& e) {
         spdlog::warn("Simeon static embedding table {} not loaded: {}", key, e.what());
     }
-    auto [it, inserted] = cache.emplace(key, std::move(entry));
-    return it->second.table ? &it->second : nullptr;
+    cache[key] = entry;
+    return entry.table ? std::optional{std::move(entry)} : std::nullopt;
 }
 
 std::mutex& dataDirHintMutex() {
@@ -227,7 +245,7 @@ ResolvedSimeonEncoder resolveEncoder(const EmbeddingConfig& yamsConfig) {
     const bool wantedStatic = wantsStaticProfile(yamsConfig, policy);
     if (wantedStatic) {
         if (auto path = resolveStaticTablePath(policy)) {
-            if (const auto* cached = cachedStaticTable(*path)) {
+            if (const auto cached = cachedStaticTable(*path)) {
                 return ResolvedSimeonEncoder{
                     .config = {}, .spaceIdentity = cached->identity, .staticTable = cached->table};
             }
@@ -425,12 +443,12 @@ void setStaticEmbeddingDataDirHint(const std::filesystem::path& dataDir) {
 
 std::shared_ptr<const simeon::StaticEmbedding>
 loadSharedStaticEmbeddingTable(const std::filesystem::path& path) {
-    const auto* cached = cachedStaticTable(path);
+    const auto cached = cachedStaticTable(path);
     return cached ? cached->table : nullptr;
 }
 
 std::string staticEmbeddingSpaceIdentity(const std::filesystem::path& path) {
-    const auto* cached = cachedStaticTable(path);
+    const auto cached = cachedStaticTable(path);
     return cached ? cached->identity : std::string{};
 }
 

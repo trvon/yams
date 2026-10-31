@@ -481,8 +481,11 @@ private:
     // is used as is. A failed download leaves the hash encoder in place.
     void ensureStaticTable(const fs::path& dataPath) {
         if (auto found = config::findStaticEmbeddingTable(std::nullopt, dataPath)) {
-            spdlog::info("Static embedding table: {}", found->string());
-            return;
+            if (vector::loadSharedStaticEmbeddingTable(*found)) {
+                spdlog::info("Static embedding table: {}", found->string());
+                return;
+            }
+            spdlog::warn("{} is not a valid static table; it will be replaced", found->string());
         }
         const auto* table = cli::findStaticTable(cli::kDefaultStaticTable);
         if (!table) {
@@ -1519,23 +1522,17 @@ private:
      *
      * Handles the prompt logic based on nonInteractive_ and autoInit_ flags:
      * - Interactive mode: prompts user for model selection
-     * - Auto mode: downloads default model without prompting
+     * - Auto mode: prints the download command; no ONNX model is fetched
      * - Non-interactive (non-auto): skips GLiNER setup entirely
      */
     void maybeSetupGlinerModel(const fs::path& dataPath, const fs::path& configPath) {
         std::string selectedGlinerModel;
 
         if (autoInit_) {
-            // Auto mode: download the small model by default
-            selectedGlinerModel = init_assets::glinerModels().front().name;
-            spdlog::info("Using default GLiNER model: {}", selectedGlinerModel);
-            fs::path glinerModelDir = dataPath / "models" / "gliner" / selectedGlinerModel;
-            auto result =
-                downloadGlinerModelFiles(init_assets::glinerModels().front(), glinerModelDir);
-            if (!result) {
-                spdlog::warn("GLiNER model download failed: {}", result.error().message);
-                spdlog::warn("You can download the model later with: yams model download --gliner");
-            }
+            // Headless setups get no ONNX models by default (hundreds of MB and the ONNX
+            // runtime); entity extraction stays opt-in.
+            printLaterCommand("yams model download --gliner " +
+                              init_assets::glinerModels().front().name);
         } else if (!nonInteractive_) {
             // Interactive mode: prompt user
             bool setupGliner =
@@ -1795,24 +1792,16 @@ private:
      *
      * Handles the prompt logic based on nonInteractive_ and autoInit_ flags:
      * - Interactive mode: prompts user for model selection
-     * - Auto mode: downloads default model without prompting
+     * - Auto mode: prints the download command; no ONNX model is fetched
      * - Non-interactive (non-auto): skips reranker setup entirely
      */
     std::string maybeSetupRerankerModel(const fs::path& dataPath, const fs::path& configPath) {
         std::string selectedRerankerModel;
 
         if (autoInit_) {
-            // Auto mode: download the base model by default
-            selectedRerankerModel = init_assets::rerankerModels().front().name;
-            spdlog::info("Using default reranker model: {}", selectedRerankerModel);
-            fs::path rerankerModelDir = dataPath / "models" / "reranker" / selectedRerankerModel;
-            auto result =
-                downloadRerankerModelFiles(init_assets::rerankerModels().front(), rerankerModelDir);
-            if (!result) {
-                spdlog::warn("Reranker model download failed: {}", result.error().message);
-                spdlog::warn(
-                    "You can download the model later with: yams model download bge-reranker-base");
-            }
+            // Headless setups rerank with the built-in lexical and static-embedding terms; the
+            // ONNX cross-encoder (about 1 GB) stays opt-in.
+            printLaterCommand("yams model download " + init_assets::rerankerModels().front().name);
         } else if (!nonInteractive_) {
             // Interactive mode: prompt user
             bool setupReranker =

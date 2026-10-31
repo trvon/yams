@@ -46,13 +46,21 @@ Result<fs::path> downloadStaticTable(const std::string& name, const std::string&
     yams::common::ensureDirectories(dir);
     const fs::path out = dir / (name + ".smstat");
     std::error_code ec;
-    if (fs::exists(out, ec) && !force) {
-        return out;
+    if (!force && fs::exists(out, ec)) {
+        if (yams::vector::loadSharedStaticEmbeddingTable(out)) {
+            return out;
+        }
+        std::cout << "Existing " << out.filename().string()
+                  << " is not a valid table; downloading it again\n";
     }
     if (sha256.empty()) {
         std::cout << "Warning: no sha256 given; the download is not verified (pass --sha256)\n";
     }
 
+    // Download and validate next to the destination, then rename over it: a failed or bad
+    // download never touches a working table.
+    const fs::path part = dir / (name + ".smstat.part");
+    fs::remove(part, ec);
     yams::downloader::StorageConfig storage{};
     storage.objectsDir = dataDir / "storage" / "objects";
     storage.stagingDir = dataDir / "staging" / "downloader";
@@ -61,7 +69,7 @@ Result<fs::path> downloadStaticTable(const std::string& name, const std::string&
     yams::downloader::DownloadRequest req{};
     req.url = url;
     req.storeOnly = true;
-    req.exportPath = out;
+    req.exportPath = part;
     req.overwrite = yams::downloader::OverwritePolicy::Always;
     if (!sha256.empty()) {
         std::string hex = sha256;
@@ -72,15 +80,22 @@ Result<fs::path> downloadStaticTable(const std::string& name, const std::string&
     std::cout << "Downloading static table " << name << "\n  from " << url << "\n";
     auto res = manager->download(req, {}, [] { return false; }, {});
     if (!res.ok() || !res.value().success) {
+        fs::remove(part, ec);
         const std::string msg = res.ok() ? (res.value().error ? res.value().error->message
                                                               : std::string("download failed"))
                                          : res.error().message;
         return Error{ErrorCode::NetworkError, "static table " + name + ": " + msg};
     }
-    if (!yams::vector::loadSharedStaticEmbeddingTable(out)) {
-        fs::remove(out, ec);
+    if (!yams::vector::loadSharedStaticEmbeddingTable(part)) {
+        fs::remove(part, ec);
         return Error{ErrorCode::CorruptedData,
-                     "downloaded file is not a valid SMSTAT01 table: " + out.string()};
+                     "downloaded file is not a valid SMSTAT01 table: " + url};
+    }
+    fs::rename(part, out, ec);
+    if (ec) {
+        const std::string why = ec.message();
+        fs::remove(part, ec);
+        return Error{ErrorCode::IOError, "could not install " + out.string() + ": " + why};
     }
     return out;
 }

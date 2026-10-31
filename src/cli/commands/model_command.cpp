@@ -1188,7 +1188,8 @@ private:
         }
         const fs::path existing =
             (output_dir.empty() ? staticTablesDir() : fs::path(output_dir)) / (name + ".smstat");
-        if (fs::exists(existing) && !force_) {
+        if (fs::exists(existing) && !force_ &&
+            yams::vector::loadSharedStaticEmbeddingTable(existing)) {
             std::cout << "Static table already exists at: " << existing << "\n";
             std::cout << "Use --force to redownload\n";
             return Result<void>{};
