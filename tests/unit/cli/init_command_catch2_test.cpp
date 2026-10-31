@@ -17,6 +17,7 @@
 
 #include <yams/cli/doctor/checks/dim_consistency.h>
 #include <yams/cli/doctor/doctor_context.h>
+#include <yams/cli/static_tables.h>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
@@ -298,13 +299,8 @@ struct ScratchDataDir {
     }
 };
 
-} // namespace
-
-TEST_CASE("InitCommand: resolveModelDimension uses the static table's dimension when one exists",
-          "[cli][init][models]") {
-    ScratchDataDir scratch;
-    std::filesystem::create_directories(scratch.dir / "models" / "static");
-    // Minimal SMSTAT01 table, dim 4.
+// Minimal SMSTAT01 table, dim 4, two tokens.
+std::string tinyStaticTableBytes() {
     std::string bytes = "SMSTAT01";
     auto u32 = [&](std::uint32_t v) {
         for (int k = 0; k < 4; ++k)
@@ -324,6 +320,52 @@ TEST_CASE("InitCommand: resolveModelDimension uses the static table's dimension 
     u32(0x3F800000u);
     u32(0x3F800000u);
     bytes.append(8, '\x01');
+    return bytes;
+}
+
+void writeFile(const fs::path& path, const std::string& bytes) {
+    fs::create_directories(path.parent_path());
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << bytes;
+}
+
+std::string readFile(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+std::string fileUrl(const fs::path& path) {
+    return "file://" + path.string();
+}
+
+// Every HTTPS download fails at once: curl honours these and nothing listens on port 1.
+struct OfflineNetwork {
+    yams::test::ScopedEnvVar https{"https_proxy", std::string{"http://127.0.0.1:1"}};
+    yams::test::ScopedEnvVar httpsUpper{"HTTPS_PROXY", std::string{"http://127.0.0.1:1"}};
+    yams::test::ScopedEnvVar http{"http_proxy", std::string{"http://127.0.0.1:1"}};
+    yams::test::ScopedEnvVar all{"ALL_PROXY", std::string{"http://127.0.0.1:1"}};
+    yams::test::ScopedEnvVar noProxy{"NO_PROXY", std::nullopt};
+    yams::test::ScopedEnvVar noProxyLower{"no_proxy", std::nullopt};
+};
+
+// --auto installs plugins dirs and agent skills under $HOME and bootstraps a session for the
+// cwd; keep all of it inside the test's temp dir.
+struct IsolatedHome {
+    yams::test::ScopedEnvVar home;
+    yams::test::ScopedEnvVar userProfile;
+    yams::test::ScopedEnvVar session{"YAMS_SESSION_CURRENT", std::string{"init-test"}};
+    explicit IsolatedHome(const fs::path& dir)
+        : home("HOME", dir.string()), userProfile("USERPROFILE", dir.string()) {
+        fs::create_directories(dir);
+    }
+};
+
+} // namespace
+
+TEST_CASE("InitCommand: resolveModelDimension uses the static table's dimension when one exists",
+          "[cli][init][models]") {
+    ScratchDataDir scratch;
+    std::filesystem::create_directories(scratch.dir / "models" / "static");
+    const std::string bytes = tinyStaticTableBytes();
     std::ofstream(scratch.dir / "models" / "static" / "t.smstat", std::ios::binary) << bytes;
 
     CHECK(yams::cli::resolveModelDimension("simeon-default") == 4);
@@ -629,4 +671,120 @@ TEST_CASE("InitCommand: non-interactive init does not download the static table"
     std::error_code ec;
     CHECK_FALSE(fs::exists(staticDir / "yams-static-bge-c4-256.smstat", ec));
     CHECK(capture.str().find("yams model download yams-static-bge-c4-256") != std::string::npos);
+}
+
+// ---- Download failures -------------------------------------------------------------------------
+
+TEST_CASE("downloadStaticTable: a missing source leaves no table behind",
+          "[cli][init][static][download]") {
+    ScratchDataDir scratch;
+    auto out = yams::cli::downloadStaticTable("t", fileUrl(scratch.dir / "nope.smstat"), "",
+                                              scratch.dir, {}, false);
+    CHECK_FALSE(out);
+    CHECK_FALSE(fs::exists(yams::cli::staticTablesDir(scratch.dir) / "t.smstat"));
+}
+
+TEST_CASE("downloadStaticTable: a checksum mismatch leaves no table behind",
+          "[cli][init][static][download]") {
+    ScratchDataDir scratch;
+    const auto src = scratch.dir / "src" / "t.smstat";
+    writeFile(src, tinyStaticTableBytes());
+    auto out = yams::cli::downloadStaticTable("t", fileUrl(src), std::string(64, '0'), scratch.dir,
+                                              {}, false);
+    CHECK_FALSE(out);
+    CHECK_FALSE(fs::exists(yams::cli::staticTablesDir(scratch.dir) / "t.smstat"));
+}
+
+TEST_CASE("downloadStaticTable: content that is not a table is rejected and removed",
+          "[cli][init][static][download]") {
+    ScratchDataDir scratch;
+    const auto src = scratch.dir / "src" / "t.smstat";
+    writeFile(src, "<html>rate limited</html>");
+    auto out = yams::cli::downloadStaticTable("t", fileUrl(src), "", scratch.dir, {}, false);
+    CHECK_FALSE(out);
+    CHECK_FALSE(fs::exists(yams::cli::staticTablesDir(scratch.dir) / "t.smstat"));
+}
+
+// A truncated or corrupt file from an earlier failed download must not count as installed.
+TEST_CASE("downloadStaticTable: replaces a corrupt existing table without --force",
+          "[cli][init][static][download]") {
+    ScratchDataDir scratch;
+    const auto dest = yams::cli::staticTablesDir(scratch.dir) / "t.smstat";
+    writeFile(dest, "SMSTAT01-truncated");
+    const auto src = scratch.dir / "src" / "t.smstat";
+    writeFile(src, tinyStaticTableBytes());
+    auto out = yams::cli::downloadStaticTable("t", fileUrl(src), "", scratch.dir, {}, false);
+    REQUIRE(out);
+    CHECK(readFile(dest) == tinyStaticTableBytes());
+    CHECK(yams::vector::loadSharedStaticEmbeddingTable(dest) != nullptr);
+}
+
+// --force with a bad source (wrong URL, an HTML error page) must not destroy a working table.
+TEST_CASE("downloadStaticTable: a failed forced re-download keeps the working table",
+          "[cli][init][static][download]") {
+    ScratchDataDir scratch;
+    const auto dest = yams::cli::staticTablesDir(scratch.dir) / "t.smstat";
+    writeFile(dest, tinyStaticTableBytes());
+    const auto bad = scratch.dir / "src" / "bad.smstat";
+    writeFile(bad, "<html>not found</html>");
+
+    SECTION("source is not a table") {
+        auto out = yams::cli::downloadStaticTable("t", fileUrl(bad), "", scratch.dir, {}, true);
+        CHECK_FALSE(out);
+    }
+    SECTION("source is missing") {
+        auto out = yams::cli::downloadStaticTable("t", fileUrl(scratch.dir / "nope"), "",
+                                                  scratch.dir, {}, true);
+        CHECK_FALSE(out);
+    }
+    CHECK(readFile(dest) == tinyStaticTableBytes());
+}
+
+TEST_CASE("InitCommand: a failed static-table download keeps init working on the hash encoder",
+          "[cli][init][static][download]") {
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    OfflineNetwork offline;
+    CliTestHelper helper;
+    IsolatedHome home(helper.tempDir / "home");
+    CaptureStdout capture;
+    // GLiNER and reranker downloads fail offline too; this case is about the table.
+    REQUIRE(helper.runCommand({"yams", "init", "--auto", "--no-keygen"}) == 0);
+    CHECK_FALSE(fs::exists(helper.dataDir / "models" / "static" / "yams-static-bge-c4-256.smstat"));
+    CHECK(yams::daemon::ConfigResolver::readVectorSentinelDim(helper.dataDir) ==
+          std::optional<size_t>{1024U});
+    CHECK(capture.str().find("yams model download yams-static-bge-c4-256") != std::string::npos);
+}
+
+TEST_CASE("InitCommand: a corrupt static table in the data dir does not count as installed",
+          "[cli][init][static][download]") {
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    CliTestHelper helper;
+    writeFile(helper.dataDir / "models" / "static" / "yams-static-bge-c4-256.smstat",
+              "SMSTAT01-truncated");
+    CaptureStdout capture;
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+    CHECK(capture.str().find("yams model download yams-static-bge-c4-256") != std::string::npos);
+    CHECK(yams::daemon::ConfigResolver::readVectorSentinelDim(helper.dataDir) ==
+          std::optional<size_t>{1024U});
+}
+
+// --auto is the headless path (containers, CI, the mesh harness). It installs the 17 MB static
+// table only; the ONNX GLiNER and reranker models (about 1.5 GB) stay opt-in, and init never
+// writes config for a model that is not on disk.
+TEST_CASE("InitCommand: --auto installs no ONNX models and writes no config for them",
+          "[cli][init][auto][download]") {
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    OfflineNetwork offline;
+    CliTestHelper helper;
+    IsolatedHome home(helper.tempDir / "home");
+    CaptureStdout capture;
+    REQUIRE(helper.runCommand({"yams", "init", "--auto", "--no-keygen", "--no-static-table"}) ==
+            0);
+    const std::string config = readFile(helper.configPath);
+    CHECK(config.find("reranker_backend = \"onnx\"") == std::string::npos);
+    CHECK(config.find("[plugins.glint]") == std::string::npos);
+    CHECK_FALSE(fs::exists(helper.dataDir / "models" / "gliner"));
+    CHECK_FALSE(fs::exists(helper.dataDir / "models" / "reranker"));
+    const std::string out = capture.str();
+    CHECK(out.find("yams model download --gliner") != std::string::npos);
 }
