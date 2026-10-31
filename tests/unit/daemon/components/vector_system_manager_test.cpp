@@ -387,3 +387,70 @@ TEST_CASE("VectorSystemManager getName returns component name",
     VectorSystemManager mgr(deps);
     CHECK((std::string(mgr.getName()) == "VectorSystemManager"));
 }
+
+#include <yams/daemon/components/ConfigResolver.h>
+#include <yams/vector/vector_types.h>
+
+namespace {
+
+// Writes vectors.db at `dim` with one document vector, as an older install would have.
+void seedVectorDb(const std::filesystem::path& dataDir, std::size_t dim) {
+    yams::vector::VectorDatabaseConfig cfg;
+    cfg.database_path = (dataDir / "vectors.db").string();
+    cfg.embedding_dim = dim;
+    cfg.create_if_missing = true;
+    yams::vector::VectorDatabase db(cfg);
+    REQUIRE(db.initialize());
+    yams::vector::VectorRecord rec;
+    rec.chunk_id = "doc-a";
+    rec.document_hash = "hash-a";
+    rec.embedding.assign(dim, 0.0F);
+    rec.embedding[0] = 1.0F;
+    rec.level = yams::vector::EmbeddingLevel::DOCUMENT;
+    REQUIRE(db.insertVector(rec));
+}
+
+} // namespace
+
+TEST_CASE_METHOD(VectorSystemManagerFixture,
+                 "VectorSystemManager recreates vector tables when the embedding space changes dim",
+                 "[daemon][components][vector][migrate][catch2]") {
+    seedVectorDb(tempDir, 1024);
+    REQUIRE(ConfigResolver::readDbEmbeddingDim((tempDir / "vectors.db").string()) == 1024U);
+
+    auto deps = makeDeps();
+    deps.getEmbeddingDimension = [] { return static_cast<size_t>(256); };
+    deps.migrationTargetDimension = [] { return std::optional<size_t>{256U}; };
+    VectorSystemManager mgr(std::move(deps));
+    const auto result = mgr.initializeOnce(tempDir);
+    REQUIRE(result.has_value());
+    REQUIRE(result.value());
+    CHECK(mgr.getEmbeddingDimension() == 256U);
+    auto vdb = mgr.getVectorDatabase();
+    REQUIRE(vdb);
+    CHECK(vdb->getVectorCount() == 0U);
+    CHECK(ConfigResolver::readVectorSentinelDim(tempDir) == std::optional<size_t>{256U});
+}
+
+TEST_CASE_METHOD(VectorSystemManagerFixture,
+                 "VectorSystemManager keeps vectors when no migration target or same dim",
+                 "[daemon][components][vector][migrate][catch2]") {
+    seedVectorDb(tempDir, 384);
+    SECTION("same dim") {
+        auto deps = makeDeps();
+        deps.migrationTargetDimension = [] { return std::optional<size_t>{384U}; };
+        VectorSystemManager mgr(std::move(deps));
+        REQUIRE(mgr.initializeOnce(tempDir).value());
+        CHECK(mgr.getEmbeddingDimension() == 384U);
+        CHECK(mgr.getVectorDatabase()->getVectorCount() == 1U);
+    }
+    SECTION("no target (auto-migrate off or not a training-free provider)") {
+        auto deps = makeDeps();
+        deps.getEmbeddingDimension = [] { return static_cast<size_t>(256); };
+        deps.migrationTargetDimension = [] { return std::optional<size_t>{}; };
+        VectorSystemManager mgr(std::move(deps));
+        REQUIRE(mgr.initializeOnce(tempDir).value());
+        CHECK(mgr.getEmbeddingDimension() == 384U); // existing DB wins, as before
+        CHECK(mgr.getVectorDatabase()->getVectorCount() == 1U);
+    }
+}

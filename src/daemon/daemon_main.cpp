@@ -338,6 +338,14 @@ int main(int argc, char* argv[]) {
                                      e.what());
                     }
                 }
+                if (daemonSection.find("auto_migrate_embeddings") != daemonSection.end()) {
+                    std::string v = daemonSection.at("auto_migrate_embeddings");
+                    for (auto& c : v) {
+                        c = static_cast<char>(std::tolower(c));
+                    }
+                    config.autoMigrateEmbeddings =
+                        !(v == "0" || v == "false" || v == "off" || v == "no");
+                }
                 if (daemonSection.find("auto_rebuild_on_dim_mismatch") != daemonSection.end()) {
                     std::string v = daemonSection.at("auto_rebuild_on_dim_mismatch");
                     for (auto& c : v) {

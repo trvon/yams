@@ -8,6 +8,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/integrity/repair_utils.h>
 #include <yams/vector/dim_resolver.h>
 #include <yams/vector/vector_database.h>
 
@@ -147,11 +148,13 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     std::optional<size_t> dim;
 
     // 1. Existing DB DDL
+    std::optional<size_t> storedDim;
     if (exists) {
         try {
             auto ddlDim = ConfigResolver::readDbEmbeddingDim(cfg.database_path);
             if (ddlDim && *ddlDim > 0) {
                 dim = ddlDim;
+                storedDim = ddlDim;
                 spdlog::info("[VectorInit] probe: ddl dim={}", *ddlDim);
             }
         } catch (...) {
@@ -442,6 +445,31 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
 #endif
     } catch (...) {
         spdlog::warn("[VectorInit] lock setup error (continuing without lock)");
+    }
+
+    // Embedding-space migration (under the vectors.lock, before any VectorDatabase opens):
+    // recreate the tables at the provider's dimension; RepairService re-embeds the documents.
+    if (storedDim && deps_.migrationTargetDimension) {
+        std::optional<size_t> target;
+        try {
+            target = deps_.migrationTargetDimension();
+        } catch (...) {
+            spdlog::debug("[VectorInit] migration target probe failed");
+        }
+        if (target && *target > 0 && *target != *storedDim) {
+            spdlog::warn("[VectorInit] embedding dimension changed {} -> {}; recreating vector "
+                         "tables (documents re-embed in the background; keyword search is "
+                         "unaffected)",
+                         *storedDim, *target);
+            auto aligned = yams::integrity::ensureVectorSchemaAligned(dataDir, *target,
+                                                                      /*recreateIfMismatch=*/true);
+            if (aligned) {
+                cfg.embedding_dim = *target;
+            } else {
+                spdlog::error("[VectorInit] vector table migration failed: {}",
+                              aligned.error().message);
+            }
+        }
     }
 
     // Initialize with retries

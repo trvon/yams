@@ -593,6 +593,19 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 return config ? config->dimension : std::nullopt;
             };
             vectorDeps.suppressVectorIndexBuild = config_.instrumentation.suppressVectorIndexBuild;
+            vectorDeps.migrationTargetDimension = [this]() -> std::optional<size_t> {
+                // Only the training-free (Simeon) space migrates automatically; a model-backed
+                // dimension change stays a reported mismatch.
+                if (!config_.autoMigrateEmbeddings) {
+                    return std::nullopt;
+                }
+                auto provider = loadModelProvider();
+                if (!provider || !provider->isAvailable() || !provider->isTrainingFree()) {
+                    return std::nullopt;
+                }
+                const size_t dim = provider->getEmbeddingDim("");
+                return dim > 0 ? std::optional<size_t>{dim} : std::nullopt;
+            };
             vectorSystemManager_ = std::make_unique<VectorSystemManager>(vectorDeps);
             spdlog::debug("[ServiceManager] VectorSystemManager created");
 

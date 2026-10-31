@@ -61,6 +61,11 @@ public:
 
         /// Suppress startup/search-index build work while profiling allocator overhead.
         bool suppressVectorIndexBuild{false};
+
+        /// Embedding-space migration: the dimension the existing vectors.db should move to, or
+        /// nullopt to keep the stored one. When it differs from the stored dimension, the vector
+        /// tables are recreated at startup and documents re-embed in the background.
+        std::function<std::optional<size_t>()> migrationTargetDimension;
     };
 
     explicit VectorSystemManager(Dependencies deps);

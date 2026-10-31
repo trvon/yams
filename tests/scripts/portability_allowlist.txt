@@ -371,10 +371,10 @@ tests/unit/search/topology_search_test_support.h:40:portability/env-read # revie
 tests/unit/topology/topology_baseline_catch2_test.cpp:65:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:42:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:48:portability/env-read # reviewed raw environment read
-tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:2495:portability/path-cstr # std::string filename, not filesystem::path
-tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:2559:portability/path-cstr # std::string filename, not filesystem::path
-tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:3089:portability/path-cstr # std::string filename, not filesystem::path
-tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:3137:portability/path-cstr # std::string filename, not filesystem::path
+tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:2528:portability/path-cstr # std::string filename, not filesystem::path
+tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:2592:portability/path-cstr # std::string filename, not filesystem::path
+tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:3122:portability/path-cstr # std::string filename, not filesystem::path
+tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:3170:portability/path-cstr # std::string filename, not filesystem::path
 tests/unit/vector/sqlite_vec_backend_persistence_catch2_test.cpp:26:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_persistence_catch2_test.cpp:32:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_spq_incremental_catch2_test.cpp:38:portability/env-read # reviewed raw environment read
