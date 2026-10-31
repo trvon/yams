@@ -228,6 +228,10 @@ public:
      */
     virtual bool isTrainingFree() const { return false; }
 
+    /// True when the provider runs a fallback embedding space instead of the configured one
+    /// (e.g. a missing static table). Stored vectors are never migrated into a fallback space.
+    virtual bool isFallbackEmbeddingSpace(const std::string& /*modelName*/) const { return false; }
+
     // ========================================================================
     // Resource Management
     // ========================================================================

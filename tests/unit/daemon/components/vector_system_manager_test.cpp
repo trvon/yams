@@ -435,7 +435,8 @@ void addVector(const std::filesystem::path& dataDir, std::size_t dim, const std:
     REQUIRE(db.insertVector(rec));
 }
 
-std::int64_t countVectorsWithModel(const std::filesystem::path& dataDir, const std::string& modelId) {
+std::int64_t countVectorsWithModel(const std::filesystem::path& dataDir,
+                                   const std::string& modelId) {
     sqlite3* db = nullptr;
     REQUIRE(sqlite3_open_v2((dataDir / "vectors.db").string().c_str(), &db, SQLITE_OPEN_READONLY,
                             nullptr) == SQLITE_OK);
@@ -502,8 +503,10 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
                  "VectorSystemManager recreates vector tables when the space identity changes",
                  "[daemon][components][vector][migrate][catch2]") {
     seedVectorDb(tempDir, 384, "simeon-config-v1:old");
-    REQUIRE(ConfigResolver::readDbEmbeddingSpaceIdentity((tempDir / "vectors.db").string()) ==
+    const auto vdbPath = (tempDir / "vectors.db").string();
+    REQUIRE(ConfigResolver::readDbForeignEmbeddingSpace(vdbPath, "simeon-static-v1:new") ==
             std::optional<std::string>{"simeon-config-v1:old"});
+    REQUIRE_FALSE(ConfigResolver::readDbForeignEmbeddingSpace(vdbPath, "simeon-config-v1:old"));
 
     auto deps = makeDeps();
     deps.migrationTarget = [] { return std::optional{target(384U, "simeon-static-v1:new")}; };
@@ -554,9 +557,17 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
         REQUIRE(first.migratedEmbeddingSpace());
         // daemon dies here, before ServiceManager runs the post-migration steps
     }
-    VectorSystemManager second(makeMigratingDeps());
-    REQUIRE(second.initializeOnce(tempDir).value());
-    CHECK(second.migratedEmbeddingSpace());
+    {
+        VectorSystemManager second(makeMigratingDeps());
+        REQUIRE(second.initializeOnce(tempDir).value());
+        CHECK(second.migratedEmbeddingSpace());
+        CHECK(second.getVectorDatabase()->getVectorCount() == 0U);
+        second.acknowledgeEmbeddingMigration();
+        CHECK_FALSE(second.migratedEmbeddingSpace());
+    }
+    VectorSystemManager third(makeMigratingDeps());
+    REQUIRE(third.initializeOnce(tempDir).value());
+    CHECK_FALSE(third.migratedEmbeddingSpace());
 }
 
 // A store holding vectors from two spaces (auto-migrate was off, or an older bug) must not keep

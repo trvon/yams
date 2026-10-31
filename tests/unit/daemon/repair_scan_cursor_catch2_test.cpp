@@ -1,5 +1,5 @@
-// RepairScanCursor: the startup repair scan resumes after hitting the queue cap, so an
-// embedding-space migration re-embeds the whole corpus, not just the first maxPendingRepairs.
+// RepairScanCursor and the startup scan: the scan resumes after hitting the queue cap and retries
+// documents that are still unembedded, so an embedding-space migration re-embeds the whole corpus.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -21,7 +21,7 @@ using yams::daemon::RepairScanCursor;
 TEST_CASE("RepairScanCursor runs once when the scan completes", "[daemon][repair][scan][catch2]") {
     RepairScanCursor cursor;
     REQUIRE(cursor.shouldStart());
-    CHECK(cursor.begin() == 0U);
+    CHECK(cursor.begin() == 0);
     CHECK_FALSE(cursor.shouldStart()); // in flight
     cursor.finished();
     CHECK_FALSE(cursor.shouldStart()); // whole corpus scanned
@@ -31,13 +31,13 @@ TEST_CASE("RepairScanCursor resumes where a capped scan stopped",
           "[daemon][repair][scan][catch2]") {
     RepairScanCursor cursor;
     REQUIRE(cursor.shouldStart());
-    CHECK(cursor.begin() == 0U);
+    CHECK(cursor.begin() == 0);
     cursor.stoppedAt(1000);
     REQUIRE(cursor.shouldStart());
-    CHECK(cursor.begin() == 1000U);
+    CHECK(cursor.begin() == 1000);
     cursor.stoppedAt(2000);
     REQUIRE(cursor.shouldStart());
-    CHECK(cursor.begin() == 2000U);
+    CHECK(cursor.begin() == 2000);
     cursor.finished();
     CHECK_FALSE(cursor.shouldStart());
 }
@@ -49,7 +49,36 @@ TEST_CASE("RepairScanCursor never starts two scans at once", "[daemon][repair][s
     CHECK_FALSE(cursor.shouldStart());
     cursor.aborted(); // exception or shutdown mid-scan: allow a retry from the same offset
     REQUIRE(cursor.shouldStart());
-    CHECK(cursor.begin() == 0U);
+    CHECK(cursor.begin() == 0);
+}
+
+TEST_CASE("RepairScanCursor retries a sweep that queued work, a bounded number of times",
+          "[daemon][repair][scan][catch2]") {
+    RepairScanCursor cursor;
+    (void)cursor.begin();
+    cursor.stoppedAt(500, /*queuedWork=*/true);
+    CHECK_FALSE(cursor.retryDue()); // resuming, not retrying
+    CHECK(cursor.begin() == 500);
+    cursor.finished(); // the capped segment queued work earlier in the sweep
+    REQUIRE(cursor.shouldStart());
+    CHECK(cursor.retryDue());
+    for (int i = 0; i < RepairScanCursor::kMaxRetrySweeps; ++i) {
+        REQUIRE(cursor.shouldStart());
+        CHECK(cursor.begin() == 0);
+        cursor.finished(/*queuedWork=*/true);
+    }
+    CHECK_FALSE(cursor.shouldStart());
+}
+
+TEST_CASE("RepairScanCursor stops after a sweep that queued nothing",
+          "[daemon][repair][scan][catch2]") {
+    RepairScanCursor cursor;
+    (void)cursor.begin();
+    cursor.finished(/*queuedWork=*/true);
+    REQUIRE(cursor.shouldStart());
+    (void)cursor.begin();
+    cursor.finished(/*queuedWork=*/false);
+    CHECK_FALSE(cursor.shouldStart());
 }
 
 namespace {
@@ -66,7 +95,10 @@ struct ScanHarness {
     std::vector<std::string> hashes;
     std::vector<int64_t> ids;
     std::unique_ptr<RepairService> service;
+    // The unit lanes disable vectors through any of these; this harness needs embeddings on.
     yams::test::ScopedEnvVar vectorsOn{"YAMS_DISABLE_VECTORS", std::nullopt};
+    yams::test::ScopedEnvVar vectorsOnAlias{"YAMS_DISABLE_VECTOR_DB", std::nullopt};
+    yams::test::ScopedEnvVar vectorsOnSingular{"YAMS_DISABLE_VECTOR", std::nullopt};
 
     explicit ScanHarness(int n, std::size_t maxPending = 1000) {
         yams::daemon::ResourceGovernor::instance().testing_setPressureState(
@@ -74,8 +106,8 @@ struct ScanHarness {
         yams::metadata::ConnectionPoolConfig pc;
         pc.minConnections = 1;
         pc.maxConnections = 2;
-        pool = std::make_unique<yams::metadata::ConnectionPool>((tmp.path() / "yams.db").string(),
-                                                                pc);
+        pool =
+            std::make_unique<yams::metadata::ConnectionPool>((tmp.path() / "yams.db").string(), pc);
         REQUIRE(pool->initialize().has_value());
         repo = std::make_shared<yams::metadata::MetadataRepository>(*pool);
         for (int i = 0; i < n; ++i) {
@@ -99,8 +131,7 @@ struct ScanHarness {
         cfg.enable = true;
         cfg.dataDir = tmp.path();
         cfg.maxPendingRepairs = maxPending;
-        service = std::make_unique<RepairService>(
-            ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+        service = std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
     }
     ~ScanHarness() {
         service.reset();
@@ -119,8 +150,8 @@ struct ScanHarness {
 TEST_CASE("Startup scan re-queues documents a previous run left Processing",
           "[daemon][repair][scan][migrate][catch2]") {
     ScanHarness h(3);
-    REQUIRE(h.repo->updateDocumentRepairStatus(h.hashes[1],
-                                               yams::metadata::RepairStatus::Processing));
+    REQUIRE(
+        h.repo->updateDocumentRepairStatus(h.hashes[1], yams::metadata::RepairStatus::Processing));
     const auto queued = h.service->testing_runStartupScanPass();
     CHECK(h.queuedIn(queued, h.hashes[0]));
     CHECK(h.queuedIn(queued, h.hashes[1]));
@@ -137,7 +168,7 @@ TEST_CASE("Startup scan covers every document when earlier ones are deleted betw
     std::set<std::string> seen;
     auto first = h.service->testing_runStartupScanPass();
     seen.insert(first.begin(), first.end());
-    REQUIRE(first.size() == 3U);           // capped
+    REQUIRE(first.size() == 3U); // capped
     REQUIRE(h.service->testing_startupScanDue());
     // The first three were embedded; the user then deletes two of them.
     for (int i = 0; i < 3; ++i)

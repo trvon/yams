@@ -114,36 +114,51 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services);
  *  - Delegates to RepairManager for block-level operations
  *  - Delegates to InternalEventBus for embedding / FTS5 jobs
  */
-// Progress of the startup repair scan across queue drains. A scan that stops at the queue cap
-// (maxPendingRepairs) resumes from where it stopped once the queue drains, so a full re-embed
-// (embedding-space migration) covers the whole corpus. Thread-safe.
+// Progress of the startup repair scan across queue drains. Positions are document ids (the scan
+// pages by id, so deletes and inserts never shift it). A scan that stops at the queue cap
+// (maxPendingRepairs) resumes after the last id it scanned once the queue drains. A sweep that
+// queued work gets up to kMaxRetrySweeps more sweeps, so documents whose embedding failed
+// transiently are picked up in the same run. Thread-safe.
 class RepairScanCursor {
 public:
-    // True when no scan is running and either none has run yet or the last one was capped.
+    static constexpr int kMaxRetrySweeps = 3;
+
+    // True when no scan is running and either none has run yet, the last one was capped, or a
+    // retry sweep is due.
     bool shouldStart() const noexcept {
         std::lock_guard<std::mutex> lk(mu_);
         return !inFlight_ && (!started_ || incomplete_);
     }
-    // Marks a scan in flight; returns the document offset to start from.
-    std::size_t begin() noexcept {
+    // True when the next scan starts a retry sweep (rather than resuming a capped one).
+    bool retryDue() const noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        return started_ && incomplete_ && lastId_ == 0 && retries_ > 0;
+    }
+    // Marks a scan in flight; returns the last document id already scanned (0: from the start).
+    std::int64_t begin() noexcept {
         std::lock_guard<std::mutex> lk(mu_);
         inFlight_ = true;
         started_ = true;
-        return offset_;
+        return lastId_;
     }
-    void stoppedAt(std::size_t offset) noexcept {
+    void stoppedAt(std::int64_t lastScannedId, bool queuedWork = false) noexcept {
         std::lock_guard<std::mutex> lk(mu_);
-        offset_ = offset;
+        lastId_ = lastScannedId;
+        sweepQueued_ = sweepQueued_ || queuedWork;
         incomplete_ = true;
         inFlight_ = false;
     }
-    void finished() noexcept {
+    void finished(bool queuedWork = false) noexcept {
         std::lock_guard<std::mutex> lk(mu_);
-        offset_ = 0;
-        incomplete_ = false;
+        lastId_ = 0;
+        const bool retry = (sweepQueued_ || queuedWork) && retries_ < kMaxRetrySweeps;
+        sweepQueued_ = false;
+        if (retry)
+            ++retries_;
+        incomplete_ = retry;
         inFlight_ = false;
     }
-    // The scan ended early (exception, shutdown, maintenance paused): retry from the same offset.
+    // The scan ended early (exception, shutdown): retry from the same position.
     void aborted() noexcept {
         std::lock_guard<std::mutex> lk(mu_);
         incomplete_ = true;
@@ -152,10 +167,12 @@ public:
 
 private:
     mutable std::mutex mu_;
-    std::size_t offset_ = 0;
+    std::int64_t lastId_ = 0;
+    int retries_ = 0;
     bool started_ = false;
     bool incomplete_ = false;
     bool inFlight_ = false;
+    bool sweepQueued_ = false;
 };
 
 class RepairService {
@@ -300,8 +317,9 @@ public:
     /// would. Returns the hashes the pass queued, in order.
     std::vector<std::string> testing_runStartupScanPass() {
         running_.store(true);
+        recoverOrphanedProcessingOnce();
         boost::asio::io_context io;
-        const std::size_t start = scanCursor_.begin();
+        const std::int64_t start = scanCursor_.begin();
         boost::asio::co_spawn(io, spawnInitialScan(start), boost::asio::detached);
         io.run();
         running_.store(false);
@@ -386,8 +404,12 @@ private:
 
     // ── Background loop (absorbs RepairCoordinator::runAsync) ──
     boost::asio::awaitable<void> backgroundLoop(ShutdownState* shutdownState);
-    boost::asio::awaitable<void> spawnInitialScan(std::size_t startOffset);
+    boost::asio::awaitable<void> spawnInitialScan(std::int64_t startAfterId);
     RepairScanCursor scanCursor_;
+    /// Resets documents a previous daemon run left Processing (it queued them and died). Runs
+    /// once, before this run queues anything.
+    void recoverOrphanedProcessingOnce();
+    std::atomic<bool> orphansRecovered_{false};
     boost::asio::awaitable<void> processPathTreeRepair();
     void performVectorCleanup();
     /// Move one batch of legacy per-snapshot metadata keys into document_snapshots.

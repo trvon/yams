@@ -113,10 +113,18 @@ public:
      * @return Dimension or 0 if not initialized
      */
     size_t getEmbeddingDimension() const;
-    /// True when this start recreated the vector tables for a new embedding space.
+    /// Marker file (in the data dir) present from a vector-table recreate until the follow-up
+    /// work is acknowledged.
+    static constexpr const char* kEmbeddingMigrationMarker = "vectors_migration.json";
+
+    /// True when an embedding-space migration happened on this start, or on an earlier start
+    /// whose follow-up work (dropping semantic_neighbor edges, topology rebuild) was never
+    /// acknowledged.
     bool migratedEmbeddingSpace() const noexcept {
         return migratedEmbeddingSpace_.load(std::memory_order_acquire);
     }
+    /// The follow-up work is done; clears the marker.
+    void acknowledgeEmbeddingMigration();
 
     /**
      * @brief Check if vector database init was attempted.
@@ -134,6 +142,7 @@ private:
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
 
     std::atomic<bool> migratedEmbeddingSpace_{false};
+    std::filesystem::path migrationMarker_;
 
     std::atomic<bool> initAttempted_{false};
 };

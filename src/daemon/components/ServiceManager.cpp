@@ -608,8 +608,9 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 if (dim == 0) {
                     return std::nullopt;
                 }
-                return VectorSystemManager::MigrationTarget{
-                    dim, provider->getEmbeddingSpaceIdentity("")};
+                return VectorSystemManager::MigrationTarget{dim,
+                                                            provider->getEmbeddingSpaceIdentity(""),
+                                                            provider->isFallbackEmbeddingSpace("")};
             };
             vectorSystemManager_ = std::make_unique<VectorSystemManager>(vectorDeps);
             spdlog::debug("[ServiceManager] VectorSystemManager created");
@@ -2595,13 +2596,22 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (vectorSystemManager_->migratedEmbeddingSpace()) {
                 // Edges derived from the old space would mix with new-space neighbours; drop them
                 // so the idle backfill rebuilds them as documents re-embed.
-                if (auto kg = getKgStore()) {
-                    auto removed = kg->deleteEdgesByRelation("semantic_neighbor");
+                // Idempotent: a crash before the acknowledgement redoes it on the next start.
+                auto kg = getKgStore();
+                auto removed = kg ? kg->deleteEdgesByRelation("semantic_neighbor")
+                                  : Result<std::int64_t>(Error{ErrorCode::NotInitialized,
+                                                               "knowledge graph unavailable"});
+                if (removed) {
                     spdlog::info("[ServiceManager] embedding space migrated: removed {} "
                                  "semantic_neighbor edges; documents re-embed in the background",
-                                 removed ? removed.value() : 0);
+                                 removed.value());
+                    requestTopologyRebuild("embedding_space_migrated");
+                    vectorSystemManager_->acknowledgeEmbeddingMigration();
+                } else {
+                    spdlog::warn("[ServiceManager] embedding space migrated, but semantic_neighbor "
+                                 "edges were not removed ({}); retrying on the next start",
+                                 removed.error().message);
                 }
-                requestTopologyRebuild("embedding_space_migrated");
             }
             startupPhase_.begin(StartupPhase::EmbeddingReconcile);
             // Wire the VDB into the coordinator now that it's ready.

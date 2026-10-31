@@ -176,7 +176,8 @@ std::optional<size_t> ConfigResolver::readDbEmbeddingDim(const std::filesystem::
 }
 
 std::optional<std::string>
-ConfigResolver::readDbEmbeddingSpaceIdentity(const std::filesystem::path& dbPath) {
+ConfigResolver::readDbForeignEmbeddingSpace(const std::filesystem::path& dbPath,
+                                            const std::string& identity) {
     namespace fs = std::filesystem;
     std::error_code ec;
     if (dbPath.empty() || !fs::exists(dbPath, ec))
@@ -186,21 +187,28 @@ ConfigResolver::readDbEmbeddingSpaceIdentity(const std::filesystem::path& dbPath
         sqlite3_close(db);
         return std::nullopt;
     }
-    std::optional<std::string> identity;
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db,
-                           "SELECT model_id FROM vectors WHERE model_id IS NOT NULL AND "
-                           "model_id <> '' LIMIT 1",
-                           -1, &stmt, nullptr) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            if (const auto* text = sqlite3_column_text(stmt, 0)) {
-                identity = std::string(reinterpret_cast<const char*>(text));
+    // Rows sorting after the identity, then rows before it (excluding NULL and '').
+    static constexpr const char* kQueries[] = {
+        "SELECT model_id FROM vectors WHERE model_id > ?1 LIMIT 1",
+        "SELECT model_id FROM vectors WHERE model_id < ?1 AND model_id > '' LIMIT 1",
+    };
+    std::optional<std::string> foreign;
+    for (const char* sql : kQueries) {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, identity.c_str(), static_cast<int>(identity.size()),
+                              SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                if (const auto* text = sqlite3_column_text(stmt, 0))
+                    foreign = std::string(reinterpret_cast<const char*>(text));
             }
         }
+        sqlite3_finalize(stmt);
+        if (foreign)
+            break;
     }
-    sqlite3_finalize(stmt);
     sqlite3_close(db);
-    return identity;
+    return foreign;
 }
 
 std::optional<size_t> ConfigResolver::readVectorSentinelDim(const std::filesystem::path& dataDir) {

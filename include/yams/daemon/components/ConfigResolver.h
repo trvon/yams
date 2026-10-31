@@ -354,9 +354,10 @@ public:
      */
     static std::optional<size_t> readDbEmbeddingDim(const std::filesystem::path& dbPath);
 
-    /// Embedding-space identity (vectors.model_id) of the stored vectors, if any row has one.
+    /// A stored embedding-space identity (vectors.model_id) other than `identity`, if any row has
+    /// one. Two seeks on idx_vectors_model, so it stays cheap on large stores.
     static std::optional<std::string>
-    readDbEmbeddingSpaceIdentity(const std::filesystem::path& dbPath);
+    readDbForeignEmbeddingSpace(const std::filesystem::path& dbPath, const std::string& identity);
 
     /**
      * @brief Read embedding dimension from sentinel file.

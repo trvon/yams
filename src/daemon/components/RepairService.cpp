@@ -552,17 +552,23 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         }
         // The startup scan runs once, and again each time the queue drains after a capped scan
         // (a full re-embed after an embedding-space migration can exceed maxPendingRepairs).
-        if (queueEmpty && scanCursor_.shouldStart()) {
+        // A retry sweep waits until the embedding consumer is idle, so it sees final outcomes
+        // instead of re-queueing work still in flight.
+        const bool embedIdle =
+            (!ctx_.getEmbeddingQueuedJobs || ctx_.getEmbeddingQueuedJobs() == 0) &&
+            (!ctx_.getEmbeddingInFlightJobs || ctx_.getEmbeddingInFlightJobs() == 0);
+        if (queueEmpty && scanCursor_.shouldStart() && (embedIdle || !scanCursor_.retryDue())) {
             if (!initialScanEnqueued && deferTicks < minDeferTicks) {
                 ++deferTicks;
             } else if (maintenanceAllowed() &&
                        ResourceGovernor::instance().admitDeferrable(DeferrableWork::RepairScan)) {
+                recoverOrphanedProcessingOnce();
                 auto scanExec = RepairThreadPool::instance().get_executor();
-                const std::size_t startOffset = scanCursor_.begin();
+                const std::int64_t startAfterId = scanCursor_.begin();
                 boost::asio::co_spawn(
                     scanExec,
-                    [this, startOffset]() -> boost::asio::awaitable<void> {
-                        co_await spawnInitialScan(startOffset);
+                    [this, startAfterId]() -> boost::asio::awaitable<void> {
+                        co_await spawnInitialScan(startAfterId);
                     },
                     boost::asio::detached);
                 initialScanEnqueued = true;
@@ -706,24 +712,52 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
     co_return;
 }
 
-boost::asio::awaitable<void> RepairService::spawnInitialScan(std::size_t startOffset) {
+void RepairService::recoverOrphanedProcessingOnce() {
+    if (orphansRecovered_.exchange(true))
+        return;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
+    if (!meta)
+        return;
+    // Only RepairService marks documents Processing, and this run has queued nothing yet, so any
+    // Processing row belongs to a previous run that died with the work queued.
+    metadata::DocumentQueryOptions opts;
+    opts.repairStatuses = {metadata::RepairStatus::Processing};
+    auto docs = meta->queryDocuments(opts);
+    if (!docs || docs.value().empty())
+        return;
+    std::vector<std::string> hashes;
+    hashes.reserve(docs.value().size());
+    for (const auto& d : docs.value())
+        hashes.push_back(d.sha256Hash);
+    if (auto r = meta->batchUpdateDocumentRepairStatuses(hashes, metadata::RepairStatus::Pending);
+        r) {
+        spdlog::info("RepairService: reset {} documents a previous run left Processing",
+                     hashes.size());
+    } else {
+        spdlog::warn("RepairService: could not reset Processing documents: {}", r.error().message);
+    }
+}
+
+boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startAfterId) {
     // How this pass ended, reported to scanCursor_ on every exit path.
     enum class End { Aborted, Finished, Stopped };
     End end = End::Aborted;
-    std::size_t stopOffset = startOffset;
+    std::int64_t lastId = startAfterId; // last document id fully scanned
+    size_t totalEnqueued = 0;
     struct Report {
         RepairScanCursor& cursor;
         const End& end;
-        const std::size_t& offset;
+        const std::int64_t& lastId;
+        const size_t& enqueued;
         ~Report() {
             if (end == End::Finished)
-                cursor.finished();
+                cursor.finished(enqueued > 0);
             else if (end == End::Stopped)
-                cursor.stoppedAt(offset);
+                cursor.stoppedAt(lastId, enqueued > 0);
             else
                 cursor.aborted();
         }
-    } report{scanCursor_, end, stopOffset};
+    } report{scanCursor_, end, lastId, totalEnqueued};
 
     try {
         auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
@@ -734,8 +768,6 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::size_t startOf
 
         const bool vectorsDisabled = vectorsDisabledByEnv();
         const size_t batchSize = TuneAdvisor::repairStartupBatchSize();
-        size_t offset = startOffset;
-        size_t totalEnqueued = 0;
         bool queueAtCapacity = false;
 
         // Preload all FTS5-indexed rowids once for O(1) lookups in the scan loop.
@@ -758,12 +790,14 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::size_t startOf
         while (running_.load(std::memory_order_relaxed) && !queueAtCapacity) {
             if (!maintenanceAllowed()) {
                 end = End::Stopped; // resume here once maintenance is allowed again
-                stopOffset = offset;
                 break;
             }
+            // Keyset paging by id: deletes and inserts behind the cursor never shift it.
             metadata::DocumentQueryOptions opts;
             opts.limit = static_cast<int>(batchSize);
-            opts.offset = static_cast<int>(offset);
+            opts.orderByIdAsc = true;
+            if (lastId > 0)
+                opts.idGreaterThan = lastId;
             auto batchDocs = meta->queryDocuments(opts);
             if (!batchDocs || batchDocs.value().empty()) {
                 end = batchDocs ? End::Finished : End::Aborted;
@@ -771,16 +805,20 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::size_t startOf
             }
 
             size_t batchEnqueued = 0;
+            bool interrupted = false;
             {
                 std::lock_guard<std::mutex> ql(queueMutex_);
                 for (const auto& d : batchDocs.value()) {
-                    if (!running_.load(std::memory_order_relaxed))
+                    if (!running_.load(std::memory_order_relaxed)) {
+                        interrupted = true;
                         break;
-                    if (d.repairStatus == yams::metadata::RepairStatus::Processing)
+                    }
+                    // Processing rows from a previous run were reset at startup; these are this
+                    // run's in-flight jobs.
+                    if (d.repairStatus == yams::metadata::RepairStatus::Processing) {
+                        lastId = d.id;
                         continue;
-
-                    // NEW: recover stalled Processing on startup
-                    // (handled by detectStuckDocuments during on-demand repair)
+                    }
 
                     bool missingEmb = false;
                     if (!vectorsDisabled) {
@@ -805,8 +843,7 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::size_t startOf
                     if (missingEmb || missingFts) {
                         if (pendingDocuments_.size() >= cfg_.maxPendingRepairs) {
                             queueAtCapacity = true;
-                            end = End::Stopped; // rescan this batch after the queue drains
-                            stopOffset = offset;
+                            end = End::Stopped; // resume at this document after the drain
                             break;
                         }
                         if (pendingSet_.find(d.sha256Hash) == pendingSet_.end()) {
@@ -815,13 +852,13 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::size_t startOf
                             ++batchEnqueued;
                         }
                     }
+                    lastId = d.id;
                 }
             }
 
             totalEnqueued += batchEnqueued;
-            if (queueAtCapacity)
+            if (queueAtCapacity || interrupted)
                 break;
-            offset += batchDocs.value().size();
             co_await boost::asio::post(co_await boost::asio::this_coro::executor,
                                        boost::asio::use_awaitable);
             if (batchDocs.value().size() < batchSize) {
