@@ -870,6 +870,56 @@ TEST_CASE("DownloadManager: Export with ETag matching", "[downloader][export]") 
     fs::remove_all(tempDir, ec);
 }
 
+TEST_CASE("DownloadManager: exported files are writable and carry no sidecar by default",
+          "[downloader][export]") {
+    auto tempDir = make_temp_dir();
+    StorageConfig storage{tempDir / "objects", tempDir / "staging"};
+    DownloaderConfig cfg;
+    auto http = std::make_unique<TestHttpAdapter>();
+    http->resumeSupported = false;
+    http->contentLength = 5;
+    http->etag = "tag-1";
+    http->payload = to_bytes("ABCDE");
+    // Real disk writer: CAS objects are finalized read-only.
+    auto dm = makeDownloadManagerWithDependencies(storage, cfg, std::move(http), nullptr, nullptr,
+                                                  nullptr, nullptr);
+
+    const fs::path exportPath = tempDir / "exports" / "table.smstat";
+    DownloadRequest req;
+    req.url = "https://example.com/table.smstat";
+    req.exportPath = exportPath;
+    req.overwrite = OverwritePolicy::Always;
+
+    auto result = dm->download(req);
+    REQUIRE(result.ok());
+    REQUIRE(result.value().success);
+    REQUIRE(fs::exists(exportPath));
+    CHECK_FALSE(fs::exists(meta_path_for(exportPath)));
+#if !defined(_WIN32)
+    const auto exportPerms = fs::status(exportPath).permissions();
+    CHECK((exportPerms & fs::perms::owner_write) != fs::perms::none);
+    const auto casPerms = fs::status(result.value().storedPath).permissions();
+    CHECK((casPerms & fs::perms::owner_write) == fs::perms::none);
+#endif
+
+    // A second export over the existing file succeeds, also over a read-only export left by
+    // older versions.
+#if !defined(_WIN32)
+    fs::permissions(exportPath,
+                    fs::perms::owner_read | fs::perms::group_read | fs::perms::others_read,
+                    fs::perm_options::replace);
+#endif
+    auto again = dm->download(req);
+    REQUIRE(again.ok());
+    CHECK(again.value().success);
+#if !defined(_WIN32)
+    CHECK((fs::status(exportPath).permissions() & fs::perms::owner_write) != fs::perms::none);
+#endif
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
 TEST_CASE("DownloadManager: Cooperative cancellation stops fetch", "[downloader][cancel][catch2]") {
     auto tempDir = make_temp_dir();
     StorageConfig storage{tempDir / "objects", tempDir / "staging"};
