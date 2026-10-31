@@ -15,6 +15,7 @@ yams_cli_sources = [
   'plugin_util.cpp',
   'doctor_checks.cpp',
   'init_assets.cpp',
+  'static_tables.cpp',
   'tune_runner.cpp',
   'commands/add_command.cpp',
   'commands/get_command.cpp',
