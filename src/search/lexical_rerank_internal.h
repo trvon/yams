@@ -40,6 +40,9 @@ struct LexicalRerankOutcome {
     std::size_t matched = 0; // pool documents with a lexical score
     bool semanticApplied = false;
     std::string semanticError;
+    // Wall time of the two scorer calls (microseconds).
+    std::int64_t semanticMicros = 0;
+    std::int64_t lexicalMicros = 0;
 };
 
 // Lowercased [A-Za-z0-9]+ tokens longer than one character, minus English stopwords, sorted and

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // pi-lens-ignore: fatal error
+#include <sqlite3.h>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/detail/config_parse_utils.h>
@@ -172,6 +173,42 @@ std::optional<size_t> ConfigResolver::readDbEmbeddingDim(const std::filesystem::
         spdlog::debug("Failed to read embedding dimension from {}: unknown error", dbPath.string());
     }
     return std::nullopt;
+}
+
+std::optional<std::string>
+ConfigResolver::readDbForeignEmbeddingSpace(const std::filesystem::path& dbPath,
+                                            const std::string& identity) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (dbPath.empty() || !fs::exists(dbPath, ec))
+        return std::nullopt;
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(dbPath.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+        sqlite3_close(db);
+        return std::nullopt;
+    }
+    // Rows sorting after the identity, then rows before it (excluding NULL and '').
+    static constexpr const char* kQueries[] = {
+        "SELECT model_id FROM vectors WHERE model_id > ?1 LIMIT 1",
+        "SELECT model_id FROM vectors WHERE model_id < ?1 AND model_id > '' LIMIT 1",
+    };
+    std::optional<std::string> foreign;
+    for (const char* sql : kQueries) {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, identity.c_str(), static_cast<int>(identity.size()),
+                              SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                if (const auto* text = sqlite3_column_text(stmt, 0))
+                    foreign = std::string(reinterpret_cast<const char*>(text));
+            }
+        }
+        sqlite3_finalize(stmt);
+        if (foreign)
+            break;
+    }
+    sqlite3_close(db);
+    return foreign;
 }
 
 std::optional<size_t> ConfigResolver::readVectorSentinelDim(const std::filesystem::path& dataDir) {

@@ -61,6 +61,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/config/config_helpers.h>
+#include <yams/config/static_embedding_table.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/CheckpointManager.h>
@@ -99,6 +100,7 @@
 #include <yams/metadata/migration.h>
 #include <yams/storage/corpus_stats.h>
 #include <yams/storage/storage_runtime_resolver.h>
+#include <yams/vector/simeon_embedding_backend.h>
 #include <yams/vector/vector_database.h>
 
 namespace {
@@ -591,6 +593,25 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 return config ? config->dimension : std::nullopt;
             };
             vectorDeps.suppressVectorIndexBuild = config_.instrumentation.suppressVectorIndexBuild;
+            vectorDeps.migrationTarget =
+                [this]() -> std::optional<VectorSystemManager::MigrationTarget> {
+                // Only the training-free (Simeon) space migrates automatically; a model-backed
+                // dimension change stays a reported mismatch.
+                if (!config_.autoMigrateEmbeddings) {
+                    return std::nullopt;
+                }
+                auto provider = loadModelProvider();
+                if (!provider || !provider->isAvailable() || !provider->isTrainingFree()) {
+                    return std::nullopt;
+                }
+                const size_t dim = provider->getEmbeddingDim("");
+                if (dim == 0) {
+                    return std::nullopt;
+                }
+                return VectorSystemManager::MigrationTarget{dim,
+                                                            provider->getEmbeddingSpaceIdentity(""),
+                                                            provider->isFallbackEmbeddingSpace("")};
+            };
             vectorSystemManager_ = std::make_unique<VectorSystemManager>(vectorDeps);
             spdlog::debug("[ServiceManager] VectorSystemManager created");
 
@@ -782,6 +803,8 @@ ServiceManager::~ServiceManager() {
 void ServiceManager::publishResolvedDataDir(std::filesystem::path dir) {
     std::lock_guard lock(resolvedDataDirMutex_);
     resolvedDataDir_ = std::move(dir);
+    // Static-embedding tables are found under this data dir by the embedding backend too.
+    vector::setStaticEmbeddingDataDirHint(resolvedDataDir_);
 }
 
 yams::Result<void> ServiceManager::initialize() {
@@ -2570,6 +2593,26 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("[ServiceManager] Vector DB init failed: {}", vdbRes.error().message);
         } else if (vdbRes.value()) {
             spdlog::info("[ServiceManager] Vector DB initialized successfully");
+            if (vectorSystemManager_->migratedEmbeddingSpace()) {
+                // Edges derived from the old space would mix with new-space neighbours; drop them
+                // so the idle backfill rebuilds them as documents re-embed.
+                // Idempotent: a crash before the acknowledgement redoes it on the next start.
+                auto kg = getKgStore();
+                auto removed = kg ? kg->deleteEdgesByRelation("semantic_neighbor")
+                                  : Result<std::int64_t>(Error{ErrorCode::NotInitialized,
+                                                               "knowledge graph unavailable"});
+                if (removed) {
+                    spdlog::info("[ServiceManager] embedding space migrated: removed {} "
+                                 "semantic_neighbor edges; documents re-embed in the background",
+                                 removed.value());
+                    requestTopologyRebuild("embedding_space_migrated");
+                    vectorSystemManager_->acknowledgeEmbeddingMigration();
+                } else {
+                    spdlog::warn("[ServiceManager] embedding space migrated, but semantic_neighbor "
+                                 "edges were not removed ({}); retrying on the next start",
+                                 removed.error().message);
+                }
+            }
             startupPhase_.begin(StartupPhase::EmbeddingReconcile);
             // Wire the VDB into the coordinator now that it's ready.
             if (vectorIndexCoordinator_) {
@@ -3563,30 +3606,13 @@ boost::asio::any_io_executor ServiceManager::getCliExecutor() const {
 
 std::shared_ptr<const simeon::StaticEmbedding> ServiceManager::loadStaticEmbeddingTable() {
     std::call_once(staticEmbeddingTableOnce_, [this]() {
-        std::error_code ec;
-        const auto dir = resolvedDataDir_ / "models" / "static";
-        if (resolvedDataDir_.empty() || !std::filesystem::is_directory(dir, ec)) {
-            return;
+        const auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
+        std::optional<std::filesystem::path> configured;
+        if (policy.staticTable) {
+            configured = std::filesystem::path(*policy.staticTable);
         }
-        std::vector<std::filesystem::path> tables;
-        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-            if (entry.is_regular_file(ec) && entry.path().extension() == ".smstat") {
-                tables.push_back(entry.path());
-            }
-        }
-        if (tables.empty()) {
-            return;
-        }
-        std::sort(tables.begin(), tables.end());
-        try {
-            staticEmbeddingTable_ = std::make_shared<const simeon::StaticEmbedding>(
-                simeon::StaticEmbedding::load(tables.front().string()));
-            spdlog::info("[search] static embedding table {} (dim={}, vocab={})",
-                         tables.front().filename().string(), staticEmbeddingTable_->dim(),
-                         staticEmbeddingTable_->vocab_size());
-        } catch (const std::exception& e) {
-            spdlog::warn("[search] static embedding table {} not loaded: {}",
-                         tables.front().string(), e.what());
+        if (auto path = yams::config::findStaticEmbeddingTable(configured, resolvedDataDir_)) {
+            staticEmbeddingTable_ = vector::loadSharedStaticEmbeddingTable(*path);
         }
     });
     return staticEmbeddingTable_;

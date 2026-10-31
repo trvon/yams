@@ -40,6 +40,15 @@ public:
     /**
      * @brief Dependency injection for VectorSystemManager.
      */
+    /// Embedding space the vectors should be in (see Dependencies::migrationTarget).
+    struct MigrationTarget {
+        size_t dim{0};
+        std::string identity; // empty: compare dimension only
+        /// The provider fell back to this space (e.g. the configured static table is missing),
+        /// so it is not a space the user chose.
+        bool fallback{false};
+    };
+
     struct Dependencies {
         /// State component for readiness tracking
         StateComponent* state{nullptr};
@@ -61,6 +70,11 @@ public:
 
         /// Suppress startup/search-index build work while profiling allocator overhead.
         bool suppressVectorIndexBuild{false};
+
+        /// Embedding-space migration target, or nullopt to keep the stored space. When the stored
+        /// vectors differ in dimension or space identity, the vector tables are recreated at
+        /// startup and documents re-embed in the background.
+        std::function<std::optional<MigrationTarget>()> migrationTarget;
     };
 
     explicit VectorSystemManager(Dependencies deps);
@@ -99,6 +113,18 @@ public:
      * @return Dimension or 0 if not initialized
      */
     size_t getEmbeddingDimension() const;
+    /// Marker file (in the data dir) present from a vector-table recreate until the follow-up
+    /// work is acknowledged.
+    static constexpr const char* kEmbeddingMigrationMarker = "vectors_migration.json";
+
+    /// True when an embedding-space migration happened on this start, or on an earlier start
+    /// whose follow-up work (dropping semantic_neighbor edges, topology rebuild) was never
+    /// acknowledged.
+    bool migratedEmbeddingSpace() const noexcept {
+        return migratedEmbeddingSpace_.load(std::memory_order_acquire);
+    }
+    /// The follow-up work is done; clears the marker.
+    void acknowledgeEmbeddingMigration();
 
     /**
      * @brief Check if vector database init was attempted.
@@ -114,6 +140,9 @@ private:
     Dependencies deps_;
 
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
+
+    std::atomic<bool> migratedEmbeddingSpace_{false};
+    std::filesystem::path migrationMarker_;
 
     std::atomic<bool> initAttempted_{false};
 };

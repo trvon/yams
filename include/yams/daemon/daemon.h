@@ -63,6 +63,10 @@ struct DaemonConfig {
     bool useMockModelProvider = false;
     size_t autoRepairBatchSize = 32;
     bool autoRebuildOnDimMismatch = false;
+    // When the training-free embedding space changes dimension (e.g. the static-embedding table
+    // replaces the hash encoder), recreate the vector tables at startup and re-embed in the
+    // background. Config: daemon.auto_migrate_embeddings.
+    bool autoMigrateEmbeddings = true;
     size_t maxPendingRepairs = 1000;
     // Embedded one-shot clients (sandboxed CLIs, Codex) should avoid startup maintenance that can
     // outlive the command and make teardown expensive. Request handlers may still perform explicit

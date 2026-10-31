@@ -30,10 +30,12 @@
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/config/static_embedding_table.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/integrity/repair_utils.h>
 #include <yams/profiling.h>
+#include <yams/vector/simeon_embedding_backend.h>
 
 namespace yams::cli {
 
@@ -77,6 +79,32 @@ static const std::vector<ModelInfo> AVAILABLE_MODELS = {
     // (no batch embeddings/preload). You can still download via --hf or --url manually.
 };
 
+// Static-embedding tables (Simeon SMSTAT01) for the dense leg and the deep rerank. Installed to
+// <data-dir>/models/static/<name>.smstat, where the runtime lookup finds them. The sha256 is
+// verified by the downloader.
+struct StaticTableInfo {
+    std::string name;
+    std::string url;
+    std::string sha256;
+    size_t size_mb;
+    std::string description;
+};
+
+static const std::vector<StaticTableInfo> STATIC_TABLES = {
+    {"yams-static-bge-c4-256",
+     "https://github.com/trvon/simeon/releases/download/static-tables-v1/"
+     "yams-static-bge-c4-256.smstat",
+     "cd7ade87d3bb360eca94792561bafb9b8ffd43eeb0739826e02642a848120d74", 17,
+     "WordPiece static embeddings, 256 dims (tokenlearn: bge-base-en-v1.5 teacher, MIT; "
+     "1M C4 passages, ODC-BY)"},
+};
+
+static const StaticTableInfo* findStaticTable(const std::string& name) {
+    auto it = std::find_if(STATIC_TABLES.begin(), STATIC_TABLES.end(),
+                           [&](const StaticTableInfo& t) { return t.name == name; });
+    return it == STATIC_TABLES.end() ? nullptr : &*it;
+}
+
 class ModelCommand : public ICommand {
 private:
     YamsCLI* cli_ = nullptr;
@@ -90,6 +118,7 @@ private:
     std::string hfRepo_;
     std::string revision_ = "main";
     std::string token_;
+    std::string sha256_; // expected sha256 for --url downloads of static tables
     bool offline_ = false;
     bool check_ = false;
     bool applyConfig_ = false; // when true, write detected dims into config
@@ -379,6 +408,8 @@ public:
         sub_download->add_option("--hf", hfRepo_, "Hugging Face repo id (org/name)");
         sub_download->add_option("--revision", revision_, "Hugging Face revision (default: main)");
         sub_download->add_option("--token", token_, "Hugging Face access token");
+        sub_download->add_option("--sha256", sha256_,
+                                 "Expected sha256 of a static table downloaded with --url");
         sub_download->add_flag("--offline", offline_, "Offline mode: use cache only");
         sub_download->add_flag("--force", force_, "Force redownload if model exists");
         sub_download->add_flag(
@@ -696,6 +727,8 @@ private:
             std::cout << "\n";
         }
 
+        printStaticTables();
+
         std::cout << "To download a model:\n";
         std::cout << "  yams model --download <model-name>\n";
         std::cout << "Then set it as preferred:\n";
@@ -704,8 +737,7 @@ private:
         return Result<void>{};
     }
 
-    Result<void> downloadModel(const std::string& model_name,
-                               [[maybe_unused]] const std::string& output_dir,
+    Result<void> downloadModel(const std::string& model_name, const std::string& output_dir,
                                const std::string& override_url) {
         YAMS_ZONE_SCOPED_N("ModelCommand::downloadModel");
 
@@ -723,6 +755,13 @@ private:
                 return "onnx-community/embeddinggemma-300m-ONNX";
             return {};
         };
+
+        if (const auto* table = findStaticTable(model_name)) {
+            return downloadStaticTable(model_name, table->url, table->sha256, output_dir);
+        }
+        if (override_url.ends_with(".smstat")) {
+            return downloadStaticTable(model_name, override_url, sha256_, output_dir);
+        }
 
         // Find model info
         auto it = std::find_if(AVAILABLE_MODELS.begin(), AVAILABLE_MODELS.end(),
@@ -1162,6 +1201,106 @@ private:
         return Result<void>{};
     }
 
+    fs::path staticTablesDir() const { return cli_->getDataPath() / "models" / "static"; }
+
+    Result<void> downloadStaticTable(const std::string& name, const std::string& url,
+                                     const std::string& sha256, const std::string& output_dir) {
+        if (url.empty()) {
+            return Error{ErrorCode::InvalidArgument, "no URL for static table: " + name};
+        }
+        if (name.empty() || name.find_first_of("/\\") != std::string::npos ||
+            !isPathSafe(fs::path(name))) {
+            return Error{ErrorCode::InvalidArgument, "invalid static table name: " + name};
+        }
+        const fs::path dir = output_dir.empty() ? staticTablesDir() : fs::path(output_dir);
+        yams::common::ensureDirectories(dir);
+        const fs::path out = dir / (name + ".smstat");
+        if (fs::exists(out) && !force_) {
+            std::cout << "Static table already exists at: " << out << "\n";
+            std::cout << "Use --force to redownload\n";
+            return Result<void>{};
+        }
+        if (sha256.empty()) {
+            std::cout << "Warning: no sha256 given; the download is not verified (pass --sha256)\n";
+        }
+
+        yams::downloader::StorageConfig storage{};
+        storage.objectsDir = cli_->getDataPath() / "storage" / "objects";
+        storage.stagingDir = cli_->getDataPath() / "staging" / "downloader";
+        yams::downloader::DownloaderConfig dcfg{};
+        auto manager = yams::downloader::makeDownloadManager(storage, dcfg);
+        yams::downloader::DownloadRequest req{};
+        req.url = url;
+        req.storeOnly = true;
+        req.exportPath = out;
+        req.overwrite = yams::downloader::OverwritePolicy::Always;
+        if (!sha256.empty()) {
+            std::string hex = sha256;
+            std::transform(hex.begin(), hex.end(), hex.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            req.checksum = yams::downloader::Checksum{yams::downloader::HashAlgo::Sha256, hex};
+        }
+        std::cout << "Downloading static table " << name << "\n  from " << url << "\n";
+        auto res = manager->download(req, {}, [] { return false; }, {});
+        if (!res.ok() || !res.value().success) {
+            const std::string msg = res.ok() ? (res.value().error ? res.value().error->message
+                                                                  : std::string("download failed"))
+                                             : res.error().message;
+            return Error{ErrorCode::NetworkError, "static table " + name + ": " + msg};
+        }
+
+        auto table = yams::vector::loadSharedStaticEmbeddingTable(out);
+        if (!table) {
+            std::error_code ec;
+            fs::remove(out, ec);
+            return Error{ErrorCode::CorruptedData,
+                         "downloaded file is not a valid SMSTAT01 table: " + out.string()};
+        }
+        std::cout << "\n✓ Static table ready: " << out << "\n";
+        std::cout << "  identity: " << yams::vector::staticEmbeddingSpaceIdentity(out) << "\n";
+        if (output_dir.empty()) {
+            std::cout << "\nThe deep rerank uses it on the next daemon start. To also embed with "
+                         "it:\n";
+            std::cout << "  yams config set embeddings.simeon.encoder_profile static\n";
+            std::cout << "  yams daemon stop && yams doctor --recreate-vectors\n";
+            std::cout << "  yams daemon start && yams repair --embeddings --force\n";
+        }
+        return Result<void>{};
+    }
+
+    void printStaticTables() const {
+        if (!cli_) {
+            return;
+        }
+        std::vector<fs::path> installed;
+        std::error_code ec;
+        if (fs::is_directory(staticTablesDir(), ec)) {
+            for (const auto& e : fs::directory_iterator(staticTablesDir(), ec)) {
+                if (e.is_regular_file(ec) && e.path().extension() == ".smstat") {
+                    installed.push_back(e.path());
+                }
+            }
+        }
+        std::sort(installed.begin(), installed.end());
+        const auto active =
+            yams::config::findStaticEmbeddingTable(std::nullopt, cli_->getDataPath());
+        std::cout << "Static embedding tables (Simeon):\n";
+        for (const auto& t : STATIC_TABLES) {
+            std::cout << "  " << t.name << " (static, " << t.size_mb << " MB)\n    "
+                      << t.description << "\n";
+        }
+        for (const auto& p : installed) {
+            std::error_code sec;
+            const auto sz = fs::file_size(p, sec);
+            std::cout << "  installed: " << p.filename().string();
+            if (!sec) {
+                std::cout << " (~" << sz / (1024 * 1024) << " MB)";
+            }
+            std::cout << "\n";
+        }
+        std::cout << "  active: " << (active ? active->string() : std::string("(none)")) << "\n\n";
+    }
+
     Result<void> showModelInfo(const std::string& model_name) {
         auto it = std::find_if(AVAILABLE_MODELS.begin(), AVAILABLE_MODELS.end(),
                                [&](const ModelInfo& m) { return m.name == model_name; });
@@ -1277,7 +1416,9 @@ private:
                 std::cout << "\n";
             }
         }
-        std::cout << "\nDefault semantic search uses built-in Simeon embeddings.\n";
+        std::cout << "\n";
+        printStaticTables();
+        std::cout << "Default semantic search uses built-in Simeon embeddings.\n";
         std::cout << "Use 'yams model download <name>' or 'yams model download <name> --url "
                      "<url>' only for optional ONNX/plugin-backed models.\n";
         return Result<void>{};

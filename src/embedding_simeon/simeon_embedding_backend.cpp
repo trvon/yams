@@ -4,6 +4,9 @@
 #include <yams/vector/embedding_generator.h>
 
 #include <simeon/simeon.hpp>
+#include <simeon/static_embedding.hpp>
+#include <yams/config/config_helpers.h>
+#include <yams/config/static_embedding_table.h>
 
 #include <spdlog/spdlog.h>
 
@@ -12,6 +15,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <mutex>
 #include <string>
 
@@ -79,7 +85,106 @@ const char* ngram_mode_label(simeon::NGramMode m) noexcept {
 struct ResolvedSimeonEncoder {
     simeon::EncoderConfig config;
     std::string spaceIdentity;
+    // Set for encoder_profile = "static": encode with this table instead of the hash encoder.
+    std::shared_ptr<const simeon::StaticEmbedding> staticTable;
+    // The static table was wanted but not loaded; this hash space is a stand-in.
+    bool fallback{false};
 };
+
+struct CachedStaticTable {
+    std::shared_ptr<const simeon::StaticEmbedding> table;
+    std::string identity;
+};
+
+std::mutex& staticTableMutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+std::map<std::string, CachedStaticTable>& staticTableCache() {
+    static std::map<std::string, CachedStaticTable> cache;
+    return cache;
+}
+
+const CachedStaticTable* cachedStaticTable(const std::filesystem::path& path) {
+    std::lock_guard<std::mutex> lock(staticTableMutex());
+    auto& cache = staticTableCache();
+    const std::string key = path.string();
+    if (auto it = cache.find(key); it != cache.end()) {
+        return it->second.table ? &it->second : nullptr;
+    }
+    CachedStaticTable entry;
+    try {
+        std::ifstream in(path, std::ios::binary);
+        std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)),
+                                        std::istreambuf_iterator<char>());
+        std::uint64_t h = 1469598103934665603ULL;
+        for (std::uint8_t b : bytes) {
+            h = (h ^ b) * 1099511628211ULL;
+        }
+        auto table = std::make_shared<const simeon::StaticEmbedding>(
+            simeon::StaticEmbedding::from_bytes(bytes));
+        char hex[17];
+        std::snprintf(hex, sizeof hex, "%016llx", static_cast<unsigned long long>(h));
+        entry.identity = "simeon-static-v1:" + path.filename().string() + ":" + hex +
+                         ":dim=" + std::to_string(table->dim());
+        entry.table = std::move(table);
+        spdlog::info("Simeon static embedding table {} (dim={}, vocab={})", key, entry.table->dim(),
+                     entry.table->vocab_size());
+    } catch (const std::exception& e) {
+        spdlog::warn("Simeon static embedding table {} not loaded: {}", key, e.what());
+    }
+    auto [it, inserted] = cache.emplace(key, std::move(entry));
+    return it->second.table ? &it->second : nullptr;
+}
+
+std::mutex& dataDirHintMutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+std::filesystem::path& dataDirHint() {
+    static std::filesystem::path hint;
+    return hint;
+}
+
+// "static" explicitly, or no profile configured: the static table is the default when one is
+// found. Any other explicit profile keeps the hash encoder.
+bool wantsStaticProfile(const EmbeddingConfig& yamsConfig,
+                        const daemon::ConfigResolver::SimeonEncoderPolicy& policy) {
+    if (yamsConfig.simeon_encoder_profile == EmbeddingConfig::SimeonEncoderProfile::FixedHash384) {
+        return false;
+    }
+    return !policy.encoderProfile.has_value() || policy.encoderProfile->empty() ||
+           *policy.encoderProfile == "static";
+}
+
+bool explicitStaticProfile(const daemon::ConfigResolver::SimeonEncoderPolicy& policy) {
+    return policy.encoderProfile.has_value() && *policy.encoderProfile == "static";
+}
+
+std::optional<std::filesystem::path>
+resolveStaticTablePath(const daemon::ConfigResolver::SimeonEncoderPolicy& policy) {
+    std::optional<std::filesystem::path> configured;
+    if (policy.staticTable) {
+        configured = std::filesystem::path(*policy.staticTable);
+    }
+    std::filesystem::path dataDir;
+    {
+        std::lock_guard<std::mutex> lock(dataDirHintMutex());
+        dataDir = dataDirHint();
+    }
+    if (dataDir.empty()) {
+        try {
+            dataDir = yams::config::resolve_data_dir_from_config();
+        } catch (const std::exception&) {
+            if (auto env = yams::config::getenv_nonempty("YAMS_DATA_DIR")) {
+                dataDir = *env;
+            }
+        }
+    }
+    return yams::config::findStaticEmbeddingTable(configured, dataDir);
+}
 
 bool usesFixedHash384Profile(const EmbeddingConfig& yamsConfig,
                              const daemon::ConfigResolver::SimeonEncoderPolicy& policy) {
@@ -92,7 +197,7 @@ bool usesFixedHash384Profile(const EmbeddingConfig& yamsConfig,
     if (*policy.encoderProfile == "fixed_hash_384" || *policy.encoderProfile == "simeon-v1-384") {
         return true;
     }
-    if (*policy.encoderProfile != "configurable") {
+    if (*policy.encoderProfile != "configurable" && *policy.encoderProfile != "static") {
         spdlog::warn("Ignoring unknown embeddings.simeon.encoder_profile='{}'",
                      *policy.encoderProfile);
     }
@@ -119,9 +224,23 @@ std::string configurableSpaceIdentity(const simeon::EncoderConfig& config) {
 
 ResolvedSimeonEncoder resolveEncoder(const EmbeddingConfig& yamsConfig) {
     const auto policy = daemon::ConfigResolver::resolveSimeonEncoderPolicy();
+    const bool wantedStatic = wantsStaticProfile(yamsConfig, policy);
+    if (wantedStatic) {
+        if (auto path = resolveStaticTablePath(policy)) {
+            if (const auto* cached = cachedStaticTable(*path)) {
+                return ResolvedSimeonEncoder{
+                    .config = {}, .spaceIdentity = cached->identity, .staticTable = cached->table};
+            }
+        }
+        if (explicitStaticProfile(policy)) {
+            spdlog::warn("embeddings.simeon.encoder_profile='static' but no static table was "
+                         "found; using the configurable hash encoder");
+        }
+    }
     if (usesFixedHash384Profile(yamsConfig, policy)) {
         return ResolvedSimeonEncoder{.config = simeon::simeon_v1_384_config(),
-                                     .spaceIdentity = std::string{simeon::simeon_v1_384_identity}};
+                                     .spaceIdentity = std::string{simeon::simeon_v1_384_identity},
+                                     .fallback = wantedStatic};
     }
 
     simeon::EncoderConfig config;
@@ -133,7 +252,8 @@ ResolvedSimeonEncoder resolveEncoder(const EmbeddingConfig& yamsConfig) {
     config.projection = parse_projection_mode(policy.projection.value_or(std::string{}));
     config.l2_normalize = policy.l2Normalize.value_or(yamsConfig.normalize_embeddings);
     return ResolvedSimeonEncoder{.config = config,
-                                 .spaceIdentity = configurableSpaceIdentity(config)};
+                                 .spaceIdentity = configurableSpaceIdentity(config),
+                                 .fallback = wantedStatic};
 }
 
 std::string compute_simeon_recipe_label() {
@@ -151,6 +271,15 @@ public:
         if (initialized_.load())
             return true;
         auto resolved = resolveEncoder(config_);
+        if (resolved.staticTable) {
+            staticTable_ = std::move(resolved.staticTable);
+            dim_ = staticTable_->dim();
+            spaceIdentity_ = std::move(resolved.spaceIdentity);
+            initialized_.store(true);
+            spdlog::info("SimeonBackend initialized: static table dim={} identity={}", dim_,
+                         spaceIdentity_);
+            return true;
+        }
         auto& enc_cfg = resolved.config;
         spdlog::info("SimeonBackend encoder_config: ngram_mode={} ngram_min={} ngram_max={} "
                      "sketch_dim={} output_dim={} projection={} l2_normalize={}",
@@ -165,6 +294,7 @@ public:
         }
         dim_ = encoder_->output_dim();
         spaceIdentity_ = std::move(resolved.spaceIdentity);
+        fallback_ = resolved.fallback;
         initialized_.store(true);
         spdlog::info("SimeonBackend initialized: dim={} tier={}", dim_,
                      simeon::simd_tier_name(simeon::active_simd_tier()));
@@ -174,6 +304,7 @@ public:
     void shutdown() override {
         std::lock_guard<std::mutex> lock(mu_);
         encoder_.reset();
+        staticTable_.reset();
         initialized_.store(false);
         dim_ = 0;
         spaceIdentity_.clear();
@@ -186,7 +317,7 @@ public:
             return Error{ErrorCode::NotInitialized, "SimeonBackend not initialized"};
         const auto start = std::chrono::steady_clock::now();
         std::vector<float> out(dim_, 0.0f);
-        encoder_->encode(text, out.data());
+        encodeInto(text, out);
         recordOne(text.size(), start);
         return out;
     }
@@ -201,7 +332,7 @@ public:
         size_t total_bytes = 0;
         for (const auto& t : texts) {
             std::vector<float> v(dim_, 0.0f);
-            encoder_->encode(t, v.data());
+            encodeInto(t, v);
             total_bytes += t.size();
             out.push_back(std::move(v));
         }
@@ -213,6 +344,7 @@ public:
     size_t getMaxSequenceLength() const override { return config_.max_sequence_length; }
     std::string getBackendName() const override { return "Simeon"; }
     std::string getEmbeddingSpaceIdentity() const override { return spaceIdentity_; }
+    bool isFallbackEmbeddingSpace() const override { return fallback_; }
     bool isAvailable() const override { return true; }
 
     GenerationStats getStats() const override { return stats_; }
@@ -228,6 +360,14 @@ public:
     }
 
 private:
+    void encodeInto(const std::string& text, std::vector<float>& out) const {
+        if (staticTable_) {
+            staticTable_->encode(text, out);
+        } else {
+            encoder_->encode(text, out.data());
+        }
+    }
+
     void recordOne(size_t bytes, std::chrono::steady_clock::time_point start) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                  std::chrono::steady_clock::now() - start)
@@ -263,10 +403,12 @@ private:
 
     EmbeddingConfig config_;
     std::unique_ptr<simeon::Encoder> encoder_;
+    std::shared_ptr<const simeon::StaticEmbedding> staticTable_;
     std::mutex mu_;
     std::atomic<bool> initialized_{false};
     size_t dim_ = 0;
     std::string spaceIdentity_;
+    bool fallback_{false};
     mutable GenerationStats stats_;
 };
 
@@ -274,6 +416,22 @@ private:
 
 std::unique_ptr<IEmbeddingBackend> makeSimeonBackend(const EmbeddingConfig& config) {
     return std::make_unique<SimeonBackend>(config);
+}
+
+void setStaticEmbeddingDataDirHint(const std::filesystem::path& dataDir) {
+    std::lock_guard<std::mutex> lock(dataDirHintMutex());
+    dataDirHint() = dataDir;
+}
+
+std::shared_ptr<const simeon::StaticEmbedding>
+loadSharedStaticEmbeddingTable(const std::filesystem::path& path) {
+    const auto* cached = cachedStaticTable(path);
+    return cached ? cached->table : nullptr;
+}
+
+std::string staticEmbeddingSpaceIdentity(const std::filesystem::path& path) {
+    const auto* cached = cachedStaticTable(path);
+    return cached ? cached->identity : std::string{};
 }
 
 std::string simeonEmbeddingSpaceIdentity(const EmbeddingConfig& config) {

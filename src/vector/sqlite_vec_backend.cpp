@@ -2700,7 +2700,11 @@ public:
             "(name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
             " name = 'vectors_hnsw_meta' OR name = 'vectors_hnsw_nodes' OR "
             " name = 'simeon_pq_meta' OR "
-            " name = 'simeon_pq_codes')";
+            " name = 'simeon_pq_codes' OR "
+            // vec0 virtual tables (their shadow tables go with them) and entity vectors,
+            // which share the embedding dimension.
+            " (name LIKE 'vectors\\_%\\_vec0' ESCAPE '\\' AND sql LIKE 'CREATE VIRTUAL TABLE%') OR "
+            " name = 'entity_vectors')";
 
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, find_tables, -1, &stmt, nullptr) == SQLITE_OK) {
@@ -2717,14 +2721,32 @@ public:
         // Drop main vectors and auxiliary metadata tables
         tables_to_drop.push_back("DROP TABLE IF EXISTS vectors");
 
-        for (const auto& sql : tables_to_drop) {
+        // One transaction: a failure leaves the previous schema intact.
+        auto exec = [this](const char* sql, std::string& err) {
             char* err_msg = nullptr;
-            int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg);
+            const int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &err_msg);
             if (rc != SQLITE_OK) {
-                std::string err = err_msg ? err_msg : "Unknown error";
+                err = err_msg ? err_msg : "Unknown error";
                 sqlite3_free(err_msg);
+                return false;
+            }
+            return true;
+        };
+        std::string err;
+        if (!exec("BEGIN IMMEDIATE", err)) {
+            return Error{ErrorCode::DatabaseError, "Failed to begin drop transaction: " + err};
+        }
+        for (const auto& sql : tables_to_drop) {
+            if (!exec(sql.c_str(), err)) {
+                std::string ignored;
+                exec("ROLLBACK", ignored);
                 return Error{ErrorCode::DatabaseError, "Failed to drop tables: " + err};
             }
+        }
+        if (!exec("COMMIT", err)) {
+            std::string ignored;
+            exec("ROLLBACK", ignored);
+            return Error{ErrorCode::DatabaseError, "Failed to commit table drop: " + err};
         }
 
         spdlog::info("Dropped {} vector-related tables", tables_to_drop.size());

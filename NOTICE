@@ -30,6 +30,10 @@ upstream projects and/or included alongside the sources when bundled.
 Examples of third‑party components used in this repository or during builds:
 - GoogleTest (BSD-3-Clause) — used for unit testing. See: _deps/googletest-src/LICENSE
 - SQLite (Public Domain) — used for database/FTS functionality. See upstream: https://www.sqlite.org
+- yams-static-bge-c4-256.smstat (share/yams/models/static) — static-embedding table trained with
+  tokenlearn (MIT) from BAAI/bge-base-en-v1.5 (MIT) on 1,000,000 passages of allenai/c4 "en"
+  (ODC-BY 1.0; the C4 text derives from Common Crawl, subject to its terms of use). Source and
+  checksums: https://github.com/trvon/simeon/releases/tag/static-tables-v1
 - Other dependencies may be fetched via build tooling or package managers; consult the corresponding
   upstream repositories and LICENSE/NOTICE files for complete and current terms.
 

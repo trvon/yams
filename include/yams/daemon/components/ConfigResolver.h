@@ -237,6 +237,8 @@ public:
         std::optional<std::string> projection;
         std::optional<bool> l2Normalize;
         std::optional<std::uint32_t> pqBytes;
+        // encoder_profile = "static": SMSTAT01 table path (embeddings.simeon.static_table).
+        std::optional<std::string> staticTable;
     };
 
     struct SimeonBm25Policy {
@@ -351,6 +353,11 @@ public:
      * @return Dimension if found and > 0, nullopt otherwise
      */
     static std::optional<size_t> readDbEmbeddingDim(const std::filesystem::path& dbPath);
+
+    /// A stored embedding-space identity (vectors.model_id) other than `identity`, if any row has
+    /// one. Two seeks on idx_vectors_model, so it stays cheap on large stores.
+    static std::optional<std::string>
+    readDbForeignEmbeddingSpace(const std::filesystem::path& dbPath, const std::string& identity);
 
     /**
      * @brief Read embedding dimension from sentinel file.
