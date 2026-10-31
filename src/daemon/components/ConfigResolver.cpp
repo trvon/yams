@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // pi-lens-ignore: fatal error
+#include <sqlite3.h>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/detail/config_parse_utils.h>
@@ -172,6 +173,34 @@ std::optional<size_t> ConfigResolver::readDbEmbeddingDim(const std::filesystem::
         spdlog::debug("Failed to read embedding dimension from {}: unknown error", dbPath.string());
     }
     return std::nullopt;
+}
+
+std::optional<std::string>
+ConfigResolver::readDbEmbeddingSpaceIdentity(const std::filesystem::path& dbPath) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (dbPath.empty() || !fs::exists(dbPath, ec))
+        return std::nullopt;
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(dbPath.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+        sqlite3_close(db);
+        return std::nullopt;
+    }
+    std::optional<std::string> identity;
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT model_id FROM vectors WHERE model_id IS NOT NULL AND "
+                           "model_id <> '' LIMIT 1",
+                           -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (const auto* text = sqlite3_column_text(stmt, 0)) {
+                identity = std::string(reinterpret_cast<const char*>(text));
+            }
+        }
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return identity;
 }
 
 std::optional<size_t> ConfigResolver::readVectorSentinelDim(const std::filesystem::path& dataDir) {

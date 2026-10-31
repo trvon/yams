@@ -394,7 +394,8 @@ TEST_CASE("VectorSystemManager getName returns component name",
 namespace {
 
 // Writes vectors.db at `dim` with one document vector, as an older install would have.
-void seedVectorDb(const std::filesystem::path& dataDir, std::size_t dim) {
+void seedVectorDb(const std::filesystem::path& dataDir, std::size_t dim,
+                  const std::string& modelId = "old-space") {
     yams::vector::VectorDatabaseConfig cfg;
     cfg.database_path = (dataDir / "vectors.db").string();
     cfg.embedding_dim = dim;
@@ -407,7 +408,12 @@ void seedVectorDb(const std::filesystem::path& dataDir, std::size_t dim) {
     rec.embedding.assign(dim, 0.0F);
     rec.embedding[0] = 1.0F;
     rec.level = yams::vector::EmbeddingLevel::DOCUMENT;
+    rec.model_id = modelId;
     REQUIRE(db.insertVector(rec));
+}
+
+VectorSystemManager::MigrationTarget target(std::size_t dim, std::string identity) {
+    return VectorSystemManager::MigrationTarget{dim, std::move(identity)};
 }
 
 } // namespace
@@ -420,7 +426,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
 
     auto deps = makeDeps();
     deps.getEmbeddingDimension = [] { return static_cast<size_t>(256); };
-    deps.migrationTargetDimension = [] { return std::optional<size_t>{256U}; };
+    deps.migrationTarget = [] { return std::optional{target(256U, "new-space")}; };
     VectorSystemManager mgr(std::move(deps));
     const auto result = mgr.initializeOnce(tempDir);
     REQUIRE(result.has_value());
@@ -436,9 +442,9 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
                  "VectorSystemManager keeps vectors when no migration target or same dim",
                  "[daemon][components][vector][migrate][catch2]") {
     seedVectorDb(tempDir, 384);
-    SECTION("same dim") {
+    SECTION("same dim and same identity") {
         auto deps = makeDeps();
-        deps.migrationTargetDimension = [] { return std::optional<size_t>{384U}; };
+        deps.migrationTarget = [] { return std::optional{target(384U, "old-space")}; };
         VectorSystemManager mgr(std::move(deps));
         REQUIRE(mgr.initializeOnce(tempDir).value());
         CHECK(mgr.getEmbeddingDimension() == 384U);
@@ -447,10 +453,25 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
     SECTION("no target (auto-migrate off or not a training-free provider)") {
         auto deps = makeDeps();
         deps.getEmbeddingDimension = [] { return static_cast<size_t>(256); };
-        deps.migrationTargetDimension = [] { return std::optional<size_t>{}; };
+        deps.migrationTarget = [] { return std::optional<VectorSystemManager::MigrationTarget>{}; };
         VectorSystemManager mgr(std::move(deps));
         REQUIRE(mgr.initializeOnce(tempDir).value());
         CHECK(mgr.getEmbeddingDimension() == 384U); // existing DB wins, as before
         CHECK(mgr.getVectorDatabase()->getVectorCount() == 1U);
     }
+}
+
+TEST_CASE_METHOD(VectorSystemManagerFixture,
+                 "VectorSystemManager recreates vector tables when the space identity changes",
+                 "[daemon][components][vector][migrate][catch2]") {
+    seedVectorDb(tempDir, 384, "simeon-config-v1:old");
+    REQUIRE(ConfigResolver::readDbEmbeddingSpaceIdentity((tempDir / "vectors.db").string()) ==
+            std::optional<std::string>{"simeon-config-v1:old"});
+
+    auto deps = makeDeps();
+    deps.migrationTarget = [] { return std::optional{target(384U, "simeon-static-v1:new")}; };
+    VectorSystemManager mgr(std::move(deps));
+    REQUIRE(mgr.initializeOnce(tempDir).value());
+    CHECK(mgr.getEmbeddingDimension() == 384U);
+    CHECK(mgr.getVectorDatabase()->getVectorCount() == 0U);
 }

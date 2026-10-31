@@ -40,6 +40,12 @@ public:
     /**
      * @brief Dependency injection for VectorSystemManager.
      */
+    /// Embedding space the vectors should be in (see Dependencies::migrationTarget).
+    struct MigrationTarget {
+        size_t dim{0};
+        std::string identity; // empty: compare dimension only
+    };
+
     struct Dependencies {
         /// State component for readiness tracking
         StateComponent* state{nullptr};
@@ -62,10 +68,10 @@ public:
         /// Suppress startup/search-index build work while profiling allocator overhead.
         bool suppressVectorIndexBuild{false};
 
-        /// Embedding-space migration: the dimension the existing vectors.db should move to, or
-        /// nullopt to keep the stored one. When it differs from the stored dimension, the vector
-        /// tables are recreated at startup and documents re-embed in the background.
-        std::function<std::optional<size_t>()> migrationTargetDimension;
+        /// Embedding-space migration target, or nullopt to keep the stored space. When the stored
+        /// vectors differ in dimension or space identity, the vector tables are recreated at
+        /// startup and documents re-embed in the background.
+        std::function<std::optional<MigrationTarget>()> migrationTarget;
     };
 
     explicit VectorSystemManager(Dependencies deps);

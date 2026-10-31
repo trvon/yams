@@ -109,6 +109,50 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services);
  *  - Delegates to RepairManager for block-level operations
  *  - Delegates to InternalEventBus for embedding / FTS5 jobs
  */
+// Progress of the startup repair scan across queue drains. A scan that stops at the queue cap
+// (maxPendingRepairs) resumes from where it stopped once the queue drains, so a full re-embed
+// (embedding-space migration) covers the whole corpus. Thread-safe.
+class RepairScanCursor {
+public:
+    // True when no scan is running and either none has run yet or the last one was capped.
+    bool shouldStart() const noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        return !inFlight_ && (!started_ || incomplete_);
+    }
+    // Marks a scan in flight; returns the document offset to start from.
+    std::size_t begin() noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        inFlight_ = true;
+        started_ = true;
+        return offset_;
+    }
+    void stoppedAt(std::size_t offset) noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        offset_ = offset;
+        incomplete_ = true;
+        inFlight_ = false;
+    }
+    void finished() noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        offset_ = 0;
+        incomplete_ = false;
+        inFlight_ = false;
+    }
+    // The scan ended early (exception, shutdown, maintenance paused): retry from the same offset.
+    void aborted() noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        incomplete_ = true;
+        inFlight_ = false;
+    }
+
+private:
+    mutable std::mutex mu_;
+    std::size_t offset_ = 0;
+    bool started_ = false;
+    bool incomplete_ = false;
+    bool inFlight_ = false;
+};
+
 class RepairService {
 public:
     struct Config {
@@ -317,7 +361,8 @@ private:
 
     // ── Background loop (absorbs RepairCoordinator::runAsync) ──
     boost::asio::awaitable<void> backgroundLoop(ShutdownState* shutdownState);
-    boost::asio::awaitable<void> spawnInitialScan();
+    boost::asio::awaitable<void> spawnInitialScan(std::size_t startOffset);
+    RepairScanCursor scanCursor_;
     boost::asio::awaitable<void> processPathTreeRepair();
     void performVectorCleanup();
     /// Move one batch of legacy per-snapshot metadata keys into document_snapshots.

@@ -550,15 +550,20 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             std::lock_guard<std::mutex> lk(queueMutex_);
             queueEmpty = pendingDocuments_.empty();
         }
-        if (queueEmpty && !initialScanEnqueued) {
-            if (deferTicks < minDeferTicks) {
+        // The startup scan runs once, and again each time the queue drains after a capped scan
+        // (a full re-embed after an embedding-space migration can exceed maxPendingRepairs).
+        if (queueEmpty && scanCursor_.shouldStart()) {
+            if (!initialScanEnqueued && deferTicks < minDeferTicks) {
                 ++deferTicks;
             } else if (maintenanceAllowed() &&
                        ResourceGovernor::instance().admitDeferrable(DeferrableWork::RepairScan)) {
                 auto scanExec = RepairThreadPool::instance().get_executor();
+                const std::size_t startOffset = scanCursor_.begin();
                 boost::asio::co_spawn(
                     scanExec,
-                    [this]() -> boost::asio::awaitable<void> { co_await spawnInitialScan(); },
+                    [this, startOffset]() -> boost::asio::awaitable<void> {
+                        co_await spawnInitialScan(startOffset);
+                    },
                     boost::asio::detached);
                 initialScanEnqueued = true;
             }
@@ -701,15 +706,35 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
     co_return;
 }
 
-boost::asio::awaitable<void> RepairService::spawnInitialScan() {
+boost::asio::awaitable<void> RepairService::spawnInitialScan(std::size_t startOffset) {
+    // How this pass ended, reported to scanCursor_ on every exit path.
+    enum class End { Aborted, Finished, Stopped };
+    End end = End::Aborted;
+    std::size_t stopOffset = startOffset;
+    struct Report {
+        RepairScanCursor& cursor;
+        const End& end;
+        const std::size_t& offset;
+        ~Report() {
+            if (end == End::Finished)
+                cursor.finished();
+            else if (end == End::Stopped)
+                cursor.stoppedAt(offset);
+            else
+                cursor.aborted();
+        }
+    } report{scanCursor_, end, stopOffset};
+
     try {
         auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
-        if (!meta)
+        if (!meta) {
+            end = End::Finished;
             co_return;
+        }
 
         const bool vectorsDisabled = vectorsDisabledByEnv();
         const size_t batchSize = TuneAdvisor::repairStartupBatchSize();
-        size_t offset = 0;
+        size_t offset = startOffset;
         size_t totalEnqueued = 0;
         bool queueAtCapacity = false;
 
@@ -732,14 +757,18 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
 
         while (running_.load(std::memory_order_relaxed) && !queueAtCapacity) {
             if (!maintenanceAllowed()) {
+                end = End::Stopped; // resume here once maintenance is allowed again
+                stopOffset = offset;
                 break;
             }
             metadata::DocumentQueryOptions opts;
             opts.limit = static_cast<int>(batchSize);
             opts.offset = static_cast<int>(offset);
             auto batchDocs = meta->queryDocuments(opts);
-            if (!batchDocs || batchDocs.value().empty())
+            if (!batchDocs || batchDocs.value().empty()) {
+                end = batchDocs ? End::Finished : End::Aborted;
                 break;
+            }
 
             size_t batchEnqueued = 0;
             {
@@ -776,6 +805,8 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
                     if (missingEmb || missingFts) {
                         if (pendingDocuments_.size() >= cfg_.maxPendingRepairs) {
                             queueAtCapacity = true;
+                            end = End::Stopped; // rescan this batch after the queue drains
+                            stopOffset = offset;
                             break;
                         }
                         if (pendingSet_.find(d.sha256Hash) == pendingSet_.end()) {
@@ -788,11 +819,15 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
             }
 
             totalEnqueued += batchEnqueued;
+            if (queueAtCapacity)
+                break;
             offset += batchDocs.value().size();
             co_await boost::asio::post(co_await boost::asio::this_coro::executor,
                                        boost::asio::use_awaitable);
-            if (batchDocs.value().size() < batchSize)
+            if (batchDocs.value().size() < batchSize) {
+                end = End::Finished;
                 break;
+            }
         }
 
         if (totalEnqueued > 0) {

@@ -449,22 +449,27 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
 
     // Embedding-space migration (under the vectors.lock, before any VectorDatabase opens):
     // recreate the tables at the provider's dimension; RepairService re-embeds the documents.
-    if (storedDim && deps_.migrationTargetDimension) {
-        std::optional<size_t> target;
+    if (storedDim && deps_.migrationTarget) {
+        std::optional<MigrationTarget> target;
         try {
-            target = deps_.migrationTargetDimension();
+            target = deps_.migrationTarget();
         } catch (...) {
             spdlog::debug("[VectorInit] migration target probe failed");
         }
-        if (target && *target > 0 && *target != *storedDim) {
-            spdlog::warn("[VectorInit] embedding dimension changed {} -> {}; recreating vector "
-                         "tables (documents re-embed in the background; keyword search is "
-                         "unaffected)",
-                         *storedDim, *target);
-            auto aligned = yams::integrity::ensureVectorSchemaAligned(dataDir, *target,
-                                                                      /*recreateIfMismatch=*/true);
+        std::optional<std::string> storedIdentity;
+        if (target && !target->identity.empty()) {
+            storedIdentity = ConfigResolver::readDbEmbeddingSpaceIdentity(cfg.database_path);
+        }
+        const bool dimChanged = target && target->dim > 0 && target->dim != *storedDim;
+        const bool spaceChanged = target && storedIdentity && *storedIdentity != target->identity;
+        if (dimChanged || spaceChanged) {
+            spdlog::warn("[VectorInit] embedding space changed (dim {} -> {}, space '{}' -> '{}'); "
+                         "recreating vector tables (documents re-embed in the background; "
+                         "keyword search is unaffected)",
+                         *storedDim, target->dim, storedIdentity.value_or("?"), target->identity);
+            auto aligned = yams::integrity::recreateVectorTables(dataDir, target->dim);
             if (aligned) {
-                cfg.embedding_dim = *target;
+                cfg.embedding_dim = target->dim;
             } else {
                 spdlog::error("[VectorInit] vector table migration failed: {}",
                               aligned.error().message);

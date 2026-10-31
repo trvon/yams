@@ -44,4 +44,24 @@ inline Result<void> ensureVectorSchemaAligned(const std::filesystem::path& dataD
     }
 }
 
+// Drop every vector table and recreate them empty at `dim` (embedding-space migration).
+inline Result<void> recreateVectorTables(const std::filesystem::path& dataDir, std::size_t dim) {
+    try {
+        yams::vector::SqliteVecBackend be;
+        auto open = be.initialize((dataDir / "vectors.db").string());
+        if (!open)
+            return Error{ErrorCode::DatabaseError, open.error().message};
+        (void)be.ensureVecLoaded();
+        if (auto dr = be.dropTables(); !dr) {
+            be.close();
+            return dr;
+        }
+        auto cr = be.createTables(dim);
+        be.close();
+        return cr;
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError, e.what()};
+    }
+}
+
 } // namespace yams::integrity
