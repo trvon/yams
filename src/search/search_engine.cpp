@@ -3761,6 +3761,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["lexical_rerank_us"] =
             std::to_string(componentTiming["lexical_rerank"]);
         response.debugStats["static_rerank_applied"] = lexical.semanticApplied ? "1" : "0";
+        response.debugStats["static_rerank_us"] = std::to_string(lexical.semanticMicros);
+        response.debugStats["lexical_rerank_bm25_us"] = std::to_string(lexical.lexicalMicros);
         if (!lexical.semanticError.empty()) {
             response.debugStats["static_rerank_error"] = lexical.semanticError;
         }

@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
+#include <future>
 #include <limits>
 #include <numeric>
 #include <string_view>
@@ -88,45 +90,79 @@ LexicalRerankOutcome applyLexicalDeepRerank(std::vector<SearchResult>& results,
     }
     const auto terms = lexicalRerankTerms(query);
 
-    // Semantic scores over the deeper static pool, when available. A failure falls back to the
-    // lexical-only blend rather than failing the stage.
+    // The semantic scorer (static pool) and the bm25 query are independent: run the semantic one
+    // on another thread and bm25 here, over the same pool. A semantic failure falls back to the
+    // lexical-only blend over its shallower depth, a prefix of the same pool.
+    const bool wantSemantic = semanticScorer && config.staticRerankDepth > 0;
+    const std::size_t lexicalDepth = std::min(config.lexicalRerankDepth, results.size());
+    const std::size_t staticDepth =
+        wantSemantic ? std::min(config.staticRerankDepth, results.size()) : 0;
+    const std::size_t poolDepth = std::max(lexicalDepth, staticDepth);
+    std::vector<std::string> pool;
+    pool.reserve(poolDepth);
+    for (std::size_t i = 0; i < poolDepth; ++i) {
+        pool.push_back(results[i].document.sha256Hash);
+    }
+
+    std::future<Result<std::unordered_map<std::string, double>>> pendingSemantic;
+    std::chrono::steady_clock::time_point semStart;
+    if (wantSemantic) {
+        std::vector<std::string> staticHashes(
+            pool.begin(), pool.begin() + static_cast<std::ptrdiff_t>(staticDepth));
+        semStart = std::chrono::steady_clock::now();
+        pendingSemantic = std::async(std::launch::async,
+                                     [&semanticScorer, &query, hashes = std::move(staticHashes)]() {
+                                         return semanticScorer(query, hashes);
+                                     });
+    }
+
+    std::unordered_map<std::string, double> lexical;
+    std::string lexicalError;
+    bool lexicalFailed = false;
+    if (!terms.empty()) {
+        const auto lexStart = std::chrono::steady_clock::now();
+        auto scored = scorer(terms, pool);
+        outcome.lexicalMicros = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - lexStart)
+                                    .count();
+        if (!scored) {
+            lexicalFailed = true;
+            lexicalError = scored.error().message;
+        } else {
+            lexical = std::move(scored).value();
+        }
+    }
+
     std::unordered_map<std::string, double> semantic;
-    std::size_t depth = std::min(config.lexicalRerankDepth, results.size());
-    if (semanticScorer && config.staticRerankDepth > 0) {
-        const std::size_t staticDepth = std::min(config.staticRerankDepth, results.size());
-        std::vector<std::string> hashes;
-        hashes.reserve(staticDepth);
-        for (std::size_t i = 0; i < staticDepth; ++i) {
-            hashes.push_back(results[i].document.sha256Hash);
+    if (pendingSemantic.valid()) {
+        try {
+            auto scoredSemantic = pendingSemantic.get();
+            if (!scoredSemantic) {
+                outcome.semanticError = scoredSemantic.error().message;
+            } else if (!scoredSemantic.value().empty()) {
+                semantic = std::move(scoredSemantic).value();
+                outcome.semanticApplied = true;
+            }
+        } catch (const std::exception& e) {
+            outcome.semanticError = e.what();
         }
-        if (auto scoredSemantic = semanticScorer(query, hashes); !scoredSemantic) {
-            outcome.semanticError = scoredSemantic.error().message;
-        } else if (!scoredSemantic.value().empty()) {
-            semantic = std::move(scoredSemantic).value();
-            outcome.semanticApplied = true;
-            depth = staticDepth;
-        }
+        outcome.semanticMicros = std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - semStart)
+                                     .count();
+    }
+    if (lexicalFailed) {
+        outcome.status = LexicalRerankOutcome::Status::Failed;
+        outcome.errorMessage = lexicalError;
+        return outcome;
     }
     if (terms.empty() && !outcome.semanticApplied) {
         outcome.skipReason = "no_terms";
         return outcome;
     }
 
-    std::vector<std::string> ids;
-    ids.reserve(depth);
-    for (std::size_t i = 0; i < depth; ++i) {
-        ids.push_back(results[i].document.sha256Hash);
-    }
-    std::unordered_map<std::string, double> lexical;
-    if (!terms.empty()) {
-        auto scored = scorer(terms, ids);
-        if (!scored) {
-            outcome.status = LexicalRerankOutcome::Status::Failed;
-            outcome.errorMessage = scored.error().message;
-            return outcome;
-        }
-        lexical = std::move(scored).value();
-    }
+    const std::size_t depth = outcome.semanticApplied ? staticDepth : lexicalDepth;
+    const std::vector<std::string> ids(pool.begin(),
+                                       pool.begin() + static_cast<std::ptrdiff_t>(depth));
 
     std::vector<double> fusedZ(depth);
     std::vector<double> lexicalZ(depth, 0.0);

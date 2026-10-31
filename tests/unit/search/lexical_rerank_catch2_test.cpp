@@ -268,7 +268,8 @@ TEST_CASE("applyLexicalDeepRerank falls back to lexical-only when the semantic s
     CHECK_FALSE(outcome.semanticApplied);
     CHECK(outcome.semanticError == "no table");
     CHECK(outcome.depth == 20);
-    CHECK(lexicalSeen.size() == 20);
+    // bm25 runs over the static pool concurrently; the fallback blend uses its top-20 prefix.
+    CHECK(lexicalSeen.size() == 50);
     CHECK(results.front().document.sha256Hash == "h15");
 }
 
