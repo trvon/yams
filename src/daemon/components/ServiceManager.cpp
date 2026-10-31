@@ -2592,6 +2592,17 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("[ServiceManager] Vector DB init failed: {}", vdbRes.error().message);
         } else if (vdbRes.value()) {
             spdlog::info("[ServiceManager] Vector DB initialized successfully");
+            if (vectorSystemManager_->migratedEmbeddingSpace()) {
+                // Edges derived from the old space would mix with new-space neighbours; drop them
+                // so the idle backfill rebuilds them as documents re-embed.
+                if (auto kg = getKgStore()) {
+                    auto removed = kg->deleteEdgesByRelation("semantic_neighbor");
+                    spdlog::info("[ServiceManager] embedding space migrated: removed {} "
+                                 "semantic_neighbor edges; documents re-embed in the background",
+                                 removed ? removed.value() : 0);
+                }
+                requestTopologyRebuild("embedding_space_migrated");
+            }
             startupPhase_.begin(StartupPhase::EmbeddingReconcile);
             // Wire the VDB into the coordinator now that it's ready.
             if (vectorIndexCoordinator_) {

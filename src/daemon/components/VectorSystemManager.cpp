@@ -470,6 +470,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
             auto aligned = yams::integrity::recreateVectorTables(dataDir, target->dim);
             if (aligned) {
                 cfg.embedding_dim = target->dim;
+                migratedEmbeddingSpace_.store(true, std::memory_order_release);
             } else {
                 spdlog::error("[VectorInit] vector table migration failed: {}",
                               aligned.error().message);

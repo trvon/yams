@@ -110,6 +110,10 @@ public:
      * @return Dimension or 0 if not initialized
      */
     size_t getEmbeddingDimension() const;
+    /// True when this start recreated the vector tables for a new embedding space.
+    bool migratedEmbeddingSpace() const noexcept {
+        return migratedEmbeddingSpace_.load(std::memory_order_acquire);
+    }
 
     /**
      * @brief Check if vector database init was attempted.
@@ -125,6 +129,8 @@ private:
     Dependencies deps_;
 
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
+
+    std::atomic<bool> migratedEmbeddingSpace_{false};
 
     std::atomic<bool> initAttempted_{false};
 };

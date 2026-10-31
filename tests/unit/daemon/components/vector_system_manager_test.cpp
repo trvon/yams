@@ -436,6 +436,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
     REQUIRE(vdb);
     CHECK(vdb->getVectorCount() == 0U);
     CHECK(ConfigResolver::readVectorSentinelDim(tempDir) == std::optional<size_t>{256U});
+    CHECK(mgr.migratedEmbeddingSpace());
 }
 
 TEST_CASE_METHOD(VectorSystemManagerFixture,
@@ -449,6 +450,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
         REQUIRE(mgr.initializeOnce(tempDir).value());
         CHECK(mgr.getEmbeddingDimension() == 384U);
         CHECK(mgr.getVectorDatabase()->getVectorCount() == 1U);
+        CHECK_FALSE(mgr.migratedEmbeddingSpace());
     }
     SECTION("no target (auto-migrate off or not a training-free provider)") {
         auto deps = makeDeps();
