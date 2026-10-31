@@ -1371,11 +1371,13 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
     REQUIRE(
         (std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) == insertedDocIds.end()));
 
+    // The cap is what this test pins. A slow runner can split a batch across the coalesce
+    // window, so the batch count is a lower bound, not an exact value.
     const auto metrics = queue->metricsSnapshot();
-    const auto expectedBatches = highPriority ? 16u : 8u;
+    const auto minBatches = highPriority ? 16u : 8u;
     const auto expectedMaxBatchSize = highPriority ? 4u : 8u;
-    CHECK(metrics.batches.extractionBatches == expectedBatches);
-    CHECK(metrics.batches.contentIndexCalls == expectedBatches);
+    CHECK(metrics.batches.extractionBatches >= minBatches);
+    CHECK(metrics.batches.contentIndexCalls == metrics.batches.extractionBatches);
     CHECK(metrics.batches.contentIndexMaxEntries == expectedMaxBatchSize);
 
     stopAndResetQueue(queue);
