@@ -1,9 +1,18 @@
 #include <fstream>
+#include <functional>
 #include "../../common/test_helpers_catch2.h"
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <CLI/CLI.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/repo_files.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/crypto/hasher.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
 
 namespace yams::cli {
 std::unique_ptr<ICommand> createSearchCommand();
@@ -15,6 +24,115 @@ std::unique_ptr<ICommand> createGraphCommand();
 std::unique_ptr<ICommand> createAddCommand();
 std::unique_ptr<ICommand> createStatusCommand();
 } // namespace yams::cli
+
+TEST_CASE("add --changed retires a missing path without deleting shared content",
+          "[cli][retrieval][path-retirement]") {
+    using namespace yams;
+    const auto root = std::filesystem::canonical(test::make_temp_dir("cli-path-retirement-"));
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code error;
+            std::filesystem::remove_all(path, error);
+        }
+    } cleanup{root};
+    const auto data = root / "data";
+    const auto worktree = root / "worktree";
+    std::filesystem::create_directories(data);
+    std::filesystem::create_directories(worktree);
+    REQUIRE(cli::runCliProcess({"git", "init", "--quiet", worktree.string()}).exitCode == 0);
+
+    // Pin an isolated endpoint and disable autostart to protect the operator's
+    // daemon. Assert path/content state below, not a no-RPC product contract.
+    const auto isolatedSocket =
+        std::filesystem::temp_directory_path() /
+        ("ypr410-" + std::to_string(std::hash<std::string>{}(root.string())) + ".sock");
+    REQUIRE_FALSE(std::filesystem::exists(isolatedSocket));
+    test::ScopedEnvVar socket("YAMS_DAEMON_SOCKET_PATH", isolatedSocket.string());
+    test::ScopedEnvVar noAutostart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", std::string("1"));
+    test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("0"));
+    test::ScopedEnvVar config("YAMS_CONFIG", (root / "config.toml").string());
+    test::ScopedEnvVar configPath("YAMS_CONFIG_PATH", (root / "config.toml").string());
+
+    const auto oldPath = worktree / "old.txt";
+    auto livePath = root / "other-worktree" / "live.txt";
+    SECTION("a live alias outside this worktree preserves its shared CAS identity") {}
+    SECTION("an already ingested Git rename retires its old location") {
+        std::ofstream(oldPath) << "shared bytes\n";
+        REQUIRE(cli::runCliProcess({"git", "-C", worktree.string(), "add", "old.txt"}).exitCode ==
+                0);
+        REQUIRE(cli::runCliProcess({"git", "-C", worktree.string(), "mv", "old.txt", "renamed.txt"})
+                    .exitCode == 0);
+        livePath = worktree / "renamed.txt";
+    }
+    std::filesystem::create_directories(livePath.parent_path());
+    std::ofstream(livePath) << "shared bytes\n";
+    if (livePath.parent_path() == worktree) {
+        REQUIRE(
+            cli::runCliProcess({"git", "-C", worktree.string(), "add", "renamed.txt"}).exitCode ==
+            0);
+    }
+    const auto hash = crypto::createSHA256Hasher()->hashFile(livePath);
+    metadata::ConnectionPool pool((data / "yams.db").string());
+    REQUIRE(pool.initialize());
+    metadata::MetadataRepository repository(pool);
+    metadata::DocumentInfo original;
+    original.filePath = oldPath.generic_string();
+    original.fileName = "old.txt";
+    original.sha256Hash = hash;
+    const auto derived = metadata::computePathDerivedValues(original.filePath);
+    original.pathPrefix = derived.pathPrefix;
+    original.reversePath = derived.reversePath;
+    original.pathHash = derived.pathHash;
+    original.parentHash = derived.parentHash;
+    original.pathDepth = derived.pathDepth;
+    auto inserted = repository.insertDocument(original);
+    REQUIRE(inserted);
+    REQUIRE(repository.recordDocumentPath(original, inserted.value(), {}));
+    auto alias = original;
+    alias.filePath = livePath.generic_string();
+    alias.fileName = livePath.filename().string();
+    REQUIRE(repository.recordDocumentPath(alias, inserted.value(), {}));
+
+    boost::asio::io_context io;
+    cli::YamsCLI cli;
+    cli.setDataPath(data);
+    auto freshness = cli.repoFreshness(cli::readRepoFiles(worktree, true));
+    REQUIRE(freshness);
+    REQUIRE(freshness.value().changed.empty());
+    REQUIRE(freshness.value().missing == std::vector<std::filesystem::path>{oldPath});
+    CLI::App app;
+    auto command = cli::createAddCommand();
+    command->setExecutor(io.get_executor());
+    command->registerCommand(app, &cli);
+    const auto directory = worktree.string();
+    const char* args[]{"yams", "add", "--changed", directory.c_str()};
+    REQUIRE_NOTHROW(app.parse(4, args));
+    auto completion = boost::asio::co_spawn(io, command->executeAsync(), boost::asio::use_future);
+    io.run();
+    auto result = completion.get();
+    INFO((result ? "completed" : result.error().message));
+    // The baseline may fail its unsafe hash-delete RPC on the isolated endpoint.
+    // The regression is the still-visible path, independent of transport success.
+    auto missing = repository.findDocumentByExactPath(oldPath.generic_string());
+    REQUIRE(missing);
+    CHECK_FALSE(missing.value());
+    auto live = repository.findDocumentByExactPath(livePath.generic_string());
+    REQUIRE(live);
+    REQUIRE(live.value());
+    CHECK(live.value()->sha256Hash == hash);
+    auto content = repository.getDocumentByHash(hash);
+    REQUIRE(content);
+    REQUIRE(content.value());
+    CHECK(result.has_value());
+    auto references = repository.getDocumentPathReferences(inserted.value());
+    REQUIRE(references);
+    REQUIRE(references.value().size() == 1);
+    CHECK(references.value().front().filePath == livePath.generic_string());
+    auto refreshed = cli.repoFreshness(cli::readRepoFiles(worktree, true));
+    REQUIRE(refreshed);
+    CHECK_FALSE(refreshed.value().stale());
+}
 
 TEST_CASE("Every retrieval command exposes its budget and quiet flags", "[cli][retrieval][flags]") {
     using namespace yams::cli;
