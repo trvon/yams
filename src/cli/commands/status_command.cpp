@@ -37,6 +37,8 @@ namespace yams::cli {
 namespace fs = std::filesystem;
 
 class StatusCommand : public ICommand {
+    std::string repoPath_;
+
 public:
     std::string getName() const override { return "status"; }
 
@@ -57,7 +59,36 @@ public:
             "--corpus", corpusStats_,
             "Show corpus statistics for search tuning (doc counts, content type ratios, coverage)");
 
-        cmd->callback([this]() { exitOnError(execute(), "Status command"); });
+        cmd->add_option("--repo", repoPath_,
+                        "Check tracked repo files against the index (exit 0: fresh, 3: stale)");
+        cmd->callback([this]() {
+            if (!repoPath_.empty()) {
+                const auto files = readRepoFiles(repoPath_);
+                auto result = cli_->repoFreshness(files);
+                if (!result) {
+                    exitOnError(Result<void>{result.error()}, "Repo status");
+                    return;
+                }
+                const auto& diff = result.value();
+                if (jsonOutput_ || cli_->getJsonOutput()) {
+                    std::cout << nlohmann::json{{"repo", files.root.string()},
+                                                {"tracked", diff.tracked},
+                                                {"stale", diff.changed.size()},
+                                                {"missing", diff.missing.size()},
+                                                {"fresh", !diff.stale()}}
+                                     .dump()
+                              << '\n';
+                } else {
+                    std::cout << "Repo: " << files.root.string() << "\nTracked: " << diff.tracked
+                              << "\nStale: " << diff.changed.size()
+                              << "\nMissing: " << diff.missing.size() << '\n';
+                }
+                if (diff.stale())
+                    throw CLI::RuntimeError(3);
+                return;
+            }
+            exitOnError(execute(), "Status command");
+        });
 
         // Provide a 'stats' alias that maps to the same implementation
         // Mirrors flags and behavior to ease migration from the old stats command

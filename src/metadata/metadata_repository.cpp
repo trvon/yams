@@ -40,6 +40,7 @@
 // Phase 5: CrudOps for generic CRUD operations (ADR-0004)
 #include "repository/corpus_stats_ops.hpp"
 #include "repository/crud_ops.hpp"
+#include "repository/document_paths.h"
 #include "repository/document_query_filters.hpp"
 #include "repository/metadata_value_count_ops.hpp"
 #include "repository/metadata_write_helpers.hpp"
@@ -652,6 +653,8 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool, ConnectionPool* rea
         const bool hasParent = columns.count("parent_hash") > 0;
         const bool hasDepth = columns.count("path_depth") > 0;
         hasPathIndexing_ = hasPrefix && hasReverse && hasHash && hasParent && hasDepth;
+        if (auto paths = db.tableExists("document_path_heads"); paths)
+            hasDocumentPaths_ = paths.value();
 
         auto ftsResult = db.tableExists("documents_path_fts");
         if (ftsResult) {
@@ -771,6 +774,8 @@ MetadataRepository::generateValueCountsCacheKey(const std::vector<std::string>& 
         cacheKey += *options.likePattern;
         cacheKey += ';';
     }
+    if (options.fileNamePattern)
+        cacheKey += "fnp:" + *options.fileNamePattern + ";";
     if (options.prefixIsDirectory)
         cacheKey += "pid;";
     if (!options.includeSubdirectories)
@@ -785,13 +790,13 @@ MetadataRepository::generateValueCountsCacheKey(const std::vector<std::string>& 
 static bool requiresDocumentJoin(const DocumentQueryOptions& options) {
     return options.exactPath.has_value() || options.pathPrefix.has_value() ||
            options.containsFragment.has_value() || options.likePattern.has_value() ||
-           options.fileName.has_value() || options.extension.has_value() ||
-           !options.extensions.empty() || options.mimeType.has_value() || options.textOnly ||
-           options.binaryOnly || options.createdAfter.has_value() ||
-           options.createdBefore.has_value() || options.modifiedAfter.has_value() ||
-           options.modifiedBefore.has_value() || options.indexedAfter.has_value() ||
-           options.indexedBefore.has_value() || options.changedSince.has_value() ||
-           !options.tags.empty();
+           options.fileName.has_value() || options.fileNamePattern.has_value() ||
+           options.extension.has_value() || !options.extensions.empty() ||
+           options.mimeType.has_value() || options.textOnly || options.binaryOnly ||
+           options.createdAfter.has_value() || options.createdBefore.has_value() ||
+           options.modifiedAfter.has_value() || options.modifiedBefore.has_value() ||
+           options.indexedAfter.has_value() || options.indexedBefore.has_value() ||
+           options.changedSince.has_value() || !options.tags.empty();
 }
 
 Result<std::unordered_map<std::string, std::vector<MetadataValueCount>>>
@@ -1597,27 +1602,33 @@ Result<std::optional<DocumentInfo>>
 MetadataRepository::findDocumentByExactPath(const std::string& path) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::findDocumentByExactPath");
     auto derived = computePathDerivedValues(path);
-    if (auto cached = lookupPathCache(derived.normalizedPath))
-        return cached;
-
+    // This lookup is authoritative for a path's version head. A cached document
+    // is not a cached head: metadata writes or another process can move the head
+    // to an older content hash without changing that document's path/timestamp.
     return executeReadQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
             using yams::metadata::sql::QuerySpec;
             QuerySpec spec{};
             spec.table = "documents";
             spec.columns = {documentColumnList(false)};
-            spec.conditions = {"path_hash = ?"};
-            spec.orderBy = std::nullopt;
+            spec.conditions = {"path_hash = ?", "file_path = ?"};
+            spec.orderBy = "COALESCE((SELECT value FROM metadata WHERE document_id = documents.id "
+                           "AND key = 'is_latest'), '0') IN ('1', 'true') DESC, "
+                           "COALESCE((SELECT CAST(value AS INTEGER) FROM metadata "
+                           "WHERE document_id = documents.id AND key = 'version'), 0) DESC, "
+                           "indexed_time DESC, id DESC";
             spec.groupBy = std::nullopt;
             spec.having = std::nullopt;
             spec.limit = 1;
             spec.offset = std::nullopt;
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+            const auto prefix =
+                hasDocumentPaths_ ? repository::documentPathQueryCte(true) : std::string{};
+            auto stmtResult = db.prepare(prefix + yams::metadata::sql::buildSelect(spec));
             if (!stmtResult)
                 return stmtResult.error();
 
             Statement stmt = std::move(stmtResult).value();
-            if (auto bind = stmt.bind(1, derived.pathHash); !bind)
+            if (auto bind = stmt.bindAll(derived.pathHash, derived.normalizedPath); !bind)
                 return bind.error();
 
             auto stepResult = stmt.step();
@@ -1633,8 +1644,11 @@ MetadataRepository::findDocumentByExactPath(const std::string& path) {
 }
 
 Result<std::vector<DocumentInfo>>
-MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
+MetadataRepository::queryDocuments(const DocumentQueryOptions& requested) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocuments");
+    auto options = requested;
+    options.usePathLocations = requested.usePathLocations && hasDocumentPaths_;
+    options.containsUsesFts = requested.containsUsesFts && !options.usePathLocations;
     return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
@@ -1681,6 +1695,8 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
                 addIntParam(params, options.offset);
             }
 
+            if (options.usePathLocations)
+                sql.insert(0, repository::documentPathQueryCte(options.currentPathsOnly));
             auto execResult = executePreparedVectorQuery<DocumentInfo>(
                 db, sql, params, [&](const Statement& stmt) { return mapDocumentRow(stmt); },
                 [&](const DocumentInfo& doc) { storePathCache(doc); });
@@ -2170,8 +2186,11 @@ MetadataRepository::getExistingDocumentHashes(const std::vector<std::string>& ha
 }
 
 Result<std::vector<ListDocumentProjection>>
-MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& options) {
+MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& requested) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocumentsForListProjection");
+    auto options = requested;
+    options.usePathLocations = requested.usePathLocations && hasDocumentPaths_;
+    options.containsUsesFts = requested.containsUsesFts && !options.usePathLocations;
     YAMS_PLOT("metadata_repo::list_limit", static_cast<int64_t>(options.limit));
     YAMS_PLOT("metadata_repo::list_offset", static_cast<int64_t>(options.offset));
     auto result = executeReadQuery<std::vector<ListDocumentProjection>>(
@@ -2216,6 +2235,8 @@ MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& 
                 addIntParam(params, options.offset);
             }
 
+            if (options.usePathLocations)
+                sql.insert(0, repository::documentPathQueryCte(options.currentPathsOnly));
             auto execResult = executePreparedVectorQuery<ListDocumentProjection>(
                 db, sql, params, [&](const Statement& stmt) { return mapListProjectionRow(stmt); });
             if (!execResult) {
@@ -2236,8 +2257,11 @@ MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& 
 }
 
 Result<std::vector<GrepCandidateProjection>>
-MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& options) {
+MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& requested) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocumentsForGrepCandidates");
+    auto options = requested;
+    options.usePathLocations = requested.usePathLocations && hasDocumentPaths_;
+    options.containsUsesFts = requested.containsUsesFts && !options.usePathLocations;
     YAMS_PLOT("metadata_repo::grep_candidates_limit", static_cast<int64_t>(options.limit));
     YAMS_PLOT("metadata_repo::grep_candidates_offset", static_cast<int64_t>(options.offset));
     auto result = executeReadQuery<std::vector<GrepCandidateProjection>>(
@@ -2281,6 +2305,8 @@ MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& 
                 addIntParam(params, options.offset);
             }
 
+            if (options.usePathLocations)
+                sql.insert(0, repository::documentPathQueryCte(options.currentPathsOnly));
             auto execResult = executePreparedVectorQuery<GrepCandidateProjection>(
                 db, sql, params, [&](const Statement& stmt) {
                     GrepCandidateProjection p;
