@@ -405,7 +405,7 @@ class Soak:
         if cfg.exists() and not self.a.fresh:
             log(f"config exists: {cfg}")
         else:
-            res = self.cli("init", "--auto", "--no-keygen", timeout=180)
+            res = self.cli("init", "--auto", "--no-keygen", "--no-static-table", timeout=180)
             if res.returncode != 0:
                 die(f"yams init failed: {res.stdout}{res.stderr}")
             log(f"wrote {cfg}")

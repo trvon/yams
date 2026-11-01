@@ -300,6 +300,27 @@ TEST_CASE("SimeonBackend reports a fallback space when the static table is missi
     std::filesystem::remove_all(dir, ec);
 }
 
+// The table cache is keyed by path. A re-download replaces the file in place, so a stale entry
+// (including a cached load failure) would hide the new table from this process.
+TEST_CASE("loadSharedStaticEmbeddingTable sees a table replaced at the same path",
+          "[vector][simeon][static][download]") {
+    const auto dir = uniqueTempDir("yams_static_replace_");
+    const auto path = dir / "t.smstat";
+    std::ofstream(path, std::ios::binary) << "SMSTAT01-truncated";
+    CHECK(loadSharedStaticEmbeddingTable(path) == nullptr);
+
+    writeTinyStaticTable(path);
+    auto first = loadSharedStaticEmbeddingTable(path);
+    REQUIRE(first != nullptr);
+    const auto firstIdentity = staticEmbeddingSpaceIdentity(path);
+
+    writeTinyStaticTable(path, /*bump=*/3);
+    CHECK(staticEmbeddingSpaceIdentity(path) != firstIdentity);
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 TEST_CASE("findStaticEmbeddingTable prefers the configured path, then the data dir",
           "[vector][simeon][static]") {
     using yams::config::findStaticEmbeddingTable;
