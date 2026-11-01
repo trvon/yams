@@ -2846,7 +2846,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     std::vector<InternalEventBus::EmbedPreparedDoc> embedPreparedBatch;
     std::vector<std::string> embedHashBatch;
     std::size_t embedPreparedBatchPayloadBytes = 0;
-    const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedJobDocCap();
+    const std::size_t maxEmbedBatch =
+        ResourceGovernor::instance().capEmbedJobDocuments(TuneAdvisor::resolvedEmbedJobDocCap());
     constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4ULL * 1024ULL * 1024ULL;
     constexpr std::size_t kMaxPreparedEmbedBatchPayloadBytes = 16ULL * 1024ULL * 1024ULL;
     const auto dispatchPolicyStart = std::chrono::steady_clock::now();

@@ -194,6 +194,11 @@ public:
     [[nodiscard]] std::uint32_t
     capEmbedConcurrencyForDbContention(std::uint32_t requested) const noexcept;
 
+    /// Clamp document count for already-admitted embedding work (not a byte budget).
+    /// Zero requests stay zero; positive requests retain progress even at Emergency.
+    /// Does not grant admission: callers must retain their existing admission/defer gates.
+    [[nodiscard]] std::size_t capEmbedJobDocuments(std::size_t requested) const noexcept;
+
     /// Recommend next connection slot target with hysteresis and governor gating.
     [[nodiscard]] std::uint32_t
     recommendConnectionSlotTarget(std::uint32_t currentSlots, std::uint32_t activeConnections,

@@ -143,8 +143,8 @@ private:
     // Parallel poller that dispatches jobs to work executor
     boost::asio::awaitable<void> channelPoller();
 
-    // Synchronous job processor (runs on work executor threads)
-    void processEmbedJob(InternalEventBus::EmbedJob job);
+    // Runs on work executor threads; suspends at document completion fences.
+    boost::asio::awaitable<void> processEmbedJob(InternalEventBus::EmbedJob job);
     void updateSemanticNeighborGraph(
         const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
         const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,

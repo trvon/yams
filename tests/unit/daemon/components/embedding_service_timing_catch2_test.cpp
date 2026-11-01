@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -14,10 +15,12 @@
 
 #include "../../../../src/daemon/components/embedding_derivation_policy.h"
 #include "../../../../src/daemon/components/embedding_input_selection.h"
+#include "../../../../src/daemon/components/embedding_job_split.h"
 #include "../../../../src/daemon/components/semantic_graph_candidate_policy.h"
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/embed_preparer.h>
 #include <yams/daemon/components/EmbeddingService.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/resource/model_provider.h>
@@ -33,6 +36,117 @@
 using namespace std::chrono_literals;
 
 namespace yams::daemon {
+
+TEST_CASE("Grouped embed dispatch bounds prepared and plain jobs without losing remainders",
+          "[daemon][embedding][embed-job-cap]") {
+    for (const bool prepared : {false, true}) {
+        INFO("prepared=" << prepared);
+        InternalEventBus::EmbedJob job;
+        job.hashes = {"a", "b", "c", "d", "e"};
+        job.modelName = "model";
+        job.skipExisting = false;
+        job.updateSemanticGraph = false;
+        if (prepared) {
+            // Prepared payloads are sparse and not positionally aligned with hashes.
+            for (const auto& hash : {"e", "a", "c"}) {
+                InternalEventBus::EmbedPreparedDoc doc;
+                doc.hash = hash;
+                doc.filePath = std::string("/") + hash;
+                doc.chunks.push_back(
+                    {std::string(hash) + "-chunk", std::string(hash) + "-text", 1, 7});
+                job.preparedDocs.push_back(std::move(doc));
+            }
+        }
+        std::vector<std::string> seen;
+        std::vector<std::string> payloads;
+        while (!job.hashes.empty()) {
+            auto split = embed::takeJobPrefix(job, 2);
+            REQUIRE(split.hashes.size() <= 2);
+            CHECK(split.batchSize == split.hashes.size());
+            CHECK(split.modelName == "model");
+            CHECK_FALSE(split.skipExisting);
+            CHECK_FALSE(split.updateSemanticGraph);
+            for (const auto& doc : split.preparedDocs) {
+                CHECK(std::find(split.hashes.begin(), split.hashes.end(), doc.hash) !=
+                      split.hashes.end());
+                CHECK(doc.filePath == "/" + doc.hash);
+                REQUIRE(doc.chunks.size() == 1);
+                CHECK(doc.chunks[0].content == doc.hash + "-text");
+                payloads.push_back(doc.hash);
+            }
+            seen.insert(seen.end(), split.hashes.begin(), split.hashes.end());
+            if (seen.size() == 2) {
+                // One available concurrency slot: this exact remainder is requeued.
+                CHECK(job.hashes == std::vector<std::string>{"c", "d", "e"});
+                CHECK_FALSE(job.updateSemanticGraph);
+                CHECK_FALSE(job.skipExisting);
+                CHECK(job.modelName == "model");
+                if (prepared) {
+                    REQUIRE(job.preparedDocs.size() == 2);
+                }
+            }
+        }
+        CHECK(seen == std::vector<std::string>{"a", "b", "c", "d", "e"});
+        std::sort(payloads.begin(), payloads.end());
+        CHECK(payloads ==
+              (prepared ? std::vector<std::string>{"a", "c", "e"} : std::vector<std::string>{}));
+    }
+}
+
+TEST_CASE("Prepared embed remainder is reclamped after governor pressure rises",
+          "[daemon][embedding][embed-job-cap][embed-doc-budget]") {
+    auto& governor = ResourceGovernor::instance();
+    struct RestorePressure {
+        ~RestorePressure() {
+            ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Normal,
+                                                                  std::chrono::steady_clock::now());
+        }
+    } restore;
+    governor.testing_setPressureState(ResourcePressureLevel::Normal,
+                                      std::chrono::steady_clock::now());
+    InternalEventBus::EmbedJob job;
+    job.hashes = {"a", "b", "c", "d", "e"};
+    job.modelName = "model";
+    job.skipExisting = false;
+    job.updateSemanticGraph = false;
+    for (const auto& hash : job.hashes) {
+        InternalEventBus::EmbedPreparedDoc doc;
+        doc.hash = hash;
+        doc.chunks.push_back({hash + "-chunk", hash + "-text", 1, 7});
+        job.preparedDocs.push_back(std::move(doc));
+    }
+    const auto preparedCap = governor.capEmbedJobDocuments(job.hashes.size());
+    REQUIRE(preparedCap == 5);
+    governor.testing_setPressureState(ResourcePressureLevel::Critical,
+                                      std::chrono::steady_clock::now());
+    std::vector<std::string> seen;
+    while (!job.hashes.empty()) {
+        auto split = embed::takeJobPrefix(job, governor.capEmbedJobDocuments(preparedCap));
+        REQUIRE(split.hashes.size() == 1);
+        REQUIRE(split.preparedDocs.size() == 1);
+        CHECK(split.preparedDocs.front().hash == split.hashes.front());
+        CHECK(split.preparedDocs.front().chunks.front().content == split.hashes.front() + "-text");
+        CHECK_FALSE(split.skipExisting);
+        CHECK_FALSE(split.updateSemanticGraph);
+        CHECK(split.modelName == "model");
+        seen.push_back(split.hashes.front());
+    }
+    CHECK(seen == std::vector<std::string>{"a", "b", "c", "d", "e"});
+    CHECK(job.preparedDocs.empty());
+}
+
+TEST_CASE("Monitored embed jobs remain indivisible for completion ownership",
+          "[daemon][embedding][embed-job-cap]") {
+    InternalEventBus::EmbedJob job;
+    job.hashes = {"a", "b", "c"};
+    job.monitor = std::make_shared<InternalEventBus::EmbedJobMonitor>();
+    auto monitor = job.monitor;
+    auto dispatch = embed::takeJobPrefix(job, 1);
+    CHECK(dispatch.hashes.size() == 3);
+    CHECK(dispatch.monitor == monitor);
+    CHECK_FALSE(monitor->done);
+    CHECK(job.hashes.empty());
+}
 
 TEST_CASE("Semantic graph output capacity follows retained neighbors rather than scored pairs",
           "[daemon][embedding][semantic-candidate-policy]") {
@@ -129,7 +243,14 @@ TEST_CASE("Embedding input selection prefers a valid duplicate over an empty pay
 class EmbeddingServiceTimingTestAccess {
 public:
     static void process(EmbeddingService& service, InternalEventBus::EmbedJob job) {
-        service.processEmbedJob(std::move(job));
+        boost::asio::io_context completionIo;
+        std::exception_ptr error;
+        boost::asio::co_spawn(completionIo, service.processEmbedJob(std::move(job)),
+                              [&](std::exception_ptr e) { error = e; });
+        completionIo.run();
+        if (error) {
+            std::rethrow_exception(error);
+        }
     }
     static bool maintenanceEligible(const EmbeddingService& service, bool idle) {
         return service.semanticBackfillEligible(idle);
@@ -309,6 +430,7 @@ public:
 class DerivationTestProvider final : public IModelProvider {
 public:
     std::size_t calls{0};
+    std::vector<std::string> inferredTexts;
     std::string version{"v1"};
     bool fail{false};
     std::function<void()> beforeFailure;
@@ -322,6 +444,7 @@ public:
     Result<std::vector<std::vector<float>>>
     generateBatchEmbeddings(const std::vector<std::string>& texts) override {
         ++calls;
+        inferredTexts.insert(inferredTexts.end(), texts.begin(), texts.end());
         if (beforeFailure) {
             auto callback = std::exchange(beforeFailure, {});
             callback();
@@ -367,6 +490,14 @@ class DerivationRaceRepository final : public metadata::MetadataRepository {
 public:
     using metadata::MetadataRepository::MetadataRepository;
     std::function<void()> beforeLookup;
+    std::function<void(int64_t)> beforeContent;
+
+    Result<std::optional<metadata::DocumentContent>> getContent(int64_t id) override {
+        if (beforeContent) {
+            beforeContent(id);
+        }
+        return metadata::MetadataRepository::getContent(id);
+    }
 
     Result<std::optional<metadata::DocumentInfo>>
     getDocumentByHash(const std::string& hash) override {
@@ -458,11 +589,11 @@ struct ServiceDerivationFixture {
         job.modelName = "test-model";
         job.skipExisting = true;
         job.updateSemanticGraph = false;
-        EmbeddingServiceTimingTestAccess::process(*service, std::move(job));
         if (!runner.valid()) {
             writer->start();
             runner = std::async(std::launch::async, [this] { io.run(); });
         }
+        EmbeddingServiceTimingTestAccess::process(*service, std::move(job));
         REQUIRE(writer->flush(5s).has_value());
     }
 
@@ -477,6 +608,156 @@ struct ServiceDerivationFixture {
 };
 
 } // namespace
+
+// Hash-only repair must bound retained input by completing one document before
+// fetching the next. The repository callback observes the real production seam.
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "Hash repair fences A before reading B and preserves full chunk payloads",
+                 "[daemon][embedding][embed-retention-red]") {
+    yams::test::ScopedEnvVar fullMode{"YAMS_EMBED_SELECTION_MODE", "full"};
+    const std::string secondHash(64, 'b');
+    const std::vector<std::string> hashes{hash, secondHash};
+    std::vector<std::string> expectedTexts;
+    std::vector<std::string> expectedIds;
+    int64_t secondId = 0;
+    const auto policy = ConfigResolver::resolveEmbeddingChunkingPolicy();
+    auto chunker = vector::createChunker(policy.strategy, policy.config, nullptr);
+    REQUIRE(chunker);
+    for (std::size_t index = 0; index < hashes.size(); ++index) {
+        std::string text;
+        for (int paragraph = 0; paragraph < 40; ++paragraph) {
+            text += "Document " + std::to_string(index) + " paragraph " +
+                    std::to_string(paragraph) + ": " + std::string(240, 'x' + index) + ".\n\n";
+        }
+        metadata::DocumentInfo doc;
+        if (index == 0) {
+            auto found = repo->getDocumentByHash(hash);
+            REQUIRE(found);
+            REQUIRE(found.value());
+            doc = *found.value();
+            auto content = repo->getContent(doc.id);
+            REQUIRE(content);
+            REQUIRE(content.value());
+            content.value()->contentText = text;
+            REQUIRE(repo->updateContent(*content.value()));
+        } else {
+            doc.sha256Hash = secondHash;
+            doc.filePath = "/second.txt";
+            doc.fileName = "second.txt";
+            doc.mimeType = "text/plain";
+            auto inserted = repo->insertDocument(doc);
+            REQUIRE(inserted);
+            secondId = inserted.value();
+            metadata::BatchContentEntry content;
+            content.documentId = secondId;
+            content.contentText = text;
+            content.title = doc.fileName;
+            content.mimeType = doc.mimeType;
+            content.extractionMethod = "test";
+            content.language = "en";
+            REQUIRE(repo->batchInsertContentAndIndex({content}));
+        }
+        auto chunks = chunker->chunkDocument(text, hashes[index]);
+        REQUIRE(chunks.size() > 1);
+        for (const auto& chunk : chunks) {
+            expectedTexts.push_back(chunk.content);
+            expectedIds.push_back(chunk.chunk_id);
+        }
+    }
+    // Start the actual persistence owner before processing; no sleep or polling.
+    writer->start();
+    runner = std::async(std::launch::async, [this] { io.run(); });
+    bool readB = false;
+    repo->beforeContent = [&](int64_t id) {
+        if (id != secondId) {
+            return;
+        }
+        readB = true;
+        CHECK(provider->calls > 0);
+        auto states = repo->batchGetDocumentEmbeddingDerivations({hash});
+        REQUIRE(states);
+        REQUIRE(states.value().contains(hash));
+        CHECK(states.value().at(hash).completed);
+        CHECK_FALSE(vectors->getVectorsByDocument(hash).empty());
+    };
+    InternalEventBus::EmbedJob job;
+    job.hashes = hashes;
+    job.modelName = "test-model";
+    job.skipExisting = false;
+    job.updateSemanticGraph = false;
+    EmbeddingServiceTimingTestAccess::process(*service, std::move(job));
+    repo->beforeContent = {};
+    REQUIRE(writer->flush(5s));
+    CHECK(readB);
+    CHECK(provider->inferredTexts == expectedTexts);
+    std::vector<std::string> actualIds;
+    for (const auto& documentHash : hashes) {
+        for (const auto& record : vectors->getVectorsByDocument(documentHash)) {
+            if (record.level == vector::EmbeddingLevel::CHUNK) {
+                actualIds.push_back(record.chunk_id);
+            }
+        }
+    }
+    std::sort(actualIds.begin(), actualIds.end());
+    std::sort(expectedIds.begin(), expectedIds.end());
+    CHECK(actualIds == expectedIds);
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "Hash repair cancellation after A inference leaves B unread and retryable",
+                 "[daemon][embedding][embed-retention-red]") {
+    const std::string secondHash(64, 'b');
+    metadata::DocumentInfo doc;
+    doc.sha256Hash = secondHash;
+    doc.filePath = "/cancel-second.txt";
+    doc.fileName = "cancel-second.txt";
+    doc.mimeType = "text/plain";
+    auto inserted = repo->insertDocument(doc);
+    REQUIRE(inserted);
+    metadata::BatchContentEntry content;
+    content.documentId = inserted.value();
+    content.contentText = "Second document must not be read after cancellation.";
+    content.title = doc.fileName;
+    content.mimeType = doc.mimeType;
+    content.extractionMethod = "test";
+    content.language = "en";
+    REQUIRE(repo->batchInsertContentAndIndex({content}));
+    bool readB = false;
+    repo->beforeContent = [&](int64_t id) { readB |= id == inserted.value(); };
+    auto monitor = std::make_shared<InternalEventBus::EmbedJobMonitor>();
+    provider->beforeFailure = [monitor] { monitor->cancelRequested.store(true); };
+    writer->start();
+    runner = std::async(std::launch::async, [this] { io.run(); });
+    InternalEventBus::EmbedJob job;
+    job.hashes = {hash, secondHash};
+    job.modelName = "test-model";
+    job.skipExisting = false;
+    job.updateSemanticGraph = false;
+    job.monitor = monitor;
+    EmbeddingServiceTimingTestAccess::process(*service, std::move(job));
+    repo->beforeContent = {};
+    REQUIRE(writer->flush(5s));
+    CHECK_FALSE(readB);
+    auto states = repo->batchGetDocumentEmbeddingDerivations({hash, secondHash});
+    REQUIRE(states);
+    REQUIRE(states.value().contains(hash));
+    CHECK(states.value().at(hash).completed);
+    REQUIRE(states.value().contains(secondHash));
+    CHECK_FALSE(states.value().at(secondHash).completed);
+    // A fresh attempt can still finish the unread work, without reminting A.
+    const auto firstCalls = provider->calls;
+    InternalEventBus::EmbedJob retry;
+    retry.hashes = {secondHash};
+    retry.modelName = "test-model";
+    retry.updateSemanticGraph = false;
+    EmbeddingServiceTimingTestAccess::process(*service, std::move(retry));
+    REQUIRE(writer->flush(5s));
+    CHECK(provider->calls > firstCalls);
+    states = repo->batchGetDocumentEmbeddingDerivations({hash, secondHash});
+    REQUIRE(states);
+    CHECK(states.value().at(hash).completed);
+    CHECK(states.value().at(secondHash).completed);
+}
 
 TEST_CASE("Derivation fixture restores vector-disabled CI environment",
           "[daemon][embedding][service-derivation][environment]") {
