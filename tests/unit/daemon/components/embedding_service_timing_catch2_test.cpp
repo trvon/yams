@@ -7,6 +7,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -34,6 +35,16 @@
 #include "../../../common/test_helpers_catch2.h"
 
 using namespace std::chrono_literals;
+
+namespace yams::metadata {
+struct MetadataRepositoryTestAccess {
+    template <typename T>
+    static Result<T> query(MetadataRepository& repo, bool write,
+                           const std::function<Result<T>(Database&)>& operation) {
+        return write ? repo.executeWriteQuery<T>(operation) : repo.executeReadQuery<T>(operation);
+    }
+};
+} // namespace yams::metadata
 
 namespace yams::daemon {
 
@@ -757,6 +768,444 @@ TEST_CASE_METHOD(ServiceDerivationFixture,
     REQUIRE(states);
     CHECK(states.value().at(hash).completed);
     CHECK(states.value().at(secondHash).completed);
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "Embedding exception releases owned unfinished attempts and permits retry",
+                 "[daemon][embedding][embed-exception-red]") {
+    bool prepared = false;
+    bool supersede = false;
+    SECTION("hash-only exception after committed A") {}
+    SECTION("prepared post-ingest inference exception") {
+        prepared = true;
+    }
+    SECTION("hash-only exception must preserve newer completed B") {
+        supersede = true;
+    }
+
+    const std::vector<std::string> hashes{hash, std::string(64, 'b'), std::string(64, 'c')};
+    for (std::size_t i = 1; i < hashes.size(); ++i) {
+        metadata::DocumentInfo doc;
+        doc.sha256Hash = hashes[i];
+        doc.filePath = "/exception-" + std::to_string(i) + ".txt";
+        doc.fileName = "exception-" + std::to_string(i) + ".txt";
+        doc.mimeType = "text/plain";
+        auto inserted = repo->insertDocument(doc);
+        REQUIRE(inserted);
+        metadata::BatchContentEntry content;
+        content.documentId = inserted.value();
+        content.contentText = "Deterministic exception recovery document " + std::to_string(i);
+        content.title = doc.fileName;
+        content.mimeType = doc.mimeType;
+        content.extractionMethod = "test";
+        content.language = "en";
+        REQUIRE(repo->batchInsertContentAndIndex({content}));
+    }
+    InternalEventBus::EmbedJob job;
+    job.hashes = hashes;
+    job.modelName = "test-model";
+    job.skipExisting = false;
+    job.updateSemanticGraph = false;
+    auto monitor = std::make_shared<InternalEventBus::EmbedJobMonitor>();
+    job.monitor = monitor;
+    if (prepared) {
+        const auto chunking = ConfigResolver::resolveEmbeddingChunkingPolicy();
+        const auto selection = ConfigResolver::resolveEmbeddingSelectionPolicy();
+        auto chunker = vector::createChunker(chunking.strategy, chunking.config, nullptr);
+        REQUIRE(chunker);
+        for (const auto& h : hashes) {
+            auto doc = repo->getDocumentByHash(h);
+            REQUIRE(doc);
+            REQUIRE(doc.value());
+            auto content = repo->getContent(doc.value()->id);
+            REQUIRE(content);
+            REQUIRE(content.value());
+            embed::EmbedSourceDoc source{h, content.value()->contentText, doc.value()->fileName,
+                                         doc.value()->filePath, doc.value()->mimeType};
+            auto payload = embed::prepareEmbedPreparedDoc(source, *chunker, selection);
+            REQUIRE(payload);
+            payload->preparationRecipe = embed::embeddingPreparationRecipe(chunking, selection);
+            job.preparedDocs.push_back(std::move(*payload));
+        }
+    }
+    // RepairService marks queued embedding work Processing before dispatch. Content
+    // insertion alone marks extraction Completed, which would miss the stranded state.
+    REQUIRE(repo->batchUpdateDocumentRepairStatuses(hashes, metadata::RepairStatus::Processing));
+    std::vector<metadata::EmbeddingDerivationToken> admitted;
+    std::string completedGeneration;
+    std::string newerGeneration;
+    bool injected = false;
+    auto inject = [&] {
+        auto states = repo->batchGetDocumentEmbeddingDerivations(hashes);
+        REQUIRE(states);
+        for (const auto& h : hashes) {
+            REQUIRE(states.value().contains(h));
+            admitted.push_back(states.value().at(h).token);
+        }
+        if (!prepared) {
+            REQUIRE(states.value().at(hash).completed);
+            completedGeneration = states.value().at(hash).token.generation;
+            REQUIRE_FALSE(vectors->getVectorsByDocument(hash).empty());
+        }
+        if (supersede) {
+            auto newer = repo->beginDocumentEmbeddingDerivation(hashes[1], "newer-recipe");
+            REQUIRE(newer);
+            newerGeneration = newer.value().generation;
+            auto completed = repo->completeDocumentEmbeddingDerivation(newer.value(), "test-model");
+            REQUIRE(completed);
+            REQUIRE(completed.value());
+        }
+        injected = true;
+        throw std::bad_alloc{};
+    };
+    if (prepared) {
+        provider->beforeFailure = inject;
+    } else {
+        // The callback is exchanged before invocation: arm a throw on B, after A's fence.
+        provider->beforeFailure = [&] { provider->beforeFailure = inject; };
+    }
+    writer->start();
+    runner = std::async(std::launch::async, [this] { io.run(); });
+    try {
+        EmbeddingServiceTimingTestAccess::process(*service, std::move(job));
+    } catch (const std::bad_alloc&) {
+        // Dispatch already catches this exception; swallowing is not the contract here.
+        SUCCEED("bad_alloc reached the existing dispatch exception boundary");
+    }
+    REQUIRE(writer->flush(5s));
+    REQUIRE(injected);
+    auto states = repo->batchGetDocumentEmbeddingDerivations(hashes);
+    REQUIRE(states);
+    for (std::size_t i = 0; i < hashes.size(); ++i) {
+        INFO("hash index=" << i << " prepared=" << prepared << " supersede=" << supersede);
+        auto doc = repo->getDocumentByHash(hashes[i]);
+        REQUIRE(doc);
+        REQUIRE(doc.value());
+        INFO("repairStatus=" << metadata::RepairStatusUtils::toString(doc.value()->repairStatus));
+        REQUIRE(states.value().contains(hashes[i]));
+        if ((!prepared && i == 0) || (supersede && i == 1)) {
+            CHECK(states.value().at(hashes[i]).completed);
+            CHECK(states.value().at(hashes[i]).token.generation ==
+                  (i == 0 ? completedGeneration : newerGeneration));
+            CHECK(doc.value()->repairStatus == metadata::RepairStatus::Completed);
+        } else {
+            CHECK_FALSE(states.value().at(hashes[i]).completed);
+            CHECK(states.value().at(hashes[i]).token.generation == admitted[i].generation);
+            CHECK((doc.value()->repairStatus == metadata::RepairStatus::Pending ||
+                   doc.value()->repairStatus == metadata::RepairStatus::Failed));
+        }
+    }
+    CHECK(monitor->done);
+    CHECK_FALSE(monitor->cancelRequested.load());
+    CHECK(monitor->phase == "failed");
+    CHECK(monitor->totalDocs == hashes.size());
+    CHECK(monitor->processedDocs == hashes.size());
+    CHECK(monitor->succeededDocs + monitor->failedDocs + monitor->skippedDocs == hashes.size());
+    CHECK(monitor->succeededDocs == (prepared ? 0 : 1));
+    CHECK(monitor->failedDocs == (prepared ? 3 : 2));
+    CHECK(monitor->skippedDocs == 0);
+
+    // Retry the throwing hash (or an unfinished hash when B was superseded), not a new hash.
+    const auto retryHash = prepared ? hash : hashes[supersede ? 2 : 1];
+    const auto callsBeforeRetry = provider->calls;
+    InternalEventBus::EmbedJob retry;
+    retry.hashes = {retryHash};
+    retry.modelName = "test-model";
+    retry.updateSemanticGraph = false;
+    EmbeddingServiceTimingTestAccess::process(*service, std::move(retry));
+    REQUIRE(writer->flush(5s));
+    CHECK(provider->calls > callsBeforeRetry);
+    states = repo->batchGetDocumentEmbeddingDerivations(hashes);
+    REQUIRE(states);
+    CHECK(states.value().at(retryHash).completed);
+    const auto retryIndex = prepared ? 0 : (supersede ? 2 : 1);
+    CHECK(states.value().at(retryHash).token.generation != admitted[retryIndex].generation);
+    auto retried = repo->getDocumentByHash(retryHash);
+    REQUIRE(retried);
+    REQUIRE(retried.value());
+    CHECK(retried.value()->repairStatus == metadata::RepairStatus::Completed);
+    CHECK_FALSE(vectors->getVectorsByDocument(retryHash).empty());
+    if (!prepared) {
+        CHECK(states.value().at(hash).token.generation == completedGeneration);
+    }
+    if (supersede) {
+        CHECK(states.value().at(hashes[1]).token.generation == newerGeneration);
+        CHECK(states.value().at(hashes[1]).completed);
+    }
+}
+
+namespace {
+struct ThrowingCopyPayload {
+    int value{42};
+    ThrowingCopyPayload() = default;
+    ThrowingCopyPayload(const ThrowingCopyPayload&) { throw std::bad_alloc{}; }
+    ThrowingCopyPayload& operator=(const ThrowingCopyPayload&) { throw std::bad_alloc{}; }
+    ThrowingCopyPayload(ThrowingCopyPayload&&) noexcept = default;
+    ThrowingCopyPayload& operator=(ThrowingCopyPayload&&) noexcept = default;
+};
+} // namespace
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "Metadata query hands off committed payload without copying",
+                 "[daemon][embedding][embed-exception-review][metadata-query]") {
+    bool write = false;
+    SECTION("read query") {}
+    SECTION("write query") {
+        write = true;
+    }
+    int calls = 0;
+    auto operation = [&](metadata::Database& db) -> Result<ThrowingCopyPayload> {
+        ++calls;
+        REQUIRE(db.execute("CREATE TABLE IF NOT EXISTS exception_commit_probe(value INTEGER)"));
+        REQUIRE(db.execute("BEGIN IMMEDIATE"));
+        REQUIRE(db.execute("INSERT INTO exception_commit_probe VALUES (42)"));
+        REQUIRE(db.execute("COMMIT"));
+        return ThrowingCopyPayload{};
+    };
+    REQUIRE_NOTHROW([&] {
+        auto result = metadata::MetadataRepositoryTestAccess::query<ThrowingCopyPayload>(
+            *repo, write, operation);
+        REQUIRE(result);
+        CHECK(result.value().value == 42);
+    }());
+    CHECK(calls == 1);
+    auto count = metadata::MetadataRepositoryTestAccess::query<int>(
+        *repo, false, [](metadata::Database& db) -> Result<int> {
+            auto statement = db.prepare("SELECT COUNT(*) FROM exception_commit_probe");
+            if (!statement)
+                return statement.error();
+            auto row = statement.value().step();
+            if (!row)
+                return row.error();
+            return statement.value().getInt(0);
+        });
+    REQUIRE(count);
+    CHECK(count.value() == 1);
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "Embedding post-ACK exceptions preserve successes and skips",
+                 "[daemon][embedding][embed-exception-review]") {
+    bool prepared = false;
+    bool duplicate = false;
+    bool emptyFirst = false;
+    bool alreadyComplete = false;
+    bool withMonitor = true;
+    SECTION("hash post ACK") {}
+    SECTION("prepared post ACK") {
+        prepared = true;
+    }
+    SECTION("duplicate post ACK") {
+        duplicate = true;
+    }
+    SECTION("duplicate without monitor") {
+        duplicate = true;
+        withMonitor = false;
+    }
+    SECTION("already completed A then post-ACK throwing B") {
+        alreadyComplete = true;
+    }
+    SECTION("empty A then throwing B") {
+        emptyFirst = true;
+    }
+    SECTION("empty A then throwing B without monitor") {
+        emptyFirst = true;
+        withMonitor = false;
+    }
+    InternalEventBus::EmbedJob job;
+    job.hashes = {hash};
+    job.modelName = "test-model";
+    job.skipExisting = false;
+    job.updateSemanticGraph = false;
+    auto monitor = std::make_shared<InternalEventBus::EmbedJobMonitor>();
+    if (withMonitor)
+        job.monitor = monitor;
+    if (duplicate)
+        job.hashes.push_back(hash);
+    if (alreadyComplete) {
+        process();
+        job.skipExisting = true;
+    }
+    if (emptyFirst || alreadyComplete) {
+        const std::string second(64, 'b');
+        metadata::DocumentInfo doc;
+        doc.sha256Hash = second;
+        doc.filePath = "/throw-second.txt";
+        doc.fileName = "throw-second.txt";
+        doc.mimeType = "text/plain";
+        auto id = repo->insertDocument(doc);
+        REQUIRE(id);
+        metadata::BatchContentEntry entry;
+        entry.documentId = id.value();
+        entry.contentText = "Throw on inference after an empty document.";
+        entry.title = doc.fileName;
+        entry.mimeType = doc.mimeType;
+        entry.extractionMethod = "test";
+        REQUIRE(repo->batchInsertContentAndIndex({entry}));
+        if (emptyFirst) {
+            auto first = repo->getDocumentByHash(hash);
+            REQUIRE(first);
+            REQUIRE(first.value());
+            auto content = repo->getContent(first.value()->id);
+            REQUIRE(content);
+            REQUIRE(content.value());
+            content.value()->contentText.clear();
+            REQUIRE(repo->updateContent(*content.value()));
+            provider->beforeFailure = [] { throw std::bad_alloc{}; };
+        }
+        job.hashes.push_back(second);
+    }
+    if (!emptyFirst) {
+        service->setEmbeddingsCommittedCallback([&](const auto& hashes) {
+            auto states = repo->batchGetDocumentEmbeddingDerivations(hashes);
+            REQUIRE(states);
+            for (const auto& h : hashes)
+                CHECK(states.value().at(h).completed);
+            throw std::bad_alloc{};
+        });
+    }
+    if (prepared) {
+        const auto chunking = ConfigResolver::resolveEmbeddingChunkingPolicy();
+        const auto selection = ConfigResolver::resolveEmbeddingSelectionPolicy();
+        auto chunker = vector::createChunker(chunking.strategy, chunking.config, nullptr);
+        auto doc = repo->getDocumentByHash(hash);
+        REQUIRE(doc);
+        REQUIRE(doc.value());
+        auto content = repo->getContent(doc.value()->id);
+        REQUIRE(content);
+        REQUIRE(content.value());
+        embed::EmbedSourceDoc source{hash, content.value()->contentText, doc.value()->fileName,
+                                     doc.value()->filePath, doc.value()->mimeType};
+        auto payload = embed::prepareEmbedPreparedDoc(source, *chunker, selection);
+        REQUIRE(payload);
+        payload->preparationRecipe = embed::embeddingPreparationRecipe(chunking, selection);
+        job.preparedDocs.push_back(std::move(*payload));
+    }
+    if (!runner.valid()) {
+        writer->start();
+        runner = std::async(std::launch::async, [this] { io.run(); });
+    }
+    REQUIRE_THROWS_AS(EmbeddingServiceTimingTestAccess::process(*service, std::move(job)),
+                      std::bad_alloc);
+    REQUIRE(writer->flush(5s));
+    CHECK(service->failed() == (emptyFirst ? 1 : 0));
+    const auto expectedProcessed = emptyFirst ? 0u : (alreadyComplete ? 2u : 1u);
+    CHECK(service->processed() == expectedProcessed);
+    if (emptyFirst) {
+        auto skippedDoc = repo->getDocumentByHash(hash);
+        REQUIRE(skippedDoc);
+        REQUIRE(skippedDoc.value());
+        CHECK(skippedDoc.value()->repairStatus == metadata::RepairStatus::Skipped);
+        auto failedDoc = repo->getDocumentByHash(std::string(64, 'b'));
+        REQUIRE(failedDoc);
+        REQUIRE(failedDoc.value());
+        CHECK(failedDoc.value()->repairStatus == metadata::RepairStatus::Failed);
+        process();
+        skippedDoc = repo->getDocumentByHash(hash);
+        REQUIRE(skippedDoc);
+        REQUIRE(skippedDoc.value());
+        CHECK(skippedDoc.value()->repairStatus == metadata::RepairStatus::Skipped);
+        CHECK(service->processed() == expectedProcessed);
+    }
+    if (!emptyFirst) {
+        auto states = repo->batchGetDocumentEmbeddingDerivations({hash});
+        REQUIRE(states);
+        CHECK(states.value().at(hash).completed);
+        auto doc = repo->getDocumentByHash(hash);
+        REQUIRE(doc);
+        REQUIRE(doc.value());
+        CHECK(doc.value()->repairStatus == metadata::RepairStatus::Completed);
+        service->setEmbeddingsCommittedCallback({});
+        process();
+        CHECK(service->processed() == expectedProcessed);
+    }
+    if (withMonitor) {
+        CHECK(monitor->done);
+        CHECK(monitor->phase == "failed");
+        CHECK(monitor->succeededDocs == (emptyFirst ? 0 : (alreadyComplete ? 2 : 1)));
+        CHECK(monitor->failedDocs == (emptyFirst ? 1 : 0));
+        CHECK(monitor->succeededDocs + monitor->failedDocs + monitor->skippedDocs ==
+              monitor->totalDocs);
+    }
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "Prepared bulk partial ACK preserves actual successes and newer tokens",
+                 "[daemon][embedding][embed-exception-review]") {
+    const std::string second(64, 'b');
+    metadata::DocumentInfo doc;
+    doc.sha256Hash = second;
+    doc.filePath = "/partial-second.txt";
+    doc.fileName = "partial-second.txt";
+    doc.mimeType = "text/plain";
+    auto id = repo->insertDocument(doc);
+    REQUIRE(id);
+    metadata::BatchContentEntry entry;
+    entry.documentId = id.value();
+    entry.contentText = "Second prepared bulk document.";
+    entry.title = doc.fileName;
+    entry.mimeType = doc.mimeType;
+    entry.extractionMethod = "test";
+    REQUIRE(repo->batchInsertContentAndIndex({entry}));
+    InternalEventBus::EmbedJob job;
+    job.hashes = {hash, second};
+    job.modelName = "test-model";
+    job.skipExisting = false;
+    job.updateSemanticGraph = false;
+    auto monitor = std::make_shared<InternalEventBus::EmbedJobMonitor>();
+    job.monitor = monitor;
+    const auto chunking = ConfigResolver::resolveEmbeddingChunkingPolicy();
+    const auto selection = ConfigResolver::resolveEmbeddingSelectionPolicy();
+    auto chunker = vector::createChunker(chunking.strategy, chunking.config, nullptr);
+    for (const auto& h : job.hashes) {
+        auto found = repo->getDocumentByHash(h);
+        REQUIRE(found);
+        REQUIRE(found.value());
+        auto content = repo->getContent(found.value()->id);
+        REQUIRE(content);
+        REQUIRE(content.value());
+        embed::EmbedSourceDoc source{h, content.value()->contentText, found.value()->fileName,
+                                     found.value()->filePath, found.value()->mimeType};
+        auto payload = embed::prepareEmbedPreparedDoc(source, *chunker, selection);
+        REQUIRE(payload);
+        payload->preparationRecipe = embed::embeddingPreparationRecipe(chunking, selection);
+        job.preparedDocs.push_back(std::move(*payload));
+    }
+    std::string newerGeneration;
+    provider->beforeFailure = [&] {
+        auto newer = repo->beginDocumentEmbeddingDerivation(second, "superseding-recipe");
+        REQUIRE(newer);
+        newerGeneration = newer.value().generation;
+        auto completed = repo->completeDocumentEmbeddingDerivation(newer.value(), "test-model");
+        REQUIRE(completed);
+        REQUIRE(completed.value());
+    };
+    bool notified = false;
+    service->setEmbeddingsCommittedCallback([&](const auto&) { notified = true; });
+    writer->start();
+    runner = std::async(std::launch::async, [this] { io.run(); });
+    EmbeddingServiceTimingTestAccess::process(*service, std::move(job));
+    REQUIRE(writer->flush(5s));
+    CHECK(provider->calls == 1);
+    CHECK(service->processed() == 1);
+    CHECK_FALSE(notified);
+    CHECK(service->failed() == 1);
+    CHECK(monitor->done);
+    CHECK(monitor->phase == "failed");
+    CHECK(monitor->succeededDocs == 1);
+    CHECK(monitor->failedDocs == 1);
+    CHECK(monitor->processedDocs == 2);
+    auto states = repo->batchGetDocumentEmbeddingDerivations({hash, second});
+    REQUIRE(states);
+    CHECK(states.value().at(hash).completed);
+    CHECK(states.value().at(second).completed);
+    CHECK(states.value().at(second).token.generation == newerGeneration);
+    for (const auto& h : {hash, second}) {
+        auto found = repo->getDocumentByHash(h);
+        REQUIRE(found);
+        REQUIRE(found.value());
+        CHECK(found.value()->repairStatus == metadata::RepairStatus::Completed);
+    }
 }
 
 TEST_CASE("Derivation fixture restores vector-disabled CI environment",

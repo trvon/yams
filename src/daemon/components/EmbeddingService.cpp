@@ -18,7 +18,9 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -1730,7 +1732,69 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
         finishMonitor("failed", "embedding admission failed: " + preparation.error().message);
         co_return;
     }
-    const auto preparationTokens = std::move(preparation.value().tokens);
+    auto preparationTokens = std::move(preparation.value().tokens);
+    std::vector<metadata::EmbeddingDerivationToken> attemptTokens;
+    uint64_t acknowledgedDocs = 0;
+    uint64_t countedFailureDocs = 0;
+    uint64_t terminalSkippedDocs = 0;
+
+    auto cleanupException = [&]() noexcept {
+        // Cleanup is best-effort under persistent allocation/metadata/scheduling failures.
+        // Neither a secondary failure nor diagnostics may replace the original exception.
+        for (auto* tokens : {&preparationTokens, &attemptTokens}) {
+            if (tokens->empty()) {
+                continue;
+            }
+            try {
+                enqueueRepairStatusUpdate(job.hashes, metadata::RepairStatus::Failed,
+                                          "EmbeddingService::exception", std::move(*tokens));
+            } catch (...) {
+                try {
+                    spdlog::error(
+                        "EmbeddingService: exception cleanup could not schedule fenced repair; "
+                        "unfinished attempts may require repair");
+                } catch (...) {
+                    std::fputs("EmbeddingService: fenced repair diagnostics unavailable\n", stderr);
+                }
+            }
+        }
+        try {
+            withMonitor([&](InternalEventBus::EmbedJobMonitor& mon) {
+                // Preserve known successes/skips, including admission deduplication. A stale
+                // failed attempt counts for this job without changing the newer token's state.
+                mon.succeededDocs = acknowledgedDocs;
+                mon.skippedDocs = terminalSkippedDocs;
+                mon.failedDocs =
+                    mon.totalDocs - std::min(mon.totalDocs, mon.succeededDocs + mon.skippedDocs);
+                mon.processedDocs = mon.totalDocs;
+                mon.done = true;
+                mon.phase = "failed";
+                mon.detail = "embedding job threw; fenced repair attempted";
+            });
+        } catch (...) {
+            try {
+                spdlog::error("EmbeddingService: exception cleanup could not finalize monitor");
+            } catch (...) {
+                std::fputs("EmbeddingService: monitor cleanup diagnostics unavailable\n", stderr);
+            }
+        }
+        failed_.fetch_add(
+            job.hashes.size() -
+                std::min<uint64_t>(job.hashes.size(),
+                                   acknowledgedDocs + countedFailureDocs + terminalSkippedDocs),
+            std::memory_order_relaxed);
+    };
+    // Declared before callbacks, destroyed after document buffers. Normal returns and
+    // cancellation do nothing; only stack unwinding activates the fenced fallback.
+    struct ExceptionCleanup {
+        decltype(cleanupException)& cleanup;
+        int exceptions = std::uncaught_exceptions();
+        ~ExceptionCleanup() noexcept {
+            if (std::uncaught_exceptions() > exceptions) {
+                cleanup();
+            }
+        }
+    } exceptionCleanup{cleanupException};
 
     std::shared_ptr<IModelProvider> provider;
     std::string modelName;
@@ -1755,6 +1819,7 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             enqueueRepairStatusUpdate(job.hashes, metadata::RepairStatus::Failed,
                                       "EmbeddingService::jobFailed", preparationTokens);
         }
+        countedFailureDocs += job.hashes.size();
         failed_.fetch_add(job.hashes.size(), std::memory_order_relaxed);
         finishMonitor("failed", std::string(reason));
     };
@@ -1883,7 +1948,11 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
     for (const auto& hash : selectedInputs.gatherHashes) {
         inputs.emplace_back(hash, nullptr);
     }
-    std::size_t skipped = 0;
+    // Input selection deduplicates work; account those terminal omissions even without a monitor.
+    terminalSkippedDocs = job.hashes.size() - std::min(job.hashes.size(), inputs.size());
+    updateMonitorCounts(
+        [&](InternalEventBus::EmbedJobMonitor& mon) { mon.skippedDocs += terminalSkippedDocs; });
+    std::size_t skipped = terminalSkippedDocs;
     std::size_t failedGather = 0;
     std::vector<std::string> completedGatherHashes;
     std::vector<std::string> failedGatherHashes;
@@ -1938,8 +2007,15 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             candidates.clear();
         } else {
             completedGatherHashes = std::move(minted.value().alreadyCompleted);
+            acknowledgedDocs += completedGatherHashes.size();
             skipped += completedGatherHashes.size();
-            ledger.adopt(std::move(minted.value().tokens));
+            attemptTokens = std::move(minted.value().tokens);
+            // Switch authority before the allocating ledger copy. Never remint on failure.
+            for (const auto& token : attemptTokens) {
+                std::erase_if(preparationTokens,
+                              [&](const auto& old) { return old.hash == token.hash; });
+            }
+            ledger.adopt(attemptTokens);
         }
     }
 
@@ -1992,6 +2068,7 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
                 if (text.empty()) {
                     spdlog::debug("EmbeddingService: empty content for document {}", hash);
                     skipped++;
+                    terminalSkippedDocs++;
                     skippedGatherHashes.push_back(hash);
                     continue;
                 }
@@ -2009,6 +2086,7 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             }
         }
 
+        countedFailureDocs += failedGather;
         failed_.fetch_add(failedGather);
 
         // A skipped attempt was already complete at admission. Do not enqueue an unfenced
@@ -2016,6 +2094,12 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
         if (!skippedGatherHashes.empty()) {
             enqueueAttemptRepairStatusUpdate(skippedGatherHashes, metadata::RepairStatus::Skipped,
                                              "EmbeddingService::gatherSkipped");
+            // Scheduling succeeded: these terminal skips no longer belong to exception cleanup.
+            // Actual minting already removed their older preparation tokens.
+            for (const auto& hash : skippedGatherHashes) {
+                ledger.byHash.erase(hash);
+                std::erase_if(attemptTokens, [&](const auto& token) { return token.hash == hash; });
+            }
         }
         if (!failedGatherHashes.empty()) {
             enqueueAttemptRepairStatusUpdate(failedGatherHashes, metadata::RepairStatus::Failed,
@@ -2057,6 +2141,7 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             spdlog::info(
                 "EmbeddingService: aborting job={} before chunking (docs={}) due to shutdown",
                 jobTag, docsToEmbed.size());
+            countedFailureDocs += docsToEmbed.size();
             failed_.fetch_add(docsToEmbed.size(), std::memory_order_relaxed);
             InternalEventBus::instance().incEmbedDropped(docsToEmbed.size());
             std::vector<std::string> failedHashes;
@@ -2155,6 +2240,7 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             spdlog::info(
                 "EmbeddingService: aborting job={} during chunking (docs={}) due to shutdown",
                 jobTag, docsToEmbed.size());
+            countedFailureDocs += docsToEmbed.size();
             failed_.fetch_add(docsToEmbed.size(), std::memory_order_relaxed);
             InternalEventBus::instance().incEmbedDropped(docsToEmbed.size());
             enqueueAttemptRepairStatusUpdate(std::move(hashesToUpdate),
@@ -2514,6 +2600,7 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
                                                   static_cast<double>(allChunks.size()))));
 
         auto markAllFailed = [&]() {
+            countedFailureDocs += docsToEmbed.size();
             failed_.fetch_add(docsToEmbed.size());
             if (documentAtATime) {
                 updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
@@ -2724,6 +2811,7 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             acc.sourceChunkIds.clear();
             docPreviews[docIdx].clear();
 
+            countedFailureDocs += 1;
             failed_.fetch_add(1, std::memory_order_relaxed);
             enqueueAttemptRepairStatusUpdate(std::vector<std::string>{doc.hash},
                                              metadata::RepairStatus::Failed,
@@ -3067,7 +3155,7 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
         }
         const auto successCount = successHashes.size();
 
-        if (documentAtATime && !successHashes.empty()) {
+        if (!successHashes.empty()) {
             auto* writer = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr;
             if (!writer) {
                 markAllFailed();
@@ -3077,9 +3165,41 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             // and committed fence even when the provider requested cancellation during inference.
             auto acknowledged = co_await writer->asyncCompleteEmbeddingDerivations(
                 ledger.tokensFor(successHashes), modelName, "EmbeddingService::documentCompletion");
-            if (!acknowledged || acknowledged.value().requested != 1 ||
-                acknowledged.value().completed != 1) {
+            if (!acknowledged || (documentAtATime && (acknowledged.value().requested != 1 ||
+                                                      acknowledged.value().completed != 1))) {
                 markAllFailed();
+                co_return;
+            }
+            // Record actual durable success before any fallible tail work. A partial ACK has
+            // no identities: retain all tokens; fenced cleanup rejects completed and newer ones.
+            const auto committed = acknowledged.value().completed;
+            acknowledgedDocs += committed;
+            // Count newly committed documents exactly once, even when tail work throws.
+            // Failed inputs, terminal skips, and admission reuse are not new completions.
+            processed_.fetch_add(committed, std::memory_order_relaxed);
+            const bool fullAck =
+                acknowledged.value().requested == successCount && committed == successCount;
+            if (fullAck) {
+                for (const auto& hash : successHashes) {
+                    ledger.byHash.erase(hash);
+                    std::erase_if(attemptTokens,
+                                  [&](const auto& token) { return token.hash == hash; });
+                }
+            }
+            updateMonitorCounts(
+                [&](InternalEventBus::EmbedJobMonitor& mon) { mon.succeededDocs += committed; });
+            if (!fullAck) {
+                const auto unacknowledged = successCount - std::min(successCount, committed);
+                countedFailureDocs += unacknowledged;
+                failed_.fetch_add(unacknowledged, std::memory_order_relaxed);
+                updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
+                    mon.failedDocs += unacknowledged;
+                });
+                enqueueAttemptRepairStatusUpdate(successHashes, metadata::RepairStatus::Failed,
+                                                 "EmbeddingService::partialCompletion");
+                documentBoundaryFailed = true;
+                finishMonitor("failed", "embedding completion partially acknowledged");
+                // Do not notify all hashes when the ACK cannot identify the committed subset.
                 co_return;
             }
         }
@@ -3121,7 +3241,6 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
                 jobTag, modelName);
         }
         updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
-            mon.succeededDocs += successCount;
             mon.processedChunks = mon.totalChunks;
             mon.processedDocs = mon.succeededDocs + mon.failedDocs + mon.skippedDocs;
             mon.detail = "completed docs=" + std::to_string(successCount);
@@ -3131,16 +3250,8 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             embeddingsCommittedCallback_(successHashes);
         }
 
-        // Publish readiness only for tokens still current: a document whose content changed
-        // while it was being embedded keeps has_embedding = 0 and is re-derived later.
-        if (!documentAtATime) {
-            enqueueEmbeddingCompletion(ledger.tokensFor(successHashes), modelName);
-        }
-
         logPoolState("job_end");
         finishMonitor("completed", "embedding job completed");
-
-        processed_.fetch_add(docsToEmbed.size());
 
         spdlog::debug("EmbeddingService: batch complete (succeeded={}, skipped={}, failed={})",
                       successCount, skipped, failedGather + (docsToEmbed.size() - successCount));
@@ -3148,6 +3259,7 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
     };
 
     // Account admission once, including documents omitted by skipExisting.
+    countedFailureDocs += failedGather;
     failed_.fetch_add(failedGather, std::memory_order_relaxed);
     updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
         mon.succeededDocs += completedGatherHashes.size();

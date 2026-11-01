@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <memory>
@@ -92,6 +93,7 @@ private:
 
 // Forward declarations
 class KnowledgeGraphStore;
+struct MetadataRepositoryTestAccess;
 
 // -----------------------------------------------------------------------------
 // Tree diff records (PBI-043)
@@ -1065,6 +1067,7 @@ public:
     }
 
 private:
+    friend struct MetadataRepositoryTestAccess;
     class ContentBatchOps;
 
     ConnectionPool& pool_;
@@ -1353,37 +1356,43 @@ private:
                 std::chrono::duration_cast<std::chrono::microseconds>(releaseEnd - attemptStart)
                     .count();
 
-            if (metadata_trace_enabled()) {
-                auto op = current_metadata_op();
-                if (result.has_value()) {
-                    spdlog::info(
-                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                        "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
-                        "total_ms={} total_us={} ok=true",
-                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
-                        queryMs, queryUs, releaseUs, totalMs, totalUs);
-                } else {
-                    spdlog::info(
-                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                        "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
-                        "total_ms={} total_us={} ok=false error='{}'",
-                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
-                        queryMs, queryUs, releaseUs, totalMs, totalUs, result.error().message);
+            // Observability must never discard a committed result or cause the operation to retry.
+            try {
+                if (metadata_trace_enabled()) {
+                    auto op = current_metadata_op();
+                    if (result.has_value()) {
+                        spdlog::info(
+                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                            "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
+                            "total_ms={} total_us={} ok=true",
+                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
+                            queryMs, queryUs, releaseUs, totalMs, totalUs);
+                    } else {
+                        spdlog::info(
+                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                            "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
+                            "total_ms={} total_us={} ok=false error='{}'",
+                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
+                            queryMs, queryUs, releaseUs, totalMs, totalUs, result.error().message);
+                    }
                 }
+            } catch (...) {
+                std::fputs("MetadataRepository: query trace unavailable\n", stderr);
             }
 
             if (result.has_value()) {
-                if (attempt > 0) {
-                    // Log successful retry at debug level
-                    spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
-                                  "after {} retries",
-                                  route, attempt);
+                try {
+                    if (attempt > 0) {
+                        // Log successful retry at debug level
+                        spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
+                                      "after {} retries",
+                                      route, attempt);
+                    }
+                } catch (...) {
+                    std::fputs("MetadataRepository: retry success trace unavailable\n", stderr);
                 }
-                if constexpr (std::is_void_v<T>) {
-                    return Result<void>();
-                } else {
-                    return result.value();
-                }
+                // NRVO / implicit move transfers the payload without an allocating copy.
+                return result;
             }
 
             // The scoped connection above has been returned to the pool before retry backoff.
