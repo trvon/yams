@@ -12,6 +12,7 @@
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/content_slice_options.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/time_filters.h>
 #include <yams/cli/time_parser.h>
@@ -52,6 +53,8 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("get", getDescription());
+        if (cli_)
+            cli_->registerReadOptions(*cmd);
 
         // Create option group for retrieval methods (only one can be used at a time)
         auto* group = cmd->add_option_group("retrieval_method");
@@ -84,6 +87,7 @@ public:
 
         cmd->add_option("-o,--output", outputPath_, "Output file path (default: stdout)");
         cmd->add_flag("--metadata-only", metadataOnly_, "Return only metadata (no bytes)");
+        registerContentSliceOptions(*cmd, slice_);
         cmd->add_option("--max-bytes", maxBytes_, "Maximum bytes to transfer (0 = unlimited)")
             ->default_val(0);
         cmd->add_option("--chunk-size", chunkSize_, "Streaming chunk size in bytes")
@@ -114,6 +118,7 @@ public:
     }
 
     Result<void> execute() override {
+        OutputBudget outputBudget(std::cout, cli_ ? cli_->outputBudgetChars() : 0);
         YAMS_ZONE_SCOPED_N("GetCommand::execute");
 
         try {
@@ -125,8 +130,8 @@ public:
                     if (!name_.empty() && name_[0] != '/' && !isValidHashPrefix(name_)) {
                         try {
                             name_ = std::filesystem::weakly_canonical(name_).string();
-                        } catch (const std::filesystem::filesystem_error&) {
-                            // Not a path, treat as name
+                        } catch (const std::filesystem::filesystem_error& e) {
+                            spdlog::debug("get: treating selector as a name: {}", e.what());
                         }
                     }
                 }
@@ -239,7 +244,7 @@ public:
             // Output options
             dreq.outputPath = outputPath_.string();
             dreq.metadataOnly = metadataOnly_;
-            dreq.maxBytes = maxBytes_;
+            dreq.maxBytes = slice_.active() ? 0 : maxBytes_;
             dreq.chunkSize = static_cast<uint32_t>(chunkSize_);
 
             // Content options
@@ -293,10 +298,12 @@ public:
                 } else if (resp.hasContent) {
                     // Content retrieval. DaemonClient decodes compressed transfers, so this is
                     // always the document itself.
-                    const std::string* content = &resp.content;
+                    const auto selectedContent = sliceContent(resp.content, slice_, maxBytes_);
+                    const std::string* content = &selectedContent;
                     if (outputPath_.empty() || outputPath_ == "-") {
                         // Output to stdout
                         std::cout << *content;
+                        noteOutputResult(std::cout);
                     } else {
                         // Write to file
                         std::ofstream outFile(outputPath_, std::ios::binary);
@@ -1201,6 +1208,7 @@ private:
 
     // Daemon streaming options
     bool metadataOnly_ = false;
+    ContentSliceOptions slice_;
     uint64_t maxBytes_ = 0;     // 0 = unlimited
     size_t chunkSize_ = 262144; // 256KB default
 };

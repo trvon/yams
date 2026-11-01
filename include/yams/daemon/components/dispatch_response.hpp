@@ -139,6 +139,13 @@ struct SearchResultMapper {
                 }
             }
 
+            if constexpr (requires { item.matches; }) {
+                if (!item.matches.empty()) {
+                    resultItem.metadata["snippet_line_number"] =
+                        std::to_string(item.matches.front().lineNumber);
+                    resultItem.metadata["compact_snippet"] = item.matches.front().line;
+                }
+            }
             if (!item.hash.empty() && !resultItem.metadata.contains("hash")) {
                 resultItem.metadata["hash"] = item.hash;
             }

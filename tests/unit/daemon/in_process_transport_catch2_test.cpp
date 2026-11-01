@@ -102,6 +102,39 @@ std::shared_ptr<yams::daemon::EmbeddedServiceHost> make_host_for_test(const fs::
 
 } // namespace
 
+TEST_CASE("Embedded host drains services before releasing completion executors",
+          "[daemon][inprocess][shutdown-order]") {
+#ifdef _WIN32
+    SKIP("Embedded host tests are unstable on Windows");
+#endif
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
+    const auto dataDir = yams::test::make_temp_dir("yams_embedded_executor_lifetime_");
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() {
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    } cleanup{dataDir};
+    yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
+    yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", dataDir.string());
+    yams::test::ScopedEnvVar configEnv("YAMS_CONFIG", (dataDir / "config.toml").string());
+    yams::test::ScopedEnvVar compatibility("YAMS_CONFIG_PATH", std::nullopt);
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::string("1"));
+    yams::test::ScopedEnvVar skipModels("YAMS_SKIP_MODEL_LOADING", std::string("1"));
+    yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
+    auto host = make_host_for_test(dataDir);
+    REQUIRE(host->shutdown());
+    auto snapshot = host->testing_getShutdownSnapshot(
+        yams::daemon::EmbeddedServiceHost::TestingShutdownPhase::BeforeIoContextRelease);
+    REQUIRE(snapshot);
+    CHECK(snapshot->ioContextAlive);
+    CHECK(snapshot->ioThreadCount == 0);
+    CHECK_FALSE(snapshot->serviceManagerAlive);
+    CHECK_FALSE(snapshot->dispatcherAlive);
+}
+
 TEST_CASE("InProcessTransport orders callbacks for stream-capable requests",
           "[daemon][streaming][inprocess]") {
 #ifdef _WIN32

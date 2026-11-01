@@ -1,6 +1,9 @@
 // Streaming handlers unit tests
 
+#include <iostream>
+#include <sstream>
 #include <catch2/catch_test_macros.hpp>
+#include <yams/daemon/client/daemon_client.h>
 
 #include <yams/core/types.h>
 #include <yams/daemon/client/streaming_handlers.h>
@@ -9,6 +12,91 @@
 using namespace yams::daemon;
 using namespace yams::daemon::client;
 using namespace yams;
+
+namespace {
+class ScopedStdoutCapture {
+public:
+    ScopedStdoutCapture() : previous_(std::cout.rdbuf(stream_.rdbuf())) {}
+    ~ScopedStdoutCapture() { std::cout.rdbuf(previous_); }
+    ScopedStdoutCapture(const ScopedStdoutCapture&) = delete;
+    ScopedStdoutCapture& operator=(const ScopedStdoutCapture&) = delete;
+    std::string str() const { return stream_.str(); }
+
+private:
+    std::ostringstream stream_;
+    std::streambuf* previous_;
+};
+} // namespace
+
+TEST_CASE("Accumulating path handlers never render behind the caller's result cap",
+          "[daemon][streaming][paths-output]") {
+    auto checkGrep = [](bool empty) {
+        DaemonClient::StreamingGrepHandler handler(true, 1);
+        GrepResponse header;
+        GrepResponse chunk;
+        if (!empty) {
+            GrepMatch first;
+            first.file = "/repo/first.cpp";
+            header.matches.push_back(first);
+            chunk.matches.push_back(first); // Per-file cap still applies across chunks.
+            GrepMatch second;
+            second.file = "/repo/second.cpp";
+            chunk.matches.push_back(second);
+        }
+        std::string output;
+        {
+            ScopedStdoutCapture capture;
+            handler.onHeaderReceived(header);
+            handler.onChunkReceived(chunk, true);
+            handler.onComplete();
+            output = capture.str();
+        }
+        CHECK(output.empty());
+        auto result = handler.getResults();
+        REQUIRE(result);
+        CHECK(result.value().matches.size() == (empty ? 0 : 2));
+    };
+    auto checkList = [](bool empty) {
+        DaemonClient::StreamingListHandler handler(true, 2);
+        ListResponse header;
+        ListResponse chunk;
+        if (!empty) {
+            ListEntry first;
+            first.path = "/repo/first.cpp";
+            header.items.push_back(first);
+            ListEntry second;
+            second.path = "/repo/second.cpp";
+            chunk.items.push_back(second);
+            ListEntry third;
+            third.path = "/repo/third.cpp";
+            chunk.items.push_back(third);
+        }
+        std::string output;
+        {
+            ScopedStdoutCapture capture;
+            handler.onHeaderReceived(header);
+            handler.onChunkReceived(chunk, true);
+            handler.onComplete();
+            output = capture.str();
+        }
+        CHECK(output.empty());
+        auto result = handler.getResults();
+        REQUIRE(result);
+        CHECK(result.value().items.size() == (empty ? 0 : 2));
+    };
+    SECTION("grep header and chunks") {
+        checkGrep(false);
+    }
+    SECTION("grep empty") {
+        checkGrep(true);
+    }
+    SECTION("list header and chunks") {
+        checkList(false);
+    }
+    SECTION("list empty") {
+        checkList(true);
+    }
+}
 
 TEST_CASE("UnaryHandler stores response on header", "[daemon][streaming][unit]") {
     auto handler = std::make_shared<UnaryHandler<SuccessResponse>>();

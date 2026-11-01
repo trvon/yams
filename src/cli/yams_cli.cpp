@@ -14,6 +14,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/crypto/hasher.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/ConfigResolver.h>
@@ -161,6 +162,40 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
 
     app_->add_flag("-v,--verbose", verbose_, "Enable verbose output");
     app_->add_flag("--json", jsonOutput_, "Output in JSON format");
+
+    const auto values = yams::config::parse_simple_toml(getConfigPath());
+    if (auto it = values.find("cli.budget_chars"); it != values.end()) {
+        std::size_t value = 0;
+        const auto [end, error] =
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), value);
+        if (error == std::errc{} && end == it->second.data() + it->second.size())
+            retrievalOutputConfig_.budgetChars = value;
+    }
+    // Explicit CLI values override this constructor default; env overrides typed TOML defaults.
+    if (const auto env = yams::config::getenv_copy("YAMS_BUDGET_CHARS"); !env.empty()) {
+        std::size_t value = 0;
+        const auto [end, error] = std::from_chars(env.data(), env.data() + env.size(), value);
+        if (error == std::errc{} && end == env.data() + env.size())
+            retrievalOutputConfig_.budgetChars = value;
+    }
+    if (auto it = values.find("search.exclude_paths"); it != values.end()) {
+        retrievalOutputConfig_.excludePaths.clear();
+        for (const auto& path : yams::config::parse_path_list(it->second))
+            retrievalOutputConfig_.excludePaths.push_back(path.generic_string());
+    }
+    for (auto& path : retrievalOutputConfig_.excludePaths)
+        path = yams::config::expand_tilde(path).generic_string();
+    registerReadOptions(*app_);
+}
+
+void YamsCLI::registerReadOptions(CLI::App& command) {
+    command
+        .add_option("--budget-chars", retrievalOutputConfig_.budgetChars,
+                    "Bound read-command stdout in bytes at line boundaries (0: unlimited; "
+                    "env: YAMS_BUDGET_CHARS; config: cli.budget_chars); appends an explicit "
+                    "truncation marker")
+        ->check(CLI::NonNegativeNumber);
+    command.add_flag("--quiet", quiet_, "Suppress retrieval hints and tips");
 }
 
 YamsCLI::~YamsCLI() {
@@ -672,6 +707,46 @@ int YamsCLI::run(int argc, char* argv[]) {
         std::cerr << "[FAIL] Unexpected error: " << e.what() << "\n";
         spdlog::error("Unexpected error: {}", e.what());
         return 1;
+    }
+}
+
+Result<RepoIndex> YamsCLI::readRepoIndex(const std::filesystem::path& root) {
+    if (!std::filesystem::exists(dataPath_ / "yams.db"))
+        return RepoIndex{};
+    auto initialized = ensureMetadataInitialized();
+    if (!initialized)
+        return initialized.error();
+    metadata::DocumentQueryOptions query;
+    query.usePathLocations = true;
+    query.currentPathsOnly = true;
+    query.pathPrefix = root.generic_string();
+    query.prefixIsDirectory = true;
+    query.orderByIndexedDesc = true;
+    auto documents = metadataRepo_->queryDocuments(query);
+    if (!documents)
+        return documents.error();
+    RepoIndex index;
+    for (const auto& doc : documents.value()) {
+        const auto path = std::filesystem::path(doc.filePath).lexically_normal();
+        const auto indexed = doc.indexedTime.time_since_epoch().count();
+        const auto found = index.find(path);
+        if (found == index.end() || indexed > found->second.indexed ||
+            (indexed == found->second.indexed && doc.id > found->second.documentId))
+            index[path] = RepoIndexFile{doc.sha256Hash, indexed, doc.id};
+    }
+    return index;
+}
+
+Result<RepoDiff> YamsCLI::repoFreshness(const RepoFiles& files) {
+    auto index = readRepoIndex(files.root);
+    if (!index)
+        return index.error();
+    try {
+        auto hasher = crypto::createSHA256Hasher();
+        return compareRepoIndex(files, index.value(),
+                                [&](const auto& path) { return hasher->hashFile(path); });
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::IOError, error.what()};
     }
 }
 

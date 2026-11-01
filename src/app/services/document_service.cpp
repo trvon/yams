@@ -1106,6 +1106,11 @@ private:
             return;
         }
 
+        // A basename selector must not become a directory-prefix query (e.g. *handoff*).
+        if (pattern.find_first_of("/\\") == std::string::npos) {
+            queryOpts.fileNamePattern = globToSqlLike(pattern);
+            return;
+        }
         auto wildcardPos = pattern.find_first_of("*?");
         const bool hasWildcard = wildcardPos != std::string::npos;
         if (!hasWildcard) {
@@ -1215,6 +1220,15 @@ private:
         return ids;
     }
 
+    Result<MetadataMap> listMetadataForPath(const metadata::DocumentInfo& doc) {
+        auto location = ctx_.metadataRepo->getDocumentPathMetadata(doc.filePath, doc.id);
+        if (!location)
+            return location.error();
+        if (location.value())
+            return std::move(*location.value());
+        return ctx_.metadataRepo->getAllMetadata(doc.id);
+    }
+
     void applyFallbackListFilters(std::vector<metadata::DocumentInfo>& docs,
                                   const ListDocumentsRequest& req) {
         if (!req.extension.empty()) {
@@ -1229,7 +1243,7 @@ private:
         if (!req.tags.empty()) {
             std::vector<metadata::DocumentInfo> filtered;
             for (const auto& doc : docs) {
-                auto md = ctx_.metadataRepo->getAllMetadata(doc.id);
+                auto md = listMetadataForPath(doc);
                 if (!md) {
                     continue;
                 }
@@ -1248,7 +1262,7 @@ private:
         if (!req.metadataFilters.empty()) {
             std::vector<metadata::DocumentInfo> filtered;
             for (const auto& doc : docs) {
-                auto md = ctx_.metadataRepo->getAllMetadata(doc.id);
+                auto md = listMetadataForPath(doc);
                 if (!md) {
                     continue;
                 }
@@ -1313,15 +1327,28 @@ private:
         return {SnippetPreviewCache{}, true};
     }
 
-    static DocumentEntry buildHydratedListEntry(const ListDocumentsRequest& req,
-                                                const metadata::DocumentInfo& doc,
-                                                const MetadataCache& metadataCache,
-                                                const SnippetPreviewCache& snippetPreviewCache,
-                                                bool snippetFetchFailed) {
+    DocumentEntry buildHydratedListEntry(const ListDocumentsRequest& req,
+                                         const metadata::DocumentInfo& doc,
+                                         const MetadataCache& metadataCache,
+                                         const SnippetPreviewCache& snippetPreviewCache,
+                                         bool snippetFetchFailed) {
         DocumentEntry entry = makeBaseListEntry(doc);
         const MetadataMap* cachedMetadata = nullptr;
         if (auto it = metadataCache.find(doc.id); it != metadataCache.end()) {
             cachedMetadata = &it->second;
+        }
+        MetadataMap locationMetadata;
+        if (req.showMetadata || req.showTags) {
+            auto location = ctx_.metadataRepo->getDocumentPathMetadata(doc.filePath, doc.id);
+            if (location && location.value()) {
+                locationMetadata = std::move(*location.value());
+                cachedMetadata = &locationMetadata;
+            } else if (!location) {
+                // Never leak a sibling location's metadata after a failed lookup.
+                cachedMetadata = nullptr;
+                spdlog::debug("Failed to hydrate path metadata for {}: {}", doc.filePath,
+                              location.error().message);
+            }
         }
 
         if (req.showSnippets && req.snippetLength > 0) {
@@ -1405,7 +1432,7 @@ public:
         out.bytesStored = storeRes.value().bytesStored;
         out.bytesDeduped = storeRes.value().bytesDeduped;
 
-        // Best-effort: insert/update metadata repository entry
+        // Commit corpus identity before acknowledging an indexed store.
         if (ctx_.metadataRepo) {
             const auto metadataPrepareStart = std::chrono::steady_clock::now();
             auto now = std::chrono::system_clock::now();
@@ -1428,13 +1455,15 @@ public:
                              "metadata insert writer unavailable in AppContext"};
             }
             metadata::BatchDocumentInsert insertRecord{.info = info,
-                                                       .tags = std::move(tagPairs),
+                                                       .tags = tagPairs,
                                                        .snapshot = std::move(snapshotRecord),
                                                        .updatePathTreeInTransaction =
                                                            req.combineMetadataPathTree,
                                                        .initializePathSeriesInTransaction = true};
             auto ins = ctx_.metadataInsertWriter->submit(std::move(insertRecord)).get();
             recordDocumentStorePhase("metadata_insert", repoInsertStart);
+            if (!ins)
+                return ins.error();
             if (ins) {
                 const int64_t docId = ins.value().documentId;
                 out.documentId = docId;
@@ -1444,6 +1473,9 @@ public:
                 }
                 applyStorePathTree(req, info, docId);
                 syncStoreKnowledgeGraph(info, snapshotId);
+                auto pathStored = ctx_.metadataRepo->recordDocumentPath(info, docId, tagPairs);
+                if (!pathStored)
+                    return pathStored.error();
                 enqueueStoreFuzzyTerms(info);
                 applyStoreInlineContentIndex(req, info, docId, usePath);
             }
@@ -1538,6 +1570,7 @@ public:
             metadata::DocumentInfo info;
             std::string snapshotId;
             std::string usePath;
+            std::vector<std::pair<std::string, metadata::MetadataValue>> pathMetadata;
             std::future<Result<metadata::DocumentInsertOutcome>> future;
         };
         std::vector<PendingMetadata> pendingMetadata;
@@ -1583,7 +1616,7 @@ public:
 
             metadata::BatchDocumentInsert insertRecord{
                 .info = info,
-                .tags = std::move(tagPairs),
+                .tags = tagPairs,
                 .snapshot = std::move(snapshotRecord),
                 .updatePathTreeInTransaction = requests[item.requestIndex].combineMetadataPathTree,
                 .initializePathSeriesInTransaction = true};
@@ -1594,6 +1627,7 @@ public:
                                        .info = std::move(info),
                                        .snapshotId = item.snapshotId,
                                        .usePath = item.usePath,
+                                       .pathMetadata = std::move(tagPairs),
                                        .future = std::move(future)});
         }
 
@@ -1621,6 +1655,12 @@ public:
             }
             applyStorePathTree(request, pending.info, response.documentId);
             syncStoreKnowledgeGraph(pending.info, pending.snapshotId);
+            auto pathStored = ctx_.metadataRepo->recordDocumentPath(
+                pending.info, response.documentId, pending.pathMetadata);
+            if (!pathStored) {
+                outcomes[pending.requestIndex] = pathStored.error();
+                continue;
+            }
             auto documentTerms = collectDocumentTermsForFuzzySearch(pending.info);
             batchFuzzyTerms.insert(batchFuzzyTerms.end(),
                                    std::make_move_iterator(documentTerms.begin()),
@@ -1648,7 +1688,13 @@ public:
     // --- store() side-effect helpers (behavior-preserving extractions) ---
 
     void applyStoreVersioning(const metadata::DocumentInfo& info, int64_t docId) {
-        // Path-series versioning (best-effort)
+        auto canonical = ctx_.metadataRepo->getDocument(docId);
+        if (!canonical || !canonical.value() || canonical.value()->filePath != info.filePath) {
+            // An alias has its own head/revision; never rewrite the canonical
+            // content row's series on behalf of a sibling location.
+            return;
+        }
+        // Legacy content-row path-series versioning (best-effort).
         const auto versioningStart = std::chrono::steady_clock::now();
         try {
             auto* writeCoord = getWriteCoordinator();
@@ -2508,7 +2554,11 @@ public:
         std::size_t totalFoundApprox = 0;
 
         metadata::DocumentQueryOptions queryOpts;
+        queryOpts.usePathLocations = true;
         queryOpts.limit = req.limit > 0 ? req.limit : 0;
+        if (req.recent && *req.recent > 0)
+            queryOpts.limit =
+                queryOpts.limit > 0 ? std::min(queryOpts.limit, *req.recent) : *req.recent;
         queryOpts.offset = std::max(0, req.offset);
         queryOpts.pathsOnly = req.pathsOnly;
 
@@ -2586,7 +2636,14 @@ public:
         if (!usedQuery) {
             std::string sqlPattern =
                 canonicalPattern.empty() ? "%" : globToSqlLike(canonicalPattern);
-            auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, sqlPattern);
+            auto fallbackQuery = queryOpts;
+            fallbackQuery.limit = 0;
+            fallbackQuery.offset = 0;
+            // Preserve the legacy fallback's any-tag semantics; the local
+            // metadata-aware filter below applies them before pagination.
+            fallbackQuery.tags.clear();
+            fallbackQuery.likePattern = sqlPattern;
+            auto docsRes = ctx_.metadataRepo->queryDocuments(fallbackQuery);
             if (!docsRes) {
                 if (listCanceled()) {
                     return canceledError();

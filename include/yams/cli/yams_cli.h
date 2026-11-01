@@ -9,6 +9,8 @@
 #include <yams/api/content_store.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/output_controls.h>
+#include <yams/cli/repo_files.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -140,6 +142,13 @@ public:
      */
     bool getJsonOutput() const { return jsonOutput_; }
 
+    void registerReadOptions(CLI::App& command);
+    std::size_t outputBudgetChars() const { return retrievalOutputConfig_.budgetChars; }
+    bool getQuiet() const { return quiet_; }
+    const RetrievalOutputConfig& retrievalOutputConfig() const { return retrievalOutputConfig_; }
+    Result<RepoIndex> readRepoIndex(const std::filesystem::path& root);
+    Result<RepoDiff> repoFreshness(const RepoFiles& files);
+
     /**
      * Ensure storage is initialized (lazy)
      */
@@ -264,6 +273,8 @@ private:
     std::string embeddingModelName_;
     bool verbose_ = false;
     bool jsonOutput_ = false;
+    bool quiet_ = false;
+    RetrievalOutputConfig retrievalOutputConfig_;
 
     // Deferred execution: a single command to run post-parse
     ICommand* pendingCommand_ = nullptr;

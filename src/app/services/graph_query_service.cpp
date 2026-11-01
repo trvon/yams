@@ -1,4 +1,5 @@
 #include <yams/app/services/graph_query_service.hpp>
+#include <yams/metadata/path_utils.h>
 
 #include <yams/metadata/kg_relation_summary.h>
 
@@ -337,6 +338,25 @@ private:
 
         // Document name
         if (req.documentName.has_value()) {
+            const bool versionQuery =
+                std::find(req.relationFilters.begin(), req.relationFilters.end(),
+                          GraphRelationType::PathVersion) != req.relationFilters.end() ||
+                std::any_of(req.relationNames.begin(), req.relationNames.end(),
+                            [](const auto& name) {
+                                const auto relation = normalizeRelationName(name);
+                                return relation == "path_version" || relation == "has_version";
+                            });
+            if (versionQuery) {
+                // Versions belong to a logical path, not to one content blob.
+                // Starting at the blob makes the other revisions unreachable.
+                const auto path =
+                    metadata::computePathDerivedValues(*req.documentName).normalizedPath;
+                auto logical = kgStore_->getNodeByKey("path:logical:" + path);
+                if (!logical)
+                    return logical.error();
+                if (logical.value())
+                    return std::optional<std::int64_t>{logical.value()->id};
+            }
             return resolveToNodeId(req.documentName.value());
         }
 
@@ -413,8 +433,11 @@ private:
         } else if (node.nodeKey.starts_with("path:")) {
             // Path node - extract snapshot and path info
             // Format: "path:snapshotId:normalized_path"
-            auto firstColon = node.nodeKey.find(':', 5);
-            if (firstColon != std::string::npos) {
+            if (node.nodeKey.starts_with("path:logical:")) {
+                metadata.normalizedPath =
+                    node.nodeKey.substr(std::string_view("path:logical:").size());
+            } else if (const auto firstColon = node.nodeKey.find(':', 5);
+                       firstColon != std::string::npos) {
                 metadata.snapshotId = node.nodeKey.substr(5, firstColon - 5);
                 metadata.normalizedPath = node.nodeKey.substr(firstColon + 1);
             }
