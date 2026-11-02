@@ -7,6 +7,8 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,9 +31,32 @@ EmbeddingConfig make_cfg(size_t dim = 256) {
     return cfg;
 }
 
+class ConfigurableSimeonProfile {
+public:
+    ConfigurableSimeonProfile() {
+        for (const char* name :
+             {"YAMS_SIMEON_NGRAM_MODE", "YAMS_SIMEON_NGRAM_MIN", "YAMS_SIMEON_NGRAM_MAX",
+              "YAMS_SIMEON_SKETCH_DIM", "YAMS_SIMEON_OUTPUT_DIM", "YAMS_SIMEON_PROJECTION",
+              "YAMS_SIMEON_PQ_BYTES"}) {
+            encoderEnvironment_.emplace_back(name, std::nullopt);
+        }
+        const auto configPath = directory_.path() / "config.toml";
+        std::ofstream(configPath) << "[embeddings.simeon]\nencoder_profile = \"configurable\"\n";
+        config_.set(configPath.string());
+        compatibilityConfig_.unset();
+    }
+
+private:
+    yams::test::TempDirGuard directory_{"yams_simeon_configurable_"};
+    yams::test::ScopedEnvVar config_{"YAMS_CONFIG"};
+    yams::test::ScopedEnvVar compatibilityConfig_{"YAMS_CONFIG_PATH"};
+    std::vector<yams::test::ScopedEnvVar> encoderEnvironment_;
+};
+
 } // namespace
 
 TEST_CASE("SimeonBackend initializes and reports its dimension", "[vector][simeon]") {
+    ConfigurableSimeonProfile profile;
     auto backend = makeSimeonBackend(make_cfg(384));
     REQUIRE(backend != nullptr);
     REQUIRE(backend->isAvailable());
@@ -55,6 +80,7 @@ TEST_CASE("SimeonBackend fixed hash profile exposes the frozen retrieval space",
 }
 
 TEST_CASE("SimeonBackend produces deterministic, unit-norm embeddings", "[vector][simeon]") {
+    ConfigurableSimeonProfile profile;
     auto backend = makeSimeonBackend(make_cfg(256));
     REQUIRE(backend->initialize());
 
@@ -73,6 +99,7 @@ TEST_CASE("SimeonBackend produces deterministic, unit-norm embeddings", "[vector
 }
 
 TEST_CASE("SimeonBackend batch matches per-item encoding", "[vector][simeon]") {
+    ConfigurableSimeonProfile profile;
     auto backend = makeSimeonBackend(make_cfg(128));
     REQUIRE(backend->initialize());
 
@@ -94,6 +121,7 @@ TEST_CASE("SimeonBackend batch matches per-item encoding", "[vector][simeon]") {
 
 TEST_CASE("EmbeddingGenerator trusts typed backend over ambient environment",
           "[vector][simeon][config]") {
+    ConfigurableSimeonProfile profile;
     yams::test::ScopedEnvVar backend{"YAMS_EMBED_BACKEND", std::string{"daemon"}};
 
     EmbeddingConfig cfg;
@@ -110,6 +138,7 @@ TEST_CASE("EmbeddingGenerator trusts typed backend over ambient environment",
 }
 
 TEST_CASE("EmbeddingGenerator selects Simeon when configured directly", "[vector][simeon]") {
+    ConfigurableSimeonProfile profile;
     EmbeddingConfig cfg;
     cfg.backend = EmbeddingConfig::Backend::Simeon;
     cfg.backend_is_resolved = true;
@@ -124,6 +153,7 @@ TEST_CASE("EmbeddingGenerator selects Simeon when configured directly", "[vector
 
 TEST_CASE("EmbeddingGenerator moved-from observers report neutral state",
           "[vector][embedding-generator][move][catch2]") {
+    ConfigurableSimeonProfile profile;
     EmbeddingGenerator source(make_cfg(128));
     EmbeddingGenerator destination(std::move(source));
 

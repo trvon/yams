@@ -1622,7 +1622,7 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
 }
 
 boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
-    YAMS_ZONE_SCOPED_N("Embedding::processEmbedJob");
+    YAMS_ZONE_SYNC_N(processEmbedJobZone, "Embedding::processEmbedJob");
     const bool timingEnabled = []() {
         if (const char* s = std::getenv("YAMS_EMBED_DEBUG_TIMINGS")) {
             return std::string{s} == "1" || std::string{s} == "true" || std::string{s} == "yes";
@@ -3296,6 +3296,7 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
     failedGatherHashes.clear();
     failedGather = 0;
     insideDocumentBoundary = documentAtATime;
+    YAMS_ZONE_END(processEmbedJobZone);
     for (std::size_t first = 0; first < candidates.size();) {
         if (isJobCanceled() || stop_.load(std::memory_order_acquire)) {
             std::vector<std::string> pending;

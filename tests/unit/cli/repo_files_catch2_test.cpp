@@ -53,11 +53,11 @@ TEST_CASE("CLI freshness detects edits and missing indexed files", "[cli][repo][
     repo.write("a.txt", "old");
     REQUIRE(runCliProcess({"git", "-C", repo.root.string(), "add", "--", "a.txt"}).exitCode == 0);
     const auto files = readRepoFiles(repo.root);
-    RepoIndex index{{repo.root / "a.txt", {"old", 1}}};
+    RepoIndex index{{files.root / "a.txt", {"old", 1}}};
     CHECK_FALSE(compareRepoIndex(files, index, contents).stale());
     repo.write("a.txt", "new");
     CHECK(compareRepoIndex(files, index, contents).changed.size() == 1);
-    index[repo.root / "a.txt"].hash = "new";
+    index[files.root / "a.txt"].hash = "new";
     CHECK_FALSE(compareRepoIndex(files, index, contents).stale());
     std::filesystem::remove(repo.root / "a.txt");
     const auto diff = compareRepoIndex(files, index, contents);
@@ -69,9 +69,10 @@ TEST_CASE("CLI repo comparison ignores sibling worktree index rows", "[cli][repo
     TempRepo repo;
     repo.write("a.txt", "content");
     REQUIRE(runCliProcess({"git", "-C", repo.root.string(), "add", "--", "a.txt"}).exitCode == 0);
-    RepoIndex index{{repo.root / "a.txt", {"content", 1}},
-                    {RepoPath(repo.root.string() + "-other") / "a.txt", {"different", 1}}};
-    CHECK_FALSE(compareRepoIndex(readRepoFiles(repo.root), index, contents).stale());
+    const auto files = readRepoFiles(repo.root);
+    RepoIndex index{{files.root / "a.txt", {"content", 1}},
+                    {RepoPath(files.root.string() + "-other") / "a.txt", {"different", 1}}};
+    CHECK_FALSE(compareRepoIndex(files, index, contents).stale());
 }
 
 TEST_CASE("CLI worktree names resolve to distinct canonical roots", "[cli][repo][worktree]") {
