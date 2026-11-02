@@ -20,10 +20,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <exception>
 #include <string>
-#include <thread>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -160,7 +159,7 @@ void EmbeddingService::recordPhaseTiming(std::string_view phase,
     const auto nonNegativeUs = static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsedUs));
     try {
         sink->record(phase, nonNegativeUs);
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // Instrumentation must never affect embedding or semantic-graph work.
     }
 }
@@ -259,17 +258,27 @@ void EmbeddingService::shutdown() {
                                      "docs={} during shutdown",
                                      droppedJobs, droppedDocs);
                     }
+                } catch (const std::exception& e) {
+                    spdlog::debug("EmbeddingService shutdown queue drain failed: {}", e.what());
                 } catch (...) {
+                    spdlog::debug("EmbeddingService shutdown queue drain failed");
                 }
                 lifecycleCv_.notify_all();
                 try {
                     done.set_value();
+                } catch (const std::exception& e) {
+                    spdlog::debug("EmbeddingService shutdown promise settlement failed: {}",
+                                  e.what());
                 } catch (...) {
+                    spdlog::debug("EmbeddingService shutdown promise settlement failed");
                 }
             });
             (void)drainFuture.wait_for(std::chrono::milliseconds(1500));
         }
+    } catch (const std::exception& e) {
+        spdlog::debug("EmbeddingService shutdown drain setup failed: {}", e.what());
     } catch (...) {
+        spdlog::debug("EmbeddingService shutdown drain setup failed");
     }
 
     std::chrono::milliseconds maxWait{30000};
@@ -435,19 +444,21 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
     // graph sparse enough for CC purity while covering more query seeds.
     constexpr std::size_t kDefaultSemanticNeighborTopK = 8;
     const auto semanticTopK = []() {
-        if (const char* env = std::getenv("YAMS_GRAPH_SEMANTIC_TOPK")) {
+        if (const auto env = yams::config::getenv_optional("YAMS_GRAPH_SEMANTIC_TOPK")) {
             try {
-                return static_cast<size_t>(std::max(1, std::stoi(env)));
-            } catch (...) {
+                return static_cast<size_t>(std::max(1, std::stoi(*env)));
+            } catch (const std::exception& e) {
+                spdlog::debug("Ignoring invalid YAMS_GRAPH_SEMANTIC_TOPK: {}", e.what());
             }
         }
         return kDefaultSemanticNeighborTopK;
     }();
     const auto explicitSemanticThreshold = []() -> std::optional<float> {
-        if (const char* env = std::getenv("YAMS_GRAPH_SEMANTIC_THRESHOLD")) {
+        if (const auto env = yams::config::getenv_optional("YAMS_GRAPH_SEMANTIC_THRESHOLD")) {
             try {
-                return embed::semanticExplicitThreshold(std::stof(env));
-            } catch (...) {
+                return embed::semanticExplicitThreshold(std::stof(*env));
+            } catch (const std::exception& e) {
+                spdlog::debug("Ignoring invalid YAMS_GRAPH_SEMANTIC_THRESHOLD: {}", e.what());
             }
         }
         return std::nullopt;
@@ -569,9 +580,10 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
         std::size_t candidateNeighborCount = 0;
 
         const bool useHnswOverride = []() {
-            if (const char* env = std::getenv("YAMS_GRAPH_SEMANTIC_USE_HNSW")) {
-                if (env[0] == '0' || env[0] == 'f' || env[0] == 'F' || env[0] == 'n' ||
-                    env[0] == 'N') {
+            if (const auto env = yams::config::getenv_optional("YAMS_GRAPH_SEMANTIC_USE_HNSW");
+                env && !env->empty()) {
+                if ((*env)[0] == '0' || (*env)[0] == 'f' || (*env)[0] == 'F' || (*env)[0] == 'n' ||
+                    (*env)[0] == 'N') {
                     return false;
                 }
             }
@@ -1225,8 +1237,8 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
     spdlog::info("[EmbeddingService] Parallel poller started");
 
     const bool poolDebug = []() {
-        if (const char* s = std::getenv("YAMS_EMBED_DEBUG_POOL")) {
-            return std::string{s} == "1" || std::string{s} == "true" || std::string{s} == "yes";
+        if (const auto value = yams::config::getenv_optional("YAMS_EMBED_DEBUG_POOL")) {
+            return *value == "1" || *value == "true" || *value == "yes";
         }
         return false;
     }();
@@ -1247,7 +1259,10 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
         if (getPreferredModel_) {
             try {
                 preferred = getPreferredModel_();
+            } catch (const std::exception& e) {
+                spdlog::debug("EmbeddingService preferred-model lookup failed: {}", e.what());
             } catch (...) {
+                spdlog::debug("EmbeddingService preferred-model lookup failed");
             }
         }
         std::transform(preferred.begin(), preferred.end(), preferred.begin(),
@@ -1274,8 +1289,8 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
         const std::size_t bufferedBacklog = channelBacklog + this->pendingJobs_.size();
 
         const bool allowRamp = []() {
-            if (const char* s = std::getenv("YAMS_EMBED_ALLOW_RAMP")) {
-                return std::string{s} == "1" || std::string{s} == "true" || std::string{s} == "yes";
+            if (const auto value = yams::config::getenv_optional("YAMS_EMBED_ALLOW_RAMP")) {
+                return *value == "1" || *value == "true" || *value == "yes";
             }
             return false;
         }();
@@ -1301,7 +1316,10 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
             const std::size_t onnxBudget =
                 std::max<std::size_t>(1u, embedReserved + sharedAvailable);
             effectiveMaxConcurrent = std::min(effectiveMaxConcurrent, onnxBudget);
+        } catch (const std::exception& e) {
+            spdlog::debug("EmbeddingService ONNX concurrency snapshot failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("EmbeddingService ONNX concurrency snapshot failed");
         }
         const bool applyCoremlUnifiedCap = coremlUnifiedHardware && !usesSimeonPreferredModel();
         if (applyCoremlUnifiedCap) {
@@ -1563,8 +1581,35 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                                                            ? config_.maxPreparedPayloadBytes
                                                            : kDefaultPreparedPayloadBytes;
                 while (!bucket.hashes.empty() && inFlight_.load() < effectiveMaxConcurrent) {
-                    dispatchJob(embed::takeJobPrefix(bucket, maxJobDocCap, preparedByteBudget,
-                                                     preparedIndex));
+                    const std::size_t bucketDocuments = bucket.hashes.size();
+                    auto dispatch = embed::takeJobPrefix(bucket, maxJobDocCap, preparedByteBudget,
+                                                         preparedIndex);
+                    if (poolDebug) {
+                        const std::size_t preparedBytes =
+                            embed::preparedPayloadBytes(dispatch.preparedDocs);
+                        std::unordered_set<std::string_view> preparedHashes;
+                        preparedHashes.reserve(dispatch.preparedDocs.size());
+                        for (const auto& prepared : dispatch.preparedDocs) {
+                            preparedHashes.emplace(prepared.hash);
+                        }
+                        const auto missingPrepared = static_cast<std::size_t>(
+                            std::count_if(dispatch.hashes.begin(), dispatch.hashes.end(),
+                                          [&](const std::string& hash) {
+                                              return !preparedHashes.contains(hash);
+                                          }));
+                        const auto countLimit = std::min(maxJobDocCap, bucketDocuments);
+                        const bool byteLimited =
+                            !bucket.hashes.empty() && dispatch.hashes.size() < countLimit;
+                        spdlog::info(
+                            "[EmbeddingService] prepared_dispatch model='{}' dispatched_docs={} "
+                            "prepared_docs={} prepared_unique_hashes={} missing_prepared_hashes={} "
+                            "prepared_bytes={} remaining_docs={} budget_bytes={} byte_limited={}",
+                            entry.key.empty() ? "<default>" : entry.key, dispatch.hashes.size(),
+                            dispatch.preparedDocs.size(), preparedHashes.size(), missingPrepared,
+                            preparedBytes, bucket.hashes.size(), preparedByteBudget,
+                            byteLimited ? 1 : 0);
+                    }
+                    dispatchJob(std::move(dispatch));
                 }
 
                 if (!bucket.hashes.empty()) {
@@ -1624,21 +1669,21 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
 boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     YAMS_ZONE_SYNC_N(processEmbedJobZone, "Embedding::processEmbedJob");
     const bool timingEnabled = []() {
-        if (const char* s = std::getenv("YAMS_EMBED_DEBUG_TIMINGS")) {
-            return std::string{s} == "1" || std::string{s} == "true" || std::string{s} == "yes";
+        if (const auto value = yams::config::getenv_optional("YAMS_EMBED_DEBUG_TIMINGS")) {
+            return *value == "1" || *value == "true" || *value == "yes";
         }
         return false;
     }();
     const bool poolDebug = []() {
-        if (const char* s = std::getenv("YAMS_EMBED_DEBUG_POOL")) {
-            return std::string{s} == "1" || std::string{s} == "true" || std::string{s} == "yes";
+        if (const auto value = yams::config::getenv_optional("YAMS_EMBED_DEBUG_POOL")) {
+            return *value == "1" || *value == "true" || *value == "yes";
         }
         return false;
     }();
     uint64_t warnMs = 5000;
-    if (const char* s = std::getenv("YAMS_EMBED_TIMING_WARN_MS")) {
+    if (const auto value = yams::config::getenv_optional("YAMS_EMBED_TIMING_WARN_MS")) {
         try {
-            warnMs = static_cast<uint64_t>(std::stoull(s));
+            warnMs = static_cast<uint64_t>(std::stoull(*value));
         } catch (const std::exception& e) {
             spdlog::debug("Ignoring invalid YAMS_EMBED_TIMING_WARN_MS: {}", e.what());
         }
@@ -1665,8 +1710,8 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
     };
 
     auto hnswCheckpointThresholdForLog = [&]() -> std::string {
-        if (const char* env = std::getenv("YAMS_HNSW_CHECKPOINT_THRESHOLD")) {
-            return env;
+        if (const auto value = yams::config::getenv_optional("YAMS_HNSW_CHECKPOINT_THRESHOLD")) {
+            return *value;
         }
         return "default";
     };
@@ -1911,7 +1956,10 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
         try {
             loadedCount = provider->getLoadedModelCount();
             loadedModels = provider->getLoadedModels();
+        } catch (const std::exception& e) {
+            spdlog::debug("EmbeddingService model-pool inspection failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("EmbeddingService model-pool inspection failed");
         }
         std::string preview;
         const std::size_t limit = std::min<std::size_t>(loadedModels.size(), 4u);
@@ -2666,10 +2714,11 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
         updateMonitor("inferring", "generating embeddings");
 
         uint64_t inferWarnMs = 15000;
-        if (const char* s = std::getenv("YAMS_EMBED_SUBBATCH_WARN_MS")) {
+        if (const auto value = yams::config::getenv_optional("YAMS_EMBED_SUBBATCH_WARN_MS")) {
             try {
-                inferWarnMs = static_cast<uint64_t>(std::stoull(s));
-            } catch (...) {
+                inferWarnMs = static_cast<uint64_t>(std::stoull(*value));
+            } catch (const std::exception& e) {
+                spdlog::debug("Ignoring invalid YAMS_EMBED_SUBBATCH_WARN_MS: {}", e.what());
             }
         }
 
@@ -2694,16 +2743,17 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             (coremlUnified && !modelPreparedByCoordinator) ? 8u : 16u;
         std::size_t adaptiveBatchCap =
             std::min<std::size_t>(kMaxBatchSize, defaultAdaptiveStartCap);
-        const char* safeCapEnv = std::getenv("YAMS_EMBED_GPU_SAFE_BATCH_CAP");
+        const auto safeCapEnv = yams::config::getenv_optional("YAMS_EMBED_GPU_SAFE_BATCH_CAP");
         if (safeCapEnv) {
             try {
-                const std::size_t parsed = static_cast<std::size_t>(std::stoull(safeCapEnv));
+                const std::size_t parsed = static_cast<std::size_t>(std::stoull(*safeCapEnv));
                 if (parsed == 0) {
                     adaptiveBatchCap = kMaxBatchSize;
                 } else {
                     adaptiveBatchCap = std::min<std::size_t>(kMaxBatchSize, parsed);
                 }
-            } catch (...) {
+            } catch (const std::exception& e) {
+                spdlog::debug("Ignoring invalid YAMS_EMBED_GPU_SAFE_BATCH_CAP: {}", e.what());
             }
         }
         std::size_t adaptiveMaxCap = kMaxBatchSize;
@@ -2713,24 +2763,26 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             // because aggressive growth can exhaust shared system memory.
             adaptiveMaxCap = std::min<std::size_t>(kMaxBatchSize, coremlUnified ? 16u : 32u);
         }
-        if (const char* env = std::getenv("YAMS_EMBED_ADAPTIVE_MAX_CAP")) {
+        if (const auto value = yams::config::getenv_optional("YAMS_EMBED_ADAPTIVE_MAX_CAP")) {
             try {
-                const std::size_t parsed = static_cast<std::size_t>(std::stoull(env));
+                const std::size_t parsed = static_cast<std::size_t>(std::stoull(*value));
                 if (parsed > 0) {
                     adaptiveMaxCap = std::min<std::size_t>(kMaxBatchSize, parsed);
                 }
-            } catch (...) {
+            } catch (const std::exception& e) {
+                spdlog::debug("Ignoring invalid YAMS_EMBED_ADAPTIVE_MAX_CAP: {}", e.what());
             }
         }
         adaptiveBatchCap = std::max<std::size_t>(1u, adaptiveBatchCap);
         adaptiveBatchCap = std::min<std::size_t>(adaptiveBatchCap, adaptiveMaxCap);
         std::size_t successfulAdaptiveBatches = 0;
         std::size_t adaptiveGrowthSuccessTarget = coremlUnified ? 6u : 4u;
-        if (const char* env = std::getenv("YAMS_EMBED_ADAPTIVE_GROW_SUCCESS")) {
+        if (const auto value = yams::config::getenv_optional("YAMS_EMBED_ADAPTIVE_GROW_SUCCESS")) {
             try {
-                const std::size_t parsed = static_cast<std::size_t>(std::stoull(env));
+                const std::size_t parsed = static_cast<std::size_t>(std::stoull(*value));
                 adaptiveGrowthSuccessTarget = std::clamp<std::size_t>(parsed, 1u, 16u);
-            } catch (...) {
+            } catch (const std::exception& e) {
+                spdlog::debug("Ignoring invalid YAMS_EMBED_ADAPTIVE_GROW_SUCCESS: {}", e.what());
             }
         }
         if (timingEnabled || poolDebug) {

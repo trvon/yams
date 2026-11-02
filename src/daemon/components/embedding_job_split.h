@@ -41,7 +41,7 @@ inline InternalEventBus::EmbedJob takeJobPrefix(InternalEventBus::EmbedJob& job,
 
 // Prepared payload bytes per document hash, built once per dispatch bucket. Order and
 // uniqueness of preparedDocs are not required: a hash without a payload counts as its own
-// length, and duplicates resolve to the largest payload so the budget cannot be bypassed.
+// length, and duplicate payloads are summed because takeJobPrefix moves every matching entry.
 using PreparedPayloadIndex = std::unordered_map<std::string, std::size_t>;
 
 inline PreparedPayloadIndex preparedPayloadIndex(const InternalEventBus::EmbedJob& job) {
@@ -52,7 +52,7 @@ inline PreparedPayloadIndex preparedPayloadIndex(const InternalEventBus::EmbedJo
             preparedPayloadBytes(std::span<const InternalEventBus::EmbedPreparedDoc>(&doc, 1));
         auto [it, inserted] = index.emplace(doc.hash, bytes);
         if (!inserted) {
-            it->second = std::max(it->second, bytes);
+            it->second = saturatingAdd(it->second, bytes);
         }
     }
     return index;

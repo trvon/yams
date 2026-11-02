@@ -1629,6 +1629,6 @@ TEST_CASE("Byte budget cannot be bypassed by prepared ordering or duplicates",
         }
         auto index = yams::daemon::embed::preparedPayloadIndex(job);
         REQUIRE(index.count("a") == 1);
-        CHECK(index.at("a") >= static_cast<std::size_t>(40) * 1024 * 1024);
+        CHECK(index.at("a") >= static_cast<std::size_t>(80) * 1024 * 1024);
     }
 }
