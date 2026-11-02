@@ -1605,10 +1605,11 @@ TEST_CASE("Byte budget cannot be bypassed by prepared ordering or duplicates",
         for (const std::string hash : {"b", "a"}) {
             yams::daemon::InternalEventBus::EmbedPreparedDoc doc;
             doc.hash = hash;
-            doc.chunks.push_back({hash + "-chunk", big(40u * 1024u * 1024u), 0, 1});
+            doc.chunks.push_back(
+                {hash + "-chunk", big(static_cast<std::size_t>(40) * 1024 * 1024), 0, 1});
             job.preparedDocs.push_back(std::move(doc));
         }
-        const std::size_t budget = 64u * 1024u * 1024u;
+        const std::size_t budget = static_cast<std::size_t>(64) * 1024 * 1024;
         auto split = yams::daemon::embed::takeJobPrefix(job, 8, budget);
         CHECK(split.hashes.size() == 1);
         CHECK(split.preparedDocs.size() == 1);
@@ -1622,11 +1623,12 @@ TEST_CASE("Byte budget cannot be bypassed by prepared ordering or duplicates",
         for (int i = 0; i < 2; ++i) {
             yams::daemon::InternalEventBus::EmbedPreparedDoc doc;
             doc.hash = "a";
-            doc.chunks.push_back({"a-chunk", big(40u * 1024u * 1024u), 0, 1});
+            doc.chunks.push_back(
+                {"a-chunk", big(static_cast<std::size_t>(40) * 1024 * 1024), 0, 1});
             job.preparedDocs.push_back(std::move(doc));
         }
         auto index = yams::daemon::embed::preparedPayloadIndex(job);
         REQUIRE(index.count("a") == 1);
-        CHECK(index.at("a") >= 40u * 1024u * 1024u);
+        CHECK(index.at("a") >= static_cast<std::size_t>(40) * 1024 * 1024);
     }
 }
