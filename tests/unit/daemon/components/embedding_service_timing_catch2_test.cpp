@@ -1593,3 +1593,40 @@ TEST_CASE("Prepared job dispatch respects a payload byte budget",
         CHECK(split.hashes.size() == 2);
     }
 }
+
+TEST_CASE("Byte budget cannot be bypassed by prepared ordering or duplicates",
+          "[daemon][embedding][embed-job-cap][memory]") {
+    auto big = [](std::size_t bytes) { return std::string(bytes, 'x'); };
+
+    SECTION("prepared docs in the wrong order are still counted") {
+        yams::daemon::InternalEventBus::EmbedJob job;
+        job.modelName = "model";
+        job.hashes = {"a", "b"};
+        for (const std::string hash : {"b", "a"}) {
+            yams::daemon::InternalEventBus::EmbedPreparedDoc doc;
+            doc.hash = hash;
+            doc.chunks.push_back({hash + "-chunk", big(40u * 1024u * 1024u), 0, 1});
+            job.preparedDocs.push_back(std::move(doc));
+        }
+        const std::size_t budget = 64u * 1024u * 1024u;
+        auto split = yams::daemon::embed::takeJobPrefix(job, 8, budget);
+        CHECK(split.hashes.size() == 1);
+        CHECK(split.preparedDocs.size() == 1);
+        CHECK(job.hashes.size() == 1);
+    }
+
+    SECTION("a duplicate prepared entry cannot hide a payload") {
+        yams::daemon::InternalEventBus::EmbedJob job;
+        job.modelName = "model";
+        job.hashes = {"a"};
+        for (int i = 0; i < 2; ++i) {
+            yams::daemon::InternalEventBus::EmbedPreparedDoc doc;
+            doc.hash = "a";
+            doc.chunks.push_back({"a-chunk", big(40u * 1024u * 1024u), 0, 1});
+            job.preparedDocs.push_back(std::move(doc));
+        }
+        auto index = yams::daemon::embed::preparedPayloadIndex(job);
+        REQUIRE(index.count("a") == 1);
+        CHECK(index.at("a") >= 40u * 1024u * 1024u);
+    }
+}

@@ -1558,11 +1558,13 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                 if (stop_.load(std::memory_order_acquire)) {
                     break;
                 }
+                const auto preparedIndex = embed::preparedPayloadIndex(bucket);
+                const std::size_t preparedByteBudget = config_.maxPreparedPayloadBytes > 0
+                                                           ? config_.maxPreparedPayloadBytes
+                                                           : kDefaultPreparedPayloadBytes;
                 while (!bucket.hashes.empty() && inFlight_.load() < effectiveMaxConcurrent) {
-                    dispatchJob(embed::takeJobPrefix(bucket, maxJobDocCap,
-                                                     config_.maxPreparedPayloadBytes > 0
-                                                         ? config_.maxPreparedPayloadBytes
-                                                         : kDefaultPreparedPayloadBytes));
+                    dispatchJob(embed::takeJobPrefix(bucket, maxJobDocCap, preparedByteBudget,
+                                                     preparedIndex));
                 }
 
                 if (!bucket.hashes.empty()) {
@@ -2360,12 +2362,9 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
         // Host-side retained bytes for this job. Prepared payload already moved into allChunks;
         // provider workspace is not observable here and is deliberately not estimated as if it
         // were.
-        spdlog::debug("EmbeddingService: job={} retained host_bytes={} prepared_bytes={} "
-                      "provider_output_bytes_min={}",
-                      jobTag, embed::chunkPayloadBytes(allChunks),
-                      embed::preparedPayloadBytes(job.preparedDocs),
-                      embed::inferenceOutputBytes(std::max<std::size_t>(1, allChunks.size()),
-                                                  provider->getEmbeddingDim(modelName)));
+        spdlog::debug("EmbeddingService: job={} retained host_bytes={} prepared_bytes={}", jobTag,
+                      embed::chunkPayloadBytes(allChunks),
+                      embed::preparedPayloadBytes(job.preparedDocs));
         updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
             if (documentAtATime) {
                 mon.totalChunks += allChunks.size();
@@ -2885,6 +2884,11 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             }
             const std::size_t take = std::min(adaptiveBatchCap, allChunks.size() - start);
             size_t end = start + take;
+            // Provider buffer plus host copy for this exact ABI sub-batch, not the whole job.
+            spdlog::debug("EmbeddingService: job={} provider_output_bytes={} batch={} dim={}",
+                          jobTag,
+                          embed::inferenceOutputBytes(take, provider->getEmbeddingDim(modelName)),
+                          take, provider->getEmbeddingDim(modelName));
             updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
                 mon.detail = "infer chunks=" + std::to_string(start) + "/" +
                              std::to_string(allChunks.size());

@@ -39,33 +39,52 @@ inline InternalEventBus::EmbedJob takeJobPrefix(InternalEventBus::EmbedJob& job,
     return split;
 }
 
+// Prepared payload bytes per document hash, built once per dispatch bucket. Order and
+// uniqueness of preparedDocs are not required: a hash without a payload counts as its own
+// length, and duplicates resolve to the largest payload so the budget cannot be bypassed.
+using PreparedPayloadIndex = std::unordered_map<std::string, std::size_t>;
+
+inline PreparedPayloadIndex preparedPayloadIndex(const InternalEventBus::EmbedJob& job) {
+    PreparedPayloadIndex index;
+    index.reserve(job.preparedDocs.size());
+    for (const auto& doc : job.preparedDocs) {
+        const auto bytes =
+            preparedPayloadBytes(std::span<const InternalEventBus::EmbedPreparedDoc>(&doc, 1));
+        auto [it, inserted] = index.emplace(doc.hash, bytes);
+        if (!inserted) {
+            it->second = std::max(it->second, bytes);
+        }
+    }
+    return index;
+}
+
 // Consume a prefix bounded by both a document count and the prepared payload bytes it will
 // retain. At least one document is always taken so an oversized payload still makes progress
-// instead of stalling the queue. Prepared documents are assumed to follow hash order, which the
-// dispatch grouping in EmbeddingService maintains.
+// instead of stalling the queue.
 inline InternalEventBus::EmbedJob takeJobPrefix(InternalEventBus::EmbedJob& job, std::size_t docCap,
-                                                std::size_t byteBudget) {
+                                                std::size_t byteBudget,
+                                                const PreparedPayloadIndex& index) {
     if (job.monitor) {
         return std::exchange(job, {});
     }
     const std::size_t countCap = std::min(std::max<std::size_t>(1, docCap), job.hashes.size());
     std::size_t take = 0;
     std::size_t bytes = 0;
-    std::size_t preparedIndex = 0;
     for (; take < countCap; ++take) {
-        std::size_t docBytes = job.hashes[take].size();
-        if (preparedIndex < job.preparedDocs.size() &&
-            job.preparedDocs[preparedIndex].hash == job.hashes[take]) {
-            docBytes = preparedPayloadBytes(std::span<const InternalEventBus::EmbedPreparedDoc>(
-                &job.preparedDocs[preparedIndex], 1));
-            ++preparedIndex;
-        }
+        const auto& hash = job.hashes[take];
+        auto it = index.find(hash);
+        const std::size_t docBytes = it == index.end() ? hash.size() : it->second;
         if (take > 0 && byteBudget > 0 && bytes + docBytes > byteBudget) {
             break;
         }
         bytes += docBytes;
     }
     return takeJobPrefix(job, take);
+}
+
+inline InternalEventBus::EmbedJob takeJobPrefix(InternalEventBus::EmbedJob& job, std::size_t docCap,
+                                                std::size_t byteBudget) {
+    return takeJobPrefix(job, docCap, byteBudget, preparedPayloadIndex(job));
 }
 
 } // namespace yams::daemon::embed
