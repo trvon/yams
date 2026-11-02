@@ -303,6 +303,11 @@ public:
     /// the background loop when maintenance is allowed; never deletes unconfirmed data.
     RecoveryArtifactMaintenanceStats runRecoveryArtifactMaintenance();
 
+    /// Returns Processing embedding rows whose current attempt began before the cutoff to
+    /// Pending, so the repair scan can retry work whose cleanup could not be scheduled. Called
+    /// only while the embedding consumer is idle. Returns the number of rows reset.
+    std::size_t recoverStalledProcessing(std::int64_t cutoffEpoch);
+
 #ifdef YAMS_TESTING
     void testing_setVectorVacuumPolicy(const SqliteVacuumPolicy& policy) {
         vectorVacuumPolicy_ = policy;
@@ -410,6 +415,8 @@ private:
     /// once, before this run queues anything.
     void recoverOrphanedProcessingOnce();
     std::atomic<bool> orphansRecovered_{false};
+    /// Last idle sweep that returned stalled Processing attempts to Pending.
+    std::chrono::steady_clock::time_point lastStalledRecovery_{};
     boost::asio::awaitable<void> processPathTreeRepair();
     void performVectorCleanup();
     /// Move one batch of legacy per-snapshot metadata keys into document_snapshots.

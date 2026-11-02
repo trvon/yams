@@ -1397,4 +1397,55 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
     return result;
 }
 
+Result<std::size_t>
+MetadataRepository::resetStalledEmbeddingRepairs(std::int64_t staleBeforeEpoch) {
+    return executeWriteQuery<std::size_t>([&](Database& db) -> Result<std::size_t> {
+        YAMS_TRY(beginTransaction(db));
+        auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
+
+        // Reconcile a stale Processing row whose current derivation already completed.
+        YAMS_TRY_UNWRAP(reconcile, db.prepareCached(R"(
+            UPDATE documents SET repair_status = 'completed'
+            WHERE repair_status = 'processing' AND repair_attempted_at < ?
+              AND EXISTS (
+                  SELECT 1 FROM document_embedding_derivations a
+                  WHERE a.document_id = documents.id AND a.completed = 1
+              )
+        )"));
+        YAMS_TRY(reconcile->bind(1, staleBeforeEpoch));
+        YAMS_TRY(reconcile->execute());
+
+        // Invalidate old tokens for the still-unfinished stale attempts before requeueing them.
+        YAMS_TRY_UNWRAP(rotate, db.prepareCached(R"(
+            UPDATE document_embedding_derivations
+            SET generation = lower(hex(randomblob(16))), completed = 0
+            WHERE completed = 0 AND document_id IN (
+                SELECT id FROM documents
+                WHERE repair_status = 'processing' AND repair_attempted_at < ?
+            )
+        )"));
+        YAMS_TRY(rotate->bind(1, staleBeforeEpoch));
+        YAMS_TRY(rotate->execute());
+
+        // Preserve repair_attempts and repair_attempted_at: no attempt was consumed.
+        // A row whose job died before minting a derivation has no row at all and must be
+        // requeued too; only a completed derivation disqualifies it (handled above).
+        YAMS_TRY_UNWRAP(requeue, db.prepareCached(R"(
+            UPDATE documents SET repair_status = 'pending'
+            WHERE repair_status = 'processing' AND repair_attempted_at < ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM document_embedding_derivations a
+                  WHERE a.document_id = documents.id AND a.completed = 1
+              )
+        )"));
+        YAMS_TRY(requeue->bind(1, staleBeforeEpoch));
+        YAMS_TRY(requeue->execute());
+        const auto reset = static_cast<std::size_t>(db.changes());
+
+        YAMS_TRY(commitOrRollback(db));
+        rollback.dismiss();
+        return reset;
+    });
+}
+
 } // namespace yams::metadata

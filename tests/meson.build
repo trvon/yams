@@ -1093,6 +1093,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'repair_stalled_processing',
+    'sources': files('unit/daemon/repair_stalled_processing_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'repair'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'write_coordinator',
     'sources': files('unit/daemon/write_coordinator_catch2_test.cpp'),
     'deps': test_deps,

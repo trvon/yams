@@ -983,6 +983,11 @@ public:
     Result<void> updateDocumentRepairStatus(const std::string& hash, RepairStatus status) override;
     Result<void> batchUpdateDocumentRepairStatuses(const std::vector<std::string>& hashes,
                                                    RepairStatus status) override;
+    /// Resolve stale Processing embedding rows in one transaction, without consuming retry
+    /// budget. Rows whose current derivation completed are reconciled to Completed; unfinished
+    /// rows have their derivation generation rotated (invalidating old tokens) and return to
+    /// Pending. Returns the number of rows returned to Pending.
+    Result<std::size_t> resetStalledEmbeddingRepairs(std::int64_t staleBeforeEpoch);
 
     Result<void> checkpointWal() override;
     Result<void> checkpointWalTruncate() override;
