@@ -1101,6 +1101,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'embedding_memory_accounting',
+    'sources': files('unit/daemon/embedding_memory_accounting_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'embedding'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'write_coordinator',
     'sources': files('unit/daemon/write_coordinator_catch2_test.cpp'),
     'deps': test_deps,

@@ -1,6 +1,7 @@
 #include "embedding_derivation_policy.h"
 #include "embedding_input_selection.h"
 #include "embedding_job_split.h"
+#include "embedding_memory_accounting.h"
 #include "semantic_graph_candidate_policy.h"
 #include "startup_work_policy.h"
 #include <yams/daemon/components/EmbeddingService.h>
@@ -1789,12 +1790,15 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
     struct ExceptionCleanup {
         decltype(cleanupException)& cleanup;
         int exceptions = std::uncaught_exceptions();
+        explicit ExceptionCleanup(decltype(cleanupException)& cleanupFn) : cleanup(cleanupFn) {}
+        ExceptionCleanup(const ExceptionCleanup&) = delete;
+        ExceptionCleanup& operator=(const ExceptionCleanup&) = delete;
         ~ExceptionCleanup() noexcept {
             if (std::uncaught_exceptions() > exceptions) {
                 cleanup();
             }
         }
-    } exceptionCleanup{cleanupException};
+    } exceptionCleanup(cleanupException);
 
     std::shared_ptr<IModelProvider> provider;
     std::string modelName;
@@ -2343,6 +2347,15 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
 
         spdlog::debug("EmbeddingService: chunked {} documents into {} chunks", docsToEmbed.size(),
                       allChunks.size());
+        // Host-side retained bytes for this job. Prepared payload already moved into allChunks;
+        // provider workspace is not observable here and is deliberately not estimated as if it
+        // were.
+        spdlog::debug("EmbeddingService: job={} retained host_bytes={} prepared_bytes={} "
+                      "provider_output_bytes_min={}",
+                      jobTag, embed::chunkPayloadBytes(allChunks),
+                      embed::preparedPayloadBytes(job.preparedDocs),
+                      embed::inferenceOutputBytes(std::max<std::size_t>(1, allChunks.size()),
+                                                  provider->getEmbeddingDim(modelName)));
         updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
             if (documentAtATime) {
                 mon.totalChunks += allChunks.size();
