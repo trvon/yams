@@ -299,6 +299,11 @@ public:
     MetricsSnapshot metricsSnapshot() const;
     void resetMetrics();
 
+#ifdef YAMS_TEST_PROVIDER_CONTROLS
+    static void testing_setPreparedEmbedBatchPayloadBytes(std::size_t bytes);
+    static void testing_resetPreparedEmbedBatchPayloadBytes();
+#endif
+
     // Backpressure observability
     std::uint64_t backpressureRejects() const {
         return backpressureRejects_.load(std::memory_order_relaxed);

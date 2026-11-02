@@ -20,13 +20,20 @@
                                       - Typed post-ingest coalescing window (default: 2)
     YAMS_BENCH_POST_INGEST_BATCH_SIZE=N
                                       - Existing typed batch-size axis (default: product value)
+    YAMS_BENCH_PREPARED_PAYLOAD_BYTES=N
+                                      - Typed per-dispatch prepared-payload budget
+    YAMS_BENCH_PREPARED_BATCH_PAYLOAD_BYTES=N
+                                      - Test-only upstream prepared-batch byte limit
+    YAMS_BENCH_PIPELINE_TIMEOUT_MS=N  - Pipeline settlement deadline (default: 60000)
     YAMS_BENCH_OUTPUT=path            - JSON output file (default: stdout)
     YAMS_BENCH_DISABLE_KG=1           - Disable KG post-ingest enrichment for ablation
     YAMS_BENCH_SEARCH_PROBES=0        - Disable fixed post-ingest search probes
     YAMS_BENCH_PHASE=initial|replay|resume
                                       - Select lifecycle contract (default: initial)
-    YAMS_BENCH_FIXTURE_ROOT=path      - Externally owned yams_e2e_bench_* temp root used across
-                                        fresh processes; caller must remove it
+    YAMS_BENCH_FIXTURE_ROOT=path      - Externally owned yams_e2e_bench_* root used across fresh
+                                        processes; caller must remove it
+    YAMS_BENCH_RUN_ROOT=path          - Authorizes a benchmark artifact root outside the system
+                                        temporary directory (xplan arm directory)
 
   Metrics collected:
     - Total pipeline duration (start → all stages complete)
@@ -93,7 +100,11 @@
 #include <vector>
 #include <yams/compat/unistd.h>
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <sys/resource.h>
+#elif defined(__linux__)
+#include <unistd.h>
 #include <sys/resource.h>
 #endif
 
@@ -180,6 +191,106 @@ std::uint64_t peakRssBytes() noexcept {
 #endif
 }
 
+std::uint64_t currentRssBytes() noexcept {
+#if defined(__APPLE__)
+    mach_task_basic_info_data_t info{};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info),
+                  &count) != KERN_SUCCESS) {
+        return 0;
+    }
+    return static_cast<std::uint64_t>(info.resident_size);
+#elif defined(__linux__)
+    std::ifstream statm("/proc/self/statm");
+    std::uint64_t pages = 0;
+    std::uint64_t resident = 0;
+    if (!(statm >> pages >> resident)) {
+        return 0;
+    }
+    const long pageSize = ::sysconf(_SC_PAGESIZE);
+    return pageSize > 0 ? resident * static_cast<std::uint64_t>(pageSize) : 0;
+#else
+    return 0;
+#endif
+}
+
+struct DispatchWindowSnapshot {
+    std::uint64_t wall_ms = 0;
+    std::uint64_t cpu_ms = 0;
+    std::uint64_t rss_start_bytes = 0;
+    std::uint64_t peak_sampled_rss_bytes = 0;
+    std::uint64_t hwm_start_bytes = 0;
+    std::uint64_t peak_hwm_bytes = 0;
+    std::uint64_t rss_delta_bytes = 0;
+    std::uint64_t samples = 0;
+    std::uint64_t sample_interval_ms = 0;
+};
+
+class DispatchWindowSampler {
+public:
+    explicit DispatchWindowSampler(std::chrono::milliseconds interval)
+        : interval_(interval), started_(std::chrono::steady_clock::now()),
+          cpuStarted_(std::clock()) {
+        snapshot_.sample_interval_ms = static_cast<std::uint64_t>(interval_.count());
+        snapshot_.rss_start_bytes = currentRssBytes();
+        snapshot_.peak_sampled_rss_bytes = snapshot_.rss_start_bytes;
+        snapshot_.hwm_start_bytes = peakRssBytes();
+        sample();
+        thread_ = std::thread([this] {
+            while (!stop_.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(interval_);
+                sample();
+            }
+        });
+    }
+
+    ~DispatchWindowSampler() { (void)stop(); }
+
+    DispatchWindowSampler(const DispatchWindowSampler&) = delete;
+    DispatchWindowSampler& operator=(const DispatchWindowSampler&) = delete;
+
+    DispatchWindowSnapshot stop() {
+        if (!stopped_.exchange(true, std::memory_order_acq_rel)) {
+            stop_.store(true, std::memory_order_release);
+            if (thread_.joinable()) {
+                thread_.join();
+            }
+            sample();
+            snapshot_.wall_ms =
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now() - started_)
+                                               .count());
+            const auto cpuEnded = std::clock();
+            if (cpuStarted_ != static_cast<std::clock_t>(-1) &&
+                cpuEnded != static_cast<std::clock_t>(-1) && cpuEnded >= cpuStarted_) {
+                snapshot_.cpu_ms = static_cast<std::uint64_t>(
+                    (static_cast<double>(cpuEnded - cpuStarted_) * 1000.0) / CLOCKS_PER_SEC);
+            }
+            snapshot_.peak_hwm_bytes = peakRssBytes();
+            snapshot_.rss_delta_bytes =
+                snapshot_.peak_sampled_rss_bytes > snapshot_.rss_start_bytes
+                    ? snapshot_.peak_sampled_rss_bytes - snapshot_.rss_start_bytes
+                    : 0;
+        }
+        return snapshot_;
+    }
+
+private:
+    void sample() noexcept {
+        snapshot_.peak_sampled_rss_bytes =
+            std::max(snapshot_.peak_sampled_rss_bytes, currentRssBytes());
+        ++snapshot_.samples;
+    }
+
+    std::chrono::milliseconds interval_;
+    std::chrono::steady_clock::time_point started_;
+    std::clock_t cpuStarted_;
+    DispatchWindowSnapshot snapshot_;
+    std::atomic<bool> stop_{false};
+    std::atomic<bool> stopped_{false};
+    std::thread thread_;
+};
+
 std::uint64_t sidecarBytes(const fs::path& dataDir, std::string_view suffix) {
     std::uint64_t total = 0;
     std::error_code ec;
@@ -241,6 +352,11 @@ std::optional<fs::path> externalFixtureRoot() {
 #ifndef _WIN32
     isolated = isolated || pathWithin(candidate, fs::weakly_canonical("/tmp"));
 #endif
+    if (const char* configuredRunRoot = std::getenv("YAMS_BENCH_RUN_ROOT");
+        configuredRunRoot != nullptr && *configuredRunRoot != '\0') {
+        const auto runRoot = fs::weakly_canonical(fs::absolute(configuredRunRoot));
+        isolated = isolated || pathWithin(candidate, runRoot);
+    }
     const auto name = candidate.filename().string();
     if (!isolated || !name.starts_with("yams_e2e_bench_")) {
         throw std::runtime_error(
@@ -288,7 +404,7 @@ std::uint32_t benchPostIngestCoalesceMs() {
 }
 
 std::uint32_t benchPostIngestBatchSize() {
-    constexpr std::uint32_t kMaxBatchSize = 256;
+    constexpr std::uint32_t kMaxBatchSize = 4096;
     const auto defaultValue = yams::daemon::TuneAdvisor::postIngestBatchSize();
     const char* raw = std::getenv("YAMS_BENCH_POST_INGEST_BATCH_SIZE");
     if (!raw || !*raw) {
@@ -300,6 +416,50 @@ std::uint32_t benchPostIngestBatchSize() {
                                                       : defaultValue;
     } catch (const std::exception&) {
         return defaultValue;
+    }
+}
+
+std::size_t benchPreparedPayloadBytes() {
+    const char* raw = std::getenv("YAMS_BENCH_PREPARED_PAYLOAD_BYTES");
+    if (!raw || !*raw) {
+        return 0;
+    }
+    try {
+        const auto parsed = std::stoull(raw);
+        return parsed > std::numeric_limits<std::size_t>::max()
+                   ? std::numeric_limits<std::size_t>::max()
+                   : static_cast<std::size_t>(parsed);
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+std::size_t benchPreparedBatchPayloadBytes() {
+    const char* raw = std::getenv("YAMS_BENCH_PREPARED_BATCH_PAYLOAD_BYTES");
+    if (!raw || !*raw) {
+        return 0;
+    }
+    try {
+        const auto parsed = std::stoull(raw);
+        return parsed > std::numeric_limits<std::size_t>::max()
+                   ? std::numeric_limits<std::size_t>::max()
+                   : static_cast<std::size_t>(parsed);
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+std::chrono::milliseconds benchPipelineTimeout() {
+    constexpr std::uint64_t kDefaultMs = 60'000;
+    constexpr std::uint64_t kMaxMs = 60ULL * 60ULL * 1000ULL;
+    const char* raw = std::getenv("YAMS_BENCH_PIPELINE_TIMEOUT_MS");
+    if (!raw || !*raw) {
+        return std::chrono::milliseconds{kDefaultMs};
+    }
+    try {
+        return std::chrono::milliseconds{std::min(kMaxMs, std::stoull(raw))};
+    } catch (const std::exception&) {
+        return std::chrono::milliseconds{kDefaultMs};
     }
 }
 
@@ -329,8 +489,11 @@ public:
         yams::common::ensureDirectories(root_);
         data_ = root_ / "data";
         yams::common::ensureDirectories(data_);
-        sock_ = root_ / "daemon.sock";
-        pid_ = root_ / "bench.pid";
+        runtimeRoot_ =
+            externallyOwnedRoot_ ? fs::temp_directory_path() / ("ybe_" + randomId()) : root_;
+        yams::common::ensureDirectories(runtimeRoot_);
+        sock_ = runtimeRoot_ / "daemon.sock";
+        pid_ = runtimeRoot_ / "bench.pid";
         log_ = root_ / "bench.log";
     }
 
@@ -402,6 +565,11 @@ public:
                           "preferred_model = \"simeon-default\"\n";
         }
 
+#ifdef YAMS_TEST_PROVIDER_CONTROLS
+        yams::daemon::PostIngestQueue::testing_setPreparedEmbedBatchPayloadBytes(
+            benchPreparedBatchPayloadBytes());
+#endif
+
         // Benchmark embedding-mode contract:
         // - YAMS_BENCH_FORCE_MOCK_EMBEDDINGS=1 forces mock model provider
         // - YAMS_DISABLE_VECTORS=1 also implies mock/FTS-only mode
@@ -425,6 +593,7 @@ public:
         options.requireReadyLifecycle = true;
         options.configureDaemon = [](yams::daemon::DaemonConfig& config) {
             config.tuning.postIngestCoalesceMs = benchPostIngestCoalesceMs();
+            config.embeddingService.maxPreparedPayloadBytes = benchPreparedPayloadBytes();
         };
 
         glinerRequested_ = !envFlagEnabled("YAMS_DISABLE_GLINER_TITLES");
@@ -487,6 +656,10 @@ public:
             fs::current_path(originalCwd_, ec);
         }
         restoreEnvironment();
+#ifdef YAMS_TEST_PROVIDER_CONTROLS
+        yams::daemon::PostIngestQueue::testing_resetPreparedEmbedBatchPayloadBytes();
+#endif
+        cleanupRuntimeRoot();
     }
 
     [[nodiscard]] const fs::path& socketPath() const { return sock_; }
@@ -496,6 +669,7 @@ public:
     [[nodiscard]] bool glinerRequested() const { return glinerRequested_; }
     [[nodiscard]] bool pluginAutoloadEnabled() const { return pluginAutoloadEnabled_; }
     [[nodiscard]] bool shutdownSucceeded() const { return shutdownSucceeded_; }
+    [[nodiscard]] bool runtimeRootRemoved() const { return runtimeRootRemoved_; }
     [[nodiscard]] bool stopRequested() const {
         return harness_ && harness_->daemon() && harness_->daemon()->isStopRequested();
     }
@@ -528,19 +702,36 @@ private:
         }
     }
 
+    void cleanupRuntimeRoot() noexcept {
+        if (runtimeRoot_.empty() || runtimeRoot_ == root_) {
+            runtimeRootRemoved_ = true;
+            return;
+        }
+        std::error_code error;
+        fs::remove_all(runtimeRoot_, error);
+        runtimeRootRemoved_ = !error && !fs::exists(runtimeRoot_);
+        if (!runtimeRootRemoved_) {
+            spdlog::warn("Failed to remove benchmark runtime root '{}': {}", runtimeRoot_.string(),
+                         error.message());
+        }
+    }
+
     void cleanup() {
-        std::error_code ec;
-        if (!root_.empty() && !externallyOwnedRoot_)
-            fs::remove_all(root_, ec);
+        cleanupRuntimeRoot();
+        if (!root_.empty() && !externallyOwnedRoot_) {
+            std::error_code error;
+            fs::remove_all(root_, error);
+        }
     }
 
     std::unique_ptr<yams::test::DaemonHarness> harness_;
-    fs::path root_, data_, sock_, pid_, log_;
+    fs::path root_, data_, runtimeRoot_, sock_, pid_, log_;
     fs::path originalCwd_;
     std::vector<yams::test::ScopedEnvVar> savedEnvironment_;
     bool glinerRequested_{false};
     bool pluginAutoloadEnabled_{false};
     bool shutdownSucceeded_{false};
+    bool runtimeRootRemoved_{false};
     bool externallyOwnedRoot_{false};
 };
 
@@ -1032,6 +1223,8 @@ struct BenchmarkResult {
     std::string fixture_phase = "initial";
     std::uint32_t post_ingest_coalesce_ms = 0;
     std::uint32_t post_ingest_batch_size = 0;
+    std::uint64_t prepared_batch_payload_bytes = 0;
+    std::uint64_t pipeline_timeout_ms = 60000;
     std::uint64_t enrichment_timeout_ms = 30000;
     std::string timestamp;
     std::string embedding_model = "simeon-default";
@@ -1085,7 +1278,9 @@ struct BenchmarkResult {
     bool socket_removed = false;
     bool pid_removed = false;
     bool sidecars_removed = false;
+    bool runtime_root_removed = false;
     AddDispatchMetrics add_dispatch_metrics;
+    DispatchWindowSnapshot dispatch_window;
 
     std::uint64_t stored_documents = 0;
     bool stored_document_count_readable = false;
@@ -1171,6 +1366,8 @@ struct BenchmarkResult {
                             {"fixture_phase", fixture_phase},
                             {"post_ingest_coalesce_ms", post_ingest_coalesce_ms},
                             {"post_ingest_batch_size", post_ingest_batch_size},
+                            {"prepared_batch_payload_bytes", prepared_batch_payload_bytes},
+                            {"pipeline_timeout_ms", pipeline_timeout_ms},
                             {"enrichment_timeout_ms", enrichment_timeout_ms},
                             {"timestamp", timestamp},
                             {"embedding_model", embedding_model},
@@ -1278,7 +1475,17 @@ struct BenchmarkResult {
                           {"shutdown_succeeded", shutdown_succeeded},
                           {"socket_removed", socket_removed},
                           {"pid_removed", pid_removed},
-                          {"sidecars_removed", sidecars_removed}};
+                          {"sidecars_removed", sidecars_removed},
+                          {"runtime_root_removed", runtime_root_removed}};
+        j["dispatch_window"] = {{"wall_ms", dispatch_window.wall_ms},
+                                {"cpu_ms", dispatch_window.cpu_ms},
+                                {"rss_start_bytes", dispatch_window.rss_start_bytes},
+                                {"peak_sampled_rss_bytes", dispatch_window.peak_sampled_rss_bytes},
+                                {"hwm_start_bytes", dispatch_window.hwm_start_bytes},
+                                {"peak_hwm_bytes", dispatch_window.peak_hwm_bytes},
+                                {"rss_delta_bytes", dispatch_window.rss_delta_bytes},
+                                {"samples", dispatch_window.samples},
+                                {"sample_interval_ms", dispatch_window.sample_interval_ms}};
         j["add_dispatch_metrics"] = add_dispatch_metrics.toJson();
 
         j["stages"] = {{"metadata_storage", metadata_storage.toJson()},
@@ -1782,6 +1989,8 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     result.fixture_phase = benchPhase();
     result.post_ingest_coalesce_ms = benchPostIngestCoalesceMs();
     result.post_ingest_batch_size = yams::daemon::TuneAdvisor::postIngestBatchSize();
+    result.prepared_batch_payload_bytes = benchPreparedBatchPayloadBytes();
+    result.pipeline_timeout_ms = static_cast<std::uint64_t>(benchPipelineTimeout().count());
     result.timestamp = nowIso8601();
     const char* forceMockEmbeddings = std::getenv("YAMS_BENCH_FORCE_MOCK_EMBEDDINGS");
     const bool mockEmbeddingsRequested =
@@ -1792,7 +2001,6 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     if (vectorsDisabled) {
         result.embedding_backend = "mock";
     }
-    result.simeon_recipe = !vectorsDisabled ? yams::vector::simeonRecipeLabel() : "";
     result.kg_enabled = !envFlagEnabled("YAMS_BENCH_DISABLE_KG");
 
     spdlog::info("=== Ingestion E2E Benchmark ===");
@@ -1818,6 +2026,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
                                    .count();
     result.gliner_requested = harness.glinerRequested();
     result.plugin_autoload_enabled = harness.pluginAutoloadEnabled();
+    result.simeon_recipe = !vectorsDisabled ? yams::vector::simeonRecipeLabel() : "";
     if (const char* modelPath = std::getenv("YAMS_GLINT_MODEL_PATH"); modelPath != nullptr) {
         result.gliner_model_path = modelPath;
     }
@@ -1833,6 +2042,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         result.socket_removed = !fs::exists(harness.socketPath());
         result.pid_removed = !fs::exists(harness.pidPath());
         result.sidecars_removed = !hasSidecars(harness.dataDir());
+        result.runtime_root_removed = harness.runtimeRootRemoved();
         if (capturePersistence && !vectorsDisabled) {
             result.vector_persistence = captureVectorPersistence(harness.dataDir() / "vectors.db",
                                                                  result.embedding_dimension);
@@ -1972,7 +2182,9 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     spdlog::info("Baseline counters: embed={}, post={}, kg={}, title={}", baselineEmbedConsumed,
                  baselinePostConsumed, baselineKgConsumed, baselineTitleConsumed);
 
-    // Phase 4: Ingest documents
+    // Phase 4: Ingest documents. Sample resident memory until all embedding and
+    // post-ingest work has drained; setup/model-loading peaks are intentionally excluded.
+    DispatchWindowSampler dispatchSampler{20ms};
     spdlog::info("Phase 4: Ingesting {} documents...", corpusSize);
     int64_t ingestStartMs = nowMs();
     result.metadata_storage.name = "metadata_storage";
@@ -2099,7 +2311,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
 
     // Poll until every expected item is consumed or explicitly dropped. Drops settle the
     // workload but never satisfy the lossless completion contract.
-    auto pipelineDeadline = std::chrono::steady_clock::now() + 60s;
+    auto pipelineDeadline = std::chrono::steady_clock::now() + benchPipelineTimeout();
     bool allStagesComplete = false;
     bool allStagesSettled = false;
     QueueSnapshot lastSnap = initialSnap;
@@ -2216,9 +2428,9 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     result.observed_kg = lastKgConsumedDelta;
 
     if (!allStagesSettled) {
-        spdlog::warn("Pipeline settlement timeout after 60s (post={}/{} embed={}/{} kg={}/{})",
-                     lastPostConsumedDelta, expectedPost, lastEmbedConsumedDelta, expectedEmbed,
-                     lastKgConsumedDelta, expectedKg);
+        spdlog::warn("Pipeline settlement timeout after {} ms (post={}/{} embed={}/{} kg={}/{})",
+                     result.pipeline_timeout_ms, lastPostConsumedDelta, expectedPost,
+                     lastEmbedConsumedDelta, expectedEmbed, lastKgConsumedDelta, expectedKg);
 
         // Preserve partial pipeline evidence instead of leaving stage metrics at zero. A timeout is
         // still a failure, but partial counters identify which PostIngestQueue branch stalled.
@@ -2276,6 +2488,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         result.observed_kg = counterDelta(lastSnap.kg_consumed, baselineKgConsumed);
         result.observed_title = counterDelta(lastSnap.title_consumed, baselineTitleConsumed);
         spdlog::warn("Termination requested; stopping isolated benchmark fixture");
+        result.dispatch_window = dispatchSampler.stop();
         stopHarness(false);
         return result;
     }
@@ -2316,6 +2529,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     result.pipeline_complete = allStagesComplete && titleComplete && result.enrichment_drained &&
                                result.write_coordinator_flushed && result.dropped_batches == 0 &&
                                failCount.load(std::memory_order_relaxed) == 0;
+    result.dispatch_window = dispatchSampler.stop();
     const int64_t enrichmentEndMs = nowMs();
     result.pipeline_drain_ms = nonNegativeDeltaMs(enrichmentEndMs, storageReadyEndMs);
     result.enrichment_ready_ms = nonNegativeDeltaMs(enrichmentEndMs, ingestStartMs);
@@ -2453,7 +2667,8 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
                               .count();
 
     const bool cleanShutdown = result.shutdown_succeeded && result.socket_removed &&
-                               result.pid_removed && result.sidecars_removed;
+                               result.pid_removed && result.sidecars_removed &&
+                               result.runtime_root_removed;
     result.pipeline_complete = result.pipeline_complete && cleanShutdown;
 
     spdlog::info("=== Benchmark Complete ===");

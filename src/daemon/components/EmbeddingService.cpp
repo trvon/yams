@@ -1608,6 +1608,9 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                             dispatch.preparedDocs.size(), preparedHashes.size(), missingPrepared,
                             preparedBytes, bucket.hashes.size(), preparedByteBudget,
                             byteLimited ? 1 : 0);
+                        for (const auto hash : preparedHashes) {
+                            spdlog::info("[EmbeddingService] prepared_dispatch_hash hash={}", hash);
+                        }
                     }
                     dispatchJob(std::move(dispatch));
                 }

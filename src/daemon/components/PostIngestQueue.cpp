@@ -59,6 +59,20 @@ namespace {
 constexpr size_t kMaxGlinerChars = 2000;
 constexpr float kMinTitleConfidence = 0.55f;
 constexpr float kMinNlEntityConfidence = 0.45f;
+constexpr std::size_t kDefaultPreparedEmbedBatchPayloadBytes = 16ULL * 1024ULL * 1024ULL;
+#ifdef YAMS_TEST_PROVIDER_CONTROLS
+std::atomic<std::size_t> gPreparedEmbedBatchPayloadBytes{0};
+#endif
+
+std::size_t preparedEmbedBatchPayloadBytes() {
+#ifdef YAMS_TEST_PROVIDER_CONTROLS
+    const auto overrideBytes = gPreparedEmbedBatchPayloadBytes.load(std::memory_order_relaxed);
+    if (overrideBytes > 0) {
+        return overrideBytes;
+    }
+#endif
+    return kDefaultPreparedEmbedBatchPayloadBytes;
+}
 
 struct PostIngestBatchPolicy {
     // Keep extraction scheduling and content-index DB commit sizing separate. The extraction
@@ -122,6 +136,16 @@ inline bool isGlinerTitleExtractionDisabled() {
 }
 
 } // namespace
+
+#ifdef YAMS_TEST_PROVIDER_CONTROLS
+void PostIngestQueue::testing_setPreparedEmbedBatchPayloadBytes(std::size_t bytes) {
+    gPreparedEmbedBatchPayloadBytes.store(bytes, std::memory_order_relaxed);
+}
+
+void PostIngestQueue::testing_resetPreparedEmbedBatchPayloadBytes() {
+    gPreparedEmbedBatchPayloadBytes.store(0, std::memory_order_relaxed);
+}
+#endif
 
 // Dynamic concurrency limits from TuneAdvisor
 std::size_t PostIngestQueue::maxExtractionConcurrent() {
@@ -2849,7 +2873,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     const std::size_t maxEmbedBatch =
         ResourceGovernor::instance().capEmbedJobDocuments(TuneAdvisor::resolvedEmbedJobDocCap());
     constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4ULL * 1024ULL * 1024ULL;
-    constexpr std::size_t kMaxPreparedEmbedBatchPayloadBytes = 16ULL * 1024ULL * 1024ULL;
+    const std::size_t maxPreparedEmbedBatchPayloadBytes = preparedEmbedBatchPayloadBytes();
     const auto dispatchPolicyStart = std::chrono::steady_clock::now();
     const auto dispatchPolicy = ConfigResolver::resolveEmbeddingDispatchPolicy();
     dispatchTimings.setupConfig.add(std::chrono::steady_clock::now() - dispatchPolicyStart);
@@ -2973,7 +2997,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
                 }
                 if (!embedPreparedBatch.empty() &&
                     embedPreparedBatchPayloadBytes + docPayloadBytes >
-                        kMaxPreparedEmbedBatchPayloadBytes) {
+                        maxPreparedEmbedBatchPayloadBytes) {
                     flushEmbedBatch();
                 }
                 embedPreparedBatchPayloadBytes += docPayloadBytes;
