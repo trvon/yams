@@ -6,6 +6,8 @@
 #include <utility>
 #include <yams/daemon/components/InternalEventBus.h>
 
+#include "embedding_memory_accounting.h"
+
 namespace yams::daemon::embed {
 
 // Consume one dispatch prefix, leaving undispatched work in job. Monitor jobs remain
@@ -35,6 +37,35 @@ inline InternalEventBus::EmbedJob takeJobPrefix(InternalEventBus::EmbedJob& job,
         job.preparedDocs.erase(remaining, job.preparedDocs.end());
     }
     return split;
+}
+
+// Consume a prefix bounded by both a document count and the prepared payload bytes it will
+// retain. At least one document is always taken so an oversized payload still makes progress
+// instead of stalling the queue. Prepared documents are assumed to follow hash order, which the
+// dispatch grouping in EmbeddingService maintains.
+inline InternalEventBus::EmbedJob takeJobPrefix(InternalEventBus::EmbedJob& job, std::size_t docCap,
+                                                std::size_t byteBudget) {
+    if (job.monitor) {
+        return std::exchange(job, {});
+    }
+    const std::size_t countCap = std::min(std::max<std::size_t>(1, docCap), job.hashes.size());
+    std::size_t take = 0;
+    std::size_t bytes = 0;
+    std::size_t preparedIndex = 0;
+    for (; take < countCap; ++take) {
+        std::size_t docBytes = job.hashes[take].size();
+        if (preparedIndex < job.preparedDocs.size() &&
+            job.preparedDocs[preparedIndex].hash == job.hashes[take]) {
+            docBytes = preparedPayloadBytes(std::span<const InternalEventBus::EmbedPreparedDoc>(
+                &job.preparedDocs[preparedIndex], 1));
+            ++preparedIndex;
+        }
+        if (take > 0 && byteBudget > 0 && bytes + docBytes > byteBudget) {
+            break;
+        }
+        bytes += docBytes;
+    }
+    return takeJobPrefix(job, take);
 }
 
 } // namespace yams::daemon::embed

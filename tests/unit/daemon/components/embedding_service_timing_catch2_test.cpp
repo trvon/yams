@@ -1544,3 +1544,52 @@ TEST_CASE("Embedding maintenance requires actual startup readiness and stops bor
 }
 
 } // namespace yams::daemon
+
+TEST_CASE("Prepared job dispatch respects a payload byte budget",
+          "[daemon][embedding][embed-job-cap][memory]") {
+    auto makeJob = [](std::size_t docs, std::size_t chunkBytes) {
+        yams::daemon::InternalEventBus::EmbedJob job;
+        job.modelName = "model";
+        for (std::size_t i = 0; i < docs; ++i) {
+            const std::string hash = "doc-" + std::to_string(i);
+            job.hashes.push_back(hash);
+            yams::daemon::InternalEventBus::EmbedPreparedDoc doc;
+            doc.hash = hash;
+            doc.sourceTextHash = "source";
+            doc.preparationRecipe = "recipe";
+            doc.chunks.push_back({hash + "-chunk", std::string(chunkBytes, 'x'), 0, chunkBytes});
+            job.preparedDocs.push_back(std::move(doc));
+        }
+        return job;
+    };
+
+    SECTION("splits stay within the budget and lose no documents") {
+        auto job = makeJob(5, 1000);
+        const std::size_t budget = yams::daemon::embed::preparedPayloadBytes(job.preparedDocs) / 2;
+        std::vector<std::string> seen;
+        while (!job.hashes.empty()) {
+            auto split = yams::daemon::embed::takeJobPrefix(job, 8, budget);
+            REQUIRE_FALSE(split.hashes.empty());
+            CHECK(yams::daemon::embed::preparedPayloadBytes(split.preparedDocs) <= budget);
+            CHECK(split.preparedDocs.size() == split.hashes.size());
+            seen.insert(seen.end(), split.hashes.begin(), split.hashes.end());
+        }
+        CHECK(seen.size() == 5);
+        CHECK(seen.front() == "doc-0");
+        CHECK(seen.back() == "doc-4");
+    }
+
+    SECTION("an oversized single document still makes progress") {
+        auto job = makeJob(2, 4096);
+        auto split = yams::daemon::embed::takeJobPrefix(job, 8, 16);
+        CHECK(split.hashes.size() == 1);
+        CHECK(split.preparedDocs.size() == 1);
+        CHECK(job.hashes.size() == 1);
+    }
+
+    SECTION("a generous budget still honours the document cap") {
+        auto job = makeJob(5, 100);
+        auto split = yams::daemon::embed::takeJobPrefix(job, 2, 1u << 20);
+        CHECK(split.hashes.size() == 2);
+    }
+}

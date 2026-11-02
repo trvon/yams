@@ -66,6 +66,13 @@ EmbeddingService::~EmbeddingService() {
     shutdown();
 }
 
+namespace {
+// Prepared payload retained per dispatched job. Chosen to keep selected chunk text small
+// relative to the document-count cap's worst case; provider workspace is separate and not
+// covered.
+constexpr std::size_t kDefaultPreparedPayloadBytes = static_cast<std::size_t>(64) * 1024 * 1024;
+} // namespace
+
 EffectiveEmbeddingServiceConfig
 EmbeddingService::resolveConcurrencyPolicy(const EmbeddingServiceConfig& config) {
     if (config.coremlUnifiedConcurrency > 0) {
@@ -1552,7 +1559,10 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                     break;
                 }
                 while (!bucket.hashes.empty() && inFlight_.load() < effectiveMaxConcurrent) {
-                    dispatchJob(embed::takeJobPrefix(bucket, maxJobDocCap));
+                    dispatchJob(embed::takeJobPrefix(bucket, maxJobDocCap,
+                                                     config_.maxPreparedPayloadBytes > 0
+                                                         ? config_.maxPreparedPayloadBytes
+                                                         : kDefaultPreparedPayloadBytes));
                 }
 
                 if (!bucket.hashes.empty()) {
