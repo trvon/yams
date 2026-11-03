@@ -3,6 +3,7 @@
 #include <future>
 #include <iostream>
 #include <map>
+#include <set>
 #include <yams/api/content_store_builder.h>
 #include <yams/cli/cli_perf_trace.h>
 #include <yams/cli/command_catalog.h>
@@ -722,17 +723,39 @@ Result<RepoIndex> YamsCLI::readRepoIndex(const std::filesystem::path& root) {
     query.pathPrefix = root.generic_string();
     query.prefixIsDirectory = true;
     query.orderByIndexedDesc = true;
-    auto documents = metadataRepo_->queryDocuments(query);
-    if (!documents)
-        return documents.error();
+    // Explicit snapshots include formerly-untracked files even after they disappear.
+    // Legacy imports are adopted only for exact Git-tracked paths, never arbitrary notes
+    // under the same prefix. Location metadata remains authoritative for aliases.
+    query.metadataFilters.emplace_back("repo_root", root.generic_string());
+    auto snapshots = metadataRepo_->queryDocuments(query);
+    if (!snapshots)
+        return snapshots.error();
+    std::set<RepoPath> legacyPaths;
+    try {
+        const auto files = readRepoFiles(root);
+        legacyPaths.insert(files.tracked.begin(), files.tracked.end());
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::IOError, error.what()};
+    }
     RepoIndex index;
-    for (const auto& doc : documents.value()) {
+    const auto include = [&](const auto& doc) {
         const auto path = std::filesystem::path(doc.filePath).lexically_normal();
         const auto indexed = doc.indexedTime.time_since_epoch().count();
         const auto found = index.find(path);
         if (found == index.end() || indexed > found->second.indexed ||
             (indexed == found->second.indexed && doc.id > found->second.documentId))
             index[path] = RepoIndexFile{doc.sha256Hash, indexed, doc.id};
+    };
+    for (const auto& doc : snapshots.value())
+        include(doc);
+    if (!legacyPaths.empty()) {
+        query.metadataFilters.clear();
+        auto documents = metadataRepo_->queryDocuments(query);
+        if (!documents)
+            return documents.error();
+        for (const auto& doc : documents.value())
+            if (legacyPaths.contains(RepoPath(doc.filePath).lexically_normal()))
+                include(doc);
     }
     return index;
 }

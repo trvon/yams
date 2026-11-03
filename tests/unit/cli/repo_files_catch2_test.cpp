@@ -4,6 +4,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/cli/live_grep.h>
 #include <yams/cli/repo_files.h>
+#include <yams/cli/yams_cli.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/metadata_repository.h>
 
 using namespace yams::cli;
 
@@ -46,6 +49,62 @@ TEST_CASE("CLI repo file enumeration respects gitignore and argv boundaries",
     REQUIRE(all.tracked.size() == 3);
     CHECK(all.root == std::filesystem::canonical(repo.root));
     CHECK_FALSE(all.worktree.empty());
+}
+
+TEST_CASE("CLI repo index excludes unrelated notes and unscoped shared-hash aliases",
+          "[cli][repo][freshness][snapshot-scope]") {
+    TempRepo repo;
+    const auto data = repo.root / ".index";
+    std::filesystem::create_directories(data);
+    yams::metadata::ConnectionPoolConfig config;
+    config.enableWAL = false;
+    config.minConnections = 1;
+    config.maxConnections = 2;
+    yams::metadata::ConnectionPool pool((data / "yams.db").string(), config);
+    REQUIRE(pool.initialize().has_value());
+    yams::metadata::MetadataRepository repository(pool);
+    yams::metadata::DocumentInfo tracked;
+    tracked.filePath = (repo.root / "tracked.txt").string();
+    tracked.fileName = "tracked.txt";
+    tracked.sha256Hash = std::string(64, 'a');
+    auto id = repository.insertDocument(tracked);
+    REQUIRE(id.has_value());
+    REQUIRE(repository
+                .recordDocumentPath(
+                    tracked, id.value(),
+                    {{"repo_root", yams::metadata::MetadataValue(repo.root.generic_string())}})
+                .has_value());
+    auto alias = tracked;
+    alias.filePath = (repo.root / "unrelated-shared-note.txt").string();
+    alias.fileName = "unrelated-shared-note.txt";
+    REQUIRE(repository.recordDocumentPath(alias, id.value(), {}).has_value());
+    auto legacy = tracked;
+    legacy.filePath = (repo.root / "unrelated-legacy-note.txt").string();
+    legacy.fileName = "unrelated-legacy-note.txt";
+    legacy.sha256Hash = std::string(64, 'b');
+    REQUIRE(repository.insertDocument(legacy).has_value());
+
+    // Existing generic imports of tracked files remain usable without snapshot metadata.
+    repo.write("legacy-tracked.txt", "legacy");
+    REQUIRE(runCliProcess({"git", "-C", repo.root.string(), "add", "--", "legacy-tracked.txt"})
+                .exitCode == 0);
+    auto legacyTracked = legacy;
+    legacyTracked.filePath = (repo.root / "legacy-tracked.txt").string();
+    legacyTracked.fileName = "legacy-tracked.txt";
+    legacyTracked.sha256Hash = std::string(64, 'c');
+    const auto legacyId = repository.insertDocument(legacyTracked);
+    REQUIRE(legacyId.has_value());
+    REQUIRE(repository.recordDocumentPath(legacyTracked, legacyId.value(), {}).has_value());
+
+    YamsCLI cli;
+    cli.setDataPath(data);
+    const auto index = cli.readRepoIndex(repo.root);
+    REQUIRE(index.has_value());
+    CHECK(index.value().size() == 2);
+    CHECK(index.value().contains(RepoPath(tracked.filePath)));
+    CHECK(index.value().contains(RepoPath(legacyTracked.filePath)));
+    CHECK_FALSE(index.value().contains(RepoPath(alias.filePath)));
+    CHECK_FALSE(index.value().contains(RepoPath(legacy.filePath)));
 }
 
 TEST_CASE("CLI freshness detects edits and missing indexed files", "[cli][repo][freshness]") {

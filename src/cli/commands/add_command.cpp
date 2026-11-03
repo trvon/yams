@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -20,7 +21,6 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/detection/file_type_detector.h>
-#include <yams/metadata/connection_pool.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/embedding_service.h>
@@ -914,29 +914,30 @@ private:
                     std::any_of(includePatterns_.begin(), includePatterns_.end(), matches)) &&
                    !std::any_of(excludePatterns_.begin(), excludePatterns_.end(), matches);
         };
-        std::shared_ptr<yams::daemon::DaemonClient> client;
+        yams::cli::CliDaemonRequestOptions daemonOptions;
+        daemonOptions.accessPolicy = yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback;
+        daemonOptions.requestTimeout = std::chrono::milliseconds(std::max(30000, daemonTimeoutMs_));
+        const auto config = yams::cli::build_cli_daemon_client_config(
+            getExecutor(),
+            cli_->hasExplicitDataDir() ? cli_->getDataPath() : std::filesystem::path{},
+            daemonOptions);
+        auto plan = yams::cli::prepare_cli_daemon_client_plan(config, daemonOptions.accessPolicy);
+        if (!plan)
+            co_return plan.error();
+        auto client = std::make_shared<yams::daemon::DaemonClient>(plan.value().config);
+        auto capabilities = co_await client->status();
+        if (!capabilities)
+            co_return capabilities.error();
+        if (!capabilities.value().supportsPathUnlink)
+            co_return Error{ErrorCode::InvalidState,
+                            "Incremental worktree ingestion requires path-location support; "
+                            "upgrade or restart the daemon before retrying"};
+        yams::app::services::DocumentIngestionService ingestion(client);
         std::size_t added = 0;
         std::size_t removed = 0;
         for (const auto& path : difference.value().changed) {
             if (!matchesFilters(path))
                 continue;
-            if (!client) {
-                yams::cli::CliDaemonRequestOptions daemonOptions;
-                daemonOptions.accessPolicy =
-                    yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback;
-                daemonOptions.requestTimeout =
-                    std::chrono::milliseconds(std::max(30000, daemonTimeoutMs_));
-                const auto config = yams::cli::build_cli_daemon_client_config(
-                    getExecutor(),
-                    cli_->hasExplicitDataDir() ? cli_->getDataPath() : std::filesystem::path{},
-                    daemonOptions);
-                auto plan =
-                    yams::cli::prepare_cli_daemon_client_plan(config, daemonOptions.accessPolicy);
-                if (!plan)
-                    co_return plan.error();
-                client = std::make_shared<yams::daemon::DaemonClient>(plan.value().config);
-            }
-            yams::app::services::DocumentIngestionService ingestion(client);
             yams::app::services::AddOptions options;
             options.path = path.string();
             options.metadata = metadata;
@@ -956,30 +957,22 @@ private:
                                 "--repo before retrying"};
             ++added;
         }
-        // A missing worktree path retires a location, not its shared CAS identity.
-        // Use a writable pool: the CLI's retrieval repository is read-only.
-        if (!difference.value().missing.empty() &&
-            std::filesystem::exists(cli_->getDataPath() / "yams.db")) {
-            yams::metadata::ConnectionPoolConfig poolConfig;
-            poolConfig.minConnections = 1;
-            poolConfig.maxConnections = 1;
-            yams::metadata::ConnectionPool pool((cli_->getDataPath() / "yams.db").string(),
-                                                poolConfig);
-            auto initialized = pool.initialize();
-            if (!initialized)
-                co_return initialized.error();
-            yams::metadata::MetadataRepository repository(pool);
-            for (const auto& path : difference.value().missing) {
-                if (!matchesFilters(path))
-                    continue;
-                auto retired = repository.retireDocumentPath(path.generic_string());
-                if (!retired) {
-                    if (retired.error().code == ErrorCode::NotFound)
-                        continue;
-                    co_return retired.error();
-                }
-                ++removed;
+        // Retire only missing snapshot locations. The distinct operation fails closed on
+        // older/reconnected daemons; never convert unsupported unlink into legacy hash delete.
+        for (const auto& path : difference.value().missing) {
+            if (!matchesFilters(path) || std::filesystem::exists(path))
+                continue;
+            yams::daemon::UnlinkPathRequest request;
+            request.path = path.generic_string();
+            auto deleted = co_await client->unlinkPath(request);
+            if (!deleted) {
+                if (deleted.error().code == ErrorCode::NotFound)
+                    continue; // Already retired by another reconciliation.
+                co_return deleted.error();
             }
+            if (deleted.value().failureCount != 0)
+                co_return Error{ErrorCode::IOError, "Failed to retire missing indexed path"};
+            removed += deleted.value().successCount;
         }
         if (cli_->getJsonOutput()) {
             std::cout << json{{"repo", files.root.string()},

@@ -170,6 +170,19 @@ class CliTokenBudgetAcceptance(unittest.TestCase):
         self.assertTrue(status["fresh"])
         self.assertIn(b"file 1 line 1", self.ok("cat", str(renamed)))
 
+    def test_snapshot_cleanup_retains_unrelated_notes(self):
+        ignored = self.repo / "ignored-notes"
+        ignored.mkdir()
+        with (self.repo / ".git" / "info" / "exclude").open("a", encoding="utf-8") as exclude:
+            exclude.write("\nignored-notes/\n")
+        note = ignored / "keep-personal-note.txt"
+        note.write_text("unrelated_note_survives_snapshot_cleanup\n", encoding="utf-8")
+        self.ok("add", str(note), "--sync", "--no-embeddings", "--no-session")
+        note.unlink()
+        self.ok("add", "--changed", str(self.repo), "--no-embeddings")
+        self.assertIn(b"unrelated_note_survives_snapshot_cleanup", self.ok("cat", str(note)))
+        self.ok("status", "--repo", str(self.repo))
+
     def test_worktree_shared_hash_scoping(self):
         self.git("add", "--all")
         self.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
