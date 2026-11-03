@@ -778,7 +778,17 @@ TEST_CASE("DocumentService - Retrieval", "[document][service][retrieval]") {
 
         REQUIRE(result);
         REQUIRE(result.value().document.has_value());
-        CHECK((result.value().document->hash == fixture.testHash1_));
+        const auto& document = *result.value().document;
+        CHECK(document.hash == fixture.testHash1_);
+        CHECK(document.name == "test1.txt");
+        CHECK(document.fileName == "test1.txt");
+        CHECK(document.fileType == "text");
+        CHECK(document.created > 0);
+        CHECK(document.modified > 0);
+        CHECK(document.indexed > 0);
+        CHECK(document.metadata.at("owner") == "trace");
+        CHECK(document.metadata.at("task") == "alpha");
+        CHECK(document.metadata.at("source") == "note");
     }
 
     SECTION("Retrieve with compressed content and metadata") {
