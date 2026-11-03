@@ -43,6 +43,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -295,7 +296,7 @@ public:
         }
 
         // Try exact path
-        auto exactRes = repo_.findDocumentByExactPath(query);
+        const auto exactRes = repo_.findDocumentByExactPath(query);
         if (exactRes && exactRes.value().has_value()) {
             std::vector<metadata::DocumentInfo> v = {exactRes.value().value()};
             addUnique(v);
@@ -345,13 +346,13 @@ private:
         std::string normalized = path;
         std::replace(normalized.begin(), normalized.end(), '\\', '/');
 
-        auto treeNodeRes = repo_.findPathTreeNodeByFullPath(normalized);
+        const auto treeNodeRes = repo_.findPathTreeNodeByFullPath(normalized);
         if (!treeNodeRes || !treeNodeRes.value().has_value()) {
             return std::nullopt;
         }
 
         const auto& node = treeNodeRes.value().value();
-        auto docRes = repo_.findDocumentByExactPath(node.fullPath);
+        const auto docRes = repo_.findDocumentByExactPath(node.fullPath);
         if (docRes && docRes.value().has_value()) {
             return docRes.value().value().sha256Hash;
         }
@@ -359,7 +360,7 @@ private:
     }
 
     std::optional<std::string> tryExactPath(const std::string& path) {
-        auto res = repo_.findDocumentByExactPath(path);
+        const auto res = repo_.findDocumentByExactPath(path);
         if (res && res.value().has_value()) {
             return res.value().value().sha256Hash;
         }
@@ -402,18 +403,14 @@ private:
 
         // For absolute paths, try progressive suffix patterns
         if (!name.empty() && (name[0] == '/' || name.find(":\\") != std::string::npos)) {
-            try {
-                std::string pathStr = name;
-                std::replace(pathStr.begin(), pathStr.end(), '\\', '/');
-                size_t pos = 0;
-                while ((pos = pathStr.find('/', pos + 1)) != std::string::npos) {
-                    std::string suffix = pathStr.substr(pos + 1);
-                    if (!suffix.empty() && suffix != basename) {
-                        patterns.push_back("%" + suffix);
-                    }
+            std::string pathStr = name;
+            std::replace(pathStr.begin(), pathStr.end(), '\\', '/');
+            size_t pos = 0;
+            while ((pos = pathStr.find('/', pos + 1)) != std::string::npos) {
+                std::string suffix = pathStr.substr(pos + 1);
+                if (!suffix.empty() && suffix != basename) {
+                    patterns.push_back("%" + suffix);
                 }
-            } catch (...) {
-                // Ignore path manipulation errors
             }
         }
 
@@ -734,8 +731,11 @@ buildDocumentInfo(const StoreDocumentRequest& req, const std::string& usePath,
                     info.mimeType =
                         yams::detection::FileTypeDetector::getMimeTypeFromExtension(extForMime);
                 }
+            } catch (const std::exception& e) {
+                spdlog::debug("MIME file detection failed for {}: {}; using fallback", p.string(),
+                              e.what());
             } catch (...) {
-                // fallback below
+                spdlog::debug("MIME file detection failed for {}; using fallback", p.string());
             }
         }
     }
@@ -750,7 +750,14 @@ buildDocumentInfo(const StoreDocumentRequest& req, const std::string& usePath,
                 if (auto sig = det.detectFromBuffer(bytes)) {
                     info.mimeType = sig.value().mimeType;
                 }
+            } catch (const std::exception& e) {
+                spdlog::debug("MIME buffer detection failed for {}: {}; retaining binary fallback",
+                              req.name, e.what());
+                info.mimeType = "application/octet-stream";
             } catch (...) {
+                spdlog::debug("MIME buffer detection failed for {}; retaining binary fallback",
+                              req.name);
+                info.mimeType = "application/octet-stream";
             }
         } else if (info.mimeType.empty())
             info.mimeType = "application/octet-stream";
@@ -848,7 +855,7 @@ private:
 
         if (!req.hash.empty()) {
             if (req.hash.size() == 64) {
-                auto docRes = ctx_.metadataRepo->getDocumentByHash(req.hash);
+                const auto docRes = ctx_.metadataRepo->getDocumentByHash(req.hash);
                 if (docRes && docRes.value().has_value()) {
                     addUniqueDeleteTargets(targets, seenHashes, {docRes.value().value()});
                 } else if (docRes && yams::common::isHexDigits(req.hash)) {
@@ -924,7 +931,7 @@ private:
             }
         }
 
-        auto lingering = ctx_.metadataRepo->getDocumentByHash(doc.sha256Hash);
+        const auto lingering = ctx_.metadataRepo->getDocumentByHash(doc.sha256Hash);
         if (!lingering) {
             r.errorCode = lingering.error().code;
             r.error = "Failed to verify metadata deletion: " + lingering.error().message;
@@ -1078,22 +1085,20 @@ private:
                 prefix.pop_back();
                 suffix = "/" + suffix;
             }
-            try {
-                if (!prefix.empty() && std::filesystem::exists(prefix)) {
-                    canonicalPattern = std::filesystem::canonical(prefix).string() + suffix;
+            if (!prefix.empty()) {
+                std::error_code ec;
+                const auto canonicalPrefix = std::filesystem::canonical(prefix, ec);
+                if (!ec) {
+                    canonicalPattern = canonicalPrefix.string() + suffix;
                 }
-            } catch (...) {
-                // Ignore errors; use original pattern.
             }
             return canonicalPattern;
         }
 
-        try {
-            if (std::filesystem::exists(pattern)) {
-                canonicalPattern = std::filesystem::canonical(pattern).string();
-            }
-        } catch (...) {
-            // Ignore errors; use original pattern.
+        std::error_code ec;
+        const auto canonicalPath = std::filesystem::canonical(pattern, ec);
+        if (!ec) {
+            canonicalPattern = canonicalPath.string();
         }
         return canonicalPattern;
     }
@@ -1224,8 +1229,9 @@ private:
         auto location = ctx_.metadataRepo->getDocumentPathMetadata(doc.filePath, doc.id);
         if (!location)
             return location.error();
-        if (location.value())
-            return std::move(*location.value());
+        auto& pathMetadata = location.value();
+        if (pathMetadata)
+            return std::move(*pathMetadata);
         return ctx_.metadataRepo->getAllMetadata(doc.id);
     }
 
@@ -1340,10 +1346,13 @@ private:
         MetadataMap locationMetadata;
         if (req.showMetadata || req.showTags) {
             auto location = ctx_.metadataRepo->getDocumentPathMetadata(doc.filePath, doc.id);
-            if (location && location.value()) {
-                locationMetadata = std::move(*location.value());
-                cachedMetadata = &locationMetadata;
-            } else if (!location) {
+            if (location) {
+                auto& pathMetadata = location.value();
+                if (pathMetadata) {
+                    locationMetadata = std::move(*pathMetadata);
+                    cachedMetadata = &locationMetadata;
+                }
+            } else {
                 // Never leak a sibling location's metadata after a failed lookup.
                 cachedMetadata = nullptr;
                 spdlog::debug("Failed to hydrate path metadata for {}: {}", doc.filePath,
@@ -1414,12 +1423,9 @@ public:
             auto err = storeRes.error();
             if (err.code == ErrorCode::FileNotFound || err.code == ErrorCode::NotFound) {
                 std::string hint;
-                try {
-                    if (usePath.find(',') != std::string::npos) {
-                        hint = " (hint: pass multiple files individually or use addDirectory; "
-                               "commas are not path separators)";
-                    }
-                } catch (...) {
+                if (usePath.find(',') != std::string::npos) {
+                    hint = " (hint: pass multiple files individually or use addDirectory; "
+                           "commas are not path separators)";
                 }
                 return Error{ErrorCode::FileNotFound,
                              std::string("File not found: ") + usePath + hint};
@@ -1545,21 +1551,22 @@ public:
                                          : std::vector<Result<api::StoreResult>>{};
         recordDocumentStorePhase("content_store", contentStoreStart);
         for (std::size_t i = 0; i < prepared.size(); ++i) {
+            const auto& item = prepared[i];
             if (i >= contentResults.size()) {
-                outcomes[prepared[i].requestIndex] =
+                outcomes[item.requestIndex] =
                     Error{ErrorCode::InternalError,
                           "content store batch returned an invalid result count"};
-                if (prepared[i].temporaryPath) {
+                if (item.temporaryPath) {
                     std::error_code ec;
-                    std::filesystem::remove(*prepared[i].temporaryPath, ec);
+                    std::filesystem::remove(*item.temporaryPath, ec);
                 }
                 continue;
             }
             if (!contentResults[i]) {
-                outcomes[prepared[i].requestIndex] = contentResults[i].error();
-                if (prepared[i].temporaryPath) {
+                outcomes[item.requestIndex] = contentResults[i].error();
+                if (item.temporaryPath) {
                     std::error_code ec;
-                    std::filesystem::remove(*prepared[i].temporaryPath, ec);
+                    std::filesystem::remove(*item.temporaryPath, ec);
                 }
             }
         }
@@ -1647,7 +1654,16 @@ public:
                 continue;
             }
 
-            auto& response = outcomes[pending.requestIndex]->value();
+            auto& outcome = outcomes[pending.requestIndex];
+            if (!outcome) {
+                outcome = Error{ErrorCode::InternalError,
+                                "metadata insert completed without a content-store response"};
+                continue;
+            }
+            if (!*outcome) {
+                continue;
+            }
+            auto& response = outcome->value();
             response.documentId = inserted.value().documentId;
             const auto& request = requests[pending.requestIndex];
             if (!inserted.value().pathSeriesInitialized) {
@@ -1688,7 +1704,7 @@ public:
     // --- store() side-effect helpers (behavior-preserving extractions) ---
 
     void applyStoreVersioning(const metadata::DocumentInfo& info, int64_t docId) {
-        auto canonical = ctx_.metadataRepo->getDocument(docId);
+        const auto canonical = ctx_.metadataRepo->getDocument(docId);
         if (!canonical || !canonical.value() || canonical.value()->filePath != info.filePath) {
             // An alias has its own head/revision; never rewrite the canonical
             // content row's series on behalf of a sibling location.
@@ -1701,12 +1717,12 @@ public:
             if (writeCoord) {
                 int64_t maxVersion = 0;
                 std::optional<int64_t> prevLatestId;
-                auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
+                const auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
                 if (priorDoc && priorDoc.value().has_value()) {
-                    auto& prior = priorDoc.value().value();
+                    const auto& prior = priorDoc.value().value();
                     if (prior.sha256Hash != info.sha256Hash) {
                         prevLatestId = prior.id;
-                        auto verRes = ctx_.metadataRepo->getMetadata(prior.id, "version");
+                        const auto verRes = ctx_.metadataRepo->getMetadata(prior.id, "version");
                         if (verRes && verRes.value().has_value()) {
                             try {
                                 maxVersion = verRes.value().value().asInteger();
@@ -1727,12 +1743,13 @@ public:
                         for (const auto& d : prevListRes.value()) {
                             if (d.id == docId)
                                 continue;
-                            auto latestRes = ctx_.metadataRepo->getMetadata(d.id, "is_latest");
+                            const auto latestRes =
+                                ctx_.metadataRepo->getMetadata(d.id, "is_latest");
                             if (latestRes && latestRes.value().has_value() &&
                                 latestRes.value().value().asBoolean()) {
                                 prevLatestId = d.id;
                             }
-                            auto verRes = ctx_.metadataRepo->getMetadata(d.id, "version");
+                            const auto verRes = ctx_.metadataRepo->getMetadata(d.id, "version");
                             if (verRes && verRes.value().has_value()) {
                                 try {
                                     int64_t v = verRes.value().value().asInteger();
@@ -1778,9 +1795,9 @@ public:
                          {docId, "series_key", metadata::MetadataValue(info.filePath)}}},
                     *writeCoord);
             } else {
-                auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
+                const auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
                 if (priorDoc && priorDoc.value().has_value()) {
-                    auto& prior = priorDoc.value().value();
+                    const auto& prior = priorDoc.value().value();
                     if (prior.sha256Hash != info.sha256Hash) {
                         metadata::applyPathSeriesVersioning(*ctx_.metadataRepo, info.filePath,
                                                             docId, prior);
@@ -2387,7 +2404,7 @@ public:
             std::string mime;
             std::string ext;
             if (ctx_.metadataRepo) {
-                auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
+                const auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
                 if (docRes && docRes.value().has_value()) {
                     mime = docRes.value()->mimeType;
                     ext = docRes.value()->fileExtension;
@@ -2463,7 +2480,7 @@ public:
         std::optional<yams::metadata::DocumentInfo> targetDoc;
         if (ctx_.metadataRepo) {
             // PERFORMANCE: Use direct hash lookup instead of scanning all documents
-            auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
+            const auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
             if (docRes && docRes.value().has_value()) {
                 targetDoc = docRes.value();
             }
@@ -2486,7 +2503,7 @@ public:
 
         if (mode == yams::cli::HotColdMode::HotOnly && !forceCold && ctx_.metadataRepo &&
             targetDoc) {
-            auto c = ctx_.metadataRepo->getContent(targetDoc->id);
+            const auto c = ctx_.metadataRepo->getContent(targetDoc->id);
             if (c && c.value().has_value()) {
                 CatDocumentResponse out;
                 out.hash = hash;
@@ -2503,7 +2520,7 @@ public:
 
         // Auto: prefer hot content when available; otherwise cold
         if (mode == yams::cli::HotColdMode::Auto && !forceCold && ctx_.metadataRepo && targetDoc) {
-            auto c = ctx_.metadataRepo->getContent(targetDoc->id);
+            const auto c = ctx_.metadataRepo->getContent(targetDoc->id);
             if (c && c.value().has_value() && !c.value()->contentText.empty()) {
                 CatDocumentResponse out;
                 out.hash = hash;
@@ -2665,6 +2682,8 @@ public:
                        docs.end());
         }
 
+        const auto totalFound = usedQuery ? totalFoundApprox : docs.size();
+
         // Pagination: offset, limit
         std::vector<metadata::DocumentInfo> page;
         if (usedQuery) {
@@ -2685,7 +2704,7 @@ public:
         }
 
         ListDocumentsResponse out;
-        out.totalFound = usedQuery ? totalFoundApprox : docs.size();
+        out.totalFound = totalFound;
         out.count = page.size();
         out.sortBy = req.sortBy;
         out.sortOrder = req.sortOrder;
@@ -2808,7 +2827,7 @@ public:
         }
 
         // Find target document by hash - use direct lookup instead of scanning all
-        auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
+        const auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
         if (!docRes) {
             return Error{ErrorCode::InternalError,
                          "Failed to lookup document: " + docRes.error().message};
