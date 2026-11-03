@@ -1,15 +1,18 @@
 #include <yams/common/string_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/magic_numbers.hpp> // C++23 constexpr patterns
 #include <yams/detection/file_type_detector.h>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string_view>
@@ -137,7 +140,7 @@ bool isConvincingTextData(std::span<const std::byte> data) {
         bool valid = true;
         for (size_t j = 1; j < sequenceLength; ++j) {
             const unsigned char continuation = static_cast<unsigned char>(data[i + j]);
-            if ((continuation & 0xC0) != 0x80) {
+            if ((continuation & 0xC0U) != 0x80U) {
                 valid = false;
                 break;
             }
@@ -609,8 +612,8 @@ std::filesystem::path FileTypeDetector::findMagicNumbersFile() {
     std::vector<fs::path> searchPaths;
 
     // 1. Check environment variable
-    if (const char* dataDir = std::getenv("YAMS_DATA_DIR")) {
-        searchPaths.push_back(fs::path(dataDir) / "magic_numbers.json");
+    if (const auto dataDir = yams::config::getenv_optional("YAMS_DATA_DIR")) {
+        searchPaths.push_back(fs::path(*dataDir) / "magic_numbers.json");
     }
 
     // 2. Check relative to executable location (for installed binaries)
@@ -635,8 +638,11 @@ std::filesystem::path FileTypeDetector::findMagicNumbersFile() {
                                   "magic_numbers.json");
         }
 #endif
+    } catch (const std::exception& e) {
+        spdlog::debug("Executable-relative magic-number lookup failed: {}; trying fallback paths",
+                      e.what());
     } catch (...) {
-        // Ignore errors in getting executable path
+        spdlog::debug("Executable-relative magic-number lookup failed; trying fallback paths");
     }
 
     // 3. Check common installation paths
@@ -652,8 +658,8 @@ std::filesystem::path FileTypeDetector::findMagicNumbersFile() {
     searchPaths.push_back("../../../../data/magic_numbers.json");
 
     // 5. Check in home directory
-    if (const char* home = std::getenv("HOME")) {
-        searchPaths.push_back(fs::path(home) / ".local" / "share" / "yams" / "data" /
+    if (const auto home = yams::config::getenv_optional("HOME")) {
+        searchPaths.push_back(fs::path(*home) / ".local" / "share" / "yams" / "data" /
                               "magic_numbers.json");
     }
 
@@ -695,12 +701,32 @@ Result<FileSignature> FileTypeDetector::detectFromBuffer(std::span<const std::by
     if (pImpl->config.useLibMagic && pImpl->magicCookie) {
         auto magicResult = pImpl->detectWithLibMagic(data);
         if (magicResult) {
-            // Treat overly generic MIME types from libmagic as provisional only
+            // Generic ASCII text still needs our conservative content check: libmagic also
+            // labels printable binary blobs as text/plain. Keep specific formats and Unicode
+            // verdicts unchanged rather than applying an ASCII word heuristic to them.
             const auto& m = magicResult.value().mimeType;
-            bool isGeneric = (m == "application/octet-stream");
+            const auto sample = data.first(std::min(data.size(), size_t(512)));
+            const bool weakAsciiText =
+                m == "text/plain" &&
+                std::all_of(
+                    sample.begin(), sample.end(),
+                    [](std::byte value) { return static_cast<unsigned char>(value) < 0x80; }) &&
+                !isConvincingTextData(sample);
+            const bool isGeneric = (m == "application/octet-stream") || weakAsciiText;
             if (!isGeneric) {
-                result = magicResult.value();
-                detected = true;
+                // Generic text is not stronger evidence than a known binary signature.
+                // In particular, libmagic can call an eight-byte PNG signature text/plain.
+                if (m == "text/plain" && pImpl->config.useBuiltinPatterns) {
+                    auto patternResult = pImpl->detectWithPatterns(data);
+                    if (patternResult && isBinaryMimeType(patternResult.value().mimeType)) {
+                        result = patternResult.value();
+                        detected = true;
+                    }
+                }
+                if (!detected) {
+                    result = magicResult.value();
+                    detected = true;
+                }
             }
         }
     }
@@ -752,8 +778,11 @@ Result<FileSignature> FileTypeDetector::detectFromFile(const std::filesystem::pa
         return Error{ErrorCode::PermissionDenied, "Cannot open file: " + path.string()};
     }
 
-    std::vector<std::byte> buffer(pImpl->config.maxBytesToRead);
-    file.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
+    const auto readLimit =
+        std::min(pImpl->config.maxBytesToRead,
+                 static_cast<size_t>(std::numeric_limits<std::streamsize>::max()));
+    std::vector<std::byte> buffer(readLimit);
+    file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
     size_t bytesRead = file.gcount();
     buffer.resize(bytesRead);
 
@@ -881,7 +910,7 @@ Result<size_t> FileTypeDetector::loadPatternsFromDatabase(metadata::Database& db
         pattern.fileType = stmt.getString(2);
         pattern.mimeType = stmt.getString(3);
         pattern.description = stmt.getString(4);
-        pattern.confidence = stmt.getDouble(5);
+        pattern.confidence = static_cast<float>(stmt.getDouble(5));
 
         auto bytesResult = hexToBytes(pattern.patternHex);
         if (bytesResult) {
@@ -1271,7 +1300,7 @@ bool isBinaryData(std::span<const std::byte> data) {
         return true;
 
     // If printable characters are less than 70%, likely binary
-    if (printableChars < checkLength * 0.7)
+    if (static_cast<double>(printableChars) < static_cast<double>(checkLength) * 0.7)
         return true;
 
     return false;

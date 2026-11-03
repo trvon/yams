@@ -208,6 +208,46 @@ TEST_CASE_METHOD(DetectorFixture, "Extensionless printable blobs do not fall thr
     CHECK(result.value().isBinary);
 }
 
+TEST_CASE_METHOD(DetectorFixture, "Default backend preserves conservative generic text detection",
+                 "[detection][file][buffer][generic-text]") {
+    auto config = configWithCustomPatterns();
+    config.useLibMagic = true;
+    REQUIRE(detector.initialize(config));
+
+    SECTION("Printable punctuation blob remains binary in buffer and file detection") {
+        const std::string blob = "?<<?"
+                                 "?Y?"
+                                 "?<[o+?g?<R`g=?#!={?;=?t?:}?";
+        auto bytes = std::as_bytes(std::span(blob.data(), blob.size()));
+        auto buffer = detector.detectFromBuffer(bytes);
+        REQUIRE(buffer);
+        CHECK(buffer.value().mimeType == "application/octet-stream");
+        CHECK(buffer.value().isBinary);
+        auto path = dir.createBinaryFile("extensionless-blob", bytes);
+        auto file = detector.detectFromFile(path);
+        REQUIRE(file);
+        CHECK(file.value().mimeType == "application/octet-stream");
+        CHECK(file.value().isBinary);
+        auto repeated = detector.detectFromBuffer(bytes);
+        REQUIRE(repeated);
+        CHECK(repeated.value().mimeType == "application/octet-stream");
+    }
+
+    SECTION("Prose, Unicode and structured text retain their text classification") {
+        for (const std::string text :
+             {"A normal plain text document with words.\n", "こんにちは世界\n",
+              "{\"message\":\"hello\"}\n", "int main() { return 0; }\n",
+              "\xEF\xBB\xBF A normal plain text document with a UTF-8 BOM.\n"}) {
+            INFO(text);
+            auto bytes = std::as_bytes(std::span(text.data(), text.size()));
+            auto result = detector.detectFromBuffer(bytes);
+            REQUIRE(result);
+            CHECK(detector.isTextMimeType(result.value().mimeType));
+            CHECK_FALSE(result.value().isBinary);
+        }
+    }
+}
+
 TEST_CASE_METHOD(DetectorFixture, "Classification utilities report mime details",
                  "[detection][classification]") {
     auto config = configWithCustomPatterns();
