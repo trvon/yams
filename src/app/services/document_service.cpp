@@ -1167,9 +1167,23 @@ private:
             return;
         }
 
-        // A basename selector must not become a directory-prefix query (e.g. *handoff*).
+        // Basenames use a LIKE pattern without globToSqlLike's path-prefix expansion.
         if (pattern.find_first_of("/\\") == std::string::npos) {
-            queryOpts.fileNamePattern = globToSqlLike(pattern);
+            std::string namePattern;
+            namePattern.reserve(pattern.size());
+            for (const char c : pattern) {
+                if (c == '*') {
+                    namePattern += '%';
+                } else if (c == '?') {
+                    namePattern += '_';
+                } else {
+                    if (c == '%' || c == '_' || c == '\\') {
+                        namePattern += '\\';
+                    }
+                    namePattern += c;
+                }
+            }
+            queryOpts.fileNamePattern = std::move(namePattern);
             return;
         }
         auto wildcardPos = pattern.find_first_of("*?");

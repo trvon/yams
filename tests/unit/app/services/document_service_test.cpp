@@ -975,6 +975,32 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         CHECK(result.value().documents.front().hash == fixture.testHash1_);
     }
 
+    SECTION("Prefix basename glob matches before pagination") {
+        ListDocumentsRequest request;
+        request.pattern = "test*.txt";
+        request.limit = 1;
+        auto result = fixture.documentService_->list(request);
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 1);
+        CHECK(result.value().documents.front().hash == fixture.testHash1_);
+    }
+
+    SECTION("Basename glob treats SQL wildcard characters literally") {
+        for (const auto& name : {"literal_one.txt", "literalXone.txt"}) {
+            const auto path = fixture.testDir_ / name;
+            std::ofstream{path} << "content for " << name;
+            StoreDocumentRequest store;
+            store.path = path.string();
+            REQUIRE(fixture.documentService_->store(store));
+        }
+        ListDocumentsRequest request;
+        request.pattern = "literal_*.txt";
+        auto result = fixture.documentService_->list(request);
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 1);
+        CHECK(result.value().documents.front().fileName == "literal_one.txt");
+    }
+
     SECTION("List recent documents") {
         ListDocumentsRequest request;
         request.limit = 5;
