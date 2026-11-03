@@ -23,6 +23,14 @@ struct StaticTableInfo {
 
 inline constexpr std::string_view kDefaultStaticTable = "yams-static-bge-c4-256";
 
+// UI decision seam shared by init and offline policy tests; never performs I/O.
+struct StaticTableInitDecision {
+    bool download{false};
+    bool prompt{false};
+    bool defaultYes{false};
+};
+StaticTableInitDecision staticTableInitDecision(bool automatic, bool nonInteractive);
+
 const std::vector<StaticTableInfo>& staticTableCatalog();
 const StaticTableInfo* findStaticTable(std::string_view name);
 

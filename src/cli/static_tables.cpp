@@ -13,6 +13,11 @@ namespace yams::cli {
 
 namespace fs = std::filesystem;
 
+StaticTableInitDecision staticTableInitDecision(bool automatic, bool nonInteractive) {
+    // Headless initialization stays offline; interactive download needs an explicit Yes.
+    return {.prompt = !automatic && !nonInteractive};
+}
+
 const std::vector<StaticTableInfo>& staticTableCatalog() {
     static const std::vector<StaticTableInfo> tables = {
         {"yams-static-bge-c4-256",

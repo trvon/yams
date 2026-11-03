@@ -705,6 +705,22 @@ TEST_CASE("Static embedding selection requires an explicit model opt-in",
     }
 }
 
+TEST_CASE("Static table initialization requires affirmative interactive consent",
+          "[cli][init][static][static-init-consent]") {
+    for (const bool nonInteractive : {false, true}) {
+        const auto automatic = yams::cli::staticTableInitDecision(true, nonInteractive);
+        CHECK_FALSE(automatic.download);
+        CHECK_FALSE(automatic.prompt);
+    }
+    const auto nonInteractive = yams::cli::staticTableInitDecision(false, true);
+    CHECK_FALSE(nonInteractive.download);
+    CHECK_FALSE(nonInteractive.prompt);
+    const auto interactive = yams::cli::staticTableInitDecision(false, false);
+    CHECK_FALSE(interactive.download);
+    CHECK(interactive.prompt);
+    CHECK_FALSE(interactive.defaultYes);
+}
+
 TEST_CASE("Explicit model download records the validated local table selection",
           "[cli][init][static][static-download-consent]") {
     CliTestHelper helper;
@@ -966,8 +982,12 @@ TEST_CASE("InitCommand: automatic setup stays offline on the built-in encoder",
     CliTestHelper helper;
     IsolatedHome home(helper.tempDir / "home");
     CaptureStdout capture;
-    // GLiNER and reranker downloads fail offline too; this case is about the table.
+    // The pure policy regression was red before changing --auto. It is now safe
+    // to exercise the command; retain the offline proxy guard as defense in depth.
     REQUIRE(helper.runCommand({"yams", "init", "--auto", "--no-keygen"}) == 0);
+    CHECK(capture.str().find("Downloading static table") == std::string::npos);
+    CHECK(yams::config::parse_config_value(helper.configPath, "embeddings.simeon", "static_table")
+              .empty());
     CHECK_FALSE(fs::exists(helper.dataDir / "models" / "static" / "yams-static-bge-c4-256.smstat"));
     CHECK(yams::daemon::ConfigResolver::readVectorSentinelDim(helper.dataDir) ==
           std::optional<size_t>{1024U});
@@ -987,9 +1007,8 @@ TEST_CASE("InitCommand: a corrupt static table in the data dir does not count as
           std::optional<size_t>{1024U});
 }
 
-// --auto is the headless path (containers, CI, the mesh harness). It installs the 17 MB static
-// table only; the ONNX GLiNER and reranker models (about 1.5 GB) stay opt-in, and init never
-// writes config for a model that is not on disk.
+// Headless setup stays offline. Static, GLiNER and reranker models all require
+// an explicit choice; init does not write configuration for an absent model.
 TEST_CASE("InitCommand: --auto installs no ONNX models and writes no config for them",
           "[cli][init][auto][download]") {
     const auto vectorEnv = VectorStoreEnv::onDisk();
@@ -997,8 +1016,7 @@ TEST_CASE("InitCommand: --auto installs no ONNX models and writes no config for 
     CliTestHelper helper;
     IsolatedHome home(helper.tempDir / "home");
     CaptureStdout capture;
-    REQUIRE(helper.runCommand({"yams", "init", "--auto", "--no-keygen", "--no-static-table"}) ==
-            0);
+    REQUIRE(helper.runCommand({"yams", "init", "--auto", "--no-keygen", "--no-static-table"}) == 0);
     const std::string config = readFile(helper.configPath);
     CHECK(config.find("reranker_backend = \"onnx\"") == std::string::npos);
     CHECK(config.find("[plugins.glint]") == std::string::npos);

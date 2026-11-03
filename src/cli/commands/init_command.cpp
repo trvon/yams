@@ -25,18 +25,14 @@
 #include <fmt/format.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cctype>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
-#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 #include <openssl/evp.h>
@@ -69,8 +65,8 @@ std::string formatInitSummary(const fs::path& configPath, const fs::path& dataPa
 
 size_t resolveModelDimension(std::string_view modelName) {
     if (modelName.empty() || modelName == "simeon-default" || modelName == "simeon") {
-        // The Simeon backend uses the static-embedding table when one is installed (its
-        // dimension), otherwise the 1024-dim hash encoder.
+        // An explicitly selected table supplies its dimension; unselected artifacts
+        // do not change the built-in 1024-dim encoder or an existing vector space.
         auto backend = vector::makeSimeonBackend(vector::EmbeddingConfig{});
         if (backend && backend->initialize() && backend->getEmbeddingDimension() > 0) {
             return backend->getEmbeddingDimension();
@@ -120,7 +116,7 @@ public:
             auto result = execute();
             if (!result) {
                 spdlog::error("Initialization failed: {}", result.error().message);
-                std::exit(1);
+                throw CLI::RuntimeError(1);
             }
         });
     }
@@ -275,11 +271,11 @@ public:
                 selectedModel = "simeon-default";
             }
 
-            // 6b) Static-embedding table: Simeon embeds with it when installed (256 dims instead of
-            // the 1024-dim hash encoder). Fetch it before the vector DB is created so the store
-            // starts in the right space.
+            // An explicit selection must be recorded before resolving the vector
+            // dimension. Automatic/noninteractive initialization never downloads.
+            std::optional<fs::path> selectedStaticTable;
             if (enableVectorDB && !colbertSelected && !noStaticTable_) {
-                ensureStaticTable(dataPath);
+                selectedStaticTable = ensureStaticTable(dataPath, configPath);
             }
 
             // 6a) S3 Storage Setup
@@ -354,6 +350,13 @@ public:
             auto createResult = migrator->createDefaultLatestConfig(configPath);
             if (!createResult) {
                 return createResult;
+            }
+
+            if (selectedStaticTable) {
+                const auto selected = cli::selectStaticTable(*selectedStaticTable, configPath);
+                if (!selected) {
+                    return selected.error();
+                }
             }
 
             // Update the v3 config with user choices
@@ -476,31 +479,37 @@ private:
         std::cout << formatLaterCommand(command);
     }
 
-    // Interactive: ask (default yes). --auto: download. --non-interactive: skip, so scripted
-    // setups stay offline. A table already installed (data dir or a release package's share dir)
-    // is used as is. A failed download leaves the hash encoder in place.
-    void ensureStaticTable(const fs::path& dataPath) {
-        if (auto found = config::findStaticEmbeddingTable(std::nullopt, dataPath)) {
-            if (vector::loadSharedStaticEmbeddingTable(*found)) {
-                spdlog::info("Static embedding table: {}", found->string());
-                return;
+    // Only a recorded selection or an affirmative interactive answer is consent.
+    // Package/data-dir artifacts alone never opt in; headless setup stays offline.
+    std::optional<fs::path> ensureStaticTable(const fs::path& dataPath,
+                                              const fs::path& configPath) {
+        const auto configured =
+            config::parse_config_value(configPath, "embeddings.simeon", "static_table");
+        if (!configured.empty()) {
+            if (auto found = config::findStaticEmbeddingTable(fs::path(configured), dataPath)) {
+                if (vector::loadSharedStaticEmbeddingTable(*found)) {
+                    spdlog::info("Explicit static embedding table: {}", found->string());
+                    return found;
+                }
             }
-            spdlog::warn("{} is not a valid static table; it will be replaced", found->string());
+            spdlog::warn("Configured static table is unavailable; no substitute is selected");
         }
         const auto* table = cli::findStaticTable(cli::kDefaultStaticTable);
         if (!table) {
-            return;
+            return std::nullopt;
         }
-        bool download = autoInit_;
-        if (!autoInit_ && !nonInteractive_) {
+        const auto decision = cli::staticTableInitDecision(autoInit_, nonInteractive_);
+        bool download = decision.download;
+        if (decision.prompt) {
             std::cout << "\nThe static embedding table (" << table->size_mb
                       << " MB) improves semantic search and reranking.\n";
-            download = prompt_yes_no("Download it now? [Y/n]: ", YesNoOptions{.defaultYes = true});
+            download = prompt_yes_no("Download it now? [y/N]: ",
+                                     YesNoOptions{.defaultYes = decision.defaultYes});
         }
         if (!download) {
             std::cout << "Skipping the static table. Install it later with:\n  yams model download "
                       << table->name << "\n";
-            return;
+            return std::nullopt;
         }
         auto out = cli::downloadStaticTable(table->name, table->url, table->sha256, dataPath, {},
                                             /*force=*/false);
@@ -509,9 +518,10 @@ private:
             std::cout << "Semantic search uses the built-in hash encoder for now. Retry with:\n"
                          "  yams model download "
                       << table->name << "\n";
-            return;
+            return std::nullopt;
         }
         std::cout << "Static table installed: " << out.value().string() << "\n";
+        return out.value();
     }
 
     static void printInitSummary(const fs::path& configPath, const fs::path& dataPath) {
@@ -568,8 +578,9 @@ private:
     }
 
     void maybeBootstrapProjectSession() {
-        if (const char* envSession = std::getenv("YAMS_SESSION_CURRENT"); envSession && *envSession)
+        if (config::getenv_nonempty("YAMS_SESSION_CURRENT")) {
             return;
+        }
 
         std::error_code ec;
         fs::path cwd = fs::current_path(ec);
@@ -986,8 +997,9 @@ private:
         std::string out;
         out.resize(len * 2);
         for (size_t i = 0; i < len; ++i) {
-            out[2 * i] = kHex[(data[i] >> 4) & 0xF];
-            out[2 * i + 1] = kHex[(data[i]) & 0xF];
+            const auto value = static_cast<unsigned int>(data[i]);
+            out[2 * i] = kHex[(value >> 4U) & 0xFU];
+            out[2 * i + 1] = kHex[value & 0xFU];
         }
         return out;
     }
@@ -1004,8 +1016,8 @@ private:
         try {
             namespace fs = std::filesystem;
             // Determine user plugin directory: ~/.local/lib/yams/plugins
-            fs::path userPlugins = fs::path(std::getenv("HOME") ? std::getenv("HOME") : "") /
-                                   ".local" / "lib" / "yams" / "plugins";
+            fs::path userPlugins =
+                fs::path(config::getenv_copy("HOME")) / ".local" / "lib" / "yams" / "plugins";
             yams::common::ensureDirectories(userPlugins);
             spdlog::info("Plugins directory: {}", userPlugins.string());
 
@@ -1140,6 +1152,8 @@ private:
                 storage.objectsDir = tmp / "yams" / "objects";
                 storage.stagingDir = tmp / "yams" / "downloader";
             } catch (...) {
+                spdlog::warn(
+                    "Could not resolve temporary downloader storage; optional download may fail");
             }
         }
 
@@ -1354,6 +1368,8 @@ private:
                 storage.objectsDir = tmp / "yams" / "objects";
                 storage.stagingDir = tmp / "yams" / "downloader";
             } catch (...) {
+                spdlog::warn(
+                    "Could not resolve temporary downloader storage; optional download may fail");
             }
         }
 
@@ -1641,6 +1657,8 @@ private:
                 storage.objectsDir = tmp / "yams" / "objects";
                 storage.stagingDir = tmp / "yams" / "downloader";
             } catch (...) {
+                spdlog::warn(
+                    "Could not resolve temporary downloader storage; optional download may fail");
             }
         }
 
@@ -1997,10 +2015,10 @@ private:
      * @brief Writes the YAMS skill file to the specified agent skill directories.
      */
     void installAgentSkill(bool installClaude, bool installOpenCode) {
-        const char* home = std::getenv("HOME");
+        auto home = config::getenv_nonempty("HOME");
 #ifdef _WIN32
         if (!home) {
-            home = std::getenv("USERPROFILE");
+            home = config::getenv_nonempty("USERPROFILE");
         }
 #endif
         if (!home) {
@@ -2008,10 +2026,10 @@ private:
             return;
         }
 
-        fs::path homeDir(home);
+        fs::path homeDir(*home);
         fs::path configHome;
-        if (const char* xdgConfig = std::getenv("XDG_CONFIG_HOME"); xdgConfig && *xdgConfig) {
-            configHome = fs::path(xdgConfig);
+        if (const auto xdgConfig = config::getenv_nonempty("XDG_CONFIG_HOME")) {
+            configHome = fs::path(*xdgConfig);
         } else {
             configHome = homeDir / ".config";
         }
