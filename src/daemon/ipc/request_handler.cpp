@@ -53,6 +53,8 @@ void log_request_handler_debug(const char* message) noexcept {
     try {
         spdlog::debug("{}", message);
     } catch (...) {
+        // Diagnostics must not interrupt connection cleanup or error delivery.
+        return;
     }
 }
 
@@ -60,6 +62,7 @@ void log_request_handler_debug(const char* message, const std::exception& e) noe
     try {
         spdlog::debug("{}: {}", message, e.what());
     } catch (...) {
+        return;
     }
 }
 
@@ -67,7 +70,16 @@ void log_request_handler_error(const char* message) noexcept {
     try {
         spdlog::error("{}", message);
     } catch (...) {
+        return;
     }
+}
+
+void closeSocketNoexcept(boost::asio::local::stream_protocol::socket& socket) noexcept {
+    boost::system::error_code error;
+    // Asio exposes the same error through the output parameter on supported versions.
+    error = socket.close(error);
+    if (error)
+        log_request_handler_error("IPC socket close failed during connection cleanup");
 }
 
 bool is_client_disconnect(const std::string& msg) {
@@ -351,8 +363,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::warn("Closing connection immediately due to FSM={} (context={}): {}",
                                  ConnectionFsm::to_string(st), "before_async_read", guard_err);
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     break;
                 }
@@ -388,8 +399,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                  "(count={}, state={})",
                                  fsm_guard_fail_count, ConnectionFsm::to_string(st));
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     break;
                 }
@@ -502,8 +512,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         "Closing idle connection after {} consecutive read timeouts (fd={})",
                         consecutive_idle_timeouts, sock_fd);
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     break;
                 }
@@ -515,8 +524,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::debug("Closing connection: read error {} ({})", read_ec.message(),
                                   read_ec.value());
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     break;
                 }
@@ -550,8 +558,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
             } else {
                 spdlog::debug("Closing connection: FSM not alive during read");
                 if (sock->is_open()) {
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    closeSocketNoexcept(*sock);
                 }
                 break;
             }
@@ -577,8 +584,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                               "Invalid frame format");
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     feed_error = true;
                     break;
@@ -589,8 +595,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                               "Frame exceeds maximum size");
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     feed_error = true;
                     break;
@@ -610,8 +615,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         (void)co_await send_error(*sock, ErrorCode::SerializationError,
                                                   "Failed to get frame");
                         if (sock->is_open()) {
-                            boost::system::error_code ignore_ec;
-                            sock->close(ignore_ec);
+                            closeSocketNoexcept(*sock);
                         }
                         should_exit = true;
                         break;
@@ -642,8 +646,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         (void)co_await send_error(*sock, message_result.error().code,
                                                   message_result.error().message, correlated_id);
                         if (sock->is_open()) {
-                            boost::system::error_code ignore_ec;
-                            sock->close(ignore_ec);
+                            closeSocketNoexcept(*sock);
                         }
                         should_exit = true;
                         break;
@@ -658,8 +661,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                                   "Expected request message", message.requestId);
                         if (sock->is_open()) {
-                            boost::system::error_code ignore_ec;
-                            sock->close(ignore_ec);
+                            closeSocketNoexcept(*sock);
                         }
                         should_exit = true;
                         break;
@@ -1925,10 +1927,10 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
                                              TuneAdvisor::writerScaleActiveHigh2Mul());
             const double halfFrac = TuneAdvisor::writerQueuedHalfThresholdFraction();
             const double threeQFrac = TuneAdvisor::writerQueuedThreeQuarterThresholdFraction();
-            if (queued_bytes > static_cast<size_t>(queued_cap * threeQFrac))
+            if (queued_bytes > static_cast<size_t>(static_cast<double>(queued_cap) * threeQFrac))
                 budget = static_cast<size_t>(static_cast<double>(budget) *
                                              TuneAdvisor::writerScaleQueuedThreeQuarterMul());
-            else if (queued_bytes > static_cast<size_t>(queued_cap * halfFrac))
+            else if (queued_bytes > static_cast<size_t>(static_cast<double>(queued_cap) * halfFrac))
                 budget = static_cast<size_t>(static_cast<double>(budget) *
                                              TuneAdvisor::writerScaleQueuedHalfMul());
 
@@ -2167,6 +2169,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                         return;
                     }
                 } catch (...) {
+                    log_request_handler_debug("Could not read embedding-provider state");
                 }
 
                 if (!modelProvider || !modelProvider->isAvailable()) {
@@ -2187,12 +2190,14 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     try {
                         modelName = sm->resolvePreferredModel();
                     } catch (...) {
+                        log_request_handler_debug("Preferred model lookup failed; trying fallback");
                     }
                 }
                 if (modelName.empty()) {
                     try {
                         modelName = sm->getEmbeddingModelName();
                     } catch (...) {
+                        log_request_handler_debug("Configured embedding model lookup failed");
                     }
                 }
                 if (modelName.empty()) {
@@ -2812,7 +2817,9 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
         if (config_.graceful_half_close) {
             boost::system::error_code ig;
-            socket.shutdown(boost::asio::socket_base::shutdown_send, ig);
+            ig = socket.shutdown(boost::asio::socket_base::shutdown_send, ig);
+            if (ig)
+                log_request_handler_debug("IPC graceful send shutdown failed");
             // Race drain read against timeout using async_initiate (no experimental APIs)
             auto executor = co_await boost::asio::this_coro::executor;
             std::array<uint8_t, 256> tmp{};
@@ -2939,8 +2946,7 @@ boost::asio::awaitable<Result<void>> RequestHandler::send_error_response(
 
     if (config_.close_after_response) {
         connection_closing_.store(true, std::memory_order_release);
-        boost::system::error_code ignore_ec;
-        socket.close(ignore_ec);
+        closeSocketNoexcept(socket);
         if (fsm) {
             fsm->on_close_request();
         }
