@@ -1739,7 +1739,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
             // intentionally omits per-file match details and instead populates the shared
             // pathsOnly projection. Map those paths into lightweight GrepMatch entries so daemon
             // clients (and tests) can observe results via the standard matches field.
-            if (serviceReq.pathsOnly) {
+            if (req.pathsOnly) {
                 GrepResponse response;
                 response.filesSearched = serviceResp.filesSearched;
                 response.regexMatches = static_cast<uint64_t>(serviceResp.regexMatches);
