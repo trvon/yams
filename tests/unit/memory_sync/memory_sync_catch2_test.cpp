@@ -2101,6 +2101,47 @@ TEST_CASE("Bounded filesystem snapshots certify only complete traversals",
     fixture.backend.resetCancel();
 }
 
+TEST_CASE("Oversized optional filesystem snapshots stop probing after overflow",
+          "[memory-sync][listing-cache][snapshot-probe-budget]") {
+    BackendFixture fixture{"snapshot-probe-budget"};
+    for (std::size_t i = 0; i < 65; ++i) {
+        REQUIRE(fixture.backend.store("index/" + std::to_string(10'000 + i), bytes("value"))
+                    .has_value());
+    }
+
+    std::size_t maxKeys = 2;
+    std::size_t maxBytes = 4096;
+    std::size_t expectedMatchingVisits = 3;
+    SECTION("key budget overflow") {}
+    SECTION("byte budget overflow") {
+        maxKeys = 65;
+        maxBytes = std::string{"index/10000"}.size();
+        expectedMatchingVisits = 2;
+    }
+
+    {
+        yams::storage::FilesystemListingStats stats;
+        stats.prefix = "index/";
+        struct RestoreObservation {
+            yams::storage::FilesystemListingStats* previous;
+            ~RestoreObservation() { yams::storage::testing_setFilesystemListingStats(previous); }
+        } restore{yams::storage::testing_setFilesystemListingStats(&stats)};
+
+        const auto snapshot = fixture.backend.listBoundedSnapshot("index/", maxKeys, maxBytes);
+        REQUIRE(snapshot.has_value());
+        CHECK_FALSE(snapshot.value().has_value());
+        CHECK(stats.matchingKeys == expectedMatchingVisits);
+    }
+
+    // Rejecting an optional cache snapshot must not truncate the authoritative fallback.
+    const auto page = fixture.backend.listPage("index/", std::nullopt, 65);
+    REQUIRE(page.has_value());
+    REQUIRE(page.value().keys.size() == 65);
+    CHECK(page.value().keys.front() == "index/10000");
+    CHECK(page.value().keys.back() == "index/10064");
+    CHECK_FALSE(page.value().nextCursor.has_value());
+}
+
 TEST_CASE("Exclusive filesystem listing falls back to pages above the snapshot budget",
           "[memory-sync][listing-cache][budget]") {
     BackendFixture fixture{"snapshot-fallback"};

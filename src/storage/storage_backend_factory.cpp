@@ -97,8 +97,8 @@ void observePeakRetainedKeys(std::string_view prefix, std::size_t retainedKeys) 
 template <typename Visitor>
 Result<void> visitFilesystemKeys(const std::filesystem::path& basePath, std::string_view prefix,
                                  const std::atomic<bool>& cancelled,
-                                 const std::function<Result<void>()>& cooperate,
-                                 Visitor&& visitor) {
+                                 const std::function<Result<void>()>& cooperate, Visitor&& visitor,
+                                 const bool* optionalProbeComplete = nullptr) {
     const auto checkCancelled = [&]() -> Result<void> {
         if (cancelled.load(std::memory_order_relaxed)) {
             return Error{ErrorCode::OperationCancelled, "filesystem listing cancelled"};
@@ -164,6 +164,11 @@ Result<void> visitFilesystemKeys(const std::filesystem::path& basePath, std::str
             }
 #endif
             visitor(std::move(key));
+            // Only an optional cache probe may stop early. Its caller must reject the
+            // snapshot; authoritative listing callers never supply this signal.
+            if (optionalProbeComplete && *optionalProbeComplete) {
+                return checkCancelled();
+            }
         }
     } catch (const std::filesystem::filesystem_error& e) {
         return Error{ErrorCode::PermissionDenied, e.what()};
@@ -700,11 +705,9 @@ FilesystemBackend::listBoundedSnapshot(std::string_view prefix, std::size_t maxK
     std::vector<std::string> keys;
     std::size_t retainedBytes = 0;
     bool oversized = false;
-    auto visited =
-        visitFilesystemKeys(basePath_, prefix, cancelled_, listingWorkCheck_, [&](std::string key) {
-            if (oversized) {
-                return;
-            }
+    auto visited = visitFilesystemKeys(
+        basePath_, prefix, cancelled_, listingWorkCheck_,
+        [&](std::string key) {
             if (keys.size() >= maxKeys || key.size() > maxKeyBytes - retainedBytes) {
                 oversized = true;
                 return;
@@ -712,7 +715,8 @@ FilesystemBackend::listBoundedSnapshot(std::string_view prefix, std::size_t maxK
             retainedBytes += key.size();
             keys.push_back(std::move(key));
             observePeakRetainedKeys(prefix, keys.size());
-        });
+        },
+        &oversized);
     if (!visited) {
         return visited.error();
     }
