@@ -365,13 +365,16 @@ struct IsolatedHome {
 
 } // namespace
 
-TEST_CASE("InitCommand: resolveModelDimension uses the static table's dimension when one exists",
+TEST_CASE("InitCommand: dimensions follow explicit selection rather than table presence",
           "[cli][init][models]") {
     ScratchDataDir scratch;
     std::filesystem::create_directories(scratch.dir / "models" / "static");
     const std::string bytes = tinyStaticTableBytes();
     std::ofstream(scratch.dir / "models" / "static" / "t.smstat", std::ios::binary) << bytes;
 
+    CHECK(yams::cli::resolveModelDimension("simeon-default") == 1024);
+    REQUIRE(yams::cli::selectStaticTable(scratch.dir / "models" / "static" / "t.smstat",
+                                         scratch.dir / "config.toml"));
     CHECK(yams::cli::resolveModelDimension("simeon-default") == 4);
     CHECK(yams::cli::resolveModelDimension("") == 4);
     CHECK(yams::cli::resolveModelDimension("all-MiniLM-L6-v2") == 384);
@@ -675,6 +678,31 @@ TEST_CASE("InitCommand: non-interactive init does not download the static table"
     std::error_code ec;
     CHECK_FALSE(fs::exists(staticDir / "yams-static-bge-c4-256.smstat", ec));
     CHECK(capture.str().find("yams model download yams-static-bge-c4-256") != std::string::npos);
+}
+
+TEST_CASE("Static embedding selection requires an explicit model opt-in",
+          "[cli][init][static][static-opt-in]") {
+    ScratchDataDir scratch;
+    const auto installed = yams::cli::staticTablesDir(scratch.dir) / "unselected.smstat";
+    fs::create_directories(installed.parent_path());
+    {
+        std::ofstream output(installed, std::ios::binary);
+        output << tinyStaticTableBytes();
+        REQUIRE(output.good());
+    }
+
+    SECTION("an installed file alone does not establish consent") {
+        CHECK_FALSE(yams::config::findStaticEmbeddingTable(std::nullopt, scratch.dir).has_value());
+    }
+    SECTION("an explicit existing selection is honored") {
+        const auto selected = yams::config::findStaticEmbeddingTable(installed, scratch.dir);
+        REQUIRE(selected.has_value());
+        CHECK(*selected == installed);
+    }
+    SECTION("a missing explicit selection does not activate a different installed table") {
+        const auto missing = scratch.dir / "missing.smstat";
+        CHECK_FALSE(yams::config::findStaticEmbeddingTable(missing, scratch.dir).has_value());
+    }
 }
 
 // ---- Download failures -------------------------------------------------------------------------
