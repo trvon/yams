@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+* **cli:** shared text-output budgets, compact retrieval, inclusive content slices, and global grep result caps. See [bounded CLI retrieval](docs/cli-retrieval.md).
+* **cli:** Git-worktree freshness checks and incremental ingestion with exact path retirement, preserving shared content and graph history. Older daemons fail closed on the distinct unlink operation.
+
+### Fixed
+
+* **retrieval:** apply basename and location-metadata filters before pagination; retain distinct current locations for shared-content grep candidates and enforce worktree scope after FTS/semantic projection.
+
 ## [0.21.1](https://github.com/trvon/yams/compare/v0.21.0...v0.21.1) (2026-10-27)
 
 
