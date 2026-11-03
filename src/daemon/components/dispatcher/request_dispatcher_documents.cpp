@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -640,17 +641,16 @@ int envIntOrDefault(const char* name, int fallback, int minValue, int maxValue) 
 
 int computeEnqueueDelayMs(const AddDocumentRequest& req, int attempt, int baseDelayMs,
                           int maxDelayMs) {
-    int expDelay = baseDelayMs;
-    if (attempt > 0) {
-        const int shift = std::min(attempt, 10);
-        expDelay = std::min(maxDelayMs, baseDelayMs << shift);
-    }
+    const auto base = static_cast<std::uint64_t>(std::max(0, baseDelayMs));
+    const auto maximum = static_cast<std::uint64_t>(std::max(0, maxDelayMs));
+    const auto shift = static_cast<unsigned int>(std::clamp(attempt, 0, 10));
+    const auto expDelay = std::min(maximum, base * (std::uint64_t{1} << shift));
 
     const std::string& key = req.name.empty() ? req.path : req.name;
     const std::size_t seed = std::hash<std::string>{}(key);
-    const int jitterCap = std::max(1, expDelay / 2);
-    const int jitter = static_cast<int>(seed % static_cast<std::size_t>(jitterCap));
-    return std::min(maxDelayMs, expDelay + jitter);
+    const auto jitterCap = std::max(std::uint64_t{1}, expDelay / 2U);
+    const auto jitter = static_cast<std::uint64_t>(seed) % jitterCap;
+    return static_cast<int>(std::min(maximum, expDelay + jitter));
 }
 
 struct ImmediateAddFingerprint {
@@ -1552,20 +1552,28 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             const auto channelCapacity =
                 static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
 
-            // Check admission control before accepting new work
+            // Keep directory/recursive routing, but never convert a requested
+            // synchronous acknowledgement into a queued-success response.
+            const bool isDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
+            const bool synchronousRequested =
+                req.waitForProcessing ||
+                (!isDir && !req.recursive && envRequestsSyncSingleFileAdd());
             if (!ResourceGovernor::instance().canAdmitWork()) {
-                const bool reqIsDir =
-                    (!req.path.empty() && std::filesystem::is_directory(req.path));
+                if (synchronousRequested) {
+                    if (state_) {
+                        state_->stats.addRequestsRejected.fetch_add(1, std::memory_order_acq_rel);
+                    }
+                    co_return admission::makeBusyError(
+                        "Synchronous ingestion was not accepted (system under pressure)",
+                        admission::captureSnapshot(serviceManager_, state_));
+                }
                 co_return co_await enqueueAddDocumentOrReject(
                     serviceManager_, state_, req, channelCapacity,
                     "Queued for deferred processing (system under pressure).",
-                    /*countDeferred=*/true, reqIsDir);
+                    /*countDeferred=*/true, isDir);
             }
 
-            // Be forgiving: if the path is a directory but recursive was not set, treat it as
-            // a directory ingestion with recursive=true to avoid file_size errors sent by clients
-            // that didn't set the flag (common with LLM-driven clients).
-            bool isDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
+            // Directory requests still use the recursive async ingestion path.
             if (req.path.empty() && (req.content.empty() || req.name.empty())) {
                 co_return yams::daemon::dispatch::makeErrorResponse(
                     ErrorCode::InvalidArgument, "Provide either 'path' or 'content' + 'name'");
@@ -1583,8 +1591,17 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 }
             }
 
-            // Centralized routing: directories/recursive/not-ready and default single-file adds go
-            // to the async queue; only sync-env / waitForProcessing take the synchronous path.
+            if (!daemonReady && synchronousRequested) {
+                if (state_) {
+                    state_->stats.addRequestsRejected.fetch_add(1, std::memory_order_acq_rel);
+                }
+                co_return admission::makeBusyError(
+                    "Daemon is initializing; synchronous ingestion was not accepted",
+                    admission::captureSnapshot(serviceManager_, state_));
+            }
+
+            // Explicit async requests can be queued during initialization; a
+            // requested synchronous store must reach the actual store path.
             const auto routing = selectAddRoutingPlan(req, isDir, daemonReady);
             if (routing.async) {
                 co_return co_await enqueueAddDocumentOrReject(

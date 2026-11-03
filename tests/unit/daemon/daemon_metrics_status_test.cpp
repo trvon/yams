@@ -1084,6 +1084,70 @@ TEST_CASE("Worker completion retains the caller context until the posting scope 
     CHECK(result.get().value == 42);
 }
 
+TEST_CASE("Synchronous add never silently becomes a queued initialization or pressure request",
+          "[daemon][documents][startup-write-guard]") {
+    const bool originalGovernor = TuneAdvisor::enableResourceGovernor();
+    const bool originalAdmission = TuneAdvisor::enableAdmissionControl();
+    auto restore = ScopeExit([&] {
+        TuneAdvisor::setEnableResourceGovernor(originalGovernor);
+        TuneAdvisor::setEnableAdmissionControl(originalAdmission);
+        ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Normal);
+        drainStoreDocumentTasks();
+    });
+    TuneAdvisor::setEnableResourceGovernor(false);
+    TuneAdvisor::setEnableAdmissionControl(false);
+    drainStoreDocumentTasks();
+    ScopedEnvVar syncDefault("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+    std::optional<ScopedEnvVar> syncOverride;
+    LifecycleState lifecycleState = LifecycleState::Initializing;
+    bool expectRejection = true;
+    AddDocumentRequest request;
+    request.name = "must-not-be-queued.txt";
+    request.content = "synchronous acknowledgement requires completed storage";
+    request.waitForProcessing = true;
+    SECTION("explicit wait while initialization is incomplete") {}
+    SECTION("existing synchronous compatibility setting during initialization") {
+        request.waitForProcessing = false;
+        syncOverride.emplace("YAMS_SYNC_SINGLE_FILE_ADD", "1");
+    }
+    SECTION("explicit wait under resource pressure") {
+        lifecycleState = LifecycleState::Ready;
+        TuneAdvisor::setEnableResourceGovernor(true);
+        TuneAdvisor::setEnableAdmissionControl(true);
+        ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+    }
+    SECTION("explicit asynchronous initialization remains an honest queued acknowledgement") {
+        request.waitForProcessing = false;
+        expectRejection = false;
+    }
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true);
+    state.readiness.metadataRepoReady.store(true);
+    StubLifecycle lifecycle(lifecycleState);
+    // No service manager, database, worker, filesystem or live daemon is needed:
+    // the existing queue is observable, and a rejection must precede any enqueue.
+    RequestDispatcher dispatcher(&lifecycle, nullptr, &state);
+    const auto response = dispatchRequest(dispatcher, Request{request});
+    auto channel = getStoreDocumentTaskChannel();
+    InternalEventBus::StoreDocumentTask task;
+    const bool enqueued = channel->try_pop(task);
+    if (expectRejection) {
+        CHECK(std::holds_alternative<ErrorResponse>(response));
+        CHECK_FALSE(enqueued);
+        CHECK(state.stats.addRequestsDeferred.load() == 0);
+        if (const auto* error = std::get_if<ErrorResponse>(&response)) {
+            CHECK(error->code == ErrorCode::ResourceExhausted);
+            CHECK(error->retry.has_value());
+            CHECK(error->message.find("retry") != std::string::npos);
+        }
+    } else {
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(response));
+        CHECK(std::get<AddDocumentResponse>(response).documentsAdded == 0);
+        CHECK(enqueued);
+        CHECK(task.request.content == request.content);
+    }
+}
+
 TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embedding]") {
     StateComponent state;
     DaemonLifecycleFsm lifecycleFsm;
