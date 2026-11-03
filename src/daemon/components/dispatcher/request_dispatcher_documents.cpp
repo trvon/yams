@@ -1439,11 +1439,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                 daemonResult.error = deleteResult.error.value_or("");
                 if (daemonResult.success) {
                     response.successCount++;
-                    if (lifecycle_ && !deleteResult.hash.empty()) {
-                        lifecycle_->onDocumentRemoved(deleteResult.hash);
-                    }
-                    if (!response.dryRun && !deleteResult.hash.empty()) {
-                        replicatedDeletes.push_back(deleteResult.hash);
+                    // A successful location retirement leaves the content in the corpus.
+                    // Neither lifecycle removal nor replication may turn it into a hash delete.
+                    if (!deleteResult.pathOnly) {
+                        if (lifecycle_ && !deleteResult.hash.empty()) {
+                            lifecycle_->onDocumentRemoved(deleteResult.hash);
+                        }
+                        if (!response.dryRun && !deleteResult.hash.empty()) {
+                            replicatedDeletes.push_back(deleteResult.hash);
+                        }
                     }
                 } else {
                     response.failureCount++;

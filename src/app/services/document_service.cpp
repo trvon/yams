@@ -845,6 +845,29 @@ private:
     }
 
     Result<std::vector<DeleteTarget>> resolveDeleteTargets(const DeleteByNameRequest& req) {
+        if (req.pathOnly) {
+            if (req.name.empty() || !req.hash.empty() || !req.names.empty() ||
+                !req.pattern.empty()) {
+                return Error{ErrorCode::InvalidArgument,
+                             "Path-only deletion requires one exact name and no other selector"};
+            }
+            if (!ctx_.metadataRepo->supportsDocumentPaths()) {
+                return Error{ErrorCode::InvalidState,
+                             "Path-only deletion requires the current metadata schema"};
+            }
+            auto document = ctx_.metadataRepo->findDocumentByExactPath(req.name);
+            if (!document)
+                return document.error();
+            auto& currentDocument = document.value();
+            if (!currentDocument)
+                return Error{ErrorCode::NotFound, "Document path not indexed: " + req.name};
+            DeleteTarget target;
+            target.doc = std::move(*currentDocument);
+            target.hash = target.doc->sha256Hash;
+            target.name = target.doc->filePath;
+            return std::vector<DeleteTarget>{std::move(target)};
+        }
+
         DocumentResolver<metadata::IMetadataRepository> resolver(*ctx_.metadataRepo);
         DocumentResolver<metadata::IMetadataRepository>::ResolveOptions resolveOpts;
         resolveOpts.tryHashPrefix = true;
@@ -959,6 +982,39 @@ private:
             resp.deleted.push_back(r);
             return;
         }
+        // A name identifies a location, not every reference to its CAS hash.
+        // Keep explicit hash deletion and keepRefs' corpus-wide semantics below.
+        if (target.doc && req.hash.empty() && ctx_.metadataRepo->supportsDocumentPaths()) {
+            const auto current = ctx_.metadataRepo->findDocumentByExactPath(target.doc->filePath);
+            if (!current || !current.value() || current.value()->id != target.doc->id) {
+                r.errorCode = current ? ErrorCode::NotFound : current.error().code;
+                r.error = current ? "Document path is no longer current: " + target.doc->filePath
+                                  : current.error().message;
+                resp.errors.push_back(r);
+                return;
+            }
+            auto references = ctx_.metadataRepo->getDocumentPathReferences(target.doc->id);
+            if (!references) {
+                r.errorCode = references.error().code;
+                r.error = references.error().message;
+                resp.errors.push_back(r);
+                return;
+            }
+            if (req.pathOnly || references.value().size() > 1) {
+                auto retired = ctx_.metadataRepo->retireDocumentPath(target.doc->filePath);
+                if (!retired) {
+                    r.errorCode = retired.error().code;
+                    r.error = retired.error().message;
+                    resp.errors.push_back(r);
+                    return;
+                }
+                r.deleted = true;
+                r.pathOnly = true;
+                resp.deleted.push_back(r);
+                return; // No CAS removal, hash-wide sync intent, or immutable-history cleanup.
+            }
+        }
+
         if (req.beforeDelete) {
             auto staged = req.beforeDelete(target.hash);
             if (!staged) {
@@ -3119,14 +3175,28 @@ public:
         deleteRequest.dryRun = req.dryRun;
         deleteRequest.force = true;
         for (const auto& candidate : candidates.value()) {
+            // An older canonical version can still be current content at another location.
+            // Exclude it in both preview and apply before removing any CAS bytes.
+            if (ctx_.metadataRepo->supportsDocumentPaths()) {
+                auto references =
+                    ctx_.metadataRepo->getDocumentPathReferences(candidate.document.id);
+                if (!references) {
+                    return references.error();
+                }
+                if (!references.value().empty()) {
+                    continue;
+                }
+            }
             DeleteTarget target;
             target.doc = candidate.document;
             target.hash = candidate.document.sha256Hash;
             target.name = candidate.document.fileName.empty() ? candidate.document.filePath
                                                               : candidate.document.fileName;
+            // Retention selects historical content, not the current head at its former path.
+            deleteRequest.hash = target.hash;
             executeDeleteTarget(deleteRequest, target, response);
         }
-        response.count = candidates.value().size();
+        response.count = response.deleted.size() + response.errors.size();
         return response;
     }
 
