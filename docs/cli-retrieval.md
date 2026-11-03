@@ -226,3 +226,34 @@ zero under TSAN. This demonstrates that those diagnostics do not require YAMS
 code or runtime state; it does not prove every request-handler path safe. The
 raw request-handler analyzer check still reports them. No suppression was added,
 and these results are not a claim of a completely clean static-analysis run.
+
+### Local commit-packaging checks: 2026-11-03
+
+The dependency-ordered commit split reproduced the preserved aggregate source tree
+exactly. Component checks and normal pre-commit hooks ran during packaging, but
+individual intermediate commit trees were not separately built. Rebuild
+`catch2_cli_common` after HEAD changes before running its version-header checks:
+those assertions compare generated metadata with the current Git commit.
+
+The registered fast-smoke scope (`~[mcpdocopsfixture]`), with the existing
+single-instance/vector-disabled test profile, passed **381 assertions** across
+**40 cases: 32 passed and 8 skipped**. It ran with
+`TSAN_OPTIONS=halt_on_error=1`, without a sanitizer suppression file. Existing
+TSAN-only teardown and vector-provider skips remain coverage limitations, not
+proof that those paths work.
+
+A broader native smoke invocation without that profile remains **red**:
+43 cases, 35 passed, 3 failed and 5 skipped. It reported an MCP tag-wait failure,
+an embedding-fixture `Result contains value` exception, and missing CLI fallback
+output. TSAN also reported `YamsDaemon::stop()` reading a thread's state while
+`runLoop()` assigned it (`src/daemon/daemon.cpp:1154` and `:710` in this snapshot).
+Those daemon and embedding-test files were unchanged from the review baseline;
+that does not establish the first-bad revision or the cause of the failures.
+Passing the fast scope does not clear the broader failures. They remain work for
+the startup/lifecycle review; no assertion or sanitizer diagnostic was suppressed.
+
+Global recovery deadlines, degraded-state read/write boundaries, checked drain,
+and constrained idle CPU/RSS measurements are still unfinished. The earlier
+Release timing above predates the startup/model changes and was not remeasured
+for this packaged candidate. These local commits do not certify merge or release
+readiness, and do not supply a human DCO sign-off.
