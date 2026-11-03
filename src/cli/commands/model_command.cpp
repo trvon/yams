@@ -1188,21 +1188,26 @@ private:
         }
         const fs::path existing =
             (output_dir.empty() ? staticTablesDir() : fs::path(output_dir)) / (name + ".smstat");
+        fs::path selected = existing;
         if (fs::exists(existing) && !force_ &&
             yams::vector::loadSharedStaticEmbeddingTable(existing)) {
             std::cout << "Static table already exists at: " << existing << "\n";
             std::cout << "Use --force to redownload\n";
-            return Result<void>{};
+        } else {
+            auto out = yams::cli::downloadStaticTable(
+                name, url, sha256, cli_->getDataPath(),
+                output_dir.empty() ? fs::path{} : fs::path(output_dir), force_);
+            if (!out) {
+                return out.error();
+            }
+            selected = out.value();
         }
-        auto out = yams::cli::downloadStaticTable(
-            name, url, sha256, cli_->getDataPath(),
-            output_dir.empty() ? fs::path{} : fs::path(output_dir), force_);
-        if (!out) {
-            return out.error();
+        const auto saved = yams::cli::selectStaticTable(selected, resolveConfigPath());
+        if (!saved) {
+            return saved.error();
         }
-        std::cout << "\n✓ Static table ready: " << out.value() << "\n";
-        std::cout << "  identity: " << yams::vector::staticEmbeddingSpaceIdentity(out.value())
-                  << "\n";
+        std::cout << "\n✓ Static table selected: " << selected << "\n";
+        std::cout << "  identity: " << yams::vector::staticEmbeddingSpaceIdentity(selected) << "\n";
         if (output_dir.empty()) {
             std::cout << "\nThe daemon uses it on its next start and re-embeds existing documents "
                          "in the background\n(set daemon.auto_migrate_embeddings = false to keep "
@@ -1225,8 +1230,11 @@ private:
             }
         }
         std::sort(installed.begin(), installed.end());
-        const auto active =
-            yams::config::findStaticEmbeddingTable(std::nullopt, cli_->getDataPath());
+        const auto choice = yams::config::parse_config_value(resolveConfigPath(),
+                                                             "embeddings.simeon", "static_table");
+        const auto active = yams::config::findStaticEmbeddingTable(
+            choice.empty() ? std::nullopt : std::optional<fs::path>{fs::path(choice)},
+            cli_->getDataPath());
         std::cout << "Static embedding tables (Simeon):\n";
         for (const auto& t : staticTableCatalog()) {
             std::cout << "  " << t.name << " (static, " << t.size_mb << " MB)\n    "
@@ -1237,11 +1245,13 @@ private:
             const auto sz = fs::file_size(p, sec);
             std::cout << "  installed: " << p.filename().string();
             if (!sec) {
-                std::cout << " (~" << sz / (1024 * 1024) << " MB)";
+                std::cout << " (~" << sz / (1024ULL * 1024ULL) << " MB)";
             }
             std::cout << "\n";
         }
-        std::cout << "  active: " << (active ? active->string() : std::string("(none)")) << "\n\n";
+        // This is the recorded choice, not the running daemon's loaded model.
+        std::cout << "  selected: " << (active ? active->string() : std::string("(none)"))
+                  << "\n\n";
     }
 
     Result<void> showModelInfo(const std::string& model_name) {
