@@ -413,6 +413,7 @@ enum class MessageType : uint8_t {
     GraphValidateRequest = 46,
     // Lifecycle-owned memory sync operations.
     MemorySyncRequest = 78,
+    UnlinkPathRequest = 79,
 
     // Responses
     SearchResponse = 128,

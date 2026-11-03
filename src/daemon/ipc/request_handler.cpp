@@ -1361,7 +1361,9 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             // Optional graceful half-close: shutdown send side then briefly drain peer
             if (config_.graceful_half_close) {
                 boost::system::error_code ig;
-                socket.shutdown(boost::asio::socket_base::shutdown_send, ig);
+                ig = socket.shutdown(boost::asio::socket_base::shutdown_send, ig);
+                if (ig)
+                    log_request_handler_debug("IPC graceful send shutdown failed");
                 // Race drain read against timeout using async_initiate (no experimental APIs)
                 auto executor = co_await boost::asio::this_coro::executor;
                 std::array<uint8_t, 256> tmp{};

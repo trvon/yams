@@ -615,6 +615,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
     // Minimal and safe status path using centralized DaemonMetrics when available
     const auto requestStart = std::chrono::steady_clock::now();
     StatusResponse res;
+    res.supportsPathUnlink = true;
     const bool includeExtendedStatus = req.detailed;
     auto finalizeStatusResponse = [&]() -> Response {
         const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(

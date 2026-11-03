@@ -417,6 +417,7 @@ constexpr std::string_view kHostIoPressurePct = "host_io_pressure_pct";
 constexpr std::string_view kHostMemoryPressurePct = "host_memory_pressure_pct";
 constexpr std::string_view kHostLoadPerCpu = "host_load_per_cpu";
 constexpr std::string_view kDeferredBackgroundWork = "deferred_background_work";
+constexpr std::string_view kSupportsPathUnlink = "supports_path_unlink_v1";
 
 } // namespace yams::daemon::status_keys
 

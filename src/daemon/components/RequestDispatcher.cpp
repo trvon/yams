@@ -107,6 +107,7 @@ DEFINE_REQUEST_HANDLER(RestoreSnapshotRequest, handleRestoreSnapshotRequest);
 DEFINE_REQUEST_HANDLER(AddDocumentRequest, handleAddDocumentRequest);
 DEFINE_REQUEST_HANDLER(ListRequest, handleListRequest);
 DEFINE_REQUEST_HANDLER(DeleteRequest, handleDeleteRequest);
+DEFINE_REQUEST_HANDLER(UnlinkPathRequest, handleUnlinkPathRequest);
 DEFINE_REQUEST_HANDLER(GetStatsRequest, handleGetStatsRequest);
 DEFINE_REQUEST_HANDLER(GenerateEmbeddingRequest, handleGenerateEmbeddingRequest);
 DEFINE_REQUEST_HANDLER(BatchEmbeddingRequest, handleBatchEmbeddingRequest);

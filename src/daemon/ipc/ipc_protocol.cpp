@@ -32,6 +32,10 @@ template <> struct MessageTypeTraits<DeleteRequest> {
     static constexpr MessageType value = MessageType::DeleteRequest;
     static constexpr const char* name = "Delete";
 };
+template <> struct MessageTypeTraits<UnlinkPathRequest> {
+    static constexpr MessageType value = MessageType::UnlinkPathRequest;
+    static constexpr const char* name = "UnlinkPath";
+};
 template <> struct MessageTypeTraits<ListRequest> {
     static constexpr MessageType value = MessageType::ListRequest;
     static constexpr const char* name = "List";
@@ -451,7 +455,8 @@ static constexpr MessageType kRequestTypeMap[] = {
     MessageType::MetadataValueCountsRequest, // 53
     MessageType::MemorySyncRequest,          // 54
     MessageType::BatchRequest,               // 55
-    MessageType::RepairRequest_MsgType       // 56 (RepairRequest)
+    MessageType::RepairRequest_MsgType,      // 56 (RepairRequest)
+    MessageType::UnlinkPathRequest           // 57
 };
 
 // MUST MATCH Request std::variant order in ipc_protocol.h
@@ -512,7 +517,8 @@ static constexpr const char* kRequestNameMap[] = {
     "MetadataValueCounts", // 53
     "MemorySync",          // 54
     "Batch",               // 55
-    "Repair"               // 56
+    "Repair",              // 56
+    "UnlinkPath"           // 57
 };
 
 // MUST MATCH Response std::variant order in ipc_protocol.h

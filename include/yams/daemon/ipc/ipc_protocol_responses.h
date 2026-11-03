@@ -1140,6 +1140,9 @@ struct StatusResponse {
     uint32_t onnxEmbedUsed{0};
     uint32_t onnxRerankerUsed{0};
 
+    // Older daemons omit this capability. Clients must not infer it from a version string.
+    bool supportsPathUnlink{false};
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -1245,6 +1248,7 @@ struct StatusResponse {
         // Host pressure (appended; older clients tolerate missing tail fields).
         ser << hostPressureSource << hostPressureElevated << hostCpuPressurePct << hostIoPressurePct
             << hostMemoryPressurePct << hostLoadPerCpu << deferredBackgroundWork;
+        ser << supportsPathUnlink;
     }
 
     template <typename Deserializer>
@@ -1681,6 +1685,8 @@ struct StatusResponse {
             res.hostLoadPerCpu = v.value();
         if (auto v = deser.template read<std::string>())
             res.deferredBackgroundWork = std::move(v.value());
+        if (auto v = deser.template read<bool>())
+            res.supportsPathUnlink = v.value();
 
         return res;
     }

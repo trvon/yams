@@ -164,6 +164,7 @@ private:
     boost::asio::awaitable<Response> handleAddDocumentRequest(const AddDocumentRequest& req);
     boost::asio::awaitable<Response> handleListRequest(const ListRequest& req);
     boost::asio::awaitable<Response> handleDeleteRequest(const DeleteRequest& req);
+    boost::asio::awaitable<Response> handleUnlinkPathRequest(const UnlinkPathRequest& req);
     boost::asio::awaitable<Response> handleGetStatsRequest(const GetStatsRequest& req);
     boost::asio::awaitable<Response> handlePingRequest(const PingRequest& req);
     boost::asio::awaitable<Response> handleUpdateDocumentRequest(const UpdateDocumentRequest& req);

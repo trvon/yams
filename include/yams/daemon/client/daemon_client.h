@@ -219,6 +219,8 @@ public:
         return call<CatRequest>(req);
     }
     boost::asio::awaitable<Result<DeleteResponse>> remove(const DeleteRequest& req);
+    // Exact location retirement. Never fall back to the legacy hash-delete operation.
+    boost::asio::awaitable<Result<DeleteResponse>> unlinkPath(const UnlinkPathRequest& req);
     // Returns a lightweight snapshot; does not request detailed (no heavy scans)
     boost::asio::awaitable<Result<StatusResponse>> status(bool detailed = false);
     boost::asio::awaitable<Result<void>> shutdown(bool graceful = true);
@@ -407,16 +409,17 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, SearchRequest>, std::is_same<Req, GetRequest>,
             std::is_same<Req, GetInitRequest>, std::is_same<Req, GetChunkRequest>,
             std::is_same<Req, GetEndRequest>, std::is_same<Req, DeleteRequest>,
-            std::is_same<Req, ListRequest>, std::is_same<Req, ShutdownRequest>,
-            std::is_same<Req, StatusRequest>, std::is_same<Req, PingRequest>,
-            std::is_same<Req, GenerateEmbeddingRequest>, std::is_same<Req, BatchEmbeddingRequest>,
-            std::is_same<Req, LoadModelRequest>, std::is_same<Req, UnloadModelRequest>,
-            std::is_same<Req, ModelStatusRequest>, std::is_same<Req, AddDocumentRequest>,
-            std::is_same<Req, GrepRequest>, std::is_same<Req, FileHistoryRequest>,
-            std::is_same<Req, UpdateDocumentRequest>, std::is_same<Req, DownloadRequest>,
-            std::is_same<Req, DownloadStatusRequest>, std::is_same<Req, CancelDownloadJobRequest>,
-            std::is_same<Req, ListDownloadJobsRequest>, std::is_same<Req, GetStatsRequest>,
-            std::is_same<Req, PrepareSessionRequest>, std::is_same<Req, EmbedDocumentsRequest>,
+            std::is_same<Req, UnlinkPathRequest>, std::is_same<Req, ListRequest>,
+            std::is_same<Req, ShutdownRequest>, std::is_same<Req, StatusRequest>,
+            std::is_same<Req, PingRequest>, std::is_same<Req, GenerateEmbeddingRequest>,
+            std::is_same<Req, BatchEmbeddingRequest>, std::is_same<Req, LoadModelRequest>,
+            std::is_same<Req, UnloadModelRequest>, std::is_same<Req, ModelStatusRequest>,
+            std::is_same<Req, AddDocumentRequest>, std::is_same<Req, GrepRequest>,
+            std::is_same<Req, FileHistoryRequest>, std::is_same<Req, UpdateDocumentRequest>,
+            std::is_same<Req, DownloadRequest>, std::is_same<Req, DownloadStatusRequest>,
+            std::is_same<Req, CancelDownloadJobRequest>, std::is_same<Req, ListDownloadJobsRequest>,
+            std::is_same<Req, GetStatsRequest>, std::is_same<Req, PrepareSessionRequest>,
+            std::is_same<Req, EmbedDocumentsRequest>,
             // Plugin management requests
             std::is_same<Req, PluginScanRequest>, std::is_same<Req, PluginLoadRequest>,
             std::is_same<Req, PluginUnloadRequest>, std::is_same<Req, PluginTrustListRequest>,

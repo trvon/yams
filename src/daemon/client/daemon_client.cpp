@@ -2398,4 +2398,9 @@ boost::asio::awaitable<Result<DeleteResponse>> DaemonClient::remove(const Delete
     co_return co_await call<DeleteRequest>(req);
 }
 
+boost::asio::awaitable<Result<DeleteResponse>>
+DaemonClient::unlinkPath(const UnlinkPathRequest& req) {
+    co_return co_await call<UnlinkPathRequest>(req);
+}
+
 } // namespace yams::daemon

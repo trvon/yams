@@ -532,7 +532,7 @@ sync_interval_ms = 25
 }
 
 TEST_CASE("Production document deletion also replicates content-byte deletion",
-          "[integration][daemon][memory-sync][deletion]") {
+          "[integration][daemon][memory-sync][deletion][path-identity]") {
     auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174020",
                                                 "delete-integrity-corpus");
     yams::test::DaemonHarness harness{std::move(options)};
@@ -593,6 +593,104 @@ TEST_CASE("Production document deletion also replicates content-byte deletion",
     clientConfig.autoStart = false;
     yams::daemon::DaemonClient client{clientConfig};
     REQUIRE(yams::cli::run_sync(client.connect(), 5s).has_value());
+
+    // A name-only deletion can retire a shared location without removing the corpus hash.
+    // Exercise the full dispatcher: its post-delete hooks must not turn that unlink into
+    // a replicated document/blob tombstone after the service has preserved the content.
+    auto sharedDocument = repository->getDocumentByHash(hash);
+    REQUIRE(sharedDocument.has_value());
+    REQUIRE(sharedDocument.value().has_value());
+    // The raw batch insert above bypasses production store's location publication.
+    // Adopt its canonical path before adding an alias so both are current locations.
+    REQUIRE(repository->recordDocumentPath(*sharedDocument.value(), sharedDocument.value()->id, {})
+                .has_value());
+    auto alias = *sharedDocument.value();
+    alias.filePath = "/local/corpus/delete-alias.md";
+    alias.fileName = "delete-alias.md";
+    REQUIRE(repository->recordDocumentPath(alias, alias.id, {}).has_value());
+    auto references = repository->getDocumentPathReferences(alias.id);
+    REQUIRE(references.has_value());
+    REQUIRE(references.value().size() == 2);
+    for (const auto& path : {std::string{"/local/corpus/delete-me.md"}, alias.filePath}) {
+        auto current = repository->findDocumentByExactPath(path);
+        REQUIRE(current.has_value());
+        REQUIRE(current.value().has_value());
+        CHECK(current.value()->filePath == path);
+        CHECK(current.value()->sha256Hash == hash);
+    }
+    yams::daemon::DeleteRequest unlinkRequest;
+    unlinkRequest.name = alias.filePath;
+    auto unlinked = yams::cli::run_sync(client.remove(unlinkRequest), 10s);
+    INFO("Unlink failure: " << (unlinked ? std::string{} : unlinked.error().message));
+    REQUIRE(unlinked.has_value());
+    CHECK(unlinked.value().successCount == 1);
+    auto retired = repository->findDocumentByExactPath(alias.filePath);
+    REQUIRE(retired.has_value());
+    CHECK_FALSE(retired.value().has_value());
+    auto original = repository->findDocumentByExactPath("/local/corpus/delete-me.md");
+    REQUIRE(original.has_value());
+    REQUIRE(original.value().has_value());
+    CHECK(original.value()->sha256Hash == hash);
+    auto retained = contentStore->exists(hash);
+    REQUIRE(retained.has_value());
+    CHECK(retained.value());
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK(peer.readCached(documentKey).has_value());
+    CHECK(peer.readCached(blobKey).has_value());
+
+    // The dedicated operation must also retire a sole location, without using keepRefs
+    // or converting it into corpus deletion. Dry-run and missing-path calls are harmless.
+    const auto capabilities = yams::cli::run_sync(client.status(), 10s);
+    REQUIRE(capabilities.has_value());
+    CHECK(capabilities.value().supportsPathUnlink);
+    auto soleReferences = repository->getDocumentPathReferences(alias.id);
+    REQUIRE(soleReferences.has_value());
+    REQUIRE(soleReferences.value().size() == 1);
+    yams::daemon::UnlinkPathRequest soleUnlink;
+    soleUnlink.path = "/local/corpus/delete-me.md";
+    soleUnlink.dryRun = true;
+    auto preview = yams::cli::run_sync(client.unlinkPath(soleUnlink), 10s);
+    INFO("Typed unlink failure: " << (preview ? std::string{} : preview.error().message));
+    REQUIRE(preview.has_value());
+    CHECK(preview.value().dryRun);
+    CHECK(preview.value().failureCount == 0);
+    auto emptyUnlink = soleUnlink;
+    emptyUnlink.path.clear();
+    auto empty = yams::cli::run_sync(client.unlinkPath(emptyUnlink), 10s);
+    CHECK_FALSE(empty.has_value());
+    if (!empty)
+        CHECK(empty.error().code == yams::ErrorCode::InvalidArgument);
+    auto afterPreview = repository->findDocumentByExactPath(soleUnlink.path);
+    REQUIRE(afterPreview.has_value());
+    REQUIRE(afterPreview.value().has_value());
+    auto missingUnlink = soleUnlink;
+    missingUnlink.path = "/not-indexed/delete-me.md";
+    auto missing = yams::cli::run_sync(client.unlinkPath(missingUnlink), 10s);
+    CHECK_FALSE(missing.has_value());
+    if (!missing)
+        CHECK(missing.error().code == yams::ErrorCode::NotFound);
+    soleUnlink.dryRun = false;
+    auto soleRemoved = yams::cli::run_sync(client.unlinkPath(soleUnlink), 10s);
+    REQUIRE(soleRemoved.has_value());
+    CHECK(soleRemoved.value().successCount == 1);
+    CHECK(soleRemoved.value().failureCount == 0);
+    auto gone = repository->findDocumentByExactPath(soleUnlink.path);
+    REQUIRE(gone.has_value());
+    CHECK_FALSE(gone.value().has_value());
+    auto contentRecord = repository->getDocumentByHash(hash);
+    REQUIRE(contentRecord.has_value());
+    REQUIRE(contentRecord.value().has_value());
+    auto blob = contentStore->exists(hash);
+    REQUIRE(blob.has_value());
+    CHECK(blob.value());
+    auto repeated = yams::cli::run_sync(client.unlinkPath(soleUnlink), 10s);
+    CHECK_FALSE(repeated.has_value());
+    if (!repeated)
+        CHECK(repeated.error().code == yams::ErrorCode::NotFound);
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK(peer.readCached(documentKey).has_value());
+    CHECK(peer.readCached(blobKey).has_value());
+
     yams::daemon::DeleteRequest deleteRequest;
     deleteRequest.hash = hash;
     const auto writerCounterBeforeDelete =
