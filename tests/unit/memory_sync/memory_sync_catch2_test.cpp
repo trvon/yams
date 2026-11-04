@@ -1486,6 +1486,41 @@ TEST_CASE("Exclusive local recovery serves every winner within resident budgets"
     }
 }
 
+TEST_CASE("Exclusive winner workspaces remove legacy plain-file workspaces",
+          "[memory-sync][exclusive-recovery][disk-backed-lifecycle][legacy-workspace]") {
+    BackendFixture fixture{"legacy-workspace"};
+    {
+        MemorySyncLoop seed{fixture.backend, "writer"};
+        REQUIRE(seed.publish("key", bytes("original")).has_value());
+    }
+    const auto temp = fixture.dir / "temp";
+    std::filesystem::create_directories(temp);
+    const std::vector<std::filesystem::path> legacy{temp / "sync-sweep-138338617696995-0.sqlite",
+                                                    temp /
+                                                        "sync-sweep-138338617696995-0.sqlite-wal"};
+    const auto unrelated = temp / "notes.sqlite";
+    for (const auto& path : std::vector<std::filesystem::path>{legacy[0], legacy[1], unrelated}) {
+        std::ofstream file{path, std::ios::binary};
+        file << "stale";
+        REQUIRE(file);
+    }
+    MemorySyncLimits limits;
+    limits.maxMergedKeys = 1;
+    limits.maxCacheBytes = 16;
+    MemorySyncLoop owner{fixture.backend,
+                         "writer",
+                         "local-test-corpus",
+                         1,
+                         false,
+                         limits,
+                         MemorySyncControl{.exclusiveBackend = true}};
+    REQUIRE(owner.syncFully().has_value());
+    for (const auto& path : legacy) {
+        CHECK_FALSE(std::filesystem::exists(path));
+    }
+    CHECK(std::filesystem::exists(unrelated));
+}
+
 TEST_CASE("Exclusive winner workspaces clean abandoned state without removing pinned generations",
           "[memory-sync][exclusive-recovery][disk-backed-lifecycle]") {
     BackendFixture fixture{"disk-backed-leases"};
@@ -2162,6 +2197,47 @@ TEST_CASE("Exclusive filesystem listing falls back to pages above the snapshot b
     REQUIRE(keys.size() == 65);
     CHECK(keys.front() == "index/10000");
     CHECK(keys.back() == "index/10064");
+}
+
+// A prefix whose complete snapshot was declined must not pay the snapshot probe (most of a
+// tree walk) again on every later sweep; a removal under it may let it fit, so it re-probes.
+TEST_CASE("Exclusive filesystem listing does not re-probe a declined snapshot",
+          "[memory-sync][listing-cache][budget][declined-probe]") {
+    BackendFixture fixture{"declined-probe"};
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 1; // 64 retained key slots
+    auto cached = MemorySyncLoop::testing_countedBackend(fixture.backend, true, limits);
+    constexpr std::size_t records = 100;
+    for (std::size_t i = 0; i < records; ++i) {
+        REQUIRE(cached->store("index/" + std::to_string(10'000 + i), bytes("value")).has_value());
+    }
+    yams::storage::FilesystemListingStats stats;
+    stats.prefix = "index/";
+    struct RestoreObservation {
+        yams::storage::FilesystemListingStats* previous;
+        ~RestoreObservation() { yams::storage::testing_setFilesystemListingStats(previous); }
+    } restore{yams::storage::testing_setFilesystemListingStats(&stats)};
+    const auto sweep = [&] {
+        std::size_t observed = 0;
+        std::optional<std::string> cursor;
+        do {
+            auto page = cached->listPage("index/", cursor, 1);
+            REQUIRE(page.has_value());
+            observed += page.value().keys.size();
+            cursor = page.value().nextCursor;
+        } while (cursor);
+        return observed;
+    };
+    REQUIRE(sweep() == records);
+    const auto firstWalks = stats.walks; // one declined probe plus one walk per window
+    REQUIRE(sweep() == records);
+    CAPTURE(firstWalks, stats.walks);
+    CHECK(stats.walks - firstWalks == firstWalks - 1);
+
+    REQUIRE(cached->remove("index/10000").has_value());
+    const auto beforeReprobe = stats.walks;
+    REQUIRE(sweep() == records - 1);
+    CHECK(stats.walks - beforeReprobe == firstWalks); // probe runs again after a removal
 }
 
 TEST_CASE("Exclusive filesystem listing snapshots follow committed key mutations",

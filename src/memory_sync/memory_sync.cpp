@@ -188,6 +188,8 @@ void MemorySyncLoop::WriteCountingBackend::finishRemove(std::string_view key, bo
         }
         if (success) {
             updateCompleteListingsAfterRemove(key);
+            std::erase_if(declinedSnapshots_,
+                          [&](const std::string& prefix) { return key.starts_with(prefix); });
         } else {
             invalidateCompleteListings(key);
         }
@@ -392,8 +394,11 @@ Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPage(
         // Only the built-in filesystem traversal certifies completeness. A backend that
         // merely describes itself as filesystem may return an opaque, short, cursor-less
         // page; the ordinary cursor-gap checks below remain authoritative for those.
+        // A prefix already declined as too large is not re-probed every sweep: the probe walks
+        // most of the tree only to decline again. Removals under it clear the mark (it may fit).
         if (!cursor && typeid(inner_) == typeid(storage::FilesystemBackend) &&
-            !prefixListings_.contains(prefix) && prefixListings_.size() < kMaxPrefixes) {
+            !prefixListings_.contains(prefix) && !declinedSnapshots_.contains(prefix) &&
+            prefixListings_.size() < kMaxPrefixes) {
             const auto remainingKeys =
                 maxRetainedKeys_ - std::min(retainedKeyCount_, maxRetainedKeys_);
             const auto remainingBytes =
