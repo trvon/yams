@@ -832,20 +832,6 @@ TEST_CASE("GraphExploreRequest appends optional binary fields",
     CHECK_FALSE(decoded.value().includeTests);
 }
 
-TEST_CASE("GraphImpactRequest encodes repository scope", "[daemon][protocol][serialization]") {
-    GraphImpactRequest request;
-    request.symbol = "RequestHandler";
-    request.scopePathPrefix = "/workspace/yams";
-
-    RecordingRequestSerializer serializer;
-    request.serialize(serializer);
-
-    CHECK((serializer.fieldOrder == "suus"));
-    REQUIRE((serializer.strings.size() == 2));
-    CHECK((serializer.strings.front() == "RequestHandler"));
-    CHECK((serializer.strings.back() == "/workspace/yams"));
-}
-
 TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serialization]") {
     SECTION("CatRequest") {
         CatRequest cr;
@@ -862,18 +848,6 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         auto* got = std::get_if<CatRequest>(&std::get<Request>(dec.value().payload));
         REQUIRE(got != nullptr);
         REQUIRE(got->name == "inline.txt");
-    }
-
-    SECTION("ListSessionsRequest") {
-        auto enc =
-            ProtoSerializer::encode_payload(makeMessageWith(Request{ListSessionsRequest{}}, 2));
-        REQUIRE(enc);
-
-        auto dec = ProtoSerializer::decode_payload(enc.value());
-        REQUIRE(dec);
-
-        auto req = std::get<Request>(dec.value().payload);
-        REQUIRE(std::holds_alternative<ListSessionsRequest>(req));
     }
 
     SECTION("SearchRequest carries session") {
@@ -1251,28 +1225,6 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         CHECK_FALSE(got->includeRelationships);
         CHECK_FALSE(got->includeCode);
         CHECK(got->includeTests);
-        CHECK(got->scopePathPrefix == "/workspace/yams");
-    }
-
-    SECTION("GraphImpactRequest roundtrips repository scope") {
-        GraphImpactRequest req;
-        req.symbol = "RequestHandler";
-        req.depth = 3;
-        req.maxSymbols = 17;
-        req.scopePathPrefix = "/workspace/yams";
-
-        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 25));
-        REQUIRE(enc);
-
-        auto dec = ProtoSerializer::decode_payload(enc.value());
-        REQUIRE(dec);
-        REQUIRE(std::holds_alternative<Request>(dec.value().payload));
-
-        auto* got = std::get_if<GraphImpactRequest>(&std::get<Request>(dec.value().payload));
-        REQUIRE(got != nullptr);
-        CHECK(got->symbol == req.symbol);
-        CHECK(got->depth == 3);
-        CHECK(got->maxSymbols == 17);
         CHECK(got->scopePathPrefix == "/workspace/yams");
     }
 
@@ -1776,7 +1728,6 @@ TEST_CASE("ResponseOf: Runtime usage with actual instances", "[daemon][protocol]
 TEST_CASE("MessageType: Request and response enum mappings", "[daemon][protocol][types]") {
     SECTION("Request type mappings") {
         REQUIRE(MessageType::CatRequest == getMessageType(Request{CatRequest{}}));
-        REQUIRE(MessageType::ListSessionsRequest == getMessageType(Request{ListSessionsRequest{}}));
         REQUIRE(MessageType::DownloadStatusRequest ==
                 getMessageType(Request{DownloadStatusRequest{.jobId = "download-1"}}));
         REQUIRE(MessageType::CancelDownloadJobRequest ==
@@ -1785,11 +1736,6 @@ TEST_CASE("MessageType: Request and response enum mappings", "[daemon][protocol]
                 getMessageType(Request{ListDownloadJobsRequest{.limit = 5}}));
         REQUIRE(MessageType::UseSessionRequest ==
                 getMessageType(Request{UseSessionRequest{.session_name = "s"}}));
-        REQUIRE(MessageType::AddPathSelectorRequest ==
-                getMessageType(Request{AddPathSelectorRequest{.session_name = "s", .path = "/p"}}));
-        REQUIRE(
-            MessageType::RemovePathSelectorRequest ==
-            getMessageType(Request{RemovePathSelectorRequest{.session_name = "s", .path = "/p"}}));
         REQUIRE(MessageType::GraphExploreRequest ==
                 getMessageType(Request{GraphExploreRequest{.query = "processTask"}}));
     }
@@ -1806,7 +1752,6 @@ TEST_CASE("MessageType: Request and response enum mappings", "[daemon][protocol]
 
     SECTION("Request name extraction") {
         REQUIRE(std::string("Cat") == getRequestName(Request{CatRequest{}}));
-        REQUIRE(std::string("ListSessions") == getRequestName(Request{ListSessionsRequest{}}));
         REQUIRE(std::string("DownloadStatus") ==
                 getRequestName(Request{DownloadStatusRequest{.jobId = "download-1"}}));
         REQUIRE(std::string("GraphExplore") ==
@@ -1817,9 +1762,5 @@ TEST_CASE("MessageType: Request and response enum mappings", "[daemon][protocol]
                 getRequestName(Request{ListDownloadJobsRequest{.limit = 5}}));
         REQUIRE(std::string("UseSession") ==
                 getRequestName(Request{UseSessionRequest{.session_name = "x"}}));
-        REQUIRE(std::string("AddPathSelector") ==
-                getRequestName(Request{AddPathSelectorRequest{}}));
-        REQUIRE(std::string("RemovePathSelector") ==
-                getRequestName(Request{RemovePathSelectorRequest{}}));
     }
 }

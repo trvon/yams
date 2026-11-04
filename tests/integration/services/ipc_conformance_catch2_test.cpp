@@ -143,12 +143,6 @@ TEST_CASE_METHOD(IpcConformanceFixture, "IpcConformance: cat and sessions roundt
 
     auto pingRes = yams::test_async::res(client.ping(), 2s);
     REQUIRE(pingRes);
-
-    yams::daemon::ListSessionsRequest lsr{};
-    auto lsrRes = yams::test_async::res(client.executeRequest(Request{lsr}), 5s);
-    REQUIRE(lsrRes);
-    auto* ls = std::get_if<yams::daemon::ListSessionsResponse>(&lsrRes.value());
-    REQUIRE(ls != nullptr);
 }
 
 TEST_CASE_METHOD(IpcConformanceFixture, "IpcConformance: second daemon startup is controlled",

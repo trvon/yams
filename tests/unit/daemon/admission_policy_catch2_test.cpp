@@ -27,7 +27,6 @@ TEST_CASE("AdmissionPolicy classifies representative requests",
     CHECK(AdmissionPolicy::classify(Request{AddDocumentRequest{}}) == CommandClass::write);
     CHECK(AdmissionPolicy::classify(Request{UpdateDocumentRequest{}}) == CommandClass::write);
     CHECK(AdmissionPolicy::classify(Request{DeleteRequest{}}) == CommandClass::write);
-    CHECK(AdmissionPolicy::classify(Request{BatchRequest{}}) == CommandClass::write);
     CHECK(AdmissionPolicy::classify(Request{RepairRequest{}}) == CommandClass::write);
     CHECK(AdmissionPolicy::classify(Request{PluginLoadRequest{}}) == CommandClass::write);
 }

@@ -107,8 +107,8 @@ src/daemon/components/DaemonMetrics.cpp:173:portability/env-read # reviewed raw 
 src/daemon/components/DaemonMetrics.cpp:2054:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:808:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:818:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:605:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:608:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:597:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:600:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestExecutor.cpp:44:portability/env-read # reviewed raw environment read
 src/daemon/components/dispatcher/request_dispatcher_models.cpp:38:portability/env-read # reviewed raw environment read
 src/mcp/stdio_transport.cpp:46:portability/env-read # reviewed raw environment read
@@ -247,7 +247,7 @@ tests/integration/daemon/client_timeout_recovery_test.cpp:616:portability/env-re
 tests/integration/daemon/onnx_tuning_integration_test.cpp:409:portability/env-read # reviewed raw environment read
 tests/integration/daemon/onnx_tuning_integration_test.cpp:410:portability/env-read # reviewed raw environment read
 tests/integration/services/grep_service_expectations_catch2_test.cpp:676:portability/env-read # reviewed raw environment read
-tests/integration/services/ipc_conformance_catch2_test.cpp:199:portability/env-read # reviewed raw environment read
+tests/integration/services/ipc_conformance_catch2_test.cpp:193:portability/env-read # reviewed raw environment read
 tests/integration/services/retrieval_and_ingestion_catch2_test.cpp:217:portability/env-read # reviewed raw environment read
 tests/integration/services/retrieval_and_ingestion_catch2_test.cpp:1210:portability/env-read # reviewed raw environment read
 tests/integration/services/ui_cli_expectations_catch2_test.cpp:46:portability/env-read # reviewed raw environment read
@@ -298,7 +298,7 @@ tests/unit/daemon/components/vector_system_manager_test.cpp:129:portability/env-
 tests/unit/daemon/components/vector_system_manager_test.cpp:130:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_background_processing_test.cpp:761:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_catch2_test.cpp:1427:portability/env-read # reviewed raw environment read
-tests/unit/daemon/daemon_metrics_status_test.cpp:965:portability/env-read # reviewed raw environment read
+tests/unit/daemon/daemon_metrics_status_test.cpp:963:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:36:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:44:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:52:portability/env-read # reviewed raw environment read

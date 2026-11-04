@@ -116,21 +116,9 @@ template <> struct MessageTypeTraits<CatRequest> {
     static constexpr MessageType value = MessageType::CatRequest;
     static constexpr const char* name = "Cat";
 };
-template <> struct MessageTypeTraits<ListSessionsRequest> {
-    static constexpr MessageType value = MessageType::ListSessionsRequest;
-    static constexpr const char* name = "ListSessions";
-};
 template <> struct MessageTypeTraits<UseSessionRequest> {
     static constexpr MessageType value = MessageType::UseSessionRequest;
     static constexpr const char* name = "UseSession";
-};
-template <> struct MessageTypeTraits<AddPathSelectorRequest> {
-    static constexpr MessageType value = MessageType::AddPathSelectorRequest;
-    static constexpr const char* name = "AddPathSelector";
-};
-template <> struct MessageTypeTraits<RemovePathSelectorRequest> {
-    static constexpr MessageType value = MessageType::RemovePathSelectorRequest;
-    static constexpr const char* name = "RemovePathSelector";
 };
 template <> struct MessageTypeTraits<FileHistoryRequest> {
     static constexpr MessageType value = MessageType::FileHistoryRequest;
@@ -181,10 +169,6 @@ template <> struct MessageTypeTraits<PluginTrustRemoveRequest> {
     static constexpr MessageType value = MessageType::PluginTrustRemoveRequest;
     static constexpr const char* name = "PluginTrustRemove";
 };
-template <> struct MessageTypeTraits<ListTreeDiffRequest> {
-    static constexpr MessageType value = MessageType::ListTreeDiffRequest;
-    static constexpr const char* name = "ListTreeDiff";
-};
 template <> struct MessageTypeTraits<GraphQueryRequest> {
     static constexpr MessageType value = MessageType::GraphQueryRequest;
     static constexpr const char* name = "GraphQuery";
@@ -200,18 +184,6 @@ template <> struct MessageTypeTraits<GraphSymbolLookupRequest> {
 template <> struct MessageTypeTraits<GraphTraceRequest> {
     static constexpr MessageType value = MessageType::GraphTraceRequest;
     static constexpr const char* name = "GraphTrace";
-};
-template <> struct MessageTypeTraits<GraphImpactRequest> {
-    static constexpr MessageType value = MessageType::GraphImpactRequest;
-    static constexpr const char* name = "GraphImpact";
-};
-template <> struct MessageTypeTraits<GraphAffectedTestsRequest> {
-    static constexpr MessageType value = MessageType::GraphAffectedTestsRequest;
-    static constexpr const char* name = "GraphAffectedTests";
-};
-template <> struct MessageTypeTraits<GraphPathHistoryRequest> {
-    static constexpr MessageType value = MessageType::GraphPathHistoryRequest;
-    static constexpr const char* name = "GraphPathHistory";
 };
 template <> struct MessageTypeTraits<GraphRepairRequest> {
     static constexpr MessageType value = MessageType::GraphRepairRequest;
@@ -232,10 +204,6 @@ template <> struct MessageTypeTraits<MetadataValueCountsRequest> {
 template <> struct MessageTypeTraits<MemorySyncRequest> {
     static constexpr MessageType value = MessageType::MemorySyncRequest;
     static constexpr const char* name = "MemorySync";
-};
-template <> struct MessageTypeTraits<BatchRequest> {
-    static constexpr MessageType value = MessageType::BatchRequest;
-    static constexpr const char* name = "Batch";
 };
 template <> struct MessageTypeTraits<RepairRequest> {
     static constexpr MessageType value = MessageType::RepairRequest_MsgType;
@@ -315,9 +283,6 @@ template <> struct MessageTypeTraits<EmbedDocumentsResponse> {
 template <> struct MessageTypeTraits<CatResponse> {
     static constexpr MessageType value = MessageType::CatResponse;
 };
-template <> struct MessageTypeTraits<ListSessionsResponse> {
-    static constexpr MessageType value = MessageType::ListSessionsResponse;
-};
 template <> struct MessageTypeTraits<FileHistoryResponse> {
     static constexpr MessageType value = MessageType::FileHistoryResponse;
 };
@@ -340,9 +305,6 @@ template <> struct MessageTypeTraits<EmbeddingEvent> {
 template <> struct MessageTypeTraits<ModelLoadEvent> {
     static constexpr MessageType value = MessageType::ModelLoadEvent;
 };
-template <> struct MessageTypeTraits<ListTreeDiffResponse> {
-    static constexpr MessageType value = MessageType::ListTreeDiffResponse;
-};
 template <> struct MessageTypeTraits<PluginScanResponse> {
     static constexpr MessageType value = MessageType::PluginScanResponse;
 };
@@ -364,15 +326,6 @@ template <> struct MessageTypeTraits<GraphSymbolLookupResponse> {
 template <> struct MessageTypeTraits<GraphTraceResponse> {
     static constexpr MessageType value = MessageType::GraphTraceResponse;
 };
-template <> struct MessageTypeTraits<GraphImpactResponse> {
-    static constexpr MessageType value = MessageType::GraphImpactResponse;
-};
-template <> struct MessageTypeTraits<GraphAffectedTestsResponse> {
-    static constexpr MessageType value = MessageType::GraphAffectedTestsResponse;
-};
-template <> struct MessageTypeTraits<GraphPathHistoryResponse> {
-    static constexpr MessageType value = MessageType::GraphPathHistoryResponse;
-};
 template <> struct MessageTypeTraits<GraphRepairResponse> {
     static constexpr MessageType value = MessageType::GraphRepairResponse;
 };
@@ -387,9 +340,6 @@ template <> struct MessageTypeTraits<MetadataValueCountsResponse> {
 };
 template <> struct MessageTypeTraits<MemorySyncResponse> {
     static constexpr MessageType value = MessageType::MemorySyncResponse;
-};
-template <> struct MessageTypeTraits<BatchResponse> {
-    static constexpr MessageType value = MessageType::BatchResponse;
 };
 template <> struct MessageTypeTraits<RepairResponse> {
     static constexpr MessageType value = MessageType::RepairResponse_MsgType;
@@ -432,31 +382,23 @@ static constexpr MessageType kRequestTypeMap[] = {
     MessageType::PluginTrustRemoveRequest,   // 30
     MessageType::CancelRequest,              // 31
     MessageType::CatRequest,                 // 32
-    MessageType::ListSessionsRequest,        // 33
-    MessageType::UseSessionRequest,          // 34
-    MessageType::AddPathSelectorRequest,     // 35
-    MessageType::RemovePathSelectorRequest,  // 36
-    MessageType::ListTreeDiffRequest,        // 37
-    MessageType::FileHistoryRequest,         // 38
-    MessageType::PruneRequest,               // 39
-    MessageType::ListSnapshotsRequest,       // 40
-    MessageType::RestoreCollectionRequest,   // 41
-    MessageType::RestoreSnapshotRequest,     // 42
-    MessageType::GraphQueryRequest,          // 43
-    MessageType::GraphExploreRequest,        // 44
-    MessageType::GraphSymbolLookupRequest,   // 45
-    MessageType::GraphTraceRequest,          // 46
-    MessageType::GraphImpactRequest,         // 47
-    MessageType::GraphAffectedTestsRequest,  // 48
-    MessageType::GraphPathHistoryRequest,    // 49
-    MessageType::GraphRepairRequest,         // 50
-    MessageType::GraphValidateRequest,       // 51
-    MessageType::KgIngestRequest,            // 52
-    MessageType::MetadataValueCountsRequest, // 53
-    MessageType::MemorySyncRequest,          // 54
-    MessageType::BatchRequest,               // 55
+    MessageType::UseSessionRequest,          // 33
+    MessageType::FileHistoryRequest,         // 34
+    MessageType::PruneRequest,               // 35
+    MessageType::ListSnapshotsRequest,       // 36
+    MessageType::RestoreCollectionRequest,   // 37
+    MessageType::RestoreSnapshotRequest,     // 38
+    MessageType::GraphQueryRequest,          // 39
+    MessageType::GraphExploreRequest,        // 40
+    MessageType::GraphSymbolLookupRequest,   // 41
+    MessageType::GraphTraceRequest,          // 42
+    MessageType::GraphRepairRequest,         // 43
+    MessageType::GraphValidateRequest,       // 44
+    MessageType::KgIngestRequest,            // 45
+    MessageType::MetadataValueCountsRequest, // 46
+    MessageType::MemorySyncRequest,          // 47
     MessageType::RepairRequest_MsgType,      // 56 (RepairRequest)
-    MessageType::UnlinkPathRequest           // 57
+    MessageType::UnlinkPathRequest           // 48
 };
 
 // MUST MATCH Request std::variant order in ipc_protocol.h
@@ -494,31 +436,23 @@ static constexpr const char* kRequestNameMap[] = {
     "PluginTrustRemove",   // 30
     "Cancel",              // 31
     "Cat",                 // 32
-    "ListSessions",        // 33
-    "UseSession",          // 34
-    "AddPathSelector",     // 35
-    "RemovePathSelector",  // 36
-    "ListTreeDiff",        // 37
-    "FileHistory",         // 38
-    "Prune",               // 39
-    "ListSnapshots",       // 40
-    "RestoreCollection",   // 41
-    "RestoreSnapshot",     // 42
-    "GraphQuery",          // 43
-    "GraphExplore",        // 44
-    "GraphSymbolLookup",   // 45
-    "GraphTrace",          // 46
-    "GraphImpact",         // 47
-    "GraphAffectedTests",  // 48
-    "GraphPathHistory",    // 49
-    "GraphRepair",         // 50
-    "GraphValidate",       // 51
-    "KgIngest",            // 52
-    "MetadataValueCounts", // 53
-    "MemorySync",          // 54
-    "Batch",               // 55
-    "Repair",              // 56
-    "UnlinkPath"           // 57
+    "UseSession",          // 33
+    "FileHistory",         // 34
+    "Prune",               // 35
+    "ListSnapshots",       // 36
+    "RestoreCollection",   // 37
+    "RestoreSnapshot",     // 38
+    "GraphQuery",          // 39
+    "GraphExplore",        // 40
+    "GraphSymbolLookup",   // 41
+    "GraphTrace",          // 42
+    "GraphRepair",         // 43
+    "GraphValidate",       // 44
+    "KgIngest",            // 45
+    "MetadataValueCounts", // 46
+    "MemorySync",          // 47
+    "Repair",              // 48
+    "UnlinkPath"           // 49
 };
 
 // MUST MATCH Response std::variant order in ipc_protocol.h
@@ -550,34 +484,28 @@ static constexpr MessageType kResponseTypeMap[] = {
     MessageType::PluginLoadResponse,          // 24
     MessageType::PluginTrustListResponse,     // 25
     MessageType::CatResponse,                 // 26
-    MessageType::ListSessionsResponse,        // 27
-    MessageType::ListTreeDiffResponse,        // 28
-    MessageType::FileHistoryResponse,         // 29
-    MessageType::PruneResponse,               // 30
-    MessageType::ListSnapshotsResponse,       // 31
-    MessageType::RestoreCollectionResponse,   // 32
-    MessageType::RestoreSnapshotResponse,     // 33
-    MessageType::GraphQueryResponse,          // 34
-    MessageType::GraphExploreResponse,        // 35
-    MessageType::GraphSymbolLookupResponse,   // 36
-    MessageType::GraphTraceResponse,          // 37
-    MessageType::GraphImpactResponse,         // 38
-    MessageType::GraphAffectedTestsResponse,  // 39
-    MessageType::GraphPathHistoryResponse,    // 40
-    MessageType::GraphRepairResponse,         // 41
-    MessageType::GraphValidateResponse,       // 42
-    MessageType::KgIngestResponse,            // 43
-    MessageType::MetadataValueCountsResponse, // 44
-    MessageType::MemorySyncResponse,          // 45
-    MessageType::BatchResponse,               // 46
-    MessageType::EmbeddingEvent,              // 47
-    MessageType::ModelLoadEvent,              // 48
-    MessageType::RepairResponse_MsgType,      // 49
-    MessageType::RepairEvent_MsgType          // 50
+    MessageType::FileHistoryResponse,         // 27
+    MessageType::PruneResponse,               // 28
+    MessageType::ListSnapshotsResponse,       // 29
+    MessageType::RestoreCollectionResponse,   // 30
+    MessageType::RestoreSnapshotResponse,     // 31
+    MessageType::GraphQueryResponse,          // 32
+    MessageType::GraphExploreResponse,        // 33
+    MessageType::GraphSymbolLookupResponse,   // 34
+    MessageType::GraphTraceResponse,          // 35
+    MessageType::GraphRepairResponse,         // 36
+    MessageType::GraphValidateResponse,       // 37
+    MessageType::KgIngestResponse,            // 38
+    MessageType::MetadataValueCountsResponse, // 39
+    MessageType::MemorySyncResponse,          // 40
+    MessageType::EmbeddingEvent,              // 41
+    MessageType::ModelLoadEvent,              // 42
+    MessageType::RepairResponse_MsgType,      // 43
+    MessageType::RepairEvent_MsgType          // 44
 };
 
 // MUST MATCH Response std::variant order in ipc_protocol_responses.h
-static constexpr std::array<const char*, 51> kResponseNameMap = {
+static constexpr std::array<const char*, 45> kResponseNameMap = {
     "SearchResponse",              // 0
     "AddResponse",                 // 1
     "GetResponse",                 // 2
@@ -605,30 +533,24 @@ static constexpr std::array<const char*, 51> kResponseNameMap = {
     "PluginLoadResponse",          // 24
     "PluginTrustListResponse",     // 25
     "CatResponse",                 // 26
-    "ListSessionsResponse",        // 27
-    "ListTreeDiffResponse",        // 28
-    "FileHistoryResponse",         // 29
-    "PruneResponse",               // 30
-    "ListSnapshotsResponse",       // 31
-    "RestoreCollectionResponse",   // 32
-    "RestoreSnapshotResponse",     // 33
-    "GraphQueryResponse",          // 34
-    "GraphExploreResponse",        // 35
-    "GraphSymbolLookupResponse",   // 36
-    "GraphTraceResponse",          // 37
-    "GraphImpactResponse",         // 38
-    "GraphAffectedTestsResponse",  // 39
-    "GraphPathHistoryResponse",    // 40
-    "GraphRepairResponse",         // 41
-    "GraphValidateResponse",       // 42
-    "KgIngestResponse",            // 43
-    "MetadataValueCountsResponse", // 44
-    "MemorySyncResponse",          // 45
-    "BatchResponse",               // 46
-    "EmbeddingEvent",              // 47
-    "ModelLoadEvent",              // 48
-    "RepairResponse",              // 49
-    "RepairEvent"                  // 50
+    "FileHistoryResponse",         // 27
+    "PruneResponse",               // 28
+    "ListSnapshotsResponse",       // 29
+    "RestoreCollectionResponse",   // 30
+    "RestoreSnapshotResponse",     // 31
+    "GraphQueryResponse",          // 32
+    "GraphExploreResponse",        // 33
+    "GraphSymbolLookupResponse",   // 34
+    "GraphTraceResponse",          // 35
+    "GraphRepairResponse",         // 36
+    "GraphValidateResponse",       // 37
+    "KgIngestResponse",            // 38
+    "MetadataValueCountsResponse", // 39
+    "MemorySyncResponse",          // 40
+    "EmbeddingEvent",              // 41
+    "ModelLoadEvent",              // 42
+    "RepairResponse",              // 43
+    "RepairEvent"                  // 44
 };
 
 static_assert(std::size(kResponseNameMap) == std::variant_size_v<Response>);
