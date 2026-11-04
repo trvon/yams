@@ -1981,6 +1981,71 @@ TEST_CASE("Daemon memory sync backfill skips a poisoned blob and continues",
     CHECK(harness.shutdownSucceeded());
 }
 
+// A blob larger than the resident publish limit can never replicate under the current
+// limits. Throwing on it pinned the backfill cursor, so every cycle re-read and re-hashed the
+// same oversized file and no later document ever replicated (seen live: 97 retries in 4.5 h
+// on an 18.5 MB PDF with a 16 MiB limit).
+TEST_CASE("Daemon memory sync backfill skips an oversized blob and continues",
+          "[integration][daemon][memory-sync][backfill][backfill-oversize]") {
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174042",
+                                                "backfill-oversize-corpus");
+    auto configure = std::move(options.configureDaemon);
+    options.configureDaemon = [configure =
+                                   std::move(configure)](yams::daemon::DaemonConfig& config) {
+        configure(config);
+        config.memorySync.limits.maxValueBytes = 2048;
+    };
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto repository = serviceManager->getMetadataRepo();
+    REQUIRE(repository != nullptr);
+
+    // The first document's content exceeds the 2 KiB publish limit; the second fits.
+    const std::vector<std::string> payloads{std::string(16 * 1024, 'x'), "backfill-small"};
+    std::vector<std::string> hashes;
+    std::vector<yams::metadata::BatchDocumentInsert> inserts;
+    for (std::size_t index = 0; index < payloads.size(); ++index) {
+        const auto payload = bytes(payloads[index]);
+        auto stored = serviceManager->getContentStore()->storeBytes(payload);
+        REQUIRE(stored.has_value());
+        hashes.push_back(stored.value().contentHash);
+        yams::metadata::BatchDocumentInsert item;
+        item.info.filePath = "/local/oversize-" + std::to_string(index) + ".md";
+        item.info.fileName = "oversize-" + std::to_string(index) + ".md";
+        item.info.fileExtension = ".md";
+        item.info.fileSize = static_cast<std::int64_t>(payload.size());
+        item.info.sha256Hash = stored.value().contentHash;
+        item.info.mimeType = "text/markdown";
+        inserts.push_back(std::move(item));
+    }
+    REQUIRE(repository->batchInsertDocumentsWithMetadata(inserts).has_value());
+
+    std::vector<std::string> stages;
+    serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (tlsTestStageCaller) { // ignore the daemon worker's own cycle
+            stages.emplace_back(stage);
+        }
+    });
+    asTestStageCaller([&] { serviceManager->testingPublishMemorySyncBackfill(); });
+
+    CHECK(std::find(stages.begin(), stages.end(), "backfill.skip_document") != stages.end());
+
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "shared-memory"),
+        yams::memory_sync::MemorySyncConfig{"backfill-oversize-peer", 60'000,
+                                            "backfill-oversize-corpus", 1}};
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK_FALSE(peer.readCached("document/" + hashes.front()).has_value());
+    CHECK(peer.readCached("document/" + hashes.back()).has_value());
+
+    serviceManager->testingSetMemorySyncStageObserver({});
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+}
+
 TEST_CASE("Daemon direct deltas immediately hydrate content and metadata",
           "[integration][daemon][memory-sync][direct-delta]") {
     auto options =

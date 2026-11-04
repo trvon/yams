@@ -943,6 +943,20 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
 
         memory_sync::ContentBlobSyncAdapter contentAdapter{*contentStore, *memorySync_};
         if (!document.sha256Hash.empty()) {
+            // Content larger than the resident publish limit can never replicate under the
+            // current limits. Skip it before reading: retrying would re-read and re-hash the same
+            // file every cycle while documentIdCursor stays pinned and no later document syncs.
+            const auto publishLimit = memorySync_->maxPublishValueBytes();
+            if (document.fileSize > 0 &&
+                static_cast<std::uint64_t>(document.fileSize) > publishLimit) {
+                spdlog::warn("[ServiceManager] memory_sync backfill skipping document {} "
+                             "(content {} bytes exceeds the {}-byte resident publish limit)",
+                             document.id, document.fileSize, publishLimit);
+                state.documentIdCursor = std::max(state.documentIdCursor, document.id);
+                ++skippedDocuments;
+                notifyMemorySyncStage("backfill.skip_document");
+                return true;
+            }
             auto published = contentAdapter.publishExisting(document.sha256Hash);
             if (!published) {
                 // A poisoned blob (corrupt manifest, digest mismatch, malformed stored bytes)
