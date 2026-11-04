@@ -382,7 +382,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             dropSymbolExtractionSubsystem(),
             bypassTopologyMetadataValueCountsTriggers(),
             createDocumentSnapshotMembership(),
-            removeLegacyGrammarArtifacts()};
+            removeLegacyGrammarArtifacts(),
+            createDocumentPathHeads()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -3353,6 +3354,37 @@ void removeLegacyGrammarDirectory(const std::filesystem::path& dbPath) {
 }
 
 } // namespace
+
+Migration YamsMetadataMigrations::createDocumentPathHeads() {
+    Migration migration;
+    migration.version = 44;
+    migration.name = "Separate local path heads from content identity";
+    migration.created = std::chrono::system_clock::now();
+    // Additive and constant-time at startup: old corpus rows remain a read
+    // fallback until explicit ingestion establishes their per-path heads.
+    migration.upSQL = R"(
+        CREATE TABLE document_path_heads (
+            file_path TEXT PRIMARY KEY,
+            document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            file_name TEXT NOT NULL,
+            file_extension TEXT NOT NULL,
+            path_prefix TEXT NOT NULL,
+            reverse_path TEXT NOT NULL,
+            path_hash TEXT NOT NULL,
+            parent_hash TEXT NOT NULL,
+            path_depth INTEGER NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1,
+            indexed_time INTEGER NOT NULL,
+            modified_time INTEGER NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0, 1))
+        );
+        CREATE INDEX idx_document_path_heads_document ON document_path_heads(document_id, deleted);
+        CREATE INDEX idx_document_path_heads_prefix ON document_path_heads(path_prefix, deleted);
+    )";
+    migration.downSQL = "DROP TABLE IF EXISTS document_path_heads;";
+    return migration;
+}
 
 Migration YamsMetadataMigrations::removeLegacyGrammarArtifacts() {
     Migration m;

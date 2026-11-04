@@ -2063,6 +2063,8 @@ if catch2_dep.found()
       'unit/cli/homebrew_service_formula_catch2_test.cpp',
       'unit/cli/pipeline_stage_render_catch2_test.cpp',
       'unit/cli/prompt_util_catch2_test.cpp',
+    'unit/cli/output_controls_catch2_test.cpp',
+    'unit/cli/repo_files_catch2_test.cpp',
       'unit/cli/recommendation_util_catch2_test.cpp',
       'unit/cli/status_metrics_catch2_test.cpp',
       'unit/cli/time_filters_catch2_test.cpp',
@@ -2082,6 +2084,7 @@ if catch2_dep.found()
     files(
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/cli_option_isolation_catch2_test.cpp',
+    'unit/cli/retrieval_flags_catch2_test.cpp',
       'unit/cli/cli_utility_coverage_catch2_test.cpp',
       'unit/cli/config_command_catch2_test.cpp',
       'unit/cli/data_dir_resolution_catch2_test.cpp',

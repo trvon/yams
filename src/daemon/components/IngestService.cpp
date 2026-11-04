@@ -10,6 +10,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/DocumentRequestMapper.h>
 #include <yams/daemon/components/IngestService.h>
@@ -56,8 +57,8 @@ static void mergePendingPostIngest(PendingPostIngestByMime& target,
 
 static bool getEnvIngestCorrectnessMode() {
     static const bool val = []() {
-        if (const char* s = std::getenv("YAMS_INGEST_CORRECTNESS_MODE")) {
-            std::string value(s);
+        if (auto valueOverride = yams::config::getenv_optional("YAMS_INGEST_CORRECTNESS_MODE")) {
+            std::string value = *valueOverride;
             std::transform(value.begin(), value.end(), value.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             return !(value == "0" || value == "false" || value == "no" || value == "off");
@@ -176,16 +177,16 @@ void IngestService::stop() {
     bool exited = false;
     {
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
+        // startGuard_ is set synchronously before spawning: running_ alone
+        // cannot distinguish a drained poller from one not scheduled yet.
         exited = lifecycleCv_.wait_until(
-            lock, deadline, [this]() { return !running_.load(std::memory_order_acquire); });
+            lock, deadline, [this]() { return !startGuard_.load(std::memory_order_acquire); });
     }
 
     if (!exited) {
         spdlog::warn("[IngestService] Stop timed out after {}ms waiting for channel poller to "
                      "exit",
                      kWaitBudget.count());
-    } else {
-        startGuard_.store(false, std::memory_order_release);
     }
 }
 
@@ -217,11 +218,13 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
         std::atomic<bool>& startGuard;
         IngestService* self;
         ~RunningGuard() {
+            // Publish completion and notify while owning the same mutex as
+            // stop(). Releasing it is our final access to the service: a
+            // waiter may destroy the service as soon as it observes completion.
+            std::lock_guard<std::mutex> lock(self->lifecycleMutex_);
             running.store(false, std::memory_order_release);
             startGuard.store(false, std::memory_order_release);
-            if (self) {
-                self->notifyLifecycle();
-            }
+            self->lifecycleCv_.notify_all();
         }
     } runningGuard{running_, startGuard_, this};
 
@@ -267,6 +270,9 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
         try {
             cpuUsagePercent = ResourceGovernor::instance().getSnapshot().cpuUsagePercent;
         } catch (...) {
+            cpuUsagePercent = 100.0;
+            spdlog::debug(
+                "IngestService: pressure snapshot unavailable; using conservative batching");
         }
         const bool canAdmitWork = ResourceGovernor::instance().canAdmitWork();
         const bool underPressure = !canAdmitWork;

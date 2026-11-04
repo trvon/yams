@@ -121,6 +121,8 @@ public:
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
         cli_ = cli;
         auto* cmd = app.add_subcommand(getName(), getDescription());
+        if (cli_)
+            cli_->registerReadOptions(*cmd);
 
         // Target selection - multiple options available
         auto* group = cmd->add_option_group("target");
@@ -198,6 +200,7 @@ public:
     Result<void> execute() override { return Result<void>(); }
 
     boost::asio::awaitable<Result<void>> executeAsync() override {
+        OutputBudget outputBudget(std::cout, cli_ ? cli_->outputBudgetChars() : 0);
         try {
             using namespace yams::daemon;
             invocationCwd_ = invocationCwdForCli();

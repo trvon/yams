@@ -14,6 +14,7 @@
 #include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/profiling.h>
 
@@ -326,9 +327,24 @@ Result<bool> hasOtherDocumentAtPath(Database& db, std::string_view filePath, int
     return stmt.step();
 }
 
-Result<MetadataTagDelta> applyDocumentMetadataWrites(
-    Database& db, const std::vector<repository::MetadataWriteEntry>& dedupedWrites, int64_t docId) {
+Result<MetadataTagDelta>
+applyDocumentMetadataWrites(Database& db,
+                            const std::vector<repository::MetadataWriteEntry>& dedupedWrites,
+                            int64_t docId, const std::string& path) {
     if (dedupedWrites.empty()) {
+        return MetadataTagDelta{};
+    }
+    YAMS_TRY_UNWRAP(canonical, db.prepareCached("SELECT file_path FROM documents WHERE id = ?"));
+    YAMS_TRY(canonical->reset());
+    YAMS_TRY(canonical->clearBindings());
+    YAMS_TRY(canonical->bind(1, docId));
+    YAMS_TRY_UNWRAP(found, canonical->step());
+    if (!found)
+        return Error{ErrorCode::NotFound, "Content row disappeared before metadata writes"};
+    if (computePathDerivedValues(canonical->getString(0)).normalizedPath !=
+        computePathDerivedValues(path).normalizedPath) {
+        // Reusing CAS bytes must not overwrite another location's metadata.
+        // Keep dedupedWrites intact for immutable snapshot membership recording.
         return MetadataTagDelta{};
     }
     auto writesForDoc = dedupedWrites;
@@ -702,8 +718,8 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
                 repository::deduplicateMetadataWrites(metadataWrites);
 
             const auto metadataWritesStart = std::chrono::steady_clock::now();
-            YAMS_TRY_UNWRAP(metadataTagDelta,
-                            applyDocumentMetadataWrites(db, dedupedMetadataWrites, docId));
+            YAMS_TRY_UNWRAP(metadataTagDelta, applyDocumentMetadataWrites(db, dedupedMetadataWrites,
+                                                                          docId, info.filePath));
             recordMetadataInsertPhase("apply_metadata_writes", metadataWritesStart);
             const uint64_t metadataWriteCount = dedupedMetadataWrites.size();
 
@@ -846,7 +862,8 @@ MetadataRepository::batchInsertDocumentsWithMetadata(std::vector<BatchDocumentIn
                     repository::deduplicateMetadataWrites(metadataWrites);
 
                 YAMS_TRY_UNWRAP(metadataTagDelta,
-                                applyDocumentMetadataWrites(db, dedupedMetadataWrites, docId));
+                                applyDocumentMetadataWrites(db, dedupedMetadataWrites, docId,
+                                                            item.info.filePath));
                 const uint64_t metadataWriteCount = dedupedMetadataWrites.size();
 
                 if (item.snapshot.has_value()) {

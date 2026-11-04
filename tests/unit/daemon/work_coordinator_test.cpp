@@ -24,6 +24,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
+#include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 
 using namespace yams::daemon;
@@ -77,6 +78,52 @@ private:
     spdlog::level::level_enum previousLevel_;
 };
 } // namespace
+
+TEST_CASE("Ingest stop waits for a scheduled but not yet running poller",
+          "[daemon][work_coordinator][ingest-drain]") {
+    SpdlogCaptureGuard logs;
+    WorkCoordinator coordinator;
+    std::promise<void> releaseWorker;
+    auto released = releaseWorker.get_future().share();
+    struct WorkerRelease {
+        std::promise<void>& promise;
+        bool done{false};
+        void release() {
+            if (!done) {
+                done = true;
+                promise.set_value();
+            }
+        }
+        ~WorkerRelease() { release(); }
+    } release{releaseWorker};
+    coordinator.start(1);
+    std::promise<void> entered;
+    auto enteredFuture = entered.get_future();
+    boost::asio::post(*coordinator.getIOContext(),
+                      [entered = std::move(entered), released]() mutable {
+                          entered.set_value();
+                          released.wait();
+                      });
+    REQUIRE(enteredFuture.wait_for(2s) == std::future_status::ready);
+    IngestService ingest(nullptr, &coordinator);
+    ingest.start();
+    std::promise<void> stopCalling;
+    auto stopCallingFuture = stopCalling.get_future();
+    auto stopped = std::async(std::launch::async, [&] {
+        stopCalling.set_value();
+        ingest.stop();
+    });
+    CHECK(stopCallingFuture.wait_for(2s) == std::future_status::ready);
+    // The only worker is deliberately held: completion is impossible until
+    // release. A short future deadline checks blocking, not a guessed sleep.
+    const bool returnedBeforePollerStarted = stopped.wait_for(25ms) == std::future_status::ready;
+    release.release();
+    REQUIRE(stopped.wait_for(2s) == std::future_status::ready);
+    stopped.get();
+    CHECK_FALSE(returnedBeforePollerStarted);
+    coordinator.stop();
+    coordinator.join();
+}
 
 TEST_CASE("WorkCoordinator lifecycle", "[daemon][work_coordinator][lifecycle]") {
     SECTION("Construct without starting") {

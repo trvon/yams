@@ -148,6 +148,44 @@ TEST_CASE_METHOD(VersioningFixture, "Versioning: first document gets version 1 a
     CHECK((seriesMeta.value()->asString() == docInfo.filePath));
 }
 
+TEST_CASE_METHOD(VersioningFixture,
+                 "Versioning: exact path lookup selects the marked head, not the first hash",
+                 "[versioning][metadata][path-head]") {
+    auto repo = makeRepo();
+    const std::string path = "/path/head.txt";
+    std::vector<int64_t> ids;
+    for (int version = 1; version <= 3; ++version) {
+        auto doc = makeDocInfo(path, "head_hash_" + std::to_string(version), "head.txt");
+        doc.indexedTime = std::chrono::sys_seconds{std::chrono::seconds{100}};
+        auto inserted = repo->insertDocument(doc);
+        REQUIRE(inserted);
+        ids.push_back(inserted.value());
+        REQUIRE(repo->setMetadata(ids.back(), "version", MetadataValue(int64_t{version})));
+        REQUIRE(repo->setMetadata(ids.back(), "is_latest", MetadataValue(version == 3)));
+    }
+    auto latest = repo->findDocumentByExactPath(path);
+    REQUIRE(latest);
+    REQUIRE(latest.value());
+    CHECK(latest.value()->id == ids.back());
+
+    // Reverting to previously indexed bytes must move the path head even though
+    // the content hash/document id is old. A cached path lookup must not pin v3.
+    REQUIRE(repo->setMetadata(ids.back(), "is_latest", MetadataValue(false)));
+    REQUIRE(repo->setMetadata(ids.front(), "version", MetadataValue(int64_t{4})));
+    REQUIRE(repo->setMetadata(ids.front(), "is_latest", MetadataValue(true)));
+    auto reverted = repo->findDocumentByExactPath(path);
+    REQUIRE(reverted);
+    REQUIRE(reverted.value());
+    CHECK(reverted.value()->id == ids.front());
+
+    // A fresh reader must agree with the writer's cached lookup.
+    MetadataRepository cold(*pool_);
+    auto reopened = cold.findDocumentByExactPath(path);
+    REQUIRE(reopened);
+    REQUIRE(reopened.value());
+    CHECK(reopened.value()->id == ids.front());
+}
+
 TEST_CASE_METHOD(VersioningFixture, "Versioning: re-index with different hash creates version edge",
                  "[versioning][metadata][catch2]") {
     yams::test::ScopedEnvVar versioning{"YAMS_ENABLE_VERSIONING", std::string{"1"}};
@@ -306,6 +344,135 @@ TEST_CASE_METHOD(VersioningFixture, "Versioning respects YAMS_ENABLE_VERSIONING=
     auto verMeta = repo->getMetadata(docId, "version");
     REQUIRE(verMeta);
     CHECK(!verMeta.value().has_value());
+}
+
+TEST_CASE_METHOD(VersioningFixture,
+                 "Path heads isolate aliases, content reversion and location retirement",
+                 "[versioning][metadata][path-locations]") {
+    auto repo = makeRepo();
+    REQUIRE(repo->supportsDocumentPaths());
+    auto original = makeDocInfo("/repo/main/file.txt", "shared-location-hash", "file.txt");
+    auto first = repo->insertDocument(original);
+    REQUIRE(first);
+    REQUIRE(repo->recordDocumentPath(original, first.value(), {{"owner", MetadataValue("main")}}));
+    auto alias = makeDocInfo("/repo/lane/file.txt", original.sha256Hash, "file.txt");
+    auto second = repo->insertDocument(alias);
+    REQUIRE(second);
+    REQUIRE(second.value() == first.value());
+    REQUIRE(repo->recordDocumentPath(
+        alias, second.value(),
+        {{"owner", MetadataValue("lane")}, {"tag:lane", MetadataValue("lane")}}));
+    auto paths = repo->getDocumentPathReferences(first.value());
+    REQUIRE(paths);
+    REQUIRE(paths.value().size() == 2);
+    auto originalMetadata = repo->getDocumentPathMetadata(original.filePath, first.value());
+    auto aliasMetadata = repo->getDocumentPathMetadata(alias.filePath, second.value());
+    REQUIRE(originalMetadata);
+    REQUIRE(originalMetadata.value());
+    REQUIRE(aliasMetadata);
+    REQUIRE(aliasMetadata.value());
+    CHECK(originalMetadata.value()->at("owner").asString() == "main");
+    CHECK(aliasMetadata.value()->at("owner").asString() == "lane");
+
+    SECTION("Path-aware projections filter local metadata and tags before pagination") {
+        REQUIRE(repo->setMetadata(first.value(), "owner", MetadataValue("main")));
+        DocumentQueryOptions options;
+        options.usePathLocations = true;
+        options.currentPathsOnly = true;
+        options.pathPrefix = "/repo/lane/";
+        options.prefixIsDirectory = true;
+        options.fileNamePattern = "file%";
+        options.tags = {"lane"};
+        options.metadataFilters = {{"owner", "lane"}};
+        options.limit = 1;
+        auto documents = repo->queryDocuments(options);
+        auto listed = repo->queryDocumentsForListProjection(options);
+        auto candidates = repo->queryDocumentsForGrepCandidates(options);
+        REQUIRE(documents);
+        REQUIRE(listed);
+        REQUIRE(candidates);
+        REQUIRE(documents.value().size() == 1);
+        REQUIRE(listed.value().size() == 1);
+        REQUIRE(candidates.value().size() == 1);
+        CHECK(documents.value().front().filePath == alias.filePath);
+        CHECK(listed.value().front().filePath == alias.filePath);
+        CHECK(candidates.value().front().filePath == alias.filePath);
+        options.metadataFilters = {{"owner", "main"}};
+        auto notInherited = repo->queryDocuments(options);
+        REQUIRE(notInherited);
+        CHECK(notInherited.value().empty());
+        options.tags.clear();
+        options.pathPrefix.reset();
+        options.limit = 0;
+        options.metadataFilters.clear();
+        options.metadataAnyFilters = {{"owner", "lane"}, {"owner", "main"}};
+        auto either = repo->queryDocuments(options);
+        REQUIRE(either);
+        CHECK(either.value().size() == 2);
+    }
+    SECTION("Cold readers resolve an alias and reverted bytes through the path head") {
+        auto changed = original;
+        changed.sha256Hash = "changed-location-hash";
+        auto updated = repo->insertDocument(changed);
+        REQUIRE(updated);
+        REQUIRE(
+            repo->recordDocumentPath(changed, updated.value(), {{"owner", MetadataValue("main")}}));
+        REQUIRE(
+            repo->recordDocumentPath(original, first.value(), {{"owner", MetadataValue("main")}}));
+        MetadataRepository cold(*pool_);
+        auto current = cold.findDocumentByExactPath(original.filePath);
+        auto other = cold.findDocumentByExactPath(alias.filePath);
+        REQUIRE(current);
+        REQUIRE(current.value());
+        REQUIRE(other);
+        REQUIRE(other.value());
+        CHECK(current.value()->sha256Hash == original.sha256Hash);
+        CHECK(other.value()->filePath == alias.filePath);
+        auto reverted = cold.getDocumentPathMetadata(original.filePath, first.value());
+        auto untouched = cold.getDocumentPathMetadata(alias.filePath, first.value());
+        REQUIRE(reverted);
+        REQUIRE(reverted.value());
+        REQUIRE(untouched);
+        REQUIRE(untouched.value());
+        CHECK(reverted.value()->at("version").asInteger() == 3);
+        CHECK(untouched.value()->at("version").asInteger() == 1);
+    }
+    SECTION(
+        "Retiring one location never deletes shared content identity or resurrects the old path") {
+        REQUIRE(repo->retireDocumentPath(original.filePath));
+        auto missing = repo->findDocumentByExactPath(original.filePath);
+        REQUIRE(missing);
+        CHECK_FALSE(missing.value());
+        auto remaining = repo->getDocumentPathReferences(first.value());
+        REQUIRE(remaining);
+        REQUIRE(remaining.value().size() == 1);
+        CHECK(remaining.value().front().filePath == alias.filePath);
+        auto content = repo->getDocumentByHash(original.sha256Hash);
+        REQUIRE(content);
+        REQUIRE(content.value());
+    }
+}
+
+TEST_CASE_METHOD(VersioningFixture,
+                 "Admitting a legacy path preserves its version but an alias starts at one",
+                 "[versioning][metadata][path-locations]") {
+    auto repo = makeRepo();
+    auto canonical = makeDocInfo("/repo/legacy.txt", "legacy-path-hash", "legacy.txt");
+    auto inserted = repo->insertDocument(canonical);
+    REQUIRE(inserted);
+    REQUIRE(repo->setMetadata(inserted.value(), "version", MetadataValue(int64_t{7})));
+    REQUIRE(repo->recordDocumentPath(canonical, inserted.value(), {}));
+    auto alias = canonical;
+    alias.filePath = "/repo/alias.txt";
+    REQUIRE(repo->recordDocumentPath(alias, inserted.value(), {}));
+    auto original = repo->getDocumentPathMetadata(canonical.filePath, inserted.value());
+    auto copied = repo->getDocumentPathMetadata(alias.filePath, inserted.value());
+    REQUIRE(original);
+    REQUIRE(original.value());
+    REQUIRE(copied);
+    REQUIRE(copied.value());
+    CHECK(original.value()->at("version").asInteger() == 7);
+    CHECK(copied.value()->at("version").asInteger() == 1);
 }
 
 TEST_CASE_METHOD(VersioningFixture, "Retention selects only superseded versions",

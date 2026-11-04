@@ -3,6 +3,8 @@ yams_cli_sources = [
   'command_registry.cpp',
   'session_store.cpp',
   'time_parser.cpp',
+  'repo_files.cpp',
+  'live_grep.cpp',
   'progress_indicator.cpp',
   'graph_explore_presenter.cpp',
   'graph_helpers.cpp',

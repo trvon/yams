@@ -193,6 +193,8 @@ struct DocumentQueryOptions {
     std::optional<std::string> pathPrefix{};
     std::optional<std::string> containsFragment{};
     std::optional<std::string> fileName{}; // Exact match on file_name column
+    // SQL LIKE on basename, not parent directories.
+    std::optional<std::string> fileNamePattern;
     std::optional<std::string> extension{};
     std::vector<std::string> extensions{};
     std::optional<std::string> mimeType{};
@@ -215,6 +217,9 @@ struct DocumentQueryOptions {
     bool orderByNameAsc{false};
     bool orderByIndexedDesc{false};
     bool pathsOnly{false};
+    // Local path identity is separate from deduplicated content identity.
+    bool usePathLocations{false};
+    bool currentPathsOnly{false};
     bool prefixIsDirectory{false};
     bool includeSubdirectories{true};
     bool containsUsesFts{false};
@@ -1046,6 +1051,15 @@ public:
 
     void setGraphComponent(std::shared_ptr<yams::daemon::GraphComponent> graphComponent);
 
+    bool supportsDocumentPaths() const { return hasDocumentPaths_; }
+    Result<void>
+    recordDocumentPath(const DocumentInfo& info, int64_t documentId,
+                       const std::vector<std::pair<std::string, MetadataValue>>& metadata);
+    Result<void> retireDocumentPath(const std::string& path);
+    Result<std::vector<DocumentInfo>> getDocumentPathReferences(int64_t documentId);
+    Result<std::optional<std::unordered_map<std::string, MetadataValue>>>
+    getDocumentPathMetadata(const std::string& path, int64_t documentId);
+
     std::shared_ptr<KnowledgeGraphStore> getKnowledgeGraphStore() const {
         return std::atomic_load_explicit(&kgStore_, std::memory_order_acquire);
     }
@@ -1056,6 +1070,7 @@ private:
     ConnectionPool& pool_;
     ConnectionPool* readPool_{nullptr};
     bool hasPathIndexing_{false};
+    bool hasDocumentPaths_{false};
     bool pathFtsAvailable_{false};
     std::shared_ptr<KnowledgeGraphStore> kgStore_;    // PBI-043: tree diff KG integration
     TreeDiffAppliedCallback treeDiffAppliedCallback_; // PBI-009: centralized graph ops hook

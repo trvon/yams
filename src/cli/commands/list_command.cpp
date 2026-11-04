@@ -76,6 +76,8 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("list", getDescription());
+        if (cli_)
+            cli_->registerReadOptions(*cmd);
         cmd->alias("ls"); // Add ls as alias for list
 
         cmd->add_option("--name,-p,--pattern", namePattern_,
@@ -97,7 +99,9 @@ public:
         cmd->add_flag("--reverse,-r", reverse_, "Reverse sort order");
         cmd->add_option("--limit,-n", limit_, "Limit number of results")->default_val(100);
         cmd->add_option("--offset", offset_, "Offset for pagination")->default_val(0);
-        cmd->add_option("--recent", recentCount_, "Show N most recent documents");
+        cmd->add_option("--recent", recentCount_,
+                        "Show at most N most recent documents, one per line")
+            ->check(CLI::PositiveNumber);
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information");
         cmd->add_flag("--paths-only", pathsOnly_,
                       "Output only file paths, one per line (useful for scripting)");
@@ -122,7 +126,8 @@ public:
 
         // Metadata filters (key/value)
         cmd->add_option("--metadata", metadataFiltersRaw_,
-                        "Additional metadata filters key=value (repeatable)")
+                        "Filter add -m metadata: key=value (repeatable; e.g. task, source, phase, "
+                        "owner, worktree, branch)")
             ->take_all();
         cmd->add_flag("--match-any-metadata", matchAnyMetadata_,
                       "Use OR across metadata filters (default AND)");
@@ -207,8 +212,11 @@ public:
     }
 
     Result<void> execute() override {
+        OutputBudget outputBudget(std::cout, cli_ ? cli_->outputBudgetChars() : 0);
         try {
             const bool cliOneShot = yams::cli::cli_one_shot_enabled();
+            if (recentCount_ > 0)
+                limit_ = limit_ > 0 ? std::min(limit_, recentCount_) : recentCount_;
 
             if (jsonFlag_ || (cli_ && cli_->getJsonOutput()))
                 format_ = "json";
@@ -262,8 +270,9 @@ public:
             dreq.recent = (recentCount_ > 0) || (limit_ <= 100);
 
             // Format and display options
-            const bool includeCompactMetadataSummary =
-                !showMetadata_ && format_ == "table" && !cli_->getJsonOutput() && !pathsOnly_;
+            const bool includeCompactMetadataSummary = recentCount_ == 0 && !showMetadata_ &&
+                                                       format_ == "table" &&
+                                                       !cli_->getJsonOutput() && !pathsOnly_;
             dreq.format = format_;
             dreq.sortBy = sortBy_;
             dreq.reverse = reverse_;
@@ -337,22 +346,36 @@ public:
                 resolvedLocalFilePath_ = resolved.isLocalFile ? resolved.absPath : std::nullopt;
             }
 
-            bool showSpinner = !cli_->getJsonOutput() && !pathsOnly_ && format_ != "json" &&
-                               format_ != "csv" && format_ != "minimal";
+            bool showSpinner = !cli_->getQuiet() && !cli_->getJsonOutput() && !pathsOnly_ &&
+                               format_ != "json" && format_ != "csv" && format_ != "minimal";
             std::optional<ui::SpinnerRunner> spinner;
             if (showSpinner) {
                 spinner.emplace();
                 spinner->start("Listing documents...");
             }
 
-            auto render = [&](const yams::daemon::ListResponse& resp) -> Result<void> {
+            auto render = [&](const yams::daemon::ListResponse& rawResp) -> Result<void> {
                 if (spinner) {
                     spinner->stop();
+                }
+                auto resp = rawResp;
+                if (limit_ > 0 && resp.items.size() > static_cast<std::size_t>(limit_))
+                    resp.items.resize(static_cast<std::size_t>(limit_));
+                if (recentCount_ > 0 && format_ == "table" && !cli_->getJsonOutput() &&
+                    !pathsOnly_) {
+                    for (const auto& entry : resp.items) {
+                        std::cout << compactSnippet(entry.path.empty() ? entry.name : entry.path,
+                                                    240)
+                                  << ": " << compactSnippet(entry.snippet) << '\n';
+                        noteOutputResult(std::cout);
+                    }
+                    return Result<void>();
                 }
                 // Handle paths-only output
                 if (pathsOnly_) {
                     for (const auto& e : resp.items) {
                         std::cout << e.path << std::endl;
+                        noteOutputResult(std::cout);
                     }
                     return Result<void>();
                 }
@@ -876,8 +899,9 @@ private:
             }
 
             // Display options
-            const bool includeCompactMetadataSummary =
-                !showMetadata_ && format_ == "table" && !cli_->getJsonOutput() && !pathsOnly_;
+            const bool includeCompactMetadataSummary = recentCount_ == 0 && !showMetadata_ &&
+                                                       format_ == "table" &&
+                                                       !cli_->getJsonOutput() && !pathsOnly_;
             serviceReq.format = format_;
             serviceReq.showSnippets = showSnippets_ && !noSnippets_;
             serviceReq.snippetLength = snippetLength_;

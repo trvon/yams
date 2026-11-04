@@ -20,6 +20,7 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/detection/file_type_detector.h>
+#include <yams/metadata/connection_pool.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/embedding_service.h>
@@ -301,6 +302,12 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("add", getDescription());
+        changedOption_ =
+            cmd->add_option("--changed", changedDirectory_,
+                            "Incrementally index changed Git worktree files (optional directory, "
+                            "default: CWD); "
+                            "remove missing indexed paths; attach worktree/branch metadata")
+                ->expected(0, 1);
         // Accept multiple paths; keep legacy single-path for backward compatibility
         cmd->add_option("paths", targetPaths_,
                         "File or directory paths to add (use '-' for stdin). Accepts multiple.");
@@ -378,6 +385,8 @@ public:
 
     boost::asio::awaitable<Result<void>> executeAsync() override {
         try {
+            if (changedOption_ && changedOption_->count() > 0)
+                co_return co_await executeChanged();
             // Attempt daemon-first add; fall back to service-based local execution
             {
                 // Determine effective paths list (prefer multi-path if provided)
@@ -876,6 +885,118 @@ public:
     }
 
 private:
+    boost::asio::awaitable<Result<void>> executeChanged() {
+        if (!targetPaths_.empty() || !legacyTargetPath_.empty() || !documentName_.empty())
+            co_return Error{
+                ErrorCode::InvalidArgument,
+                "--changed takes its own optional directory; do not combine paths/--name"};
+        const auto files =
+            readRepoFiles(changedDirectory_.empty() ? std::filesystem::current_path()
+                                                    : std::filesystem::path(changedDirectory_),
+                          true);
+        auto difference = cli_->repoFreshness(files);
+        if (!difference)
+            co_return difference.error();
+        auto metadataResult = sanitizeMetadata(metadata_);
+        if (!metadataResult)
+            co_return metadataResult.error();
+        auto metadata = std::move(metadataResult.value());
+        metadata["worktree"] = files.worktree;
+        metadata["branch"] = files.branch;
+        metadata["repo_root"] = files.root.generic_string();
+        const auto matchesFilters = [&](const std::filesystem::path& path) {
+            const auto relative = path.lexically_relative(files.root).generic_string();
+            const auto matches = [&](const auto& pattern) {
+                return yams::app::services::utils::matchGlob(relative, pattern) ||
+                       yams::app::services::utils::matchGlob(path.filename().string(), pattern);
+            };
+            return (includePatterns_.empty() ||
+                    std::any_of(includePatterns_.begin(), includePatterns_.end(), matches)) &&
+                   !std::any_of(excludePatterns_.begin(), excludePatterns_.end(), matches);
+        };
+        std::shared_ptr<yams::daemon::DaemonClient> client;
+        std::size_t added = 0;
+        std::size_t removed = 0;
+        for (const auto& path : difference.value().changed) {
+            if (!matchesFilters(path))
+                continue;
+            if (!client) {
+                yams::cli::CliDaemonRequestOptions daemonOptions;
+                daemonOptions.accessPolicy =
+                    yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback;
+                daemonOptions.requestTimeout =
+                    std::chrono::milliseconds(std::max(30000, daemonTimeoutMs_));
+                const auto config = yams::cli::build_cli_daemon_client_config(
+                    getExecutor(),
+                    cli_->hasExplicitDataDir() ? cli_->getDataPath() : std::filesystem::path{},
+                    daemonOptions);
+                auto plan =
+                    yams::cli::prepare_cli_daemon_client_plan(config, daemonOptions.accessPolicy);
+                if (!plan)
+                    co_return plan.error();
+                client = std::make_shared<yams::daemon::DaemonClient>(plan.value().config);
+            }
+            yams::app::services::DocumentIngestionService ingestion(client);
+            yams::app::services::AddOptions options;
+            options.path = path.string();
+            options.metadata = metadata;
+            options.tags = tags_;
+            options.noEmbeddings = noEmbeddings_;
+            options.collection = collection_;
+            options.verify = verify_;
+            options.waitForProcessing = true;
+            options.waitTimeoutSeconds = waitTimeoutSeconds_;
+            options.timeoutMs = std::max(30000, daemonTimeoutMs_);
+            auto result = co_await ingestion.addViaDaemonAsync(options);
+            if (!result)
+                co_return result.error();
+            if (result.value().hash.empty() || indicatesAsyncAcceptance(result.value().message))
+                co_return Error{ErrorCode::InvalidState,
+                                "Changed-file ingestion was queued, not committed; check status "
+                                "--repo before retrying"};
+            ++added;
+        }
+        // A missing worktree path retires a location, not its shared CAS identity.
+        // Use a writable pool: the CLI's retrieval repository is read-only.
+        if (!difference.value().missing.empty() &&
+            std::filesystem::exists(cli_->getDataPath() / "yams.db")) {
+            yams::metadata::ConnectionPoolConfig poolConfig;
+            poolConfig.minConnections = 1;
+            poolConfig.maxConnections = 1;
+            yams::metadata::ConnectionPool pool((cli_->getDataPath() / "yams.db").string(),
+                                                poolConfig);
+            auto initialized = pool.initialize();
+            if (!initialized)
+                co_return initialized.error();
+            yams::metadata::MetadataRepository repository(pool);
+            for (const auto& path : difference.value().missing) {
+                if (!matchesFilters(path))
+                    continue;
+                auto retired = repository.retireDocumentPath(path.generic_string());
+                if (!retired) {
+                    if (retired.error().code == ErrorCode::NotFound)
+                        continue;
+                    co_return retired.error();
+                }
+                ++removed;
+            }
+        }
+        if (cli_->getJsonOutput()) {
+            std::cout << json{{"repo", files.root.string()},
+                              {"worktree", files.worktree},
+                              {"branch", files.branch},
+                              {"added", added},
+                              {"removed", removed}}
+                             .dump()
+                      << '\n';
+        } else {
+            std::cout << "Changed index: " << added << " added/updated, " << removed
+                      << " removed (worktree=" << files.worktree << ", branch=" << files.branch
+                      << ")\n";
+        }
+        co_return Result<void>();
+    }
+
     Result<void> executeWithServices() {
         // Get app context and services
         auto appContext = cli_->getAppContext();
@@ -1379,6 +1500,8 @@ private:
     std::filesystem::path legacyTargetPath_;
     std::string documentName_;
     std::vector<std::string> tags_;
+    CLI::Option* changedOption_{nullptr};
+    std::string changedDirectory_;
     std::vector<std::string> metadata_;
     std::string mimeType_;
     bool disableAutoMime_ = false;

@@ -485,6 +485,102 @@ TEST_CASE("DocumentService initializes fresh path series without follow-up write
     fixture.documentService_.reset();
 }
 
+TEST_CASE("DocumentService keeps identical content paths independently addressable",
+          "[document][service][path-identity]") {
+    DocumentFixture fixture;
+    const auto original = fixture.testDir_ / "test1.txt";
+    const auto alias = fixture.testDir_ / "other-worktree" / "test1.txt";
+    std::filesystem::create_directories(alias.parent_path());
+    std::filesystem::copy_file(original, alias);
+    StoreDocumentRequest request;
+    request.path = alias.string();
+    request.metadata = {
+        {"owner", "lane-owner"}, {"worktree", "other-worktree"}, {"branch", "lane"}};
+    auto stored = fixture.documentService_->store(request);
+    REQUIRE(stored);
+    REQUIRE(stored.value().hash == fixture.testHash1_);
+
+    SECTION("A path-scoped query resolves the second location without stealing the original") {
+        ListDocumentsRequest query;
+        query.pattern = alias.string();
+        query.showMetadata = true;
+        auto aliases = fixture.documentService_->list(query);
+        REQUIRE(aliases);
+        REQUIRE(aliases.value().documents.size() == 1);
+        CHECK(aliases.value().documents.front().path == alias.string());
+        CHECK(aliases.value().documents.front().hash == fixture.testHash1_);
+        CHECK(aliases.value().documents.front().metadata.at("worktree") == "other-worktree");
+        query.pattern = original.string();
+        auto originals = fixture.documentService_->list(query);
+        REQUIRE(originals);
+        REQUIRE(originals.value().documents.size() == 1);
+        CHECK(originals.value().documents.front().metadata.at("owner") == "trace");
+    }
+    SECTION("Removing one path does not remove the shared blob or the other location") {
+        DeleteByNameRequest remove;
+        remove.name = original.string();
+        auto deleted = fixture.documentService_->deleteByName(remove);
+        REQUIRE(deleted);
+        CHECK(deleted.value().errors.empty());
+        auto retained = fixture.contentStore_->exists(fixture.testHash1_);
+        REQUIRE(retained);
+        CHECK(retained.value());
+        ListDocumentsRequest query;
+        query.pattern = alias.string();
+        auto aliases = fixture.documentService_->list(query);
+        REQUIRE(aliases);
+        CHECK(aliases.value().documents.size() == 1);
+    }
+}
+
+TEST_CASE("DocumentService graph versions remain navigable after content reversion",
+          "[document][service][versioning][graph-history]") {
+    DocumentFixture fixture;
+    auto kg = makeSqliteKnowledgeGraphStore(*fixture.pool_);
+    REQUIRE(kg);
+    fixture.documentService_.reset();
+    fixture.appContext_.kgStore = std::shared_ptr<KnowledgeGraphStore>(std::move(kg).value());
+    fixture.metadataRepo_->setKnowledgeGraphStore(fixture.appContext_.kgStore);
+    fixture.documentService_ = makeDocumentService(fixture.appContext_);
+    const auto path = fixture.testDir_ / "history.txt";
+    std::vector<std::string> hashes;
+    for (int revision = 1; revision <= 3; ++revision) {
+        std::ofstream(path) << (revision == 2 ? "version two\n" : "version one\n");
+        StoreDocumentRequest request;
+        request.path = path.string();
+        request.snapshotId = "correctness-snapshot-" + std::to_string(revision);
+        auto stored = fixture.documentService_->store(request);
+        REQUIRE(stored);
+        hashes.push_back(stored.value().hash);
+    }
+    REQUIRE(hashes.front() == hashes.back());
+    REQUIRE(hashes[0] != hashes[1]);
+    auto graph = makeGraphQueryService(fixture.appContext_.kgStore, fixture.metadataRepo_);
+    REQUIRE(graph);
+    GraphQueryRequest query;
+    query.documentName = path.string();
+    query.relationFilters = {GraphRelationType::PathVersion};
+    query.maxDepth = 2;
+    auto response = graph->query(query);
+    REQUIRE(response);
+    CHECK(response.value().originNode.node.nodeKey == "path:logical:" + path.string());
+    CHECK_FALSE(response.value().originNode.snapshotId.has_value());
+    CHECK(response.value().originNode.normalizedPath == path.string());
+    std::set<std::string> visibleHashes;
+    for (const auto& node : response.value().allConnectedNodes) {
+        if (node.nodeMetadata.node.nodeKey.starts_with("blob:"))
+            visibleHashes.insert(node.nodeMetadata.node.nodeKey.substr(5));
+    }
+    CHECK(visibleHashes == std::set<std::string>{hashes[0], hashes[1]});
+    auto history = graph->getPathHistory({.path = path.string()});
+    REQUIRE(history);
+    CHECK(history.value().history.size() == 3);
+    auto head = fixture.metadataRepo_->findDocumentByExactPath(path.string());
+    REQUIRE(head);
+    REQUIRE(head.value());
+    CHECK(head.value()->sha256Hash == hashes.back());
+}
+
 TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
     DocumentFixture fixture;
 
@@ -714,6 +810,34 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
             }
         }
         CHECK(foundSharedObject);
+    }
+
+    SECTION("Recent count caps the fast SQL list path independently of limit") {
+        ListDocumentsRequest request;
+        request.limit = 100;
+        request.recent = 1;
+        auto result = fixture.documentService_->list(request);
+        REQUIRE(result);
+        CHECK(result.value().documents.size() == 1);
+    }
+
+    SECTION("Basename glob is not interpreted as a directory prefix") {
+        ListDocumentsRequest request;
+        request.pattern = "*test2*";
+        request.limit = 1;
+        auto result = fixture.documentService_->list(request);
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 1);
+        CHECK(result.value().documents.front().hash == fixture.testHash2_);
+    }
+
+    SECTION("Exact basename matches without an absolute path") {
+        ListDocumentsRequest request;
+        request.pattern = "test1.txt";
+        auto result = fixture.documentService_->list(request);
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 1);
+        CHECK(result.value().documents.front().hash == fixture.testHash1_);
     }
 
     SECTION("List recent documents") {

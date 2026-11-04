@@ -291,6 +291,9 @@ private:
     // acts on a data directory's yams.db, only deletes grammar libraries, and never follows a
     // symlink out of the data directory.
     static Migration removeLegacyGrammarArtifacts();
+
+    // Version 44: Local per-path heads and metadata, independent of CAS hash identity.
+    static Migration createDocumentPathHeads();
 };
 
 /**
