@@ -1585,11 +1585,8 @@ void ServiceManager::shutdown() {
 
     // Direct P2P sessions use memory_sync and the peer registry database. Stop and join the
     // listener/reconnect worker before either dependency starts teardown.
-    if (p2pManager_) {
-        p2pManager_->stop();
-        p2pManager_.reset();
-        spdlog::info("[ServiceManager] Phase 1.8: direct P2P stopped");
-    }
+    stopDirectP2pRecovery();
+    spdlog::info("[ServiceManager] Phase 1.8: direct P2P stopped");
 
     // memory_sync callbacks use WorkCoordinator-owned vector rebuilds and database-backed
     // destinations. Stop and join the sync worker before either dependency starts teardown.
@@ -2782,16 +2779,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // All replicated destination stores are now initialized. Attach the ordered apply callback
     // only at this point so the convergence worker cannot race database/vector/KG startup.
-    // Coarse phase markers for the init-waiter warning. Atomics only: both calls below can block
-    // for minutes on a corpus-sized scan, so a status path must never query memory-sync.
+    // Coarse phase markers for the init-waiter warning. Atomics only: the apply setup below can
+    // block for minutes on a corpus-sized scan, so a status path must never query memory-sync.
     startupPhase_.begin(StartupPhase::MemorySyncApply);
     if (auto applyResult = configureMemorySyncApply(); !applyResult) {
         co_return applyResult.error();
-    }
-    startupPhase_.begin(StartupPhase::DirectP2p);
-    if (auto p2pResult = initializeDirectP2p(dataDir); !p2pResult) {
-        co_return Error{p2pResult.error().code,
-                        "direct P2P initialization failed: " + p2pResult.error().message};
     }
 
     // Full SearchEngine construction is non-critical. Metadata search is already available via
@@ -2807,6 +2799,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         ingestService_->start();
     }
     spdlog::info("[ServiceManager] Phase: Ingest Service Started.");
+    // Direct P2P recovers the local op store with a corpus-sized scan before listening. It runs
+    // in the background so search, ingest and readiness never wait on it; a failure degrades
+    // the "p2p" subsystem instead of failing startup.
+    startDirectP2pRecovery(dataDir);
     startupPhase_.begin(StartupPhase::AsyncInitComplete);
 
     co_return Result<void>();

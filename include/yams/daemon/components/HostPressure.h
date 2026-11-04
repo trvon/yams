@@ -90,9 +90,10 @@ enum class DeferrableWork : std::uint8_t {
     TopologyRebuild = 0,  // topology artifact rebuild after ingest
     RepairScan = 1,       // repair initial scan, legacy backfills, vectors.db VACUUM
     SemanticBackfill = 2, // semantic_neighbor graph backfill for older documents
+    P2pRecovery = 3,      // direct P2P local op-store recovery scan before listening
 };
 
-inline constexpr std::size_t kDeferrableWorkKinds = 3;
+inline constexpr std::size_t kDeferrableWorkKinds = 4;
 
 constexpr std::string_view deferrableWorkName(DeferrableWork kind) noexcept {
     switch (kind) {
@@ -102,6 +103,8 @@ constexpr std::string_view deferrableWorkName(DeferrableWork kind) noexcept {
             return "repair";
         case DeferrableWork::SemanticBackfill:
             return "semantic_backfill";
+        case DeferrableWork::P2pRecovery:
+            return "p2p_recovery";
     }
     return "unknown";
 }

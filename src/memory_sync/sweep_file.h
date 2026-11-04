@@ -62,6 +62,18 @@ class SweepFile {
         }
         return name.size() <= 41; // two uint64 decimal components and their separator
     }
+    // Earlier releases used a plain `sync-sweep-<n>-<m>.sqlite` file (plus SQLite sidecars)
+    // instead of a leased directory. Nothing opens that layout any more, so it is always stale.
+    static bool legacyWorkspaceFile(std::string_view name) {
+        for (const std::string_view suffix :
+             {std::string_view{".sqlite"}, std::string_view{".sqlite-wal"},
+              std::string_view{".sqlite-shm"}, std::string_view{".sqlite-journal"}}) {
+            if (name.ends_with(suffix)) {
+                return ownedName(name.substr(0, name.size() - suffix.size()));
+            }
+        }
+        return false;
+    }
     static File openFile(const std::filesystem::path& path, bool create) {
         std::FILE* stream = nullptr;
 #ifdef _WIN32
@@ -179,7 +191,12 @@ class SweepFile {
                 if (!ready)
                     throw SweepFileError(ready.error().code, ready.error().message.c_str());
             }
-            if (!ownedName(entry.path().filename().string()))
+            const auto name = entry.path().filename().string();
+            if (legacyWorkspaceFile(name) && entry.is_regular_file()) {
+                std::filesystem::remove(entry.path());
+                continue;
+            }
+            if (!ownedName(name))
                 continue;
             checkOwnedDirectory(entry.path());
             auto lease = openFile(entry.path() / "lease", false);
