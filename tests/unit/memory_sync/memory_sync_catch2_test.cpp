@@ -2717,6 +2717,56 @@ TEST_CASE("MemorySyncLoop retains complete exclusive listings during active publ
     CHECK(loop.quarantinedRecordCount() == 0);
 }
 
+// A store larger than the retained-key cap must not fall back to one whole-store walk per
+// page. Production hit this with 35,946 index keys over a 32,768-key cap: ~71 walks of a
+// 271k-directory tree per sweep, blocking daemon startup for hours.
+TEST_CASE("MemorySyncLoop bounds full-sweep walks when the listing exceeds the retained-key cap",
+          "[memory-sync][sync-loop][bounds][listing-cost-over-cap]") {
+    constexpr std::size_t kPage = 4; // retained-key cap = kPage * 64 = 256 keys
+    constexpr std::size_t kCap = kPage * 64;
+    constexpr std::size_t records = 600;
+    BackendFixture fixture{"over-cap-listing"};
+    const auto payload = bytes("seed payload");
+    const auto payloadHash = digest(payload);
+    REQUIRE(fixture.backend.store("blob/" + payloadHash, payload).has_value());
+    for (std::size_t i = 0; i < records; ++i) {
+        MemoryIndexRecord record;
+        record.entryHash = payloadHash;
+        record.ts = {100, 0};
+        record.origin = "seed";
+        record.vv.observe(record.origin, i + 1);
+        record.corpusId = "local-test-corpus";
+        record.corpusEpoch = 1;
+        record.operationId = makeOperationId(record.origin, i + 1);
+        record.logicalKey = "seed/" + std::to_string(10'000 + i);
+        record.recordKind = std::string(kMemoryValueRecordKind);
+        const auto encoded = jsonBytes(nlohmann::json(record));
+        REQUIRE(fixture.backend.store("index/" + record.logicalKey + "/" + digest(encoded), encoded)
+                    .has_value());
+    }
+    MemorySyncLoop loop{fixture.backend,
+                        "reader",
+                        "local-test-corpus",
+                        1,
+                        false,
+                        MemorySyncLimits{.maxIndexObjectsPerSync = kPage},
+                        MemorySyncControl{.exclusiveBackend = true}};
+    yams::storage::FilesystemListingStats stats;
+    stats.prefix = "index/";
+    struct RestoreObservation {
+        yams::storage::FilesystemListingStats* previous;
+        ~RestoreObservation() { yams::storage::testing_setFilesystemListingStats(previous); }
+    } restore{yams::storage::testing_setFilesystemListingStats(&stats)};
+
+    const auto swept = loop.syncFully();
+    REQUIRE(swept.has_value());
+    CHECK(swept.value().size() == records);
+    CAPTURE(records, kCap, stats.walks, stats.pageCalls, stats.entriesVisited);
+    // One failed complete-snapshot attempt plus one walk per cap-sized window.
+    CHECK(stats.walks <= 1 + (records + kCap - 1) / kCap);
+    CHECK(loop.quarantinedRecordCount() == 0);
+}
+
 TEST_CASE("MemorySyncLoop replaces a same-key winner within a tight cache budget",
           "[memory-sync][sync-loop][bounds]") {
     BackendFixture fixture{"cache-replacement"};
