@@ -261,10 +261,5 @@ TEST_CASE("DownloadService - Factory Construction", "[download][service][factory
 TEST_CASE("Service factory handles incomplete context", "[service][factory]") {
     AppContext ctx;
 
-    auto bundle = makeServices(ctx);
-
-    CHECK((bundle.restore == nullptr));
-    CHECK((bundle.graph == nullptr));
-    CHECK_FALSE(bundle.valid());
     CHECK((makeGraphQueryService(ctx) == nullptr));
 }

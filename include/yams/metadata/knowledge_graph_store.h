@@ -79,17 +79,6 @@ struct KGEdge {
 };
 
 /**
- * Node embedding representation (kg_node_embeddings).
- */
-struct KGNodeEmbedding {
-    std::int64_t nodeId = 0;                 // PRIMARY KEY, REFERENCES kg_nodes(id)
-    int dim = 0;                             // Embedding dimension
-    std::vector<float> vector;               // Dense vector
-    std::optional<std::string> model;        // Model identifier/name
-    std::optional<std::int64_t> updatedTime; // Unix seconds
-};
-
-/**
  * Document entity annotation (doc_entities).
  */
 struct DocEntity {
@@ -394,19 +383,6 @@ public:
     }
 
     virtual Result<void> removeEdgeById(std::int64_t edgeId) = 0;
-
-    // -----------------------------------------------------------------------------
-    // Embeddings
-    // -----------------------------------------------------------------------------
-
-    // Upsert node embedding (replace if exists)
-    virtual Result<void> setNodeEmbedding(const KGNodeEmbedding& embedding) = 0;
-
-    // Retrieve embedding (optional)
-    virtual Result<std::optional<KGNodeEmbedding>> getNodeEmbedding(std::int64_t nodeId) = 0;
-
-    // Delete embedding
-    virtual Result<void> deleteNodeEmbedding(std::int64_t nodeId) = 0;
 
     // -----------------------------------------------------------------------------
     // Document Entities
