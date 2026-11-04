@@ -1871,8 +1871,11 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
 
     serviceManager->testingSetMemorySyncBackfillItemBudget(1);
     std::vector<std::string> stages;
-    serviceManager->testingSetMemorySyncStageObserver(
-        [&](std::string_view stage) { stages.emplace_back(stage); });
+    serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (tlsTestStageCaller) { // ignore the daemon worker's own cycle
+            stages.emplace_back(stage);
+        }
+    });
     yams::memory_sync::MemorySyncService peer{
         makeFilesystemBackend(harness.dataDir() / "shared-memory"),
         yams::memory_sync::MemorySyncConfig{"backfill-peer", 60'000, "backfill-budget-corpus", 1}};
@@ -1893,7 +1896,7 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
     // before the records derived from them, so the topology waits until every document is out.
     for (std::size_t cycle = 1; cycle <= hashes.size(); ++cycle) {
         stages.clear();
-        serviceManager->testingPublishMemorySyncBackfill();
+        asTestStageCaller([&] { serviceManager->testingPublishMemorySyncBackfill(); });
         INFO("cycle=" << cycle);
         CHECK(publishedDocuments() == cycle);
         CHECK_FALSE(observed("backfill.after_node"));
@@ -1903,7 +1906,7 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
     // second node within a bounded number of further cycles.
     stages.clear();
     for (int cycle = 0; cycle < 4 && !observed("backfill.after_edge"); ++cycle) {
-        serviceManager->testingPublishMemorySyncBackfill();
+        asTestStageCaller([&] { serviceManager->testingPublishMemorySyncBackfill(); });
     }
     CHECK(observed("backfill.after_node"));
     CHECK(observed("backfill.after_edge"));
@@ -1948,9 +1951,12 @@ TEST_CASE("Daemon memory sync backfill skips a poisoned blob and continues",
     serviceManager->__test_setContentStore(std::make_shared<ManifestPoisonedContentStore>(
         serviceManager->getContentStore(), hashes.front()));
     std::vector<std::string> stages;
-    serviceManager->testingSetMemorySyncStageObserver(
-        [&](std::string_view stage) { stages.emplace_back(stage); });
-    serviceManager->testingPublishMemorySyncBackfill();
+    serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (tlsTestStageCaller) { // ignore the daemon worker's own cycle
+            stages.emplace_back(stage);
+        }
+    });
+    asTestStageCaller([&] { serviceManager->testingPublishMemorySyncBackfill(); });
 
     CHECK(std::find(stages.begin(), stages.end(), "backfill.skip_document") != stages.end());
 
