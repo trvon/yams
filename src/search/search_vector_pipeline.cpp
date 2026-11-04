@@ -501,15 +501,13 @@ mergeAuxiliaryVectorCandidates(std::vector<ComponentResult> components,
                 candidate.source == ComponentResult::Source::PathTree ||
                 candidate.source == ComponentResult::Source::KnowledgeGraph ||
                 candidate.source == ComponentResult::Source::Tag ||
-                candidate.source == ComponentResult::Source::Metadata ||
-                candidate.source == ComponentResult::Source::Symbol) {
+                candidate.source == ComponentResult::Source::Metadata) {
                 textAnchoredHashes.insert(candidate.documentHash);
             }
             if (candidate.source == ComponentResult::Source::Text ||
                 candidate.source == ComponentResult::Source::SimeonText ||
                 candidate.source == ComponentResult::Source::PathTree ||
-                candidate.source == ComponentResult::Source::KnowledgeGraph ||
-                candidate.source == ComponentResult::Source::Symbol) {
+                candidate.source == ComponentResult::Source::KnowledgeGraph) {
                 baselineTextAnchoredHashes.insert(candidate.documentHash);
             }
         }

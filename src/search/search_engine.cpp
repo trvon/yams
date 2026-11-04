@@ -785,15 +785,9 @@ collectGraphSeedDocs(const std::vector<ComponentResult>& componentResults, size_
             case ComponentResult::Source::PathTree:
                 sourceBoost = 0.70f;
                 break;
-            case ComponentResult::Source::Symbol:
-                sourceBoost = 0.80f;
-                break;
             case ComponentResult::Source::Tag:
             case ComponentResult::Source::Metadata:
                 sourceBoost = 0.60f;
-                break;
-            case ComponentResult::Source::Anchor:
-                sourceBoost = 0.70f;
                 break;
             case ComponentResult::Source::Unknown:
                 sourceBoost = 0.50f;
@@ -3152,11 +3146,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     const float communitySignal = i < communitySupport.size()
                                                       ? std::clamp(communitySupport[i], 0.0f, 1.0f)
                                                       : 0.0f;
-                    const float lexicalAnchor = std::clamp(
-                        static_cast<float>(
-                            result.keywordScore.value_or(0.0) + result.pathScore.value_or(0.0) +
-                            result.tagScore.value_or(0.0) + result.symbolScore.value_or(0.0)),
-                        0.0f, 1.0f);
+                    const float lexicalAnchor =
+                        std::clamp(static_cast<float>(result.keywordScore.value_or(0.0) +
+                                                      result.pathScore.value_or(0.0) +
+                                                      result.tagScore.value_or(0.0)),
+                                   0.0f, 1.0f);
                     lexicalAnchors[i] = lexicalAnchor;
                     maxLexicalAnchor = std::max(maxLexicalAnchor, lexicalAnchor);
                     graphCommunitySignalMass += communitySignal;
@@ -3295,8 +3289,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             if (guardWindow > 0) {
                 const auto lexicalAnchorScore = [](const SearchResult& r) {
                     return r.keywordScore.value_or(0.0) + r.graphTextScore.value_or(0.0) +
-                           r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) +
-                           r.symbolScore.value_or(0.0);
+                           r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0);
                 };
 
                 std::vector<std::string> protectedIds;
@@ -3642,9 +3635,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         const double lexical = lexicalAnchorScore(result);
         const double vector = result.vectorScore.value_or(0.0);
         const double kg = result.kgScore.value_or(0.0);
-        const double bestSignal =
-            std::max({lexical, vector, kg, result.pathScore.value_or(0.0),
-                      result.symbolScore.value_or(0.0), result.tagScore.value_or(0.0)});
+        const double bestSignal = std::max(
+            {lexical, vector, kg, result.pathScore.value_or(0.0), result.tagScore.value_or(0.0)});
         const double componentBonus = (lexical > 0.0 && vector > 0.0) ? 0.01 : 0.0;
         return bestSignal + componentBonus;
     };

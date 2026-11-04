@@ -15,7 +15,7 @@ namespace yams::search::detail {
 // Lexical evidence used to break near-ties in the final ordering.
 inline double finalLexicalAnchorScore(const SearchResult& r) {
     return r.keywordScore.value_or(0.0) + r.graphTextScore.value_or(0.0) +
-           r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) + r.symbolScore.value_or(0.0);
+           r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0);
 }
 
 // Final-result comparator (true when `a` ranks before `b`). Used by std::sort/partial_sort, so it
