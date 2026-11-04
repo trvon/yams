@@ -215,9 +215,19 @@ public:
 private:
     // Unconditional: production and test translation units must agree on the layout.
     std::atomic<bool> cancelled_{false};
+    // True while objects/HH/HH may still hold hierarchical keys written before the
+    // namespaced layout. Cleared once a listing has moved them all.
+    mutable std::atomic<bool> legacyHierarchical_{false};
     std::filesystem::path basePath_;
     std::function<Result<void>()> listingWorkCheck_;
     Result<std::filesystem::path> getObjectPath(std::string_view key) const;
+    Result<std::filesystem::path> getLegacyObjectPath(std::string_view key) const;
+    bool legacyHierarchicalPending() const;
+    void retireLegacyCopy(std::string_view key) const;
+    Result<std::optional<std::filesystem::path>> resolveExisting(std::string_view key) const;
+    template <typename Visitor>
+    Result<void> visitKeys(std::string_view prefix, Visitor&& visitor,
+                           const bool* optionalProbeComplete = nullptr) const;
     Result<void> ensureDirectoryExists(const std::filesystem::path& path) const;
 };
 
