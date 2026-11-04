@@ -1830,7 +1830,6 @@ if catch2_dep.found()
     'sources': files(
       'unit/search/chunk_coverage_catch2_test.cpp',
       'unit/search/graph_expansion_catch2_test.cpp',
-      'unit/search/hotzone_manager_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/lexical_scoring_catch2_test.cpp',
       'unit/search/simeon_lexical_backend_catch2_test.cpp',
@@ -3159,7 +3158,6 @@ if catch2_dep.found()
     'sources': files(
       'unit/app/services/service_utilities_test.cpp',
       'unit/app/services/download_metadata_entries_test.cpp',
-      'unit/app/services/enhanced_search_config_catch2_test.cpp',
       'unit/app/services/retrieval_service_mapping_catch2_test.cpp',
     ),
     'deps': test_deps,

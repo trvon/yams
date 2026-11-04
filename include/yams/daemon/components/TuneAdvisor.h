@@ -670,7 +670,6 @@ public:
     static uint32_t maxIdleTimeouts();
     static uint32_t checkpointIntervalSeconds();
     static uint32_t checkpointInsertThreshold();
-    static bool enableHotzoneCheckpoint();
     // =========================================================================
     // PBI-05a: PostIngestQueue Dynamic Concurrency Scaling
     // =========================================================================
@@ -902,7 +901,6 @@ private:
     // PBI-090: CheckpointManager overrides
     static inline std::atomic<uint32_t> checkpointIntervalSecondsOverride_{0};
     static inline std::atomic<uint32_t> checkpointInsertThresholdOverride_{0};
-    static inline std::atomic<int> enableHotzoneCheckpointOverride_{-1};
 
     // PBI-05a: PostIngestQueue concurrency overrides
     static inline std::atomic<uint32_t> postExtractionConcurrentOverride_{0};

@@ -1747,21 +1747,6 @@ uint32_t TuneAdvisor::checkpointInsertThreshold() {
     return 1000;
 }
 
-bool TuneAdvisor::enableHotzoneCheckpoint() {
-    int ov = enableHotzoneCheckpointOverride_.load(std::memory_order_relaxed);
-    if (ov >= 0)
-        return ov > 0;
-    if (const char* s = compatibilityEnvironment("YAMS_ENABLE_HOTZONE_PERSISTENCE")) {
-        std::string v{s};
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (v == "1" || v == "true" || v == "on" || v == "yes")
-            return true;
-        return false;
-    }
-    return false;
-}
-
 void TuneAdvisor::setPostIngestStageActive(PostIngestStage stage, bool active) {
     const uint32_t bit = 1u << static_cast<uint8_t>(stage);
     if (active) {

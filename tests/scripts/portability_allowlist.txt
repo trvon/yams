@@ -75,7 +75,7 @@ plugins/ort_runtime/ort_runtime_loader.cpp:137:portability/env-read # reviewed r
 plugins/ort_runtime/ort_runtime_loader.cpp:140:portability/env-read # reviewed raw environment read
 plugins/ort_runtime/ort_runtime_loader.cpp:148:portability/env-read # reviewed raw environment read
 src/app/services/document_service.cpp:1254:portability/env-read # reviewed raw environment read
-src/app/services/search_service.cpp:511:portability/env-read # reviewed raw environment read
+src/app/services/search_service.cpp:510:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:19:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:21:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:72:portability/env-read # reviewed raw environment read
@@ -104,7 +104,7 @@ src/daemon/client/sandbox_detection.cpp:74:portability/env-read # reviewed raw e
 src/daemon/client/sandbox_probe.cpp:54:portability/env-read # reviewed raw environment read
 src/daemon/client/sandbox_probe.cpp:60:portability/env-read # reviewed raw environment read
 src/daemon/components/DaemonMetrics.cpp:173:portability/env-read # reviewed raw environment read
-src/daemon/components/DaemonMetrics.cpp:2054:portability/env-read # reviewed raw environment read
+src/daemon/components/DaemonMetrics.cpp:2052:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:808:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:818:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestDispatcher.cpp:597:portability/env-read # reviewed raw environment read

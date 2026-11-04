@@ -2020,7 +2020,6 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             try {
                 if (auto* cm = services_->getCheckpointManager()) {
                     out.checkpointVectorCount = cm->vectorCheckpointCount();
-                    out.checkpointHotzoneCount = cm->hotzoneCheckpointCount();
                     out.checkpointErrorCount = cm->checkpointErrorCount();
 
                     auto epochToIso = [](uint64_t epochMs) -> std::string {
@@ -2041,7 +2040,6 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     };
 
                     out.lastVectorCheckpointTime = epochToIso(cm->lastVectorCheckpointEpoch());
-                    out.lastHotzoneCheckpointTime = epochToIso(cm->lastHotzoneCheckpointEpoch());
                 }
             } catch (...) {
                 spdlog::debug(

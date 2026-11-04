@@ -91,7 +91,6 @@ struct CheckpointManagerFixture {
         CheckpointManager::Config cfg;
         cfg.checkpoint_interval = interval;
         cfg.vector_index_insert_threshold = 100;
-        cfg.enable_hotzone_persistence = false;
         cfg.data_dir = tempDir;
         return cfg;
     }
@@ -99,7 +98,6 @@ struct CheckpointManagerFixture {
     CheckpointManager::Dependencies makeDeps() {
         CheckpointManager::Dependencies deps;
         deps.vectorSystemManager = nullptr;
-        deps.hotzoneManager = nullptr;
         deps.executor = io->get_executor();
         deps.stopRequested = stopRequested;
         return deps;
@@ -120,13 +118,11 @@ TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager construction and s
 
     SECTION("initial counters are zero") {
         CHECK((mgr.vectorCheckpointCount() == 0));
-        CHECK((mgr.hotzoneCheckpointCount() == 0));
         CHECK((mgr.checkpointErrorCount() == 0));
     }
 
     SECTION("stats are initially zero") {
         CHECK((mgr.lastVectorCheckpointEpoch() == 0));
-        CHECK((mgr.lastHotzoneCheckpointEpoch() == 0));
     }
 }
 
@@ -181,18 +177,7 @@ TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager manual checkpoint"
         bool result = mgr.checkpointNow();
         CHECK(result);
         CHECK((mgr.vectorCheckpointCount() == 0));
-        CHECK((mgr.hotzoneCheckpointCount() == 0));
         CHECK((mgr.checkpointErrorCount() == 0));
-    }
-
-    SECTION("checkpoint with hotzone enabled succeeds") {
-        auto cfg = makeConfig();
-        cfg.enable_hotzone_persistence = true;
-        auto deps = makeDeps();
-        CheckpointManager mgr(cfg, deps);
-
-        bool result = mgr.checkpointNow();
-        CHECK(result);
     }
 
     SECTION("multiple manual checkpoints work") {
@@ -304,5 +289,4 @@ TEST_CASE("CheckpointManager config defaults", "[daemon][components][checkpoint]
 
     CHECK((cfg.checkpoint_interval.count() == 300));
     CHECK((cfg.vector_index_insert_threshold == 1000));
-    CHECK_FALSE(cfg.enable_hotzone_persistence);
 }
