@@ -4,6 +4,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/embedding_service_config.h>
+#include <yams/daemon/components/InitWaiterOwnership.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
@@ -24,6 +25,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <yams/compat/thread_stop_compat.h>
 //
@@ -182,12 +184,55 @@ public:
     Result<void> start();
     Result<void> stop();
     bool waitForStopCompletion(std::chrono::milliseconds timeout);
+    /// stop(); if another thread already owns the close, wait for it and retry if it failed.
+    Result<void> stopOrAwaitClose(std::chrono::milliseconds timeout);
     /// Run the daemon main loop on the calling thread. Call after start().
     /// Returns when stopRequested_ becomes true or requestStop() is called.
     void runLoop();
+    /// Checked entry boundary; success does not certify Ready or completed shutdown.
+    Result<void> runLoopChecked();
     /// Test helper: trigger deferred async initialization and the init waiter
     /// without entering the long-lived runLoop wait loop.
     void testingStartAsyncInitWithoutRunLoop();
+    Result<void> testingStartAsyncInitWithoutRunLoopChecked();
+#if defined(YAMS_TESTING)
+    // Install before start(); immutable until all daemon callers/waiters have joined.
+    bool testingSetBeforeInitOutcomeObserver(std::function<void()> observer) {
+        if (running_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        beforeInitOutcomeObserverForTesting_ = std::move(observer);
+        return true;
+    }
+    bool testingSetAfterShutdownAdmissionObserver(std::function<void()> observer) {
+        if (running_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        afterShutdownAdmissionObserverForTesting_ = std::move(observer);
+        return true;
+    }
+    bool testingSetBeforeInitWaiterPublicationObserver(std::function<void()> observer) {
+        if (running_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        beforeInitWaiterPublicationObserverForTesting_ = std::move(observer);
+        return true;
+    }
+    bool testingSetAdditionalInitWaiterAdmission(std::function<bool()> permission) {
+        if (running_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        additionalInitWaiterAdmissionForTesting_ = std::move(permission);
+        return true;
+    }
+    bool testingSetBeforeInitWaiterJoinObserver(std::function<void()> observer) {
+        if (running_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        beforeInitWaiterJoinObserverForTesting_ = std::move(observer);
+        return true;
+    }
+#endif
     void requestStop() {
         stopRequested_.store(true, std::memory_order_release);
         stop_cv_.notify_all();
@@ -253,6 +298,7 @@ public:
     std::atomic<bool> asyncInitBarrierSet_{false};
 
     std::thread initWaiterThread_;
+    InitWaiterOwnership initWaiterOwnership_;
     std::atomic<bool> initHandled_{false};
 
     std::mutex shutdownThreadMutex_;
@@ -273,6 +319,16 @@ public:
 
     // Signal check hook for integration with main loop (avoids separate thread)
     std::function<bool()> signalCheckHook_;
+    // Always present for identical library/test class layout. Empty in production;
+    // invoked outside daemon/FSM locks at initialization lifecycle test seams.
+    std::function<void()> beforeInitOutcomeObserverForTesting_;
+    std::function<void()> afterShutdownAdmissionObserverForTesting_;
+    std::function<void()> beforeInitWaiterPublicationObserverForTesting_;
+    // Test-only additive denial: never permits work refused by the real governor.
+    std::function<bool()> additionalInitWaiterAdmissionForTesting_;
+    std::function<void()> beforeInitWaiterJoinObserverForTesting_;
+    bool sampleInitWaiterAdmission() const;
+    void runInitWaiterJob(bool withoutRunLoop);
 
     // External shutdown flag reference for CV predicate wake-up (yams-qe6r fix)
     // When set, the CV predicate in runLoop() also checks this flag, enabling

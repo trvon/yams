@@ -1,10 +1,13 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <string>
+
+#include <yams/core/types.h>
 
 namespace yams::daemon {
 
@@ -50,6 +53,11 @@ public:
     void dispatch(const ShutdownRequestedEvent&);
     void dispatch(const StoppedEvent&);
 
+    // True: admitted; false: cancellation/terminal close; error: unexpected state.
+    // Check, provider bookkeeping and transition share the existing FSM mutex.
+    Result<bool> tryCommitInitializationReadiness(const std::atomic<bool>& stopRequested,
+                                                  bool providerUnavailable);
+
     void reset();
 
     void setSubsystemDegraded(const std::string& name, bool degraded,
@@ -62,6 +70,9 @@ public:
     std::string degradationReason(const std::string& name) const;
 
 private:
+    void setSubsystemDegradedLocked(const std::string& name, bool degraded,
+                                    const std::string& reason);
+
 #if defined(__cpp_lib_scoped_lock) && __cpp_lib_scoped_lock >= 201703L
     using MutexLock = std::scoped_lock<std::mutex>;
 #else
