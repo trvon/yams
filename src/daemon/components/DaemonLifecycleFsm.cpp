@@ -40,7 +40,7 @@ protected:
     }
 };
 
-LifecycleSnapshot LifecycleMachine::snap{};
+constinit LifecycleSnapshot LifecycleMachine::snap{};
 
 struct LCUnknown : LifecycleMachine {
     void entry() override {
@@ -223,6 +223,43 @@ void DaemonLifecycleFsm::dispatch(const StoppedEvent& ev) {
     detail::LifecycleMachine::dispatch(ev);
 }
 
+Result<bool>
+DaemonLifecycleFsm::tryCommitInitializationReadiness(const std::atomic<bool>& stopRequested,
+                                                     bool providerUnavailable) {
+    MutexLock lock(sharedMutex());
+    const auto state = detail::LifecycleMachine::snap.state;
+    if (stopRequested.load(std::memory_order_acquire) || state == LifecycleState::Stopping ||
+        state == LifecycleState::Stopped || state == LifecycleState::Failed) {
+        return false;
+    }
+
+    const bool allowed = providerUnavailable ? canDispatch(state, DegradedEvent{})
+                                             : canDispatch(state, HealthyEvent{});
+    if (!allowed) {
+        return Error{ErrorCode::InvalidState,
+                     "Initialization readiness cannot commit in the current lifecycle state"};
+    }
+    if (providerUnavailable) {
+        validateDispatch(state, DegradedEvent{},
+                         "Initialization degradation requires Initializing or Ready state");
+    } else {
+        validateDispatch(state, HealthyEvent{},
+                         "Initialization readiness requires Initializing or Degraded state");
+    }
+
+    setSubsystemDegradedLocked(
+        "model_provider", providerUnavailable,
+        providerUnavailable
+            ? "Model provider unavailable; embeddings disabled until provider recovery"
+            : std::string{});
+    if (providerUnavailable) {
+        detail::LifecycleMachine::dispatch(DegradedEvent{});
+    } else {
+        detail::LifecycleMachine::dispatch(HealthyEvent{});
+    }
+    return true;
+}
+
 void DaemonLifecycleFsm::reset() {
     MutexLock lock(sharedMutex());
     detail::LifecycleMachine::snap = {};
@@ -234,6 +271,11 @@ void DaemonLifecycleFsm::setSubsystemDegraded(const std::string& name, bool degr
     YAMS_PRECONDITION(!name.empty(),
                       "DaemonLifecycleFsm subsystem degradation tracking requires a name");
     MutexLock lock(sharedMutex());
+    setSubsystemDegradedLocked(name, degraded, reason);
+}
+
+void DaemonLifecycleFsm::setSubsystemDegradedLocked(const std::string& name, bool degraded,
+                                                    const std::string& reason) {
     auto it = degraded_.find(name);
     if (it == degraded_.end() || it->second != degraded) {
         degraded_[name] = degraded;

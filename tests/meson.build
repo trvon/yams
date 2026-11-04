@@ -630,6 +630,26 @@ if catch2_dep.found()
     'is_parallel': false,
   }]
 
+  catch2_test_table += [{
+    'name': 'daemon_startup_ownership',
+    'target': 'catch2_daemon_startup_ownership',
+    'sources': files('unit/daemon/daemon_startup_ownership_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'concurrency'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
+
+  catch2_test_table += [{
+    'name': 'daemon_stop_state',
+    'target': 'catch2_daemon_stop_state',
+    'sources': files('unit/daemon/daemon_stop_state_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'concurrency'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
+
   catch2_daemon_metrics_status_exe = executable('catch2_daemon_metrics_status',
     files('unit/daemon/daemon_metrics_status_test.cpp'),
     include_directories: incs,

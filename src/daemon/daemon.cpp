@@ -1,3 +1,5 @@
+#include "daemon_stop_state.h"
+
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
@@ -23,6 +25,7 @@
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/storage_preflight.h>
@@ -254,16 +257,23 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
 }
 
 YamsDaemon::~YamsDaemon() {
+    detail::DaemonStopStateView stopState{
+        running_, stopRequested_, initWaiterThread_,   stop_mutex_,
+        stop_cv_, stopCompleted_, initWaiterOwnership_};
     try {
-        if (running_) {
-            if (auto result = stop(); !result) {
+        if (running_.load() || detail::hasPendingStop(stopState)) {
+            // Another thread (e.g. the remote shutdown thread) may still own the close.
+            if (auto result = stopOrAwaitClose(std::chrono::seconds{60}); !result) {
                 spdlog::error("YamsDaemon destructor stop() failed: {}", result.error().message);
+                std::terminate(); // Never destroy dependencies of an undrained owned waiter.
             }
         }
     } catch (const std::exception& e) {
         spdlog::error("YamsDaemon destructor caught exception from stop(): {}", e.what());
+        std::terminate();
     } catch (...) {
         spdlog::error("YamsDaemon destructor caught unknown exception from stop()");
+        std::terminate();
     }
 
     if (tuningManager_) {
@@ -326,8 +336,12 @@ Result<size_t> YamsDaemon::autoloadPluginsNow() {
 
 Result<void> YamsDaemon::start() {
     YAMS_ZONE_SCOPED_N("YamsDaemon::start");
-    if (running_.exchange(true)) {
-        return Error{ErrorCode::InvalidState, "Daemon already running"};
+    detail::DaemonStopStateView stopState{
+        running_, stopRequested_, initWaiterThread_,   stop_mutex_,
+        stop_cv_, stopCompleted_, initWaiterOwnership_};
+    auto admitted = detail::beginStart(stopState);
+    if (!admitted) {
+        return admitted.error();
     }
 
     struct TuningProfileStartGuard {
@@ -689,10 +703,31 @@ Result<void> YamsDaemon::start() {
     return Result<void>();
 }
 
+bool YamsDaemon::sampleInitWaiterAdmission() const {
+    const bool governed = ResourceGovernor::instance().canAdmitWork();
+    const bool additional =
+        !additionalInitWaiterAdmissionForTesting_ || additionalInitWaiterAdmissionForTesting_();
+    return governed && additional;
+}
+
 void YamsDaemon::runLoop() {
+    auto result = runLoopChecked();
+    if (!result) {
+        throw std::runtime_error(result.error().message);
+    }
+}
+
+Result<void> YamsDaemon::runLoopChecked() {
+    // A successfully started caller may be scheduled only after another caller has stopped us.
+    if (!running_.load(std::memory_order_acquire) ||
+        stopRequested_.load(std::memory_order_acquire)) {
+        return Result<void>();
+    }
     set_current_thread_name("yams-daemon-main");
     runLoopStarted_.store(true, std::memory_order_release);
 
+    // Set only while governor admission for the init waiter is being deferred.
+    std::function<Result<detail::InitWaiterAdmission>()> retryInitWaiter;
     if (serviceManager_) {
         spdlog::info("Triggering deferred service initialization...");
         serviceManager_->startAsyncInit(&asyncInitStartedPromise_, &asyncInitBarrierSet_);
@@ -707,86 +742,119 @@ void YamsDaemon::runLoop() {
             }
         }
 
-        initWaiterThread_ = std::thread([this]() {
-            set_current_thread_name("yams-init-waiter");
-            spdlog::info(
-                "[InitWaiter] Thread started, waiting for ServiceManager terminal state...");
+        if (beforeInitWaiterPublicationObserverForTesting_) {
+            beforeInitWaiterPublicationObserverForTesting_();
+        }
+        auto registerWaiter = [this]() {
+            detail::DaemonStopStateView waiterState{
+                running_, stopRequested_, initWaiterThread_,   stop_mutex_,
+                stop_cv_, stopCompleted_, initWaiterOwnership_};
+            return detail::registerInitWaiter(
+                waiterState, [this] { return sampleInitWaiterAdmission(); },
+                [this]() {
+                    set_current_thread_name("yams-init-waiter");
+                    spdlog::info("[InitWaiter] Thread started, waiting for ServiceManager terminal "
+                                 "state...");
 
-            ServiceManagerSnapshot snapshot{};
-            while (true) {
-                snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
-                if (stopRequested_.load()) {
-                    spdlog::info("[InitWaiter] Stop requested, exiting without dispatching events");
-                    return;
-                }
-                if (snapshot.state == ServiceManagerState::Ready ||
-                    snapshot.state == ServiceManagerState::Failed ||
-                    snapshot.state == ServiceManagerState::ShuttingDown ||
-                    snapshot.state == ServiceManagerState::Stopped) {
-                    break;
-                }
-                spdlog::warn("[InitWaiter] ServiceManager still initializing (state={}, "
-                             "phase={}, phase_elapsed_ms={}), continuing to wait",
-                             static_cast<int>(snapshot.state),
-                             startupPhaseName(serviceManager_->getStartupPhase()),
-                             serviceManager_->getStartupPhaseElapsedMs());
-            }
-
-            initHandled_.store(true, std::memory_order_release);
-
-            if (snapshot.state == ServiceManagerState::Ready) {
-                const bool providerExpected = config_.enableModelProvider;
-                const bool providerReady =
-                    state_.readiness.modelProviderReady.load(std::memory_order_acquire);
-                if (providerExpected && !providerReady) {
-                    const std::string reason =
-                        "Model provider unavailable; embeddings disabled until provider recovery";
-                    spdlog::warn("[InitWaiter] ServiceManager ready but model provider missing; "
-                                 "dispatching DegradedEvent");
-                    lifecycleFsm_.setSubsystemDegraded("model_provider", true, reason);
-                    lifecycleFsm_.dispatch(DegradedEvent{});
-                } else {
-                    lifecycleFsm_.setSubsystemDegraded("model_provider", false);
-                    spdlog::info("[InitWaiter] ServiceManager reached Ready state, dispatching "
-                                 "HealthyEvent");
-                    lifecycleFsm_.dispatch(HealthyEvent{});
-                }
-                try {
-                    serviceManager_->startDeferredMetadataWarmup();
-                } catch (const std::exception& e) {
-                    spdlog::warn("[InitWaiter] Failed to start deferred metadata warmup: {}",
-                                 e.what());
-                } catch (...) {
-                    spdlog::warn("[InitWaiter] Failed to start deferred metadata warmup");
-                }
-                try {
-                    std::shared_ptr<DaemonMetrics> m;
-                    {
-                        std::lock_guard<std::mutex> lk(metricsMutex_);
-                        m = metrics_;
+                    ServiceManagerSnapshot snapshot{};
+                    while (true) {
+                        snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
+                        if (stopRequested_.load()) {
+                            spdlog::info(
+                                "[InitWaiter] Stop requested, exiting without dispatching events");
+                            return;
+                        }
+                        if (snapshot.state == ServiceManagerState::Ready ||
+                            snapshot.state == ServiceManagerState::Failed ||
+                            snapshot.state == ServiceManagerState::ShuttingDown ||
+                            snapshot.state == ServiceManagerState::Stopped) {
+                            break;
+                        }
+                        spdlog::warn("[InitWaiter] ServiceManager still initializing (state={}, "
+                                     "phase={}, phase_elapsed_ms={}), continuing to wait",
+                                     static_cast<int>(snapshot.state),
+                                     startupPhaseName(serviceManager_->getStartupPhase()),
+                                     serviceManager_->getStartupPhaseElapsedMs());
                     }
-                    if (m) {
-                        m->startPolling(); // no-op if already started during early startup
-                        spdlog::info("[InitWaiter] DaemonMetrics polling confirmed active");
+
+                    if (beforeInitOutcomeObserverForTesting_) {
+                        beforeInitOutcomeObserverForTesting_();
                     }
-                } catch (const std::exception& e) {
-                    spdlog::warn("[InitWaiter] Failed to start metrics polling: {}", e.what());
-                }
-            } else if (snapshot.state == ServiceManagerState::Failed) {
-                spdlog::error("[InitWaiter] ServiceManager failed: {}", snapshot.lastError);
-                lifecycleFsm_.dispatch(FailureEvent{std::move(snapshot.lastError)});
-            } else if (snapshot.state == ServiceManagerState::ShuttingDown ||
-                       snapshot.state == ServiceManagerState::Stopped) {
-                spdlog::debug(
-                    "[InitWaiter] ServiceManager shutdown observed before ready (state={})",
-                    static_cast<int>(snapshot.state));
-            } else {
-                spdlog::warn("[InitWaiter] ServiceManager in unexpected terminal state: {}",
-                             static_cast<int>(snapshot.state));
+
+                    if (snapshot.state != ServiceManagerState::Ready) {
+                        initHandled_.store(true, std::memory_order_release);
+                    }
+
+                    if (snapshot.state == ServiceManagerState::Ready) {
+                        const bool providerExpected = config_.enableModelProvider;
+                        const bool providerReady =
+                            state_.readiness.modelProviderReady.load(std::memory_order_acquire);
+                        auto admitted = lifecycleFsm_.tryCommitInitializationReadiness(
+                            stopRequested_, providerExpected && !providerReady);
+                        if (!admitted) {
+                            spdlog::error(
+                                "[InitWaiter] Initialization readiness admission failed: {}",
+                                admitted.error().message);
+                            return;
+                        }
+                        if (!admitted.value()) {
+                            spdlog::debug(
+                                "[InitWaiter] Initialization readiness rejected during shutdown");
+                            return;
+                        }
+                        initHandled_.store(true, std::memory_order_release);
+                        try {
+                            serviceManager_->startDeferredMetadataWarmup();
+                        } catch (const std::exception& e) {
+                            spdlog::warn(
+                                "[InitWaiter] Failed to start deferred metadata warmup: {}",
+                                e.what());
+                        } catch (...) {
+                            spdlog::warn("[InitWaiter] Failed to start deferred metadata warmup");
+                        }
+                        try {
+                            std::shared_ptr<DaemonMetrics> m;
+                            {
+                                std::lock_guard<std::mutex> lk(metricsMutex_);
+                                m = metrics_;
+                            }
+                            if (m) {
+                                m->startPolling(); // no-op if already started during early startup
+                                spdlog::info("[InitWaiter] DaemonMetrics polling confirmed active");
+                            }
+                        } catch (const std::exception& e) {
+                            spdlog::warn("[InitWaiter] Failed to start metrics polling: {}",
+                                         e.what());
+                        }
+                    } else if (snapshot.state == ServiceManagerState::Failed) {
+                        spdlog::error("[InitWaiter] ServiceManager failed: {}", snapshot.lastError);
+                        lifecycleFsm_.dispatch(FailureEvent{std::move(snapshot.lastError)});
+                    } else if (snapshot.state == ServiceManagerState::ShuttingDown ||
+                               snapshot.state == ServiceManagerState::Stopped) {
+                        spdlog::debug(
+                            "[InitWaiter] ServiceManager shutdown observed before ready (state={})",
+                            static_cast<int>(snapshot.state));
+                    } else {
+                        spdlog::warn("[InitWaiter] ServiceManager in unexpected terminal state: {}",
+                                     static_cast<int>(snapshot.state));
+                    }
+                    spdlog::info("[InitWaiter] Thread exiting");
+                });
+        };
+        auto admission = registerWaiter();
+        if (!admission) {
+            if (admission.error().code != ErrorCode::ResourceExhausted) {
+                return admission.error();
             }
-            spdlog::info("[InitWaiter] Thread exiting");
-        });
-        spdlog::info("runLoop: init waiter thread spawned");
+            // Pressure is transient: keep serving (not Ready) and retry admission each tick.
+            spdlog::warn("runLoop: init waiter deferred ({}); retrying each tick",
+                         admission.error().message);
+            retryInitWaiter = registerWaiter;
+        } else if (admission.value() != detail::InitWaiterAdmission::Created) {
+            return Result<void>();
+        } else {
+            spdlog::info("runLoop: init waiter thread spawned");
+        }
     } else {
         initHandled_.store(true, std::memory_order_release);
     }
@@ -867,6 +935,18 @@ void YamsDaemon::runLoop() {
             }
         } catch (const std::exception& e) {
             spdlog::debug("Metrics refresh failed: {}", e.what());
+        }
+        if (retryInitWaiter) {
+            auto retried = retryInitWaiter();
+            if (retried) {
+                retryInitWaiter = nullptr;
+                if (retried.value() == detail::InitWaiterAdmission::Cancelled) {
+                    break; // a close owns shutdown now
+                }
+                spdlog::info("runLoop: deferred init waiter admitted");
+            } else if (retried.error().code != ErrorCode::ResourceExhausted) {
+                return retried.error();
+            }
         }
         // Apply pending reload requests (e.g., SIGHUP) for tuning-only adjustments
         if (reloadRequested_.load(std::memory_order_relaxed)) {
@@ -970,13 +1050,25 @@ void YamsDaemon::runLoop() {
 #endif
     }
     spdlog::debug("Daemon main loop exiting.");
+    return Result<void>();
 }
 
 void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
+    auto result = testingStartAsyncInitWithoutRunLoopChecked();
+    if (!result) {
+        throw std::runtime_error(result.error().message);
+    }
+}
+
+Result<void> YamsDaemon::testingStartAsyncInitWithoutRunLoopChecked() {
+    if (!running_.load(std::memory_order_acquire) ||
+        stopRequested_.load(std::memory_order_acquire)) {
+        return Result<void>();
+    }
     if (!serviceManager_) {
         initHandled_.store(true, std::memory_order_release);
         lifecycleFsm_.tick();
-        return;
+        return Result<void>();
     }
 
     spdlog::info("Triggering deferred service initialization (test helper)...");
@@ -992,8 +1084,15 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
         }
     }
 
-    if (!initWaiterThread_.joinable()) {
-        initWaiterThread_ = std::thread([this]() {
+    if (beforeInitWaiterPublicationObserverForTesting_) {
+        beforeInitWaiterPublicationObserverForTesting_();
+    }
+    detail::DaemonStopStateView waiterState{
+        running_, stopRequested_, initWaiterThread_,   stop_mutex_,
+        stop_cv_, stopCompleted_, initWaiterOwnership_};
+    auto admission = detail::registerInitWaiter(
+        waiterState, [this] { return sampleInitWaiterAdmission(); },
+        [this]() {
             set_current_thread_name("yams-init-waiter");
             spdlog::info(
                 "[InitWaiter] Thread started, waiting for ServiceManager terminal state...");
@@ -1018,25 +1117,30 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
                              serviceManager_->getStartupPhaseElapsedMs());
             }
 
-            initHandled_.store(true, std::memory_order_release);
+            if (beforeInitOutcomeObserverForTesting_) {
+                beforeInitOutcomeObserverForTesting_();
+            }
+
+            if (snapshot.state != ServiceManagerState::Ready) {
+                initHandled_.store(true, std::memory_order_release);
+            }
 
             if (snapshot.state == ServiceManagerState::Ready) {
                 const bool providerExpected = config_.enableModelProvider;
                 const bool providerReady =
                     state_.readiness.modelProviderReady.load(std::memory_order_acquire);
-                if (providerExpected && !providerReady) {
-                    const std::string reason =
-                        "Model provider unavailable; embeddings disabled until provider recovery";
-                    spdlog::warn("[InitWaiter] ServiceManager ready but model provider missing; "
-                                 "dispatching DegradedEvent");
-                    lifecycleFsm_.setSubsystemDegraded("model_provider", true, reason);
-                    lifecycleFsm_.dispatch(DegradedEvent{});
-                } else {
-                    lifecycleFsm_.setSubsystemDegraded("model_provider", false);
-                    spdlog::info("[InitWaiter] ServiceManager reached Ready state, dispatching "
-                                 "HealthyEvent");
-                    lifecycleFsm_.dispatch(HealthyEvent{});
+                auto admitted = lifecycleFsm_.tryCommitInitializationReadiness(
+                    stopRequested_, providerExpected && !providerReady);
+                if (!admitted) {
+                    spdlog::error("[InitWaiter] Initialization readiness admission failed: {}",
+                                  admitted.error().message);
+                    return;
                 }
+                if (!admitted.value()) {
+                    spdlog::debug("[InitWaiter] Initialization readiness rejected during shutdown");
+                    return;
+                }
+                initHandled_.store(true, std::memory_order_release);
                 try {
                     std::shared_ptr<DaemonMetrics> m;
                     {
@@ -1083,10 +1187,18 @@ void YamsDaemon::testingStartAsyncInitWithoutRunLoop() {
             }
             spdlog::info("[InitWaiter] Thread exiting");
         });
+    if (!admission) {
+        return admission.error();
+    }
+    if (admission.value() == detail::InitWaiterAdmission::Cancelled) {
+        return Result<void>();
+    }
+    if (admission.value() == detail::InitWaiterAdmission::Created) {
         spdlog::info("testingStartAsyncInitWithoutRunLoop: init waiter thread spawned");
     }
 
     lifecycleFsm_.tick();
+    return Result<void>();
 }
 
 void YamsDaemon::shutdownIpcLayer() noexcept {
@@ -1108,133 +1220,152 @@ void YamsDaemon::shutdownIpcLayer() noexcept {
 }
 
 Result<void> YamsDaemon::stop() {
-    if (!running_.exchange(false)) {
-        const auto snapshot = lifecycleFsm_.snapshot();
-        const bool shutdownInProgress = stopRequested_.load(std::memory_order_acquire) ||
-                                        snapshot.state == LifecycleState::Stopping ||
-                                        snapshot.state == LifecycleState::Stopped;
-        if (shutdownInProgress) {
-            spdlog::debug("stop() called while daemon shutdown is already in progress");
+    detail::DaemonStopStateView stopState{
+        running_, stopRequested_, initWaiterThread_,   stop_mutex_,
+        stop_cv_, stopCompleted_, initWaiterOwnership_};
+    return detail::runStopFlow(
+        stopState, [this] { return lifecycleFsm_.snapshot(); },
+        [] { spdlog::debug("stop() called while daemon shutdown is already in progress"); },
+        [this, stopState]() -> Result<void> {
+            struct TuningProfileStopGuard {
+                YamsDaemon* daemon;
+                ~TuningProfileStopGuard() { daemon->restoreTuningProfileOverrideSnapshot(); }
+            } tuningProfileStopGuard{this};
+
+            spdlog::info("Stopping YAMS daemon...");
+
+            detail::signalStopRequest(stopState);
+            // repairBusySince_/repairReadySince_ belong to the runLoop thread, which may still be
+            // running here; start() resets them before the next loop begins.
+
+            detail::requestLifecycleClose(lifecycleFsm_);
+            if (afterShutdownAdmissionObserverForTesting_) {
+                afterShutdownAdmissionObserverForTesting_();
+            }
+
+            if (serviceManager_) {
+                serviceManager_->cancelServiceManagerWait();
+            }
+            auto joined = detail::joinInitWaiter(
+                stopState,
+                [this] {
+                    spdlog::debug("Joining init waiter thread...");
+                    if (beforeInitWaiterJoinObserverForTesting_) {
+                        beforeInitWaiterJoinObserverForTesting_();
+                    }
+                },
+                [] { spdlog::debug("Init waiter thread joined"); });
+            if (!joined) {
+                return joined.error();
+            }
+
+            // Stop components that use WorkCoordinator's io_context BEFORE stopping ServiceManager
+            // (ServiceManager stops WorkCoordinator, which would prevent async operations from
+            // completing)
+
+            // Stop tuning manager (uses WorkCoordinator strand + timers)
+            if (tuningManager_) {
+                try {
+                    spdlog::debug("Stopping tuning manager...");
+                    tuningManager_->stop();
+                    spdlog::debug("Tuning manager stopped");
+                } catch (const std::exception& e) {
+                    spdlog::warn("TuningManager stop exception: {}", e.what());
+                } catch (...) {
+                    spdlog::warn("TuningManager stop: unknown exception");
+                }
+                tuningManager_.reset();
+            }
+
+            // Stop metrics (uses WorkCoordinator strand + timers)
+            // Keep the object alive (RequestDispatcher holds a raw pointer).
+            std::shared_ptr<DaemonMetrics> metricsHandle;
+            {
+                std::lock_guard<std::mutex> lk(metricsMutex_);
+                metricsHandle = metrics_;
+            }
+            if (metricsHandle) {
+                spdlog::debug("Stopping metrics polling...");
+                metricsHandle->stopPolling();
+                spdlog::debug("Metrics polling stopped");
+            }
+
+            // Stop the IPC layer before ServiceManager tears down the WorkCoordinator.
+            shutdownIpcLayer();
+
+            // Release metrics before ServiceManager teardown.
+            // DaemonMetrics owns asio strand/executor state bound to WorkCoordinator's io_context.
+            // If metrics is destroyed after ServiceManager::shutdown() tears down WorkCoordinator,
+            // strand service destruction can read freed io_context memory (ASAN UAF).
+            {
+                std::lock_guard<std::mutex> lk(metricsMutex_);
+                metrics_.reset();
+            }
+            metricsHandle.reset();
+
+            // Stop ServiceManager (this will stop WorkCoordinator's io_context in Phase 4)
+            if (serviceManager_) {
+                spdlog::debug("Shutting down service manager...");
+                serviceManager_->shutdown();
+                spdlog::debug("Service manager shutdown complete");
+            }
+
+            // Note: Main loop runs on caller's thread via runLoop(), no daemon thread to join
+
+            // RepairService is now owned by ServiceManager; stopped during its Phase 6.0.5
+
+            // Metrics already stopped earlier (before ServiceManager)
+
+            if (lifecycleManager_) {
+                lifecycleManager_->shutdown();
+            }
+
+            // NOTE: We do NOT reset GlobalIOContext here.
+            // GlobalIOContext is a singleton that should persist for the process lifetime.
+            // Resetting it after multiple daemon lifecycles causes resource corruption.
+            // For production use, daemons typically run for extended periods without restart.
+            // For testing, the accumulated resources are acceptable and freed at process exit.
+
+            // Mark lifecycle stopped
+            lifecycleFsm_.dispatch(StoppedEvent{});
+            YAMS_ASSERT(lifecycleFsm_.snapshot().state == LifecycleState::Stopped,
+                        "YamsDaemon stop() must finish with lifecycle state Stopped");
+
+            spdlog::info("YAMS daemon stopped.");
             return Result<void>();
-        }
-        return Error{ErrorCode::InvalidState, "Daemon not running"};
-    }
-
-    struct StopCompletionGuard {
-        YamsDaemon* daemon;
-        ~StopCompletionGuard() {
-            std::lock_guard<std::mutex> lock(daemon->stop_mutex_);
-            daemon->stopCompleted_ = true;
-            daemon->stop_cv_.notify_all();
-        }
-    } stopCompletionGuard{this};
-
-    struct TuningProfileStopGuard {
-        YamsDaemon* daemon;
-        ~TuningProfileStopGuard() { daemon->restoreTuningProfileOverrideSnapshot(); }
-    } tuningProfileStopGuard{this};
-
-    spdlog::info("Stopping YAMS daemon...");
-
-    stopRequested_.store(true, std::memory_order_release);
-    stop_cv_.notify_all();
-    // repairBusySince_/repairReadySince_ belong to the runLoop thread, which may still be running
-    // here; start() resets them before the next loop begins.
-
-    const auto lifecycleBeforeShutdown = lifecycleFsm_.snapshot().state;
-    if (lifecycleBeforeShutdown != LifecycleState::Stopping &&
-        lifecycleBeforeShutdown != LifecycleState::Stopped &&
-        lifecycleBeforeShutdown != LifecycleState::Failed) {
-        lifecycleFsm_.dispatch(ShutdownRequestedEvent{});
-    }
-
-    if (serviceManager_) {
-        serviceManager_->cancelServiceManagerWait();
-    }
-    if (initWaiterThread_.joinable()) {
-        spdlog::debug("Joining init waiter thread...");
-        initWaiterThread_.join();
-        spdlog::debug("Init waiter thread joined");
-    }
-
-    // Stop components that use WorkCoordinator's io_context BEFORE stopping ServiceManager
-    // (ServiceManager stops WorkCoordinator, which would prevent async operations from completing)
-
-    // Stop tuning manager (uses WorkCoordinator strand + timers)
-    if (tuningManager_) {
-        try {
-            spdlog::debug("Stopping tuning manager...");
-            tuningManager_->stop();
-            spdlog::debug("Tuning manager stopped");
-        } catch (const std::exception& e) {
-            spdlog::warn("TuningManager stop exception: {}", e.what());
-        } catch (...) {
-            spdlog::warn("TuningManager stop: unknown exception");
-        }
-        tuningManager_.reset();
-    }
-
-    // Stop metrics (uses WorkCoordinator strand + timers)
-    // Keep the object alive (RequestDispatcher holds a raw pointer).
-    std::shared_ptr<DaemonMetrics> metricsHandle;
-    {
-        std::lock_guard<std::mutex> lk(metricsMutex_);
-        metricsHandle = metrics_;
-    }
-    if (metricsHandle) {
-        spdlog::debug("Stopping metrics polling...");
-        metricsHandle->stopPolling();
-        spdlog::debug("Metrics polling stopped");
-    }
-
-    // Stop the IPC layer before ServiceManager tears down the WorkCoordinator.
-    shutdownIpcLayer();
-
-    // Release metrics before ServiceManager teardown.
-    // DaemonMetrics owns asio strand/executor state bound to WorkCoordinator's io_context.
-    // If metrics is destroyed after ServiceManager::shutdown() tears down WorkCoordinator,
-    // strand service destruction can read freed io_context memory (ASAN UAF).
-    {
-        std::lock_guard<std::mutex> lk(metricsMutex_);
-        metrics_.reset();
-    }
-    metricsHandle.reset();
-
-    // Stop ServiceManager (this will stop WorkCoordinator's io_context in Phase 4)
-    if (serviceManager_) {
-        spdlog::debug("Shutting down service manager...");
-        serviceManager_->shutdown();
-        spdlog::debug("Service manager shutdown complete");
-    }
-
-    // Note: Main loop runs on caller's thread via runLoop(), no daemon thread to join
-
-    // RepairService is now owned by ServiceManager; stopped during its Phase 6.0.5
-
-    // Metrics already stopped earlier (before ServiceManager)
-
-    if (lifecycleManager_) {
-        lifecycleManager_->shutdown();
-    }
-
-    // NOTE: We do NOT reset GlobalIOContext here.
-    // GlobalIOContext is a singleton that should persist for the process lifetime.
-    // Resetting it after multiple daemon lifecycles causes resource corruption.
-    // For production use, daemons typically run for extended periods without restart.
-    // For testing, the accumulated resources are acceptable and freed at process exit.
-
-    // Mark lifecycle stopped
-    lifecycleFsm_.dispatch(StoppedEvent{});
-    YAMS_ASSERT(lifecycleFsm_.snapshot().state == LifecycleState::Stopped,
-                "YamsDaemon stop() must finish with lifecycle state Stopped");
-
-    spdlog::info("YAMS daemon stopped.");
-    return Result<void>();
+        });
 }
 
 bool YamsDaemon::waitForStopCompletion(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(stop_mutex_);
-    return stop_cv_.wait_for(lock, timeout, [&] { return stopCompleted_; });
+    const auto closed = [&] {
+        return stopCompleted_ && initWaiterOwnership_.phase.load(std::memory_order_acquire) ==
+                                     InitWaiterClosePhase::Closed;
+    };
+    // A failed close is also an outcome: wake so the caller can retry instead of timing out.
+    stop_cv_.wait_for(lock, timeout, [&] {
+        return closed() || initWaiterOwnership_.phase.load(std::memory_order_acquire) ==
+                               InitWaiterClosePhase::FailedRetained;
+    });
+    return closed();
+}
+
+Result<void> YamsDaemon::stopOrAwaitClose(std::chrono::milliseconds timeout) {
+    auto stopped = stop();
+    if (stopped || stopped.error().code != ErrorCode::ResourceBusy) {
+        return stopped;
+    }
+    detail::DaemonStopStateView stopState{
+        running_, stopRequested_, initWaiterThread_,   stop_mutex_,
+        stop_cv_, stopCompleted_, initWaiterOwnership_};
+    if (detail::isCurrentInitWaiter(stopState)) {
+        return stopped; // waiting on our own close would never finish
+    }
+    if (waitForStopCompletion(timeout)) {
+        return Result<void>();
+    }
+    // The other close failed (retry claims it) or is still draining (reported as busy).
+    return stop();
 }
 
 void YamsDaemon::onDocumentAdded(const std::string& hash, const std::string& path) {
