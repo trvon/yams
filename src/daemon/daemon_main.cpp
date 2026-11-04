@@ -936,17 +936,24 @@ int main(int argc, char* argv[]) {
 
         // Run the main daemon loop on this thread (handles FSM ticks, metrics refresh, etc.)
         // The loop exits when stopRequested is set (via signal handler or daemon.stop())
-        spdlog::info("Calling daemon.runLoop()...");
-        daemon.runLoop();
-        spdlog::info("daemon.runLoop() returned");
+        spdlog::info("Calling daemon.runLoopChecked()...");
+        auto entry = daemon.runLoopChecked();
+        if (!entry) {
+            spdlog::error("Daemon main-loop entry failed: {}", entry.error().message);
+        }
+        spdlog::info("daemon.runLoopChecked() returned");
 
         // Log reason for exit
         spdlog::info("Main loop exiting: isRunning={}, isStopRequested={}, g_shutdown_requested={}",
                      daemon.isRunning(), daemon.isStopRequested(), g_shutdown_requested.load());
-        // Ensure proper cleanup
-        daemon.stop();
-
-        return 0;
+        // A remote shutdown caller may already own the close: wait for its checked completion
+        // (not merely running=false), and retry the close if that caller failed.
+        auto stopped = daemon.stopOrAwaitClose(std::chrono::seconds{30});
+        if (!stopped) {
+            spdlog::error("Daemon stop did not complete: {}", stopped.error().message);
+            return 1;
+        }
+        return entry ? 0 : 1;
 
     } catch (const std::exception& e) {
         spdlog::error("Daemon error: {}", e.what());

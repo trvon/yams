@@ -3,6 +3,7 @@
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -209,6 +210,7 @@ private:
             return false;
         }
         shutdownSucceeded_ = false;
+        backgroundFailed_.store(false, std::memory_order_release);
         startAttempted_ = true;
         // Always create new daemon instance on start()
         // (daemon cannot be restarted after stop() - must create new instance)
@@ -313,7 +315,12 @@ private:
 
 #ifdef YAMS_TESTING
         if (!preRunLoopCallback && !options_.enableAutoRepair) {
-            daemon_->testingStartAsyncInitWithoutRunLoop();
+            auto entry = daemon_->testingStartAsyncInitWithoutRunLoopChecked();
+            if (!entry) {
+                spdlog::error("[DaemonHarness] Async init entry failed: {}", entry.error().message);
+                stop();
+                return false;
+            }
             spdlog::info("[DaemonHarness] Async init triggered without runLoop thread, polling for "
                          "daemon Ready state...");
         } else
@@ -322,11 +329,29 @@ private:
             // Start runLoop in background thread - this triggers async initialization
             // Without runLoop(), ServiceManager::startAsyncInit() is never called
             runLoopThread_ = std::thread([this]() {
-                daemon_->runLoop();
-                auto stopResult = daemon_->stop();
-                if (!stopResult && daemon_->isRunning()) {
-                    spdlog::warn("[DaemonHarness] Background stop after runLoop returned error: {}",
-                                 stopResult.error().message);
+                try {
+                    auto entry = daemon_->runLoopChecked();
+                    if (!entry) {
+                        backgroundFailed_.store(true, std::memory_order_release);
+                        spdlog::error("[DaemonHarness] Background entry failed: {}",
+                                      entry.error().message);
+                        daemon_->requestStop();
+                    }
+                    auto stopResult = daemon_->stopOrAwaitClose(std::chrono::seconds{30});
+                    if (!stopResult) {
+                        backgroundFailed_.store(true, std::memory_order_release);
+                        spdlog::error("[DaemonHarness] Background stop failed: {}",
+                                      stopResult.error().message);
+                    }
+                } catch (const std::exception& error) {
+                    backgroundFailed_.store(true, std::memory_order_release);
+                    spdlog::error("[DaemonHarness] Background lifecycle exception: {}",
+                                  error.what());
+                    daemon_->requestStop();
+                } catch (...) {
+                    backgroundFailed_.store(true, std::memory_order_release);
+                    spdlog::error("[DaemonHarness] Unknown background lifecycle exception");
+                    daemon_->requestStop();
                 }
             });
             spdlog::info(
@@ -394,7 +419,7 @@ public:
             // daemon_main by calling stop() after runLoop() returns on remote shutdown.
             if (daemon_->isRunning() ||
                 !daemon_->waitForStopCompletion(std::chrono::milliseconds(0))) {
-                auto stopResult = daemon_->stop();
+                auto stopResult = daemon_->stopOrAwaitClose(std::chrono::seconds{30});
                 stopCallSucceeded = static_cast<bool>(stopResult);
                 if (!stopResult) {
                     spdlog::warn("[DaemonHarness] Daemon stop returned error: {}",
@@ -402,9 +427,20 @@ public:
                 }
             }
 
+            // A failed retained owner is not stopped merely because running has been withdrawn.
+            // Leave dependencies and global IO intact for a later checked retry/destructor drain.
+            if (!stopCallSucceeded) {
+                shutdownSucceeded_ = false;
+                return;
+            }
             const bool stopped =
-                wait_for_condition(std::chrono::seconds(2), std::chrono::milliseconds(10),
-                                   [this] { return !daemon_->isRunning(); });
+                daemon_->waitForStopCompletion(std::chrono::seconds{30}) && !daemon_->isRunning();
+            if (!stopped) {
+                spdlog::error(
+                    "[DaemonHarness] Close completion unconfirmed; retaining dependencies");
+                shutdownSucceeded_ = false;
+                return;
+            }
             spdlog::info("[DaemonHarness] Daemon stopped (running={}), resetting instance...",
                          daemon_->isRunning());
 
@@ -474,12 +510,17 @@ private:
         const bool reachedTerminal =
             wait_for_condition(timeout, std::chrono::milliseconds(20), [this] {
                 const auto state = daemon_->getLifecycle().snapshot().state;
-                return state == yams::daemon::LifecycleState::Ready ||
+                return backgroundFailed_.load(std::memory_order_acquire) ||
+                       state == yams::daemon::LifecycleState::Ready ||
                        (!options_.requireReadyLifecycle &&
                         state == yams::daemon::LifecycleState::Degraded) ||
                        state == yams::daemon::LifecycleState::Failed;
             });
         const auto lifecycle = daemon_->getLifecycle().snapshot();
+        if (backgroundFailed_.load(std::memory_order_acquire)) {
+            spdlog::error("[DaemonHarness] Rejected failed background lifecycle entry/close");
+            return false;
+        }
         const bool usable = lifecycle.state == yams::daemon::LifecycleState::Ready ||
                             (!options_.requireReadyLifecycle &&
                              lifecycle.state == yams::daemon::LifecycleState::Degraded);
@@ -695,6 +736,7 @@ private:
 
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
     std::thread runLoopThread_; // Background thread for runLoop
+    std::atomic<bool> backgroundFailed_{false};
     std::filesystem::path root_, data_, sock_, proxySock_, pid_, log_;
     std::filesystem::path ownershipMarker_;
     std::filesystem::path originalCwd_;
