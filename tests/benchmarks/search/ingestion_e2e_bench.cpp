@@ -457,7 +457,7 @@ std::chrono::milliseconds benchPipelineTimeout() {
         return std::chrono::milliseconds{kDefaultMs};
     }
     try {
-        return std::chrono::milliseconds{std::min(kMaxMs, std::stoull(raw))};
+        return std::chrono::milliseconds{std::min<std::uint64_t>(kMaxMs, std::stoull(raw))};
     } catch (const std::exception&) {
         return std::chrono::milliseconds{kDefaultMs};
     }
