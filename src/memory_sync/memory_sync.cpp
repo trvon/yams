@@ -46,6 +46,8 @@ void MemorySyncLoop::WriteCountingBackend::clearListingCaches() const noexcept {
     // everything without relying on potentially partial bookkeeping.
     pages_.clear();
     prefixListings_.clear();
+    windows_.clear();
+    declinedSnapshots_.clear();
     retainedKeyCount_ = 0;
     retainedKeyBytes_ = 0;
 }
@@ -153,6 +155,8 @@ void MemorySyncLoop::WriteCountingBackend::updateCompleteListingsAfterRemove(std
 void MemorySyncLoop::WriteCountingBackend::beforeMutation(std::string_view key) {
     incrementWrites();
     clearExactPages();
+    // A window is a partial traversal too: any matching mutation, applied or not, ends it.
+    invalidateWindows(key);
     if (filesystemSnapshotEligible()) {
         // A partial traversal cannot be certified across any matching mutation, including a
         // failed call whose backend may have applied a partial side effect.
@@ -184,6 +188,8 @@ void MemorySyncLoop::WriteCountingBackend::finishRemove(std::string_view key, bo
         }
         if (success) {
             updateCompleteListingsAfterRemove(key);
+            std::erase_if(declinedSnapshots_,
+                          [&](const std::string& prefix) { return key.starts_with(prefix); });
         } else {
             invalidateCompleteListings(key);
         }
@@ -206,6 +212,112 @@ storage::ObjectListPage MemorySyncLoop::WriteCountingBackend::pageFromSnapshot(
         page.nextCursor = page.keys.back();
     }
     return page;
+}
+
+void MemorySyncLoop::WriteCountingBackend::dropWindow(std::string_view prefix) const {
+    if (const auto found = windows_.find(prefix); found != windows_.end()) {
+        unaccountKeys(found->second.keys);
+        windows_.erase(found);
+    }
+}
+
+void MemorySyncLoop::WriteCountingBackend::invalidateWindows(std::string_view key) const {
+    for (auto it = windows_.begin(); it != windows_.end();) {
+        if (key.starts_with(it->first)) {
+            unaccountKeys(it->second.keys);
+            it = windows_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+std::optional<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::pageFromWindow(
+    std::string_view prefix, std::optional<std::string_view> cursor, std::size_t limit) const {
+    const auto found = windows_.find(prefix);
+    if (found == windows_.end() || found->second.keys.empty()) {
+        return std::nullopt;
+    }
+    const auto& window = found->second;
+    // The cursor must fall inside the run this window certifies: at or after its start
+    // and strictly before its last key (a cursor at the last key needs the next window).
+    if (cursor) {
+        if ((window.start && *cursor < std::string_view{*window.start}) ||
+            *cursor >= std::string_view{window.keys.back()}) {
+            return std::nullopt;
+        }
+    } else if (window.start) {
+        return std::nullopt;
+    }
+    const auto begin = cursor ? std::upper_bound(window.keys.begin(), window.keys.end(), *cursor,
+                                                 [](std::string_view value,
+                                                    const std::string& key) { return value < key; })
+                              : window.keys.begin();
+    const auto available = static_cast<std::size_t>(std::distance(begin, window.keys.end()));
+    const auto count = std::min(limit, available);
+    storage::ObjectListPage page;
+    page.keys.assign(begin, std::next(begin, static_cast<std::ptrdiff_t>(count)));
+    if (count < available || window.more) {
+        page.nextCursor = page.keys.back();
+    }
+    return page;
+}
+
+Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPageThroughWindow(
+    std::string_view prefix, std::optional<std::string_view> cursor, std::size_t limit) const {
+    if (auto served = pageFromWindow(prefix, cursor, limit)) {
+        return std::move(*served);
+    }
+    dropWindow(prefix);
+    const auto remainingKeys = maxRetainedKeys_ - std::min(retainedKeyCount_, maxRetainedKeys_);
+    if (remainingKeys <= limit || (!windows_.contains(prefix) && windows_.size() >= kMaxPrefixes)) {
+        return inner_.listPage(prefix, cursor, limit);
+    }
+    auto fetched = inner_.listPage(prefix, cursor, remainingKeys);
+    if (!fetched) {
+        return fetched.error();
+    }
+    auto& run = fetched.value();
+    // Keep the longest prefix of the run that fits the byte budget; the rest is "more".
+    auto remainingBytes = maxRetainedKeyBytes_ - std::min(retainedKeyBytes_, maxRetainedKeyBytes_);
+    std::size_t fits = 0;
+    for (; fits < run.keys.size(); ++fits) {
+        if (run.keys[fits].size() > remainingBytes) {
+            break;
+        }
+        remainingBytes -= run.keys[fits].size();
+    }
+    if (fits < limit && fits < run.keys.size()) {
+        // Not even one page fits the budget: answer this page from the run, retain nothing.
+        storage::ObjectListPage page;
+        const auto count = std::min(limit, run.keys.size());
+        page.keys.assign(run.keys.begin(),
+                         std::next(run.keys.begin(), static_cast<std::ptrdiff_t>(count)));
+        if (count < run.keys.size() || run.nextCursor) {
+            page.nextCursor = page.keys.back();
+        }
+        return page;
+    }
+    ListingWindow window;
+    if (cursor) {
+        window.start = std::string(*cursor);
+    }
+    window.more = fits < run.keys.size() || run.nextCursor.has_value();
+    run.keys.resize(fits);
+    window.keys = std::move(run.keys);
+    if (testing_beforeCacheAllocation) {
+        testing_beforeCacheAllocation("window-insert");
+    }
+    const auto [inserted, retained] = windows_.emplace(std::string(prefix), std::move(window));
+    if (retained) {
+        accountKeys(inserted->second.keys);
+    }
+    if (auto served = pageFromWindow(prefix, cursor, limit)) {
+        return std::move(*served);
+    }
+    // An empty run (nothing after the cursor) is a complete, empty final page.
+    dropWindow(prefix);
+    return storage::ObjectListPage{};
 }
 
 void MemorySyncLoop::WriteCountingBackend::observeFilesystemPage(
@@ -282,8 +394,11 @@ Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPage(
         // Only the built-in filesystem traversal certifies completeness. A backend that
         // merely describes itself as filesystem may return an opaque, short, cursor-less
         // page; the ordinary cursor-gap checks below remain authoritative for those.
+        // A prefix already declined as too large is not re-probed every sweep: the probe walks
+        // most of the tree only to decline again. Removals under it clear the mark (it may fit).
         if (!cursor && typeid(inner_) == typeid(storage::FilesystemBackend) &&
-            !prefixListings_.contains(prefix) && prefixListings_.size() < kMaxPrefixes) {
+            !prefixListings_.contains(prefix) && !declinedSnapshots_.contains(prefix) &&
+            prefixListings_.size() < kMaxPrefixes) {
             const auto remainingKeys =
                 maxRetainedKeys_ - std::min(retainedKeyCount_, maxRetainedKeys_);
             const auto remainingBytes =
@@ -295,7 +410,15 @@ Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPage(
                 if (!snapshot) {
                     return snapshot.error();
                 }
-                if (snapshot.value()) {
+                if (!snapshot.value()) {
+                    // The whole prefix does not fit: page through bounded windows instead.
+                    // Bounded like the other per-prefix caches; past the cap a prefix simply
+                    // keeps ordinary paging.
+                    if (declinedSnapshots_.size() < kMaxPrefixes) {
+                        declinedSnapshots_.insert(std::string(prefix));
+                    }
+                } else {
+                    declinedSnapshots_.erase(std::string(prefix));
                     try {
                         PrefixListing listing;
                         listing.keys = std::move(*snapshot.value());
@@ -313,6 +436,16 @@ Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPage(
                         clearListingCaches();
                     }
                 }
+            }
+        }
+        // A prefix whose complete snapshot was declined as too large reads budget-sized
+        // windows instead of walking the whole tree for every page.
+        if (declinedSnapshots_.contains(prefix)) {
+            try {
+                return listPageThroughWindow(prefix, cursor, limit);
+            } catch (...) {
+                clearListingCaches();
+                return inner_.listPage(prefix, cursor, limit);
             }
         }
         auto page = inner_.listPage(prefix, cursor, limit);

@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <optional>
 #include <ostream>
@@ -298,10 +299,14 @@ void renderMemorySyncSection(const yams::daemon::MemorySyncResponse* sync, std::
         {"Sync cycles",
          std::to_string(m.successfulCycles) + " ok · " + std::to_string(m.failedCycles) + " failed",
          severity_text(health(m.failedCycles > 0), "")});
-    rows.push_back({"Last sync",
-                    severity_text(health(m.lastSuccessAgeMs > 60000),
-                                  format_duration(m.lastSuccessAgeMs / 1000) + " ago"),
-                    ""});
+    // UINT64_MAX is the daemon's "no successful cycle yet" sentinel, not an age.
+    const bool neverSynced = m.lastSuccessAgeMs == std::numeric_limits<std::uint64_t>::max();
+    rows.push_back(
+        {"Last sync",
+         severity_text(health(neverSynced || m.lastSuccessAgeMs > 60000),
+                       neverSynced ? std::string{"never"}
+                                   : format_duration(m.lastSuccessAgeMs / 1000) + " ago"),
+         ""});
     // A reconciled cycle can still fail to apply; report it apart from transport health.
     const auto applyOk = m.applyCycles - std::min(m.applyCycles, m.applyFailedCycles);
     rows.push_back({"Apply cycles",

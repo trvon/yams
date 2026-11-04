@@ -32,7 +32,6 @@
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
-#include <yams/daemon/components/MetricsSnapshotRegistry.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
@@ -980,7 +979,6 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                 dispatchDetailedCollect();
             }
             try {
-                MetricsSnapshotRegistry::instance().set(fastSnapshot);
             } catch (...) {
                 spdlog::debug(
                     "[DaemonMetrics] best-effort metric probe failed with unknown exception");
@@ -1085,7 +1083,6 @@ void DaemonMetrics::publishSnapshotPair(const std::shared_ptr<MetricsSnapshot>& 
     }
 
     try {
-        MetricsSnapshotRegistry::instance().set(fastSnapshot);
     } catch (...) {
         spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }

@@ -21,7 +21,9 @@
 #include <malloc/malloc.h>
 #elif defined(__GLIBC__)
 #include <malloc.h>
-#include <sys/resource.h>
+#endif
+#if defined(__linux__)
+#include <unistd.h>
 #endif
 
 #include <algorithm>
@@ -30,6 +32,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -93,10 +96,17 @@ std::uint64_t rssBytesCurrent() noexcept {
         return info.resident_size;
     }
     return 0;
-#elif defined(__GLIBC__)
-    struct rusage ru{};
-    if (getrusage(RUSAGE_SELF, &ru) == 0) {
-        return static_cast<std::uint64_t>(ru.ru_maxrss) * 1024ull;
+#elif defined(__linux__)
+    // ru_maxrss is the peak, which never falls; resident pages come from statm.
+    if (std::FILE* statm = std::fopen("/proc/self/statm", "r")) {
+        unsigned long long totalPages = 0;
+        unsigned long long residentPages = 0;
+        const int read = std::fscanf(statm, "%llu %llu", &totalPages, &residentPages);
+        std::fclose(statm);
+        const long pageSize = sysconf(_SC_PAGESIZE);
+        if (read == 2 && pageSize > 0) {
+            return static_cast<std::uint64_t>(residentPages) * static_cast<std::uint64_t>(pageSize);
+        }
     }
     return 0;
 #else

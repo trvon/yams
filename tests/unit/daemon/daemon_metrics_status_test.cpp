@@ -34,7 +34,6 @@
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
-#include <yams/daemon/components/MetricsSnapshotRegistry.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -7703,16 +7702,11 @@ TEST_CASE("DaemonMetrics: stopPolling returns after the WorkCoordinator cancelle
     REQUIRE((wc != nullptr));
     REQUIRE(wc->isRunning());
 
-    auto& registry = MetricsSnapshotRegistry::instance();
-    const auto priorSnapshot = registry.get();
-
     // Off-strand collectors use shared_from_this(), so the object needs shared ownership.
     auto metrics = std::make_shared<DaemonMetrics>(nullptr, &state, &svc, wc);
     metrics->startPolling();
-    REQUIRE(yams::test::wait_for_condition(5s, 1ms, [&] {
-        const auto published = registry.get();
-        return published && published != priorSnapshot;
-    }));
+    REQUIRE(
+        yams::test::wait_for_condition(5s, 1ms, [&] { return metrics->pollingIterations() > 0; }));
 
     wc->stop();
     REQUIRE(wc->joinWithTimeout(10s));
@@ -7727,5 +7721,4 @@ TEST_CASE("DaemonMetrics: stopPolling returns after the WorkCoordinator cancelle
     // shares with the object, never the object itself.
     metrics.reset();
     svc.shutdown();
-    registry.set(priorSnapshot);
 }

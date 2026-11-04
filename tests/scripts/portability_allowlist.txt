@@ -103,8 +103,8 @@ src/daemon/client/sandbox_detection.cpp:45:portability/env-read # reviewed raw e
 src/daemon/client/sandbox_detection.cpp:74:portability/env-read # reviewed raw environment read
 src/daemon/client/sandbox_probe.cpp:54:portability/env-read # reviewed raw environment read
 src/daemon/client/sandbox_probe.cpp:60:portability/env-read # reviewed raw environment read
-src/daemon/components/DaemonMetrics.cpp:173:portability/env-read # reviewed raw environment read
-src/daemon/components/DaemonMetrics.cpp:2052:portability/env-read # reviewed raw environment read
+src/daemon/components/DaemonMetrics.cpp:172:portability/env-read # reviewed raw environment read
+src/daemon/components/DaemonMetrics.cpp:2049:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:808:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:818:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestDispatcher.cpp:597:portability/env-read # reviewed raw environment read
@@ -298,7 +298,7 @@ tests/unit/daemon/components/vector_system_manager_test.cpp:129:portability/env-
 tests/unit/daemon/components/vector_system_manager_test.cpp:130:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_background_processing_test.cpp:761:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_catch2_test.cpp:1427:portability/env-read # reviewed raw environment read
-tests/unit/daemon/daemon_metrics_status_test.cpp:963:portability/env-read # reviewed raw environment read
+tests/unit/daemon/daemon_metrics_status_test.cpp:962:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:36:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:44:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:52:portability/env-read # reviewed raw environment read

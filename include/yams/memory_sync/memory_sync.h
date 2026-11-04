@@ -781,6 +781,15 @@ private:
             bool complete{false};
         };
 
+        // One budget-sized, sorted run of keys after `start`, read in a single traversal
+        // when the whole prefix does not fit the retained-key budget. Pages are served from
+        // it, so a sweep costs one walk per window instead of one walk per page.
+        struct ListingWindow {
+            std::optional<std::string> start; // exclusive lower bound; nullopt = first key
+            std::vector<std::string> keys;
+            bool more{false}; // keys exist after keys.back()
+        };
+
         [[nodiscard]] bool filesystemSnapshotEligible() const;
         void incrementWrites();
         void beforeMutation(std::string_view key);
@@ -801,6 +810,14 @@ private:
         [[nodiscard]] storage::ObjectListPage
         pageFromSnapshot(const PrefixListing& listing, std::optional<std::string_view> cursor,
                          std::size_t limit) const;
+        [[nodiscard]] std::optional<storage::ObjectListPage>
+        pageFromWindow(std::string_view prefix, std::optional<std::string_view> cursor,
+                       std::size_t limit) const;
+        [[nodiscard]] Result<storage::ObjectListPage>
+        listPageThroughWindow(std::string_view prefix, std::optional<std::string_view> cursor,
+                              std::size_t limit) const;
+        void dropWindow(std::string_view prefix) const;
+        void invalidateWindows(std::string_view key) const;
 
         storage::IStorageBackend& inner_;
         bool exclusive_{false};
@@ -812,6 +829,8 @@ private:
         mutable std::size_t retainedKeyBytes_{0};
         mutable std::map<std::string, storage::ObjectListPage> pages_;
         mutable std::map<std::string, PrefixListing, std::less<>> prefixListings_;
+        mutable std::map<std::string, ListingWindow, std::less<>> windows_;
+        mutable std::set<std::string, std::less<>> declinedSnapshots_;
     };
 
     /// Mutation count and quarantine generation observed when the last complete scan ended.
