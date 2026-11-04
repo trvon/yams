@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Native Linux sanitizer lane. Configure offline against existing system deps;
+# Native Linux sanitizer lane. Configure offline from the local Conan cache;
 # missing dependencies fail closed rather than downloading/building packages.
 set -euo pipefail
 
@@ -18,8 +18,8 @@ Usage: native-linux-lane.sh [options]
   --log-root DIR    Log directory
   --dry-run         Describe the lane; not sanitizer validation
 
-New build directories use setup.sh Debug --offline --system-deps. Dependencies
-must already be available. Existing directories must be native builds of this
+New build directories use setup.sh Debug --offline (Conan cache only, no remotes,
+no source builds). Dependencies must already be cached. Existing directories must be native builds of this
 checkout with Debug, tests, nofallback, and the requested sanitizers configured.
 Both unit and integration suites are mandatory; there is no test-list override.
 USAGE
@@ -80,7 +80,7 @@ run_lane() {
 			return 2
 		fi
 	done
-	setup_args=(Debug --offline --system-deps --with-tests)
+	setup_args=(Debug --offline --with-tests)
 	setup_extra="${YAMS_EXTRA_MESON_FLAGS:-}"
 	case "${PROFILE}" in
 	asan)

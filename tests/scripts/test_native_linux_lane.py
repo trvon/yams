@@ -76,12 +76,14 @@ exit "${TEST_SETUP_EXIT:-0}"
         calls = [json.loads(s) for s in self.calls.read_text().splitlines()] if self.calls.exists() else []
         return result, calls
 
-    def test_asan_uses_offline_system_setup_and_both_test_suites(self):
+    def test_asan_uses_offline_conan_cache_setup_and_both_test_suites(self):
         result, calls = self.run_lane()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         setup = (self.root / "setup-calls.txt").read_text()
-        for arg in ("--offline", "--system-deps", "--asan", "--no-tsan"):
+        for arg in ("--offline", "--asan", "--no-tsan"):
             self.assertIn(arg, setup)
+        # System packages lack several deps on common distros; the Conan cache is offline too.
+        self.assertNotIn("--system-deps", setup)
         self.assertTrue(any(c[0] == "compile" and "-j4" in c for c in calls), calls)
         tests = next(c for c in calls if c[0] == "test")
         self.assertIn("unit", tests)
