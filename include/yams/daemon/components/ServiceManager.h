@@ -461,10 +461,6 @@ public:
     WriteCoordinator* getWriteCoordinator() const { return writeCoordinator_.get(); }
     // NOLINTBEGIN(bugprone-reserved-identifier): repo test-helper surface intentionally uses
     // historical __test_* names across many suites; rename is tracked separately.
-    /// Test seam (declared in every build so the library links it). Runs on the direct-P2P recovery
-    /// thread just before its local op-store scan. Install before the daemon starts; release it
-    /// before stopping the daemon.
-    static void testingSetDirectP2pRecoveryGate(std::function<void()> gate);
 #ifdef YAMS_TESTING
     void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
         writeCoordinator_ = std::move(coordinator);
@@ -842,6 +838,9 @@ public:
                                        std::string_view contents);
     YAMS_DAEMON_TEST_HOOK void testing_setModelProviderDegraded(bool degraded,
                                                                 const std::string& error = {});
+    /// Runs on the direct-P2P recovery thread just before its local op-store scan. Install
+    /// before the daemon starts; release it before stopping the daemon.
+    YAMS_DAEMON_TEST_HOOK static void testingSetDirectP2pRecoveryGate(std::function<void()> gate);
 #endif
 
 #ifdef YAMS_TESTING

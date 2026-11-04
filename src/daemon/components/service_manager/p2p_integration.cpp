@@ -669,8 +669,6 @@ std::function<void()>& directP2pRecoveryGate() {
 }
 } // namespace
 
-// Defined in every build so library and YAMS_TESTING translation units link the same symbol;
-// only test code declares and calls it. An empty gate costs one uncontended lock per start.
 void ServiceManager::testingSetDirectP2pRecoveryGate(std::function<void()> gate) {
     std::lock_guard lock(directP2pRecoveryGateMutex());
     directP2pRecoveryGate() = std::move(gate);
@@ -698,50 +696,60 @@ void ServiceManager::startDirectP2pRecovery(std::filesystem::path dataDir) {
                 std::lock_guard lock(p2pRecoveryMutex_);
                 return p2pRecoveryStop_;
             };
-            while (!ResourceGovernor::instance().admitDeferrable(DeferrableWork::P2pRecovery)) {
-                std::unique_lock lock(p2pRecoveryMutex_);
-                if (p2pRecoveryCv_.wait_for(lock, kDirectP2pDeferredRetryInterval,
-                                            [this] { return p2pRecoveryStop_; })) {
+            // An exception escaping a std::thread terminates the process. Treat it like any
+            // other recovery failure: degrade "p2p" unless shutdown already cancelled the work.
+            const auto degrade = [this, &stopRequested](const std::string& reason) {
+                if (stopRequested()) {
                     return;
                 }
-            }
-            if (stopRequested()) {
-                return;
-            }
-            {
-                std::function<void()> gate;
-                {
-                    std::lock_guard lock(directP2pRecoveryGateMutex());
-                    gate = directP2pRecoveryGate();
-                }
-                if (gate) {
-                    gate();
-                }
-            }
-            auto manager = initializeDirectP2p(dataDir);
-            if (!manager) {
-                if (stopRequested()) {
-                    return; // shutdown cancelled the scan; not a P2P failure
-                }
-                const std::string reason =
-                    "direct P2P initialization failed: " + manager.error().message;
                 spdlog::error("[ServiceManager] {}; daemon continues without P2P", reason);
                 lifecycleFsm_.setSubsystemDegraded("p2p", true, reason);
-                return;
+            };
+            try {
+                while (!ResourceGovernor::instance().admitDeferrable(DeferrableWork::P2pRecovery)) {
+                    std::unique_lock lock(p2pRecoveryMutex_);
+                    if (p2pRecoveryCv_.wait_for(lock, kDirectP2pDeferredRetryInterval,
+                                                [this] { return p2pRecoveryStop_; })) {
+                        return;
+                    }
+                }
+                if (stopRequested()) {
+                    return;
+                }
+                {
+                    std::function<void()> gate;
+                    {
+                        std::lock_guard lock(directP2pRecoveryGateMutex());
+                        gate = directP2pRecoveryGate();
+                    }
+                    if (gate) {
+                        gate();
+                    }
+                }
+                auto manager = initializeDirectP2p(dataDir);
+                if (!manager) {
+                    // A shutdown-cancelled scan is not a P2P failure; degrade() checks that.
+                    degrade("direct P2P initialization failed: " + manager.error().message);
+                    return;
+                }
+                if (!manager.value()) {
+                    return;
+                }
+                std::lock_guard recovery(p2pRecoveryMutex_);
+                if (p2pRecoveryStop_) {
+                    manager.value()->stop(); // shutdown began while the listener was starting
+                    return;
+                }
+                {
+                    std::lock_guard lock(p2pManagerMutex_);
+                    p2pManager_ = std::move(manager.value());
+                }
+                lifecycleFsm_.setSubsystemDegraded("p2p", false);
+            } catch (const std::exception& e) {
+                degrade(std::string{"direct P2P recovery failed: "} + e.what());
+            } catch (...) {
+                degrade("direct P2P recovery failed with an unknown exception");
             }
-            if (!manager.value()) {
-                return;
-            }
-            std::lock_guard recovery(p2pRecoveryMutex_);
-            if (p2pRecoveryStop_) {
-                manager.value()->stop(); // shutdown began while the listener was starting
-                return;
-            }
-            {
-                std::lock_guard lock(p2pManagerMutex_);
-                p2pManager_ = std::move(manager.value());
-            }
-            lifecycleFsm_.setSubsystemDegraded("p2p", false);
         });
     } catch (const std::exception& e) {
         const std::string reason = std::string{"direct P2P recovery could not start: "} + e.what();

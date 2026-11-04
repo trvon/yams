@@ -407,7 +407,11 @@ Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPage(
                 }
                 if (!snapshot.value()) {
                     // The whole prefix does not fit: page through bounded windows instead.
-                    declinedSnapshots_.insert(std::string(prefix));
+                    // Bounded like the other per-prefix caches; past the cap a prefix simply
+                    // keeps ordinary paging.
+                    if (declinedSnapshots_.size() < kMaxPrefixes) {
+                        declinedSnapshots_.insert(std::string(prefix));
+                    }
                 } else {
                     declinedSnapshots_.erase(std::string(prefix));
                     try {

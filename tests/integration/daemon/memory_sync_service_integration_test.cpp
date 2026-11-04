@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -2201,4 +2202,42 @@ TEST_CASE("Daemon readiness and search do not wait for direct P2P recovery",
     // Once recovery completes, the listener is published.
     releaseGate.release();
     CHECK(eventually([&] { return manager->getP2pIdentity().has_value(); }));
+}
+
+// The recovery worker is a std::thread: an exception escaping it would terminate the daemon.
+// A throwing recovery must degrade "p2p" and leave the daemon serving.
+TEST_CASE("Direct P2P recovery that throws degrades P2P instead of terminating",
+          "[integration][daemon][memory-sync][p2p][p2p-recovery-throws]") {
+    ScopedHostPressureSample hostPressure;
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::off);
+    yams::daemon::ServiceManager::testingSetDirectP2pRecoveryGate(
+        [] { throw std::runtime_error("injected recovery failure"); });
+    struct ClearGate {
+        ~ClearGate() { yams::daemon::ServiceManager::testingSetDirectP2pRecoveryGate({}); }
+    } clearGate;
+
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174041",
+                                                "p2p-throwing-recovery-corpus");
+    auto configure = std::move(options.configureDaemon);
+    options.configureDaemon = [configure =
+                                   std::move(configure)](yams::daemon::DaemonConfig& config) {
+        configure(config);
+        configureDirectWriterAuth(config);
+    };
+    options.isolateEnvironment = true;
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+    const auto deadline = std::chrono::steady_clock::now() + 30s;
+    std::string reason;
+    while (std::chrono::steady_clock::now() < deadline) {
+        reason = harness.daemon()->getLifecycle().degradationReason("p2p");
+        if (!reason.empty()) {
+            break;
+        }
+        std::this_thread::sleep_for(20ms);
+    }
+    CHECK(reason.find("injected recovery failure") != std::string::npos);
+    CHECK_FALSE(harness.daemon()->getServiceManager()->getP2pIdentity().has_value());
+    CHECK(harness.daemon()->isRunning());
 }
