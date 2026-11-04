@@ -13,6 +13,11 @@ namespace yams::cli {
 
 namespace fs = std::filesystem;
 
+StaticTableInitDecision staticTableInitDecision(bool automatic, bool nonInteractive) {
+    // Headless initialization stays offline; interactive download needs an explicit Yes.
+    return {.prompt = !automatic && !nonInteractive};
+}
+
 const std::vector<StaticTableInfo>& staticTableCatalog() {
     static const std::vector<StaticTableInfo> tables = {
         {"yams-static-bge-c4-256",
@@ -79,12 +84,16 @@ Result<fs::path> downloadStaticTable(const std::string& name, const std::string&
     }
     std::cout << "Downloading static table " << name << "\n  from " << url << "\n";
     auto res = manager->download(req, {}, [] { return false; }, {});
-    if (!res.ok() || !res.value().success) {
+    if (!res.ok()) {
         fs::remove(part, ec);
-        const std::string msg = res.ok() ? (res.value().error ? res.value().error->message
-                                                              : std::string("download failed"))
-                                         : res.error().message;
-        return Error{ErrorCode::NetworkError, "static table " + name + ": " + msg};
+        return Error{ErrorCode::NetworkError, "static table " + name + ": " + res.error().message};
+    }
+    const auto& outcome = res.value();
+    if (!outcome.success) {
+        fs::remove(part, ec);
+        const auto& failure = outcome.error;
+        const std::string message = failure ? failure->message : std::string("download failed");
+        return Error{ErrorCode::NetworkError, "static table " + name + ": " + message};
     }
     if (!yams::vector::loadSharedStaticEmbeddingTable(part)) {
         fs::remove(part, ec);
