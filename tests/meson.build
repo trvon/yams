@@ -233,6 +233,19 @@ test('meson_failure_reporter_unit',
   suite: ['unit', 'ci'],
   timeout: 30,
 )
+# Command-policy tests with fake lanes/meson; they never stand in for sanitizer results.
+test('pre_push_host_dispatch_unit',
+  python_exe,
+  args: files('scripts/test_pre_push_host_dispatch.py'),
+  suite: ['unit', 'ci'],
+  timeout: 30,
+)
+test('native_linux_lane_unit',
+  python_exe,
+  args: files('scripts/test_native_linux_lane.py'),
+  suite: ['unit', 'ci'],
+  timeout: 30,
+)
 test('portability_policy_unit',
   python_exe,
   args: [portability_policy_tests],
