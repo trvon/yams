@@ -557,6 +557,20 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         const bool embedIdle =
             (!ctx_.getEmbeddingQueuedJobs || ctx_.getEmbeddingQueuedJobs() == 0) &&
             (!ctx_.getEmbeddingInFlightJobs || ctx_.getEmbeddingInFlightJobs() == 0);
+        // A job whose cleanup could not be scheduled leaves a Processing row with an unfinished
+        // derivation. Recover it only while the consumer is idle, so no live job owns the row,
+        // and only after the configured stall threshold has elapsed.
+        if (queueEmpty && embedIdle && maintenanceAllowed()) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastStalledRecovery_ >= std::chrono::seconds{60}) {
+                lastStalledRecovery_ = now;
+                const auto cutoff = std::chrono::duration_cast<std::chrono::seconds>(
+                                        (std::chrono::system_clock::now() - cfg_.stalledThreshold)
+                                            .time_since_epoch())
+                                        .count();
+                recoverStalledProcessing(cutoff);
+            }
+        }
         if (queueEmpty && scanCursor_.shouldStart() && (embedIdle || !scanCursor_.retryDue())) {
             if (!initialScanEnqueued && deferTicks < minDeferTicks) {
                 ++deferTicks;
@@ -736,6 +750,26 @@ void RepairService::recoverOrphanedProcessingOnce() {
     } else {
         spdlog::warn("RepairService: could not reset Processing documents: {}", r.error().message);
     }
+}
+
+std::size_t RepairService::recoverStalledProcessing(std::int64_t cutoffEpoch) {
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
+    if (!meta) {
+        return 0;
+    }
+    // One transaction resolves completed derivations and requeues unfinished stale attempts,
+    // conditionally at execution time so a concurrent fresh attempt is never overwritten.
+    auto reset = meta->resetStalledEmbeddingRepairs(cutoffEpoch);
+    if (!reset) {
+        spdlog::warn("RepairService: could not reset stalled Processing documents: {}",
+                     reset.error().message);
+        return 0;
+    }
+    if (reset.value() > 0) {
+        spdlog::info("RepairService: returned {} stalled Processing documents to Pending",
+                     reset.value());
+    }
+    return reset.value();
 }
 
 boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startAfterId) {

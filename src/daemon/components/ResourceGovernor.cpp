@@ -985,6 +985,30 @@ std::uint32_t ResourceGovernor::recommendRetryAfterMs(
     return std::min<std::uint32_t>(retry, 5000u);
 }
 
+std::size_t ResourceGovernor::capEmbedJobDocuments(std::size_t requested) const noexcept {
+    if (requested == 0) {
+        return 0;
+    }
+    // Pressure already incorporates RSS relative to the daemon memory budget.
+    // Use raw pressure, not startup grace: sizing work must not enlarge a job
+    // while Emergency admission caps are still in force.
+    switch (currentLevel_.load(std::memory_order_acquire)) {
+        case ResourcePressureLevel::Normal:
+            return requested;
+        case ResourcePressureLevel::Warning: {
+            const auto percent =
+                std::min<std::size_t>(100, TuneAdvisor::governorWarningScalePercent());
+            // Ceiling division without overflowing for a maximum-sized request.
+            const auto scaled = requested / 100 * percent + (requested % 100 * percent + 99) / 100;
+            return std::min(requested, std::max<std::size_t>(1, scaled));
+        }
+        case ResourcePressureLevel::Critical:
+        case ResourcePressureLevel::Emergency:
+            return 1;
+    }
+    return 1;
+}
+
 std::uint64_t ResourceGovernor::recommendLexicalCorpusBytes() const noexcept {
     // The simeon lexical enhancement holds the entire corpus text in RAM during
     // its build. Allocate ~6.25% of the daemon's memory budget to it, with a

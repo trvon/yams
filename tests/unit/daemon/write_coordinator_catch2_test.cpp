@@ -12,11 +12,19 @@
 #include <yams/metadata/migration.h>
 #include <yams/metadata/path_utils.h>
 
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/cancellation_type.hpp>
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <memory>
+#include <optional>
 #include <random>
 #include <thread>
 
@@ -870,6 +878,517 @@ TEST_CASE("WriteCoordinator: delete op mid-stream does not lose buffered edges",
 
     auto row = queryEdgesForRelation(fix.dbPath, "del_rel");
     CHECK((row.count == 2));
+}
+
+TEST_CASE("WriteCoordinator: embedding acknowledgement waits for the matching commit",
+          "[unit][daemon][write-coordinator][embedding][ack]") {
+    using yams::daemon::EmbeddingCompletionAcknowledgement;
+
+    KgCoordinatorFixture fix("yams_wc_embedding_ack_deferred_");
+    auto repo = std::make_shared<yams::metadata::MetadataRepository>(
+        *fix.pool, nullptr, yams::metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
+    const std::string hash = "wc-ack-deferred";
+    yams::metadata::DocumentInfo info;
+    info.filePath = "/tmp/" + hash + ".txt";
+    info.fileName = hash + ".txt";
+    info.fileExtension = ".txt";
+    info.fileSize = 16;
+    info.sha256Hash = hash;
+    info.mimeType = "text/plain";
+    info.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    info.modifiedTime = info.createdTime;
+    info.indexedTime = info.createdTime;
+    yams::metadata::populatePathDerivedFields(info);
+    REQUIRE(repo->insertDocument(info).has_value());
+    auto token = repo->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(token.has_value());
+
+    boost::asio::io_context io;
+    WriteCoordinator coordinator(io, fix.kg, repo, kgTestConfig(false));
+    std::atomic<int> callbackCount{0};
+    std::atomic<bool> callbackObservedReady{false};
+    std::optional<yams::Result<EmbeddingCompletionAcknowledgement>> acknowledgement;
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/embedding_ack_deferred";
+    CompleteDocumentEmbeddingsByHashesOp op;
+    op.modelName = "model-x";
+    op.derivations = {token.value()};
+    op.acknowledgement = [&](yams::Result<EmbeddingCompletionAcknowledgement> result) {
+        acknowledgement.emplace(std::move(result));
+        auto ready = repo->hasDocumentEmbeddingByHash(hash);
+        callbackObservedReady.store(ready.has_value() && ready.value(), std::memory_order_release);
+        callbackCount.fetch_add(1, std::memory_order_release);
+    };
+    batch->ops.emplace_back(std::move(op));
+    coordinator.enqueue(std::move(batch));
+
+    CHECK(callbackCount.load(std::memory_order_acquire) == 0);
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+    coordinator.shutdown();
+    REQUIRE(callbackCount.load(std::memory_order_acquire) == 1);
+    REQUIRE(acknowledgement.has_value());
+    REQUIRE(acknowledgement->has_value());
+    CHECK(acknowledgement->value().requested == 1);
+    CHECK(acknowledgement->value().completed == 1);
+    CHECK(callbackObservedReady.load(std::memory_order_acquire));
+
+    io.stop();
+    writerLoop.join();
+    repo.reset();
+}
+
+TEST_CASE("WriteCoordinator: embedding acknowledgements isolate results after metadata starts",
+          "[unit][daemon][write-coordinator][embedding][ack]") {
+    using yams::daemon::EmbeddingCompletionAcknowledgement;
+
+    KgCoordinatorFixture fix("yams_wc_embedding_ack_isolated_");
+    auto repo = std::make_shared<yams::metadata::MetadataRepository>(
+        *fix.pool, nullptr, yams::metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
+    std::vector<yams::metadata::EmbeddingDerivationToken> tokens;
+    for (const auto& hash : {std::string{"wc-ack-failed"}, std::string{"wc-ack-success"}}) {
+        yams::metadata::DocumentInfo info;
+        info.filePath = "/tmp/" + hash + ".txt";
+        info.fileName = hash + ".txt";
+        info.fileExtension = ".txt";
+        info.fileSize = 16;
+        info.sha256Hash = hash;
+        info.mimeType = "text/plain";
+        info.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        info.modifiedTime = info.createdTime;
+        info.indexedTime = info.createdTime;
+        yams::metadata::populatePathDerivedFields(info);
+        REQUIRE(repo->insertDocument(info).has_value());
+        auto token = repo->beginDocumentEmbeddingDerivation(hash, "recipe");
+        REQUIRE(token.has_value());
+        tokens.push_back(std::move(token.value()));
+    }
+
+    boost::asio::io_context io;
+    WriteCoordinator coordinator(io, fix.kg, repo, kgTestConfig(false));
+    std::optional<yams::Result<EmbeddingCompletionAcknowledgement>> failedAck;
+    std::optional<yams::Result<EmbeddingCompletionAcknowledgement>> successfulAck;
+    std::atomic<int> failedCalls{0};
+    std::atomic<int> successfulCalls{0};
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/embedding_ack_isolated";
+    CompleteDocumentEmbeddingsByHashesOp failed;
+    failed.derivations = {tokens[0]};
+    failed.acknowledgement = [&](yams::Result<EmbeddingCompletionAcknowledgement> result) {
+        failedAck.emplace(std::move(result));
+        failedCalls.fetch_add(1, std::memory_order_release);
+    };
+    batch->ops.emplace_back(std::move(failed));
+    CompleteDocumentEmbeddingsByHashesOp successful;
+    successful.modelName = "model-x";
+    successful.derivations = {tokens[1]};
+    successful.acknowledgement = [&](yams::Result<EmbeddingCompletionAcknowledgement> result) {
+        successfulAck.emplace(std::move(result));
+        successfulCalls.fetch_add(1, std::memory_order_release);
+    };
+    batch->ops.emplace_back(std::move(successful));
+
+    coordinator.enqueue(std::move(batch));
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+    auto flushed = coordinator.flush(std::chrono::seconds{10});
+    REQUIRE_FALSE(flushed.has_value());
+    REQUIRE(failedCalls.load(std::memory_order_acquire) == 1);
+    REQUIRE(successfulCalls.load(std::memory_order_acquire) == 1);
+    REQUIRE(failedAck.has_value());
+    CHECK_FALSE(failedAck->has_value());
+    CHECK(failedAck->error().code == yams::ErrorCode::InvalidArgument);
+    REQUIRE(successfulAck.has_value());
+    REQUIRE(successfulAck->has_value());
+    CHECK(successfulAck->value().completed == 1);
+    auto ready = repo->hasDocumentEmbeddingByHash(tokens[1].hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+
+    coordinator.shutdown();
+    io.stop();
+    writerLoop.join();
+    repo.reset();
+}
+
+TEST_CASE("WriteCoordinator: retryable capacity rejection preserves embedding acknowledgement",
+          "[unit][daemon][write-coordinator][embedding][ack]") {
+    using yams::daemon::EmbeddingCompletionAcknowledgement;
+
+    boost::asio::io_context io;
+    WriteCoordinator::Config config;
+    config.maxBatchSize = 1;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    config.channelCapacity = 1;
+    WriteCoordinator coordinator(io, {}, {}, config);
+    coordinator.enqueue(makeTermBatch("occupy-capacity"));
+
+    std::atomic<int> rejectedCalls{0};
+    std::optional<yams::Result<EmbeddingCompletionAcknowledgement>> rejectedAck;
+    auto rejected = std::make_unique<WriteBatch>();
+    rejected->source = "test/embedding_ack_rejected";
+    CompleteDocumentEmbeddingsByHashesOp rejectedOp;
+    rejectedOp.modelName = "model-x";
+    rejectedOp.derivations = {{"hash", "generation", "recipe"}};
+    rejectedOp.acknowledgement = [&](yams::Result<EmbeddingCompletionAcknowledgement> result) {
+        rejectedAck.emplace(std::move(result));
+        rejectedCalls.fetch_add(1, std::memory_order_release);
+    };
+    rejected->ops.emplace_back(std::move(rejectedOp));
+    CHECK_FALSE(coordinator.tryEnqueue(rejected));
+    CHECK(rejected != nullptr);
+    CHECK(rejectedCalls.load(std::memory_order_acquire) == 0);
+    CHECK_FALSE(rejectedAck.has_value());
+
+    auto capacityFuture = boost::asio::co_spawn(
+        io,
+        coordinator.asyncCompleteEmbeddingDerivations({{"async-hash", "generation", "recipe"}},
+                                                      "model-x", "test/embedding_awaiter_capacity"),
+        boost::asio::use_future);
+    io.run();
+    auto capacityResult = capacityFuture.get();
+    REQUIRE_FALSE(capacityResult.has_value());
+    CHECK(capacityResult.error().code == yams::ErrorCode::ResourceExhausted);
+
+    io.restart();
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+    REQUIRE(coordinator.flush(std::chrono::seconds{10}).has_value());
+    CHECK(coordinator.tryEnqueue(rejected));
+    CHECK(rejected == nullptr);
+    REQUIRE(coordinator.flush(std::chrono::seconds{10}).has_value());
+    REQUIRE(rejectedCalls.load(std::memory_order_acquire) == 1);
+    REQUIRE(rejectedAck.has_value());
+    REQUIRE_FALSE(rejectedAck->has_value());
+    CHECK(rejectedAck->error().code == yams::ErrorCode::InvalidState);
+
+    coordinator.shutdown();
+    writerLoop.join();
+    CHECK(rejectedCalls.load(std::memory_order_acquire) == 1);
+}
+
+TEST_CASE("WriteCoordinator: shutdown admissions settle embedding acknowledgements once",
+          "[unit][daemon][write-coordinator][embedding][ack]") {
+    using yams::daemon::EmbeddingCompletionAcknowledgement;
+
+    boost::asio::io_context io;
+    WriteCoordinator coordinator(io, {}, {}, {});
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+    coordinator.shutdown();
+    writerLoop.join();
+
+    std::atomic<int> shutdownCalls{0};
+    std::optional<yams::Result<EmbeddingCompletionAcknowledgement>> shutdownAck;
+    auto afterShutdown = std::make_unique<WriteBatch>();
+    afterShutdown->source = "test/embedding_ack_shutdown";
+    CompleteDocumentEmbeddingsByHashesOp shutdownOp;
+    shutdownOp.modelName = "model-x";
+    shutdownOp.derivations = {{"hash", "generation", "recipe"}};
+    shutdownOp.acknowledgement = [&](yams::Result<EmbeddingCompletionAcknowledgement> result) {
+        shutdownAck.emplace(std::move(result));
+        shutdownCalls.fetch_add(1, std::memory_order_release);
+    };
+    afterShutdown->ops.emplace_back(std::move(shutdownOp));
+    coordinator.enqueue(std::move(afterShutdown));
+    REQUIRE(shutdownCalls.load(std::memory_order_acquire) == 1);
+    REQUIRE(shutdownAck.has_value());
+    REQUIRE_FALSE(shutdownAck->has_value());
+    CHECK(shutdownAck->error().code == yams::ErrorCode::SystemShutdown);
+
+    io.restart();
+    auto shutdownFuture = boost::asio::co_spawn(
+        io,
+        coordinator.asyncCompleteEmbeddingDerivations({{"hash", "generation", "recipe"}}, "model-x",
+                                                      "test/embedding_awaiter_shutdown"),
+        boost::asio::use_future);
+    io.run();
+    auto shutdownResult = shutdownFuture.get();
+    REQUIRE_FALSE(shutdownResult.has_value());
+    CHECK(shutdownResult.error().code == yams::ErrorCode::SystemShutdown);
+}
+
+TEST_CASE("WriteCoordinator: shutdown timeout releases pending and in-flight embedding awaiters",
+          "[unit][daemon][write-coordinator][embedding][ack][shutdown]") {
+    using yams::daemon::EmbeddingCompletionAcknowledgement;
+
+    KgCoordinatorFixture fix("yams_wc_embedding_ack_shutdown_timeout_");
+    auto repo = std::make_shared<yams::metadata::MetadataRepository>(
+        *fix.pool, nullptr, yams::metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
+    std::vector<yams::metadata::EmbeddingDerivationToken> tokens;
+    for (const auto& hash :
+         {std::string{"wc-ack-shutdown-blocker"}, std::string{"wc-ack-shutdown-inflight"},
+          std::string{"wc-ack-shutdown-pending"}}) {
+        yams::metadata::DocumentInfo info;
+        info.filePath = "/tmp/" + hash + ".txt";
+        info.fileName = hash + ".txt";
+        info.fileExtension = ".txt";
+        info.fileSize = 16;
+        info.sha256Hash = hash;
+        info.mimeType = "text/plain";
+        info.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        info.modifiedTime = info.createdTime;
+        info.indexedTime = info.createdTime;
+        yams::metadata::populatePathDerivedFields(info);
+        REQUIRE(repo->insertDocument(info).has_value());
+        auto token = repo->beginDocumentEmbeddingDerivation(hash, "recipe");
+        REQUIRE(token.has_value());
+        tokens.push_back(std::move(token.value()));
+    }
+
+    boost::asio::io_context io;
+    WriteCoordinator::Config config = kgTestConfig(false);
+    config.maxBatchSize = 1;
+    config.shutdownTimeout = std::chrono::milliseconds{25};
+    WriteCoordinator coordinator(io, fix.kg, repo, config);
+
+    std::promise<void> blockerEntered;
+    auto blockerEnteredFuture = blockerEntered.get_future();
+    std::promise<void> releaseBlocker;
+    auto releaseBlockerFuture = releaseBlocker.get_future().share();
+    std::atomic<int> blockerCalls{0};
+    std::atomic<int> inFlightCalls{0};
+    std::optional<yams::Result<EmbeddingCompletionAcknowledgement>> blockerAck;
+    std::optional<yams::Result<EmbeddingCompletionAcknowledgement>> inFlightAck;
+
+    auto blockingBatch = std::make_unique<WriteBatch>();
+    blockingBatch->source = "test/embedding_ack_shutdown_blocked_writer";
+    CompleteDocumentEmbeddingsByHashesOp blocker;
+    blocker.modelName = "model-x";
+    blocker.derivations = {tokens[0]};
+    blocker.acknowledgement = [&](yams::Result<EmbeddingCompletionAcknowledgement> result) {
+        blockerAck.emplace(std::move(result));
+        blockerCalls.fetch_add(1, std::memory_order_release);
+        blockerEntered.set_value();
+        releaseBlockerFuture.wait();
+    };
+    blockingBatch->ops.emplace_back(std::move(blocker));
+    CompleteDocumentEmbeddingsByHashesOp inFlight;
+    inFlight.modelName = "model-x";
+    inFlight.derivations = {tokens[1]};
+    inFlight.acknowledgement = [&](yams::Result<EmbeddingCompletionAcknowledgement> result) {
+        inFlightAck.emplace(std::move(result));
+        inFlightCalls.fetch_add(1, std::memory_order_release);
+    };
+    blockingBatch->ops.emplace_back(std::move(inFlight));
+    coordinator.enqueue(std::move(blockingBatch));
+
+    auto pendingFuture =
+        boost::asio::co_spawn(io,
+                              coordinator.asyncCompleteEmbeddingDerivations(
+                                  {tokens[2]}, "model-x", "test/embedding_ack_shutdown_pending"),
+                              boost::asio::use_future);
+    io.poll();
+    REQUIRE(coordinator.queuedBatches() == 2);
+
+    io.restart();
+    coordinator.start();
+    std::thread writerOne([&io] { io.run(); });
+    std::thread writerTwo([&io] { io.run(); });
+    REQUIRE(blockerEnteredFuture.wait_for(std::chrono::seconds{5}) == std::future_status::ready);
+
+    const auto shutdownStart = std::chrono::steady_clock::now();
+    coordinator.shutdown();
+    const auto shutdownElapsed = std::chrono::steady_clock::now() - shutdownStart;
+    CHECK(shutdownElapsed < std::chrono::seconds{1});
+
+    REQUIRE(inFlightCalls.load(std::memory_order_acquire) == 1);
+    REQUIRE(inFlightAck.has_value());
+    REQUIRE_FALSE(inFlightAck->has_value());
+    CHECK(inFlightAck->error().code == yams::ErrorCode::SystemShutdown);
+    REQUIRE(pendingFuture.wait_for(std::chrono::seconds{1}) == std::future_status::ready);
+    auto pendingAck = pendingFuture.get();
+    REQUIRE_FALSE(pendingAck.has_value());
+    CHECK(pendingAck.error().code == yams::ErrorCode::SystemShutdown);
+
+    releaseBlocker.set_value();
+    writerOne.join();
+    writerTwo.join();
+    REQUIRE(blockerCalls.load(std::memory_order_acquire) == 1);
+    REQUIRE(blockerAck.has_value());
+    REQUIRE(blockerAck->has_value());
+    CHECK(inFlightCalls.load(std::memory_order_acquire) == 1);
+
+    // Shutdown cancellation bounds the acknowledgement wait; it does not retract admitted writes.
+    for (const auto& token : tokens) {
+        auto ready = repo->hasDocumentEmbeddingByHash(token.hash);
+        REQUIRE(ready.has_value());
+        CHECK(ready.value());
+    }
+    repo.reset();
+}
+
+TEST_CASE("WriteCoordinator: cancelling an embedding awaiter does not leave a dangling handler",
+          "[unit][daemon][write-coordinator][embedding][ack]") {
+    KgCoordinatorFixture fix("yams_wc_embedding_ack_cancel_");
+    auto repo = std::make_shared<yams::metadata::MetadataRepository>(
+        *fix.pool, nullptr, yams::metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
+    const std::string hash = "wc-ack-cancel";
+    yams::metadata::DocumentInfo info;
+    info.filePath = "/tmp/" + hash + ".txt";
+    info.fileName = hash + ".txt";
+    info.fileExtension = ".txt";
+    info.fileSize = 16;
+    info.sha256Hash = hash;
+    info.mimeType = "text/plain";
+    info.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    info.modifiedTime = info.createdTime;
+    info.indexedTime = info.createdTime;
+    yams::metadata::populatePathDerivedFields(info);
+    REQUIRE(repo->insertDocument(info).has_value());
+    auto token = repo->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(token.has_value());
+
+    boost::asio::io_context io;
+    WriteCoordinator coordinator(io, fix.kg, repo, kgTestConfig(false));
+    boost::asio::cancellation_signal cancellation;
+    auto future = boost::asio::co_spawn(
+        io,
+        coordinator.asyncCompleteEmbeddingDerivations({token.value()}, "model-x",
+                                                      "test/embedding_ack_cancel"),
+        boost::asio::bind_cancellation_slot(cancellation.slot(), boost::asio::use_future));
+    io.poll();
+    REQUIRE(coordinator.queuedBatches() == 1);
+    cancellation.emit(boost::asio::cancellation_type::all);
+    io.restart();
+    io.run_for(std::chrono::milliseconds{100});
+    REQUIRE(future.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready);
+    auto cancelled = future.get();
+    REQUIRE_FALSE(cancelled.has_value());
+    CHECK(cancelled.error().code == yams::ErrorCode::OperationCancelled);
+
+    coordinator.start();
+    io.restart();
+    std::thread writerLoop([&io] { io.run(); });
+    REQUIRE(coordinator.flush(std::chrono::seconds{10}).has_value());
+    auto ready = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+    coordinator.shutdown();
+    io.stop();
+    writerLoop.join();
+    repo.reset();
+}
+
+TEST_CASE("WriteCoordinator: stale embedding awaitable reports zero committed tokens",
+          "[unit][daemon][write-coordinator][embedding][ack]") {
+    KgCoordinatorFixture fix("yams_wc_embedding_ack_stale_");
+    auto repo = std::make_shared<yams::metadata::MetadataRepository>(
+        *fix.pool, nullptr, yams::metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
+    const std::string hash = "wc-ack-stale";
+    yams::metadata::DocumentInfo info;
+    info.filePath = "/tmp/" + hash + ".txt";
+    info.fileName = hash + ".txt";
+    info.fileExtension = ".txt";
+    info.fileSize = 16;
+    info.sha256Hash = hash;
+    info.mimeType = "text/plain";
+    info.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    info.modifiedTime = info.createdTime;
+    info.indexedTime = info.createdTime;
+    yams::metadata::populatePathDerivedFields(info);
+    REQUIRE(repo->insertDocument(info).has_value());
+    auto stale = repo->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(stale.has_value());
+    auto current = repo->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(current.has_value());
+
+    boost::asio::io_context io;
+    WriteCoordinator coordinator(io, fix.kg, repo, kgTestConfig(false));
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+
+    auto staleFuture =
+        boost::asio::co_spawn(io,
+                              coordinator.asyncCompleteEmbeddingDerivations(
+                                  {stale.value()}, "model-x", "test/embedding_ack_stale"),
+                              boost::asio::use_future);
+    auto staleAck = staleFuture.get();
+    REQUIRE(staleAck.has_value());
+    CHECK(staleAck.value().requested == 1);
+    CHECK(staleAck.value().completed == 0);
+    auto notReady = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(notReady.has_value());
+    CHECK_FALSE(notReady.value());
+
+    auto currentFuture =
+        boost::asio::co_spawn(io,
+                              coordinator.asyncCompleteEmbeddingDerivations(
+                                  {current.value()}, "model-x", "test/embedding_ack_current"),
+                              boost::asio::use_future);
+    auto currentAck = currentFuture.get();
+    REQUIRE(currentAck.has_value());
+    CHECK(currentAck.value().requested == 1);
+    CHECK(currentAck.value().completed == 1);
+    auto ready = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+
+    coordinator.shutdown();
+    io.stop();
+    writerLoop.join();
+    repo.reset();
+}
+
+TEST_CASE("WriteCoordinator: mixed embedding acknowledgement reports committed token count",
+          "[unit][daemon][write-coordinator][embedding][ack]") {
+    KgCoordinatorFixture fix("yams_wc_embedding_ack_mixed_");
+    auto repo = std::make_shared<yams::metadata::MetadataRepository>(
+        *fix.pool, nullptr, yams::metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
+
+    auto beginDerivation = [&](const std::string& hash) {
+        yams::metadata::DocumentInfo info;
+        info.filePath = "/tmp/" + hash + ".txt";
+        info.fileName = hash + ".txt";
+        info.fileExtension = ".txt";
+        info.fileSize = 16;
+        info.sha256Hash = hash;
+        info.mimeType = "text/plain";
+        info.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        info.modifiedTime = info.createdTime;
+        info.indexedTime = info.createdTime;
+        yams::metadata::populatePathDerivedFields(info);
+        REQUIRE(repo->insertDocument(info).has_value());
+        auto token = repo->beginDocumentEmbeddingDerivation(hash, "recipe");
+        REQUIRE(token.has_value());
+        return token.value();
+    };
+
+    const std::string committedHash = "wc-ack-mixed-committed";
+    const std::string staleHash = "wc-ack-mixed-stale";
+    auto committedToken = beginDerivation(committedHash);
+    auto staleToken = beginDerivation(staleHash);
+    REQUIRE(repo->beginDocumentEmbeddingDerivation(staleHash, "recipe").has_value());
+
+    boost::asio::io_context io;
+    WriteCoordinator coordinator(io, fix.kg, repo, kgTestConfig(false));
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+
+    auto mixedFuture = boost::asio::co_spawn(
+        io,
+        coordinator.asyncCompleteEmbeddingDerivations({committedToken, staleToken}, "model-x",
+                                                      "test/embedding_ack_mixed"),
+        boost::asio::use_future);
+    auto mixedAck = mixedFuture.get();
+    REQUIRE(mixedAck.has_value());
+    CHECK(mixedAck.value().requested == 2);
+    CHECK(mixedAck.value().completed == 1);
+
+    auto committed = repo->hasDocumentEmbeddingByHash(committedHash);
+    REQUIRE(committed.has_value());
+    CHECK(committed.value());
+    auto stale = repo->hasDocumentEmbeddingByHash(staleHash);
+    REQUIRE(stale.has_value());
+    CHECK_FALSE(stale.value());
+
+    coordinator.shutdown();
+    io.stop();
+    writerLoop.join();
+    repo.reset();
 }
 
 TEST_CASE("WriteCoordinator: derivation completions publish only current tokens",

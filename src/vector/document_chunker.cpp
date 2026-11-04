@@ -219,6 +219,21 @@ DocumentChunker::splitLargeChunks(const std::vector<DocumentChunk>& chunks) {
                     --end;
                 }
 
+                // Splitting runs after merging, so a short tail cannot be repaired by
+                // mergeSmallChunks. Extend it backwards as bounded source overlap rather
+                // than losing it or failing validation for the entire document.
+                const size_t min_chunk_chars =
+                    config_.use_token_count ? (config_.min_chunk_size * 4) : config_.min_chunk_size;
+                if (end > start && end - start < min_chunk_chars && end >= min_chunk_chars) {
+                    start = end - min_chunk_chars;
+                    if (config_.preserve_words) {
+                        while (start > 0 && end - start < max_chunk_chars &&
+                               !std::isspace(static_cast<unsigned char>(content[start - 1]))) {
+                            --start;
+                        }
+                    }
+                }
+
                 // Ensure end is always after start.
                 if (end <= start) {
                     end = std::min(start + 1, content.size());

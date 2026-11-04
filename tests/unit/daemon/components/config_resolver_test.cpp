@@ -1126,8 +1126,17 @@ preferred_model = "simeon-default"
     CHECK_FALSE(resolved.warnings.empty());
 }
 
-TEST_CASE("EmbeddingGenerator preserves a resolved backend against ambient changes",
-          "[daemon][components][config][embeddings][snapshot][catch2]") {
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "EmbeddingGenerator preserves a resolved backend against ambient changes",
+                 "[daemon][components][config][embeddings][snapshot][catch2]") {
+    const auto configPath = writeToml("configurable-simeon.toml",
+                                      "[embeddings.simeon]\nencoder_profile = \"configurable\"\n");
+    EnvGuard configEnvironment{"YAMS_CONFIG", configPath.string()};
+    EnvGuard compatibilityConfigEnvironment{"YAMS_CONFIG_PATH", std::nullopt};
+    auto encoderEnvironment = unsetEnvironment({"YAMS_SIMEON_NGRAM_MODE", "YAMS_SIMEON_NGRAM_MIN",
+                                                "YAMS_SIMEON_NGRAM_MAX", "YAMS_SIMEON_SKETCH_DIM",
+                                                "YAMS_SIMEON_OUTPUT_DIM", "YAMS_SIMEON_PROJECTION",
+                                                "YAMS_SIMEON_PQ_BYTES"});
     EnvGuard backendEnvironment{"YAMS_EMBED_BACKEND", "daemon"};
 
     yams::vector::EmbeddingConfig config;

@@ -1,9 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/cli/time_parser.h>
+#include <yams/config/config_helpers.h>
 
 #include <chrono>
-#include <cmath>
 #include <ctime>
+#include <optional>
 #include <string>
 
 using namespace yams::cli;
@@ -25,6 +26,42 @@ static std::tm toLocalTm(const system_clock::time_point& tp) {
 static bool contains(const std::string& s, const std::string& needle) {
     return s.find(needle) != std::string::npos;
 }
+
+static std::tm localCivilDay(int dayOffset) {
+    auto tm = toLocalTm(system_clock::now());
+    tm.tm_mday += dayOffset;
+    tm.tm_hour = 0;
+    tm.tm_min = 0;
+    tm.tm_sec = 0;
+    tm.tm_isdst = -1;
+    const auto normalized = std::mktime(&tm);
+    return *std::localtime(&normalized);
+}
+
+static void refreshTimezone() {
+#ifdef _WIN32
+    ::_tzset();
+#else
+    ::tzset();
+#endif
+}
+
+class ScopedTimezone {
+public:
+    explicit ScopedTimezone(const char* timezone) : previous_(yams::config::getenv_optional("TZ")) {
+        REQUIRE(yams::config::set_environment("TZ", timezone));
+        refreshTimezone();
+    }
+
+    ~ScopedTimezone() {
+        const char* previous = previous_ ? previous_->c_str() : nullptr;
+        (void)yams::config::set_environment("TZ", previous);
+        refreshTimezone();
+    }
+
+private:
+    std::optional<std::string> previous_;
+};
 
 } // namespace
 
@@ -196,6 +233,26 @@ TEST_CASE("TimeParser::parseUnixTimestamp()", "[cli][time_parser][catch2]") {
     }
 }
 
+TEST_CASE("TimeParser::startOfDay normalizes DST at civil midnight", "[cli][time_parser][catch2]") {
+    ScopedTimezone timezone{"America/New_York"};
+    std::tm localNoon{};
+    localNoon.tm_year = 2026 - 1900;
+    localNoon.tm_mon = 10;
+    localNoon.tm_mday = 1;
+    localNoon.tm_hour = 12;
+    localNoon.tm_isdst = -1;
+
+    const auto noon = system_clock::from_time_t(std::mktime(&localNoon));
+    const auto midnight = toLocalTm(TimeParser::startOfDay(noon));
+
+    CHECK(midnight.tm_year == localNoon.tm_year);
+    CHECK(midnight.tm_mon == localNoon.tm_mon);
+    CHECK(midnight.tm_mday == localNoon.tm_mday);
+    CHECK(midnight.tm_hour == 0);
+    CHECK(midnight.tm_min == 0);
+    CHECK(midnight.tm_sec == 0);
+}
+
 TEST_CASE("TimeParser::parseNatural()", "[cli][time_parser][catch2]") {
     SECTION("'now' is close to system_clock::now()") {
         const auto tp = TimeParser::parseNatural("now");
@@ -216,27 +273,27 @@ TEST_CASE("TimeParser::parseNatural()", "[cli][time_parser][catch2]") {
         CHECK(tm.tm_sec == 0);
     }
 
-    SECTION("'yesterday' is start of day minus 24h") {
-        const auto now = system_clock::now();
-        const auto expected = TimeParser::startOfDay(now) - hours(24);
+    SECTION("'yesterday' is the prior civil day's midnight") {
+        const auto expected = localCivilDay(-1);
         const auto tp = TimeParser::parseNatural("yesterday");
         REQUIRE(tp);
-        CHECK(absDuration(*tp - expected) < kTolerance);
 
         const auto tm = toLocalTm(*tp);
+        CHECK(tm.tm_year == expected.tm_year);
+        CHECK(tm.tm_yday == expected.tm_yday);
         CHECK(tm.tm_hour == 0);
         CHECK(tm.tm_min == 0);
         CHECK(tm.tm_sec == 0);
     }
 
-    SECTION("'tomorrow' is start of day plus 24h") {
-        const auto now = system_clock::now();
-        const auto expected = TimeParser::startOfDay(now) + hours(24);
+    SECTION("'tomorrow' is the next civil day's midnight") {
+        const auto expected = localCivilDay(1);
         const auto tp = TimeParser::parseNatural("tomorrow");
         REQUIRE(tp);
-        CHECK(absDuration(*tp - expected) < kTolerance);
 
         const auto tm = toLocalTm(*tp);
+        CHECK(tm.tm_year == expected.tm_year);
+        CHECK(tm.tm_yday == expected.tm_yday);
         CHECK(tm.tm_hour == 0);
         CHECK(tm.tm_min == 0);
         CHECK(tm.tm_sec == 0);
@@ -280,11 +337,16 @@ TEST_CASE("TimeParser::parseNatural()", "[cli][time_parser][catch2]") {
     }
 
     SECTION("Case insensitive: 'YESTERDAY' works") {
-        const auto now = system_clock::now();
-        const auto expected = TimeParser::startOfDay(now) - hours(24);
+        const auto expected = localCivilDay(-1);
         const auto tp = TimeParser::parseNatural("YESTERDAY");
         REQUIRE(tp);
-        CHECK(absDuration(*tp - expected) < kTolerance);
+
+        const auto tm = toLocalTm(*tp);
+        CHECK(tm.tm_year == expected.tm_year);
+        CHECK(tm.tm_yday == expected.tm_yday);
+        CHECK(tm.tm_hour == 0);
+        CHECK(tm.tm_min == 0);
+        CHECK(tm.tm_sec == 0);
     }
 
     SECTION("Unrecognized 'nextmonth' returns nullopt") {

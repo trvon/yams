@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -138,12 +139,23 @@ struct UpdateEmbeddingStatusByHashesOp {
     bool embedded = false;
     std::string modelName;
 };
+struct EmbeddingCompletionAcknowledgement {
+    std::size_t requested{0};
+    std::size_t completed{0};
+};
+
+using EmbeddingCompletionAcknowledgementCallback =
+    std::function<void(Result<EmbeddingCompletionAcknowledgement>)>;
+
 struct CompleteDocumentEmbeddingsByHashesOp {
     std::vector<std::string> hashes;
     std::string modelName;
     // Token-bearing completions are distinct attempts, never coalesced by hash/model alone.
     // Use either legacy hashes or derivations, not both.
     std::vector<metadata::EmbeddingDerivationToken> derivations{};
+    // Optional per-attempt acknowledgement. A successful result reports requested and committed
+    // counts; callers that require a full commit must compare completed with requested.
+    EmbeddingCompletionAcknowledgementCallback acknowledgement;
 };
 struct InsertRelationshipOp {
     metadata::DocumentRelationship relationship;
@@ -220,6 +232,7 @@ public:
         std::size_t maxCoalescedOpsPerApply = 512;
         bool kgDedupEnabled = true;
         std::size_t kgDedupMaxEdges = 50000;
+        std::chrono::milliseconds shutdownTimeout{std::chrono::seconds{30}};
     };
 
     struct Stats {
@@ -280,6 +293,15 @@ public:
 
     bool tryEnqueue(std::unique_ptr<WriteBatch>& batch);
 
+    /// Enqueue token-fenced embedding completion and suspend until that exact operation applies.
+    /// A successful result reports actual committed counts, including zero or partial completion.
+    /// Dependency failures may prevent execution; once metadata execution begins, the result is
+    /// isolated to this operation.
+    boost::asio::awaitable<Result<EmbeddingCompletionAcknowledgement>, boost::asio::any_io_executor>
+    asyncCompleteEmbeddingDerivations(std::vector<metadata::EmbeddingDerivationToken> derivations,
+                                      std::string modelName,
+                                      std::string source = "WriteCoordinator::embeddingCompletion");
+
     Result<void> flush(std::chrono::milliseconds timeout = std::chrono::seconds(60));
 
     void start();
@@ -330,7 +352,8 @@ private:
     Result<void> applyMetadataOp(UpdateExtractionStatusOp& op);
     Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashOp& op);
     Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashesOp& op);
-    Result<void> applyMetadataOp(CompleteDocumentEmbeddingsByHashesOp& op);
+    Result<EmbeddingCompletionAcknowledgement>
+    applyMetadataOp(CompleteDocumentEmbeddingsByHashesOp& op);
     Result<void> applyMetadataOp(InsertRelationshipOp& op);
     Result<void> applyMetadataOp(AddSymSpellTermsOp& op);
     Result<void> applyMetadataOp(AcknowledgeKnowledgeGraphOp& op);
@@ -339,6 +362,10 @@ private:
     void recordSourceApply(const std::string& source, std::uint64_t opCount, std::uint64_t applyMs,
                            bool error);
     void wakeWriter();
+
+    struct EmbeddingAcknowledgementState;
+    void registerEmbeddingAcknowledgementsLocked(WriteBatch& batch);
+    void settleOutstandingEmbeddingAcknowledgements(const Error& error) noexcept;
 
     struct SourceTiming {
         std::uint64_t batches = 0;
@@ -360,6 +387,7 @@ private:
     mutable std::mutex queueMutex_;
     mutable std::condition_variable drainCv_;
     std::vector<std::unique_ptr<WriteBatch>> pendingBatches_;
+    std::vector<std::weak_ptr<EmbeddingAcknowledgementState>> embeddingAcknowledgements_;
     std::optional<Error> lastApplyError_;
 
     std::atomic<bool> stop_{false};

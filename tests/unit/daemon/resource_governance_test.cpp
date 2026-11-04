@@ -259,6 +259,46 @@ TEST_CASE("ResourceGovernor scaling caps are queryable", "[daemon][governance][c
     (void)maxKg;
 }
 
+TEST_CASE("ResourceGovernor embedding document budget follows pressure without granting admission",
+          "[daemon][governance][embed-doc-budget]") {
+    auto& governor = ResourceGovernor::instance();
+    struct RestorePressure {
+        ~RestorePressure() {
+            auto& g = ResourceGovernor::instance();
+            g.testing_setPressureState(ResourcePressureLevel::Normal,
+                                       std::chrono::steady_clock::now());
+            g.refreshScalingCaps();
+        }
+    } restore;
+    std::size_t previous = 64;
+    for (const auto level : {ResourcePressureLevel::Normal, ResourcePressureLevel::Warning,
+                             ResourcePressureLevel::Critical, ResourcePressureLevel::Emergency}) {
+        governor.testing_setPressureState(level, std::chrono::steady_clock::now());
+        governor.refreshScalingCaps();
+        const auto admission = governor.getScalingCaps();
+        const auto cap = governor.capEmbedJobDocuments(64);
+        CHECK(cap > 0);
+        CHECK(cap <= previous);
+        CHECK(governor.capEmbedJobDocuments(0) == 0);
+        CHECK(governor.capEmbedJobDocuments(1) == 1);
+        if (level == ResourcePressureLevel::Normal) {
+            CHECK(cap == 64);
+        } else if (level == ResourcePressureLevel::Warning) {
+            CHECK(cap < 64);
+        } else {
+            CHECK(cap == 1);
+        }
+        // Sizing already-admitted work must not mutate admission or deferral state.
+        CHECK(governor.getScalingCaps().embedConcurrency == admission.embedConcurrency);
+        CHECK(governor.getScalingCaps().allowNewIngest == admission.allowNewIngest);
+        if (level == ResourcePressureLevel::Emergency) {
+            CHECK(admission.embedConcurrency == 0);
+            CHECK_FALSE(admission.allowNewIngest);
+        }
+        previous = cap;
+    }
+}
+
 TEST_CASE("ResourceGovernor Warning caps honor configurable scale percent",
           "[daemon][governance][catch2]") {
     auto& governor = ResourceGovernor::instance();

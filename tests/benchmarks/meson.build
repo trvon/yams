@@ -302,7 +302,7 @@ ingestion_e2e_bench = executable('ingestion_e2e_bench',
     dependency('spdlog'),
     dependency('nlohmann_json'),
   ] + yams_tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
+  cpp_args: ['-DYAMS_TESTING=1', '-DYAMS_TEST_PROVIDER_CONTROLS=1'] + yams_tracy_args,
   install: false,
 )
 
