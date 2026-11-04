@@ -33,6 +33,7 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/MetricsSnapshotRegistry.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
@@ -1013,6 +1014,75 @@ template <typename Predicate> bool waitForCondition(Predicate&& predicate, int a
 // =============================================================================
 // Embedding Status Tests
 // =============================================================================
+
+TEST_CASE("Worker completion retains the caller context until the posting scope exits",
+          "[daemon][dispatcher][offload-lifetime]") {
+    struct TailGate {
+        std::promise<void> entered;
+        std::promise<void> releasePromise;
+        std::shared_future<void> released{releasePromise.get_future().share()};
+        std::once_flag releaseOnce;
+        std::thread::id worker;
+
+        void release() {
+            std::call_once(releaseOnce, [this] { releasePromise.set_value(); });
+        }
+    };
+    struct TailResult {
+        std::shared_ptr<TailGate> gate;
+        int value{0};
+        bool workerTemporary{false};
+
+        TailResult() = default;
+        explicit TailResult(std::shared_ptr<TailGate> g) : gate(std::move(g)), value(42) {}
+        TailResult(const TailResult&) = delete;
+        TailResult& operator=(const TailResult&) = delete;
+        TailResult(TailResult&& other) noexcept : gate(other.gate), value(other.value) {}
+        TailResult& operator=(TailResult&& other) noexcept {
+            gate = other.gate;
+            value = other.value;
+            workerTemporary = true;
+            return *this;
+        }
+        ~TailResult() {
+            // offload_to_worker assigns its worker-local result, then moves a
+            // separate result into the completion. Hold that original scope
+            // after posting without blocking the caller's completion handler.
+            if (workerTemporary && gate && std::this_thread::get_id() == gate->worker) {
+                gate->entered.set_value();
+                gate->released.wait();
+            }
+        }
+    };
+
+    // The context outlives the actual workers even if a REQUIRE aborts the case.
+    boost::asio::io_context caller;
+    GraphDispatcherFixture fixture;
+    auto gate = std::make_shared<TailGate>();
+    ScopeExit releaseWorker([&] { gate->release(); });
+    auto work = [gate] {
+        gate->worker = std::this_thread::get_id();
+        return TailResult(gate);
+    };
+    auto result =
+        boost::asio::co_spawn(caller,
+                              yams::daemon::dispatch::offload_to_worker(
+                                  fixture.svc.get(), "test_completion_lifetime", std::move(work)),
+                              boost::asio::use_future);
+    caller.poll();
+    REQUIRE(gate->entered.get_future().wait_for(std::chrono::seconds(2)) ==
+            std::future_status::ready);
+    // This is an I/O work-budget check, not a sleep/racy timing inference: the
+    // completion is queued and the worker remains held by an explicit future.
+    caller.run_for(std::chrono::milliseconds(10));
+    CHECK(result.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    CHECK_FALSE(caller.stopped());
+    gate->release();
+    caller.restart();
+    caller.run_for(std::chrono::seconds(2));
+    REQUIRE(result.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    CHECK(result.get().value == 42);
+}
 
 TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embedding]") {
     StateComponent state;

@@ -118,6 +118,14 @@ message DeleteRequest {
   string instance_id = 100;
 }
 
+// Exact location retirement is a separate payload, not an ignorable DeleteRequest flag.
+message UnlinkPathRequest {
+  string path = 1;
+  bool dry_run = 2;
+  string session_id = 99;
+  string instance_id = 100;
+}
+
 message ListRequest {
   uint32 limit = 1;
   int32 offset = 2;
@@ -1293,6 +1301,7 @@ message Envelope {
     GetChunkRequest get_chunk_request = 15;
     GetEndRequest get_end_request = 16;
     DeleteRequest delete_request = 17;
+    UnlinkPathRequest unlink_path_request = 190;
     ListRequest list_request = 18;
     ShutdownRequest shutdown_request = 19;
     StatusRequest status_request = 20;

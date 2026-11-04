@@ -228,8 +228,13 @@ queryGrepCandidatesForGlobPattern(IMetadataRepository& repo, std::string_view gl
     }
 
     std::string sqlPattern = globToSqlLike(std::string(globPattern));
-    if (globPattern.find('?') != std::string_view::npos) {
+    const auto lastSlash = globPattern.find_last_of('/');
+    if (globPattern.find('?') != std::string_view::npos ||
+        (lastSlash != std::string_view::npos && globPattern.find('*') < lastSlash)) {
+        // Wildcards in directory segments are not literal path-prefix constraints.
         DocumentQueryOptions opts;
+        opts.usePathLocations = true;
+        opts.currentPathsOnly = true;
         opts.likePattern = sqlPattern;
         opts.excludeBinaryMimeTypes = true;
         if (limit > 0)
@@ -282,6 +287,8 @@ queryDocumentsByGlobPatterns(IMetadataRepository& repo,
 Result<std::vector<GrepCandidateProjection>>
 queryGrepCandidatesByPattern(IMetadataRepository& repo, const std::string& likePattern, int limit) {
     auto opts = buildQueryOptionsForSqlLikePattern(likePattern);
+    opts.usePathLocations = true;
+    opts.currentPathsOnly = true;
     opts.excludeBinaryMimeTypes = true;
     if (limit > 0)
         opts.limit = limit;
@@ -290,6 +297,8 @@ queryGrepCandidatesByPattern(IMetadataRepository& repo, const std::string& likeP
     if (result && result.value().empty() && !likePattern.empty() &&
         likePattern.find('%') == std::string::npos) {
         DocumentQueryOptions fallback;
+        fallback.usePathLocations = true;
+        fallback.currentPathsOnly = true;
         fallback.excludeBinaryMimeTypes = true;
         auto derived = computePathDerivedValues(likePattern);
         fallback.exactPath = derived.normalizedPath;
@@ -314,7 +323,7 @@ queryGrepCandidatesByGlobPatterns(IMetadataRepository& repo,
     // Multiple patterns — OR them together with O(1) dedup
     std::vector<GrepCandidateProjection> allResults;
     allResults.reserve(limit > 0 ? limit : 100);
-    std::unordered_set<int64_t> seenIds;
+    std::unordered_set<std::string> seenPaths;
 
     for (const auto& globPattern : globPatterns) {
         auto result = queryGrepCandidatesForGlobPattern(repo, globPattern, 0);
@@ -323,7 +332,7 @@ queryGrepCandidatesByGlobPatterns(IMetadataRepository& repo,
         }
 
         for (auto& doc : result.value()) {
-            if (seenIds.insert(doc.id).second) {
+            if (seenPaths.insert(doc.filePath).second) {
                 allResults.push_back(std::move(doc));
                 if (limit > 0 && allResults.size() >= static_cast<size_t>(limit)) {
                     return allResults;

@@ -14,6 +14,7 @@
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -73,9 +74,14 @@ offload_to_worker(ServiceManager* sm, const char* jobName, Fn&& fn) {
     co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
                                                    void(const std::exception_ptr&, ResultType)>(
         [work_executor, jobName](auto handler, auto f) mutable {
-            // Post work to the worker thread pool
+            // A completion can execute before the worker's post() returns. Keep
+            // caller work alive on the worker through that entire posting scope,
+            // not only in the completion handler which may already be destroyed.
+            auto completionWork =
+                boost::asio::make_work_guard(boost::asio::get_associated_executor(handler));
             boost::asio::post(
-                work_executor, [handler = std::move(handler), f = std::move(f), jobName]() mutable {
+                work_executor, [handler = std::move(handler), f = std::move(f), jobName,
+                                completionWork = std::move(completionWork)]() mutable {
                     std::exception_ptr ep;
                     ResultType result{};
                     try {
@@ -84,9 +90,8 @@ offload_to_worker(ServiceManager* sm, const char* jobName, Fn&& fn) {
                     } catch (...) {
                         ep = std::current_exception();
                     }
-                    // Post completion back to the handler's associated executor
-                    auto completion_executor = boost::asio::get_associated_executor(handler);
-                    boost::asio::post(completion_executor,
+                    // Keep completionWork here until post() and worker cleanup finish.
+                    boost::asio::post(completionWork.get_executor(),
                                       [handler = std::move(handler), ep = std::move(ep),
                                        result = std::move(result)]() mutable {
                                           std::move(handler)(ep, std::move(result));

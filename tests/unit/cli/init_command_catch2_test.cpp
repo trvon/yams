@@ -22,6 +22,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/config/static_embedding_table.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/daemon.h>
 #include <yams/vector/simeon_embedding_backend.h>
@@ -68,6 +69,7 @@ struct CliTestHelper {
     fs::path configPath;
     fs::path dataDir;
     std::optional<yams::test::ScopedEnvVar> configEnv;
+    std::optional<yams::test::ScopedEnvVar> compatibilityConfigEnv;
     std::optional<yams::test::ScopedEnvVar> dataEnv;
     std::optional<yams::test::ScopedEnvVar> nonInteractiveEnv;
     std::optional<yams::test::ScopedEnvVar> disableDaemonEnv;
@@ -83,6 +85,7 @@ struct CliTestHelper {
         fs::create_directories(configPath.parent_path());
 
         configEnv.emplace("YAMS_CONFIG", configPath.string());
+        compatibilityConfigEnv.emplace("YAMS_CONFIG_PATH", std::nullopt);
         dataEnv.emplace("YAMS_DATA_DIR", dataDir.string());
         nonInteractiveEnv.emplace(std::string("YAMS_NON_INTERACTIVE"),
                                   std::optional<std::string>("1"));
@@ -94,6 +97,7 @@ struct CliTestHelper {
 
     ~CliTestHelper() {
         configEnv.reset();
+        compatibilityConfigEnv.reset();
         dataEnv.reset();
         nonInteractiveEnv.reset();
         disableDaemonEnv.reset();

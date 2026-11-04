@@ -813,6 +813,9 @@ struct DeleteByNameRequest {
 
     // Optional durable-intent seam invoked for the exact resolved hash before destructive work.
     std::function<Result<void>(std::string_view)> beforeDelete;
+    // Retire one exact current name without CAS, corpus, or immutable-history deletion.
+    // Requires name only (not hash/names/pattern); keepRefs retains its separate legacy meaning.
+    bool pathOnly{false};
 };
 
 struct DeleteByNameResult {
@@ -822,6 +825,8 @@ struct DeleteByNameResult {
     bool contentRemoved{false};
     ErrorCode errorCode{ErrorCode::Success};
     std::optional<std::string> error{};
+    // A retired location is not a corpus-wide removal, even when content was retained.
+    bool pathOnly{false};
 };
 
 struct DeleteByNameResponse {

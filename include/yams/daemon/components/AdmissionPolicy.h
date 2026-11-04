@@ -47,6 +47,7 @@ public:
         if (std::holds_alternative<AddDocumentRequest>(request) ||
             std::holds_alternative<UpdateDocumentRequest>(request) ||
             std::holds_alternative<DeleteRequest>(request) ||
+            std::holds_alternative<UnlinkPathRequest>(request) ||
             std::holds_alternative<BatchRequest>(request) ||
             std::holds_alternative<GenerateEmbeddingRequest>(request) ||
             std::holds_alternative<BatchEmbeddingRequest>(request) ||

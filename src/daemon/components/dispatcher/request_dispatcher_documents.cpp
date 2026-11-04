@@ -1439,11 +1439,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                 daemonResult.error = deleteResult.error.value_or("");
                 if (daemonResult.success) {
                     response.successCount++;
-                    if (lifecycle_ && !deleteResult.hash.empty()) {
-                        lifecycle_->onDocumentRemoved(deleteResult.hash);
-                    }
-                    if (!response.dryRun && !deleteResult.hash.empty()) {
-                        replicatedDeletes.push_back(deleteResult.hash);
+                    // A successful location retirement leaves the content in the corpus.
+                    // Neither lifecycle removal nor replication may turn it into a hash delete.
+                    if (!deleteResult.pathOnly) {
+                        if (lifecycle_ && !deleteResult.hash.empty()) {
+                            lifecycle_->onDocumentRemoved(deleteResult.hash);
+                        }
+                        if (!response.dryRun && !deleteResult.hash.empty()) {
+                            replicatedDeletes.push_back(deleteResult.hash);
+                        }
                     }
                 } else {
                     response.failureCount++;
@@ -1486,6 +1490,57 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                 }
             }
             co_return response;
+        });
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleUnlinkPathRequest(const UnlinkPathRequest& req) {
+    co_return co_await yams::daemon::dispatch::guard_await(
+        "unlink_path", [this, req]() -> boost::asio::awaitable<Response> {
+            auto documentService =
+                app::services::makeDocumentService(serviceManager_->getAppContext());
+            app::services::DeleteByNameRequest operation;
+            operation.name = req.path;
+            operation.dryRun = req.dryRun;
+            operation.pathOnly = true;
+            // No hash-wide durable intent, lifecycle removal, or replication publication.
+            auto result = co_await yams::daemon::dispatch::offload_to_worker(
+                serviceManager_, "documents.unlink_path",
+                [documentService, operation = std::move(operation)]() mutable {
+                    return documentService->deleteByName(operation);
+                });
+            if (!result) {
+                co_return yams::daemon::dispatch::makeErrorResponse(result.error().code,
+                                                                    result.error().message);
+            }
+            const auto& response = result.value();
+            if (!response.errors.empty()) {
+                const auto& error = response.errors.front();
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    error.errorCode, error.error.value_or("Failed to retire document path"));
+            }
+            if (response.deleted.size() != 1) {
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::InvalidState,
+                    "Path unlink must resolve exactly one current location");
+            }
+            const auto& effect = response.deleted.front();
+            if (!req.dryRun && !effect.pathOnly) {
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::InvalidState, "Path unlink returned a corpus-wide deletion effect");
+            }
+            DeleteResponse reply;
+            reply.dryRun = req.dryRun;
+            DeleteResponse::DeleteResult status;
+            status.name = effect.name;
+            status.hash = effect.hash;
+            status.success = effect.deleted || req.dryRun;
+            status.errorCode = effect.errorCode;
+            status.error = effect.error.value_or("");
+            reply.successCount = status.success ? 1 : 0;
+            reply.failureCount = status.success ? 0 : 1;
+            reply.results.push_back(std::move(status));
+            co_return reply;
         });
 }
 
@@ -1684,7 +1739,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
             // intentionally omits per-file match details and instead populates the shared
             // pathsOnly projection. Map those paths into lightweight GrepMatch entries so daemon
             // clients (and tests) can observe results via the standard matches field.
-            if (serviceReq.pathsOnly) {
+            if (req.pathsOnly) {
                 GrepResponse response;
                 response.filesSearched = serviceResp.filesSearched;
                 response.regexMatches = static_cast<uint64_t>(serviceResp.regexMatches);

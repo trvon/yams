@@ -40,6 +40,51 @@ class ConfigurationAuthorityPolicyTest(unittest.TestCase):
             POLICY.run(self.root, self.env_allowlist, self.reader_allowlist), 0
         )
 
+    def test_canonical_reader_calls_are_not_definitions(self) -> None:
+        (self.root / "src" / "config.cpp").write_text(
+            'const char* key = "YAMS_EXISTING";\n'
+            "Config parseSimpleTomlFlat(const Path&) { return {}; }\n",
+            encoding="utf-8",
+        )
+        calls = [
+            'if (config::parse_simple_toml(staged) != expected) { reject(); }',
+            'if (config::parse_simple_toml(staged) == expected) { accept(); }',
+            'if (valid(config::parse_simple_toml(staged))) { accept(); }',
+        ]
+        for call in calls:
+            with self.subTest(call=call):
+                (self.root / "src" / "selection.cpp").write_text(
+                    "void select() { " + call + " }\n", encoding="utf-8"
+                )
+                self.assertEqual(
+                    POLICY.run(self.root, self.env_allowlist, self.reader_allowlist), 0
+                )
+
+    def test_nested_reader_definition_is_still_rejected(self) -> None:
+        (self.root / "src" / "config.cpp").write_text(
+            'const char* key = "YAMS_EXISTING";\n'
+            "Config parseSimpleTomlFlat(const Path&) { return {}; }\n",
+            encoding="utf-8",
+        )
+        parameters = [
+            "const Path&, Hook hook = callback(nested(1))",
+            'const Path&, const char* marker = "("',
+            "const Path& /* ) */",
+        ]
+        for signature in parameters:
+            with self.subTest(signature=signature):
+                (self.root / "src" / "duplicate.cpp").write_text(
+                    f"Config parseAnotherToml({signature}) const {{ return {{}}; }}\n",
+                    encoding="utf-8",
+                )
+                self.assertIn(
+                    "src/duplicate.cpp:parseAnotherToml:1",
+                    POLICY.toml_reader_definitions(self.root),
+                )
+                self.assertEqual(
+                    POLICY.run(self.root, self.env_allowlist, self.reader_allowlist), 1
+                )
+
     def test_new_environment_key_fails(self) -> None:
         (self.root / "src" / "feature.cpp").write_text(
             'auto value = getenv("YAMS_NEW_PRODUCT_KNOB");\n', encoding="utf-8"

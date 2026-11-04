@@ -2,6 +2,7 @@ spdlog_dep = dependency('spdlog', required: true)
 json_dep = dependency('nlohmann_json', required: true)
 yams_core = dependency('yams_core', required: false)
 yams_metadata = dependency('yams_metadata', required: false)
+detection_config_dep = dependency('yams_config', required: true)
 
 # Optional libmagic
 libmagic_dep = dependency('libmagic', required: false)
@@ -14,13 +15,14 @@ endif
 yams_detection = static_library('yams_detection',
   [ 'file_type_detector.cpp' ],
   include_directories: [include_directories('../../include'), include_directories('.')],
-  dependencies: [spdlog_dep, json_dep, yams_core, yams_metadata, libmagic_dep] + yams_tracy_deps,
+  dependencies: [spdlog_dep, json_dep, yams_core, yams_metadata, libmagic_dep, detection_config_dep] + yams_tracy_deps,
   cpp_args: yams_detection_cppargs + yams_tracy_args,
   install: false,
 )
 
 yams_detection_dep = declare_dependency(
   link_with: yams_detection,
+  dependencies: detection_config_dep,
   include_directories: include_directories('../../include'),
 )
 meson.override_dependency('yams_detection', yams_detection_dep)

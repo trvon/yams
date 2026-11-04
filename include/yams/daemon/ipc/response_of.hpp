@@ -30,6 +30,9 @@ template <> struct ResponseOf<ListRequest> {
 template <> struct ResponseOf<DeleteRequest> {
     using type = DeleteResponse;
 };
+template <> struct ResponseOf<UnlinkPathRequest> {
+    using type = DeleteResponse;
+};
 template <> struct ResponseOf<StatusRequest> {
     using type = StatusResponse;
 };

@@ -3389,6 +3389,32 @@ struct MemorySyncRequest {
     }
 };
 
+// A distinct operation is required: older daemons may ignore new DeleteRequest fields.
+// An unknown unlink operation must fail closed, never become a corpus-wide hash delete.
+struct UnlinkPathRequest {
+    std::string path;
+    bool dryRun{false};
+    std::string sessionId;
+    std::string instanceId;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << path << dryRun << sessionId << instanceId;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<UnlinkPathRequest> deserialize(Deserializer& deser) {
+        UnlinkPathRequest request;
+        YAMS_TRY(ipc_detail::readField(deser, request.path));
+        YAMS_TRY(ipc_detail::readField(deser, request.dryRun));
+        YAMS_TRY(ipc_detail::readField(deser, request.sessionId));
+        YAMS_TRY(ipc_detail::readField(deser, request.instanceId));
+        return request;
+    }
+};
+
 // Forward declaration for batch request type (defined with the batch envelope types)
 struct BatchRequest;
 
@@ -3406,6 +3432,7 @@ using Request = std::variant<
     ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest,
     GraphExploreRequest, GraphSymbolLookupRequest, GraphTraceRequest, GraphImpactRequest,
     GraphAffectedTestsRequest, GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest,
-    KgIngestRequest, MetadataValueCountsRequest, MemorySyncRequest, BatchRequest, RepairRequest>;
+    KgIngestRequest, MetadataValueCountsRequest, MemorySyncRequest, BatchRequest, RepairRequest,
+    UnlinkPathRequest>;
 
 } // namespace yams::daemon

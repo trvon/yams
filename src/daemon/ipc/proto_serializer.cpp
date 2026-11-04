@@ -637,6 +637,26 @@ template <> struct ProtoBinding<DeleteRequest> {
     }
 };
 
+template <> struct ProtoBinding<UnlinkPathRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kUnlinkPathRequest;
+    static void set(Envelope& env, const UnlinkPathRequest& request) {
+        auto* wire = env.mutable_unlink_path_request();
+        wire->set_path(request.path);
+        wire->set_dry_run(request.dryRun);
+        wire->set_session_id(request.sessionId);
+        wire->set_instance_id(request.instanceId);
+    }
+    static UnlinkPathRequest get(const Envelope& env) {
+        const auto& wire = env.unlink_path_request();
+        UnlinkPathRequest request;
+        request.path = wire.path();
+        request.dryRun = wire.dry_run();
+        request.sessionId = wire.session_id();
+        request.instanceId = wire.instance_id();
+        return request;
+    }
+};
+
 template <> struct ProtoBinding<ListRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kListRequest;
     static void set(Envelope& env, const ListRequest& r) {
@@ -1626,6 +1646,11 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key(std::string(status_keys::kStorageWarning));
             kv->set_value(r.storageWarning);
         }
+        if (r.supportsPathUnlink) {
+            auto* kv = o->add_request_counts();
+            kv->set_key(std::string(status_keys::kSupportsPathUnlink));
+            kv->set_value("1");
+        }
         if (!r.hostPressureSource.empty()) {
             const auto put = [&](std::string_view key, std::string value) {
                 auto* kv = o->add_request_counts();
@@ -1775,6 +1800,10 @@ template <> struct ProtoBinding<StatusResponse> {
             }
             if (kv.key() == status_keys::kHostPressureElevated) {
                 r.hostPressureElevated = kv.value() == "1";
+                continue;
+            }
+            if (kv.key() == status_keys::kSupportsPathUnlink) {
+                r.supportsPathUnlink = kv.value() == "1";
                 continue;
             }
             if (kv.key() == status_keys::kDeferredBackgroundWork) {
@@ -4357,6 +4386,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kDeleteRequest: {
             auto v = ProtoBinding<DeleteRequest>::get(env);
             m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kUnlinkPathRequest: {
+            auto request = ProtoBinding<UnlinkPathRequest>::get(env);
+            m.payload = Request{std::move(request)};
             break;
         }
         case Envelope::kListRequest: {
