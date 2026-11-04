@@ -773,7 +773,7 @@ size_t SlidingWindowChunker::calculateStride() const {
 
 std::unique_ptr<DocumentChunker> createChunker(ChunkingStrategy strategy,
                                                const ChunkingConfig& config,
-                                               std::shared_ptr<EmbeddingGenerator> embedder) {
+                                               std::shared_ptr<EmbeddingGenerator> /*embedder*/) {
     switch (strategy) {
         case ChunkingStrategy::FIXED_SIZE:
             return std::make_unique<FixedSizeChunker>(config);
@@ -791,10 +791,7 @@ std::unique_ptr<DocumentChunker> createChunker(ChunkingStrategy strategy,
             return std::make_unique<SlidingWindowChunker>(config);
 
         case ChunkingStrategy::SEMANTIC:
-            if (embedder) {
-                return std::make_unique<SemanticChunker>(config, embedder);
-            }
-            // Fall back to sentence-based if no embedder provided
+            // Semantic chunking was never implemented; sentence boundaries are the fallback.
             return std::make_unique<SentenceBasedChunker>(config);
 
         case ChunkingStrategy::MARKDOWN_AWARE:
@@ -1097,62 +1094,6 @@ std::string createChunkingSummary(const std::vector<DocumentChunk>& chunks) {
 // =============================================================================
 // Placeholder implementations for remaining chunkers
 // =============================================================================
-
-// SemanticChunker
-SemanticChunker::SemanticChunker(const ChunkingConfig& config,
-                                 std::shared_ptr<EmbeddingGenerator> embedder)
-    : DocumentChunker(config), embedder_(std::move(embedder)) {
-    config_.strategy = ChunkingStrategy::SEMANTIC;
-}
-
-std::vector<DocumentChunk> SemanticChunker::doChunking(const std::string& content,
-                                                       const std::string& document_hash) {
-    // Simplified implementation - creates basic chunks
-    // Full implementation would use embeddings to group semantically similar sentences
-    std::vector<DocumentChunk> chunks;
-
-    size_t chunk_size =
-        config_.use_token_count ? (config_.target_chunk_size * 4) : config_.target_chunk_size;
-    size_t start = 0;
-    size_t chunk_index = 0;
-
-    while (start < content.size()) {
-        size_t end = std::min(start + chunk_size, content.size());
-
-        DocumentChunk chunk;
-        chunk.chunk_id = generateChunkId(document_hash, chunk_index);
-        chunk.document_hash = document_hash;
-        chunk.content = content.substr(start, end - start);
-        chunk.chunk_index = chunk_index;
-        chunk.start_offset = start;
-        chunk.end_offset = end;
-        chunk.strategy_used = ChunkingStrategy::SEMANTIC;
-
-        chunks.push_back(std::move(chunk));
-
-        start = end;
-        chunk_index++;
-    }
-
-    linkChunks(chunks);
-    return chunks;
-}
-
-double SemanticChunker::computeSimilarity(const std::string& text1, const std::string& text2) {
-    (void)text1; // Suppress unused parameter warning
-    (void)text2; // Suppress unused parameter warning
-    // Compute embeddings and calculate cosine similarity
-    // Placeholder implementation
-    return 0.5;
-}
-
-std::vector<size_t> SemanticChunker::findSemanticBoundaries(const std::string& text) {
-    // Find boundaries where semantic similarity drops
-    // Placeholder implementation
-    return findSentenceBoundaries(text);
-}
-
-// =============================================================================
 // SentenceBasedChunker Implementation
 // =============================================================================
 
@@ -1295,31 +1236,6 @@ ParagraphBasedChunker::ParagraphBasedChunker(const ChunkingConfig& config)
     config_.strategy = ChunkingStrategy::PARAGRAPH_BASED;
 }
 
-std::vector<std::string> ParagraphBasedChunker::splitIntoParagraphs(const std::string& text) const {
-    std::vector<std::string> paragraphs;
-    auto boundaries = findParagraphBoundaries(text);
-
-    size_t start = 0;
-    for (size_t boundary : boundaries) {
-        if (boundary > start) {
-            std::string paragraph = text.substr(start, boundary - start);
-            // Trim whitespace
-            while (!paragraph.empty() && std::isspace(paragraph.back())) {
-                paragraph.pop_back();
-            }
-            while (!paragraph.empty() && std::isspace(paragraph.front())) {
-                paragraph.erase(0, 1);
-            }
-            if (!paragraph.empty()) {
-                paragraphs.push_back(paragraph);
-            }
-        }
-        start = boundary;
-    }
-
-    return paragraphs;
-}
-
 std::vector<DocumentChunk> ParagraphBasedChunker::doChunking(const std::string& content,
                                                              const std::string& document_hash) {
     std::vector<DocumentChunk> chunks;
@@ -1452,24 +1368,6 @@ std::vector<DocumentChunk> MarkdownChunker::doChunking(const std::string& conten
 
     linkChunks(chunks);
     return chunks;
-}
-
-std::vector<MarkdownChunker::MarkdownSection>
-MarkdownChunker::parseMarkdownStructure(const std::string& text) const {
-    (void)text; // Suppress unused parameter warning
-    // Parse markdown headers and sections
-    // Placeholder implementation
-    return {};
-}
-
-std::vector<DocumentChunk>
-MarkdownChunker::chunksFromSections(const std::vector<MarkdownSection>& sections,
-                                    const std::string& document_hash) const {
-    (void)sections;      // Suppress unused parameter warning
-    (void)document_hash; // Suppress unused parameter warning
-    // Convert markdown sections to chunks
-    // Placeholder implementation
-    return {};
 }
 
 } // namespace yams::vector

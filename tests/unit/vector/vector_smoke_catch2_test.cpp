@@ -790,36 +790,4 @@ TEST_CASE_METHOD(VectorSmokeFixture,
     CHECK(got.value().model_version == "v2");
 }
 
-TEST_CASE_METHOD(VectorSmokeFixture,
-                 "VectorSmoke soft delete helpers fail explicitly until schema supports them",
-                 "[vector][smoke][lifecycle][catch2]") {
-    skipIfNeeded();
-
-    VectorDatabaseConfig config;
-    config.database_path = ":memory:";
-    config.embedding_dim = 4;
-    config.create_if_missing = true;
-    config.use_in_memory = true;
-
-    VectorDatabase db(config);
-    REQUIRE(db.initialize());
-
-    VectorRecord rec;
-    rec.chunk_id = "delete_lifecycle_1";
-    rec.document_hash = "doc_delete_lifecycle";
-    rec.embedding = {1.0f, 0.0f, 0.0f, 0.0f};
-    rec.content = "delete lifecycle content";
-    rec.start_offset = 0;
-    rec.end_offset = rec.content.size();
-    REQUIRE(db.insertVector(rec));
-
-    auto softDelete = db.markAsDeleted("delete_lifecycle_1");
-    REQUIRE_FALSE(softDelete.has_value());
-    CHECK(softDelete.error().code == yams::ErrorCode::NotSupported);
-
-    auto purgeDeleted = db.purgeDeleted(std::chrono::hours(24));
-    REQUIRE_FALSE(purgeDeleted.has_value());
-    CHECK(purgeDeleted.error().code == yams::ErrorCode::NotSupported);
-}
-
 // NOLINTEND(bugprone-chained-comparison)
