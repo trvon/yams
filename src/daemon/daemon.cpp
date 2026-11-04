@@ -657,19 +657,6 @@ Result<void> YamsDaemon::start() {
         });
     }
 
-#ifdef YAMS_TESTING
-    // Fast-start mode for tests: skip heavy service initialization and allow
-    // streaming stubs/status responses to operate over the live socket server.
-    // Enable by setting YAMS_TEST_FAST_START=1 in the environment.
-    if (yams::config::read_env_bool("YAMS_TEST_FAST_START").valueOr(false)) {
-        spdlog::warn("YAMS_TEST_FAST_START enabled: skipping ServiceManager initialization");
-        // Leave lifecycle FSM in its current (Initializing) state; readiness flags
-        // for services remain false. RequestDispatcher will serve Status responses
-        // and RequestHandler will use streaming stubs for Search/List/Grep.
-        return Result<void>();
-    }
-#endif
-
     spdlog::info("[Startup] Phase: ServiceManager Init");
     if (auto result = serviceManager_->initialize(); !result) {
         running_ = false;

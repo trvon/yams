@@ -474,27 +474,6 @@ TEST_CASE_METHOD(DocumentChunkerFixture, "MarkdownChunker basic chunking",
 }
 
 // =============================================================================
-// Semantic Chunker Tests
-// =============================================================================
-
-TEST_CASE_METHOD(DocumentChunkerFixture, "SemanticChunker basic chunking",
-                 "[vector][chunker][semantic][catch2]") {
-    ChunkingConfig config = defaultConfig;
-    config.strategy = ChunkingStrategy::SEMANTIC;
-    config.target_chunk_size = 100;
-    config.semantic_threshold = 0.7f;
-
-    EmbeddingConfig embedConfig;
-    embedConfig.backend_is_resolved = true;
-    auto embedder = std::make_shared<EmbeddingGenerator>(embedConfig);
-
-    SemanticChunker chunker(config, embedder);
-    auto chunks = chunker.chunkDocument(sentenceText, "doc_hash");
-
-    REQUIRE_FALSE(chunks.empty());
-}
-
-// =============================================================================
 // Factory Function Tests
 // =============================================================================
 

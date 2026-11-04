@@ -93,7 +93,6 @@ public:
     bool hasReusablePersistedSearchIndex() const;
     bool optimizeIndex();
     bool persistIndex();
-    void compactDatabase();
     bool rebuildIndex();
     bool beginBulkLoad();
     bool finalizeBulkLoad();
@@ -123,11 +122,6 @@ public:
     Result<std::vector<VectorRecord>> getEmbeddingsByVersion(const std::string& model_version,
                                                              size_t limit = 1000);
     Result<void> markAsStale(const std::string& chunk_id);
-    // Soft-delete lifecycle is not yet modeled in the current vectors schema; this API returns
-    // NotSupported until deleted-state columns are introduced.
-    Result<void> markAsDeleted(const std::string& chunk_id);
-    // Companion to markAsDeleted(); currently returns NotSupported for the same reason.
-    Result<size_t> purgeDeleted(std::chrono::hours age_threshold);
 
     Result<void> insertEntityVector(const EntityVectorRecord& record);
     Result<void> insertEntityVectorsBatch(const std::vector<EntityVectorRecord>& records);

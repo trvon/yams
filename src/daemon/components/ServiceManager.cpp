@@ -636,14 +636,12 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 std::chrono::seconds(TuneAdvisor::checkpointIntervalSeconds());
             checkpointConfig.vector_index_insert_threshold =
                 TuneAdvisor::checkpointInsertThreshold();
-            checkpointConfig.enable_hotzone_persistence = TuneAdvisor::enableHotzoneCheckpoint();
             checkpointConfig.data_dir = config_.dataDir;
 
             CheckpointManager::Dependencies checkpointDeps;
             checkpointDeps.vectorSystemManager = vectorSystemManager_.get();
             checkpointDeps.vectorIndexCoordinator = vectorIndexCoordinator_.get();
             checkpointDeps.state = &state_;
-            checkpointDeps.hotzoneManager = nullptr;
             if (auto metadataRepository = getMetadataRepo()) {
                 checkpointDeps.checkpointWal = [metadataRepository]() {
                     return metadataRepository->checkpointWal();

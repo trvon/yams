@@ -486,8 +486,6 @@ struct SearchResult {
     std::optional<double> kgScore;          ///< Contribution from knowledge graph
     std::optional<double> pathScore;        ///< Contribution from path matching
     std::optional<double> tagScore;         ///< Contribution from tag matching
-    std::optional<double> symbolScore;      ///< Contribution from symbol search
-    std::optional<double> anchorScore;      ///< Contribution from topology anchor (medoid affinity)
     std::optional<double> topologyScore; ///< Contribution from topology candidate-rescue evidence
 };
 

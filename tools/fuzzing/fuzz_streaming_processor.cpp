@@ -99,8 +99,6 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         RequestHandler::Config config;
         config.enable_streaming = true;
         config.chunk_size = (size > 0) ? (data[0] * 1024) + 1024 : 128 * 1024;
-        config.auto_detect_streaming = (size > 2) ? (data[2] & 1) : true;
-        config.force_streaming = (size > 3) ? (data[3] & 1) : false;
 
         auto processor = std::make_shared<StreamingRequestProcessor>(delegate, config);
 

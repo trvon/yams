@@ -233,51 +233,6 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
                                  expansionStats);
     }
 
-    if (config.enableLexicalExpansion && stats.baseFtsHitCount < config.lexicalExpansionMinHits) {
-        std::vector<std::string> tokens = tokenizeLower(query);
-        std::vector<std::string> expansionTerms;
-        expansionTerms.reserve(tokens.size());
-        std::unordered_set<std::string> uniqueTokens;
-        uniqueTokens.reserve(tokens.size());
-
-        for (const auto& token : tokens) {
-            if (token.size() < 3) {
-                continue;
-            }
-            if (uniqueTokens.insert(token).second) {
-                expansionTerms.push_back(token);
-            }
-            if (expansionTerms.size() >= 6) {
-                break;
-            }
-        }
-
-        if (expansionTerms.size() >= 2) {
-            std::string expandedQuery;
-            expandedQuery.reserve(expansionTerms.size() * 8);
-            for (size_t i = 0; i < expansionTerms.size(); ++i) {
-                if (i > 0) {
-                    expandedQuery += " OR ";
-                }
-                expandedQuery += expansionTerms[i];
-            }
-
-            auto expandedResults = metadataRepo->search(expandedQuery, static_cast<int>(limit), 0);
-            if (expandedResults) {
-                const float penalty = std::clamp(config.lexicalExpansionScorePenalty, 0.1f, 1.0f);
-                appendLexicalBatch(query, queryIntent, config, expandedResults.value(), penalty,
-                                   true, &seenHashes, ComponentResult::Source::Text, results,
-                                   expansionStats);
-                appendSimeonLexicalBatch(query, session, lastSimeonRouteRecipe, queryIntent, config,
-                                         expandedResults.value(), penalty, simeonSeenHashes,
-                                         results, expansionStats);
-                spdlog::debug("queryFullText lexical expansion: base_hits={} expanded_hits={} "
-                              "query='{}' expanded='{}'",
-                              stats.baseFtsHitCount, results.size(), query, expandedQuery);
-            }
-        }
-    }
-
     if (config.enableSubPhraseExpansion &&
         stats.baseFtsHitCount < config.subPhraseExpansionMinHits) {
         const size_t maxSubPhrases = std::max<size_t>(config.multiVectorMaxPhrases, 3);

@@ -6,318 +6,6 @@
 namespace yams::daemon {
 
 // ============================================================================
-// Batch Request/Response Types (Track B: Communication Overhead Reduction)
-// ============================================================================
-
-struct BatchItem;
-
-struct BatchItemResponse {
-    uint32_t sequenceId = 0;
-    bool success = false;
-    std::variant<SearchResponse, GetResponse, AddDocumentResponse, GrepResponse,
-                 UpdateDocumentResponse, DeleteResponse, ListResponse, GraphQueryResponse,
-                 ErrorResponse>
-        response;
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << sequenceId << success;
-        std::visit(
-            [&ser](const auto& r) {
-                using T = std::decay_t<decltype(r)>;
-                if constexpr (std::is_same_v<T, SearchResponse>)
-                    ser << uint8_t(0);
-                else if constexpr (std::is_same_v<T, GetResponse>)
-                    ser << uint8_t(1);
-                else if constexpr (std::is_same_v<T, AddDocumentResponse>)
-                    ser << uint8_t(2);
-                else if constexpr (std::is_same_v<T, GrepResponse>)
-                    ser << uint8_t(3);
-                else if constexpr (std::is_same_v<T, UpdateDocumentResponse>)
-                    ser << uint8_t(4);
-                else if constexpr (std::is_same_v<T, DeleteResponse>)
-                    ser << uint8_t(5);
-                else if constexpr (std::is_same_v<T, ListResponse>)
-                    ser << uint8_t(6);
-                else if constexpr (std::is_same_v<T, GraphQueryResponse>)
-                    ser << uint8_t(7);
-                else if constexpr (std::is_same_v<T, ErrorResponse>)
-                    ser << uint8_t(8);
-                ser << r;
-            },
-            response);
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<BatchItemResponse> deserialize(Deserializer& deser) {
-        BatchItemResponse resp;
-        auto seq = deser.template read<uint32_t>();
-        if (!seq)
-            return seq.error();
-        resp.sequenceId = seq.value();
-        auto succ = deser.template read<bool>();
-        if (!succ)
-            return succ.error();
-        resp.success = succ.value();
-        auto type = deser.template read<uint8_t>();
-        if (!type)
-            return type.error();
-        switch (type.value()) {
-            case 0: {
-                auto r = SearchResponse::deserialize(deser);
-                if (!r)
-                    return r.error();
-                resp.response = r.value();
-                break;
-            }
-            case 1: {
-                auto r = GetResponse::deserialize(deser);
-                if (!r)
-                    return r.error();
-                resp.response = r.value();
-                break;
-            }
-            case 2: {
-                auto r = AddDocumentResponse::deserialize(deser);
-                if (!r)
-                    return r.error();
-                resp.response = r.value();
-                break;
-            }
-            case 3: {
-                auto r = GrepResponse::deserialize(deser);
-                if (!r)
-                    return r.error();
-                resp.response = r.value();
-                break;
-            }
-            case 4: {
-                auto r = UpdateDocumentResponse::deserialize(deser);
-                if (!r)
-                    return r.error();
-                resp.response = r.value();
-                break;
-            }
-            case 5: {
-                auto r = DeleteResponse::deserialize(deser);
-                if (!r)
-                    return r.error();
-                resp.response = r.value();
-                break;
-            }
-            case 6: {
-                auto r = ListResponse::deserialize(deser);
-                if (!r)
-                    return r.error();
-                resp.response = r.value();
-                break;
-            }
-            case 7: {
-                auto r = GraphQueryResponse::deserialize(deser);
-                if (!r)
-                    return r.error();
-                resp.response = r.value();
-                break;
-            }
-            case 8: {
-                auto r = ErrorResponse::deserialize(deser);
-                if (!r)
-                    return r.error();
-                resp.response = r.value();
-                break;
-            }
-            default:
-                return Error{ErrorCode::InvalidData, "Unknown BatchItemResponse type"};
-        }
-        return resp;
-    }
-};
-
-struct BatchResponse {
-    std::vector<BatchItemResponse> items;
-    uint32_t totalCount = 0;
-    uint32_t successCount = 0;
-    uint32_t errorCount = 0;
-    std::chrono::milliseconds elapsed{0};
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << items << totalCount << successCount << errorCount << elapsed;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<BatchResponse> deserialize(Deserializer& deser) {
-        BatchResponse resp;
-        auto items = deser.template readVector<BatchItemResponse>();
-        if (!items)
-            return items.error();
-        resp.items = items.value();
-        auto total = deser.template read<uint32_t>();
-        if (!total)
-            return total.error();
-        resp.totalCount = total.value();
-        auto success = deser.template read<uint32_t>();
-        if (!success)
-            return success.error();
-        resp.successCount = success.value();
-        auto error = deser.template read<uint32_t>();
-        if (!error)
-            return error.error();
-        resp.errorCount = error.value();
-        auto elapsed = deser.template readDuration<std::chrono::milliseconds>();
-        if (elapsed)
-            resp.elapsed = elapsed.value();
-        return resp;
-    }
-};
-
-struct BatchItem {
-    uint32_t sequenceId = 0;
-    std::variant<SearchRequest, GetRequest, AddDocumentRequest, GrepRequest, UpdateDocumentRequest,
-                 DeleteRequest, ListRequest, GraphQueryRequest>
-        request;
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << sequenceId;
-        std::visit(
-            [&ser](const auto& r) {
-                using T = std::decay_t<decltype(r)>;
-                if constexpr (std::is_same_v<T, SearchRequest>)
-                    ser << uint8_t(0);
-                else if constexpr (std::is_same_v<T, GetRequest>)
-                    ser << uint8_t(1);
-                else if constexpr (std::is_same_v<T, AddDocumentRequest>)
-                    ser << uint8_t(2);
-                else if constexpr (std::is_same_v<T, GrepRequest>)
-                    ser << uint8_t(3);
-                else if constexpr (std::is_same_v<T, UpdateDocumentRequest>)
-                    ser << uint8_t(4);
-                else if constexpr (std::is_same_v<T, DeleteRequest>)
-                    ser << uint8_t(5);
-                else if constexpr (std::is_same_v<T, ListRequest>)
-                    ser << uint8_t(6);
-                else if constexpr (std::is_same_v<T, GraphQueryRequest>)
-                    ser << uint8_t(7);
-                ser << r;
-            },
-            request);
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<BatchItem> deserialize(Deserializer& deser) {
-        BatchItem item;
-        auto seq = deser.template read<uint32_t>();
-        if (!seq)
-            return seq.error();
-        item.sequenceId = seq.value();
-        auto type = deser.template read<uint8_t>();
-        if (!type)
-            return type.error();
-        switch (type.value()) {
-            case 0: {
-                auto r = SearchRequest::deserialize(deser);
-                if (!r)
-                    return r.error();
-                item.request = r.value();
-                break;
-            }
-            case 1: {
-                auto r = GetRequest::deserialize(deser);
-                if (!r)
-                    return r.error();
-                item.request = r.value();
-                break;
-            }
-            case 2: {
-                auto r = AddDocumentRequest::deserialize(deser);
-                if (!r)
-                    return r.error();
-                item.request = r.value();
-                break;
-            }
-            case 3: {
-                auto r = GrepRequest::deserialize(deser);
-                if (!r)
-                    return r.error();
-                item.request = r.value();
-                break;
-            }
-            case 4: {
-                auto r = UpdateDocumentRequest::deserialize(deser);
-                if (!r)
-                    return r.error();
-                item.request = r.value();
-                break;
-            }
-            case 5: {
-                auto r = DeleteRequest::deserialize(deser);
-                if (!r)
-                    return r.error();
-                item.request = r.value();
-                break;
-            }
-            case 6: {
-                auto r = ListRequest::deserialize(deser);
-                if (!r)
-                    return r.error();
-                item.request = r.value();
-                break;
-            }
-            case 7: {
-                auto r = GraphQueryRequest::deserialize(deser);
-                if (!r)
-                    return r.error();
-                item.request = r.value();
-                break;
-            }
-            default:
-                return Error{ErrorCode::InvalidData, "Unknown BatchItem request type"};
-        }
-        return item;
-    }
-};
-
-struct BatchRequest {
-    std::vector<BatchItem> items;
-    bool continueOnError = false;
-    std::string sessionId;
-    std::string instanceId; // Instance-level isolation
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << items << continueOnError << sessionId << instanceId;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<BatchRequest> deserialize(Deserializer& deser) {
-        BatchRequest req;
-        auto items = deser.template readVector<BatchItem>();
-        if (!items)
-            return items.error();
-        req.items = items.value();
-        auto cont = deser.template read<bool>();
-        if (!cont)
-            return cont.error();
-        req.continueOnError = cont.value();
-        auto session = deser.readString();
-        if (session)
-            req.sessionId = session.value();
-        if (auto ii = deser.readString(); ii)
-            req.instanceId = std::move(ii.value());
-        return req;
-    }
-};
-
-// ============================================================================
 // Message Envelope
 // ============================================================================
 
@@ -349,6 +37,9 @@ constexpr size_t HEADER_SIZE = 16; // version(4) + size(4) + requestId(8)
 
 // Message type tags for serialization
 enum class MessageType : uint8_t {
+    // Retired values, never reuse: 26, 28, 29, 30, 44, 72, 153, 154, 165, 170, 179, 180, 181,
+    // 182 (removed ListSessions, path-selector, tree-diff, graph impact/tests/path-history and
+    // batch messages).
     // Requests
     SearchRequest = 1,
     AddRequest = 2,
@@ -379,12 +70,11 @@ enum class MessageType : uint8_t {
     EmbedDocumentsRequest = 24,
     // Session and utility requests
     CatRequest = 25,
-    ListSessionsRequest = 26,
+
     UseSessionRequest = 27,
-    AddPathSelectorRequest = 28,
-    RemovePathSelectorRequest = 29,
+
     // Tree diff requests (PBI-043)
-    ListTreeDiffRequest = 30,
+
     // File history request (PBI-043 enhancement)
     FileHistoryRequest = 31,
     // Prune request (PBI-062)
@@ -405,9 +95,7 @@ enum class MessageType : uint8_t {
     GraphExploreRequest = 77,
     GraphSymbolLookupRequest = 175,
     GraphTraceRequest = 177,
-    GraphImpactRequest = 179,
-    GraphAffectedTestsRequest = 181,
-    GraphPathHistoryRequest = 44,
+
     // Graph maintenance requests (PBI-009 Phase 4.3)
     GraphRepairRequest = 45,
     GraphValidateRequest = 46,
@@ -439,9 +127,9 @@ enum class MessageType : uint8_t {
     DeleteResponse = 147,
     PrepareSessionResponse = 148,
     CatResponse = 152,
-    ListSessionsResponse = 153,
+
     // Tree diff responses (PBI-043)
-    ListTreeDiffResponse = 154,
+
     // File history response (PBI-043 enhancement)
     FileHistoryResponse = 155,
     // Prune response (PBI-062)
@@ -459,9 +147,7 @@ enum class MessageType : uint8_t {
     GraphExploreResponse = 174,
     GraphSymbolLookupResponse = 176,
     GraphTraceResponse = 178,
-    GraphImpactResponse = 180,
-    GraphAffectedTestsResponse = 182,
-    GraphPathHistoryResponse = 165,
+
     // Graph maintenance responses (PBI-009 Phase 4.3)
     GraphRepairResponse = 166,
     GraphValidateResponse = 167,
@@ -472,10 +158,10 @@ enum class MessageType : uint8_t {
     // Generic metadata value counts query (MCP client mode)
     MetadataValueCountsRequest = 71,
     // Batch request (Track B: Communication Overhead Reduction)
-    BatchRequest = 72,
+
     MetadataValueCountsResponse = 169,
     // Batch response (Track B: Communication Overhead Reduction)
-    BatchResponse = 170,
+
     // Repair service
     RepairRequest_MsgType = 73,
     RepairResponse_MsgType = 171,

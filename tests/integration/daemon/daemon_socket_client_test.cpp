@@ -270,7 +270,6 @@ std::filesystem::path createMockExternalPlugin(const std::filesystem::path& base
 import json
 import sys
 
-
 def handle_request(req):
     method = req.get("method", "")
     if method == "handshake.manifest":
@@ -292,7 +291,6 @@ def handle_request(req):
     if method == "plugin.shutdown":
         return {"status": "ok"}
     raise ValueError(f"Method not found: {method}")
-
 
 for line in sys.stdin:
     line = line.strip()
@@ -1766,21 +1764,9 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
 
     const std::string sessionA = "dispatcher-session-a";
     const std::string sessionB = "dispatcher-session-b";
-    const std::string selectorPath = "src/**/*.cpp";
 
     sessionService->init(sessionA, "dispatcher coverage session A");
     sessionService->create(sessionB, "dispatcher coverage session B");
-
-    auto listResult =
-        yams::cli::run_sync(client.executeRequest(Request{ListSessionsRequest{}}), 10s);
-    REQUIRE(listResult.has_value());
-    REQUIRE(std::holds_alternative<ListSessionsResponse>(listResult.value()));
-    const auto& listResp = std::get<ListSessionsResponse>(listResult.value());
-    std::set<std::string> sessionNames(listResp.session_names.begin(),
-                                       listResp.session_names.end());
-    CHECK(sessionNames.contains(sessionA));
-    CHECK(sessionNames.contains(sessionB));
-    CHECK(listResp.current_session == sessionA);
 
     UseSessionRequest missingReq;
     missingReq.session_name = "dispatcher-session-missing";
@@ -1791,28 +1777,6 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
 
     sessionService->close();
 
-    auto noCurrentListResult =
-        yams::cli::run_sync(client.executeRequest(Request{ListSessionsRequest{}}), 10s);
-    REQUIRE(noCurrentListResult.has_value());
-    REQUIRE(std::holds_alternative<ListSessionsResponse>(noCurrentListResult.value()));
-    CHECK(std::get<ListSessionsResponse>(noCurrentListResult.value()).current_session.empty());
-
-    AddPathSelectorRequest noCurrentReq;
-    noCurrentReq.path = selectorPath;
-    auto noCurrentResult = yams::cli::run_sync(client.executeRequest(Request{noCurrentReq}), 10s);
-    REQUIRE(noCurrentResult.has_value());
-    REQUIRE(std::holds_alternative<ErrorResponse>(noCurrentResult.value()));
-    CHECK(std::get<ErrorResponse>(noCurrentResult.value()).code == yams::ErrorCode::InvalidState);
-
-    RemovePathSelectorRequest noCurrentRemoveReq;
-    noCurrentRemoveReq.path = selectorPath;
-    auto noCurrentRemoveResult =
-        yams::cli::run_sync(client.executeRequest(Request{noCurrentRemoveReq}), 10s);
-    REQUIRE(noCurrentRemoveResult.has_value());
-    REQUIRE(std::holds_alternative<ErrorResponse>(noCurrentRemoveResult.value()));
-    CHECK(std::get<ErrorResponse>(noCurrentRemoveResult.value()).code ==
-          yams::ErrorCode::InvalidState);
-
     UseSessionRequest useReq;
     useReq.session_name = sessionB;
     auto useResult = yams::cli::run_sync(client.executeRequest(Request{useReq}), 10s);
@@ -1821,67 +1785,6 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
     CHECK(std::get<SuccessResponse>(useResult.value()).message == "OK");
     REQUIRE(sessionService->current().has_value());
     CHECK(sessionService->current().value() == sessionB);
-
-    AddPathSelectorRequest missingSessionAddReq;
-    missingSessionAddReq.session_name = "dispatcher-session-missing";
-    missingSessionAddReq.path = "missing/**/*.txt";
-    auto missingSessionAddResult =
-        yams::cli::run_sync(client.executeRequest(Request{missingSessionAddReq}), 10s);
-    REQUIRE(missingSessionAddResult.has_value());
-    REQUIRE(std::holds_alternative<ErrorResponse>(missingSessionAddResult.value()));
-    CHECK(std::get<ErrorResponse>(missingSessionAddResult.value()).code ==
-          yams::ErrorCode::NotFound);
-
-    AddPathSelectorRequest addReq;
-    addReq.path = selectorPath;
-    addReq.tags = {"pinned", "coverage"};
-    addReq.metadata = {{"team", "daemon"}, {"task", "dispatcher-session"}};
-    auto addResult = yams::cli::run_sync(client.executeRequest(Request{addReq}), 10s);
-    REQUIRE(addResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(addResult.value()));
-    CHECK(std::get<SuccessResponse>(addResult.value()).message == "OK");
-    auto selectors = sessionService->listPathSelectors(sessionB);
-    REQUIRE(selectors.size() == 1);
-    CHECK(selectors.front() == selectorPath);
-
-    AddPathSelectorRequest explicitSessionAddReq;
-    explicitSessionAddReq.session_name = sessionB;
-    explicitSessionAddReq.path = "include/**/*.hpp";
-    explicitSessionAddReq.tags = {"explicit"};
-    auto explicitSessionAddResult =
-        yams::cli::run_sync(client.executeRequest(Request{explicitSessionAddReq}), 10s);
-    REQUIRE(explicitSessionAddResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(explicitSessionAddResult.value()));
-
-    selectors = sessionService->listPathSelectors(sessionB);
-    REQUIRE(selectors.size() == 2);
-    CHECK(std::find(selectors.begin(), selectors.end(), "include/**/*.hpp") != selectors.end());
-
-    RemovePathSelectorRequest missingSessionRemoveReq;
-    missingSessionRemoveReq.session_name = "dispatcher-session-missing";
-    missingSessionRemoveReq.path = selectorPath;
-    auto missingSessionRemoveResult =
-        yams::cli::run_sync(client.executeRequest(Request{missingSessionRemoveReq}), 10s);
-    REQUIRE(missingSessionRemoveResult.has_value());
-    REQUIRE(std::holds_alternative<ErrorResponse>(missingSessionRemoveResult.value()));
-    CHECK(std::get<ErrorResponse>(missingSessionRemoveResult.value()).code ==
-          yams::ErrorCode::NotFound);
-
-    RemovePathSelectorRequest explicitRemoveReq;
-    explicitRemoveReq.session_name = sessionB;
-    explicitRemoveReq.path = "include/**/*.hpp";
-    auto explicitRemoveResult =
-        yams::cli::run_sync(client.executeRequest(Request{explicitRemoveReq}), 10s);
-    REQUIRE(explicitRemoveResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(explicitRemoveResult.value()));
-
-    RemovePathSelectorRequest removeReq;
-    removeReq.path = selectorPath;
-    auto removeResult = yams::cli::run_sync(client.executeRequest(Request{removeReq}), 10s);
-    REQUIRE(removeResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(removeResult.value()));
-    CHECK(std::get<SuccessResponse>(removeResult.value()).message == "OK");
-    CHECK(sessionService->listPathSelectors(sessionB).empty());
 }
 
 TEST_CASE("Daemon client repair request execution", "[daemon][socket][requests][repair]") {
@@ -1958,227 +1861,6 @@ TEST_CASE("Daemon client repair request execution", "[daemon][socket][requests][
     CHECK(std::any_of(events.begin(), events.end(), [](const RepairEvent& event) {
         return event.phase == "completed" && event.operation == "orphans";
     }));
-}
-
-TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][requests][tree-diff]") {
-    SKIP_DAEMON_TEST_ON_WINDOWS();
-
-    DaemonHarness harness;
-    startHarnessWithRetry(harness);
-    std::this_thread::sleep_for(200ms);
-
-    auto client = createClient(harness.socketPath());
-
-    yams::Result<void> connectResult;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        connectResult = yams::cli::run_sync(client.connect(), 5s);
-        if (connectResult.has_value())
-            break;
-        std::this_thread::sleep_for(200ms);
-    }
-    REQUIRE(connectResult.has_value());
-    const auto* daemon = harness.daemon();
-    REQUIRE(daemon != nullptr);
-    const auto* serviceManager = daemon->getServiceManager();
-    REQUIRE(serviceManager != nullptr);
-    auto metadataRepo = serviceManager->getMetadataRepo();
-    REQUIRE(metadataRepo != nullptr);
-
-    const std::string baseSnapshotId = "dispatcher-coverage-base";
-    const std::string targetSnapshotId = "dispatcher-coverage-target";
-
-    const auto nowMicros = std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::system_clock::now().time_since_epoch())
-                               .count();
-
-    yams::metadata::TreeSnapshotRecord baseSnapshot;
-    baseSnapshot.snapshotId = baseSnapshotId;
-    baseSnapshot.createdTime = nowMicros;
-    baseSnapshot.metadata["directory_path"] = "/tmp/dispatcher-base";
-    REQUIRE(metadataRepo->upsertTreeSnapshot(baseSnapshot).has_value());
-
-    yams::metadata::TreeSnapshotRecord targetSnapshot;
-    targetSnapshot.snapshotId = targetSnapshotId;
-    targetSnapshot.createdTime = nowMicros + 1;
-    targetSnapshot.metadata["directory_path"] = "/tmp/dispatcher-target";
-    REQUIRE(metadataRepo->upsertTreeSnapshot(targetSnapshot).has_value());
-
-    yams::metadata::TreeDiffDescriptor descriptor;
-    descriptor.baseSnapshotId = baseSnapshotId;
-    descriptor.targetSnapshotId = targetSnapshotId;
-    descriptor.computedAt = nowMicros + 2;
-    descriptor.status = "pending";
-
-    auto diffIdResult = metadataRepo->beginTreeDiff(descriptor);
-    REQUIRE(diffIdResult.has_value());
-
-    std::vector<yams::metadata::TreeChangeRecord> changes;
-
-    yams::metadata::TreeChangeRecord added;
-    added.type = yams::metadata::TreeChangeType::Added;
-    added.newPath = "src/new_file.cpp";
-    added.newHash = "hash-added";
-    added.mode = 0644;
-    changes.push_back(added);
-
-    yams::metadata::TreeChangeRecord modified;
-    modified.type = yams::metadata::TreeChangeType::Modified;
-    modified.oldPath = "src/existing.cpp";
-    modified.newPath = "src/existing.cpp";
-    modified.oldHash = "hash-old";
-    modified.newHash = "hash-new";
-    modified.mode = 0644;
-    modified.contentDeltaHash = "delta-existing";
-    changes.push_back(modified);
-
-    yams::metadata::TreeChangeRecord renamed;
-    renamed.type = yams::metadata::TreeChangeType::Renamed;
-    renamed.oldPath = "src/old_name.cpp";
-    renamed.newPath = "src/new_name.cpp";
-    renamed.oldHash = "hash-rename";
-    renamed.newHash = "hash-rename";
-    renamed.mode = 0644;
-    changes.push_back(renamed);
-
-    yams::metadata::TreeChangeRecord deleted;
-    deleted.type = yams::metadata::TreeChangeType::Deleted;
-    deleted.oldPath = "src/removed.cpp";
-    deleted.oldHash = "hash-deleted";
-    deleted.mode = 0644;
-    changes.push_back(deleted);
-
-    yams::metadata::TreeChangeRecord moved;
-    moved.type = yams::metadata::TreeChangeType::Moved;
-    moved.oldPath = "include/old_header.hpp";
-    moved.newPath = "include/new_header.hpp";
-    moved.oldHash = "hash-moved";
-    moved.newHash = "hash-moved";
-    moved.mode = 0644;
-    changes.push_back(moved);
-
-    auto appendResult = metadataRepo->appendTreeChanges(diffIdResult.value(), changes);
-    REQUIRE(appendResult.has_value());
-
-    auto finalizeResult =
-        metadataRepo->finalizeTreeDiff(diffIdResult.value(), changes.size(), "complete");
-    REQUIRE(finalizeResult.has_value());
-
-    yams::metadata::TreeDiffQuery directQuery;
-    directQuery.baseSnapshotId = baseSnapshotId;
-    directQuery.targetSnapshotId = targetSnapshotId;
-    directQuery.limit = 20000;
-    auto directListResult = metadataRepo->listTreeChanges(directQuery);
-    if (!directListResult.has_value()) {
-        INFO("direct listTreeChanges error: " << directListResult.error().message);
-    }
-    REQUIRE(directListResult.has_value());
-    CHECK(directListResult.value().size() == 5);
-
-    ListTreeDiffRequest listReq;
-    listReq.baseSnapshotId = baseSnapshotId;
-    listReq.targetSnapshotId = targetSnapshotId;
-    listReq.limit = 20000;
-    auto listResult = yams::cli::run_sync(client.executeRequest(Request{listReq}), 10s);
-
-    INFO("listTreeDiff has_value=" << listResult.has_value());
-    if (!listResult.has_value()) {
-        INFO("listTreeDiff transport error: " << listResult.error().message);
-    }
-    REQUIRE(listResult.has_value());
-    if (std::holds_alternative<ErrorResponse>(listResult.value())) {
-        INFO("listTreeDiff daemon error: " << std::get<ErrorResponse>(listResult.value()).message);
-    }
-    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(listResult.value()));
-    const auto& listResp = std::get<ListTreeDiffResponse>(listResult.value());
-    CHECK(listResp.totalCount == 5);
-    REQUIRE(listResp.changes.size() == 5);
-    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
-        return entry.changeType == "added" && entry.path == "src/new_file.cpp" &&
-               entry.oldPath.empty();
-    }));
-    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
-        return entry.changeType == "modified" && entry.path == "src/existing.cpp" &&
-               entry.oldPath.empty() && entry.contentDeltaHash == "delta-existing";
-    }));
-    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
-        return entry.changeType == "renamed" && entry.path == "src/new_name.cpp" &&
-               entry.oldPath == "src/old_name.cpp";
-    }));
-    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
-        return entry.changeType == "deleted" && entry.path.empty() &&
-               entry.oldPath == "src/removed.cpp";
-    }));
-    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
-        return entry.changeType == "unknown" && entry.path == "include/new_header.hpp" &&
-               entry.oldPath == "include/old_header.hpp";
-    }));
-
-    ListTreeDiffRequest filteredReq;
-    filteredReq.baseSnapshotId = baseSnapshotId;
-    filteredReq.targetSnapshotId = targetSnapshotId;
-    filteredReq.pathPrefix = "src/new";
-    filteredReq.typeFilter = "renamed";
-    filteredReq.limit = 10;
-    auto filteredResult = yams::cli::run_sync(client.executeRequest(Request{filteredReq}), 10s);
-
-    INFO("filteredTreeDiff has_value=" << filteredResult.has_value());
-    if (!filteredResult.has_value()) {
-        INFO("filteredTreeDiff transport error: " << filteredResult.error().message);
-    }
-    REQUIRE(filteredResult.has_value());
-    if (std::holds_alternative<ErrorResponse>(filteredResult.value())) {
-        INFO("filteredTreeDiff daemon error: "
-             << std::get<ErrorResponse>(filteredResult.value()).message);
-    }
-    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(filteredResult.value()));
-    const auto& filteredResp = std::get<ListTreeDiffResponse>(filteredResult.value());
-    CHECK(filteredResp.totalCount == 1);
-    REQUIRE(filteredResp.changes.size() == 1);
-    CHECK(filteredResp.changes.front().changeType == "renamed");
-    CHECK(filteredResp.changes.front().path == "src/new_name.cpp");
-    CHECK(filteredResp.changes.front().oldPath == "src/old_name.cpp");
-
-    ListTreeDiffRequest unknownFilterReq;
-    unknownFilterReq.baseSnapshotId = baseSnapshotId;
-    unknownFilterReq.targetSnapshotId = targetSnapshotId;
-    unknownFilterReq.pathPrefix = "include/new";
-    unknownFilterReq.typeFilter = "moved";
-    unknownFilterReq.limit = 10;
-    auto unknownFilterResult =
-        yams::cli::run_sync(client.executeRequest(Request{unknownFilterReq}), 10s);
-
-    REQUIRE(unknownFilterResult.has_value());
-    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(unknownFilterResult.value()));
-    const auto& unknownFilterResp = std::get<ListTreeDiffResponse>(unknownFilterResult.value());
-    CHECK(unknownFilterResp.totalCount == 1);
-    REQUIRE(unknownFilterResp.changes.size() == 1);
-    CHECK(unknownFilterResp.changes.front().changeType == "unknown");
-    CHECK(unknownFilterResp.changes.front().path == "include/new_header.hpp");
-    CHECK(unknownFilterResp.changes.front().oldPath == "include/old_header.hpp");
-
-    ListTreeDiffRequest pagedReq;
-    pagedReq.baseSnapshotId = baseSnapshotId;
-    pagedReq.targetSnapshotId = targetSnapshotId;
-    pagedReq.limit = 1;
-    pagedReq.offset = 1;
-    auto pagedResult = yams::cli::run_sync(client.executeRequest(Request{pagedReq}), 10s);
-
-    REQUIRE(pagedResult.has_value());
-    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(pagedResult.value()));
-    const auto& pagedResp = std::get<ListTreeDiffResponse>(pagedResult.value());
-    CHECK(pagedResp.totalCount == 1);
-    REQUIRE(pagedResp.changes.size() == 1);
-    CHECK(pagedResp.changes.front().changeType == "modified");
-    CHECK(pagedResp.changes.front().path == "src/existing.cpp");
-    CHECK(pagedResp.changes.front().contentDeltaHash == "delta-existing");
-
-    ListTreeDiffRequest invalidReq;
-    invalidReq.targetSnapshotId = targetSnapshotId;
-    auto invalidResult = yams::cli::run_sync(client.executeRequest(Request{invalidReq}), 10s);
-
-    REQUIRE(invalidResult.has_value());
-    REQUIRE(std::holds_alternative<ErrorResponse>(invalidResult.value()));
-    CHECK(std::get<ErrorResponse>(invalidResult.value()).code == yams::ErrorCode::InvalidArgument);
 }
 
 TEST_CASE("Daemon client error handling", "[daemon][socket][errors]") {

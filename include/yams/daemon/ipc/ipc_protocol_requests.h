@@ -2652,102 +2652,6 @@ struct GraphTraceRequest {
     }
 };
 
-struct GraphImpactRequest {
-    std::string symbol;
-    std::string scopePathPrefix;
-    uint64_t depth{2};
-    uint64_t maxSymbols{32};
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << symbol << depth << maxSymbols << scopePathPrefix;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<GraphImpactRequest> deserialize(Deserializer& deser) {
-        GraphImpactRequest req;
-        if (auto r = deser.readString(); r)
-            req.symbol = std::move(r.value());
-        else
-            return r.error();
-        if (auto r = deser.template read<uint64_t>(); r)
-            req.depth = r.value();
-        else
-            return r.error();
-        if (auto r = deser.template read<uint64_t>(); r)
-            req.maxSymbols = r.value();
-        else
-            return r.error();
-        if (auto r = deser.readString(); r)
-            req.scopePathPrefix = std::move(r.value());
-        else
-            return r.error();
-        return req;
-    }
-};
-
-struct GraphAffectedTestsRequest {
-    std::vector<std::string> changedFiles;
-    uint64_t depth{5};
-    std::string testPathPattern;
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << changedFiles << depth << testPathPattern;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<GraphAffectedTestsRequest> deserialize(Deserializer& deser) {
-        GraphAffectedTestsRequest req;
-        if (auto r = deser.readStringVector(); r)
-            req.changedFiles = std::move(r.value());
-        else
-            return r.error();
-        if (auto r = deser.template read<uint64_t>(); r)
-            req.depth = r.value();
-        else
-            return r.error();
-        if (auto r = deser.readString(); r)
-            req.testPathPattern = std::move(r.value());
-        else
-            return r.error();
-        return req;
-    }
-};
-
-struct GraphPathHistoryRequest {
-    std::string path;
-    uint32_t limit{100};
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << path << limit;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<GraphPathHistoryRequest> deserialize(Deserializer& deser) {
-        GraphPathHistoryRequest req;
-
-        if (auto r = deser.readString(); r)
-            req.path = std::move(r.value());
-        else
-            return r.error();
-
-        if (auto r = deser.template read<uint32_t>(); r)
-            req.limit = r.value();
-        else
-            return r.error();
-
-        return req;
-    }
-};
-
 // ============================================================================
 // Graph Maintenance Requests (PBI-009 Phase 4.3)
 // ============================================================================
@@ -3186,18 +3090,6 @@ struct CatRequest {
     }
 };
 
-struct ListSessionsRequest {
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer&) const {}
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<ListSessionsRequest> deserialize(Deserializer&) {
-        return ListSessionsRequest{};
-    }
-};
-
 struct UseSessionRequest {
     std::string session_name;
 
@@ -3219,123 +3111,9 @@ struct UseSessionRequest {
     }
 };
 
-struct AddPathSelectorRequest {
-    std::string session_name;
-    std::string path;
-    std::vector<std::string> tags = {};
-    std::map<std::string, std::string> metadata = {};
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << session_name << path << tags << metadata;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<AddPathSelectorRequest> deserialize(Deserializer& deser) {
-        AddPathSelectorRequest req;
-        auto sn = deser.readString();
-        if (!sn)
-            return sn.error();
-        req.session_name = std::move(sn.value());
-        auto p = deser.readString();
-        if (!p)
-            return p.error();
-        req.path = std::move(p.value());
-        auto t = deser.readStringVector();
-        if (!t)
-            return t.error();
-        req.tags = std::move(t.value());
-        auto m = deser.readStringMap();
-        if (!m)
-            return m.error();
-        req.metadata = std::move(m.value());
-        return req;
-    }
-};
-
-struct RemovePathSelectorRequest {
-    std::string session_name;
-    std::string path;
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << session_name << path;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<RemovePathSelectorRequest> deserialize(Deserializer& deser) {
-        RemovePathSelectorRequest req;
-        auto sn = deser.readString();
-        if (!sn)
-            return sn.error();
-        req.session_name = std::move(sn.value());
-        auto p = deser.readString();
-        if (!p)
-            return p.error();
-        req.path = std::move(p.value());
-        return req;
-    }
-};
-
 // ============================================================================
 // Tree Diff Request/Response (PBI-043)
 // ============================================================================
-
-struct ListTreeDiffRequest {
-    std::string baseSnapshotId;
-    std::string targetSnapshotId;
-    std::string pathPrefix;
-    std::string typeFilter;
-    uint64_t limit = 1000;
-    uint64_t offset = 0;
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << baseSnapshotId << targetSnapshotId << pathPrefix << typeFilter << limit << offset;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<ListTreeDiffRequest> deserialize(Deserializer& deser) {
-        ListTreeDiffRequest req;
-        auto base = deser.readString();
-        if (!base)
-            return base.error();
-        req.baseSnapshotId = std::move(base.value());
-
-        auto target = deser.readString();
-        if (!target)
-            return target.error();
-        req.targetSnapshotId = std::move(target.value());
-
-        auto prefix = deser.readString();
-        if (!prefix)
-            return prefix.error();
-        req.pathPrefix = std::move(prefix.value());
-
-        auto filter = deser.readString();
-        if (!filter)
-            return filter.error();
-        req.typeFilter = std::move(filter.value());
-
-        auto lim = deser.template read<uint64_t>();
-        if (!lim)
-            return lim.error();
-        req.limit = lim.value();
-
-        auto off = deser.template read<uint64_t>();
-        if (!off)
-            return off.error();
-        req.offset = off.value();
-
-        return req;
-    }
-};
 
 // Memory-sync operations are routed to the lifecycle-owned service. The value is
 // binary-safe and encoded as a protobuf bytes field by ProtoSerializer.
@@ -3415,9 +3193,6 @@ struct UnlinkPathRequest {
     }
 };
 
-// Forward declaration for batch request type (defined with the batch envelope types)
-struct BatchRequest;
-
 // Variant type for all requests
 using Request = std::variant<
     SearchRequest, GetRequest, GetInitRequest, GetChunkRequest, GetEndRequest, DeleteRequest,
@@ -3427,12 +3202,10 @@ using Request = std::variant<
     CancelDownloadJobRequest, ListDownloadJobsRequest, GetStatsRequest, PrepareSessionRequest,
     EmbedDocumentsRequest, PluginScanRequest, PluginLoadRequest, PluginUnloadRequest,
     PluginTrustListRequest, PluginTrustAddRequest, PluginTrustRemoveRequest, CancelRequest,
-    CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
-    RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest,
-    ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest,
-    GraphExploreRequest, GraphSymbolLookupRequest, GraphTraceRequest, GraphImpactRequest,
-    GraphAffectedTestsRequest, GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest,
-    KgIngestRequest, MetadataValueCountsRequest, MemorySyncRequest, BatchRequest, RepairRequest,
+    CatRequest, UseSessionRequest, FileHistoryRequest, PruneRequest, ListSnapshotsRequest,
+    RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest, GraphExploreRequest,
+    GraphSymbolLookupRequest, GraphTraceRequest, GraphRepairRequest, GraphValidateRequest,
+    KgIngestRequest, MetadataValueCountsRequest, MemorySyncRequest, RepairRequest,
     UnlinkPathRequest>;
 
 } // namespace yams::daemon

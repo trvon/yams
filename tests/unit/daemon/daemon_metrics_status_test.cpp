@@ -882,7 +882,6 @@ import sys
 EXPECTED_MODE = )PY"
                    << (requireTrustedConfig ? R"PY("trusted")PY" : "None") << R"PY(
 
-
 def handle_request(req):
     method = req.get("method", "")
     if method == "handshake.manifest":
@@ -900,7 +899,6 @@ def handle_request(req):
     if method == "plugin.shutdown":
         return {"status": "ok"}
     raise ValueError(f"Method not found: {method}")
-
 
 for line in sys.stdin:
     line = line.strip()
@@ -1565,45 +1563,6 @@ TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",
     auto resp = fut.get();
 
     REQUIRE(std::holds_alternative<StatusResponse>(resp));
-}
-
-TEST_CASE("RequestDispatcher: tree diff handler validates inputs and missing metadata repo",
-          "[daemon][tree-diff][dispatcher]") {
-    DaemonConfig cfg;
-    cfg.dataDir = makeTempDir("yams_tree_diff_dispatcher_");
-
-    StubLifecycle lifecycle;
-    StateComponent state;
-    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
-    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
-    DaemonLifecycleFsm lifecycleFsm;
-    ServiceManager svc(cfg, state, lifecycleFsm);
-    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
-
-    SECTION("returns invalid argument when snapshot ids are missing") {
-        ListTreeDiffRequest req;
-        req.targetSnapshotId = "target-only";
-
-        auto resp = dispatchRequest(dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::InvalidArgument);
-        CHECK(err.message.find("baseSnapshotId") != std::string::npos);
-    }
-
-    SECTION("returns internal error when metadata repository is unavailable") {
-        ListTreeDiffRequest req;
-        req.baseSnapshotId = "base";
-        req.targetSnapshotId = "target";
-
-        auto resp = dispatchRequest(dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::InternalError);
-        CHECK(err.message.find("Metadata repository not available") != std::string::npos);
-    }
 }
 
 TEST_CASE("RequestDispatcher: prune handler reports missing metadata repo",
@@ -5207,41 +5166,6 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK(graphResp.warning == "Knowledge graph not available");
     }
 
-    SECTION("graph path history reports unavailable metadata repository") {
-        GraphPathHistoryRequest req;
-        req.path = "/repo/file.cpp";
-
-        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::InternalError);
-        CHECK(err.message == "Metadata repository unavailable");
-    }
-
-    SECTION("legacy impact and affected-tests requests explain the removed symbol graph") {
-        // No metadata repository: the answer does not depend on daemon state.
-        GraphImpactRequest impactReq;
-        impactReq.symbol = "callee";
-        auto impactResp = dispatchRequest(*fixture.dispatcher, Request{impactReq});
-        REQUIRE(std::holds_alternative<GraphImpactResponse>(impactResp));
-        const auto& impact = std::get<GraphImpactResponse>(impactResp);
-        CHECK(impact.symbol == "callee");
-        CHECK(impact.affectedSymbols.empty());
-        REQUIRE(impact.warnings.size() == 1);
-        CHECK(impact.warnings.front() == app::services::kImpactNeedsSymbolGraphWarning);
-
-        GraphAffectedTestsRequest testsReq;
-        testsReq.changedFiles = {"src/callee.cpp"};
-        auto testsResp = dispatchRequest(*fixture.dispatcher, Request{testsReq});
-        REQUIRE(std::holds_alternative<GraphAffectedTestsResponse>(testsResp));
-        const auto& tests = std::get<GraphAffectedTestsResponse>(testsResp);
-        CHECK(tests.changedFiles == testsReq.changedFiles);
-        CHECK(tests.affectedTests.empty());
-        REQUIRE(tests.warnings.size() == 1);
-        CHECK(tests.warnings.front() == app::services::kAffectedTestsNeedSymbolGraphWarning);
-    }
-
     SECTION("graph explore reports unavailable metadata repository") {
         auto resp =
             dispatchRequest(*fixture.dispatcher, Request{GraphExploreRequest{.query = "entry"}});
@@ -5773,71 +5697,6 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK(relations.count("renamed_to") == 1);
         CHECK(relations.count("renamed_from") == 1);
         CHECK(relations.count("custom_rel") == 1);
-    }
-
-    SECTION("graph path history requires path") {
-        fixture.initMetadata();
-
-        auto resp = dispatchRequest(*fixture.dispatcher, Request{GraphPathHistoryRequest{}});
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::InvalidArgument);
-        CHECK(err.message == "Path is required for path history query");
-    }
-
-    SECTION("graph path history returns empty response when kg store is unavailable") {
-        fixture.initMetadata(false);
-
-        GraphPathHistoryRequest req;
-        req.path = "/repo/file.cpp";
-
-        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<GraphPathHistoryResponse>(resp));
-        const auto& historyResp = std::get<GraphPathHistoryResponse>(resp);
-        CHECK(historyResp.queryPath == "/repo/file.cpp");
-        CHECK(historyResp.history.empty());
-        CHECK_FALSE(historyResp.hasMore);
-    }
-
-    SECTION("graph path history returns snapshot entries") {
-        fixture.initMetadata();
-        fixture.upsertNode("path:snap1:/repo/file.cpp", "/repo/file.cpp", "path",
-                           R"({"snapshot_id":"snap1","path":"/repo/file.cpp"})");
-        fixture.upsertNode("path:snap2:/repo/file.cpp", "/repo/file.cpp", "path",
-                           R"({"snapshot_id":"snap2","path":"/repo/file.cpp"})");
-
-        GraphPathHistoryRequest req;
-        req.path = "/repo/file.cpp";
-        req.limit = 10;
-
-        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<GraphPathHistoryResponse>(resp));
-        const auto& historyResp = std::get<GraphPathHistoryResponse>(resp);
-        CHECK(historyResp.queryPath == "/repo/file.cpp");
-        REQUIRE(historyResp.history.size() == 2);
-        CHECK(historyResp.history[0].snapshotId == "snap2");
-        CHECK(historyResp.history[0].blobHash.empty());
-        CHECK(historyResp.history[0].changeType == "unknown");
-        CHECK(historyResp.history[1].snapshotId == "snap1");
-        CHECK_FALSE(historyResp.hasMore);
-    }
-
-    SECTION("graph path history reports store errors") {
-        fixture.initMetadata();
-        fixture.execSql("ALTER TABLE kg_nodes RENAME TO kg_nodes_broken");
-
-        GraphPathHistoryRequest req;
-        req.path = "/repo/file.cpp";
-
-        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code != ErrorCode::Success);
-        CHECK_FALSE(err.message.empty());
     }
 
     SECTION("kg ingest reports unavailable metadata repository") {
@@ -6732,28 +6591,6 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::DatabaseError);
         CHECK(err.message == "counts failed");
-    }
-
-    SECTION("batch request returns not implemented items for each sequence") {
-        BatchRequest req;
-        req.items.push_back(BatchItem{.sequenceId = 7, .request = SearchRequest{.query = "one"}});
-        req.items.push_back(BatchItem{.sequenceId = 8, .request = ListRequest{}});
-
-        auto resp = dispatchRequest(dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<BatchResponse>(resp));
-        const auto& batchResp = std::get<BatchResponse>(resp);
-        CHECK(batchResp.totalCount == 2);
-        CHECK(batchResp.successCount == 0);
-        CHECK(batchResp.errorCount == 2);
-        REQUIRE(batchResp.items.size() == 2);
-        CHECK(batchResp.items[0].sequenceId == 7);
-        CHECK_FALSE(batchResp.items[0].success);
-        REQUIRE(std::holds_alternative<ErrorResponse>(batchResp.items[0].response));
-        CHECK(std::get<ErrorResponse>(batchResp.items[0].response).code ==
-              ErrorCode::NotImplemented);
-        CHECK(batchResp.items[1].sequenceId == 8);
-        CHECK_FALSE(batchResp.items[1].success);
     }
 
     SECTION("restore collection exercises regex, layout, and io branches") {

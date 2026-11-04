@@ -178,15 +178,7 @@ private:
     boost::asio::awaitable<Response> handlePrepareSessionRequest(const PrepareSessionRequest& req);
 
     // Session management handlers
-    boost::asio::awaitable<Response> handleListSessionsRequest(const ListSessionsRequest& req);
     boost::asio::awaitable<Response> handleUseSessionRequest(const UseSessionRequest& req);
-    boost::asio::awaitable<Response>
-    handleAddPathSelectorRequest(const AddPathSelectorRequest& req);
-    boost::asio::awaitable<Response>
-    handleRemovePathSelectorRequest(const RemovePathSelectorRequest& req);
-
-    // Tree diff handlers (PBI-043)
-    boost::asio::awaitable<Response> handleListTreeDiffRequest(const ListTreeDiffRequest& req);
 
     // File history handler (PBI-043)
     boost::asio::awaitable<Response> handleFileHistoryRequest(const FileHistoryRequest& req);
@@ -228,11 +220,6 @@ private:
     boost::asio::awaitable<Response>
     handleGraphSymbolLookupRequest(const GraphSymbolLookupRequest& req);
     boost::asio::awaitable<Response> handleGraphTraceRequest(const GraphTraceRequest& req);
-    boost::asio::awaitable<Response> handleGraphImpactRequest(const GraphImpactRequest& req);
-    boost::asio::awaitable<Response>
-    handleGraphAffectedTestsRequest(const GraphAffectedTestsRequest& req);
-    boost::asio::awaitable<Response>
-    handleGraphPathHistoryRequest(const GraphPathHistoryRequest& req);
     // PBI-093: Helper for listByType mode
     boost::asio::awaitable<Response>
     handleGraphQueryListByType(const GraphQueryRequest& req,
@@ -267,9 +254,6 @@ private:
     // Memory-sync control is deliberately daemon-owned: calls do not construct
     // standalone services or force a reconciliation cycle.
     boost::asio::awaitable<Response> handleMemorySyncRequest(const MemorySyncRequest& req);
-
-    // Batch request handler (Track B: Communication Overhead Reduction)
-    boost::asio::awaitable<Response> handleBatchRequest(const BatchRequest& req);
 
     boost::asio::awaitable<AdmissionGuard>
     acquireBoundedAdmission(std::atomic<uint64_t>& activeCounter,

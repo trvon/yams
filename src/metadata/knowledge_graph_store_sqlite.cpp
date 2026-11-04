@@ -1636,19 +1636,6 @@ public:
         });
     }
 
-    // Embeddings (not needed for SimpleKGScorer MVP)
-    Result<void> setNodeEmbedding(const KGNodeEmbedding&) override {
-        return Error{ErrorCode::NotImplemented, "setNodeEmbedding not implemented"};
-    }
-
-    Result<std::optional<KGNodeEmbedding>> getNodeEmbedding(std::int64_t) override {
-        return Error{ErrorCode::NotImplemented, "getNodeEmbedding not implemented"};
-    }
-
-    Result<void> deleteNodeEmbedding(std::int64_t) override {
-        return Error{ErrorCode::NotImplemented, "deleteNodeEmbedding not implemented"};
-    }
-
     // Document Entities
     Result<void> addDocEntities(const std::vector<DocEntity>& entities) override {
         if (entities.empty())
