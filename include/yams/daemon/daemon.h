@@ -328,6 +328,7 @@ public:
     std::function<bool()> additionalInitWaiterAdmissionForTesting_;
     std::function<void()> beforeInitWaiterJoinObserverForTesting_;
     bool sampleInitWaiterAdmission() const;
+    void runInitWaiterJob(bool withoutRunLoop);
 
     // External shutdown flag reference for CV predicate wake-up (yams-qe6r fix)
     // When set, the CV predicate in runLoop() also checks this flag, enabling

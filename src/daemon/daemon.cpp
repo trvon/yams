@@ -703,6 +703,113 @@ Result<void> YamsDaemon::start() {
     return Result<void>();
 }
 
+// Shared by runLoop and the no-runLoop test helper so tests exercise the shipped waiter.
+// Without a runLoop, the waiter also starts the services the loop would otherwise start.
+void YamsDaemon::runInitWaiterJob(bool withoutRunLoop) {
+    set_current_thread_name("yams-init-waiter");
+    spdlog::info("[InitWaiter] Thread started, waiting for ServiceManager terminal "
+                 "state...");
+
+    ServiceManagerSnapshot snapshot{};
+    while (true) {
+        snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
+        if (stopRequested_.load()) {
+            spdlog::info("[InitWaiter] Stop requested, exiting without dispatching events");
+            return;
+        }
+        if (snapshot.state == ServiceManagerState::Ready ||
+            snapshot.state == ServiceManagerState::Failed ||
+            snapshot.state == ServiceManagerState::ShuttingDown ||
+            snapshot.state == ServiceManagerState::Stopped) {
+            break;
+        }
+        spdlog::warn("[InitWaiter] ServiceManager still initializing (state={}, "
+                     "phase={}, phase_elapsed_ms={}), continuing to wait",
+                     static_cast<int>(snapshot.state),
+                     startupPhaseName(serviceManager_->getStartupPhase()),
+                     serviceManager_->getStartupPhaseElapsedMs());
+    }
+
+    if (beforeInitOutcomeObserverForTesting_) {
+        beforeInitOutcomeObserverForTesting_();
+    }
+
+    if (snapshot.state != ServiceManagerState::Ready) {
+        initHandled_.store(true, std::memory_order_release);
+    }
+
+    if (snapshot.state == ServiceManagerState::Ready) {
+        const bool providerExpected = config_.enableModelProvider;
+        const bool providerReady =
+            state_.readiness.modelProviderReady.load(std::memory_order_acquire);
+        auto admitted = lifecycleFsm_.tryCommitInitializationReadiness(
+            stopRequested_, providerExpected && !providerReady);
+        if (!admitted) {
+            spdlog::error("[InitWaiter] Initialization readiness admission failed: {}",
+                          admitted.error().message);
+            return;
+        }
+        if (!admitted.value()) {
+            spdlog::debug("[InitWaiter] Initialization readiness rejected during shutdown");
+            return;
+        }
+        initHandled_.store(true, std::memory_order_release);
+        if (!withoutRunLoop) {
+            try {
+                serviceManager_->startDeferredMetadataWarmup();
+            } catch (const std::exception& e) {
+                spdlog::warn("[InitWaiter] Failed to start deferred metadata warmup: {}", e.what());
+            } catch (...) {
+                spdlog::warn("[InitWaiter] Failed to start deferred metadata warmup");
+            }
+        }
+        try {
+            std::shared_ptr<DaemonMetrics> m;
+            {
+                std::lock_guard<std::mutex> lk(metricsMutex_);
+                m = metrics_;
+            }
+            if (m) {
+                m->startPolling(); // no-op if already started during early startup
+                spdlog::info("[InitWaiter] DaemonMetrics polling confirmed active");
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("[InitWaiter] Failed to start metrics polling: {}", e.what());
+        }
+        if (withoutRunLoop) {
+            try {
+                auto rs = serviceManager_->getRepairServiceShared();
+                if (config_.enableAutoRepair && !rs) {
+                    spdlog::info("[InitWaiter] Starting RepairService (no-runLoop test path)...");
+                    auto activeFn = [this]() -> size_t {
+                        return static_cast<size_t>(state_.stats.activeConnections.load());
+                    };
+                    serviceManager_->startRepairService(std::move(activeFn));
+                }
+                if (!modelPreloadSkipped_) {
+                    modelPreloadSkipped_ = true;
+                    if (!serviceManager_->startEmbeddingWarmupIfConfigured()) {
+                        spdlog::info("Model preload disabled - models will load on first use");
+                    }
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("[InitWaiter] Failed to start deferred services: {}", e.what());
+            }
+        }
+    } else if (snapshot.state == ServiceManagerState::Failed) {
+        spdlog::error("[InitWaiter] ServiceManager failed: {}", snapshot.lastError);
+        lifecycleFsm_.dispatch(FailureEvent{std::move(snapshot.lastError)});
+    } else if (snapshot.state == ServiceManagerState::ShuttingDown ||
+               snapshot.state == ServiceManagerState::Stopped) {
+        spdlog::debug("[InitWaiter] ServiceManager shutdown observed before ready (state={})",
+                      static_cast<int>(snapshot.state));
+    } else {
+        spdlog::warn("[InitWaiter] ServiceManager in unexpected terminal state: {}",
+                     static_cast<int>(snapshot.state));
+    }
+    spdlog::info("[InitWaiter] Thread exiting");
+}
+
 bool YamsDaemon::sampleInitWaiterAdmission() const {
     const bool governed = ResourceGovernor::instance().canAdmitWork();
     const bool additional =
@@ -751,95 +858,7 @@ Result<void> YamsDaemon::runLoopChecked() {
                 stop_cv_, stopCompleted_, initWaiterOwnership_};
             return detail::registerInitWaiter(
                 waiterState, [this] { return sampleInitWaiterAdmission(); },
-                [this]() {
-                    set_current_thread_name("yams-init-waiter");
-                    spdlog::info("[InitWaiter] Thread started, waiting for ServiceManager terminal "
-                                 "state...");
-
-                    ServiceManagerSnapshot snapshot{};
-                    while (true) {
-                        snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
-                        if (stopRequested_.load()) {
-                            spdlog::info(
-                                "[InitWaiter] Stop requested, exiting without dispatching events");
-                            return;
-                        }
-                        if (snapshot.state == ServiceManagerState::Ready ||
-                            snapshot.state == ServiceManagerState::Failed ||
-                            snapshot.state == ServiceManagerState::ShuttingDown ||
-                            snapshot.state == ServiceManagerState::Stopped) {
-                            break;
-                        }
-                        spdlog::warn("[InitWaiter] ServiceManager still initializing (state={}, "
-                                     "phase={}, phase_elapsed_ms={}), continuing to wait",
-                                     static_cast<int>(snapshot.state),
-                                     startupPhaseName(serviceManager_->getStartupPhase()),
-                                     serviceManager_->getStartupPhaseElapsedMs());
-                    }
-
-                    if (beforeInitOutcomeObserverForTesting_) {
-                        beforeInitOutcomeObserverForTesting_();
-                    }
-
-                    if (snapshot.state != ServiceManagerState::Ready) {
-                        initHandled_.store(true, std::memory_order_release);
-                    }
-
-                    if (snapshot.state == ServiceManagerState::Ready) {
-                        const bool providerExpected = config_.enableModelProvider;
-                        const bool providerReady =
-                            state_.readiness.modelProviderReady.load(std::memory_order_acquire);
-                        auto admitted = lifecycleFsm_.tryCommitInitializationReadiness(
-                            stopRequested_, providerExpected && !providerReady);
-                        if (!admitted) {
-                            spdlog::error(
-                                "[InitWaiter] Initialization readiness admission failed: {}",
-                                admitted.error().message);
-                            return;
-                        }
-                        if (!admitted.value()) {
-                            spdlog::debug(
-                                "[InitWaiter] Initialization readiness rejected during shutdown");
-                            return;
-                        }
-                        initHandled_.store(true, std::memory_order_release);
-                        try {
-                            serviceManager_->startDeferredMetadataWarmup();
-                        } catch (const std::exception& e) {
-                            spdlog::warn(
-                                "[InitWaiter] Failed to start deferred metadata warmup: {}",
-                                e.what());
-                        } catch (...) {
-                            spdlog::warn("[InitWaiter] Failed to start deferred metadata warmup");
-                        }
-                        try {
-                            std::shared_ptr<DaemonMetrics> m;
-                            {
-                                std::lock_guard<std::mutex> lk(metricsMutex_);
-                                m = metrics_;
-                            }
-                            if (m) {
-                                m->startPolling(); // no-op if already started during early startup
-                                spdlog::info("[InitWaiter] DaemonMetrics polling confirmed active");
-                            }
-                        } catch (const std::exception& e) {
-                            spdlog::warn("[InitWaiter] Failed to start metrics polling: {}",
-                                         e.what());
-                        }
-                    } else if (snapshot.state == ServiceManagerState::Failed) {
-                        spdlog::error("[InitWaiter] ServiceManager failed: {}", snapshot.lastError);
-                        lifecycleFsm_.dispatch(FailureEvent{std::move(snapshot.lastError)});
-                    } else if (snapshot.state == ServiceManagerState::ShuttingDown ||
-                               snapshot.state == ServiceManagerState::Stopped) {
-                        spdlog::debug(
-                            "[InitWaiter] ServiceManager shutdown observed before ready (state={})",
-                            static_cast<int>(snapshot.state));
-                    } else {
-                        spdlog::warn("[InitWaiter] ServiceManager in unexpected terminal state: {}",
-                                     static_cast<int>(snapshot.state));
-                    }
-                    spdlog::info("[InitWaiter] Thread exiting");
-                });
+                [this] { runInitWaiterJob(false); });
         };
         auto admission = registerWaiter();
         if (!admission) {
@@ -1092,101 +1111,7 @@ Result<void> YamsDaemon::testingStartAsyncInitWithoutRunLoopChecked() {
         stop_cv_, stopCompleted_, initWaiterOwnership_};
     auto admission = detail::registerInitWaiter(
         waiterState, [this] { return sampleInitWaiterAdmission(); },
-        [this]() {
-            set_current_thread_name("yams-init-waiter");
-            spdlog::info(
-                "[InitWaiter] Thread started, waiting for ServiceManager terminal state...");
-
-            ServiceManagerSnapshot snapshot{};
-            while (true) {
-                snapshot = serviceManager_->waitForServiceManagerTerminalState(300);
-                if (stopRequested_.load()) {
-                    spdlog::info("[InitWaiter] Stop requested, exiting without dispatching events");
-                    return;
-                }
-                if (snapshot.state == ServiceManagerState::Ready ||
-                    snapshot.state == ServiceManagerState::Failed ||
-                    snapshot.state == ServiceManagerState::ShuttingDown ||
-                    snapshot.state == ServiceManagerState::Stopped) {
-                    break;
-                }
-                spdlog::warn("[InitWaiter] ServiceManager still initializing (state={}, "
-                             "phase={}, phase_elapsed_ms={}), continuing to wait",
-                             static_cast<int>(snapshot.state),
-                             startupPhaseName(serviceManager_->getStartupPhase()),
-                             serviceManager_->getStartupPhaseElapsedMs());
-            }
-
-            if (beforeInitOutcomeObserverForTesting_) {
-                beforeInitOutcomeObserverForTesting_();
-            }
-
-            if (snapshot.state != ServiceManagerState::Ready) {
-                initHandled_.store(true, std::memory_order_release);
-            }
-
-            if (snapshot.state == ServiceManagerState::Ready) {
-                const bool providerExpected = config_.enableModelProvider;
-                const bool providerReady =
-                    state_.readiness.modelProviderReady.load(std::memory_order_acquire);
-                auto admitted = lifecycleFsm_.tryCommitInitializationReadiness(
-                    stopRequested_, providerExpected && !providerReady);
-                if (!admitted) {
-                    spdlog::error("[InitWaiter] Initialization readiness admission failed: {}",
-                                  admitted.error().message);
-                    return;
-                }
-                if (!admitted.value()) {
-                    spdlog::debug("[InitWaiter] Initialization readiness rejected during shutdown");
-                    return;
-                }
-                initHandled_.store(true, std::memory_order_release);
-                try {
-                    std::shared_ptr<DaemonMetrics> m;
-                    {
-                        std::lock_guard<std::mutex> lk(metricsMutex_);
-                        m = metrics_;
-                    }
-                    if (m) {
-                        m->startPolling();
-                        spdlog::info("[InitWaiter] DaemonMetrics polling confirmed active");
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("[InitWaiter] Failed to start metrics polling: {}", e.what());
-                }
-                try {
-                    auto rs = serviceManager_->getRepairServiceShared();
-                    if (config_.enableAutoRepair && !rs) {
-                        spdlog::info(
-                            "[InitWaiter] Starting RepairService (no-runLoop test path)...");
-                        auto activeFn = [this]() -> size_t {
-                            return static_cast<size_t>(state_.stats.activeConnections.load());
-                        };
-                        serviceManager_->startRepairService(std::move(activeFn));
-                    }
-                    if (!modelPreloadSkipped_) {
-                        modelPreloadSkipped_ = true;
-                        if (!serviceManager_->startEmbeddingWarmupIfConfigured()) {
-                            spdlog::info("Model preload disabled - models will load on first use");
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("[InitWaiter] Failed to start deferred services: {}", e.what());
-                }
-            } else if (snapshot.state == ServiceManagerState::Failed) {
-                spdlog::error("[InitWaiter] ServiceManager failed: {}", snapshot.lastError);
-                lifecycleFsm_.dispatch(FailureEvent{std::move(snapshot.lastError)});
-            } else if (snapshot.state == ServiceManagerState::ShuttingDown ||
-                       snapshot.state == ServiceManagerState::Stopped) {
-                spdlog::debug(
-                    "[InitWaiter] ServiceManager shutdown observed before ready (state={})",
-                    static_cast<int>(snapshot.state));
-            } else {
-                spdlog::warn("[InitWaiter] ServiceManager in unexpected terminal state: {}",
-                             static_cast<int>(snapshot.state));
-            }
-            spdlog::info("[InitWaiter] Thread exiting");
-        });
+        [this] { runInitWaiterJob(true); });
     if (!admission) {
         return admission.error();
     }
