@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <future>
@@ -11,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -459,6 +461,10 @@ public:
     WriteCoordinator* getWriteCoordinator() const { return writeCoordinator_.get(); }
     // NOLINTBEGIN(bugprone-reserved-identifier): repo test-helper surface intentionally uses
     // historical __test_* names across many suites; rename is tracked separately.
+    /// Test seam (declared in every build so the library links it). Runs on the direct-P2P recovery
+    /// thread just before its local op-store scan. Install before the daemon starts; release it
+    /// before stopping the daemon.
+    static void testingSetDirectP2pRecoveryGate(std::function<void()> gate);
 #ifdef YAMS_TESTING
     void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
         writeCoordinator_ = std::move(coordinator);
@@ -905,7 +911,15 @@ private:
     Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
     Result<void> initializeMemorySync(const std::filesystem::path& dataDir);
-    Result<void> initializeDirectP2p(const std::filesystem::path& dataDir);
+    /// Recover the local op store and start the listener. Returns null when direct P2P is
+    /// not configured. Blocking (corpus-sized scan): run only on the recovery thread.
+    Result<std::shared_ptr<yams::daemon::p2p::P2pManager>>
+    initializeDirectP2p(const std::filesystem::path& dataDir);
+    /// Start direct P2P recovery off the startup path, admitted by the resource governor.
+    void startDirectP2pRecovery(std::filesystem::path dataDir);
+    /// Cancel and join recovery, then stop any published listener. Idempotent.
+    void stopDirectP2pRecovery() noexcept;
+    std::shared_ptr<yams::daemon::p2p::P2pManager> p2pManagerSnapshot() const;
     Result<void> configureMemorySyncApply();
     void applyMemorySyncWinners() noexcept;
     bool drainMemorySyncDocumentDeleteOutbox() noexcept;
@@ -1070,7 +1084,14 @@ private:
     // P2P memory-sync service (version-vector + LWW over a shared store).
     // Started after storage/content-store init, stopped during shutdown.
     std::unique_ptr<yams::memory_sync::MemorySyncService> memorySync_;
-    std::unique_ptr<yams::daemon::p2p::P2pManager> p2pManager_;
+    // Published by the recovery thread; read by IPC status/peer commands. Guarded by
+    // p2pManagerMutex_. Lock order: p2pRecoveryMutex_ before p2pManagerMutex_.
+    std::shared_ptr<yams::daemon::p2p::P2pManager> p2pManager_;
+    mutable std::mutex p2pManagerMutex_;
+    std::thread p2pRecoveryThread_;
+    std::mutex p2pRecoveryMutex_;
+    std::condition_variable p2pRecoveryCv_;
+    bool p2pRecoveryStop_{false}; // guarded by p2pRecoveryMutex_
     mutable std::mutex memorySyncDeleteOutboxMutex_;
     mutable std::mutex memorySyncDeleteOutboxObserverMutex_;
     std::function<void(std::string_view)> memorySyncDeleteOutboxObserver_;

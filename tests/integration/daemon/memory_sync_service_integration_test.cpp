@@ -281,6 +281,48 @@ makeFilesystemBackend(const std::filesystem::path& path) {
     return backend;
 }
 
+// Direct transport requires authenticated writers: generate a local writer key, trust it in a
+// manifest, and listen on a reserved loopback port.
+void configureDirectWriterAuth(yams::daemon::DaemonConfig& config) {
+    auto keys = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(keys.has_value());
+    const auto directory = config.dataDir / "read-auth";
+    std::filesystem::create_directories(directory);
+    const auto privateKey = directory / "writer-private.pem";
+    const auto publicKey = directory / "writer-public.pem";
+    const auto manifest = directory / "writers.json";
+    REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
+                privateKey, keys.value().privateKeyPem)
+                .has_value());
+    REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
+                publicKey, keys.value().publicKeyPem)
+                .has_value());
+    const nlohmann::json content{
+        {"schema_version", 1},
+        {"corpus_id", config.memorySync.corpusId},
+        {"corpus_epoch", config.memorySync.corpusEpoch},
+        {"local_key",
+         {{"writer_id", config.memorySync.nodeId},
+          {"key_id", "cold-read-v1"},
+          {"private_key_path", privateKey.string()}}},
+        {"trusted_writers", nlohmann::json::array({{{"writer_id", config.memorySync.nodeId},
+                                                    {"key_id", "cold-read-v1"},
+                                                    {"public_key_path", publicKey.string()}}})}};
+    REQUIRE(
+        yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(manifest, content.dump())
+            .has_value());
+    // The listener parser requires a real port; reserve an OS-selected local endpoint
+    // briefly instead of using the live daemon's default listener or weakening parsing.
+    boost::asio::io_context io;
+    boost::asio::ip::tcp::acceptor reserved{io, {boost::asio::ip::address_v4::loopback(), 0}};
+    const auto port = reserved.local_endpoint().port();
+    reserved.close();
+    config.memorySync.transport = "direct";
+    config.memorySync.listen = "127.0.0.1:" + std::to_string(port);
+    config.memorySync.writerAuthRequired = true;
+    config.memorySync.writerAuthManifestPath = manifest.string();
+}
+
 } // namespace
 
 TEST_CASE("Daemon refuses enabled memory sync when writer authentication cannot initialize",
@@ -1194,44 +1236,7 @@ TEST_CASE("Daemon memory sync IPC reads off-resident authenticated winners",
     options.configureDaemon = [configure =
                                    std::move(configure)](yams::daemon::DaemonConfig& config) {
         configure(config);
-        auto keys = yams::memory_sync::generateWriterKeyPair();
-        REQUIRE(keys.has_value());
-        const auto directory = config.dataDir / "read-auth";
-        std::filesystem::create_directories(directory);
-        const auto privateKey = directory / "writer-private.pem";
-        const auto publicKey = directory / "writer-public.pem";
-        const auto manifest = directory / "writers.json";
-        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
-                    privateKey, keys.value().privateKeyPem)
-                    .has_value());
-        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
-                    publicKey, keys.value().publicKeyPem)
-                    .has_value());
-        const nlohmann::json content{
-            {"schema_version", 1},
-            {"corpus_id", config.memorySync.corpusId},
-            {"corpus_epoch", config.memorySync.corpusEpoch},
-            {"local_key",
-             {{"writer_id", config.memorySync.nodeId},
-              {"key_id", "cold-read-v1"},
-              {"private_key_path", privateKey.string()}}},
-            {"trusted_writers",
-             nlohmann::json::array({{{"writer_id", config.memorySync.nodeId},
-                                     {"key_id", "cold-read-v1"},
-                                     {"public_key_path", publicKey.string()}}})}};
-        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(manifest,
-                                                                                 content.dump())
-                    .has_value());
-        // The listener parser requires a real port; reserve an OS-selected local endpoint
-        // briefly instead of using the live daemon's default listener or weakening parsing.
-        boost::asio::io_context io;
-        boost::asio::ip::tcp::acceptor reserved{io, {boost::asio::ip::address_v4::loopback(), 0}};
-        const auto port = reserved.local_endpoint().port();
-        reserved.close();
-        config.memorySync.transport = "direct";
-        config.memorySync.listen = "127.0.0.1:" + std::to_string(port);
-        config.memorySync.writerAuthRequired = true;
-        config.memorySync.writerAuthManifestPath = manifest.string();
+        configureDirectWriterAuth(config);
         config.memorySync.limits.maxCacheBytes = 8;
     };
     options.isolateEnvironment = true;
@@ -2120,4 +2125,80 @@ auto_repair = false
     CHECK(std::filesystem::exists(persistentMarker));
     CHECK(std::filesystem::exists(otherSessionPath));
     CHECK((!std::filesystem::exists(sessionPath) || std::filesystem::is_empty(sessionPath)));
+}
+
+// Direct P2P recovers the local op store with a corpus-sized scan before it listens. On a
+// large store that took hours and, while it ran inside async init, kept search, ingest and
+// daemon readiness waiting. Recovery now runs in the background behind the governor.
+TEST_CASE("Daemon readiness and search do not wait for direct P2P recovery",
+          "[integration][daemon][memory-sync][p2p][p2p-recovery-background]") {
+    ScopedHostPressureSample hostPressure;
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
+
+    std::promise<void> enteredPromise;
+    auto entered = enteredPromise.get_future();
+    std::promise<void> releasePromise;
+    const auto released = releasePromise.get_future().share();
+    std::atomic<bool> enteredOnce{false};
+    yams::daemon::ServiceManager::testingSetDirectP2pRecoveryGate([&] {
+        if (!enteredOnce.exchange(true)) {
+            enteredPromise.set_value();
+        }
+        released.wait();
+    });
+    // Destroyed after the harness: the gate captures this test's promises.
+    struct ClearGate {
+        ~ClearGate() { yams::daemon::ServiceManager::testingSetDirectP2pRecoveryGate({}); }
+    } clearGate;
+
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174040",
+                                                "p2p-background-corpus");
+    auto configure = std::move(options.configureDaemon);
+    options.configureDaemon = [configure =
+                                   std::move(configure)](yams::daemon::DaemonConfig& config) {
+        configure(config);
+        configureDirectWriterAuth(config);
+    };
+    options.isolateEnvironment = true;
+    yams::test::DaemonHarness harness{std::move(options)};
+    // Destroyed before the harness, so shutdown never joins a recovery parked on the gate.
+    struct ReleaseGate {
+        std::promise<void>& promise;
+        bool released{false};
+        void release() {
+            if (!released) {
+                promise.set_value();
+                released = true;
+            }
+        }
+        ~ReleaseGate() { release(); }
+    } releaseGate{releasePromise};
+
+    REQUIRE(harness.start(30s));
+    REQUIRE(entered.wait_for(30s) == std::future_status::ready);
+    auto* manager = harness.daemon()->getServiceManager();
+    REQUIRE(manager != nullptr);
+
+    // Recovery is parked, yet the daemon is up and search builds.
+    const auto identityWhileRecovering = manager->getP2pIdentity();
+    CHECK_FALSE(identityWhileRecovering.has_value());
+    // Readiness flags have no wait primitive; poll with a tight bounded deadline.
+    const auto eventually = [](auto&& predicate) {
+        const auto deadline = std::chrono::steady_clock::now() + 30s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (predicate()) {
+                return true;
+            }
+            std::this_thread::sleep_for(20ms);
+        }
+        return predicate();
+    };
+    CHECK(eventually([&] {
+        return manager->getState().readiness.searchEngineReady.load(std::memory_order_acquire);
+    }));
+
+    // Once recovery completes, the listener is published.
+    releaseGate.release();
+    CHECK(eventually([&] { return manager->getP2pIdentity().has_value(); }));
 }

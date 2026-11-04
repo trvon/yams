@@ -5,15 +5,19 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <ranges>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -547,51 +551,58 @@ ServiceManager::__test_writeProtectedP2pPrivateKey(const std::filesystem::path& 
 }
 
 Result<p2p::P2pSyncResult> ServiceManager::connectP2p(std::string_view connectionString) {
-    if (!p2pManager_) {
+    const auto manager = p2pManagerSnapshot();
+    if (!manager) {
         return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
     }
-    return p2pManager_->connect(connectionString);
+    return manager->connect(connectionString);
 }
 
 Result<void> ServiceManager::disconnectP2p(std::string_view nodeId) {
-    if (!p2pManager_) {
+    const auto manager = p2pManagerSnapshot();
+    if (!manager) {
         return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
     }
-    return p2pManager_->disconnect(nodeId);
+    return manager->disconnect(nodeId);
 }
 
 Result<void> ServiceManager::enrollP2pPeer(std::string_view nodeId, std::string_view spkiPin) {
-    if (!p2pManager_) {
+    const auto manager = p2pManagerSnapshot();
+    if (!manager) {
         return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
     }
-    return p2pManager_->enrollPeer(nodeId, spkiPin);
+    return manager->enrollPeer(nodeId, spkiPin);
 }
 
 Result<void> ServiceManager::forgetP2pPeer(std::string_view nodeId) {
-    if (!p2pManager_) {
+    const auto manager = p2pManagerSnapshot();
+    if (!manager) {
         return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
     }
-    return p2pManager_->forget(nodeId);
+    return manager->forget(nodeId);
 }
 
 Result<p2p::P2pLocalIdentity> ServiceManager::getP2pIdentity() const {
-    if (!p2pManager_) {
+    const auto manager = p2pManagerSnapshot();
+    if (!manager) {
         return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
     }
-    return p2pManager_->localIdentity();
+    return manager->localIdentity();
 }
 
 Result<std::vector<p2p::PeerRegistryRecord>> ServiceManager::listP2pPeers() const {
-    if (!p2pManager_) {
+    const auto manager = p2pManagerSnapshot();
+    if (!manager) {
         return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
     }
-    return p2pManager_->peers();
+    return manager->peers();
 }
 
-Result<void> ServiceManager::initializeDirectP2p(const std::filesystem::path& dataDir) {
+Result<std::shared_ptr<p2p::P2pManager>>
+ServiceManager::initializeDirectP2p(const std::filesystem::path& dataDir) {
     const auto& policy = config_.memorySync;
     if (!policy.enabled || policy.transport != "direct") {
-        return Result<void>();
+        return std::shared_ptr<p2p::P2pManager>{};
     }
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "direct P2P requires memory sync service"};
@@ -640,8 +651,131 @@ Result<void> ServiceManager::initializeDirectP2p(const std::filesystem::path& da
     }
     spdlog::info("[ServiceManager] direct P2P listening on {}:{} with identity {}",
                  listen.value().host, manager.value()->boundPort(), policy.nodeId);
-    p2pManager_ = std::move(manager.value());
-    return Result<void>();
+    return std::shared_ptr<p2p::P2pManager>{std::move(manager.value())};
+}
+
+namespace {
+// Retry cadence while the resource governor defers recovery. The governor's starvation guard
+// still admits one pass per background_max_deferral, so a busy host delays but never blocks P2P.
+constexpr auto kDirectP2pDeferredRetryInterval = std::chrono::seconds(5);
+
+std::mutex& directP2pRecoveryGateMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+std::function<void()>& directP2pRecoveryGate() {
+    static std::function<void()> gate;
+    return gate;
+}
+} // namespace
+
+// Defined in every build so library and YAMS_TESTING translation units link the same symbol;
+// only test code declares and calls it. An empty gate costs one uncontended lock per start.
+void ServiceManager::testingSetDirectP2pRecoveryGate(std::function<void()> gate) {
+    std::lock_guard lock(directP2pRecoveryGateMutex());
+    directP2pRecoveryGate() = std::move(gate);
+}
+
+std::shared_ptr<p2p::P2pManager> ServiceManager::p2pManagerSnapshot() const {
+    std::lock_guard lock(p2pManagerMutex_);
+    return p2pManager_;
+}
+
+void ServiceManager::startDirectP2pRecovery(std::filesystem::path dataDir) {
+    const auto& policy = config_.memorySync;
+    if (!policy.enabled || policy.transport != "direct") {
+        return;
+    }
+    std::lock_guard recoveryLock(p2pRecoveryMutex_);
+    if (p2pRecoveryStop_ || p2pRecoveryThread_.joinable()) {
+        return;
+    }
+    // The local op-store scan is corpus-sized (minutes to hours on a large store). Search,
+    // ingest and readiness must not wait for it; P2P starts listening when it completes.
+    try {
+        p2pRecoveryThread_ = std::thread([this, dataDir = std::move(dataDir)] {
+            const auto stopRequested = [this] {
+                std::lock_guard lock(p2pRecoveryMutex_);
+                return p2pRecoveryStop_;
+            };
+            while (!ResourceGovernor::instance().admitDeferrable(DeferrableWork::P2pRecovery)) {
+                std::unique_lock lock(p2pRecoveryMutex_);
+                if (p2pRecoveryCv_.wait_for(lock, kDirectP2pDeferredRetryInterval,
+                                            [this] { return p2pRecoveryStop_; })) {
+                    return;
+                }
+            }
+            if (stopRequested()) {
+                return;
+            }
+            {
+                std::function<void()> gate;
+                {
+                    std::lock_guard lock(directP2pRecoveryGateMutex());
+                    gate = directP2pRecoveryGate();
+                }
+                if (gate) {
+                    gate();
+                }
+            }
+            auto manager = initializeDirectP2p(dataDir);
+            if (!manager) {
+                if (stopRequested()) {
+                    return; // shutdown cancelled the scan; not a P2P failure
+                }
+                const std::string reason =
+                    "direct P2P initialization failed: " + manager.error().message;
+                spdlog::error("[ServiceManager] {}; daemon continues without P2P", reason);
+                lifecycleFsm_.setSubsystemDegraded("p2p", true, reason);
+                return;
+            }
+            if (!manager.value()) {
+                return;
+            }
+            std::lock_guard recovery(p2pRecoveryMutex_);
+            if (p2pRecoveryStop_) {
+                manager.value()->stop(); // shutdown began while the listener was starting
+                return;
+            }
+            {
+                std::lock_guard lock(p2pManagerMutex_);
+                p2pManager_ = std::move(manager.value());
+            }
+            lifecycleFsm_.setSubsystemDegraded("p2p", false);
+        });
+    } catch (const std::exception& e) {
+        const std::string reason = std::string{"direct P2P recovery could not start: "} + e.what();
+        spdlog::error("[ServiceManager] {}", reason);
+        lifecycleFsm_.setSubsystemDegraded("p2p", true, reason);
+    }
+}
+
+void ServiceManager::stopDirectP2pRecovery() noexcept {
+    {
+        std::lock_guard lock(p2pRecoveryMutex_);
+        p2pRecoveryStop_ = true;
+    }
+    p2pRecoveryCv_.notify_all();
+    if (p2pRecoveryThread_.joinable()) {
+        // Recovery may be inside memory_sync's corpus-sized scan. Stopping memory_sync
+        // (idempotent; shutdown stops it again next) cancels that scan between entries.
+        if (!p2pManagerSnapshot() && memorySync_) {
+            memorySync_->stop();
+        }
+        try {
+            p2pRecoveryThread_.join();
+        } catch (const std::exception& e) {
+            spdlog::error("[ServiceManager] direct P2P recovery join failed: {}", e.what());
+        }
+    }
+    std::shared_ptr<p2p::P2pManager> manager;
+    {
+        std::lock_guard lock(p2pManagerMutex_);
+        manager = std::move(p2pManager_);
+    }
+    if (manager) {
+        manager->stop();
+    }
 }
 
 } // namespace yams::daemon
