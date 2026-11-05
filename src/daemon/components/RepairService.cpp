@@ -840,6 +840,11 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
         const auto contentStore = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
         if (startAfterId == 0) {
             beginSweepExtractorCheck(extractors);
+            // A sweep starts the progress count over. Resumed passes add to it batch by batch,
+            // before the drain loop can take those documents, so completions are never lost.
+            totalBacklog_.store(0, std::memory_order_relaxed);
+            processed_.store(0, std::memory_order_relaxed);
+            publishRepairProgress();
         }
         const bool extractorsChanged = sweepExtractorsChanged_;
 
@@ -919,6 +924,12 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
                     }
                     lastId = d.id;
                 }
+                // Still under the queue lock: the drain loop cannot resolve these documents
+                // before they are counted in the backlog.
+                if (batchEnqueued > 0) {
+                    totalBacklog_.fetch_add(batchEnqueued, std::memory_order_relaxed);
+                    publishRepairProgress();
+                }
             }
 
             totalEnqueued += batchEnqueued;
@@ -935,22 +946,7 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
         if (end == End::Finished) {
             finishSweepExtractorCheck();
         }
-        if (startAfterId == 0 || totalEnqueued > 0) {
-            // A sweep starts the count over; a pass resumed after the queue cap adds to it.
-            std::uint64_t backlog = totalEnqueued;
-            if (startAfterId == 0) {
-                totalBacklog_.store(backlog, std::memory_order_relaxed);
-                processed_.store(0, std::memory_order_relaxed);
-            } else {
-                backlog = totalBacklog_.fetch_add(totalEnqueued, std::memory_order_relaxed) +
-                          totalEnqueued;
-            }
-            if (state_) {
-                state_->stats.repairTotalBacklog.store(backlog, std::memory_order_relaxed);
-                state_->stats.repairProcessed.store(
-                    std::min(processed_.load(std::memory_order_relaxed), backlog),
-                    std::memory_order_relaxed);
-            }
+        if (totalEnqueued > 0) {
             spdlog::debug("RepairService: initial scan queued {} documents", totalEnqueued);
         }
     } catch (const std::exception& e) {
@@ -1436,12 +1432,26 @@ void RepairService::noteRepairResolved(std::uint64_t documents) {
     if (documents == 0)
         return;
     // Documents also arrive from ingest and explicit requests, which the scan backlog does not
-    // count; never report more done than queued.
+    // count. Saturate the counter itself at the backlog, so such documents never pre-fill
+    // progress for scan documents queued later.
+    auto done = processed_.load(std::memory_order_relaxed);
+    for (;;) {
+        const auto backlog = totalBacklog_.load(std::memory_order_relaxed);
+        const auto next = std::min(done + documents, std::max(done, backlog));
+        if (processed_.compare_exchange_weak(done, next, std::memory_order_relaxed)) {
+            break;
+        }
+    }
+    publishRepairProgress();
+}
+
+void RepairService::publishRepairProgress() {
+    if (!state_)
+        return;
     const auto backlog = totalBacklog_.load(std::memory_order_relaxed);
-    const auto done =
-        std::min(processed_.fetch_add(documents, std::memory_order_relaxed) + documents, backlog);
-    if (state_)
-        state_->stats.repairProcessed.store(done, std::memory_order_relaxed);
+    state_->stats.repairTotalBacklog.store(backlog, std::memory_order_relaxed);
+    state_->stats.repairProcessed.store(
+        std::min(processed_.load(std::memory_order_relaxed), backlog), std::memory_order_relaxed);
 }
 
 void RepairService::beginRepairOperation(std::string_view operation) {

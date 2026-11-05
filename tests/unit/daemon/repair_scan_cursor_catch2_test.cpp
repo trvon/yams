@@ -302,3 +302,20 @@ TEST_CASE("Startup scan records the extractor set only after a finished sweep",
     }
     CHECK(std::filesystem::exists(marker));
 }
+
+// Ingest and explicit requests also feed the repair queue. Documents handled before the scan has
+// queued anything must not count toward scan documents queued later.
+TEST_CASE("Repair progress does not pre-count documents outside the scan backlog",
+          "[daemon][repair][progress][catch2]") {
+    yams::test::ScopedEnvVar batch{"YAMS_REPAIR_STARTUP_BATCH", std::string{"2"}};
+    ScanHarness h(6, /*maxPending=*/3);
+    REQUIRE(h.service->testing_runStartupScanPass().size() == 3U); // capped
+    h.service->testing_noteRepairResolved(3);
+    CHECK(h.service->testing_repairProgress() == std::pair<std::uint64_t, std::uint64_t>{3, 3});
+
+    // Freshly ingested documents are handled before the scan resumes.
+    h.service->testing_noteRepairResolved(2);
+    REQUIRE(h.service->testing_startupScanDue());
+    REQUIRE(h.service->testing_runStartupScanPass().size() == 3U); // resumed pass
+    CHECK(h.service->testing_repairProgress() == std::pair<std::uint64_t, std::uint64_t>{6, 3});
+}

@@ -340,6 +340,13 @@ public:
     }
     /// Whether the background loop would start another scan once the queue is empty.
     bool testing_startupScanDue() const { return scanCursor_.shouldStart(); }
+    /// Count documents as handled, as the drain loop does.
+    void testing_noteRepairResolved(std::uint64_t documents) { noteRepairResolved(documents); }
+    /// {backlog, processed} as the status counters would show them.
+    std::pair<std::uint64_t, std::uint64_t> testing_repairProgress() const {
+        const auto backlog = totalBacklog_.load();
+        return {backlog, std::min(processed_.load(), backlog)};
+    }
 #endif
 
 private:
@@ -556,6 +563,8 @@ private:
     // ── Progress helper ──
     // Count documents taken off the queue and handled; published as repairProcessed.
     void noteRepairResolved(std::uint64_t documents);
+    // Publish totalBacklog_ / processed_ to the status counters.
+    void publishRepairProgress();
     void beginRepairOperation(std::string_view operation);
     void endRepairOperation();
 
