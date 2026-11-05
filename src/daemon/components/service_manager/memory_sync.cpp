@@ -1,4 +1,5 @@
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/profiling.h>
 
 #include <algorithm>
@@ -710,6 +711,13 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         inputsUnchanged = false;
     }
     const auto cycleStart = std::chrono::steady_clock::now();
+    // A profile change (config reload) moves the pending deadline instead of waiting out the old
+    // interval.
+    if (const auto interval = TuneAdvisor::memorySyncFullApplyInterval();
+        lastMemorySyncFullApplyStart_ && interval != memorySyncFullApplyInterval_) {
+        memorySyncFullApplyInterval_ = interval;
+        nextMemorySyncFullApply_ = *lastMemorySyncFullApplyStart_ + interval;
+    }
     if (inputsUnchanged && cycleStart < nextMemorySyncFullApply_ &&
         !memorySyncApplySkipDisabled_.load(std::memory_order_acquire)) {
         memorySyncApplySkippedCycles_.fetch_add(1, std::memory_order_acq_rel);
@@ -906,7 +914,9 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     memorySyncApplyHealth_.recordCycle(stageFailed);
     if (applyInputs && cycleSettled && !stageFailed) {
         if (!inputsUnchanged || cycleStart >= nextMemorySyncFullApply_) {
-            nextMemorySyncFullApply_ = cycleStart + kMemorySyncFullApplyInterval;
+            memorySyncFullApplyInterval_ = TuneAdvisor::memorySyncFullApplyInterval();
+            lastMemorySyncFullApplyStart_ = cycleStart;
+            nextMemorySyncFullApply_ = cycleStart + memorySyncFullApplyInterval_;
         }
         applyInputs->view.reset(); // keep the name only; never hold an old store open
         lastSettledMemorySyncApplyInputs_ = std::move(applyInputs);

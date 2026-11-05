@@ -506,6 +506,12 @@ public:
     void testingExpireMemorySyncFullApply() {
         std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
         nextMemorySyncFullApply_ = {};
+        lastMemorySyncFullApplyStart_.reset();
+    }
+    /// When the next full apply pass is due.
+    std::chrono::steady_clock::time_point testingMemorySyncFullApplyDeadline() {
+        std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
+        return nextMemorySyncFullApply_;
     }
     /// Run every inbound stage on every cycle, for tests that observe stages per call. Lock-free,
     /// so it is safe while an apply cycle holds memorySyncApplyMutex_.
@@ -1174,15 +1180,19 @@ private:
     std::chrono::steady_clock::time_point nextMemorySyncBackfill_{};
     // Inbound apply skips a cycle whose adapter inputs match the last settled pass (complete, no
     // failures, only topology deferrals). A
-    // full pass still runs every kMemorySyncFullApplyInterval, so local drift (a replicated record
-    // deleted or changed locally) is repaired within that bound. Guarded by memorySyncApplyMutex_.
-    static constexpr std::chrono::minutes kMemorySyncFullApplyInterval{5};
-    // Holds the last settled pass's overlay rows (bounded by the merged-cache limit).
+    // full pass still runs every TuneAdvisor::memorySyncFullApplyInterval(), so local drift (a
+    // replicated record deleted or changed locally) is repaired within that bound. Guarded by
+    // memorySyncApplyMutex_. Holds the last settled pass's overlay rows (bounded by the
+    // merged-cache limit).
     std::optional<memory_sync::MemorySyncService::AdapterInputs> lastSettledMemorySyncApplyInputs_;
     // Graph change generation after the last settled pass, set only when that pass deferred
     // topology edges; a different reading means an endpoint may have appeared locally.
     std::optional<std::uint64_t> lastSettledTopologyDeferredKgGeneration_;
     std::chrono::steady_clock::time_point nextMemorySyncFullApply_{};
+    // When the last full pass started and the interval its deadline used, so a profile change
+    // can move the pending deadline.
+    std::optional<std::chrono::steady_clock::time_point> lastMemorySyncFullApplyStart_;
+    std::chrono::minutes memorySyncFullApplyInterval_{0};
     std::atomic<std::uint64_t> memorySyncApplySkippedCycles_{0};
     std::atomic<bool> memorySyncApplySkipDisabled_{false};
 
