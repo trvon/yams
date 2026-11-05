@@ -730,6 +730,10 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     // prerequisite only a peer could publish, every node refused to publish and the
     // prerequisites never arrived. Only a stop request ends the cycle early.
     // A stage that defers records is healthy; only a hard failure marks the cycle failed.
+    // Read before any stage scans: a local endpoint node committed while the topology stage runs
+    // must still look like a change next cycle, not be absorbed into this pass's baseline. The
+    // pass's own graph writes then cost at most one more pass.
+    const auto kgGenerationBeforeStages = kgGeneration();
     bool stageFailed = false;
     // Settled: every stage scanned completely, nothing failed, and any deferrals are topology
     // edges. A deferred edge waits on endpoint nodes that either replicate (the adapter inputs
@@ -906,8 +910,8 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         }
         applyInputs->view.reset(); // keep the name only; never hold an old store open
         lastSettledMemorySyncApplyInputs_ = std::move(applyInputs);
-        // Read after the stages ran, so the pass's own graph writes do not force a rerun.
-        lastSettledTopologyDeferredKgGeneration_ = topologyDeferred ? kgGeneration() : std::nullopt;
+        lastSettledTopologyDeferredKgGeneration_ =
+            topologyDeferred ? kgGenerationBeforeStages : std::nullopt;
         if (topologyDeferred && !lastSettledTopologyDeferredKgGeneration_) {
             lastSettledMemorySyncApplyInputs_.reset(); // no graph store: nothing to compare
         }

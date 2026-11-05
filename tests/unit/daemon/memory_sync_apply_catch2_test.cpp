@@ -1191,6 +1191,9 @@ TEST_CASE("Memory sync apply does not re-run an unchanged pass that only deferre
 
     reader.manager->testingApplyMemorySyncWinners();
     REQUIRE(reader.deferredTopology() == 1);
+    // That pass wrote the replicated source node, so the graph moved during it; one more pass
+    // runs before the baseline is quiet.
+    reader.manager->testingApplyMemorySyncWinners();
     const auto skipped = reader.manager->testingMemorySyncApplySkippedCycles();
     const auto reads = reader.kgStoreAcquisitions();
     reader.manager->testingApplyMemorySyncWinners();
@@ -1208,6 +1211,39 @@ TEST_CASE("Memory sync apply does not re-run an unchanged pass that only deferre
     CHECK(reader.deferredTopology() == 1);
 }
 
+TEST_CASE("Memory sync apply retries a deferred edge whose endpoint lands during the pass",
+          "[daemon][memory-sync][apply][idle]") {
+    // A local endpoint committed after the topology stage saw it missing, but before the pass
+    // recorded its graph baseline, must not be absorbed into that baseline.
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore};
+    writer.seedEdgePublishedAheadOfTarget();
+    reader.manager->testingApplyMemorySyncWinners();
+    REQUIRE(reader.deferredTopology() == 1);
+
+    bool landed = false;
+    reader.manager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (stage == "apply.after_topology" && !landed) {
+            landed = true;
+            (void)reader.addNode(writer.targetKey(), "omega");
+        }
+    });
+    reader.manager->testingExpireMemorySyncFullApply();
+    reader.manager->testingApplyMemorySyncWinners();
+    reader.manager->testingSetMemorySyncStageObserver({});
+    REQUIRE(landed);
+    REQUIRE(reader.deferredTopology() == 1); // that pass scanned before the node existed
+
+    const auto skipped = reader.manager->testingMemorySyncApplySkippedCycles();
+    reader.manager->testingApplyMemorySyncWinners();
+    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == skipped);
+    CHECK(reader.deferredTopology() == 0);
+    CHECK(reader.hasEdge(writer.sourceKey(), writer.targetKey()));
+}
+
 TEST_CASE("Memory sync apply retries a deferred record as soon as its prerequisite replicates",
           "[daemon][memory-sync][apply][idle]") {
     TempRoot root;
@@ -1219,6 +1255,7 @@ TEST_CASE("Memory sync apply retries a deferred record as soon as its prerequisi
 
     reader.manager->testingApplyMemorySyncWinners();
     REQUIRE(reader.deferredTopology() == 1);
+    reader.manager->testingApplyMemorySyncWinners(); // settles after the pass's own graph writes
     reader.manager->testingApplyMemorySyncWinners();
     REQUIRE(reader.manager->testingMemorySyncApplySkippedCycles() > 0);
 
