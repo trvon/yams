@@ -1308,8 +1308,8 @@ void RepairService::beginSweepExtractorCheck(
     const auto path = cfg_.dataDir / "repair-extractor-set";
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) {
-        // First run with this file: record the current set; nothing to compare against.
-        finishSweepExtractorCheck();
+        // First run with this file: nothing to compare against. The set is recorded only when
+        // this sweep finishes, so an interrupted first sweep leaves no marker behind.
         return;
     }
     std::ifstream in(path, std::ios::binary);
@@ -1339,6 +1339,15 @@ void RepairService::finishSweepExtractorCheck() {
     }
     std::error_code ec;
     std::filesystem::rename(temp, path, ec);
+#if defined(_WIN32)
+    if (ec) {
+        // Windows rename does not replace an existing file.
+        std::error_code removeEc;
+        std::filesystem::remove(path, removeEc);
+        ec.clear();
+        std::filesystem::rename(temp, path, ec);
+    }
+#endif
     if (ec) {
         spdlog::debug("RepairService: cannot record extractor set: {}", ec.message());
     }

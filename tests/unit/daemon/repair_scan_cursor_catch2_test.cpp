@@ -12,6 +12,7 @@
 #include <yams/metadata/metadata_repository.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <memory>
 #include <set>
 #include <string>
@@ -285,4 +286,19 @@ TEST_CASE("Startup scan retries terminal documents once the extractor set change
     // Once that sweep finished, the same extractor set does not retry it again.
     h.service = std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
     CHECK(h.service->testing_runStartupScanPass().empty());
+}
+
+// The extractor set is recorded only when a sweep finishes. A first sweep that stops at the queue
+// cap must leave no marker, or documents after the stop point would lose their retry.
+TEST_CASE("Startup scan records the extractor set only after a finished sweep",
+          "[daemon][repair][scan][terminal][catch2]") {
+    yams::test::ScopedEnvVar batch{"YAMS_REPAIR_STARTUP_BATCH", std::string{"1"}};
+    ScanHarness h(3, /*maxPending=*/1);
+    const auto marker = h.tmp.path() / "repair-extractor-set";
+    REQUIRE(h.service->testing_runStartupScanPass().size() == 1U); // capped
+    CHECK_FALSE(std::filesystem::exists(marker));
+    for (int pass = 0; pass < 6 && h.service->testing_startupScanDue(); ++pass) {
+        (void)h.service->testing_runStartupScanPass();
+    }
+    CHECK(std::filesystem::exists(marker));
 }
