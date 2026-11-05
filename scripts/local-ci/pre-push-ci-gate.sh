@@ -22,9 +22,10 @@ usage() {
 	cat <<'USAGE'
 Usage: pre-push-ci-gate.sh [options]
 
-Runs the blocking pre-push CI gate:
-  1. Native macOS ASan+UBSan Debug build + unit/integration tests.
-  2. Native macOS TSan Debug build + unit/integration tests.
+Runs the blocking pre-push CI gate on the native host lane (macOS or Linux):
+  1. Native ASan+UBSan Debug build + unit/integration tests.
+  2. Native TSan Debug build + unit/integration tests.
+Other hosts fail closed.
 
 Options:
   --self-test    Verify gate dispatch without expensive builds.
@@ -146,15 +147,23 @@ else
 	run_step "cross-compile-smoke" bash "${SCRIPT_DIR}/cross-compile-smoke.sh"
 fi
 
-if [ "$(uname -s)" != "Darwin" ]; then
-	fail "host sanitizer pre-push gate currently requires a Darwin host"
+host_os="$(uname -s)"
+case "${host_os}" in
+Darwin) host_lane="native-macos" ;;
+Linux) host_lane="native-linux" ;;
+*) host_lane="" ;;
+esac
+
+if [ -z "${host_lane}" ]; then
+	fail "host sanitizer pre-push gate supports Darwin and Linux hosts (got ${host_os})"
 	FAILURES+=("host-sanitizer-unavailable (2)")
 else
+	# A failing ASan lane still runs TSan so one push reports both sanitizer results.
 	if [ "${TSAN_ONLY}" -ne 1 ]; then
-		run_step "native-macos-${asan_profile}" bash "${SCRIPT_DIR}/native-macos-lane.sh" --profile "${asan_profile}" --log-root "${LOG_ROOT}/asan"
+		run_step "${host_lane}-${asan_profile}" bash "${SCRIPT_DIR}/${host_lane}-lane.sh" --profile "${asan_profile}" --log-root "${LOG_ROOT}/asan"
 	fi
 	if [ "${ASAN_ONLY}" -ne 1 ]; then
-		run_step "native-macos-${tsan_profile}" bash "${SCRIPT_DIR}/native-macos-lane.sh" --profile "${tsan_profile}" --log-root "${LOG_ROOT}/tsan"
+		run_step "${host_lane}-${tsan_profile}" bash "${SCRIPT_DIR}/${host_lane}-lane.sh" --profile "${tsan_profile}" --log-root "${LOG_ROOT}/tsan"
 	fi
 fi
 
