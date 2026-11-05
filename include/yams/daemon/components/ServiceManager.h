@@ -1172,12 +1172,16 @@ private:
         std::chrono::milliseconds timeBudgetPerCycle{100};
     } memorySyncBackfillState_;
     std::chrono::steady_clock::time_point nextMemorySyncBackfill_{};
-    // Inbound apply skips a cycle whose adapter inputs match the last complete, clean pass. A
+    // Inbound apply skips a cycle whose adapter inputs match the last settled pass (complete, no
+    // failures, only topology deferrals). A
     // full pass still runs every kMemorySyncFullApplyInterval, so local drift (a replicated record
     // deleted or changed locally) is repaired within that bound. Guarded by memorySyncApplyMutex_.
     static constexpr std::chrono::minutes kMemorySyncFullApplyInterval{5};
-    // Holds the last clean pass's overlay rows (bounded by the merged-cache limit).
-    std::optional<memory_sync::MemorySyncService::AdapterInputs> lastCleanMemorySyncApplyInputs_;
+    // Holds the last settled pass's overlay rows (bounded by the merged-cache limit).
+    std::optional<memory_sync::MemorySyncService::AdapterInputs> lastSettledMemorySyncApplyInputs_;
+    // Graph change generation after the last settled pass, set only when that pass deferred
+    // topology edges; a different reading means an endpoint may have appeared locally.
+    std::optional<std::uint64_t> lastSettledTopologyDeferredKgGeneration_;
     std::chrono::steady_clock::time_point nextMemorySyncFullApply_{};
     std::atomic<std::uint64_t> memorySyncApplySkippedCycles_{0};
     std::atomic<bool> memorySyncApplySkipDisabled_{false};

@@ -1448,8 +1448,8 @@ bool TuningManager::tick_once() {
         if (setRepair_) {
             using clock = std::chrono::steady_clock;
             auto now = clock::now();
-            const uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
-            const bool isBusy = (activeConns >= busyThresh);
+            const uint32_t busyThresh = TuneAdvisor::repairBusyRequestThreshold();
+            const bool isBusy = (activeNonHealthRequests >= busyThresh);
             updateRepairHysteresis(isBusy, now, repairBusySince_, repairReadySince_);
             const uint32_t degradeHold = TuneAdvisor::repairDegradeHoldMs();
             const uint32_t readyHold = TuneAdvisor::repairReadyHoldMs();

@@ -232,6 +232,12 @@ public:
         beforeInitWaiterJoinObserverForTesting_ = std::move(observer);
         return true;
     }
+    /// Stands in for client requests executing on the IPC handler, which increments this
+    /// counter for every non-health request. Tests use it to drive client-demand gating.
+    void testingAdjustExecutingRequests(std::int64_t delta) {
+        state_.stats.activeNonHealthRequests.fetch_add(static_cast<std::uint64_t>(delta),
+                                                       std::memory_order_relaxed);
+    }
 #endif
     void requestStop() {
         stopRequested_.store(true, std::memory_order_release);

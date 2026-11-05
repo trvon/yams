@@ -291,7 +291,7 @@ lists the full set; copy only the sections you change, because a copied
 | `[daemon.maintenance] session_expiry_days` | `30` | Idle session files older than this are removed. Sessions that are current, watch an existing directory, or still tag documents are kept. `0` disables. |
 | `[tuning.resource] host_pressure` | `true` | Defer background work (topology rebuilds, repair scans, vacuum, backfills) while the machine is busy. |
 | `[tuning.resource] host_cpu_pressure_pct` | from profile (`30` / `40` / `60`) | CPU pressure (Linux PSI `some avg10`) above which the host counts as busy. Raise it on shared build hosts. |
-| `[tuning.resource] host_io_pressure_pct` | from profile (`60` / `85` / `100`) | IO pressure above which the host counts as busy. Kept high because idle io_uring waiters (terminals, browsers) raise PSI IO without disk activity. |
+| `[tuning.resource] host_io_pressure_pct` | from profile (`60` / `85` / `100`) | IO pressure above which the host counts as busy. On Linux it counts only while the busiest physical disk is also busy (`50` / `70` / `90` percent of the time, from the profile), because idle io_uring waiters (terminals, browsers) raise PSI IO with no disk activity. |
 | `[tuning.resource] background_max_deferral_s` | `300` | Longest background work waits before it runs anyway. `0` never defers. |
 | `[tuning] profile` | `balanced` | `efficient`, `balanced` or `aggressive` resource use. |
 

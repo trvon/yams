@@ -98,6 +98,9 @@ public:
     /** Get page count */
     [[nodiscard]] int pageCount() const;
 
+    /** Cap the bytes one page's extraction may decompress (0 = unlimited). */
+    void setPageDecompressLimit(size_t limit);
+
     /** Get page information */
     [[nodiscard]] std::optional<PageInfo> pageInfo(int pageNum) const;
 
@@ -112,9 +115,12 @@ public:
      *  distributes pages across threads for true parallelism.
      *  @param data   Raw PDF buffer (must remain valid for the duration of the call)
      *  @param numThreads  Number of threads (0 = hardware concurrency)
+     *  @param pageDecompressLimit  Per-page decompression cap for every
+     *         thread's document (0 = unlimited)
      *  @return Combined text buffer, or empty TextBuffer on failure */
     [[nodiscard]] static TextBuffer extractAllParallelized(std::span<const uint8_t> data,
-                                                           int numThreads = 0);
+                                                           int numThreads = 0,
+                                                           size_t pageDecompressLimit = 0);
 
     /** Alias for extractAll(); named for backward compatibility.
      *  Note: despite the name this is sequential, not parallel;

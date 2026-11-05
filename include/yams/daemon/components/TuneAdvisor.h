@@ -416,11 +416,12 @@ public:
     // Maintenance tokens (concurrency) when daemon is idle. Default scales with profile.
     // Efficient: 1, Balanced: 2, Aggressive: 4
     static uint32_t repairTokensIdle();
-    // Maintenance tokens (concurrency) when daemon is busy (has active connections).
+    // Maintenance tokens (concurrency) when daemon is busy (has executing client requests).
     // Default 0, except Aggressive mode which keeps 1 worker to ensure catch-up.
     static uint32_t repairTokensBusy();
-    // Threshold of active connections to consider the daemon busy. Default 1.
-    static uint32_t repairBusyConnThreshold();
+    // Executing non-health client requests at which the daemon counts as busy for repair.
+    // Open connections do not count: agents hold them open while idle. Default 1.
+    static uint32_t repairBusyRequestThreshold();
 
     // Max allowed repair batches per second (rate limiter). Default 1.
     static uint32_t repairMaxBatchesPerSec();

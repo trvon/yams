@@ -49,6 +49,9 @@ namespace yams::search {
 
 namespace {
 
+// How often a running build re-reads the index memory grant.
+constexpr std::size_t kIndexBudgetPollDocs = 256;
+
 std::unique_ptr<simeon::Encoder> makeFixedHashFragmentEncoder() {
     return std::make_unique<simeon::Encoder>(simeon::simeon_v1_384_config());
 }
@@ -403,22 +406,46 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             return;
         }
 
-        // Primary index: matches cfg_.variant (used by score()).
-        simeon::Bm25Config bcfg;
-        bcfg.variant = toSimeonVariant(cfg_.variant);
-        bcfg.subword_gamma = cfg_.subword_gamma;
-        auto primary = std::make_unique<simeon::Bm25Index>(bcfg);
-        primary->reserve_docs(ids.size());
+        // Index memory grant. It can only shrink during a build: each index's
+        // simeon reservations are sized from the starting grant.
+        const auto pollIndexCap = [this](std::size_t current) {
+            if (!cfg_.index_budget_provider) {
+                return current;
+            }
+            const std::size_t granted = cfg_.index_budget_provider();
+            return granted == 0 ? current : std::min(current, granted);
+        };
+        std::size_t indexCap = std::max<std::size_t>(1, cfg_.max_index_bytes);
+        if (cfg_.index_budget_provider) {
+            const std::size_t granted = cfg_.index_budget_provider();
+            if (granted > 0) {
+                indexCap = granted;
+            }
+        }
 
         // Secondary index: Atire, only when routing is enabled AND the
         // primary isn't already Atire. Router dispatches between
         // {Atire, SabSmooth}, so the pair is always (Atire, SabSmooth).
-        std::unique_ptr<simeon::Bm25Index> atire;
         const bool build_atire = (cfg_.router_enabled || cfg_.bm25_variants_rrf) &&
                                  cfg_.variant != SimeonLexicalBackend::Variant::Atire;
+        // The grant covers both indexes together; each index's own simeon cap
+        // (and the reservations sized from it) gets its share.
+        const std::size_t perIndexCap =
+            build_atire ? std::max<std::size_t>(1, indexCap / 2) : indexCap;
+
+        // Primary index: matches cfg_.variant (used by score()).
+        simeon::Bm25Config bcfg;
+        bcfg.variant = toSimeonVariant(cfg_.variant);
+        bcfg.subword_gamma = cfg_.subword_gamma;
+        bcfg.max_memory_bytes = perIndexCap;
+        auto primary = std::make_unique<simeon::Bm25Index>(bcfg);
+        primary->reserve_docs(ids.size());
+
+        std::unique_ptr<simeon::Bm25Index> atire;
         if (build_atire) {
             simeon::Bm25Config acfg;
             acfg.variant = simeon::Bm25Variant::Atire;
+            acfg.max_memory_bytes = perIndexCap;
             atire = std::make_unique<simeon::Bm25Index>(acfg);
             atire->reserve_docs(ids.size());
         }
@@ -489,9 +516,32 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             if (cfg_.strategy_router_enabled) {
                 leadText = simeon::extract_lead_tokens(buildText.view, 64);
             }
-            primary->add_doc(buildText.view, leadText);
-            if (atire) {
-                atire->add_doc(buildText.view, leadText);
+            if (dense > 0 && dense % kIndexBudgetPollDocs == 0) {
+                indexCap = pollIndexCap(indexCap);
+            }
+            // Checked before and after the document, so a built index never
+            // holds more than the grant (it can pass it only while one
+            // document is being added).
+            const auto combinedBytes = [&] {
+                return primary->memory_bytes() + (atire ? atire->memory_bytes() : 0);
+            };
+            std::size_t indexBytes = combinedBytes();
+            bool withinGrant = indexBytes < indexCap &&
+                               primary->try_add_doc(buildText.view, leadText) &&
+                               (!atire || atire->try_add_doc(buildText.view, leadText));
+            if (withinGrant) {
+                indexBytes = combinedBytes();
+                withinGrant = indexBytes <= indexCap;
+            }
+            if (!withinGrant) {
+                spdlog::warn("[simeon-lexical] index memory budget reached (docs={} of {} "
+                             "index_bytes={} cap={}) - staying on FTS5 only",
+                             dense, ids.size(), indexBytes, indexCap);
+                primary.reset();
+                atire.reset();
+                releaseTransientPages("index-budget-abort");
+                building_.store(false, std::memory_order_release);
+                return;
             }
             if (considerFragmentGeometry && useCorpusPmi) {
                 const bool sampleDocsOk =
@@ -520,6 +570,8 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         if (atire) {
             atire->finalize();
         }
+        const std::size_t finalIndexBytes =
+            primary->memory_bytes() + (atire ? atire->memory_bytes() : 0);
         releaseTransientPages("post-bm25-finalize");
 
         // Concept mining: second pass over the corpus to discover word-bigram
@@ -756,10 +808,11 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         building_.store(false, std::memory_order_release);
 
         spdlog::info("[simeon-lexical] ready: variant={} router={} fragment_geometry={} docs={} "
-                     "missing={} raw_bytes={} processed_bytes={} chunked_docs={} build_ms={}",
+                     "missing={} raw_bytes={} processed_bytes={} chunked_docs={} "
+                     "index_bytes={} index_cap={} build_ms={}",
                      variantLabel(cfg_.variant), cfg_.router_enabled ? "on" : "off",
                      fragment_encoder_ ? "on" : "off", dense, missing, rawCorpusBytes,
-                     processedCorpusBytes, chunkedDocs, buildMs);
+                     processedCorpusBytes, chunkedDocs, finalIndexBytes, indexCap, buildMs);
         releaseTransientPages("post-build");
     });
 

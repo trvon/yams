@@ -8,10 +8,13 @@
 
 #include <yams/plugins/abi.h>
 #include <yams/plugins/content_extractor_v1.h>
+#include <yams/plugins/host_context_v1.h>
 
 #include "pdf_metadata.h"
 #include "zpdf_wrapper.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 
@@ -50,6 +53,36 @@ bool supports(const char* mime_type, const char* extension) {
     return false;
 }
 
+// Host context from yams_plugin_init; owned by the host and valid until unload.
+const yams_plugin_host_context_v1* g_host = nullptr;
+
+struct ExtractionGrant {
+    int threads = 0;                // 0: hardware concurrency
+    size_t pageDecompressLimit = 0; // 0: unlimited
+};
+
+// Ask the host's resource governor for this document's grant. Hosts older
+// than services version 2 have no resource service; keep zpdf's defaults.
+ExtractionGrant requestGrant() {
+    ExtractionGrant grant;
+    if (!g_host || g_host->version < 2 || !g_host->resource_service ||
+        !g_host->resource_service->get_extraction_budget) {
+        return grant;
+    }
+    yams_extraction_budget_v1 budget{};
+    if (g_host->resource_service->get_extraction_budget(g_host->resource_service->handle,
+                                                        &budget) != 0) {
+        return grant;
+    }
+    grant.threads = static_cast<int>(budget.max_threads > 0 ? budget.max_threads : 1);
+    if (budget.max_decompressed_bytes > 0) {
+        // Each thread extracts one page at a time, so split the bytes per thread.
+        grant.pageDecompressLimit = static_cast<size_t>(
+            std::max<uint64_t>(1, budget.max_decompressed_bytes / grant.threads));
+    }
+    return grant;
+}
+
 /**
  * Extract text and metadata from a PDF buffer.
  */
@@ -72,8 +105,10 @@ int extract(const uint8_t* content, size_t content_len, yams_extraction_result_t
         pageCount = probeDoc->pageCount();
     }
 
-    // Extract text using true parallel extraction across pages
-    auto text = yams::zyp::Document::extractAllParallelized(buffer);
+    // Extract text in parallel across pages, within the host's grant.
+    const auto grant = requestGrant();
+    auto text = yams::zyp::Document::extractAllParallelized(buffer, grant.threads,
+                                                            grant.pageDecompressLimit);
 
     // Extract metadata
     auto metadata = yams::zyp::extractMetadata(buffer);
@@ -191,12 +226,12 @@ const char* yams_plugin_get_manifest_json(void) {
 
 int yams_plugin_init(const char* config_json, const void* host_context) {
     (void)config_json;
-    (void)host_context;
+    g_host = static_cast<const yams_plugin_host_context_v1*>(host_context);
     return YAMS_PLUGIN_OK;
 }
 
 void yams_plugin_shutdown(void) {
-    // No cleanup needed
+    g_host = nullptr;
 }
 
 int yams_plugin_get_interface(const char* iface_id, uint32_t version, void** out_iface) {
