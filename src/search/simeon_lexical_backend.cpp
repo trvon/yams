@@ -423,24 +423,29 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             }
         }
 
+        // Secondary index: Atire, only when routing is enabled AND the
+        // primary isn't already Atire. Router dispatches between
+        // {Atire, SabSmooth}, so the pair is always (Atire, SabSmooth).
+        const bool build_atire = (cfg_.router_enabled || cfg_.bm25_variants_rrf) &&
+                                 cfg_.variant != SimeonLexicalBackend::Variant::Atire;
+        // The grant covers both indexes together; each index's own simeon cap
+        // (and the reservations sized from it) gets its share.
+        const std::size_t perIndexCap =
+            build_atire ? std::max<std::size_t>(1, indexCap / 2) : indexCap;
+
         // Primary index: matches cfg_.variant (used by score()).
         simeon::Bm25Config bcfg;
         bcfg.variant = toSimeonVariant(cfg_.variant);
         bcfg.subword_gamma = cfg_.subword_gamma;
-        bcfg.max_memory_bytes = indexCap;
+        bcfg.max_memory_bytes = perIndexCap;
         auto primary = std::make_unique<simeon::Bm25Index>(bcfg);
         primary->reserve_docs(ids.size());
 
-        // Secondary index: Atire, only when routing is enabled AND the
-        // primary isn't already Atire. Router dispatches between
-        // {Atire, SabSmooth}, so the pair is always (Atire, SabSmooth).
         std::unique_ptr<simeon::Bm25Index> atire;
-        const bool build_atire = (cfg_.router_enabled || cfg_.bm25_variants_rrf) &&
-                                 cfg_.variant != SimeonLexicalBackend::Variant::Atire;
         if (build_atire) {
             simeon::Bm25Config acfg;
             acfg.variant = simeon::Bm25Variant::Atire;
-            acfg.max_memory_bytes = indexCap;
+            acfg.max_memory_bytes = perIndexCap;
             atire = std::make_unique<simeon::Bm25Index>(acfg);
             atire->reserve_docs(ids.size());
         }
@@ -514,10 +519,21 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             if (dense > 0 && dense % kIndexBudgetPollDocs == 0) {
                 indexCap = pollIndexCap(indexCap);
             }
-            const std::size_t indexBytes =
-                primary->memory_bytes() + (atire ? atire->memory_bytes() : 0);
-            if (indexBytes >= indexCap || !primary->try_add_doc(buildText.view, leadText) ||
-                (atire && !atire->try_add_doc(buildText.view, leadText))) {
+            // Checked before and after the document, so a built index never
+            // holds more than the grant (it can pass it only while one
+            // document is being added).
+            const auto combinedBytes = [&] {
+                return primary->memory_bytes() + (atire ? atire->memory_bytes() : 0);
+            };
+            std::size_t indexBytes = combinedBytes();
+            bool withinGrant = indexBytes < indexCap &&
+                               primary->try_add_doc(buildText.view, leadText) &&
+                               (!atire || atire->try_add_doc(buildText.view, leadText));
+            if (withinGrant) {
+                indexBytes = combinedBytes();
+                withinGrant = indexBytes <= indexCap;
+            }
+            if (!withinGrant) {
                 spdlog::warn("[simeon-lexical] index memory budget reached (docs={} of {} "
                              "index_bytes={} cap={}) - staying on FTS5 only",
                              dense, ids.size(), indexBytes, indexCap);

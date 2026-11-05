@@ -333,10 +333,17 @@ public:
         deferredWorkMask_.store(0, std::memory_order_release);
     }
     /// Test-only: end the startup grace period, so Critical and Emergency are reported.
+    /// Returns the previous startup time for testing_restoreStartupTime().
     /// Call only while no tick thread is running.
-    void testing_endStartupGrace() noexcept {
+    std::chrono::steady_clock::time_point testing_endStartupGrace() noexcept {
+        const auto previous = startupTime_;
         startupTime_ =
             std::chrono::steady_clock::now() - kStartupGracePeriod - std::chrono::seconds(1);
+        return previous;
+    }
+    /// Test-only: restore a startup time saved by testing_endStartupGrace().
+    void testing_restoreStartupTime(std::chrono::steady_clock::time_point t) noexcept {
+        startupTime_ = t;
     }
     /// Test-only: set pressure state for hysteresis tests.
     void testing_setPressureState(ResourcePressureLevel level,
