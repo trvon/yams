@@ -305,9 +305,6 @@ public:
         return score_micros_total_.load(std::memory_order_relaxed);
     }
 
-    /// Reset the score cache hit counter.
-    void resetScoreCacheHits() { score_cache_hits_.store(0, std::memory_order_relaxed); }
-
     /// Clear the score cache (e.g., after corpus rebuild).
     void clearScoreCache();
 

@@ -2575,30 +2575,6 @@ template <> struct ProtoBinding<CatResponse> {
     }
 };
 
-template <> struct ProtoBinding<ListSessionsRequest> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kListSessionsRequest;
-    static void set(Envelope& env, const ListSessionsRequest&) {
-        (void)env.mutable_list_sessions_request();
-    }
-    static ListSessionsRequest get(const Envelope&) { return ListSessionsRequest{}; }
-};
-
-template <> struct ProtoBinding<ListSessionsResponse> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kListSessionsResponse;
-    static void set(Envelope& env, const ListSessionsResponse& r) {
-        auto* o = env.mutable_list_sessions_response();
-        set_string_list(r.session_names, o->mutable_session_names());
-        o->set_current_session(r.current_session);
-    }
-    static ListSessionsResponse get(const Envelope& env) {
-        const auto& i = env.list_sessions_response();
-        ListSessionsResponse r{};
-        r.session_names = get_string_list(i.session_names());
-        r.current_session = i.current_session();
-        return r;
-    }
-};
-
 template <> struct ProtoBinding<UseSessionRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kUseSessionRequest;
     static void set(Envelope& env, const UseSessionRequest& r) {
@@ -2609,105 +2585,6 @@ template <> struct ProtoBinding<UseSessionRequest> {
         const auto& i = env.use_session_request();
         UseSessionRequest r{};
         r.session_name = i.session_name();
-        return r;
-    }
-};
-
-template <> struct ProtoBinding<AddPathSelectorRequest> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kAddPathSelectorRequest;
-    static void set(Envelope& env, const AddPathSelectorRequest& r) {
-        auto* o = env.mutable_add_path_selector_request();
-        o->set_session_name(r.session_name);
-        o->set_path(r.path);
-        set_string_list(r.tags, o->mutable_tags());
-        to_kv_pairs(r.metadata, o->mutable_metadata());
-    }
-    static AddPathSelectorRequest get(const Envelope& env) {
-        const auto& i = env.add_path_selector_request();
-        AddPathSelectorRequest r{};
-        r.session_name = i.session_name();
-        r.path = i.path();
-        r.tags = get_string_list(i.tags());
-        r.metadata = from_kv_pairs(i.metadata());
-        return r;
-    }
-};
-
-template <> struct ProtoBinding<RemovePathSelectorRequest> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kRemovePathSelectorRequest;
-    static void set(Envelope& env, const RemovePathSelectorRequest& r) {
-        auto* o = env.mutable_remove_path_selector_request();
-        o->set_session_name(r.session_name);
-        o->set_path(r.path);
-    }
-    static RemovePathSelectorRequest get(const Envelope& env) {
-        const auto& i = env.remove_path_selector_request();
-        RemovePathSelectorRequest r{};
-        r.session_name = i.session_name();
-        r.path = i.path();
-        return r;
-    }
-};
-
-// Tree diff bindings (PBI-043)
-template <> struct ProtoBinding<ListTreeDiffRequest> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kListTreeDiffRequest;
-    static void set(Envelope& env, const ListTreeDiffRequest& r) {
-        auto* o = env.mutable_list_tree_diff_request();
-        o->set_base_snapshot_id(r.baseSnapshotId);
-        o->set_target_snapshot_id(r.targetSnapshotId);
-        o->set_path_prefix(r.pathPrefix);
-        o->set_type_filter(r.typeFilter);
-        o->set_limit(r.limit);
-        o->set_offset(r.offset);
-    }
-    static ListTreeDiffRequest get(const Envelope& env) {
-        const auto& i = env.list_tree_diff_request();
-        ListTreeDiffRequest r{};
-        r.baseSnapshotId = i.base_snapshot_id();
-        r.targetSnapshotId = i.target_snapshot_id();
-        r.pathPrefix = i.path_prefix();
-        r.typeFilter = i.type_filter();
-        r.limit = i.limit();
-        r.offset = i.offset();
-        return r;
-    }
-};
-
-template <> struct ProtoBinding<ListTreeDiffResponse> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kListTreeDiffResponse;
-    static void set(Envelope& env, const ListTreeDiffResponse& r) {
-        auto* o = env.mutable_list_tree_diff_response();
-        for (const auto& change : r.changes) {
-            auto* entry = o->add_changes();
-            entry->set_change_type(change.changeType);
-            entry->set_path(change.path);
-            entry->set_old_path(change.oldPath);
-            entry->set_hash(change.hash);
-            entry->set_old_hash(change.oldHash);
-            entry->set_size(change.size);
-            entry->set_old_size(change.oldSize);
-            entry->set_content_delta_hash(change.contentDeltaHash);
-        }
-        o->set_total_count(r.totalCount);
-    }
-    static ListTreeDiffResponse get(const Envelope& env) {
-        const auto& i = env.list_tree_diff_response();
-        ListTreeDiffResponse r{};
-        reserve_from_proto_size(r.changes, i.changes_size());
-        for (const auto& entry : i.changes()) {
-            TreeChangeEntry ce;
-            ce.changeType = entry.change_type();
-            ce.path = entry.path();
-            ce.oldPath = entry.old_path();
-            ce.hash = entry.hash();
-            ce.oldHash = entry.old_hash();
-            ce.size = entry.size();
-            ce.oldSize = entry.old_size();
-            ce.contentDeltaHash = entry.content_delta_hash();
-            r.changes.push_back(std::move(ce));
-        }
-        r.totalCount = i.total_count();
         return r;
     }
 };
@@ -3496,151 +3373,6 @@ template <> struct ProtoBinding<GraphTraceResponse> {
     }
 };
 
-template <> struct ProtoBinding<GraphImpactRequest> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphImpactRequest;
-    static void set(Envelope& env, const GraphImpactRequest& r) {
-        auto* o = env.mutable_graph_impact_request();
-        o->set_symbol(r.symbol);
-        o->set_depth(r.depth);
-        o->set_max_symbols(r.maxSymbols);
-        o->set_scope_path_prefix(r.scopePathPrefix);
-    }
-    static GraphImpactRequest get(const Envelope& env) {
-        const auto& i = env.graph_impact_request();
-        GraphImpactRequest r{};
-        r.symbol = i.symbol();
-        r.depth = i.depth();
-        r.maxSymbols = i.max_symbols();
-        r.scopePathPrefix = i.scope_path_prefix();
-        return r;
-    }
-};
-
-template <> struct ProtoBinding<GraphImpactResponse> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphImpactResponse;
-    static void set(Envelope& env, const GraphImpactResponse& r) {
-        auto* o = env.mutable_graph_impact_response();
-        o->set_symbol(r.symbol);
-        for (const auto& affected : r.affectedSymbols) {
-            setGraphSymbolMsg(o->add_affected_symbols(), affected);
-        }
-        for (const auto& relation : r.relationships) {
-            setGraphRelationMsg(o->add_relationships(), relation);
-        }
-        set_string_list(r.warnings, o->mutable_warnings());
-        o->set_truncated(r.truncated);
-    }
-    static GraphImpactResponse get(const Envelope& env) {
-        const auto& i = env.graph_impact_response();
-        GraphImpactResponse r{};
-        r.symbol = i.symbol();
-        reserve_from_proto_size(r.affectedSymbols, i.affected_symbols_size());
-        for (const auto& affected : i.affected_symbols()) {
-            r.affectedSymbols.push_back(getGraphSymbolMsg(affected));
-        }
-        reserve_from_proto_size(r.relationships, i.relationships_size());
-        for (const auto& relation : i.relationships()) {
-            r.relationships.push_back(getGraphRelationMsg(relation));
-        }
-        r.warnings = get_string_list(i.warnings());
-        r.truncated = i.truncated();
-        return r;
-    }
-};
-
-template <> struct ProtoBinding<GraphAffectedTestsRequest> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphAffectedTestsRequest;
-    static void set(Envelope& env, const GraphAffectedTestsRequest& r) {
-        auto* o = env.mutable_graph_affected_tests_request();
-        set_string_list(r.changedFiles, o->mutable_changed_files());
-        o->set_depth(r.depth);
-        o->set_test_path_pattern(r.testPathPattern);
-    }
-    static GraphAffectedTestsRequest get(const Envelope& env) {
-        const auto& i = env.graph_affected_tests_request();
-        GraphAffectedTestsRequest r{};
-        r.changedFiles = get_string_list(i.changed_files());
-        r.depth = i.depth();
-        r.testPathPattern = i.test_path_pattern();
-        return r;
-    }
-};
-
-template <> struct ProtoBinding<GraphAffectedTestsResponse> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphAffectedTestsResponse;
-    static void set(Envelope& env, const GraphAffectedTestsResponse& r) {
-        auto* o = env.mutable_graph_affected_tests_response();
-        set_string_list(r.changedFiles, o->mutable_changed_files());
-        set_string_list(r.affectedTests, o->mutable_affected_tests());
-        for (const auto& relation : r.relationships) {
-            setGraphRelationMsg(o->add_relationships(), relation);
-        }
-        set_string_list(r.warnings, o->mutable_warnings());
-        o->set_truncated(r.truncated);
-    }
-    static GraphAffectedTestsResponse get(const Envelope& env) {
-        const auto& i = env.graph_affected_tests_response();
-        GraphAffectedTestsResponse r{};
-        r.changedFiles = get_string_list(i.changed_files());
-        r.affectedTests = get_string_list(i.affected_tests());
-        reserve_from_proto_size(r.relationships, i.relationships_size());
-        for (const auto& relation : i.relationships()) {
-            r.relationships.push_back(getGraphRelationMsg(relation));
-        }
-        r.warnings = get_string_list(i.warnings());
-        r.truncated = i.truncated();
-        return r;
-    }
-};
-
-template <> struct ProtoBinding<GraphPathHistoryRequest> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphPathHistoryRequest;
-    static void set(Envelope& env, const GraphPathHistoryRequest& r) {
-        auto* o = env.mutable_graph_path_history_request();
-        o->set_path(r.path);
-        o->set_limit(r.limit);
-    }
-    static GraphPathHistoryRequest get(const Envelope& env) {
-        const auto& i = env.graph_path_history_request();
-        GraphPathHistoryRequest r{};
-        r.path = i.path();
-        r.limit = i.limit();
-        return r;
-    }
-};
-
-template <> struct ProtoBinding<GraphPathHistoryResponse> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kGraphPathHistoryResponse;
-    static void set(Envelope& env, const GraphPathHistoryResponse& r) {
-        auto* o = env.mutable_graph_path_history_response();
-        o->set_query_path(r.queryPath);
-        for (const auto& entry : r.history) {
-            auto* e = o->add_history();
-            e->set_path(entry.path);
-            e->set_snapshot_id(entry.snapshotId);
-            e->set_blob_hash(entry.blobHash);
-            e->set_change_type(entry.changeType);
-        }
-        o->set_has_more(r.hasMore);
-    }
-    static GraphPathHistoryResponse get(const Envelope& env) {
-        const auto& i = env.graph_path_history_response();
-        GraphPathHistoryResponse r{};
-        r.queryPath = i.query_path();
-        reserve_from_proto_size(r.history, i.history_size());
-        for (const auto& entry : i.history()) {
-            PathHistoryEntry e{};
-            e.path = entry.path();
-            e.snapshotId = entry.snapshot_id();
-            e.blobHash = entry.blob_hash();
-            e.changeType = entry.change_type();
-            r.history.push_back(std::move(e));
-        }
-        r.hasMore = i.has_more();
-        return r;
-    }
-};
-
 template <> struct ProtoBinding<MetadataValueCountsRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kMetadataValueCountsRequest;
     static void set(Envelope& env, const MetadataValueCountsRequest& r) {
@@ -3842,245 +3574,6 @@ template <> struct ProtoBinding<RestoreSnapshotResponse> {
             rf.skipped = f.skipped();
             rf.skipReason = f.skip_reason();
             r.files.push_back(std::move(rf));
-        }
-        return r;
-    }
-};
-
-// --------------------------- Batch Request/Response (Track B) ---------------------------
-template <> struct ProtoBinding<BatchRequest> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kBatchRequest;
-    static void set(Envelope& env, const BatchRequest& r) {
-        auto* o = env.mutable_batch_request();
-        o->set_continue_on_error(r.continueOnError);
-        o->set_session_id(r.sessionId);
-        if (!r.instanceId.empty()) {
-            o->set_instance_id(r.instanceId);
-        }
-        for (const auto& item : r.items) {
-            auto* item_pb = o->add_items();
-            item_pb->set_sequence_id(item.sequenceId);
-            std::visit(
-                [&item_pb](const auto& req) {
-                    using T = std::decay_t<decltype(req)>;
-                    Envelope tempEnv;
-                    if constexpr (std::is_same_v<T, SearchRequest>) {
-                        ProtoBinding<SearchRequest>::set(tempEnv, req);
-                        *item_pb->mutable_search_request() = tempEnv.search_request();
-                    } else if constexpr (std::is_same_v<T, GetRequest>) {
-                        ProtoBinding<GetRequest>::set(tempEnv, req);
-                        *item_pb->mutable_get_request() = tempEnv.get_request();
-                    } else if constexpr (std::is_same_v<T, AddDocumentRequest>) {
-                        ProtoBinding<AddDocumentRequest>::set(tempEnv, req);
-                        *item_pb->mutable_add_document_request() = tempEnv.add_document_request();
-                    } else if constexpr (std::is_same_v<T, GrepRequest>) {
-                        ProtoBinding<GrepRequest>::set(tempEnv, req);
-                        *item_pb->mutable_grep_request() = tempEnv.grep_request();
-                    } else if constexpr (std::is_same_v<T, UpdateDocumentRequest>) {
-                        ProtoBinding<UpdateDocumentRequest>::set(tempEnv, req);
-                        *item_pb->mutable_update_document_request() =
-                            tempEnv.update_document_request();
-                    } else if constexpr (std::is_same_v<T, DeleteRequest>) {
-                        ProtoBinding<DeleteRequest>::set(tempEnv, req);
-                        *item_pb->mutable_delete_request() = tempEnv.delete_request();
-                    } else if constexpr (std::is_same_v<T, ListRequest>) {
-                        ProtoBinding<ListRequest>::set(tempEnv, req);
-                        *item_pb->mutable_list_request() = tempEnv.list_request();
-                    } else if constexpr (std::is_same_v<T, GraphQueryRequest>) {
-                        ProtoBinding<GraphQueryRequest>::set(tempEnv, req);
-                        *item_pb->mutable_graph_query_request() = tempEnv.graph_query_request();
-                    }
-                },
-                item.request);
-        }
-    }
-    static BatchRequest get(const Envelope& env) {
-        const auto& i = env.batch_request();
-        BatchRequest r{};
-        r.continueOnError = i.continue_on_error();
-        r.sessionId = i.session_id();
-        r.instanceId = i.instance_id();
-        for (const auto& item_pb : i.items()) {
-            BatchItem item;
-            item.sequenceId = item_pb.sequence_id();
-            switch (item_pb.request_case()) {
-                case pb::BatchItem::kSearchRequest: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_search_request() = item_pb.search_request();
-                    item.request = ProtoBinding<SearchRequest>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItem::kGetRequest: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_get_request() = item_pb.get_request();
-                    item.request = ProtoBinding<GetRequest>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItem::kAddDocumentRequest: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_add_document_request() = item_pb.add_document_request();
-                    item.request = ProtoBinding<AddDocumentRequest>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItem::kGrepRequest: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_grep_request() = item_pb.grep_request();
-                    item.request = ProtoBinding<GrepRequest>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItem::kUpdateDocumentRequest: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_update_document_request() = item_pb.update_document_request();
-                    item.request = ProtoBinding<UpdateDocumentRequest>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItem::kDeleteRequest: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_delete_request() = item_pb.delete_request();
-                    item.request = ProtoBinding<DeleteRequest>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItem::kListRequest: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_list_request() = item_pb.list_request();
-                    item.request = ProtoBinding<ListRequest>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItem::kGraphQueryRequest: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_graph_query_request() = item_pb.graph_query_request();
-                    item.request = ProtoBinding<GraphQueryRequest>::get(tempEnv);
-                    break;
-                }
-                default:
-                    break;
-            }
-            r.items.push_back(std::move(item));
-        }
-        return r;
-    }
-};
-
-template <> struct ProtoBinding<BatchResponse> {
-    static constexpr Envelope::PayloadCase case_v = Envelope::kBatchResponse;
-    static void set(Envelope& env, const BatchResponse& r) {
-        auto* o = env.mutable_batch_response();
-        for (const auto& item : r.items) {
-            auto* item_pb = o->add_items();
-            item_pb->set_sequence_id(item.sequenceId);
-            item_pb->set_success(item.success);
-            std::visit(
-                [&item_pb](const auto& resp) {
-                    using T = std::decay_t<decltype(resp)>;
-                    Envelope tempEnv;
-                    if constexpr (std::is_same_v<T, SearchResponse>) {
-                        ProtoBinding<SearchResponse>::set(tempEnv, resp);
-                        *item_pb->mutable_search_response() = tempEnv.search_response();
-                    } else if constexpr (std::is_same_v<T, GetResponse>) {
-                        ProtoBinding<GetResponse>::set(tempEnv, resp);
-                        *item_pb->mutable_get_response() = tempEnv.get_response();
-                    } else if constexpr (std::is_same_v<T, AddDocumentResponse>) {
-                        ProtoBinding<AddDocumentResponse>::set(tempEnv, resp);
-                        *item_pb->mutable_add_document_response() = tempEnv.add_document_response();
-                    } else if constexpr (std::is_same_v<T, GrepResponse>) {
-                        ProtoBinding<GrepResponse>::set(tempEnv, resp);
-                        *item_pb->mutable_grep_response() = tempEnv.grep_response();
-                    } else if constexpr (std::is_same_v<T, UpdateDocumentResponse>) {
-                        ProtoBinding<UpdateDocumentResponse>::set(tempEnv, resp);
-                        *item_pb->mutable_update_document_response() =
-                            tempEnv.update_document_response();
-                    } else if constexpr (std::is_same_v<T, DeleteResponse>) {
-                        ProtoBinding<DeleteResponse>::set(tempEnv, resp);
-                        *item_pb->mutable_delete_response() = tempEnv.delete_response();
-                    } else if constexpr (std::is_same_v<T, ListResponse>) {
-                        ProtoBinding<ListResponse>::set(tempEnv, resp);
-                        *item_pb->mutable_list_response() = tempEnv.list_response();
-                    } else if constexpr (std::is_same_v<T, GraphQueryResponse>) {
-                        ProtoBinding<GraphQueryResponse>::set(tempEnv, resp);
-                        *item_pb->mutable_graph_query_response() = tempEnv.graph_query_response();
-                    } else if constexpr (std::is_same_v<T, ErrorResponse>) {
-                        ProtoBinding<ErrorResponse>::set(tempEnv, resp);
-                        *item_pb->mutable_error() = tempEnv.error();
-                    }
-                },
-                item.response);
-        }
-        o->set_total_count(r.totalCount);
-        o->set_success_count(r.successCount);
-        o->set_error_count(r.errorCount);
-        o->set_elapsed_ms(static_cast<int64_t>(r.elapsed.count()));
-    }
-    static BatchResponse get(const Envelope& env) {
-        const auto& i = env.batch_response();
-        BatchResponse r{};
-        r.totalCount = i.total_count();
-        r.successCount = i.success_count();
-        r.errorCount = i.error_count();
-        r.elapsed = std::chrono::milliseconds{i.elapsed_ms()};
-        for (const auto& item_pb : i.items()) {
-            BatchItemResponse item;
-            item.sequenceId = item_pb.sequence_id();
-            item.success = item_pb.success();
-            switch (item_pb.response_case()) {
-                case pb::BatchItemResponse::kSearchResponse: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_search_response() = item_pb.search_response();
-                    item.response = ProtoBinding<SearchResponse>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItemResponse::kGetResponse: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_get_response() = item_pb.get_response();
-                    item.response = ProtoBinding<GetResponse>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItemResponse::kAddDocumentResponse: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_add_document_response() = item_pb.add_document_response();
-                    item.response = ProtoBinding<AddDocumentResponse>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItemResponse::kGrepResponse: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_grep_response() = item_pb.grep_response();
-                    item.response = ProtoBinding<GrepResponse>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItemResponse::kUpdateDocumentResponse: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_update_document_response() =
-                        item_pb.update_document_response();
-                    item.response = ProtoBinding<UpdateDocumentResponse>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItemResponse::kDeleteResponse: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_delete_response() = item_pb.delete_response();
-                    item.response = ProtoBinding<DeleteResponse>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItemResponse::kListResponse: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_list_response() = item_pb.list_response();
-                    item.response = ProtoBinding<ListResponse>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItemResponse::kGraphQueryResponse: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_graph_query_response() = item_pb.graph_query_response();
-                    item.response = ProtoBinding<GraphQueryResponse>::get(tempEnv);
-                    break;
-                }
-                case pb::BatchItemResponse::kError: {
-                    Envelope tempEnv;
-                    *tempEnv.mutable_error() = item_pb.error();
-                    item.response = ProtoBinding<ErrorResponse>::get(tempEnv);
-                    break;
-                }
-                default:
-                    break;
-            }
-            r.items.push_back(std::move(item));
         }
         return r;
     }
@@ -4488,28 +3981,8 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
-        case Envelope::kListSessionsRequest: {
-            auto v = ProtoBinding<ListSessionsRequest>::get(env);
-            m.payload = Request{std::move(v)};
-            break;
-        }
         case Envelope::kUseSessionRequest: {
             auto v = ProtoBinding<UseSessionRequest>::get(env);
-            m.payload = Request{std::move(v)};
-            break;
-        }
-        case Envelope::kAddPathSelectorRequest: {
-            auto v = ProtoBinding<AddPathSelectorRequest>::get(env);
-            m.payload = Request{std::move(v)};
-            break;
-        }
-        case Envelope::kRemovePathSelectorRequest: {
-            auto v = ProtoBinding<RemovePathSelectorRequest>::get(env);
-            m.payload = Request{std::move(v)};
-            break;
-        }
-        case Envelope::kListTreeDiffRequest: {
-            auto v = ProtoBinding<ListTreeDiffRequest>::get(env);
             m.payload = Request{std::move(v)};
             break;
         }
@@ -4583,21 +4056,6 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
-        case Envelope::kGraphImpactRequest: {
-            auto v = ProtoBinding<GraphImpactRequest>::get(env);
-            m.payload = Request{std::move(v)};
-            break;
-        }
-        case Envelope::kGraphAffectedTestsRequest: {
-            auto v = ProtoBinding<GraphAffectedTestsRequest>::get(env);
-            m.payload = Request{std::move(v)};
-            break;
-        }
-        case Envelope::kGraphPathHistoryRequest: {
-            auto v = ProtoBinding<GraphPathHistoryRequest>::get(env);
-            m.payload = Request{std::move(v)};
-            break;
-        }
         case Envelope::kMetadataValueCountsRequest: {
             auto v = ProtoBinding<MetadataValueCountsRequest>::get(env);
             m.payload = Request{std::move(v)};
@@ -4605,11 +4063,6 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         }
         case Envelope::kMemorySyncRequest: {
             auto v = ProtoBinding<MemorySyncRequest>::get(env);
-            m.payload = Request{std::move(v)};
-            break;
-        }
-        case Envelope::kBatchRequest: {
-            auto v = ProtoBinding<BatchRequest>::get(env);
             m.payload = Request{std::move(v)};
             break;
         }
@@ -4760,16 +4213,6 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Response{std::in_place_type<CatResponse>, std::move(v)};
             break;
         }
-        case Envelope::kListSessionsResponse: {
-            auto v = ProtoBinding<ListSessionsResponse>::get(env);
-            m.payload = Response{std::in_place_type<ListSessionsResponse>, std::move(v)};
-            break;
-        }
-        case Envelope::kListTreeDiffResponse: {
-            auto v = ProtoBinding<ListTreeDiffResponse>::get(env);
-            m.payload = Response{std::in_place_type<ListTreeDiffResponse>, std::move(v)};
-            break;
-        }
         case Envelope::kFileHistoryResponse: {
             auto v = ProtoBinding<FileHistoryResponse>::get(env);
             m.payload = Response{std::in_place_type<FileHistoryResponse>, std::move(v)};
@@ -4810,21 +4253,6 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Response{std::in_place_type<GraphTraceResponse>, std::move(v)};
             break;
         }
-        case Envelope::kGraphImpactResponse: {
-            auto v = ProtoBinding<GraphImpactResponse>::get(env);
-            m.payload = Response{std::in_place_type<GraphImpactResponse>, std::move(v)};
-            break;
-        }
-        case Envelope::kGraphAffectedTestsResponse: {
-            auto v = ProtoBinding<GraphAffectedTestsResponse>::get(env);
-            m.payload = Response{std::in_place_type<GraphAffectedTestsResponse>, std::move(v)};
-            break;
-        }
-        case Envelope::kGraphPathHistoryResponse: {
-            auto v = ProtoBinding<GraphPathHistoryResponse>::get(env);
-            m.payload = Response{std::in_place_type<GraphPathHistoryResponse>, std::move(v)};
-            break;
-        }
         case Envelope::kMetadataValueCountsResponse: {
             auto v = ProtoBinding<MetadataValueCountsResponse>::get(env);
             m.payload = Response{std::in_place_type<MetadataValueCountsResponse>, std::move(v)};
@@ -4833,11 +4261,6 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kMemorySyncResponse: {
             auto v = ProtoBinding<MemorySyncResponse>::get(env);
             m.payload = Response{std::in_place_type<MemorySyncResponse>, std::move(v)};
-            break;
-        }
-        case Envelope::kBatchResponse: {
-            auto v = ProtoBinding<BatchResponse>::get(env);
-            m.payload = Response{std::in_place_type<BatchResponse>, std::move(v)};
             break;
         }
         case Envelope::kListSnapshotsResponse: {

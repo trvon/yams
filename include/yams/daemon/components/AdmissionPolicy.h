@@ -39,8 +39,7 @@ public:
 
         if (std::holds_alternative<SearchRequest>(request) ||
             std::holds_alternative<GrepRequest>(request) ||
-            std::holds_alternative<GraphQueryRequest>(request) ||
-            std::holds_alternative<GraphPathHistoryRequest>(request)) {
+            std::holds_alternative<GraphQueryRequest>(request)) {
             return CommandClass::search;
         }
 
@@ -48,7 +47,6 @@ public:
             std::holds_alternative<UpdateDocumentRequest>(request) ||
             std::holds_alternative<DeleteRequest>(request) ||
             std::holds_alternative<UnlinkPathRequest>(request) ||
-            std::holds_alternative<BatchRequest>(request) ||
             std::holds_alternative<GenerateEmbeddingRequest>(request) ||
             std::holds_alternative<BatchEmbeddingRequest>(request) ||
             std::holds_alternative<EmbedDocumentsRequest>(request) ||
@@ -64,8 +62,6 @@ public:
             std::holds_alternative<PluginTrustAddRequest>(request) ||
             std::holds_alternative<PluginTrustRemoveRequest>(request) ||
             std::holds_alternative<UseSessionRequest>(request) ||
-            std::holds_alternative<AddPathSelectorRequest>(request) ||
-            std::holds_alternative<RemovePathSelectorRequest>(request) ||
             std::holds_alternative<PruneRequest>(request) ||
             std::holds_alternative<RestoreCollectionRequest>(request) ||
             std::holds_alternative<RestoreSnapshotRequest>(request)) {

@@ -4,7 +4,6 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <yams/app/services/enhanced_search_executor.h>
 #include <yams/app/services/extract_scope.h>
 #include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/retrieval_path_policy.hpp>
@@ -570,18 +569,6 @@ public:
         if (!ctx_.searchRepairDetails.empty()) {
             repairDetails_ = ctx_.searchRepairDetails;
         }
-
-        // Enhanced search config (best-effort; off by default). Keep lightweight and safe.
-        try {
-            enhancedCfg_ = EnhancedSearchExecutor::loadConfigFromToml();
-            if (enhancedCfg_.enable) {
-                hotzones_ = std::make_shared<yams::search::HotzoneManager>(enhancedCfg_.hotzones);
-                enhanced_.setHotzoneManager(hotzones_);
-            }
-        } catch (...) {
-            // Ignore config errors; keep enhancements disabled.
-            enhancedCfg_ = {};
-        }
     }
 
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) override {
@@ -851,9 +838,6 @@ public:
         if (result && !normalizedReq.pathsOnly) {
             auto resp = std::move(result).value();
             const bool metadataOnlyResult = resp.type == "metadata";
-            if (enhancedCfg_.enable && !metadataOnlyResult) {
-                enhanced_.apply(ctx_, enhancedCfg_, normalizedReq.query, resp.results);
-            }
             if (!metadataOnlyResult) {
                 co_await hydrateSnippetsAsync_worker(normalizedReq, resp, &metadataTelemetry);
             }
@@ -1115,9 +1099,6 @@ private:
     AppContext ctx_;
     bool degraded_{false};
     std::string repairDetails_;
-    EnhancedConfig enhancedCfg_{}; // off by default
-    EnhancedSearchExecutor enhanced_;
-    std::shared_ptr<yams::search::HotzoneManager> hotzones_;
 
     std::string resolveSearchType(const SearchRequest& req,
                                   search::QueryRetrievalMode retrievalMode,

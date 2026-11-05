@@ -85,13 +85,6 @@ public:
             o.autoTune = true;
             return o;
         }
-
-        // Create options with auto-tune disabled (use static config)
-        static BuildOptions withoutAutoTune() {
-            BuildOptions o = makeDefault();
-            o.autoTune = false;
-            return o;
-        }
     };
 
 public:

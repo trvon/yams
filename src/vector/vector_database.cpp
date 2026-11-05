@@ -950,32 +950,6 @@ public:
         return result;
     }
 
-    Result<void> markAsDeleted(const std::string& chunk_id) const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-
-        if (!initialized_) {
-            return Error{ErrorCode::NotInitialized, "Database not initialized"};
-        }
-
-        (void)chunk_id;
-        return Result<void>(Error{ErrorCode::NotSupported,
-                                  "Soft delete is not supported by the current vectors schema; "
-                                  "use deleteVector/deleteVectorsByDocument instead"});
-    }
-
-    Result<size_t> purgeDeleted(std::chrono::hours age_threshold) const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-
-        if (!initialized_) {
-            return Error{ErrorCode::NotInitialized, "Database not initialized"};
-        }
-
-        (void)age_threshold;
-        return Result<size_t>(Error{ErrorCode::NotSupported,
-                                    "Purging deleted vectors requires soft-delete schema support "
-                                    "that is not present in the current vectors table"});
-    }
-
     bool buildIndex() { return buildIndexChecked().has_value(); }
 
     Result<void> buildIndexChecked() {
@@ -1587,10 +1561,6 @@ Result<void> VectorDatabase::persistIndexChecked() {
     return pImpl->persistIndexChecked();
 }
 
-void VectorDatabase::compactDatabase() {
-    pImpl->optimizeIndex(); // For now, optimization serves as compaction
-}
-
 bool VectorDatabase::rebuildIndex() {
     return pImpl->buildIndex();
 }
@@ -1647,14 +1617,6 @@ VectorDatabase::getEmbeddingsByVersion(const std::string& model_version, size_t 
 
 Result<void> VectorDatabase::markAsStale(const std::string& chunk_id) {
     return pImpl->markAsStale(chunk_id);
-}
-
-Result<void> VectorDatabase::markAsDeleted(const std::string& chunk_id) {
-    return pImpl->markAsDeleted(chunk_id);
-}
-
-Result<size_t> VectorDatabase::purgeDeleted(std::chrono::hours age_threshold) {
-    return pImpl->purgeDeleted(age_threshold);
 }
 
 // =========================================================================

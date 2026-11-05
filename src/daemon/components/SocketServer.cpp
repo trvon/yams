@@ -246,8 +246,6 @@ RequestHandler::Config SocketServer::makeHandlerConfig(bool isProxy,
     }
 
     handlerConfig.chunk_size = TuneAdvisor::chunkSize();
-    handlerConfig.close_after_response = false;
-    handlerConfig.graceful_half_close = true;
 
     auto connectionTimeout = config_.connectionTimeout;
     if (connectionTimeout.count() == 0) {

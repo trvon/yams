@@ -403,10 +403,6 @@ void EmbeddingGenerator::resetStats() {
     }
 }
 
-bool EmbeddingGenerator::validateText(const std::string& text) const {
-    return !text.empty() && text.length() < 1000000; // 1MB limit
-}
-
 size_t EmbeddingGenerator::estimateTokenCount(const std::string& text) const {
     return pImpl ? pImpl->estimateTokenCount(text) : 0;
 }

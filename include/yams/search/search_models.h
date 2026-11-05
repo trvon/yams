@@ -29,8 +29,6 @@ struct ComponentResult {
         EntityVector,
         Tag,
         Metadata,
-        Symbol,
-        Anchor,
         Unknown
     } source = Source::Unknown;
     size_t rank = 0;
@@ -63,10 +61,6 @@ inline constexpr const char* componentSourceToString(ComponentResult::Source sou
             return "tag";
         case ComponentResult::Source::Metadata:
             return "metadata";
-        case ComponentResult::Source::Symbol:
-            return "symbol";
-        case ComponentResult::Source::Anchor:
-            return "anchor";
         case ComponentResult::Source::Unknown:
             return "unknown";
     }
@@ -96,8 +90,6 @@ inline float componentSourceWeight(const SearchEngineConfig& config,
             return config.tagWeight;
         case ComponentResult::Source::Metadata:
             return config.metadataWeight;
-        case ComponentResult::Source::Anchor:
-        case ComponentResult::Source::Symbol:
         case ComponentResult::Source::Unknown:
             return 0.0f;
     }
@@ -116,8 +108,7 @@ inline constexpr bool isTextAnchoringComponent(ComponentResult::Source source) n
            source == ComponentResult::Source::GraphText ||
            source == ComponentResult::Source::PathTree ||
            source == ComponentResult::Source::KnowledgeGraph ||
-           source == ComponentResult::Source::Tag || source == ComponentResult::Source::Metadata ||
-           source == ComponentResult::Source::Symbol;
+           source == ComponentResult::Source::Tag || source == ComponentResult::Source::Metadata;
 }
 
 inline double componentSourceScoreInResult(const SearchResult& r,
@@ -140,10 +131,6 @@ inline double componentSourceScoreInResult(const SearchResult& r,
         case ComponentResult::Source::Tag:
         case ComponentResult::Source::Metadata:
             return r.tagScore.value_or(0.0);
-        case ComponentResult::Source::Symbol:
-            return r.symbolScore.value_or(0.0);
-        case ComponentResult::Source::Anchor:
-            return r.anchorScore.value_or(0.0);
         case ComponentResult::Source::Unknown:
             return 0.0;
     }
@@ -176,12 +163,6 @@ inline void accumulateComponentScore(SearchResult& result, ComponentResult::Sour
         case ComponentResult::Source::Tag:
         case ComponentResult::Source::Metadata:
             result.tagScore = result.tagScore.value_or(0.0) + contribution;
-            break;
-        case ComponentResult::Source::Symbol:
-            result.symbolScore = result.symbolScore.value_or(0.0) + contribution;
-            break;
-        case ComponentResult::Source::Anchor:
-            result.anchorScore = result.anchorScore.value_or(0.0) + contribution;
             break;
         case ComponentResult::Source::Unknown:
             break;

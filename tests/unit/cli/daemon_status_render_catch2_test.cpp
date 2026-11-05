@@ -12,6 +12,7 @@
 #include <yams/daemon/metric_keys.h>
 
 #include <filesystem>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -380,6 +381,19 @@ TEST_CASE("memory sync section renders only when the loop has started",
         CHECK(out.find("0 records") != std::string::npos);
         CHECK(out.find("Last apply error") == std::string::npos);
         CHECK(out.find("Publish") == std::string::npos);
+    }
+
+    SECTION("started but never synced") {
+        // The daemon reports UINT64_MAX until the first successful cycle; it must not
+        // render as an age ("213503982334d ago").
+        m.started = true;
+        m.successfulCycles = 0;
+        m.lastSuccessAgeMs = std::numeric_limits<std::uint64_t>::max();
+        std::ostringstream os;
+        yams::cli::renderMemorySyncSection(&m, os);
+        const std::string out = os.str();
+        CHECK(out.find("never") != std::string::npos);
+        CHECK(out.find("213503982334d") == std::string::npos);
     }
 
     SECTION("started with a stuck apply path") {

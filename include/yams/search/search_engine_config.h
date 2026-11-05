@@ -365,9 +365,6 @@ struct SearchEngineConfig {
     float chunkAggregationWeightDecay = 0.6f;
 
     bool enableIntentAdaptiveWeighting = true;
-    bool enableLexicalExpansion = false;
-    size_t lexicalExpansionMinHits = 3;
-    float lexicalExpansionScorePenalty = 0.65f;
     size_t lexicalFloorTopN = 0;
     float lexicalFloorBoost = 0.0f;
     bool enableLexicalTieBreak = false;
@@ -376,39 +373,6 @@ struct SearchEngineConfig {
     float semanticRescueMinVectorScore = 0.0f;
     size_t fusionEvidenceRescueSlots = 0;
     float fusionEvidenceRescueMinScore = 0.0f;
-
-    /// Ordering for candidates that have already passed topology rescue eligibility. Identity order
-    /// is the established baseline. SimeonFragmentGeometry is experimental and requires a ready,
-    /// deterministic fixed-hash Simeon fragment space; when unavailable the engine records the
-    /// unavailability and falls back to identity order rather than broadening the rescue set.
-    enum class TopologyRescueSelector {
-        IdentityOrder,
-        SimeonFragmentGeometry,
-    } topologyRescueSelector = TopologyRescueSelector::IdentityOrder;
-
-    /// Guarantee up to this many topology-rescued candidates a slot in the fused candidate pool
-    /// beyond the ordinary fusion window (see EvidenceSearchPipeline::execute). Purely additive:
-    /// it never displaces a candidate already inside the window, so baseline-relevant candidates
-    /// are preserved by construction. Default 0 (disabled/product-unchanged).
-    ///
-    /// Eligibility is identity-based: the candidate must be present in the caller-supplied
-    /// novel-rescue hash set (the specific baseline-miss documents a topology route actually
-    /// rescued, from detail::CandidateRescueMergeResult::novelDocumentHashes) and must have
-    /// received actual topology evidence (SearchResult::topologyScore.has_value()). A raw
-    /// topologyScore magnitude was tried and dropped as a gate: topology evidence is assigned to
-    /// the whole route-admitted relation (often hundreds of candidates sharing one route-level
-    /// confidence), so its scale cannot discriminate the actual rescued candidate from ambient
-    /// route membership -- a magnitude floor only ever filtered out real rescues at real-corpus
-    /// scale (see DIFFERENTIAL_REVIEW_REPORT.md), never anything worth filtering.
-    size_t topologyFusionRescueSlots = 0;
-
-    /// Guarantee up to this many identity-eligible candidates a slot in the final top-k window,
-    /// promoted over the weakest-scored window occupant (mirrors fusionEvidenceRescueSlots but
-    /// gated on the same novel-rescue identity as topologyFusionRescueSlots instead of generic
-    /// lexical/vector/kg evidence, so the two rescue obligations stay independently measurable).
-    /// Default 0 (disabled). Unlike the fusion-window seam this one can displace a window
-    /// occupant, so keep this small relative to the requested top-k.
-    size_t topologyFinalRescueSlots = 0;
 
     bool enableMultiVectorQuery = false;
     size_t multiVectorMaxPhrases = 3;
@@ -430,9 +394,6 @@ struct SearchEngineConfig {
     bool graphVectorRequireCorroboration = true;
     bool graphVectorRequireTextAnchoring = true;
     bool graphVectorRequireBaselineTextAnchoring = true;
-    bool enableGraphFusionWindowGuard = false;
-    size_t graphFusionGuardDepthMultiplier = 2;
-    size_t graphMaxAddedInFusionWindow = 0;
     float graphTextMinAdmissionScore = 0.0010f;
     float graphExpansionFtsPenalty = 0.78f;
     float graphExpansionVectorPenalty = 0.82f;
@@ -628,9 +589,6 @@ struct SearchEngineConfig {
         topologyGraphNeighborReciprocalOnly = source.topologyGraphNeighborReciprocalOnly;
         topologyGraphWeightedSeedRanking = source.topologyGraphWeightedSeedRanking;
         topologyGraphVectorSeedProbe = source.topologyGraphVectorSeedProbe;
-        topologyFusionRescueSlots = source.topologyFusionRescueSlots;
-        topologyFinalRescueSlots = source.topologyFinalRescueSlots;
-        topologyRescueSelector = source.topologyRescueSelector;
     }
 
     /// Reapply operator-selected execution policies after a corpus tuner replaces relevance

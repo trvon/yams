@@ -238,7 +238,6 @@ public:
     void resetStats();
 
     // Validation and utility
-    bool validateText(const std::string& text) const;
     size_t estimateTokenCount(const std::string& text) const;
     std::string getModelInfo() const;
 

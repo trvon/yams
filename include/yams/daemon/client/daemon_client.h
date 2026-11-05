@@ -156,10 +156,6 @@ public:
     // Streaming grep helper method
     boost::asio::awaitable<Result<GrepResponse>> streamingGrep(const GrepRequest& req);
 
-    // Streaming get helpers (init/header-only + chunk loop)
-    boost::asio::awaitable<Result<void>> streamingGetToStdout(const GetInitRequest& req) {
-        return getToStdout(req);
-    }
     boost::asio::awaitable<Result<void>>
     streamingGetToFile(const GetInitRequest& req, const std::filesystem::path& outputPath) {
         return getToFile(req, outputPath);
@@ -424,7 +420,6 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, PluginScanRequest>, std::is_same<Req, PluginLoadRequest>,
             std::is_same<Req, PluginUnloadRequest>, std::is_same<Req, PluginTrustListRequest>,
             std::is_same<Req, PluginTrustAddRequest>, std::is_same<Req, PluginTrustRemoveRequest>,
-            std::is_same<Req, ListTreeDiffRequest>,
             // Doctor commands
             std::is_same<Req, PruneRequest>,
             // Snapshot operations (PBI-066) - collections use generic metadata query
@@ -436,7 +431,6 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, GraphQueryRequest>, std::is_same<Req, GraphExploreRequest>,
             // Graph navigation operations
             std::is_same<Req, GraphSymbolLookupRequest>, std::is_same<Req, GraphTraceRequest>,
-            std::is_same<Req, GraphImpactRequest>, std::is_same<Req, GraphAffectedTestsRequest>,
             // KG ingest operations
             std::is_same<Req, KgIngestRequest>,
             // Cat operations
