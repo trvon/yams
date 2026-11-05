@@ -96,6 +96,18 @@ public:
         // which scales with the daemon memory budget; 256 MiB is the floor used
         // when the governor is disabled or unavailable.
         std::size_t max_corpus_bytes = 256ULL * 1024ULL * 1024ULL;
+        // Cap on the live heap of the in-memory BM25 indexes (primary plus
+        // Atire), as counted by simeon::Bm25Index::memory_bytes(). When
+        // reached, the build stops and yams stays on FTS5 only.
+        // Real default is ResourceGovernor::recommendLexicalIndexBytes(),
+        // supplied through index_budget_provider; 256 MiB is the floor used
+        // without one.
+        std::size_t max_index_bytes = 256ULL * 1024ULL * 1024ULL;
+        // Re-reads the index budget during the build (every 256
+        // docs), so a pressure rise reaches a running build; the grant only
+        // shrinks mid-build. The daemon wires this to the ResourceGovernor.
+        // Empty keeps max_index_bytes fixed.
+        std::function<std::size_t()> index_budget_provider;
         // Chunk very large documents into a small number of evenly spaced
         // windows before feeding them into the in-memory simeon lexical
         // enhancement stack. This bounds char-ngram / fragment build pressure

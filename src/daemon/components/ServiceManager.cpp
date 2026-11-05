@@ -92,6 +92,7 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/daemon/resource/plugin_host_services.h>
 #include <yams/daemon/resource/simeon_model_provider.h>
 #include <yams/daemon/shutdown_budget.h>
 #include <yams/extraction/builtin_text_content_extractor.h>
@@ -441,6 +442,14 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 spdlog::debug("ServiceManager: AbiPluginHost initialized (trustFile='{}')",
                               trustFile.string());
             }
+            // Extraction plugins get their thread and memory grants from the governor.
+            yams_set_extraction_budget_provider([] {
+                const auto grant = ResourceGovernor::instance().recommendExtractionBudget();
+                yams_extraction_budget_v1 out{};
+                out.max_threads = grant.maxThreads;
+                out.max_decompressed_bytes = grant.maxDecompressedBytes;
+                return out;
+            });
         } catch (const std::exception& e) {
             spdlog::warn("ServiceManager: failed to initialize AbiPluginHost: {}", e.what());
         } catch (...) {
@@ -1513,6 +1522,7 @@ void ServiceManager::shutdownExtractedManagers() {
 void ServiceManager::releasePluginInfrastructure() {
     spdlog::info("[ServiceManager] Phase 10: Releasing plugin infrastructure");
     try {
+        yams_set_extraction_budget_provider({});
         abiHost_.reset();
         spdlog::info("[ServiceManager] Phase 10.1: ABI host reset");
     } catch (...) {
