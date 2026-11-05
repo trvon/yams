@@ -340,6 +340,8 @@ public:
     }
     /// Whether the background loop would start another scan once the queue is empty.
     bool testing_startupScanDue() const { return scanCursor_.shouldStart(); }
+    /// Run the MIME repair operation (not a dry run).
+    RepairOperationResult testing_repairMimeTypes() { return repairMimeTypes(false, false, {}); }
     /// Count documents as handled, as the drain loop does.
     void testing_noteRepairResolved(std::uint64_t documents) { noteRepairResolved(documents); }
     /// {backlog, processed} as the status counters would show them.

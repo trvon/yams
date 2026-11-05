@@ -2201,6 +2201,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
     MetadataWriteFacade metaFacade(wc, meta.get());
 
     auto store = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
+    auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
     (void)detection::FileTypeDetector::initializeWithMagicNumbers();
     auto& detector = detection::FileTypeDetector::instance();
 
@@ -2272,6 +2273,13 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
                     if (oldWasText && !newIsText) {
                         (void)meta->deleteContent(id);
                         (void)meta->removeFromIndex(id);
+                        // The vectors embed the text just cleared; left behind, vector search
+                        // keeps returning a document that has no text.
+                        if (vectorDb && !vectorDb->deleteVectorsByDocument(doc.sha256Hash)) {
+                            spdlog::warn("RepairService: MIME repair could not delete vectors "
+                                         "of {}",
+                                         doc.sha256Hash);
+                        }
                         metaFacade.updateExtractionStatus(
                             id, false, metadata::ExtractionStatus::Pending,
                             "MIME repaired; stale text content cleared");

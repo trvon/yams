@@ -5,6 +5,7 @@
 #include "../../common/test_helpers_catch2.h"
 
 #include <yams/daemon/components/LegacyVectorCleanup.h>
+#include <yams/daemon/components/RepairService.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_database.h>
@@ -47,11 +48,11 @@ struct CleanupHarness {
     }
 
     void addDocument(const std::string& hash, bool withText, const std::string& modelId,
-                     int chunks = 2) {
+                     int chunks = 2, const std::string& extension = ".txt") {
         metadata::DocumentInfo doc;
-        doc.fileName = hash + ".txt";
+        doc.fileName = hash + extension;
         doc.filePath = (tmp.path() / doc.fileName).string();
-        doc.fileExtension = ".txt";
+        doc.fileExtension = extension;
         doc.fileSize = 4;
         doc.sha256Hash = hash;
         doc.mimeType = "text/plain";
@@ -96,4 +97,31 @@ TEST_CASE("Legacy vectors are purged only for documents without text",
     CHECK(h.vectors->getVectorsByDocument("replicated-early").size() == 2);
     // The text still exists, so the vectors still describe it.
     CHECK(h.vectors->getVectorsByDocument("legacy-with-text").size() == 2);
+}
+
+// MIME repair that turns a text document into a binary type clears its text. Its vectors embed
+// that text, so they must go too, or vector search keeps returning a document with no text.
+TEST_CASE("MIME repair deletes the vectors of text it clears",
+          "[daemon][embeddings][legacy-vectors][mime][catch2]") {
+    CleanupHarness h;
+    // Ingested as text/plain, but the extension says image.
+    h.addDocument("mime-flip", /*withText=*/true, /*modelId=*/"simeon-v1", 2, ".png");
+    REQUIRE(h.vectors->getVectorsByDocument("mime-flip").size() == 2);
+
+    daemon::RepairServiceContext ctx;
+    ctx.getMetadataRepo = [r = h.repo] { return r; };
+    std::shared_ptr<vector::VectorDatabase> shared(h.vectors.get(), [](vector::VectorDatabase*) {});
+    ctx.getVectorDatabase = [shared] { return shared; };
+    daemon::RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = h.tmp.path();
+    daemon::RepairService service(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+
+    const auto result = service.testing_repairMimeTypes();
+    REQUIRE(result.succeeded == 1);
+    auto doc = h.repo->getDocumentByHash("mime-flip");
+    REQUIRE(doc.has_value());
+    REQUIRE(doc.value().has_value());
+    REQUIRE(doc.value()->mimeType == "image/png");
+    CHECK(h.vectors->getVectorsByDocument("mime-flip").empty());
 }
