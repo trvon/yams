@@ -16,14 +16,16 @@ std::function<yams_extraction_budget_v1()> g_budgetProvider;
 int getExtractionBudget(void* /*handle*/, yams_extraction_budget_v1* out) {
     if (!out)
         return 1;
-    std::function<yams_extraction_budget_v1()> provider;
-    {
-        std::lock_guard lock(g_budgetMutex);
-        provider = g_budgetProvider;
-    }
-    if (!provider)
-        return 1;
+    // Everything that can throw (copying the provider, calling it) stays in
+    // the try: no exception may cross this C ABI boundary.
     try {
+        std::function<yams_extraction_budget_v1()> provider;
+        {
+            std::lock_guard lock(g_budgetMutex);
+            provider = g_budgetProvider;
+        }
+        if (!provider)
+            return 1;
         *out = provider();
     } catch (...) {
         return 1;

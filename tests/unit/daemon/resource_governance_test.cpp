@@ -526,7 +526,12 @@ TEST_CASE("ResourceGovernor::recommendExtractionBudget splits cores and memory a
     constexpr std::uint64_t kGiB = 1024ULL * kMiB;
     const std::uint64_t prev = TuneAdvisor::memoryBudgetBytes();
     const auto now = std::chrono::steady_clock::now();
-    governor.testing_endStartupGrace();
+    // Grace caps pressure at Warning; restore it so later tests see it.
+    struct GraceGuard {
+        ResourceGovernor& g;
+        std::chrono::steady_clock::time_point saved;
+        ~GraceGuard() { g.testing_restoreStartupTime(saved); }
+    } grace{governor, governor.testing_endStartupGrace()};
     governor.testing_setPressureState(ResourcePressureLevel::Normal, now);
     governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
 
@@ -538,10 +543,10 @@ TEST_CASE("ResourceGovernor::recommendExtractionBudget splits cores and memory a
         TuneAdvisor::setMemoryBudgetBytes(16 * kGiB); // 2 GiB pool
         const auto b = governor.recommendExtractionBudget();
         CHECK(b.maxThreads == std::clamp<std::uint32_t>(cores / workers, 1, 8));
-        CHECK(b.maxDecompressedBytes == std::max<std::uint64_t>(64 * kMiB, 2 * kGiB / workers));
+        CHECK(b.maxDecompressedBytes == std::max<std::uint64_t>(8 * kMiB, 2 * kGiB / workers));
         // All concurrent extractions together stay within the pool.
         CHECK(b.maxDecompressedBytes * workers <=
-              std::max<std::uint64_t>(2 * kGiB, 64 * kMiB * workers));
+              std::max<std::uint64_t>(2 * kGiB, 8 * kMiB * workers));
     }
 
     SECTION("Critical: one thread and half the bytes, never below 64 MiB") {
@@ -551,13 +556,22 @@ TEST_CASE("ResourceGovernor::recommendExtractionBudget splits cores and memory a
         const auto b = governor.recommendExtractionBudget();
         CHECK(b.maxThreads == 1u);
         CHECK(b.maxDecompressedBytes ==
-              std::max<std::uint64_t>(64 * kMiB, normal.maxDecompressedBytes / 2));
+              std::max<std::uint64_t>(8 * kMiB, normal.maxDecompressedBytes / 2));
+    }
+
+    SECTION("all workers together stay within the pool") {
+        // The 256 MiB minimum pool. A 64 MiB floor let 64 workers hold 4 GiB;
+        // the 8 MiB floor keeps up to 32 workers inside the pool.
+        TuneAdvisor::setMemoryBudgetBytes(512 * kMiB);
+        const auto b = governor.recommendExtractionBudget();
+        CHECK(b.maxDecompressedBytes <= std::max<std::uint64_t>(8 * kMiB, 256 * kMiB / workers));
+        CHECK(b.maxDecompressedBytes * std::min<std::uint32_t>(workers, 32) <= 256 * kMiB);
     }
 
     SECTION("tiny budget falls back to the 256 MiB pool floor") {
         TuneAdvisor::setMemoryBudgetBytes(512 * kMiB);
         CHECK(governor.recommendExtractionBudget().maxDecompressedBytes ==
-              std::max<std::uint64_t>(64 * kMiB, 256 * kMiB / workers));
+              std::max<std::uint64_t>(8 * kMiB, 256 * kMiB / workers));
     }
 
     governor.testing_setPressureState(ResourcePressureLevel::Normal,

@@ -245,8 +245,9 @@ public:
     /// Threads and decompressed bytes one document's extraction may use. Splits
     /// the cores and a 12.5% share of the memory budget across the current
     /// extraction worker cap, so all concurrent extractions together stay
-    /// within that share. Shrinks under pressure; Critical and above get one
-    /// thread.
+    /// within that share. Each document gets at least 8 MiB, which lifts the
+    /// total past the share only when workers * 8 MiB exceeds it. Shrinks
+    /// under pressure; Critical and above get one thread.
     [[nodiscard]] ExtractionBudget recommendExtractionBudget() const noexcept;
 
     /// Recommend the maximum working-set byte budget for the SPQ vector index

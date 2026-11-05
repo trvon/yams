@@ -40,7 +40,7 @@ typedef struct {
     uint32_t max_threads;
     uint32_t reserved;
     // Bytes one document's extraction may hold decompressed at once, summed
-    // over its threads. 0 means no byte grant.
+    // over its threads. 0 means no byte limit (only the thread grant applies).
     uint64_t max_decompressed_bytes;
 } yams_extraction_budget_v1;
 
