@@ -71,7 +71,12 @@ bool isCodeMime(std::string_view mimeType) {
 
 bool isStructuredTextMime(std::string_view mimeType) {
     return mimeType == "application/json" || mimeType == "application/xml" ||
-           mimeType == "application/x-yaml" || mimeType == "application/yaml";
+           mimeType == "application/x-yaml" || mimeType == "application/yaml" ||
+           // JSON Lines / newline-delimited JSON: one JSON value per line.
+           mimeType == "application/x-ndjson" || mimeType == "application/ndjson" ||
+           mimeType == "application/jsonl" || mimeType == "application/x-jsonlines" ||
+           // Plain-text containers: mailboxes, and PEM (base64 between BEGIN/END markers).
+           mimeType == "application/mbox" || mimeType == "application/x-pem-file";
 }
 
 bool isExecutableMime(std::string_view mimeType) {

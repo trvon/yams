@@ -7,10 +7,12 @@
 
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/extraction/content_extractor.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <memory>
 #include <set>
 #include <string>
@@ -95,6 +97,7 @@ struct ScanHarness {
     std::vector<std::string> hashes;
     std::vector<int64_t> ids;
     std::unique_ptr<RepairService> service;
+    std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> extractors;
     // The unit lanes disable vectors through any of these; this harness needs embeddings on.
     yams::test::ScopedEnvVar vectorsOn{"YAMS_DISABLE_VECTORS", std::nullopt};
     yams::test::ScopedEnvVar vectorsOnAlias{"YAMS_DISABLE_VECTOR_DB", std::nullopt};
@@ -127,6 +130,7 @@ struct ScanHarness {
         }
         RepairServiceContext ctx;
         ctx.getMetadataRepo = [r = repo] { return r; };
+        ctx.getContentExtractors = [this] { return extractors; };
         RepairService::Config cfg;
         cfg.enable = true;
         cfg.dataDir = tmp.path();
@@ -137,6 +141,12 @@ struct ScanHarness {
         service.reset();
         repo.reset();
         pool->shutdown();
+    }
+    // Extraction ran and produced nothing (a binary blob): no content, no embedding.
+    void markExtractionFailed(int i) {
+        REQUIRE(repo->updateDocumentExtractionStatus(
+            ids[i], false, yams::metadata::ExtractionStatus::Failed, "No text extracted"));
+        REQUIRE(repo->updateDocumentRepairStatus(hashes[i], yams::metadata::RepairStatus::Failed));
     }
     bool queuedIn(const std::vector<std::string>& q, const std::string& h) const {
         return std::find(q.begin(), q.end(), h) != q.end();
@@ -199,4 +209,113 @@ TEST_CASE("Startup scan runs again when documents are still unembedded after the
     REQUIRE(h.service->testing_startupScanDue());
     const auto retry = h.service->testing_runStartupScanPass();
     CHECK(retry == std::vector<std::string>{h.hashes[1]});
+}
+
+namespace {
+// Claims every document, as a newly installed extractor plugin would for its formats.
+class AcceptAllExtractor final : public yams::extraction::IContentExtractor {
+public:
+    bool supports(const std::string&, const std::string&) const override { return true; }
+    std::optional<std::string> extractText(const std::vector<std::byte>&, const std::string&,
+                                           const std::string&) override {
+        return std::string{"text"};
+    }
+};
+} // namespace
+
+// A binary whose extraction failed has no content to embed or index. Re-queuing it every sweep
+// failed the same ~1.6k documents 4 times per daemon run on the dev corpus and churned their
+// status rows; it is terminal until something that could extract it changes.
+TEST_CASE("Startup scan skips documents whose extraction failed with no content",
+          "[daemon][repair][scan][terminal][catch2]") {
+    ScanHarness h(3);
+    h.markExtractionFailed(1);
+    const auto queued = h.service->testing_runStartupScanPass();
+    CHECK(h.queuedIn(queued, h.hashes[0]));
+    CHECK_FALSE(h.queuedIn(queued, h.hashes[1]));
+    CHECK(h.queuedIn(queued, h.hashes[2]));
+}
+
+TEST_CASE("Startup scan does not retry a sweep whose only candidates are terminal",
+          "[daemon][repair][scan][terminal][catch2]") {
+    ScanHarness h(2);
+    h.markExtractionFailed(0);
+    h.markExtractionFailed(1);
+    CHECK(h.service->testing_runStartupScanPass().empty());
+    CHECK_FALSE(h.service->testing_startupScanDue());
+}
+
+// Documents the per-document check would drop (already embedded, extraction pending, a format
+// nothing can extract) must not be queued either, or every sweep counts as "queued work" and
+// re-arms a retry for nothing.
+TEST_CASE("Startup scan only queues documents the repair batch would act on",
+          "[daemon][repair][scan][terminal][catch2]") {
+    ScanHarness h(1);
+    REQUIRE(h.repo->updateDocumentEmbeddingStatusByHash(h.hashes[0], true, "m"));
+    auto doc = h.repo->getDocumentByHash(h.hashes[0]);
+    REQUIRE(doc.has_value());
+    REQUIRE(doc.value().has_value());
+    auto info = *doc.value();
+    info.mimeType = "application/x-unextractable";
+    info.fileExtension = ".bin";
+    REQUIRE(h.repo->updateDocument(info));
+    REQUIRE(h.repo->updateDocumentExtractionStatus(h.ids[0], false,
+                                                   yams::metadata::ExtractionStatus::Pending));
+    CHECK(h.service->testing_runStartupScanPass().empty());
+    CHECK_FALSE(h.service->testing_startupScanDue());
+}
+
+TEST_CASE("Startup scan retries terminal documents once the extractor set changes",
+          "[daemon][repair][scan][terminal][catch2]") {
+    ScanHarness h(1);
+    h.markExtractionFailed(0);
+    REQUIRE(h.service->testing_runStartupScanPass().empty());
+
+    // A new extractor plugin is installed; the next daemon run scans from the start.
+    h.extractors.push_back(std::make_shared<AcceptAllExtractor>());
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = h.tmp.path();
+    RepairServiceContext ctx;
+    ctx.getMetadataRepo = [r = h.repo] { return r; };
+    ctx.getContentExtractors = [&h] { return h.extractors; };
+    h.service = std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+    const auto queued = h.service->testing_runStartupScanPass();
+    CHECK(h.queuedIn(queued, h.hashes[0]));
+
+    // Once that sweep finished, the same extractor set does not retry it again.
+    h.service = std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+    CHECK(h.service->testing_runStartupScanPass().empty());
+}
+
+// The extractor set is recorded only when a sweep finishes. A first sweep that stops at the queue
+// cap must leave no marker, or documents after the stop point would lose their retry.
+TEST_CASE("Startup scan records the extractor set only after a finished sweep",
+          "[daemon][repair][scan][terminal][catch2]") {
+    yams::test::ScopedEnvVar batch{"YAMS_REPAIR_STARTUP_BATCH", std::string{"1"}};
+    ScanHarness h(3, /*maxPending=*/1);
+    const auto marker = h.tmp.path() / "repair-extractor-set";
+    REQUIRE(h.service->testing_runStartupScanPass().size() == 1U); // capped
+    CHECK_FALSE(std::filesystem::exists(marker));
+    for (int pass = 0; pass < 6 && h.service->testing_startupScanDue(); ++pass) {
+        (void)h.service->testing_runStartupScanPass();
+    }
+    CHECK(std::filesystem::exists(marker));
+}
+
+// Ingest and explicit requests also feed the repair queue. Documents handled before the scan has
+// queued anything must not count toward scan documents queued later.
+TEST_CASE("Repair progress does not pre-count documents outside the scan backlog",
+          "[daemon][repair][progress][catch2]") {
+    yams::test::ScopedEnvVar batch{"YAMS_REPAIR_STARTUP_BATCH", std::string{"2"}};
+    ScanHarness h(6, /*maxPending=*/3);
+    REQUIRE(h.service->testing_runStartupScanPass().size() == 3U); // capped
+    h.service->testing_noteRepairResolved(3);
+    CHECK(h.service->testing_repairProgress() == std::pair<std::uint64_t, std::uint64_t>{3, 3});
+
+    // Freshly ingested documents are handled before the scan resumes.
+    h.service->testing_noteRepairResolved(2);
+    REQUIRE(h.service->testing_startupScanDue());
+    REQUIRE(h.service->testing_runStartupScanPass().size() == 3U); // resumed pass
+    CHECK(h.service->testing_repairProgress() == std::pair<std::uint64_t, std::uint64_t>{6, 3});
 }

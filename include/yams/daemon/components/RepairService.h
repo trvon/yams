@@ -28,6 +28,7 @@
 #endif
 
 namespace yams::metadata {
+struct DocumentInfo;
 class KnowledgeGraphStore;
 class MetadataRepository;
 class IMetadataRepository;
@@ -339,6 +340,13 @@ public:
     }
     /// Whether the background loop would start another scan once the queue is empty.
     bool testing_startupScanDue() const { return scanCursor_.shouldStart(); }
+    /// Count documents as handled, as the drain loop does.
+    void testing_noteRepairResolved(std::uint64_t documents) { noteRepairResolved(documents); }
+    /// {backlog, processed} as the status counters would show them.
+    std::pair<std::uint64_t, std::uint64_t> testing_repairProgress() const {
+        const auto backlog = totalBacklog_.load();
+        return {backlog, std::min(processed_.load(), backlog)};
+    }
 #endif
 
 private:
@@ -411,6 +419,14 @@ private:
     boost::asio::awaitable<void> backgroundLoop(ShutdownState* shutdownState);
     boost::asio::awaitable<void> spawnInitialScan(std::int64_t startAfterId);
     RepairScanCursor scanCursor_;
+    // Fingerprint of the content extractors the last finished startup sweep ran with, persisted
+    // in <dataDir>/repair-extractor-set. A change makes documents whose extraction failed
+    // retryable for one sweep.
+    std::string sweepExtractorFingerprint_;
+    bool sweepExtractorsChanged_{false};
+    void beginSweepExtractorCheck(
+        const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors);
+    void finishSweepExtractorCheck();
     /// Resets documents a previous daemon run left Processing (it queued them and died). Runs
     /// once, before this run queues anything.
     void recoverOrphanedProcessingOnce();
@@ -447,6 +463,15 @@ private:
         bool missingFts5{false};
     };
     MissingWorkResult detectMissingWork(const std::vector<std::string>& batch);
+    /// Whether a document needs its text extracted and FTS-indexed again. Shared by the startup
+    /// scan and the per-batch check so the scan never queues work the batch would drop.
+    /// Skipped extraction needs nothing; a successful one needs only a missing FTS row.
+    static bool ftsRepairNeeded(const metadata::DocumentInfo& d,
+                                const std::function<bool()>& ftsIndexed,
+                                const std::function<bool()>& canExtract);
+    /// Stable identity of a set of content extractors (plugin names; type names otherwise).
+    static std::string extractorFingerprint(
+        const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors);
     MissingWorkFlags analyzeMissingWorkForHash(
         const std::string& hash, bool checkEmbeddings,
         const std::shared_ptr<api::IContentStore>& contentStore,
@@ -536,7 +561,10 @@ private:
     }
 
     // ── Progress helper ──
-    void updateProgressPct();
+    // Count documents taken off the queue and handled; published as repairProcessed.
+    void noteRepairResolved(std::uint64_t documents);
+    // Publish totalBacklog_ / processed_ to the status counters.
+    void publishRepairProgress();
     void beginRepairOperation(std::string_view operation);
     void endRepairOperation();
 
