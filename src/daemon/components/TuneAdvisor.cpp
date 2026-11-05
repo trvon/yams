@@ -2519,7 +2519,26 @@ void TuneAdvisor::setHostPressureEnabled(bool enabled) {
 }
 
 HostPressureThresholds TuneAdvisor::hostPressureThresholds() {
+    // Defaults follow the tuning profile: Efficient yields to the host earliest, Aggressive
+    // only under heavy contention. IO "some" stays high on desktops where idle io_uring waiters
+    // (terminals, browsers) count as stalled with no disk activity, so its floor is high.
     HostPressureThresholds thresholds;
+    switch (tuningProfile()) {
+        case Profile::Efficient:
+            thresholds.ioSomePct = 60.0;
+            thresholds.cpuSomePct = 30.0;
+            thresholds.memorySomePct = 5.0;
+            thresholds.loadPerCpu = 1.0;
+            break;
+        case Profile::Balanced:
+            break; // the struct defaults
+        case Profile::Aggressive:
+            thresholds.ioSomePct = 100.0;
+            thresholds.cpuSomePct = 60.0;
+            thresholds.memorySomePct = 20.0;
+            thresholds.loadPerCpu = 2.0;
+            break;
+    }
     const auto apply = [](const std::atomic<double>& overrideValue, double& field) {
         const double value = overrideValue.load(std::memory_order_relaxed);
         if (value > 0.0) {
