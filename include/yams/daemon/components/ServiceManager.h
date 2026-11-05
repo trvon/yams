@@ -506,6 +506,7 @@ public:
     void testingExpireMemorySyncFullApply() {
         std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
         nextMemorySyncFullApply_ = {};
+        lastMemorySyncFullApplyStart_.reset();
     }
     /// When the next full apply pass is due.
     std::chrono::steady_clock::time_point testingMemorySyncFullApplyDeadline() {
@@ -1188,6 +1189,10 @@ private:
     // topology edges; a different reading means an endpoint may have appeared locally.
     std::optional<std::uint64_t> lastSettledTopologyDeferredKgGeneration_;
     std::chrono::steady_clock::time_point nextMemorySyncFullApply_{};
+    // When the last full pass started and the interval its deadline used, so a profile change
+    // can move the pending deadline.
+    std::optional<std::chrono::steady_clock::time_point> lastMemorySyncFullApplyStart_;
+    std::chrono::minutes memorySyncFullApplyInterval_{0};
     std::atomic<std::uint64_t> memorySyncApplySkippedCycles_{0};
     std::atomic<bool> memorySyncApplySkipDisabled_{false};
 

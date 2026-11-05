@@ -1187,6 +1187,16 @@ TEST_CASE("Memory sync full apply interval follows the tuning profile",
     const auto deadline = reader.manager->testingMemorySyncFullApplyDeadline();
     CHECK(deadline >= before + expected.interval);
     CHECK(deadline <= after + expected.interval);
+
+    // A profile change at runtime (config reload) moves the pending deadline on the next cycle.
+    const auto other = expected.profile == TuneAdvisor::Profile::Aggressive
+                           ? TuneAdvisor::Profile::Efficient
+                           : TuneAdvisor::Profile::Aggressive;
+    TuneAdvisor::setTuningProfile(other);
+    reader.manager->testingApplyMemorySyncWinners();
+    const auto moved = reader.manager->testingMemorySyncFullApplyDeadline();
+    CHECK(moved >= before + TuneAdvisor::memorySyncFullApplyInterval());
+    CHECK(moved <= after + TuneAdvisor::memorySyncFullApplyInterval());
 }
 
 TEST_CASE("Memory sync full apply repairs a replicated record deleted locally",
