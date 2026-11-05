@@ -1115,24 +1115,60 @@ TEST_CASE("Memory sync full apply repairs a replicated record deleted locally",
     CHECK(reader.hasEdge("entity:drift:source", "entity:drift:target"));
 }
 
-TEST_CASE("Memory sync apply never skips a cycle that deferred records",
+TEST_CASE("Memory sync apply does not re-run an unchanged pass that only deferred records",
           "[daemon][memory-sync][apply][idle]") {
+    // A prerequisite no peer will publish (a cluster node deleted before it replicated) must not
+    // make every cycle re-read and re-verify the whole corpus. Measured on a 28k-record corpus:
+    // 17 such deferrals kept one core busy re-applying every winner each cycle.
     TempRoot root;
     const auto sharedStore = root.path / "shared-store";
     fs::create_directories(sharedStore);
     MeshNode writer{root.path, "writer", sharedStore};
     MeshNode reader{root.path, "reader", sharedStore, MeshNode::KgReads::Counted};
-    // The writer's edge reaches the shared store ahead of its target node.
     writer.seedEdgePublishedAheadOfTarget();
 
     reader.manager->testingApplyMemorySyncWinners();
     REQUIRE(reader.deferredTopology() == 1);
+    const auto skipped = reader.manager->testingMemorySyncApplySkippedCycles();
     const auto reads = reader.kgStoreAcquisitions();
     reader.manager->testingApplyMemorySyncWinners();
     reader.manager->testingApplyMemorySyncWinners();
 
-    // A deferral waits on a local prerequisite, so every cycle keeps retrying it.
-    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == 0);
+    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == skipped + 2);
+    CHECK(reader.kgStoreAcquisitions() == reads);
+    // The deferral stays visible while cycles skip.
+    CHECK(reader.deferredTopology() == 1);
+
+    // The periodic full pass still retries it.
+    reader.manager->testingExpireMemorySyncFullApply();
+    reader.manager->testingApplyMemorySyncWinners();
     CHECK(reader.kgStoreAcquisitions() > reads);
     CHECK(reader.deferredTopology() == 1);
+}
+
+TEST_CASE("Memory sync apply retries a deferred record as soon as its prerequisite replicates",
+          "[daemon][memory-sync][apply][idle]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore};
+    writer.seedEdgePublishedAheadOfTarget();
+
+    reader.manager->testingApplyMemorySyncWinners();
+    REQUIRE(reader.deferredTopology() == 1);
+    reader.manager->testingApplyMemorySyncWinners();
+    REQUIRE(reader.manager->testingMemorySyncApplySkippedCycles() > 0);
+
+    // The missing target node replicates: the inputs change, so the next cycle runs and the
+    // deferred edge applies without waiting for the full pass.
+    {
+        metadata::TopologySyncAdapter publisher{*writer.kgStore, *writer.sync_};
+        const auto target = writer.kgStore->getNodeByKey(writer.targetKey());
+        REQUIRE(target.has_value());
+        REQUIRE(target.value().has_value());
+        REQUIRE(publisher.publishNode(*target.value()).has_value());
+    }
+    applyUntilEdge(reader, writer.sourceKey(), writer.targetKey());
+    CHECK(reader.deferredTopology() == 0);
 }
