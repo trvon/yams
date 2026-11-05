@@ -1043,7 +1043,8 @@ bool FileTypeDetector::isTextMimeType(const std::string& mimeType) const {
         return true;
 
     return isStructuredTextMime(normalizedMime) || normalizedMime == "application/javascript" ||
-           normalizedMime == "application/x-sh" || normalizedMime == "application/mbox";
+           normalizedMime == "application/x-sh" || normalizedMime == "application/mbox" ||
+           normalizedMime == "application/x-pem-file";
 }
 
 bool FileTypeDetector::isBinaryMimeType(const std::string& mimeType) const {

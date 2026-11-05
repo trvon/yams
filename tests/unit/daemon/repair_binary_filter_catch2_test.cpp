@@ -54,7 +54,7 @@ TEST_CASE_METHOD(RepairBinaryFilterFixture, "RepairBinaryFilter: recognizes text
         CHECK(detector.isTextMimeType("application/x-yaml"));
     }
 
-    SECTION("JSON Lines and mailboxes are text") {
+    SECTION("JSON Lines, mailboxes and PEM files are text") {
         // Unrecognised, 183 JSONL documents on the dev corpus were never FTS-indexed: repair
         // judged them unextractable and post-ingest never ran.
         CHECK(detector.isTextMimeType("application/x-ndjson"));
@@ -62,6 +62,7 @@ TEST_CASE_METHOD(RepairBinaryFilterFixture, "RepairBinaryFilter: recognizes text
         CHECK(detector.isTextMimeType("application/jsonl"));
         CHECK(detector.isTextMimeType("application/x-jsonlines"));
         CHECK(detector.isTextMimeType("application/mbox"));
+        CHECK(detector.isTextMimeType("application/x-pem-file"));
     }
 }
 
