@@ -690,6 +690,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
                 missingEmbeddings, static_cast<uint32_t>(shutdownState->config.maxBatch), true,
                 std::string{},     std::vector<InternalEventBus::EmbedPreparedDoc>{},     nullptr};
             job.updateSemanticGraph = false;
+            job.fromRepair = true; // counted into repair_embeddings_generated as it commits
             static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
                     "embed_jobs", TuneAdvisor::embedChannelCapacity());
@@ -3807,8 +3808,9 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
                               ", failed=" + std::to_string(result.failed);
         }
         if (state_) {
-            state_->stats.repairEmbeddingsGenerated.store(result.succeeded,
-                                                          std::memory_order_relaxed);
+            // Add, not overwrite: background repair counts into the same field.
+            state_->stats.repairEmbeddingsGenerated.fetch_add(result.succeeded,
+                                                              std::memory_order_relaxed);
             state_->stats.repairEmbeddingsSkipped.store(result.skipped, std::memory_order_relaxed);
             state_->stats.repairFailedOperations.store(result.failed, std::memory_order_relaxed);
         }

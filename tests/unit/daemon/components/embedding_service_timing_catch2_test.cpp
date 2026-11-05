@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -1541,6 +1542,28 @@ TEST_CASE("Embedding maintenance requires actual startup readiness and stops bor
     service.shutdown();
     CHECK_FALSE(EmbeddingServiceTimingTestAccess::maintenanceEligible(service, true));
     CHECK(calls == beforeBusy);
+}
+
+// `yams daemon status` showed "0 embeddings" for repair while background repair embedded
+// documents: only the foreground RPC ever wrote the counter.
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "Background repair jobs count the embeddings they commit",
+                 "[daemon][embedding][repair][progress]") {
+    const bool fromRepair = GENERATE(true, false);
+    std::atomic<std::uint64_t> repairEmbedded{0};
+    service->setRepairEmbeddedCounter(&repairEmbedded);
+    InternalEventBus::EmbedJob job;
+    job.hashes = {hash};
+    job.modelName = "test-model";
+    job.skipExisting = false;
+    job.updateSemanticGraph = false;
+    job.fromRepair = fromRepair;
+    writer->start();
+    runner = std::async(std::launch::async, [this] { io.run(); });
+    EmbeddingServiceTimingTestAccess::process(*service, std::move(job));
+    REQUIRE(writer->flush(5s));
+    REQUIRE(service->processed() == 1);
+    CHECK(repairEmbedded.load() == (fromRepair ? 1U : 0U));
 }
 
 } // namespace yams::daemon

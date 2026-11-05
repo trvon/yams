@@ -114,6 +114,11 @@ public:
     /// Called with the hashes of the documents a job committed vectors for (new or re-embedded),
     /// after the vector insert and before readiness is published.
     void setEmbeddingsCommittedCallback(std::function<void(const std::vector<std::string>&)> cb);
+    /// Counter that documents embedded for EmbedJob::fromRepair jobs are added to (the status
+    /// field repair_embeddings_generated). Set before start; the counter must outlive the service.
+    void setRepairEmbeddedCounter(std::atomic<std::uint64_t>* counter) {
+        repairEmbeddedCounter_ = counter;
+    }
 
     // Exposes the immutable effective safeguard and its provenance for status/tests.
     EffectiveEmbeddingServiceConfig effectiveConcurrencyPolicy() const;
@@ -185,6 +190,7 @@ private:
     bool stageActivityPublished_{false};
     std::uint64_t stageActivityToken_{0};
     std::atomic<std::size_t> processed_{0};
+    std::atomic<std::uint64_t>* repairEmbeddedCounter_{nullptr};
     std::atomic<std::size_t> failed_{0};
     std::atomic<std::size_t> inFlight_{0}; // PBI-05b: parallel job tracking
     std::atomic<bool> pollerRunning_{false};

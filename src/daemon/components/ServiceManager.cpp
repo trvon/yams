@@ -2344,6 +2344,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             auto embeddingService = std::make_shared<EmbeddingService>(
                 getContentStore(), getMetadataRepo(), workCoordinator_.get(),
                 config_.embeddingService);
+            embeddingService->setRepairEmbeddedCounter(&state_.stats.repairEmbeddingsGenerated);
 
             auto initRes = embeddingService->initialize();
             if (initRes) {

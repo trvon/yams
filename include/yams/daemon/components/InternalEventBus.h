@@ -373,6 +373,8 @@ public:
         std::vector<EmbedPreparedDoc> preparedDocs;
         std::shared_ptr<EmbedJobMonitor> monitor;
         bool updateSemanticGraph{true};
+        /// Submitted by RepairService; committed embeddings count toward repair progress.
+        bool fromRepair{false};
     };
 
     enum class Fts5Operation {

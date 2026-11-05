@@ -1402,9 +1402,11 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                     bucket.modelName = pending.modelName;
                     bucket.skipExisting = pending.skipExisting;
                     bucket.updateSemanticGraph = pending.updateSemanticGraph;
+                    bucket.fromRepair = pending.fromRepair;
                 }
                 if (bucket.skipExisting != pending.skipExisting ||
-                    bucket.updateSemanticGraph != pending.updateSemanticGraph) {
+                    bucket.updateSemanticGraph != pending.updateSemanticGraph ||
+                    bucket.fromRepair != pending.fromRepair) {
                     deferred.push_back(std::move(pending));
                     continue;
                 }
@@ -3259,6 +3261,9 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
             // Count newly committed documents exactly once, even when tail work throws.
             // Failed inputs, terminal skips, and admission reuse are not new completions.
             processed_.fetch_add(committed, std::memory_order_relaxed);
+            if (job.fromRepair && repairEmbeddedCounter_) {
+                repairEmbeddedCounter_->fetch_add(committed, std::memory_order_relaxed);
+            }
             const bool fullAck =
                 acknowledged.value().requested == successCount && committed == successCount;
             if (fullAck) {
