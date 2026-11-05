@@ -50,10 +50,11 @@ struct HostPressureSample {
     bool vmPressureElevated{false}; // macOS kernel VM pressure at warn or critical
 };
 
-/// Thresholds above which the host counts as busy. Resolved from [tuning.resource].
+/// Thresholds above which the host counts as busy. Defaults are the Balanced profile;
+/// TuneAdvisor::hostPressureThresholds() scales them by profile and applies [tuning.resource].
 struct HostPressureThresholds {
     double cpuSomePct{40.0};
-    double ioSomePct{30.0};
+    double ioSomePct{85.0};
     double memorySomePct{10.0};
     double loadPerCpu{1.5};
     /// Fraction of each threshold the signal must drop below before the host counts as calm

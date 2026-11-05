@@ -3,6 +3,7 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <yams/daemon/components/HostPressure.h>
 #include <yams/daemon/components/ResourceGovernor.h>
@@ -176,6 +177,63 @@ TEST_CASE("ResourceGovernor host thresholds come from typed tuning",
     CHECK(TuneAdvisor::hostPressureThresholds().cpuSomePct == Catch::Approx(15.0));
     governor.testing_setHostPressureSampler([] { return psiSample(20.0, 0.0, 0.0); });
     CHECK(governor.tick(nullptr).hostPressureElevated);
+}
+
+namespace {
+struct TuningProfileGuard {
+    explicit TuningProfileGuard(TuneAdvisor::Profile profile)
+        : previous(TuneAdvisor::tuningProfile()) {
+        TuneAdvisor::setTuningProfile(profile);
+    }
+    ~TuningProfileGuard() { TuneAdvisor::setTuningProfile(previous); }
+    TuningProfileGuard(const TuningProfileGuard&) = delete;
+    TuningProfileGuard& operator=(const TuningProfileGuard&) = delete;
+    TuneAdvisor::Profile previous;
+};
+} // namespace
+
+TEST_CASE("Host pressure thresholds follow the tuning profile",
+          "[daemon][governance][host_pressure][profile][catch2]") {
+    HostSamplerGuard guard;
+    struct Expected {
+        TuneAdvisor::Profile profile;
+        double io;
+        double cpu;
+        double memory;
+        double loadPerCpu;
+    };
+    const auto expected =
+        GENERATE(Expected{TuneAdvisor::Profile::Efficient, 60.0, 30.0, 5.0, 1.0},
+                 Expected{TuneAdvisor::Profile::Balanced, 85.0, 40.0, 10.0, 1.5},
+                 Expected{TuneAdvisor::Profile::Aggressive, 100.0, 60.0, 20.0, 2.0});
+    TuningProfileGuard profile{expected.profile};
+    const auto thresholds = TuneAdvisor::hostPressureThresholds();
+    CHECK(thresholds.ioSomePct == Catch::Approx(expected.io));
+    CHECK(thresholds.cpuSomePct == Catch::Approx(expected.cpu));
+    CHECK(thresholds.memorySomePct == Catch::Approx(expected.memory));
+    CHECK(thresholds.loadPerCpu == Catch::Approx(expected.loadPerCpu));
+
+    // An explicit [tuning.resource] value still wins over the profile.
+    TuneAdvisor::setHostIoPressurePct(45.0);
+    CHECK(TuneAdvisor::hostPressureThresholds().ioSomePct == Catch::Approx(45.0));
+}
+
+TEST_CASE("Idle io_uring waiters alone do not defer background work under any profile",
+          "[daemon][governance][host_pressure][profile][catch2]") {
+    // A desktop where an idle terminal's io_uring waits keep PSI io "some" near 40% with no
+    // disk activity. That level must not count as a busy host.
+    HostSamplerGuard guard;
+    auto& governor = ResourceGovernor::instance();
+    const auto profile = GENERATE(TuneAdvisor::Profile::Efficient, TuneAdvisor::Profile::Balanced,
+                                  TuneAdvisor::Profile::Aggressive);
+    TuningProfileGuard scoped{profile};
+    governor.testing_setHostPressureSampler([] { return psiSample(0.0, 40.0, 0.0); });
+    CHECK_FALSE(governor.tick(nullptr).hostPressureElevated);
+
+    // Real contention still counts, earlier on the profiles that yield more.
+    governor.testing_setHostPressureSampler([] { return psiSample(0.0, 99.0, 0.0); });
+    CHECK(governor.tick(nullptr).hostPressureElevated ==
+          (profile != TuneAdvisor::Profile::Aggressive));
 }
 
 TEST_CASE("ResourceGovernor host sampling can be disabled",
