@@ -2518,6 +2518,18 @@ void TuneAdvisor::setHostPressureEnabled(bool enabled) {
     hostPressureEnabled_.store(enabled, std::memory_order_relaxed);
 }
 
+std::chrono::minutes TuneAdvisor::memorySyncFullApplyInterval() {
+    switch (tuningProfile()) {
+        case Profile::Efficient:
+            return std::chrono::minutes{30};
+        case Profile::Aggressive:
+            return std::chrono::minutes{5};
+        case Profile::Balanced:
+        default:
+            return std::chrono::minutes{15};
+    }
+}
+
 HostPressureThresholds TuneAdvisor::hostPressureThresholds() {
     // Defaults follow the tuning profile: Efficient yields to the host earliest, Aggressive
     // only under heavy contention. IO "some" stays high on desktops where idle io_uring waiters

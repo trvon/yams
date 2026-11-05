@@ -11,6 +11,7 @@
 // pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 #include <chrono>
 #include <cstddef>
@@ -1149,6 +1150,55 @@ TEST_CASE("Memory sync apply runs again as soon as a new winner arrives",
     CHECK(reader.hasEdge("entity:first:source", "entity:first:target"));
 }
 
+TEST_CASE("Memory sync full apply interval follows the tuning profile",
+          "[daemon][memory-sync][apply][idle][profile]") {
+    // The full pass re-applies every winner to catch local drift. On a 28k-record corpus it
+    // costs about 45 s of one core, so Efficient runs it least often.
+    struct Expected {
+        TuneAdvisor::Profile profile;
+        std::chrono::minutes interval;
+    };
+    const auto expected =
+        GENERATE(Expected{TuneAdvisor::Profile::Efficient, std::chrono::minutes{30}},
+                 Expected{TuneAdvisor::Profile::Balanced, std::chrono::minutes{15}},
+                 Expected{TuneAdvisor::Profile::Aggressive, std::chrono::minutes{5}});
+
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore};
+    publishEdgeWithEndpoints(writer, "entity:interval:source", "entity:interval:target");
+    applyUntilEdge(reader, "entity:interval:source", "entity:interval:target");
+
+    // After the nodes start: daemon startup applies the configured profile.
+    const auto previous = TuneAdvisor::tuningProfile();
+    TuneAdvisor::setTuningProfile(expected.profile);
+    struct Restore {
+        TuneAdvisor::Profile profile;
+        ~Restore() { TuneAdvisor::setTuningProfile(profile); }
+    } restore{previous};
+    CHECK(TuneAdvisor::memorySyncFullApplyInterval() == expected.interval);
+
+    reader.manager->testingExpireMemorySyncFullApply();
+    const auto before = std::chrono::steady_clock::now();
+    reader.manager->testingApplyMemorySyncWinners();
+    const auto after = std::chrono::steady_clock::now();
+    const auto deadline = reader.manager->testingMemorySyncFullApplyDeadline();
+    CHECK(deadline >= before + expected.interval);
+    CHECK(deadline <= after + expected.interval);
+
+    // A profile change at runtime (config reload) moves the pending deadline on the next cycle.
+    const auto other = expected.profile == TuneAdvisor::Profile::Aggressive
+                           ? TuneAdvisor::Profile::Efficient
+                           : TuneAdvisor::Profile::Aggressive;
+    TuneAdvisor::setTuningProfile(other);
+    reader.manager->testingApplyMemorySyncWinners();
+    const auto moved = reader.manager->testingMemorySyncFullApplyDeadline();
+    CHECK(moved >= before + TuneAdvisor::memorySyncFullApplyInterval());
+    CHECK(moved <= after + TuneAdvisor::memorySyncFullApplyInterval());
+}
+
 TEST_CASE("Memory sync full apply repairs a replicated record deleted locally",
           "[daemon][memory-sync][apply][idle]") {
     TempRoot root;
@@ -1191,6 +1241,9 @@ TEST_CASE("Memory sync apply does not re-run an unchanged pass that only deferre
 
     reader.manager->testingApplyMemorySyncWinners();
     REQUIRE(reader.deferredTopology() == 1);
+    // That pass wrote the replicated source node, so the graph moved during it; one more pass
+    // runs before the baseline is quiet.
+    reader.manager->testingApplyMemorySyncWinners();
     const auto skipped = reader.manager->testingMemorySyncApplySkippedCycles();
     const auto reads = reader.kgStoreAcquisitions();
     reader.manager->testingApplyMemorySyncWinners();
@@ -1208,6 +1261,39 @@ TEST_CASE("Memory sync apply does not re-run an unchanged pass that only deferre
     CHECK(reader.deferredTopology() == 1);
 }
 
+TEST_CASE("Memory sync apply retries a deferred edge whose endpoint lands during the pass",
+          "[daemon][memory-sync][apply][idle]") {
+    // A local endpoint committed after the topology stage saw it missing, but before the pass
+    // recorded its graph baseline, must not be absorbed into that baseline.
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore};
+    writer.seedEdgePublishedAheadOfTarget();
+    reader.manager->testingApplyMemorySyncWinners();
+    REQUIRE(reader.deferredTopology() == 1);
+
+    bool landed = false;
+    reader.manager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (stage == "apply.after_topology" && !landed) {
+            landed = true;
+            (void)reader.addNode(writer.targetKey(), "omega");
+        }
+    });
+    reader.manager->testingExpireMemorySyncFullApply();
+    reader.manager->testingApplyMemorySyncWinners();
+    reader.manager->testingSetMemorySyncStageObserver({});
+    REQUIRE(landed);
+    REQUIRE(reader.deferredTopology() == 1); // that pass scanned before the node existed
+
+    const auto skipped = reader.manager->testingMemorySyncApplySkippedCycles();
+    reader.manager->testingApplyMemorySyncWinners();
+    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == skipped);
+    CHECK(reader.deferredTopology() == 0);
+    CHECK(reader.hasEdge(writer.sourceKey(), writer.targetKey()));
+}
+
 TEST_CASE("Memory sync apply retries a deferred record as soon as its prerequisite replicates",
           "[daemon][memory-sync][apply][idle]") {
     TempRoot root;
@@ -1219,6 +1305,7 @@ TEST_CASE("Memory sync apply retries a deferred record as soon as its prerequisi
 
     reader.manager->testingApplyMemorySyncWinners();
     REQUIRE(reader.deferredTopology() == 1);
+    reader.manager->testingApplyMemorySyncWinners(); // settles after the pass's own graph writes
     reader.manager->testingApplyMemorySyncWinners();
     REQUIRE(reader.manager->testingMemorySyncApplySkippedCycles() > 0);
 
