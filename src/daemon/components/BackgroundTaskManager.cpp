@@ -924,8 +924,10 @@ void BackgroundTaskManager::launchAutoRepairTask() {
                     const auto& state = self->getState();
                     const bool queueEmpty =
                         state.stats.repairQueueDepth.load(std::memory_order_relaxed) == 0;
+                    // Executing requests, not open connections: an agent holding
+                    // an idle connection must not block scheduled repair.
                     const bool busy =
-                        state.stats.activeConnections.load(std::memory_order_relaxed) > 0;
+                        state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) > 0;
 
                     auto canRunAuto = [&]() {
                         if (busy)

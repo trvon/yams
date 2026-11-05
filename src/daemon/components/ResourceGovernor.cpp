@@ -1062,7 +1062,10 @@ ResourceGovernor::ExtractionBudget ResourceGovernor::recommendExtractionBudget()
     constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
     constexpr std::uint64_t kPoolFloor = 256 * kMiB;
     constexpr std::uint64_t kPoolCeiling = 8 * 1024 * kMiB;
-    constexpr std::uint64_t kPerDocFloor = 64 * kMiB;
+    // Small enough that the floor rarely lifts the total past the pool:
+    // that happens only when workers * 8 MiB > pool (33+ workers on the
+    // 256 MiB minimum pool).
+    constexpr std::uint64_t kPerDocFloor = 8 * kMiB;
     constexpr std::uint32_t kMaxThreadsPerDoc = 8;
 
     const std::uint32_t workers =
