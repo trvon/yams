@@ -1,4 +1,5 @@
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/profiling.h>
 
 #include <algorithm>
@@ -710,6 +711,13 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         inputsUnchanged = false;
     }
     const auto cycleStart = std::chrono::steady_clock::now();
+    // A profile change (config reload) moves the pending deadline instead of waiting out the old
+    // interval.
+    if (const auto interval = TuneAdvisor::memorySyncFullApplyInterval();
+        lastMemorySyncFullApplyStart_ && interval != memorySyncFullApplyInterval_) {
+        memorySyncFullApplyInterval_ = interval;
+        nextMemorySyncFullApply_ = *lastMemorySyncFullApplyStart_ + interval;
+    }
     if (inputsUnchanged && cycleStart < nextMemorySyncFullApply_ &&
         !memorySyncApplySkipDisabled_.load(std::memory_order_acquire)) {
         memorySyncApplySkippedCycles_.fetch_add(1, std::memory_order_acq_rel);
@@ -730,6 +738,10 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     // prerequisite only a peer could publish, every node refused to publish and the
     // prerequisites never arrived. Only a stop request ends the cycle early.
     // A stage that defers records is healthy; only a hard failure marks the cycle failed.
+    // Read before any stage scans: a local endpoint node committed while the topology stage runs
+    // must still look like a change next cycle, not be absorbed into this pass's baseline. The
+    // pass's own graph writes then cost at most one more pass.
+    const auto kgGenerationBeforeStages = kgGeneration();
     bool stageFailed = false;
     // Settled: every stage scanned completely, nothing failed, and any deferrals are topology
     // edges. A deferred edge waits on endpoint nodes that either replicate (the adapter inputs
@@ -902,12 +914,14 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     memorySyncApplyHealth_.recordCycle(stageFailed);
     if (applyInputs && cycleSettled && !stageFailed) {
         if (!inputsUnchanged || cycleStart >= nextMemorySyncFullApply_) {
-            nextMemorySyncFullApply_ = cycleStart + kMemorySyncFullApplyInterval;
+            memorySyncFullApplyInterval_ = TuneAdvisor::memorySyncFullApplyInterval();
+            lastMemorySyncFullApplyStart_ = cycleStart;
+            nextMemorySyncFullApply_ = cycleStart + memorySyncFullApplyInterval_;
         }
         applyInputs->view.reset(); // keep the name only; never hold an old store open
         lastSettledMemorySyncApplyInputs_ = std::move(applyInputs);
-        // Read after the stages ran, so the pass's own graph writes do not force a rerun.
-        lastSettledTopologyDeferredKgGeneration_ = topologyDeferred ? kgGeneration() : std::nullopt;
+        lastSettledTopologyDeferredKgGeneration_ =
+            topologyDeferred ? kgGenerationBeforeStages : std::nullopt;
         if (topologyDeferred && !lastSettledTopologyDeferredKgGeneration_) {
             lastSettledMemorySyncApplyInputs_.reset(); // no graph store: nothing to compare
         }
