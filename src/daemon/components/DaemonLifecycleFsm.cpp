@@ -40,7 +40,14 @@ protected:
     }
 };
 
+// MSVC's debug std::string allocates a container proxy when default-constructed,
+// so LifecycleSnapshot is not a constant expression there and constinit is an
+// error (C2127). Every other toolchain constant-initializes it; keep the check.
+#if defined(_MSC_VER) && defined(_DEBUG)
+LifecycleSnapshot LifecycleMachine::snap{};
+#else
 constinit LifecycleSnapshot LifecycleMachine::snap{};
+#endif
 
 struct LCUnknown : LifecycleMachine {
     void entry() override {

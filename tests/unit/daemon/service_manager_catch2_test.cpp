@@ -844,10 +844,18 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects symbolic-link P2
     auto future = boost::asio::co_spawn(
         io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
     io.run();
+    // Direct P2P recovery runs off the startup path (4ab5ff82d): a rejected identity
+    // key degrades the "p2p" subsystem and the listener never starts, but daemon
+    // initialization still succeeds.
     const auto initialized = future.get();
-    REQUIRE_FALSE(initialized.has_value());
-    CHECK(initialized.error().code == ErrorCode::Unauthorized);
-    CHECK(initialized.error().message.find("symbolic link") != std::string::npos);
+    REQUIRE(initialized.has_value());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!lifecycleFsm_.isSubsystemDegraded("p2p") &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(lifecycleFsm_.isSubsystemDegraded("p2p"));
+    CHECK(lifecycleFsm_.degradationReason("p2p").find("symbolic link") != std::string::npos);
     CHECK(fs::is_symlink(fs::symlink_status(identity)));
 #endif
 }
