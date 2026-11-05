@@ -4,26 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <yams/plugins/host_context_v1.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define YAMS_PLUGIN_HOST_SERVICES_API_VERSION 1
-
-// Forward declarations for C-style service structs
-typedef struct yams_document_service_v1 yams_document_service_v1;
-typedef struct yams_search_service_v1 yams_search_service_v1;
-typedef struct yams_grep_service_v1 yams_grep_service_v1;
-
-// Main context struct passed to plugins
-typedef struct yams_plugin_host_context_v1 {
-    uint32_t version;
-    void* impl; // Opaque pointer to host-side implementation
-    yams_document_service_v1* document_service;
-    yams_search_service_v1* search_service;
-    yams_grep_service_v1* grep_service;
-    // Add other services here in the future
-} yams_plugin_host_context_v1;
+// The context struct and resource service live in host_context_v1.h so a
+// plugin can read them without pulling in every service definition.
 
 // --- Generic Utility Structs ---
 

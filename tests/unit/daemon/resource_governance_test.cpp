@@ -4,14 +4,18 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/app/services/services.hpp>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
+#include <yams/daemon/resource/plugin_host_services.h>
 
 #include "../../common/test_helpers_catch2.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -467,6 +471,135 @@ TEST_CASE("ResourceGovernor::recommendVectorRebuildBudgetBytes scales with budge
     }
 
     TuneAdvisor::setMemoryBudgetBytes(prev);
+}
+
+TEST_CASE("ResourceGovernor::recommendLexicalIndexBytes scales with budget and pressure",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+    constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
+    constexpr std::uint64_t kGiB = 1024ULL * kMiB;
+    const std::uint64_t prev = TuneAdvisor::memoryBudgetBytes();
+    governor.testing_setPressureState(ResourcePressureLevel::Normal,
+                                      std::chrono::steady_clock::now());
+
+    SECTION("8 GiB budget yields 512 MiB (6.25%)") {
+        TuneAdvisor::setMemoryBudgetBytes(8 * kGiB);
+        CHECK(governor.recommendLexicalIndexBytes() == 512 * kMiB);
+    }
+
+    SECTION("256 GiB budget clamps at the 4 GiB ceiling") {
+        TuneAdvisor::setMemoryBudgetBytes(256 * kGiB);
+        CHECK(governor.recommendLexicalIndexBytes() == 4 * kGiB);
+    }
+
+    SECTION("1 GiB budget clamps at the 256 MiB floor") {
+        TuneAdvisor::setMemoryBudgetBytes(1 * kGiB);
+        CHECK(governor.recommendLexicalIndexBytes() == 256 * kMiB);
+    }
+
+    SECTION("pressure shrinks the grant, never below the floor") {
+        governor.testing_endStartupGrace();           // grace caps pressure at Warning
+        TuneAdvisor::setMemoryBudgetBytes(32 * kGiB); // 2 GiB at Normal
+        const auto now = std::chrono::steady_clock::now();
+        governor.testing_setPressureState(ResourcePressureLevel::Warning, now);
+        CHECK(governor.recommendLexicalIndexBytes() == 1536 * kMiB);
+        governor.testing_setPressureState(ResourcePressureLevel::Critical, now);
+        CHECK(governor.recommendLexicalIndexBytes() == 1 * kGiB);
+        governor.testing_setPressureState(ResourcePressureLevel::Emergency, now);
+        CHECK(governor.recommendLexicalIndexBytes() == 256 * kMiB);
+    }
+
+    governor.testing_setPressureState(ResourcePressureLevel::Normal,
+                                      std::chrono::steady_clock::now());
+    TuneAdvisor::setMemoryBudgetBytes(prev);
+}
+
+TEST_CASE("ResourceGovernor::recommendExtractionBudget splits cores and memory across workers",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+    constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
+    constexpr std::uint64_t kGiB = 1024ULL * kMiB;
+    const std::uint64_t prev = TuneAdvisor::memoryBudgetBytes();
+    const auto now = std::chrono::steady_clock::now();
+    governor.testing_endStartupGrace();
+    governor.testing_setPressureState(ResourcePressureLevel::Normal, now);
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+
+    const std::uint32_t workers =
+        std::max<std::uint32_t>(1, governor.getScalingCaps().extractionConcurrency);
+    const std::uint32_t cores = std::max<std::uint32_t>(1, std::thread::hardware_concurrency());
+
+    SECTION("Normal: 12.5% of the budget split across workers") {
+        TuneAdvisor::setMemoryBudgetBytes(16 * kGiB); // 2 GiB pool
+        const auto b = governor.recommendExtractionBudget();
+        CHECK(b.maxThreads == std::clamp<std::uint32_t>(cores / workers, 1, 8));
+        CHECK(b.maxDecompressedBytes == std::max<std::uint64_t>(64 * kMiB, 2 * kGiB / workers));
+        // All concurrent extractions together stay within the pool.
+        CHECK(b.maxDecompressedBytes * workers <=
+              std::max<std::uint64_t>(2 * kGiB, 64 * kMiB * workers));
+    }
+
+    SECTION("Critical: one thread and half the bytes, never below 64 MiB") {
+        TuneAdvisor::setMemoryBudgetBytes(16 * kGiB);
+        const auto normal = governor.recommendExtractionBudget();
+        governor.testing_setPressureState(ResourcePressureLevel::Critical, now);
+        const auto b = governor.recommendExtractionBudget();
+        CHECK(b.maxThreads == 1u);
+        CHECK(b.maxDecompressedBytes ==
+              std::max<std::uint64_t>(64 * kMiB, normal.maxDecompressedBytes / 2));
+    }
+
+    SECTION("tiny budget falls back to the 256 MiB pool floor") {
+        TuneAdvisor::setMemoryBudgetBytes(512 * kMiB);
+        CHECK(governor.recommendExtractionBudget().maxDecompressedBytes ==
+              std::max<std::uint64_t>(64 * kMiB, 256 * kMiB / workers));
+    }
+
+    governor.testing_setPressureState(ResourcePressureLevel::Normal,
+                                      std::chrono::steady_clock::now());
+    TuneAdvisor::setMemoryBudgetBytes(prev);
+}
+
+TEST_CASE("Plugin host resource_service serves the registered extraction budget",
+          "[daemon][governance][plugins][catch2]") {
+    yams::app::services::AppContext app{};
+    auto* ctx = yams_create_host_context(app);
+    REQUIRE(ctx != nullptr);
+    CHECK(ctx->version >= 2u);
+    REQUIRE(ctx->resource_service != nullptr);
+    REQUIRE(ctx->resource_service->get_extraction_budget != nullptr);
+    auto ask = [&](yams_extraction_budget_v1& out) {
+        return ctx->resource_service->get_extraction_budget(ctx->resource_service->handle, &out);
+    };
+
+    SECTION("no provider: the request fails so plugins keep their defaults") {
+        yams_set_extraction_budget_provider({});
+        yams_extraction_budget_v1 out{};
+        CHECK(ask(out) != 0);
+    }
+
+    SECTION("provider answers, and a zero thread grant becomes one") {
+        yams_set_extraction_budget_provider([] {
+            yams_extraction_budget_v1 b{};
+            b.max_threads = 0;
+            b.max_decompressed_bytes = 123;
+            return b;
+        });
+        yams_extraction_budget_v1 out{};
+        REQUIRE(ask(out) == 0);
+        CHECK(out.max_threads == 1u);
+        CHECK(out.max_decompressed_bytes == 123u);
+    }
+
+    SECTION("a throwing provider fails the request instead of crossing the C ABI") {
+        yams_set_extraction_budget_provider(
+            []() -> yams_extraction_budget_v1 { throw std::runtime_error("boom"); });
+        yams_extraction_budget_v1 out{};
+        CHECK(ask(out) != 0);
+    }
+
+    yams_set_extraction_budget_provider({});
+    yams_free_host_context(ctx);
 }
 
 // =============================================================================

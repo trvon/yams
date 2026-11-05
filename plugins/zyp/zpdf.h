@@ -74,6 +74,16 @@ void zpdf_close(ZpdfDocument* handle);
 int zpdf_page_count(ZpdfDocument* handle);
 
 /**
+ * Cap the bytes one page's text extraction may decompress (page content plus
+ * Form XObjects). Bounds per-page scratch memory; a page over the cap yields
+ * the text extracted before it was reached.
+ *
+ * @param handle Document handle
+ * @param limit  Byte cap, or 0 for unlimited (the default)
+ */
+void zpdf_set_page_decompress_limit(ZpdfDocument* handle, size_t limit);
+
+/**
  * Get information about a specific page.
  *
  * @param handle Document handle

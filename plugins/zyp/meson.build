@@ -91,6 +91,8 @@ if host_machine.system() == 'windows'
     ],
     output: [zpdf_lib_name, zpdf_import_lib_name],
     build_by_default: true,
+    # zig build tracks the zpdf sources itself; meson does not, so always ask.
+    build_always_stale: true,
     console: true,
   )
 #Extract just the import library for linking
@@ -112,6 +114,8 @@ elif host_machine.system() == 'darwin'
     ],
     output: [zpdf_lib_name],
     build_by_default: true,
+    # zig build tracks the zpdf sources itself; meson does not, so always ask.
+    build_always_stale: true,
     console: true,
   )
 else
@@ -129,6 +133,8 @@ else
     ],
     output: [zpdf_lib_name],
     build_by_default: true,
+    # zig build tracks the zpdf sources itself; meson does not, so always ask.
+    build_always_stale: true,
     console: true,
   )
 endif

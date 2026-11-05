@@ -226,6 +226,29 @@ public:
     /// no memory budget (caller should fall back to a conservative literal).
     [[nodiscard]] std::uint64_t recommendLexicalCorpusBytes() const noexcept;
 
+    /// Recommend the maximum live heap for the in-memory simeon lexical index
+    /// (BM25 postings, summed over every index one build holds), as counted by
+    /// simeon::Bm25Index::memory_bytes(). This bounds the index itself; the
+    /// corpus-text cap above does not: a SubwordAwareBackoff index runs ~8x its
+    /// input text. The build polls this during the build, so a pressure rise
+    /// stops it. Peak RSS while building runs up to ~2x the grant (arrays
+    /// double as they grow).
+    [[nodiscard]] std::uint64_t recommendLexicalIndexBytes() const noexcept;
+
+    /// Per-document grant for content extraction plugins, served to them
+    /// through the plugin host's resource_service.
+    struct ExtractionBudget {
+        std::uint32_t maxThreads{1};
+        std::uint64_t maxDecompressedBytes{0};
+    };
+
+    /// Threads and decompressed bytes one document's extraction may use. Splits
+    /// the cores and a 12.5% share of the memory budget across the current
+    /// extraction worker cap, so all concurrent extractions together stay
+    /// within that share. Shrinks under pressure; Critical and above get one
+    /// thread.
+    [[nodiscard]] ExtractionBudget recommendExtractionBudget() const noexcept;
+
     /// Recommend the maximum working-set byte budget for the SPQ vector index
     /// rebuild (training set + per-row encoded codes scratch). Scales with the
     /// daemon memory budget and current pressure so the rebuild does not push
@@ -323,6 +346,12 @@ public:
         deferralGates_ = {};
         deferredWorkMask_.store(0, std::memory_order_release);
     }
+    /// Test-only: end the startup grace period, so Critical and Emergency are reported.
+    /// Call only while no tick thread is running.
+    void testing_endStartupGrace() noexcept {
+        startupTime_ =
+            std::chrono::steady_clock::now() - kStartupGracePeriod - std::chrono::seconds(1);
+    }
     /// Test-only: set pressure state for hysteresis tests.
     void testing_setPressureState(ResourcePressureLevel level,
                                   std::chrono::steady_clock::time_point when) {
@@ -379,6 +408,11 @@ private:
 
     /// Update CPU-based admission control with hysteresis
     void updateCpuAdmissionControl(const ResourceSnapshot& snap);
+
+    /// Scale a byte budget down for the current pressure level, never below `floor`.
+    /// Shared by the recommend*Bytes() budgets.
+    [[nodiscard]] std::uint64_t scaleBudgetForPressure(std::uint64_t cap,
+                                                       std::uint64_t floor) const noexcept;
 
     /// Update scaling caps based on pressure level.
     void updateScalingCaps(ResourcePressureLevel level);

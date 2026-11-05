@@ -354,6 +354,14 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                     1024, static_cast<std::size_t>(governorCap) / kAvgDocBytes);
                 lexicalCfg.max_corpus_docs = std::min(lexicalCfg.max_corpus_docs, docsFromBudget);
             }
+            // The index built from that text has its own grant, re-read while
+            // the build runs so a pressure rise stops it.
+            lexicalCfg.max_index_bytes =
+                static_cast<std::size_t>(ResourceGovernor::instance().recommendLexicalIndexBytes());
+            lexicalCfg.index_budget_provider = [] {
+                return static_cast<std::size_t>(
+                    ResourceGovernor::instance().recommendLexicalIndexBytes());
+            };
             if (bm25Policy.variant && *bm25Policy.variant == "atire") {
                 lexicalCfg.variant = yams::search::SimeonLexicalBackend::Variant::Atire;
             }

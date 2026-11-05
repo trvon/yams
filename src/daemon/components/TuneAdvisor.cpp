@@ -763,7 +763,7 @@ uint32_t TuneAdvisor::repairTokensBusy() {
     return def;
 }
 
-uint32_t TuneAdvisor::repairBusyConnThreshold() {
+uint32_t TuneAdvisor::repairBusyRequestThreshold() {
     uint32_t def = 1;
     auto envValue = parseBoundedUintEnvNow("YAMS_REPAIR_BUSY_CONN_THRESHOLD", 0u, 1024u);
     if (envValue)
@@ -2521,7 +2521,8 @@ void TuneAdvisor::setHostPressureEnabled(bool enabled) {
 HostPressureThresholds TuneAdvisor::hostPressureThresholds() {
     // Defaults follow the tuning profile: Efficient yields to the host earliest, Aggressive
     // only under heavy contention. IO "some" stays high on desktops where idle io_uring waiters
-    // (terminals, browsers) count as stalled with no disk activity, so its floor is high.
+    // (terminals, browsers) count as stalled with no disk activity, so its floor is high, and it
+    // only counts while the busiest disk is also busy for ioBusyPct of the time.
     HostPressureThresholds thresholds;
     switch (tuningProfile()) {
         case Profile::Efficient:
@@ -2529,6 +2530,7 @@ HostPressureThresholds TuneAdvisor::hostPressureThresholds() {
             thresholds.cpuSomePct = 30.0;
             thresholds.memorySomePct = 5.0;
             thresholds.loadPerCpu = 1.0;
+            thresholds.ioBusyPct = 50.0;
             break;
         case Profile::Balanced:
             break; // the struct defaults
@@ -2537,6 +2539,7 @@ HostPressureThresholds TuneAdvisor::hostPressureThresholds() {
             thresholds.cpuSomePct = 60.0;
             thresholds.memorySomePct = 20.0;
             thresholds.loadPerCpu = 2.0;
+            thresholds.ioBusyPct = 90.0;
             break;
     }
     const auto apply = [](const std::atomic<double>& overrideValue, double& field) {
