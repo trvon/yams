@@ -465,13 +465,31 @@ std::filesystem::path legacyRelativePath(std::string_view key) {
     return std::filesystem::path(hash.substr(0, 2)) / hash.substr(2, 2) / std::string(key);
 }
 
+// Written to a temporary name and renamed, so the marker either exists whole or not at all.
 bool writeLayoutMarker(const std::filesystem::path& basePath) {
-    std::ofstream marker(longPath(basePath / kLayoutMarker), std::ios::trunc);
-    marker << "1\n";
-    return static_cast<bool>(marker);
+    const auto marker = basePath / kLayoutMarker;
+    auto staged = marker;
+    staged += ".tmp";
+    {
+        std::ofstream out(longPath(staged), std::ios::trunc);
+        out << "1\n";
+        out.flush();
+        if (!out) {
+            return false;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(longPath(staged), longPath(marker), ec);
+    if (ec) {
+        std::filesystem::remove(longPath(staged), ec);
+        return false;
+    }
+    return true;
 }
 
-enum class Migration { Moved, Superseded, Failed };
+// Moved and Superseded leave only the namespaced copy. Pending means the namespaced copy exists
+// but the legacy one could not be removed, so a later pass must retry.
+enum class Migration { Moved, Superseded, Pending, Failed };
 
 // Moves one legacy object into the namespaced tree without ever replacing a newer copy: the hard
 // link fails when the destination exists, and then the legacy copy is simply retired.
@@ -481,6 +499,11 @@ Migration migrateLegacyObject(const std::filesystem::path& objectsDir,
         return Migration::Failed;
     }
     const auto target = objectsDir / kNamespaceDir / namespacedRelativePath(key);
+    // Check before creating directories (create_directories follows symlinks) and again after,
+    // as store() does.
+    if (!verifyFilesystemContainment(objectsDir, target)) {
+        return Migration::Failed;
+    }
     std::error_code ec;
     if (!yams::common::ensureDirectories(longPath(target.parent_path()), ec) ||
         !verifyFilesystemContainment(objectsDir, target)) {
@@ -489,7 +512,11 @@ Migration migrateLegacyObject(const std::filesystem::path& objectsDir,
     std::filesystem::create_hard_link(longPath(legacyPath), longPath(target), ec);
     if (!ec || ec == std::errc::file_exists) {
         const bool linked = !ec;
-        std::filesystem::remove(longPath(legacyPath), ec);
+        std::error_code removeEc;
+        std::filesystem::remove(longPath(legacyPath), removeEc);
+        if (removeEc && std::filesystem::exists(longPath(legacyPath))) {
+            return Migration::Pending;
+        }
         return linked ? Migration::Moved : Migration::Superseded;
     }
     // Another backend on the same root may have moved it first.
@@ -583,6 +610,8 @@ Result<void> FilesystemBackend::initialize(const BackendConfig& config) {
                 break;
             }
         }
+        // A scan that could not finish proves nothing: keep the legacy fallback.
+        legacy = legacy || static_cast<bool>(ec);
         if (!legacy) {
             (void)writeLayoutMarker(basePath_);
         }
@@ -912,6 +941,7 @@ Result<void> FilesystemBackend::visitKeys(std::string_view prefix, Visitor&& vis
         const bool flatKeysMayMatch = prefix.find('/') == std::string_view::npos;
         const bool migrate = legacyHierarchicalPending();
         if (flatKeysMayMatch || migrate) {
+            std::size_t legacyFound = 0;
             std::size_t unmigrated = 0;
             for (auto it = std::filesystem::recursive_directory_iterator(traversalPath(objectsDir));
                  it != std::filesystem::recursive_directory_iterator(); ++it) {
@@ -935,21 +965,29 @@ Result<void> FilesystemBackend::visitKeys(std::string_view prefix, Visitor&& vis
                                       ? pathStr.substr(6)
                                       : std::move(pathStr);
                 if (migrate && isHierarchicalKey(key)) {
-                    if (migrateLegacyObject(objectsDir, plainPath(entry.path()), key) !=
-                        Migration::Failed) {
-                        continue; // now in the namespaced tree, which is walked next
+                    ++legacyFound;
+                    const auto moved =
+                        migrateLegacyObject(objectsDir, plainPath(entry.path()), key);
+                    if (moved != Migration::Moved && moved != Migration::Superseded) {
+                        ++unmigrated;
                     }
-                    ++unmigrated;
+                    if (moved != Migration::Failed) {
+                        continue; // the namespaced copy is walked next
+                    }
                 }
                 if (emit(std::move(key))) {
                     return checkCancelled();
                 }
             }
-            if (migrate && unmigrated == 0) {
+            // Entries moved while the directory walk runs are not guaranteed to be seen exactly
+            // once, so the pass that moves objects only prunes. The layout is committed by a
+            // later pass that finds nothing left to move.
+            if (migrate && unmigrated == 0 && legacyFound > 0) {
                 if (auto pruned = pruneEmptyDirectories(objectsDir, true, checkCancelled);
                     !pruned) {
                     return pruned.error();
                 }
+            } else if (migrate && legacyFound == 0) {
                 if (writeLayoutMarker(basePath_)) {
                     legacyHierarchical_.store(false, std::memory_order_release);
                     spdlog::info("[FilesystemBackend] moved legacy objects to the namespaced "
@@ -974,9 +1012,13 @@ Result<void> FilesystemBackend::visitKeys(std::string_view prefix, Visitor&& vis
             start /= encodeDirectories(dirs);
             keyBase = std::string(prefix.substr(0, slash + 1));
         }
+        if (auto contained = verifyFilesystemContainment(objectsDir, start); !contained) {
+            return contained.error(); // a symlinked start would list outside the root
+        }
         if (!std::filesystem::is_directory(longPath(start))) {
             return checkCancelled();
         }
+        const bool filterTopLevel = keyBase.empty() && !prefix.empty();
         for (auto it = std::filesystem::recursive_directory_iterator(traversalPath(start));
              it != std::filesystem::recursive_directory_iterator(); ++it) {
             if (auto ready = onEntry(); !ready) {
@@ -985,8 +1027,12 @@ Result<void> FilesystemBackend::visitKeys(std::string_view prefix, Visitor&& vis
             const auto& entry = *it;
             const auto name = plainPath(entry.path()).filename().string();
             if (entry.is_directory()) {
-                if (!decodeDirectory(name)) {
-                    it.disable_recursion_pending(); // not written by this layout
+                const auto decoded = decodeDirectory(name);
+                // Not written by this layout, or a top-level namespace a slashless prefix
+                // cannot match: every key below starts with "<name>/".
+                if (!decoded ||
+                    (filterTopLevel && it.depth() == 0 && !decoded->starts_with(prefix))) {
+                    it.disable_recursion_pending();
                 }
                 continue;
             }

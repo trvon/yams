@@ -864,6 +864,12 @@ TEST_CASE("FilesystemBackend - Legacy hash-sharded objects migrate on first list
     CHECK(fsText(backend->retrieve("blob/b1").value()) == "blob");
     CHECK(fsText(backend->retrieve("flat-key").value()) == "flat");
 
+    // The pass that moves objects does not commit the layout: a later pass that finds no
+    // legacy objects does, so an entry the moving pass missed is still found.
+    CHECK_FALSE(fs::exists(root / "layout-namespaced-v1"));
+    CHECK(listAll(*backend, "index/").size() == 2);
+    CHECK(fs::exists(root / "layout-namespaced-v1"));
+
     // Once migrated, a reopened backend lists a namespace without touching the legacy tree.
     auto reopened = createFilesystemBackend(root);
     REQUIRE(reopened != nullptr);
@@ -876,6 +882,88 @@ TEST_CASE("FilesystemBackend - Legacy hash-sharded objects migrate on first list
     CHECK(stats.entriesVisited == 1);
     CHECK(listAll(*reopened, "").size() == 4); // flat-key, blob/b1, index/both, index/old
 }
+
+TEST_CASE("FilesystemBackend - Slashless prefixes skip non-matching namespaces",
+          "[storage][backend][filesystem][list][namespace-layout]") {
+    TestDirectory testDir;
+    auto backend = createFilesystemBackend(testDir.subdir("storage"));
+    REQUIRE(backend != nullptr);
+    for (int i = 0; i < 8; ++i) {
+        REQUIRE(backend->store("index/" + std::to_string(i), fsBytes("v")).has_value());
+    }
+    for (int i = 0; i < 200; ++i) {
+        REQUIRE(backend->store("blob/" + std::to_string(i), fsBytes("v")).has_value());
+    }
+    FilesystemListingStats stats;
+    struct RestoreObservation {
+        FilesystemListingStats* previous;
+        ~RestoreObservation() { testing_setFilesystemListingStats(previous); }
+    } restore{testing_setFilesystemListingStats(&stats)};
+    CHECK(listAll(*backend, "ind").size() == 8);
+    CAPTURE(stats.entriesVisited);
+    CHECK(stats.entriesVisited < 50);
+}
+
+#ifndef _WIN32
+TEST_CASE("FilesystemBackend - Listing and migration stay inside the object root",
+          "[storage][backend][filesystem][namespace-layout][security]") {
+    TestDirectory testDir;
+    const auto root = testDir.subdir("storage");
+    const auto outside = testDir.subdir("outside");
+    fs::create_directories(outside / "inner");
+    std::ofstream(outside / "secret.k") << "x";
+    // A legacy object whose namespaced directory is a planted symlink.
+    (void)writeLegacyObject(root, "pivot/inner/leaf", "legacy");
+    auto backend = createFilesystemBackend(root);
+    REQUIRE(backend != nullptr);
+    fs::create_directories(root / "objects" / "ns");
+    fs::create_directory_symlink(outside, root / "objects" / "ns" / "pivot");
+
+    const auto page = backend->listPage("pivot/", std::nullopt, 100);
+    if (page) {
+        CHECK(std::ranges::find(page.value().keys, "pivot/secret") == page.value().keys.end());
+    }
+    // The migration refused the target and did not create directories outside the root.
+    CHECK_FALSE(fs::exists(outside / "inner" / "leaf.k"));
+    CHECK(fs::is_empty(outside / "inner"));
+    CHECK_FALSE(fs::exists(root / "layout-namespaced-v1"));
+}
+
+TEST_CASE("FilesystemBackend - Migration stays pending when it cannot finish",
+          "[storage][backend][filesystem][namespace-layout][migration]") {
+    if (::geteuid() == 0) {
+        SKIP("permission checks do not apply to root");
+    }
+    TestDirectory testDir;
+    const auto root = testDir.subdir("storage");
+    const auto legacy = writeLegacyObject(root, "index/stuck", "stuck");
+    const auto shard = legacy.parent_path();
+
+    SECTION("an unreadable object root at open keeps the legacy fallback") {
+        fs::permissions(root / "objects", fs::perms::owner_write | fs::perms::owner_exec);
+        auto backend = createFilesystemBackend(root);
+        fs::permissions(root / "objects", fs::perms::owner_all);
+        REQUIRE(backend != nullptr);
+        CHECK_FALSE(fs::exists(root / "layout-namespaced-v1"));
+        CHECK(backend->exists("index/stuck").value());
+    }
+    SECTION("a legacy copy that cannot be removed is retried") {
+        auto backend = createFilesystemBackend(root);
+        REQUIRE(backend != nullptr);
+        fs::permissions(shard, fs::perms::owner_read | fs::perms::owner_exec);
+        CHECK(listAll(*backend, "index/") == std::vector<std::string>{"index/stuck"});
+        CHECK(listAll(*backend, "index/") == std::vector<std::string>{"index/stuck"});
+        fs::permissions(shard, fs::perms::owner_all);
+        CHECK(fs::exists(legacy));
+        CHECK_FALSE(fs::exists(root / "layout-namespaced-v1"));
+
+        CHECK(listAll(*backend, "index/") == std::vector<std::string>{"index/stuck"});
+        CHECK_FALSE(fs::exists(legacy));
+        CHECK(listAll(*backend, "index/") == std::vector<std::string>{"index/stuck"});
+        CHECK(fs::exists(root / "layout-namespaced-v1"));
+    }
+}
+#endif
 
 // =============================================================================
 // FilesystemBackend - Statistics
