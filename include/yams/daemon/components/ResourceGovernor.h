@@ -245,8 +245,9 @@ public:
     /// Threads and decompressed bytes one document's extraction may use. Splits
     /// the cores and a 12.5% share of the memory budget across the current
     /// extraction worker cap, so all concurrent extractions together stay
-    /// within that share. Shrinks under pressure; Critical and above get one
-    /// thread.
+    /// within that share. Each document gets at least 8 MiB, which lifts the
+    /// total past the share only when workers * 8 MiB exceeds it. Shrinks
+    /// under pressure; Critical and above get one thread.
     [[nodiscard]] ExtractionBudget recommendExtractionBudget() const noexcept;
 
     /// Recommend the maximum working-set byte budget for the SPQ vector index
@@ -347,10 +348,17 @@ public:
         deferredWorkMask_.store(0, std::memory_order_release);
     }
     /// Test-only: end the startup grace period, so Critical and Emergency are reported.
+    /// Returns the previous startup time for testing_restoreStartupTime().
     /// Call only while no tick thread is running.
-    void testing_endStartupGrace() noexcept {
+    std::chrono::steady_clock::time_point testing_endStartupGrace() noexcept {
+        const auto previous = startupTime_;
         startupTime_ =
             std::chrono::steady_clock::now() - kStartupGracePeriod - std::chrono::seconds(1);
+        return previous;
+    }
+    /// Test-only: restore a startup time saved by testing_endStartupGrace().
+    void testing_restoreStartupTime(std::chrono::steady_clock::time_point t) noexcept {
+        startupTime_ = t;
     }
     /// Test-only: set pressure state for hysteresis tests.
     void testing_setPressureState(ResourcePressureLevel level,
