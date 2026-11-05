@@ -110,6 +110,8 @@ TEST_CASE("SimeonLexicalBackend default config uses SabSmooth", "[search][simeon
     CHECK(cfg.subword_gamma == 5.0f);
     CHECK(cfg.max_corpus_docs == 200'000u);
     CHECK(cfg.max_corpus_bytes == 256ULL * 1024ULL * 1024ULL);
+    CHECK(cfg.max_index_bytes == 256ULL * 1024ULL * 1024ULL);
+    CHECK_FALSE(cfg.index_budget_provider);
     CHECK(cfg.build_doc_chunk_bytes == 16ULL * 1024ULL);
     CHECK(cfg.build_doc_max_chunks == 4u);
     CHECK_FALSE(cfg.fragment_geometry_enabled); // retired by default; opt-in only
@@ -253,6 +255,77 @@ TEST_CASE("SimeonLexicalBackend skips build when corpus text budget is exceeded"
     REQUIRE(waitNotBuilding(backend, std::chrono::seconds(5)));
     CHECK_FALSE(backend.ready());
     CHECK(backend.doc_count() == 0u);
+}
+
+namespace {
+std::vector<std::pair<std::string, std::string>> wordyCorpus(std::size_t docs) {
+    std::vector<std::pair<std::string, std::string>> out;
+    for (std::size_t d = 0; d < docs; ++d) {
+        std::string text;
+        for (std::size_t w = 0; w < 40; ++w) {
+            text += "term" + std::to_string((d * 31 + w * 7) % 997) + " ";
+        }
+        out.emplace_back("hash_w" + std::to_string(d), std::move(text));
+    }
+    return out;
+}
+} // namespace
+
+TEST_CASE("SimeonLexicalBackend stays on FTS5 when the index memory budget is exceeded",
+          "[search][simeon][catch2]") {
+    auto corpus = makeCorpus(wordyCorpus(64));
+
+    SECTION("a generous grant builds") {
+        SimeonLexicalBackend::Config cfg;
+        cfg.max_index_bytes = 256ULL * 1024ULL * 1024ULL;
+        SimeonLexicalBackend backend(cfg);
+        REQUIRE(backend.buildAsync(corpus.repo).has_value());
+        REQUIRE(waitNotBuilding(backend, std::chrono::seconds(10)));
+        CHECK(backend.ready());
+        CHECK(backend.doc_count() == 64u);
+    }
+
+    SECTION("a tiny fixed grant stops the build") {
+        SimeonLexicalBackend::Config cfg;
+        cfg.max_index_bytes = 4096;
+        SimeonLexicalBackend backend(cfg);
+        REQUIRE(backend.buildAsync(corpus.repo).has_value());
+        REQUIRE(waitNotBuilding(backend, std::chrono::seconds(10)));
+        CHECK_FALSE(backend.ready());
+        CHECK(backend.doc_count() == 0u);
+    }
+
+    SECTION("the provider's grant replaces the fixed default") {
+        SimeonLexicalBackend::Config cfg;
+        cfg.max_index_bytes = 256ULL * 1024ULL * 1024ULL;
+        std::atomic<int> calls{0};
+        cfg.index_budget_provider = [&calls] {
+            ++calls;
+            return std::size_t{4096};
+        };
+        SimeonLexicalBackend backend(cfg);
+        REQUIRE(backend.buildAsync(corpus.repo).has_value());
+        REQUIRE(waitNotBuilding(backend, std::chrono::seconds(10)));
+        CHECK_FALSE(backend.ready());
+        CHECK(calls.load() >= 1);
+    }
+}
+
+TEST_CASE("SimeonLexicalBackend re-reads the index grant during a build",
+          "[search][simeon][catch2]") {
+    // 600 docs crosses the 256-doc poll twice. The grant is generous at the
+    // start and collapses at the first poll, as under a pressure spike.
+    auto corpus = makeCorpus(wordyCorpus(600));
+    SimeonLexicalBackend::Config cfg;
+    std::atomic<int> calls{0};
+    cfg.index_budget_provider = [&calls] {
+        return ++calls == 1 ? std::size_t{256ULL * 1024ULL * 1024ULL} : std::size_t{4096};
+    };
+    SimeonLexicalBackend backend(cfg);
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitNotBuilding(backend, std::chrono::seconds(20)));
+    CHECK_FALSE(backend.ready());
+    CHECK(calls.load() >= 2);
 }
 
 TEST_CASE("SimeonLexicalBackend chunks oversized docs before applying corpus byte budget",

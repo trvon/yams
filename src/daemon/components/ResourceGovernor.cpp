@@ -1024,20 +1024,37 @@ std::uint64_t ResourceGovernor::recommendLexicalCorpusBytes() const noexcept {
     std::uint64_t cap = budget / 16ULL;                                    // 6.25%
     cap = std::clamp<std::uint64_t>(cap, kFloor, kCeiling);
 
+    return scaleBudgetForPressure(cap, kFloor);
+}
+
+std::uint64_t ResourceGovernor::scaleBudgetForPressure(std::uint64_t cap,
+                                                       std::uint64_t floor) const noexcept {
     switch (getPressureLevel()) {
         case ResourcePressureLevel::Warning:
-            cap = std::max<std::uint64_t>(kFloor, cap * 3 / 4);
-            break;
+            return std::max<std::uint64_t>(floor, cap * 3 / 4);
         case ResourcePressureLevel::Critical:
-            cap = std::max<std::uint64_t>(kFloor, cap / 2);
-            break;
+            return std::max<std::uint64_t>(floor, cap / 2);
         case ResourcePressureLevel::Emergency:
-            cap = kFloor;
-            break;
+            return floor;
         case ResourcePressureLevel::Normal:
             break;
     }
     return cap;
+}
+
+std::uint64_t ResourceGovernor::recommendLexicalIndexBytes() const noexcept {
+    // Live heap for the BM25 indexes the lexical build holds. 6.25% of the
+    // daemon memory budget (peak RSS during the build runs up to 2x that),
+    // floor 256 MiB, ceiling 4 GiB. A corpus whose index would not fit stays
+    // on FTS5 only.
+    const std::uint64_t budget = TuneAdvisor::memoryBudgetBytes();
+    constexpr std::uint64_t kFloor = 256ULL * 1024ULL * 1024ULL;           // 256 MiB
+    constexpr std::uint64_t kCeiling = 4ULL * 1024ULL * 1024ULL * 1024ULL; // 4 GiB
+    if (budget == 0) {
+        return kFloor;
+    }
+    const std::uint64_t cap = std::clamp<std::uint64_t>(budget / 16ULL, kFloor, kCeiling);
+    return scaleBudgetForPressure(cap, kFloor);
 }
 
 std::uint64_t ResourceGovernor::recommendVectorRebuildBudgetBytes() const noexcept {
@@ -1059,20 +1076,7 @@ std::uint64_t ResourceGovernor::recommendVectorRebuildBudgetBytes() const noexce
     std::uint64_t cap = budget / 8ULL;                                     // 12.5%
     cap = std::clamp<std::uint64_t>(cap, kFloor, kCeiling);
 
-    switch (getPressureLevel()) {
-        case ResourcePressureLevel::Warning:
-            cap = std::max<std::uint64_t>(kFloor, cap * 3 / 4);
-            break;
-        case ResourcePressureLevel::Critical:
-            cap = std::max<std::uint64_t>(kFloor, cap / 2);
-            break;
-        case ResourcePressureLevel::Emergency:
-            cap = kFloor;
-            break;
-        case ResourcePressureLevel::Normal:
-            break;
-    }
-    return cap;
+    return scaleBudgetForPressure(cap, kFloor);
 }
 
 std::uint32_t

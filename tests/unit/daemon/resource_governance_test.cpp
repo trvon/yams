@@ -469,6 +469,47 @@ TEST_CASE("ResourceGovernor::recommendVectorRebuildBudgetBytes scales with budge
     TuneAdvisor::setMemoryBudgetBytes(prev);
 }
 
+TEST_CASE("ResourceGovernor::recommendLexicalIndexBytes scales with budget and pressure",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+    constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
+    constexpr std::uint64_t kGiB = 1024ULL * kMiB;
+    const std::uint64_t prev = TuneAdvisor::memoryBudgetBytes();
+    governor.testing_setPressureState(ResourcePressureLevel::Normal,
+                                      std::chrono::steady_clock::now());
+
+    SECTION("8 GiB budget yields 512 MiB (6.25%)") {
+        TuneAdvisor::setMemoryBudgetBytes(8 * kGiB);
+        CHECK(governor.recommendLexicalIndexBytes() == 512 * kMiB);
+    }
+
+    SECTION("256 GiB budget clamps at the 4 GiB ceiling") {
+        TuneAdvisor::setMemoryBudgetBytes(256 * kGiB);
+        CHECK(governor.recommendLexicalIndexBytes() == 4 * kGiB);
+    }
+
+    SECTION("1 GiB budget clamps at the 256 MiB floor") {
+        TuneAdvisor::setMemoryBudgetBytes(1 * kGiB);
+        CHECK(governor.recommendLexicalIndexBytes() == 256 * kMiB);
+    }
+
+    SECTION("pressure shrinks the grant, never below the floor") {
+        governor.testing_endStartupGrace();           // grace caps pressure at Warning
+        TuneAdvisor::setMemoryBudgetBytes(32 * kGiB); // 2 GiB at Normal
+        const auto now = std::chrono::steady_clock::now();
+        governor.testing_setPressureState(ResourcePressureLevel::Warning, now);
+        CHECK(governor.recommendLexicalIndexBytes() == 1536 * kMiB);
+        governor.testing_setPressureState(ResourcePressureLevel::Critical, now);
+        CHECK(governor.recommendLexicalIndexBytes() == 1 * kGiB);
+        governor.testing_setPressureState(ResourcePressureLevel::Emergency, now);
+        CHECK(governor.recommendLexicalIndexBytes() == 256 * kMiB);
+    }
+
+    governor.testing_setPressureState(ResourcePressureLevel::Normal,
+                                      std::chrono::steady_clock::now());
+    TuneAdvisor::setMemoryBudgetBytes(prev);
+}
+
 // =============================================================================
 // Profile-Aware Configuration Tests
 // =============================================================================
