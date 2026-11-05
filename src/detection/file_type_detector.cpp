@@ -95,7 +95,7 @@ bool isConvincingTextData(std::span<const std::byte> data) {
     size_t whitespace = 0;
     size_t alphaNum = 0;
     size_t punctuation = 0;
-    size_t utf8LeadBytes = 0;
+    size_t utf8Bytes = 0;
     size_t invalidUtf8Bytes = 0;
 
     for (size_t i = 0; i < checkLength; ++i) {
@@ -151,11 +151,11 @@ bool isConvincingTextData(std::span<const std::byte> data) {
             continue;
         }
 
-        utf8LeadBytes++;
+        utf8Bytes += sequenceLength;
         i += sequenceLength - 1;
     }
 
-    const size_t textishBytes = asciiPrintable + whitespace + utf8LeadBytes;
+    const size_t textishBytes = asciiPrintable + whitespace + utf8Bytes;
     if (invalidUtf8Bytes > checkLength / 50)
         return false;
     if (textishBytes < (checkLength * 9) / 10)
@@ -471,7 +471,8 @@ public:
                     bestMatch.description = pattern.description;
                     bestMatch.magicNumber = pattern.patternHex;
                     bestMatch.confidence = pattern.confidence;
-                    bestMatch.isBinary = true;
+                    bestMatch.isBinary =
+                        FileTypeDetector::instance().isBinaryMimeType(pattern.mimeType);
                     bestConfidence = pattern.confidence;
                 }
             }
@@ -1288,6 +1289,17 @@ bool isBinaryData(std::span<const std::byte> data) {
             controlChars++;
         } else if (c >= 32 && c < 127) {
             printableChars++;
+        } else if (c >= 0xC2 && c <= 0xF4) {
+            // Count a well-formed UTF-8 sequence as printable text.
+            const size_t len = c <= 0xDF ? 2 : (c <= 0xEF ? 3 : 4);
+            size_t j = 1;
+            while (j < len && i + j < checkLength &&
+                   (static_cast<unsigned char>(data[i + j]) & 0xC0U) == 0x80U)
+                ++j;
+            if (j == len) {
+                printableChars += len;
+                i += len - 1;
+            }
         }
     }
 
