@@ -816,7 +816,8 @@ if catch2_dep.found()
       'unit/daemon/request_handler_status_unary_catch2_test.cpp',
       'unit/daemon/proto_serializer_catch2_test.cpp',
     ),
-    'deps': test_deps,
+    # proto_serializer_catch2_test builds a descriptor pool directly.
+    'deps': test_deps + [protobuf_dep],
     'suite': ['catch2', 'unit', 'daemon', 'protocol', 'concurrency'],
     'timeout': 60,
     'is_parallel': false,
