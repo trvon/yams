@@ -351,7 +351,7 @@ TEST_CASE("loadSharedStaticEmbeddingTable sees a table replaced at the same path
     std::filesystem::remove_all(dir, ec);
 }
 
-TEST_CASE("findStaticEmbeddingTable prefers the configured path, then the data dir",
+TEST_CASE("findStaticEmbeddingTable uses only an explicitly configured table",
           "[vector][simeon][static]") {
     using yams::config::findStaticEmbeddingTable;
     const auto dir = uniqueTempDir("yams_static_lookup_");
@@ -359,35 +359,47 @@ TEST_CASE("findStaticEmbeddingTable prefers the configured path, then the data d
     std::filesystem::create_directories(models);
     writeTinyStaticTable(models / "b.smstat");
     writeTinyStaticTable(models / "a.smstat");
-    std::ofstream(models / "notes.txt") << "not a table";
     const auto configured = dir / "chosen.smstat";
     writeTinyStaticTable(configured);
 
     CHECK(findStaticEmbeddingTable(configured, dir) == configured);
-    CHECK(findStaticEmbeddingTable(std::nullopt, dir) == models / "a.smstat");
-    // A configured path that does not exist falls through to the data dir.
-    CHECK(findStaticEmbeddingTable(dir / "missing.smstat", dir) == models / "a.smstat");
+    // Tables present in the data dir are not a selection (58e475bf2).
+    CHECK_FALSE(findStaticEmbeddingTable(std::nullopt, dir).has_value());
+    // A configured table that is missing is not replaced by another one.
+    CHECK_FALSE(findStaticEmbeddingTable(dir / "missing.smstat", dir).has_value());
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
 
-TEST_CASE("SimeonBackend defaults to the static table when the profile is unset",
-          "[vector][simeon][static]") {
+TEST_CASE("SimeonBackend does not adopt an unselected static table", "[vector][simeon][static]") {
     const auto dir = uniqueTempDir("yams_static_default_");
     std::filesystem::create_directories(dir / "models" / "static");
     writeTinyStaticTable(dir / "models" / "static" / "shipped.smstat");
     const auto cfgPath = dir / "config.toml";
-    std::ofstream(cfgPath) << "[core]\ndata_dir = \"" << dir.string() << "\"\n";
     yams::test::ScopedEnvVar cfgEnv{"YAMS_CONFIG", cfgPath.string()};
     yams::test::ScopedEnvVar compatEnv{"YAMS_CONFIG_PATH", std::nullopt};
     yams::test::ScopedEnvVar dataEnv{"YAMS_DATA_DIR", dir.string()};
 
-    auto backend = makeSimeonBackend(EmbeddingConfig{});
-    REQUIRE(backend->initialize());
-    CHECK_THAT(backend->getEmbeddingSpaceIdentity(),
-               StartsWith("simeon-static-v1:shipped.smstat:"));
-    CHECK(backend->getEmbeddingDimension() == 4);
+    SECTION("a table in the data dir is not used without a selection") {
+        std::ofstream(cfgPath) << "[core]\ndata_dir = \"" << dir.string() << "\"\n";
+        auto backend = makeSimeonBackend(EmbeddingConfig{});
+        REQUIRE(backend->initialize());
+        CHECK_THAT(backend->getEmbeddingSpaceIdentity(), StartsWith("simeon-config-v1:"));
+        CHECK(backend->getEmbeddingDimension() != 4);
+    }
+
+    SECTION("the selected table is used when the profile is unset") {
+        const auto chosen = dir / "models" / "static" / "shipped.smstat";
+        std::ofstream(cfgPath) << "[core]\ndata_dir = \"" << dir.string()
+                               << "\"\n[embeddings.simeon]\nstatic_table = \"" << chosen.string()
+                               << "\"\n";
+        auto backend = makeSimeonBackend(EmbeddingConfig{});
+        REQUIRE(backend->initialize());
+        CHECK_THAT(backend->getEmbeddingSpaceIdentity(),
+                   StartsWith("simeon-static-v1:shipped.smstat:"));
+        CHECK(backend->getEmbeddingDimension() == 4);
+    }
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -413,8 +425,7 @@ TEST_CASE("SimeonBackend keeps the hash encoder when the profile is set explicit
     std::filesystem::remove_all(dir, ec);
 }
 
-TEST_CASE("Static table lookup honours the daemon's resolved data dir",
-          "[vector][simeon][static]") {
+TEST_CASE("The daemon's data dir hint does not select a static table", "[vector][simeon][static]") {
     const auto daemonDir = uniqueTempDir("yams_static_hint_");
     std::filesystem::create_directories(daemonDir / "models" / "static");
     writeTinyStaticTable(daemonDir / "models" / "static" / "daemon.smstat");
@@ -428,7 +439,7 @@ TEST_CASE("Static table lookup honours the daemon's resolved data dir",
     setStaticEmbeddingDataDirHint(daemonDir);
     auto backend = makeSimeonBackend(EmbeddingConfig{});
     REQUIRE(backend->initialize());
-    CHECK_THAT(backend->getEmbeddingSpaceIdentity(), StartsWith("simeon-static-v1:daemon.smstat:"));
+    CHECK_THAT(backend->getEmbeddingSpaceIdentity(), StartsWith("simeon-config-v1:"));
     setStaticEmbeddingDataDirHint({});
 
     std::error_code ec;
