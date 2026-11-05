@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -1010,6 +1012,11 @@ public:
     /// A value <= 0 passed to a setter restores the default.
     /// Config: tuning.resource.host_{cpu,io,memory}_pressure_pct, host_load_per_cpu
     static HostPressureThresholds hostPressureThresholds();
+    /// How often memory sync re-applies every replicated winner to repair local drift (a
+    /// replicated record deleted or changed locally) when no peer input changed. The pass reads
+    /// and verifies the whole corpus, so it follows the profile: Efficient 30 min, Balanced
+    /// 15 min, Aggressive 5 min.
+    static std::chrono::minutes memorySyncFullApplyInterval();
     static void setHostCpuPressurePct(double pct);
     static void setHostIoPressurePct(double pct);
     static void setHostMemoryPressurePct(double pct);
