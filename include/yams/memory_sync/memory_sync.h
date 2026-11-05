@@ -331,6 +331,10 @@ public:
         struct Identity {
             std::uint64_t instance{0};
             std::int64_t generation{0};
+            /// Advances only when a winner this node did not write changes (or a writer is
+            /// banned). Equal readings in one instance mean every change in between was a local
+            /// write, which local state already holds.
+            std::int64_t foreignGeneration{0};
             bool operator==(const Identity&) const = default;
         };
         virtual ~WinnerView() = default;

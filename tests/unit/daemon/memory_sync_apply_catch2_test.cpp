@@ -1066,6 +1066,68 @@ TEST_CASE("Memory sync apply skips cycles whose replicated inputs have not chang
     CHECK(reader.hasEdge("entity:idle:source", "entity:idle:target"));
 }
 
+TEST_CASE("Memory sync apply skips cycles whose only new winners are this node's own writes",
+          "[daemon][memory-sync][apply][idle]") {
+    // The outbound backfill and local ingest publish this node's own records every few cycles.
+    // They came from local state, so applying them back is a no-op; re-running the inbound pass
+    // for them re-read and re-verified every winner (about one core on a 28k-record corpus).
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore, MeshNode::KgReads::Counted};
+    publishEdgeWithEndpoints(writer, "entity:own:source", "entity:own:target");
+    applyUntilEdge(reader, "entity:own:source", "entity:own:target");
+
+    {
+        metadata::TopologySyncAdapter publisher{*reader.kgStore, *reader.sync_};
+        for (int i = 0; i < 3; ++i) {
+            const auto node = reader.addNode("entity:own:local-" + std::to_string(i), "local");
+            REQUIRE(publisher.publishNode(node).has_value());
+        }
+    }
+    const auto skipped = reader.manager->testingMemorySyncApplySkippedCycles();
+    const auto reads = reader.kgStoreAcquisitions();
+    reader.manager->testingApplyMemorySyncWinners();
+    reader.manager->testingApplyMemorySyncWinners();
+
+    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == skipped + 2);
+    CHECK(reader.kgStoreAcquisitions() == reads);
+}
+
+TEST_CASE("Memory sync apply runs when a peer's record replaces this node's own",
+          "[daemon][memory-sync][apply][idle]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode writer{root.path, "writer", sharedStore};
+    MeshNode reader{root.path, "reader", sharedStore};
+    publishEdgeWithEndpoints(writer, "entity:peer:source", "entity:peer:target");
+    applyUntilEdge(reader, "entity:peer:source", "entity:peer:target");
+
+    const std::string contested = "entity:peer:contested";
+    {
+        metadata::TopologySyncAdapter publisher{*reader.kgStore, *reader.sync_};
+        REQUIRE(publisher.publishNode(reader.addNode(contested, "reader-type")).has_value());
+    }
+    reader.manager->testingApplyMemorySyncWinners();
+    reader.manager->testingApplyMemorySyncWinners();
+    const auto skipped = reader.manager->testingMemorySyncApplySkippedCycles();
+    REQUIRE(skipped > 0);
+
+    // A later write from the peer wins the same key: the inbound pass must run for it.
+    {
+        metadata::TopologySyncAdapter publisher{*writer.kgStore, *writer.sync_};
+        REQUIRE(publisher.publishNode(writer.addNode(contested, "writer-type")).has_value());
+    }
+    reader.manager->testingApplyMemorySyncWinners();
+    CHECK(reader.manager->testingMemorySyncApplySkippedCycles() == skipped);
+    const auto local = reader.kgStore->getNodeByKey(contested);
+    REQUIRE(local.has_value());
+    REQUIRE(local.value().has_value());
+    CHECK(local.value()->type == "writer-type");
+}
+
 TEST_CASE("Memory sync apply runs again as soon as a new winner arrives",
           "[daemon][memory-sync][apply][idle]") {
     TempRoot root;

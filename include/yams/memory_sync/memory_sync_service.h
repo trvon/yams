@@ -96,13 +96,43 @@ public:
             return current && earlier && *current == *earlier;
         }
 
-    private:
-        [[nodiscard]] std::optional<Rows> visible(const Rows& rows) const {
-            if (!view) {
-                return rows;
+        /// True when everything an adapter pass would read that `localOrigin` did not write is
+        /// unchanged. Records this node wrote came from its local state, so applying them back
+        /// is a no-op; an inbound pass only needs to run for a peer's change.
+        [[nodiscard]] bool sameForeignInputsAs(const AdapterInputs& previous,
+                                               std::string_view localOrigin) const {
+            if (localOrigin.empty()) {
+                return sameAs(previous);
             }
+            if (winners.instance != previous.winners.instance ||
+                winners.foreignGeneration != previous.winners.foreignGeneration || !overlays ||
+                !previous.overlays) {
+                return false;
+            }
+            if (overlays == previous.overlays || *overlays == *previous.overlays) {
+                return true;
+            }
+            const auto current = visible(*overlays, localOrigin);
+            const auto earlier = visible(*previous.overlays, localOrigin);
+            return current && earlier && *current == *earlier;
+        }
+
+    private:
+        [[nodiscard]] std::optional<Rows> visible(const Rows& rows,
+                                                  std::string_view skipOrigin = {}) const {
             Rows out;
+            if (!view) {
+                for (const auto& [key, record] : rows) {
+                    if (skipOrigin.empty() || record.origin != skipOrigin) {
+                        out.emplace(key, record);
+                    }
+                }
+                return out;
+            }
             for (const auto& [key, record] : rows) {
+                if (!skipOrigin.empty() && record.origin == skipOrigin) {
+                    continue;
+                }
                 auto committed = view->find(key);
                 if (committed) {
                     continue;

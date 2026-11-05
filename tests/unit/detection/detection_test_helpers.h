@@ -43,8 +43,7 @@ class TestDirectory {
 public:
     explicit TestDirectory(std::string_view name = "detection")
         : root_(fs::temp_directory_path() / ("yams_" + std::string(name) + "_" + uniqueSuffix())),
-          sourceDataDir_(fs::path(__FILE__).parent_path() / "test_data"),
-          testDataDir_(root_ / "test_data") {
+          sourceDataDir_(sourceTestDataDir()), testDataDir_(root_ / "test_data") {
         fs::create_directories(testDataDir_);
         copyTestDataFile("valid_magic_numbers.json");
         copyTestDataFile("invalid_magic_numbers.json");
@@ -95,6 +94,14 @@ public:
     }
 
 private:
+    static fs::path sourceTestDataDir() {
+#ifdef YAMS_DETECTION_TEST_DATA_DIR
+        return fs::path(YAMS_DETECTION_TEST_DATA_DIR);
+#else
+        return fs::path(__FILE__).parent_path() / "test_data";
+#endif
+    }
+
     void copyTestDataFile(const std::string& filename) const {
         auto src = sourceDataDir_ / filename;
         auto dst = testDataDir_ / filename;

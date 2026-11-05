@@ -25,7 +25,7 @@ std::unique_ptr<ICommand> createAddCommand();
 std::unique_ptr<ICommand> createStatusCommand();
 } // namespace yams::cli
 
-TEST_CASE("add --changed retires a missing path without deleting shared content",
+TEST_CASE("add --changed detects a missing snapshot path and fails closed without a daemon",
           "[cli][retrieval][path-retirement]") {
     using namespace yams;
     const auto root = std::filesystem::canonical(test::make_temp_dir("cli-path-retirement-"));
@@ -88,7 +88,11 @@ TEST_CASE("add --changed retires a missing path without deleting shared content"
     original.pathDepth = derived.pathDepth;
     auto inserted = repository.insertDocument(original);
     REQUIRE(inserted);
-    REQUIRE(repository.recordDocumentPath(original, inserted.value(), {}));
+    // add --changed scopes freshness to explicit repo snapshots (repo_root) or
+    // currently tracked paths; old.txt is neither once renamed, so mark the snapshot.
+    REQUIRE(repository.recordDocumentPath(
+        original, inserted.value(),
+        {{"repo_root", metadata::MetadataValue(worktree.generic_string())}}));
     auto alias = original;
     alias.filePath = livePath.generic_string();
     alias.fileName = livePath.filename().string();
@@ -111,12 +115,13 @@ TEST_CASE("add --changed retires a missing path without deleting shared content"
     auto completion = boost::asio::co_spawn(io, command->executeAsync(), boost::asio::use_future);
     io.run();
     auto result = completion.get();
-    INFO((result ? "completed" : result.error().message));
-    // The baseline may fail its unsafe hash-delete RPC on the isolated endpoint.
-    // The regression is the still-visible path, independent of transport success.
+    // Retirement is a typed daemon unlinkPath. Without a daemon on the isolated
+    // endpoint add --changed must fail closed: no local or hash-wide delete.
+    // Daemon-backed retirement is covered by tests/integration/cli_token_budget_test.py.
+    REQUIRE_FALSE(result.has_value());
     auto missing = repository.findDocumentByExactPath(oldPath.generic_string());
     REQUIRE(missing);
-    CHECK_FALSE(missing.value());
+    CHECK(missing.value());
     auto live = repository.findDocumentByExactPath(livePath.generic_string());
     REQUIRE(live);
     REQUIRE(live.value());
@@ -124,14 +129,12 @@ TEST_CASE("add --changed retires a missing path without deleting shared content"
     auto content = repository.getDocumentByHash(hash);
     REQUIRE(content);
     REQUIRE(content.value());
-    CHECK(result.has_value());
     auto references = repository.getDocumentPathReferences(inserted.value());
     REQUIRE(references);
-    REQUIRE(references.value().size() == 1);
-    CHECK(references.value().front().filePath == livePath.generic_string());
+    CHECK(references.value().size() == 2);
     auto refreshed = cli.repoFreshness(cli::readRepoFiles(worktree, true));
     REQUIRE(refreshed);
-    CHECK_FALSE(refreshed.value().stale());
+    CHECK(refreshed.value().missing == std::vector<std::filesystem::path>{oldPath});
 }
 
 TEST_CASE("Every retrieval command exposes its budget and quiet flags", "[cli][retrieval][flags]") {

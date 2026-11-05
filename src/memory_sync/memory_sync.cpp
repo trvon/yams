@@ -1100,9 +1100,13 @@ Result<std::shared_ptr<MemorySyncLoop::SweepStore>> MemorySyncLoop::makeSweepSto
     const auto rowBytes = std::max<std::size_t>(
         4096,
         std::min<std::size_t>(limits_.maxEnvelopeBytes, std::numeric_limits<int>::max() / 4) * 4);
-    return SweepStore::create(sweepDirectory_, limits_.maxScanBytes, std::move(verifier),
-                              limits_.maxIndexObjectsPerSync, rowBytes,
-                              [this] { return beforeRemoteWork(); });
+    auto store = SweepStore::create(sweepDirectory_, limits_.maxScanBytes, std::move(verifier),
+                                    limits_.maxIndexObjectsPerSync, rowBytes,
+                                    [this] { return beforeRemoteWork(); });
+    if (store) {
+        store.value()->setLocalOrigin(nodeId_);
+    }
+    return store;
 }
 
 Result<void> MemorySyncLoop::ensureCommittedStore() {
