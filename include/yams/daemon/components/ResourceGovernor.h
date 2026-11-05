@@ -235,6 +235,20 @@ public:
     /// double as they grow).
     [[nodiscard]] std::uint64_t recommendLexicalIndexBytes() const noexcept;
 
+    /// Per-document grant for content extraction plugins, served to them
+    /// through the plugin host's resource_service.
+    struct ExtractionBudget {
+        std::uint32_t maxThreads{1};
+        std::uint64_t maxDecompressedBytes{0};
+    };
+
+    /// Threads and decompressed bytes one document's extraction may use. Splits
+    /// the cores and a 12.5% share of the memory budget across the current
+    /// extraction worker cap, so all concurrent extractions together stay
+    /// within that share. Shrinks under pressure; Critical and above get one
+    /// thread.
+    [[nodiscard]] ExtractionBudget recommendExtractionBudget() const noexcept;
+
     /// Recommend the maximum working-set byte budget for the SPQ vector index
     /// rebuild (training set + per-row encoded codes scratch). Scales with the
     /// daemon memory budget and current pressure so the rebuild does not push
