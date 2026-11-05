@@ -4,6 +4,9 @@
 #include <yams/daemon/components/MetadataWriteFacade.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/WriteCoordinator.h>
+#include <yams/daemon/resource/plugin_content_extractor_adapter.h>
+#include <yams/extraction/external_plugin_extractor.hpp>
+#include <yams/metadata/document_metadata.h>
 
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/config/config_helpers.h>
@@ -48,11 +51,13 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <set>
 #include <span>
 #include <string>
 #include <thread>
+#include <typeinfo>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -821,6 +826,17 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
             }
         }
 
+        // The same extractors and content store the per-batch check uses, so the scan queues
+        // exactly the documents that check would act on.
+        const auto extractors = ctx_.getContentExtractors
+                                    ? ctx_.getContentExtractors()
+                                    : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
+        const auto contentStore = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
+        if (startAfterId == 0) {
+            beginSweepExtractorCheck(extractors);
+        }
+        const bool extractorsChanged = sweepExtractorsChanged_;
+
         while (running_.load(std::memory_order_relaxed) && !queueAtCapacity) {
             if (!maintenanceAllowed()) {
                 end = End::Stopped; // resume here once maintenance is allowed again
@@ -838,43 +854,52 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
                 break;
             }
 
+            // Decide per document before taking the queue lock: the extractability check can
+            // read a blob prefix.
+            std::vector<bool> needsWork(batchDocs.value().size(), false);
+            for (std::size_t i = 0; i < batchDocs.value().size(); ++i) {
+                const auto& d = batchDocs.value()[i];
+                // Processing rows from a previous run were reset at startup; these are this
+                // run's in-flight jobs.
+                if (d.repairStatus == yams::metadata::RepairStatus::Processing) {
+                    continue;
+                }
+                // Extraction ran and produced nothing (a binary blob): there is no content to
+                // embed or index. Terminal until the extractor set changes, or an explicit
+                // repair asks for it.
+                if (!extractorsChanged && !d.contentExtracted &&
+                    d.extractionStatus == yams::metadata::ExtractionStatus::Failed) {
+                    continue;
+                }
+                bool missingEmb = false;
+                if (!vectorsDisabled) {
+                    if (haveEmbeddedSnapshot) {
+                        missingEmb = embeddedHashes.find(d.sha256Hash) == embeddedHashes.end();
+                    } else {
+                        auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(d.sha256Hash);
+                        missingEmb = !hasEmbedRes || !hasEmbedRes.value();
+                    }
+                }
+                needsWork[i] = missingEmb || ftsRepairNeeded(
+                                                 d, [&] { return ftsRowIds.count(d.id) != 0; },
+                                                 [&] {
+                                                     return canExtractDocument(
+                                                         d.mimeType, d.fileExtension, extractors,
+                                                         contentStore, d.sha256Hash);
+                                                 });
+            }
+
             size_t batchEnqueued = 0;
             bool interrupted = false;
             {
                 std::lock_guard<std::mutex> ql(queueMutex_);
-                for (const auto& d : batchDocs.value()) {
+                for (std::size_t i = 0; i < batchDocs.value().size(); ++i) {
+                    const auto& d = batchDocs.value()[i];
                     if (!running_.load(std::memory_order_relaxed)) {
                         interrupted = true;
                         break;
                     }
-                    // Processing rows from a previous run were reset at startup; these are this
-                    // run's in-flight jobs.
-                    if (d.repairStatus == yams::metadata::RepairStatus::Processing) {
-                        lastId = d.id;
-                        continue;
-                    }
-
-                    bool missingEmb = false;
-                    if (!vectorsDisabled) {
-                        if (haveEmbeddedSnapshot) {
-                            missingEmb = embeddedHashes.find(d.sha256Hash) == embeddedHashes.end();
-                        } else {
-                            auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(d.sha256Hash);
-                            missingEmb = !hasEmbedRes || !hasEmbedRes.value();
-                        }
-                    }
-                    bool missingFts =
-                        (!d.contentExtracted) &&
-                        (d.extractionStatus != yams::metadata::ExtractionStatus::Skipped) &&
-                        (d.extractionStatus != yams::metadata::ExtractionStatus::Success);
-                    // Also detect successful extraction with missing FTS5 entry.
-                    if (!missingFts &&
-                        d.extractionStatus == yams::metadata::ExtractionStatus::Success &&
-                        ftsRowIds.count(d.id) == 0) {
-                        missingFts = true;
-                    }
-
-                    if (missingEmb || missingFts) {
+                    if (needsWork[i]) {
                         if (pendingDocuments_.size() >= cfg_.maxPendingRepairs) {
                             queueAtCapacity = true;
                             end = End::Stopped; // resume at this document after the drain
@@ -901,6 +926,9 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
             }
         }
 
+        if (end == End::Finished) {
+            finishSweepExtractorCheck();
+        }
         if (totalEnqueued > 0) {
             totalBacklog_.store(totalEnqueued, std::memory_order_relaxed);
             processed_.store(0, std::memory_order_relaxed);
@@ -1201,15 +1229,104 @@ RepairService::MissingWorkFlags RepairService::analyzeMissingWorkForHash(
         return flags;
     }
 
-    if (!d.contentExtracted || d.extractionStatus != yams::metadata::ExtractionStatus::Success) {
-        flags.missingFts5 =
-            canExtractDocument(d.mimeType, d.fileExtension, customExtractors, contentStore, hash);
-        return flags;
-    }
-
-    auto ftsRes = metaRepo->hasFtsEntry(d.id);
-    flags.missingFts5 = ftsRes && !ftsRes.value();
+    flags.missingFts5 = ftsRepairNeeded(
+        d,
+        [&] {
+            auto ftsRes = metaRepo->hasFtsEntry(d.id);
+            return !(ftsRes && !ftsRes.value());
+        },
+        [&] {
+            return canExtractDocument(d.mimeType, d.fileExtension, customExtractors, contentStore,
+                                      hash);
+        });
     return flags;
+}
+
+bool RepairService::ftsRepairNeeded(const metadata::DocumentInfo& d,
+                                    const std::function<bool()>& ftsIndexed,
+                                    const std::function<bool()>& canExtract) {
+    if (d.extractionStatus == yams::metadata::ExtractionStatus::Skipped) {
+        return false;
+    }
+    if (d.contentExtracted && d.extractionStatus == yams::metadata::ExtractionStatus::Success) {
+        return !ftsIndexed();
+    }
+    return canExtract();
+}
+
+std::string RepairService::extractorFingerprint(
+    const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors) {
+    std::vector<std::string> names;
+    names.reserve(extractors.size());
+    for (const auto& extractor : extractors) {
+        if (!extractor) {
+            continue;
+        }
+        if (const auto* plugin =
+                dynamic_cast<const PluginContentExtractorAdapter*>(extractor.get());
+            plugin && !plugin->name().empty()) {
+            names.push_back("plugin:" + plugin->name());
+        } else if (const auto* external =
+                       dynamic_cast<const extraction::ExternalPluginExtractor*>(extractor.get())) {
+            names.push_back("external:" + external->name());
+        } else {
+            const auto& self = *extractor;
+            names.emplace_back(typeid(self).name());
+        }
+    }
+    std::sort(names.begin(), names.end());
+    std::string out;
+    for (const auto& name : names) {
+        out += name;
+        out += '\n';
+    }
+    return out;
+}
+
+void RepairService::beginSweepExtractorCheck(
+    const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors) {
+    sweepExtractorFingerprint_ = extractorFingerprint(extractors);
+    sweepExtractorsChanged_ = false;
+    if (cfg_.dataDir.empty()) {
+        return;
+    }
+    const auto path = cfg_.dataDir / "repair-extractor-set";
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) {
+        // First run with this file: record the current set; nothing to compare against.
+        finishSweepExtractorCheck();
+        return;
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        return; // unreadable: treat as unchanged rather than retry every sweep
+    }
+    const std::string stored((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+    sweepExtractorsChanged_ = stored != sweepExtractorFingerprint_;
+}
+
+void RepairService::finishSweepExtractorCheck() {
+    if (cfg_.dataDir.empty()) {
+        return;
+    }
+    const auto path = cfg_.dataDir / "repair-extractor-set";
+    const auto temp = cfg_.dataDir / "repair-extractor-set.tmp";
+    {
+        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return;
+        }
+        out << sweepExtractorFingerprint_;
+        if (!out) {
+            return;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, path, ec);
+    if (ec) {
+        spdlog::debug("RepairService: cannot record extractor set: {}", ec.message());
+    }
 }
 
 RepairService::MissingWorkResult

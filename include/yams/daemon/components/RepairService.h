@@ -28,6 +28,7 @@
 #endif
 
 namespace yams::metadata {
+struct DocumentInfo;
 class KnowledgeGraphStore;
 class MetadataRepository;
 class IMetadataRepository;
@@ -411,6 +412,14 @@ private:
     boost::asio::awaitable<void> backgroundLoop(ShutdownState* shutdownState);
     boost::asio::awaitable<void> spawnInitialScan(std::int64_t startAfterId);
     RepairScanCursor scanCursor_;
+    // Fingerprint of the content extractors the last finished startup sweep ran with, persisted
+    // in <dataDir>/repair-extractor-set. A change makes documents whose extraction failed
+    // retryable for one sweep.
+    std::string sweepExtractorFingerprint_;
+    bool sweepExtractorsChanged_{false};
+    void beginSweepExtractorCheck(
+        const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors);
+    void finishSweepExtractorCheck();
     /// Resets documents a previous daemon run left Processing (it queued them and died). Runs
     /// once, before this run queues anything.
     void recoverOrphanedProcessingOnce();
@@ -447,6 +456,15 @@ private:
         bool missingFts5{false};
     };
     MissingWorkResult detectMissingWork(const std::vector<std::string>& batch);
+    /// Whether a document needs its text extracted and FTS-indexed again. Shared by the startup
+    /// scan and the per-batch check so the scan never queues work the batch would drop.
+    /// Skipped extraction needs nothing; a successful one needs only a missing FTS row.
+    static bool ftsRepairNeeded(const metadata::DocumentInfo& d,
+                                const std::function<bool()>& ftsIndexed,
+                                const std::function<bool()>& canExtract);
+    /// Stable identity of a set of content extractors (plugin names; type names otherwise).
+    static std::string extractorFingerprint(
+        const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors);
     MissingWorkFlags analyzeMissingWorkForHash(
         const std::string& hash, bool checkEmbeddings,
         const std::shared_ptr<api::IContentStore>& contentStore,
