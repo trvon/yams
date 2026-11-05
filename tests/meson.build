@@ -920,7 +920,16 @@ if catch2_dep.found()
     'timeout': 60,
   }]
 
-#ResourceGovernor memory accounting (anon vs file-backed RSS)
+#Legacy vectors whose document lost its text
+  catch2_test_table += [{
+    'name': 'legacy_vector_cleanup',
+    'sources': files('unit/daemon/legacy_vector_cleanup_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'embeddings'],
+    'timeout': 60,
+  }]
+
+  #ResourceGovernor memory accounting (anon vs file-backed RSS)
   catch2_test_table += [{
     'name': 'resource_governor_memory',
     'sources': files('unit/daemon/resource_governor_memory_catch2_test.cpp'),

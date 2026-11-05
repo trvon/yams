@@ -22,6 +22,7 @@
 #include <string>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
@@ -77,6 +78,7 @@
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/init_utils.hpp>
+#include <yams/daemon/components/LegacyVectorCleanup.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
@@ -2700,6 +2702,35 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                                         orphanDocsFailed);
                                 }
                                 reconciledHashes = std::move(retainedHashes);
+                            }
+                        }
+
+                        // Once per data directory: vectors from builds that recorded no model
+                        // id, whose document has since lost its text, embed nothing current.
+                        const auto legacyMarker =
+                            config_.dataDir / "legacy-vectors-without-text-purged";
+                        std::error_code markerEc;
+                        if (!config_.dataDir.empty() && !reconciledHashes.empty() &&
+                            !std::filesystem::exists(legacyMarker, markerEc)) {
+                            const std::unordered_set<std::string> vectorHashes(
+                                reconciledHashes.begin(), reconciledHashes.end());
+                            auto purged = purgeLegacyVectorsWithoutText(
+                                *metadataRepo, *vectorDatabase, vectorHashes);
+                            if (!purged) {
+                                spdlog::warn("[Embeddings] Legacy vector cleanup failed: {}",
+                                             purged.error().message);
+                            } else {
+                                if (purged.value().documentsPurged > 0) {
+                                    spdlog::info("[Embeddings] Removed legacy vectors of {} "
+                                                 "documents that no longer have text",
+                                                 purged.value().documentsPurged);
+                                    std::erase_if(reconciledHashes, [&](const std::string& h) {
+                                        return vectorDatabase->getVectorsByDocument(h).empty();
+                                    });
+                                }
+                                if (purged.value().documentsFailed == 0) {
+                                    std::ofstream(legacyMarker) << "1\n";
+                                }
                             }
                         }
 

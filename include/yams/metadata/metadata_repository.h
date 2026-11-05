@@ -748,6 +748,8 @@ public:
     Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>& hashes) override;
     Result<bool> hasFtsEntry(int64_t documentId) override;
     Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() override;
+    /// Hashes of documents that have no document_content row (no extracted text).
+    Result<std::unordered_set<std::string>> getDocumentHashesWithoutContent();
     Result<std::vector<int64_t>> getAllFts5IndexedDocumentIds() override;
     Result<SearchResults>
     search(const std::string& query, int limit = 50, int offset = 0,

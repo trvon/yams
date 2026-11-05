@@ -1313,6 +1313,29 @@ Result<bool> MetadataRepository::hasFtsEntry(int64_t documentId) {
     });
 }
 
+Result<std::unordered_set<std::string>> MetadataRepository::getDocumentHashesWithoutContent() {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::getDocumentHashesWithoutContent");
+    return executeReadQuery<std::unordered_set<std::string>>(
+        [&](Database& db) -> Result<std::unordered_set<std::string>> {
+            auto stmtResult =
+                db.prepare("SELECT d.sha256_hash FROM documents d WHERE NOT EXISTS "
+                           "(SELECT 1 FROM document_content c WHERE c.document_id = d.id)");
+            if (!stmtResult)
+                return stmtResult.error();
+            Statement stmt = std::move(stmtResult).value();
+            std::unordered_set<std::string> hashes;
+            for (;;) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break;
+                hashes.insert(stmt.getString(0));
+            }
+            return hashes;
+        });
+}
+
 Result<std::unordered_set<int64_t>> MetadataRepository::getFts5IndexedRowIdSet() {
     YAMS_ZONE_SCOPED_N("MetadataRepo::getFts5IndexedRowIdSet");
     return executeReadQuery<std::unordered_set<int64_t>>(
