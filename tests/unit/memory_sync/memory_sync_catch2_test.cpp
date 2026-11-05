@@ -1920,24 +1920,37 @@ TEST_CASE("Exclusive sweeps retain fork decisions and chained history across chu
     CHECK(scratchGenerations(fixture.dir / "temp").empty());
 }
 
-TEST_CASE("Filesystem listing cooperates while visiting unrelated keys",
+TEST_CASE("Filesystem listing cooperates while walking a namespace",
           "[memory-sync][governor][filesystem]") {
     BackendFixture fixture{"cooperative-listing"};
-    REQUIRE(fixture.backend.store("unrelated/a", bytes("one")).has_value());
-    REQUIRE(fixture.backend.store("unrelated/b", bytes("two")).has_value());
+    REQUIRE(fixture.backend.store("shared/a", bytes("one")).has_value());
+    REQUIRE(fixture.backend.store("shared/b", bytes("two")).has_value());
+    REQUIRE(fixture.backend.store("unrelated/c", bytes("three")).has_value());
     std::size_t checks = 0;
+    fixture.backend.setListingWorkCheck([&]() -> yams::Result<void> {
+        ++checks;
+        return {};
+    });
+    // Other namespaces are separate subtrees: listing one that does not exist costs only the
+    // entry and exit checks.
+    const auto absent = fixture.backend.listPage("absent/", std::nullopt, 1);
+    REQUIRE(absent.has_value());
+    CHECK(absent.value().keys.empty());
+    CHECK(checks == 2);
+
+    checks = 0;
     fixture.backend.setListingWorkCheck([&]() -> yams::Result<void> {
         if (++checks == 3) {
             return yams::Error{yams::ErrorCode::OperationCancelled, "test checkpoint"};
         }
         return {};
     });
-    const auto page = fixture.backend.listPage("absent/", std::nullopt, 1);
+    const auto page = fixture.backend.listPage("shared/", std::nullopt, 1);
     REQUIRE_FALSE(page.has_value());
     CHECK(page.error().code == yams::ErrorCode::OperationCancelled);
     CHECK(checks == 3);
     fixture.backend.setListingWorkCheck({});
-    const auto intact = fixture.backend.list("unrelated/");
+    const auto intact = fixture.backend.list("shared/");
     REQUIRE(intact.has_value());
     CHECK(intact.value().size() == 2);
 }
