@@ -920,6 +920,7 @@ Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
                 JOIN temp_embedding_reconcile_hashes th ON th.sha256_hash = d.sha256_hash
                 LEFT JOIN document_embedding_derivations ded ON ded.document_id = d.id
                 WHERE ded.completed IS NOT 0
+                  AND EXISTS (SELECT 1 FROM document_content c WHERE c.document_id = d.id)
             )");
             if (!countStmt) {
                 return countStmt.error();
@@ -936,14 +937,20 @@ Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
                 )
                 SELECT d.id,
                        CASE WHEN th.sha256_hash IS NOT NULL AND ded.completed IS NOT 0
+                                 AND dc.document_id IS NOT NULL
                             THEN 1 ELSE 0 END,
                        CASE WHEN th.sha256_hash IS NOT NULL AND ded.completed IS NOT 0
+                                 AND dc.document_id IS NOT NULL
                             THEN ? ELSE NULL END,
                        CASE WHEN th.sha256_hash IS NOT NULL AND ded.completed IS NOT 0
+                                 AND dc.document_id IS NOT NULL
                             THEN 1 ELSE 0 END,
                        unixepoch()
                 FROM documents d
                 LEFT JOIN temp_embedding_reconcile_hashes th ON th.sha256_hash = d.sha256_hash
+                -- Vectors without text are not an embedding of anything current: an old build's
+                -- vectors can outlive content that MIME repair or re-extraction removed.
+                LEFT JOIN document_content dc ON dc.document_id = d.id
                 -- A document whose derivation is open (content changed under an in-flight
                 -- embed) keeps has_embedding = 0 even though vector rows exist for it: the
                 -- rows describe superseded text and the next embed pass replaces them.
