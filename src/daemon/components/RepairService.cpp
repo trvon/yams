@@ -649,9 +649,11 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 
         // Under Warning pressure, reduce batch sizes so repair cooperates with
         // the ingestion pipeline instead of competing for channel capacity.
+        std::size_t requeued = 0; // pushed back under Warning: not handled yet
         if (pressureLevel >= ResourcePressureLevel::Warning) {
             const size_t reducedCap = std::max<size_t>(1, missingEmbeddings.size() / 2);
             if (missingEmbeddings.size() > reducedCap) {
+                requeued = missingEmbeddings.size() - reducedCap;
                 // Put excess back into the pending queue for the next iteration.
                 std::lock_guard<std::mutex> lk(queueMutex_);
                 for (size_t i = reducedCap; i < missingEmbeddings.size(); ++i) {
@@ -666,6 +668,10 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
                         static_cast<uint64_t>(pendingDocuments_.size()));
             }
         }
+
+        // Every document taken off the queue is handled from here on: dispatched, or found to
+        // need nothing.
+        noteRepairResolved(batch.size() - std::min(requeued, batch.size()));
 
         // Queue embedding repair jobs
         if (!missingEmbeddings.empty()) {
@@ -901,12 +907,21 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
             }
         }
 
-        if (totalEnqueued > 0) {
-            totalBacklog_.store(totalEnqueued, std::memory_order_relaxed);
-            processed_.store(0, std::memory_order_relaxed);
+        if (startAfterId == 0 || totalEnqueued > 0) {
+            // A sweep starts the count over; a pass resumed after the queue cap adds to it.
+            std::uint64_t backlog = totalEnqueued;
+            if (startAfterId == 0) {
+                totalBacklog_.store(backlog, std::memory_order_relaxed);
+                processed_.store(0, std::memory_order_relaxed);
+            } else {
+                backlog = totalBacklog_.fetch_add(totalEnqueued, std::memory_order_relaxed) +
+                          totalEnqueued;
+            }
             if (state_) {
-                state_->stats.repairTotalBacklog.store(totalEnqueued, std::memory_order_relaxed);
-                state_->stats.repairProcessed.store(0, std::memory_order_relaxed);
+                state_->stats.repairTotalBacklog.store(backlog, std::memory_order_relaxed);
+                state_->stats.repairProcessed.store(
+                    std::min(processed_.load(std::memory_order_relaxed), backlog),
+                    std::memory_order_relaxed);
             }
             spdlog::debug("RepairService: initial scan queued {} documents", totalEnqueued);
         }
@@ -1291,18 +1306,16 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
     return result;
 }
 
-void RepairService::updateProgressPct() {
-    YAMS_ZONE_SCOPED_N("RepairSvc::updateProgressPct");
-    if (!state_)
+void RepairService::noteRepairResolved(std::uint64_t documents) {
+    if (documents == 0)
         return;
-    auto tot = totalBacklog_.load(std::memory_order_relaxed);
-    state_->stats.repairTotalBacklog.store(tot, std::memory_order_relaxed);
-    if (tot == 0)
-        return;
-    auto done = processed_.load(std::memory_order_relaxed);
-    state_->stats.repairProcessed.store(done, std::memory_order_relaxed);
-    int pct = static_cast<int>(std::min<std::uint64_t>(100, (done * 100) / tot));
-    state_->readiness.vectorIndexProgress.store(pct, std::memory_order_relaxed);
+    // Documents also arrive from ingest and explicit requests, which the scan backlog does not
+    // count; never report more done than queued.
+    const auto backlog = totalBacklog_.load(std::memory_order_relaxed);
+    const auto done =
+        std::min(processed_.fetch_add(documents, std::memory_order_relaxed) + documents, backlog);
+    if (state_)
+        state_->stats.repairProcessed.store(done, std::memory_order_relaxed);
 }
 
 void RepairService::beginRepairOperation(std::string_view operation) {

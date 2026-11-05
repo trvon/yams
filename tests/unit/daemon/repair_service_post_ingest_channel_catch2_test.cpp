@@ -2443,3 +2443,70 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     sm->shutdown();
 }
+
+// `yams daemon status` showed "Progress 0/863" for the whole run: the backlog was published but
+// nothing ever counted documents leaving the queue. Progress must reach the backlog once the
+// queue drains, and must not touch the vector-index readiness percentage.
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: progress reaches the backlog as the queue drains",
+                 "[daemon][repair][progress][regression]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE((sm->initialize()));
+    sm->startAsyncInit();
+    REQUIRE(waitForCoreServices(*sm));
+    auto meta = sm->getMetadataRepo();
+    REQUIRE((meta != nullptr));
+
+    constexpr int kDocs = 3;
+    for (int i = 0; i < kDocs; ++i) {
+        metadata::DocumentInfo doc{};
+        doc.fileName = "progress_" + std::to_string(i) + ".txt";
+        doc.filePath = (config_.dataDir / doc.fileName).string();
+        doc.fileExtension = "txt";
+        doc.fileSize = 42;
+        doc.sha256Hash = std::string(63, 'p') + static_cast<char>('a' + i);
+        doc.mimeType = "text/plain";
+        const auto now =
+            std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+        doc.modifiedTime = now;
+        doc.indexedTime = now;
+        auto id = meta->insertDocument(doc);
+        REQUIRE(id.has_value());
+        REQUIRE(meta->updateDocumentExtractionStatus(id.value(), true,
+                                                     metadata::ExtractionStatus::Success));
+    }
+
+    state_.stats.repairTotalBacklog.store(0, std::memory_order_relaxed);
+    state_.stats.repairProcessed.store(0, std::memory_order_relaxed);
+    state_.readiness.vectorIndexProgress.store(100, std::memory_order_relaxed);
+
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.maxBatch = 16;
+    cfg.initialScanDeferTicks = 0;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+    repair.start();
+    const bool drained = waitForCondition(std::chrono::seconds(15), [&]() {
+        const auto backlog = state_.stats.repairTotalBacklog.load(std::memory_order_relaxed);
+        return backlog >= kDocs &&
+               state_.stats.repairProcessed.load(std::memory_order_relaxed) == backlog;
+    });
+    repair.stop();
+
+    CHECK(drained);
+    CHECK(state_.stats.repairTotalBacklog.load(std::memory_order_relaxed) >= kDocs);
+    CHECK(state_.stats.repairProcessed.load(std::memory_order_relaxed) ==
+          state_.stats.repairTotalBacklog.load(std::memory_order_relaxed));
+    CHECK(state_.readiness.vectorIndexProgress.load(std::memory_order_relaxed) == 100);
+
+    sm->shutdown();
+}

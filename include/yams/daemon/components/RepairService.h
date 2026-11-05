@@ -536,7 +536,8 @@ private:
     }
 
     // ── Progress helper ──
-    void updateProgressPct();
+    // Count documents taken off the queue and handled; published as repairProcessed.
+    void noteRepairResolved(std::uint64_t documents);
     void beginRepairOperation(std::string_view operation);
     void endRepairOperation();
 
