@@ -678,10 +678,10 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
             publishMemorySyncBackfill();
         }
     };
-    // Re-applying unchanged winners re-reads and re-verifies every record. When the adapter inputs
-    // match the last settled pass, and the local graph has not changed since a pass that deferred
-    // topology records, skip the inbound stages until the next full pass.
-    // Unknown inputs (an unnamed winner view, admission pressure) never skip.
+    // Re-applying unchanged winners re-reads and re-verifies every record. When no peer's input
+    // changed since the last settled pass, and the local graph has not changed since a pass that
+    // deferred topology records, skip the inbound stages until the next full pass. Unknown inputs
+    // (an unnamed winner view, admission pressure) never skip.
     const auto kgGeneration = [this]() -> std::optional<std::uint64_t> {
         auto kg = getKgStore();
         if (!kg) {
@@ -696,8 +696,11 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         if (auto inputs = memorySync_->adapterInputs(); inputs) {
             applyInputs = std::move(inputs.value());
         }
+        // Only a peer's change needs an inbound pass: this node's own publishes (the outbound
+        // backfill, local ingest) came from local state and apply back as no-ops.
         inputsUnchanged = applyInputs && lastSettledMemorySyncApplyInputs_ &&
-                          applyInputs->sameAs(*lastSettledMemorySyncApplyInputs_);
+                          applyInputs->sameForeignInputsAs(*lastSettledMemorySyncApplyInputs_,
+                                                           memorySync_->localNodeId());
         // Deferred topology edges wait on their endpoint nodes, which can also appear locally.
         if (inputsUnchanged && lastSettledTopologyDeferredKgGeneration_) {
             inputsUnchanged = kgGeneration() == lastSettledTopologyDeferredKgGeneration_;
