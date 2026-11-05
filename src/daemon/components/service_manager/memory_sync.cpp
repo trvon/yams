@@ -679,8 +679,16 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         }
     };
     // Re-applying unchanged winners re-reads and re-verifies every record. When the adapter inputs
-    // match the last settled pass, skip the inbound stages until the next full pass.
+    // match the last settled pass, and the local graph has not changed since a pass that deferred
+    // topology records, skip the inbound stages until the next full pass.
     // Unknown inputs (an unnamed winner view, admission pressure) never skip.
+    const auto kgGeneration = [this]() -> std::optional<std::uint64_t> {
+        auto kg = getKgStore();
+        if (!kg) {
+            return std::nullopt;
+        }
+        return kg->changeGeneration();
+    };
     std::optional<memory_sync::MemorySyncService::AdapterInputs> applyInputs;
     bool inputsUnchanged = false;
     try {
@@ -690,6 +698,10 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         }
         inputsUnchanged = applyInputs && lastSettledMemorySyncApplyInputs_ &&
                           applyInputs->sameAs(*lastSettledMemorySyncApplyInputs_);
+        // Deferred topology edges wait on their endpoint nodes, which can also appear locally.
+        if (inputsUnchanged && lastSettledTopologyDeferredKgGeneration_) {
+            inputsUnchanged = kgGeneration() == lastSettledTopologyDeferredKgGeneration_;
+        }
     } catch (...) {
         applyInputs.reset();
         inputsUnchanged = false;
@@ -716,15 +728,18 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     // prerequisites never arrived. Only a stop request ends the cycle early.
     // A stage that defers records is healthy; only a hard failure marks the cycle failed.
     bool stageFailed = false;
-    // Settled: every stage scanned completely and nothing failed. Deferrals are allowed. A
-    // deferred record waits on a prerequisite that either replicates (which changes the adapter
-    // inputs, so the next cycle runs) or appears locally (which the periodic full pass picks up).
-    // Re-running an unchanged pass only repeats the same deferrals: with a prerequisite no peer
-    // will publish, that re-verified the whole corpus every cycle. Failures still retry each cycle.
+    // Settled: every stage scanned completely, nothing failed, and any deferrals are topology
+    // edges. A deferred edge waits on endpoint nodes that either replicate (the adapter inputs
+    // change) or appear locally (the graph store's change generation moves), so re-running a pass
+    // with neither only repeats the same deferrals. With an endpoint no peer will publish, that
+    // re-verified the whole corpus every cycle. Content, metadata and vector deferrals wait on
+    // local document content, which has no change signal, so they keep retrying every cycle, as
+    // do failures.
     bool cycleSettled = true;
-    const auto runStage = [this, &stageFailed, &cycleSettled](memory_sync::ApplyStage stage,
-                                                              std::string_view completedStage,
-                                                              auto&& applyStage) {
+    bool topologyDeferred = false;
+    const auto runStage = [this, &stageFailed, &cycleSettled,
+                           &topologyDeferred](memory_sync::ApplyStage stage,
+                                              std::string_view completedStage, auto&& applyStage) {
         if (memorySync_->stopRequested()) {
             return false;
         }
@@ -755,6 +770,13 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
                     deferred.size(), pass.value().deferredCount.value_or(deferred.size()));
                 if (!pass.value().scanComplete || pass.value().failure) {
                     cycleSettled = false;
+                }
+                if (deferredCount != 0) {
+                    if (stage == memory_sync::ApplyStage::Topology) {
+                        topologyDeferred = true;
+                    } else {
+                        cycleSettled = false;
+                    }
                 }
                 if (!pass.value().scanComplete) {
                     spdlog::debug("[ServiceManager] memory_sync {} scan incomplete; "
@@ -881,8 +903,14 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         }
         applyInputs->view.reset(); // keep the name only; never hold an old store open
         lastSettledMemorySyncApplyInputs_ = std::move(applyInputs);
+        // Read after the stages ran, so the pass's own graph writes do not force a rerun.
+        lastSettledTopologyDeferredKgGeneration_ = topologyDeferred ? kgGeneration() : std::nullopt;
+        if (topologyDeferred && !lastSettledTopologyDeferredKgGeneration_) {
+            lastSettledMemorySyncApplyInputs_.reset(); // no graph store: nothing to compare
+        }
     } else {
         lastSettledMemorySyncApplyInputs_.reset();
+        lastSettledTopologyDeferredKgGeneration_.reset();
     }
 
     publishBackfillIfDue();
