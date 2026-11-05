@@ -498,7 +498,12 @@ TEST_CASE("ResourceGovernor::recommendLexicalIndexBytes scales with budget and p
     }
 
     SECTION("pressure shrinks the grant, never below the floor") {
-        governor.testing_endStartupGrace();           // grace caps pressure at Warning
+        // Grace caps pressure at Warning; restore it so later tests see it.
+        struct GraceGuard {
+            ResourceGovernor& g;
+            std::chrono::steady_clock::time_point saved;
+            ~GraceGuard() { g.testing_restoreStartupTime(saved); }
+        } grace{governor, governor.testing_endStartupGrace()};
         TuneAdvisor::setMemoryBudgetBytes(32 * kGiB); // 2 GiB at Normal
         const auto now = std::chrono::steady_clock::now();
         governor.testing_setPressureState(ResourcePressureLevel::Warning, now);
