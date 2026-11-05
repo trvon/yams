@@ -93,7 +93,10 @@ run_lane() {
 	ci) setup_args+=(--no-asan --no-tsan); multiplier=2; processes=4 ;;
 	esac
 	if [ ! -f "${BUILD_DIR}/meson-private/coredata.dat" ]; then
-		YAMS_BUILD_DIR="${BUILD_DIR}" YAMS_MESON_WRAP_MODE=nofallback \
+		# The lane resolves only from the offline Conan cache: drop caller settings that would
+		# skip Conan or append options after --build=never.
+		env -u YAMS_USE_SYSTEM_DEPS -u YAMS_CONAN_EXTRA_OPTIONS \
+			YAMS_BUILD_DIR="${BUILD_DIR}" YAMS_MESON_WRAP_MODE=nofallback \
 			YAMS_EXTRA_MESON_FLAGS="${setup_extra}" ./setup.sh "${setup_args[@]}"
 	fi
 	# Inspect the effective build, not flag strings or a compiler-version claim.

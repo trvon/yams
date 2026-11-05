@@ -54,6 +54,8 @@ else:
         setup.write_text('''#!/bin/bash
 set -eu
 printf '%s\\n' "$*" >> "$TEST_SETUP_CALLS"
+printf 'system_deps=%s extra=%s\\n' "${YAMS_USE_SYSTEM_DEPS-unset}" \\
+    "${YAMS_CONAN_EXTRA_OPTIONS-unset}" >> "$TEST_SETUP_CALLS"
 exit "${TEST_SETUP_EXIT:-0}"
 ''')
         setup.chmod(0o755)
@@ -75,6 +77,13 @@ exit "${TEST_SETUP_EXIT:-0}"
         )
         calls = [json.loads(s) for s in self.calls.read_text().splitlines()] if self.calls.exists() else []
         return result, calls
+
+    def test_caller_env_cannot_bypass_offline_cache_policy(self):
+        result, _ = self.run_lane(YAMS_USE_SYSTEM_DEPS="1",
+                                  YAMS_CONAN_EXTRA_OPTIONS="--build=missing")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        setup = (self.root / "setup-calls.txt").read_text()
+        self.assertIn("system_deps=unset extra=unset", setup)
 
     def test_asan_uses_offline_conan_cache_setup_and_both_test_suites(self):
         result, calls = self.run_lane()
