@@ -769,7 +769,7 @@ void YamsDaemon::runInitWaiterJob(bool withoutRunLoop) {
                 if (config_.enableAutoRepair && !rs) {
                     spdlog::info("[InitWaiter] Starting RepairService (no-runLoop test path)...");
                     auto activeFn = [this]() -> size_t {
-                        return static_cast<size_t>(state_.stats.activeConnections.load());
+                        return static_cast<size_t>(state_.stats.activeNonHealthRequests.load());
                     };
                     serviceManager_->startRepairService(std::move(activeFn));
                 }
@@ -975,8 +975,10 @@ Result<void> YamsDaemon::runLoopChecked() {
                 if (config_.enableAutoRepair && !rs) {
                     spdlog::info("[DaemonLoop] Starting RepairService...");
                     try {
+                        // Client demand is executing requests. An agent holding an idle
+                        // connection open is not activity and must not block maintenance.
                         auto activeFn = [this]() -> size_t {
-                            return static_cast<size_t>(state_.stats.activeConnections.load());
+                            return static_cast<size_t>(state_.stats.activeNonHealthRequests.load());
                         };
                         serviceManager_->startRepairService(std::move(activeFn));
                     } catch (const std::exception& e) {
@@ -993,8 +995,8 @@ Result<void> YamsDaemon::runLoopChecked() {
         {
             auto rs = serviceManager_->getRepairServiceShared();
             if (rs) {
-                size_t active = static_cast<size_t>(state_.stats.activeConnections.load());
-                uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
+                size_t active = static_cast<size_t>(state_.stats.activeNonHealthRequests.load());
+                uint32_t busyThresh = TuneAdvisor::repairBusyRequestThreshold();
                 auto now = std::chrono::steady_clock::now();
                 bool isBusy = (active >= busyThresh);
                 updateRepairHysteresis(isBusy, now, repairBusySince_, repairReadySince_);
