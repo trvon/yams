@@ -1,4 +1,5 @@
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/profiling.h>
 
 #include <algorithm>
@@ -902,7 +903,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     memorySyncApplyHealth_.recordCycle(stageFailed);
     if (applyInputs && cycleSettled && !stageFailed) {
         if (!inputsUnchanged || cycleStart >= nextMemorySyncFullApply_) {
-            nextMemorySyncFullApply_ = cycleStart + kMemorySyncFullApplyInterval;
+            nextMemorySyncFullApply_ = cycleStart + TuneAdvisor::memorySyncFullApplyInterval();
         }
         applyInputs->view.reset(); // keep the name only; never hold an old store open
         lastSettledMemorySyncApplyInputs_ = std::move(applyInputs);
