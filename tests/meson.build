@@ -2908,6 +2908,12 @@ if catch2_dep.found()
       'unit/detection/file_type_graceful_fallback_test.cpp',
     ),
     'deps': test_deps,
+    # Absolute source path: __FILE__ is build-dir relative under meson, so the
+    # fixture could not find its JSON files from another working directory.
+    'cpp_args': [
+      '-DYAMS_DETECTION_TEST_DATA_DIR="@0@"'.format(
+        meson.current_source_dir() / 'unit' / 'detection' / 'test_data'),
+    ],
     'suite': ['catch2', 'unit', 'detection'],
     'timeout': 120,
   }]
@@ -3750,7 +3756,7 @@ foreach t : catch2_test_table
   t_exe = executable(t.get('target', 'catch2_' + t['name']), t['sources'],
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + t['deps'],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'] + t.get('cpp_args', []),
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
