@@ -1287,7 +1287,7 @@ std::string RepairService::extractorFingerprint(
         }
     }
     std::sort(names.begin(), names.end());
-    std::string out;
+    std::string out = "policy:" + std::string(kExtractionPolicyVersion) + "\n";
     for (const auto& name : names) {
         out += name;
         out += '\n';
@@ -1305,8 +1305,10 @@ void RepairService::beginSweepExtractorCheck(
     const auto path = cfg_.dataDir / "repair-extractor-set";
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) {
-        // First run with this file: nothing to compare against. The set is recorded only when
-        // this sweep finishes, so an interrupted first sweep leaves no marker behind.
+        // No record yet (first run with this file, or a data dir from before it existed):
+        // terminal documents get one retry, since the rules they failed under are unknown. The
+        // set is recorded only when this sweep finishes, so an interrupted sweep retries again.
+        sweepExtractorsChanged_ = true;
         return;
     }
     std::ifstream in(path, std::ios::binary);

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <set>
 #include <string>
@@ -135,6 +136,10 @@ struct ScanHarness {
         cfg.enable = true;
         cfg.dataDir = tmp.path();
         cfg.maxPendingRepairs = maxPending;
+        // A data dir that already finished a sweep with no extractors; tests that need the
+        // first-run retry remove it.
+        std::ofstream(tmp.path() / "repair-extractor-set")
+            << RepairService::extractorFingerprint({});
         service = std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
     }
     ~ScanHarness() {
@@ -295,6 +300,7 @@ TEST_CASE("Startup scan records the extractor set only after a finished sweep",
     yams::test::ScopedEnvVar batch{"YAMS_REPAIR_STARTUP_BATCH", std::string{"1"}};
     ScanHarness h(3, /*maxPending=*/1);
     const auto marker = h.tmp.path() / "repair-extractor-set";
+    std::filesystem::remove(marker); // a data dir from before the marker existed
     REQUIRE(h.service->testing_runStartupScanPass().size() == 1U); // capped
     CHECK_FALSE(std::filesystem::exists(marker));
     for (int pass = 0; pass < 6 && h.service->testing_startupScanDue(); ++pass) {
@@ -318,4 +324,23 @@ TEST_CASE("Repair progress does not pre-count documents outside the scan backlog
     REQUIRE(h.service->testing_startupScanDue());
     REQUIRE(h.service->testing_runStartupScanPass().size() == 3U); // resumed pass
     CHECK(h.service->testing_repairProgress() == std::pair<std::uint64_t, std::uint64_t>{6, 3});
+}
+
+// A data dir from before the marker existed: documents that failed extraction under unknown rules
+// (here, PEM files that were not yet treated as text) get one retry sweep, then stay terminal.
+TEST_CASE("Startup scan retries terminal documents once when no extractor set is recorded",
+          "[daemon][repair][scan][terminal][catch2]") {
+    ScanHarness h(1);
+    std::filesystem::remove(h.tmp.path() / "repair-extractor-set");
+    h.markExtractionFailed(0);
+    RepairServiceContext ctx;
+    ctx.getMetadataRepo = [r = h.repo] { return r; };
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = h.tmp.path();
+    h.service = std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+    CHECK(h.queuedIn(h.service->testing_runStartupScanPass(), h.hashes[0]));
+
+    h.service = std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+    CHECK(h.service->testing_runStartupScanPass().empty());
 }

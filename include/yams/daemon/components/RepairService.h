@@ -340,6 +340,15 @@ public:
     }
     /// Whether the background loop would start another scan once the queue is empty.
     bool testing_startupScanDue() const { return scanCursor_.shouldStart(); }
+#endif
+    /// Bump when the rules for what counts as extractable text change (e.g. which MIME types
+    /// are text), so documents that failed extraction under the old rules get one retry sweep.
+    static constexpr std::string_view kExtractionPolicyVersion = "text-mime-2";
+    /// Stable identity of a set of content extractors (plugin names; type names otherwise) and
+    /// the extraction policy version. Recorded after a finished startup sweep.
+    static std::string extractorFingerprint(
+        const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors);
+#if defined(YAMS_TESTING)
     /// Run the MIME repair operation (not a dry run).
     RepairOperationResult testing_repairMimeTypes() { return repairMimeTypes(false, false, {}); }
     /// Count documents as handled, as the drain loop does.
@@ -471,9 +480,7 @@ private:
     static bool ftsRepairNeeded(const metadata::DocumentInfo& d,
                                 const std::function<bool()>& ftsIndexed,
                                 const std::function<bool()>& canExtract);
-    /// Stable identity of a set of content extractors (plugin names; type names otherwise).
-    static std::string extractorFingerprint(
-        const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors);
+
     MissingWorkFlags analyzeMissingWorkForHash(
         const std::string& hash, bool checkEmbeddings,
         const std::shared_ptr<api::IContentStore>& contentStore,
