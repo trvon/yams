@@ -71,7 +71,10 @@ bool isCodeMime(std::string_view mimeType) {
 
 bool isStructuredTextMime(std::string_view mimeType) {
     return mimeType == "application/json" || mimeType == "application/xml" ||
-           mimeType == "application/x-yaml" || mimeType == "application/yaml";
+           mimeType == "application/x-yaml" || mimeType == "application/yaml" ||
+           // JSON Lines / newline-delimited JSON: one JSON value per line.
+           mimeType == "application/x-ndjson" || mimeType == "application/ndjson" ||
+           mimeType == "application/jsonl" || mimeType == "application/x-jsonlines";
 }
 
 bool isExecutableMime(std::string_view mimeType) {
@@ -1040,7 +1043,7 @@ bool FileTypeDetector::isTextMimeType(const std::string& mimeType) const {
         return true;
 
     return isStructuredTextMime(normalizedMime) || normalizedMime == "application/javascript" ||
-           normalizedMime == "application/x-sh";
+           normalizedMime == "application/x-sh" || normalizedMime == "application/mbox";
 }
 
 bool FileTypeDetector::isBinaryMimeType(const std::string& mimeType) const {
