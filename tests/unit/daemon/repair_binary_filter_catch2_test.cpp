@@ -63,6 +63,12 @@ TEST_CASE_METHOD(RepairBinaryFilterFixture, "RepairBinaryFilter: recognizes text
         CHECK(detector.isTextMimeType("application/x-jsonlines"));
         CHECK(detector.isTextMimeType("application/mbox"));
         CHECK(detector.isTextMimeType("application/x-pem-file"));
+        // Every detection path must agree: the category drives isBinary in detectFromFile.
+        for (const auto* mime :
+             {"application/x-ndjson", "application/mbox", "application/x-pem-file"}) {
+            INFO(mime);
+            CHECK(detector.getFileTypeCategory(mime) == "text");
+        }
     }
 }
 
