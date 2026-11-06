@@ -25,6 +25,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #define NOMINMAX
@@ -360,7 +361,7 @@ public:
             if (ren_ec == std::errc::cross_device_link) {
                 spdlog::warn("Cross-device rename detected; performing copy+fsync+replace for {}",
                              finalPath.string());
-                auto copy_ok = copy_file_fsync_replace(stagingFile, finalPath);
+                auto copy_ok = detail::copyFileDurablyReplacing(stagingFile, finalPath);
                 if (!copy_ok.ok()) {
                     return copy_ok.error();
                 }
@@ -397,55 +398,61 @@ public:
     }
 
 private:
-    // Copy file contents and ensure durability (fsync destination and dir). Replace if exists.
-    static Expected<void> copy_file_fsync_replace(const fs::path& src, const fs::path& dst) {
+};
+
+namespace detail {
+
+Expected<void> copyFileDurablyReplacing(const fs::path& src, const fs::path& dst) {
+    // Write beside dst and rename into place: copying straight onto dst left a truncated file at
+    // the content-addressed path when the copy failed, and that path is trusted by name.
+    const auto temp = dst.parent_path() / (dst.filename().string() + ".partial");
+    const auto fail = [&](Error error) -> Expected<void> {
         std::error_code ec;
-
-        // If destination exists, remove it before copying (we maintain immutability)
-        if (fs::exists(dst)) {
-            fs::remove(dst, ec);
-            ec.clear();
+        fs::remove(temp, ec);
+        return error;
+    };
+    {
+        std::ifstream is(src, std::ios::binary);
+        if (!is.good()) {
+            return Error{ErrorCode::IoError, "copy: failed to open source: " + src.string()};
         }
-
-        // Copy file contents (streaming copy)
-        {
-            std::ifstream is(src, std::ios::binary);
-            if (!is.good()) {
-                return Error{ErrorCode::IoError, "copy: failed to open source: " + src.string()};
-            }
-            std::ofstream os(dst, std::ios::binary | std::ios::trunc);
-            if (!os.good()) {
-                return Error{ErrorCode::IoError,
-                             "copy: failed to open destination: " + dst.string()};
-            }
-            char buffer[1 << 20]; // 1 MiB buffer
-            while (is.good()) {
-                is.read(buffer, sizeof(buffer));
-                std::streamsize got = is.gcount();
-                if (got > 0) {
-                    os.write(buffer, got);
-                    if (!os.good()) {
-                        return Error{ErrorCode::IoError,
-                                     "copy: write failed for destination: " + dst.string()};
-                    }
+        std::ofstream os(temp, std::ios::binary | std::ios::trunc);
+        if (!os.good()) {
+            return fail(Error{ErrorCode::IoError, "copy: failed to open " + temp.string()});
+        }
+        std::vector<char> buffer(1 << 20);
+        while (is.good()) {
+            is.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize got = is.gcount();
+            if (got > 0) {
+                os.write(buffer.data(), got);
+                if (!os.good()) {
+                    return fail(
+                        Error{ErrorCode::IoError, "copy: write failed for " + temp.string()});
                 }
             }
-            if (!is.eof()) {
-                return Error{ErrorCode::IoError, "copy: read failed for source: " + src.string()};
-            }
         }
-
-        // Ensure durability
-        auto rf = fsync_file(dst);
-        if (!rf.ok())
-            return rf;
-        auto rd = fsync_dir(dst.parent_path());
-        if (!rd.ok())
-            return rd;
-
-        return Expected<void>{};
+        if (!is.eof()) {
+            return fail(Error{ErrorCode::IoError, "copy: read failed for source: " + src.string()});
+        }
+        os.flush();
+        if (!os.good()) {
+            return fail(Error{ErrorCode::IoError, "copy: flush failed for " + temp.string()});
+        }
     }
-};
+    if (auto synced = fsync_file(temp); !synced.ok()) {
+        return fail(synced.error());
+    }
+    std::error_code ec;
+    fs::rename(temp, dst, ec);
+    if (ec) {
+        return fail(Error{ErrorCode::IoError, "copy: rename into place failed for " + dst.string() +
+                                                  ": " + ec.message()});
+    }
+    return fsync_dir(dst.parent_path());
+}
+
+} // namespace detail
 
 /// Factory (optional)
 std::unique_ptr<IDiskWriter> makeDiskWriter() {
