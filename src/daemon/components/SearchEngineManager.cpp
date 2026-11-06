@@ -1,6 +1,7 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/SearchEngineManager.h>
+#include <yams/daemon/components/thread_pool_naming.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -117,7 +118,9 @@ SearchEngineManager::SearchEngineManager()
     : compatibilityEnvironment_(yams::search::snapshotLegacySearchEnvironment()),
       runtimePolicy_(std::make_unique<RuntimePolicy>(
           RuntimePolicy{ConfigResolver::resolveTopologyRoutingPolicy()})),
-      runtimeExecutor_(TuneAdvisor::searchRuntimeThreads()) {}
+      runtimeExecutor_(TuneAdvisor::searchRuntimeThreads()) {
+    nameThreadPoolWorkers(runtimeExecutor_, TuneAdvisor::searchRuntimeThreads(), "yams-search-");
+}
 
 SearchEngineManager::~SearchEngineManager() {
     runtimeExecutor_.stop();

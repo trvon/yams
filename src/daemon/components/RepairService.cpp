@@ -3,6 +3,7 @@
 #include <yams/daemon/components/db_salvage.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
 #include <yams/daemon/components/RepairService.h>
+#include <yams/daemon/components/thread_pool_naming.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/resource/plugin_content_extractor_adapter.h>
 #include <yams/extraction/external_plugin_extractor.hpp>
@@ -211,6 +212,7 @@ struct RepairThreadPool {
                 threads = 1;
             threads = std::max(threads + 1, 2u);
             pool_ = std::make_unique<boost::asio::thread_pool>(threads);
+            nameThreadPoolWorkers(*pool_, threads, "yams-repair-");
             spdlog::debug("[RepairThreadPool] Initialized with {} threads", threads);
         });
         return pool_->get_executor();
