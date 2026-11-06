@@ -594,6 +594,9 @@ private:
     // Progress tracking
     std::atomic<std::uint64_t> totalBacklog_{0};
     std::atomic<std::uint64_t> processed_{0};
+    // Set when a startup sweep begins; the first batch it queues restarts the progress count.
+    // Guarded by queueMutex_.
+    bool progressResetPending_{false};
 
     std::shared_ptr<ShutdownState> shutdownState_;
     VectorIndexCoordinator* coordinator_{nullptr}; // not owned; injected via context

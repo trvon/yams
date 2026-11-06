@@ -344,3 +344,18 @@ TEST_CASE("Startup scan retries terminal documents once when no extractor set is
     h.service = std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
     CHECK(h.service->testing_runStartupScanPass().empty());
 }
+
+// A retry sweep that finds nothing to do must not wipe the finished sweep's progress to 0/0:
+// status would read as if no repair had happened, and a status poll could miss the result.
+TEST_CASE("Repair progress survives a retry sweep that queues nothing",
+          "[daemon][repair][progress][catch2]") {
+    ScanHarness h(2);
+    REQUIRE(h.service->testing_runStartupScanPass().size() == 2U);
+    h.service->testing_noteRepairResolved(2);
+    REQUIRE(h.service->testing_repairProgress() == std::pair<std::uint64_t, std::uint64_t>{2, 2});
+    for (int i = 0; i < 2; ++i)
+        REQUIRE(h.repo->updateDocumentEmbeddingStatusByHash(h.hashes[i], true, "m"));
+    REQUIRE(h.service->testing_startupScanDue()); // the sweep queued work, so a retry is armed
+    CHECK(h.service->testing_runStartupScanPass().empty());
+    CHECK(h.service->testing_repairProgress() == std::pair<std::uint64_t, std::uint64_t>{2, 2});
+}

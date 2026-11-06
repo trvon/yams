@@ -841,11 +841,10 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
         const auto contentStore = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
         if (startAfterId == 0) {
             beginSweepExtractorCheck(extractors);
-            // A sweep starts the progress count over. Resumed passes add to it batch by batch,
-            // before the drain loop can take those documents, so completions are never lost.
-            totalBacklog_.store(0, std::memory_order_relaxed);
-            processed_.store(0, std::memory_order_relaxed);
-            publishRepairProgress();
+            // A sweep starts the progress count over once it queues its first batch. A retry
+            // sweep that finds nothing keeps the last sweep's numbers rather than showing 0/0.
+            std::lock_guard<std::mutex> ql(queueMutex_);
+            progressResetPending_ = true;
         }
         const bool extractorsChanged = sweepExtractorsChanged_;
 
@@ -928,7 +927,13 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
                 // Still under the queue lock: the drain loop cannot resolve these documents
                 // before they are counted in the backlog.
                 if (batchEnqueued > 0) {
-                    totalBacklog_.fetch_add(batchEnqueued, std::memory_order_relaxed);
+                    if (progressResetPending_) {
+                        progressResetPending_ = false;
+                        processed_.store(0, std::memory_order_relaxed);
+                        totalBacklog_.store(batchEnqueued, std::memory_order_relaxed);
+                    } else {
+                        totalBacklog_.fetch_add(batchEnqueued, std::memory_order_relaxed);
+                    }
                     publishRepairProgress();
                 }
             }
