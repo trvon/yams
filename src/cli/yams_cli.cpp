@@ -7,6 +7,7 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/cli/cli_perf_trace.h>
 #include <yams/cli/command_catalog.h>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/command_registry.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/env_utils.h>
@@ -100,6 +101,86 @@ namespace fs = std::filesystem;
 
 namespace yams::cli {
 // NOTE: KG store is now managed as an instance member on YamsCLI (kgStore_)
+
+namespace {
+
+std::size_t editDistance(std::string_view a, std::string_view b) {
+    std::vector<std::size_t> row(b.size() + 1);
+    for (std::size_t j = 0; j <= b.size(); ++j)
+        row[j] = j;
+    for (std::size_t i = 1; i <= a.size(); ++i) {
+        std::size_t diag = row[0];
+        row[0] = i;
+        for (std::size_t j = 1; j <= b.size(); ++j) {
+            const std::size_t up = row[j];
+            row[j] = std::min({row[j] + 1, row[j - 1] + 1, diag + (a[i - 1] == b[j - 1] ? 0 : 1)});
+            diag = up;
+        }
+    }
+    return row[b.size()];
+}
+
+void clearCallbacks(CLI::App& app) {
+    app.preparse_callback(std::function<void(std::size_t)>{});
+    app.parse_complete_callback(std::function<void()>{});
+    app.final_callback(std::function<void()>{});
+    for (auto* sub : app.get_subcommands([](const CLI::App*) { return true; })) {
+        if (sub != nullptr)
+            clearCallbacks(*sub);
+    }
+}
+
+} // namespace
+
+std::string YamsCLI::closestCommandName(std::string_view typed) {
+    std::vector<std::string> names = topLevelCommandNames();
+    for (const char* alias : {"rm", "ls", "stats", "plugins"})
+        names.emplace_back(alias);
+    std::string best;
+    std::size_t bestDistance = std::string::npos;
+    for (const auto& name : names) {
+        const auto d = editDistance(typed, name);
+        if (d < bestDistance) {
+            bestDistance = d;
+            best = name;
+        }
+    }
+    // Suggest only near misses: one edit for short names, two otherwise.
+    const std::size_t limit = typed.size() <= 4 ? 1 : 2;
+    return bestDistance <= limit ? best : std::string{};
+}
+
+std::vector<std::string> YamsCLI::unrecognizedArguments(const RunParsePlan& plan,
+                                                        std::string_view subcmd) const {
+    YamsCLI probe(executor_);
+    probe.registerCommandsForRun(subcmd);
+    clearCallbacks(*probe.app_);
+    try {
+        probe.parseRunPlan(plan);
+    } catch (const CLI::ParseError&) {
+        return {}; // the real parse reports it
+    }
+    return probe.app_->remaining(true);
+}
+
+int YamsCLI::reportUnrecognizedArguments(const std::vector<std::string>& extra,
+                                         std::string_view subcmd) const {
+    // A bare word where a command was expected (global options first,
+    // e.g. `yams --data-dir X serch`) is an unknown command.
+    if (subcmd.empty() && !extra.front().empty() && extra.front()[0] != '-') {
+        std::cerr << "error: unknown command '" << extra.front() << "'\n";
+        if (const auto suggestion = closestCommandName(extra.front()); !suggestion.empty()) {
+            std::cerr << "hint: did you mean `yams " << suggestion << "`?\n";
+        } else {
+            std::cerr << "hint: run `yams --help` to list commands\n";
+        }
+        return 2;
+    }
+    std::cerr << "error: unknown option '" << extra.front() << "'\n"
+              << "hint: run `yams " << (subcmd.empty() ? "" : std::string(subcmd) + " ")
+              << "--help` for the accepted options\n";
+    return 2;
+}
 
 void YamsCLI::setPendingCommand(ICommand* cmd) {
     pendingCommand_ = cmd;
@@ -525,10 +606,18 @@ int YamsCLI::runPendingCommand() {
                    std::chrono::duration_cast<std::chrono::microseconds>(
                        std::chrono::steady_clock::now() - execStart));
     if (!result) {
-        std::cerr << formatErrorWithHint(result.error().code, result.error().message) << "\n";
-        return 1;
+        printCommandError(result.error());
+        return cliExitCode(result.error().code);
     }
     return 0;
+}
+
+void YamsCLI::printCommandError(const Error& error) const {
+    if (errorHint_.empty()) {
+        std::cerr << formatErrorWithHint(error.code, error.message) << "\n";
+    } else {
+        std::cerr << "error: " << error.message << "\nhint: " << errorHint_ << "\n";
+    }
 }
 
 int YamsCLI::run(int argc, char* argv[]) {
@@ -635,6 +724,12 @@ int YamsCLI::run(int argc, char* argv[]) {
             }
         }
 
+        if (argc <= 1) {
+            registerCommandsForRun("");
+            std::cerr << app_->help();
+            return 2;
+        }
+
         auto parsePlan = buildRunParsePlan(argc, argv, kCommands);
         if (parsePlan.argv.empty()) {
             parsePlan.argc = argc;
@@ -644,16 +739,28 @@ int YamsCLI::run(int argc, char* argv[]) {
         const std::string_view routedSubcmd =
             parsePlan.argc > 1 && !isFlag(parsePlan.argv[1]) ? parsePlan.argv[1] : "";
         if (!routedSubcmd.empty() && !CommandRegistry::isRegisteredTopLevelCommand(routedSubcmd)) {
-            std::cerr << "[FAIL] Unknown command: " << routedSubcmd << "\n";
-            std::cerr << "Hint: Run `yams --help` to list commands.";
-            if (routedSubcmd == "prun") {
-                std::cerr << " Did you mean `yams prune`?";
+            std::cerr << "error: unknown command '" << routedSubcmd << "'\n";
+            if (const auto suggestion = closestCommandName(routedSubcmd); !suggestion.empty()) {
+                std::cerr << "hint: did you mean `yams " << suggestion << "`?\n";
+            } else {
+                std::cerr << "hint: run `yams --help` to list commands\n";
             }
-            std::cerr << "\n";
             return 2;
         }
+        // prefix_command() leaves options no command recognised in remaining().
+        // CLI11 runs command callbacks during parse, so check a callback-free
+        // parse first: `daemon stop --nope` must fail before it stops anything.
+        if (const auto extra = unrecognizedArguments(parsePlan, routedSubcmd); !extra.empty()) {
+            return reportUnrecognizedArguments(extra, routedSubcmd);
+        }
+
         registerCommandsForRun(routedSubcmd);
         parseRunPlan(parsePlan);
+
+        // Backstop for anything the validation parse could not see.
+        if (const auto extra = app_->remaining(true); !extra.empty()) {
+            return reportUnrecognizedArguments(extra, routedSubcmd);
+        }
 
         // Disallow multiple top-level subcommands (e.g., "yams search graph"),
         // which can accidentally treat query terms as commands.
@@ -664,8 +771,13 @@ int YamsCLI::run(int argc, char* argv[]) {
                     active.push_back(sub->get_name());
                 }
             }
+            // Global options alone (`yams --json`) run nothing; that is a usage error.
+            if (active.empty() && pendingCommand_ == nullptr) {
+                std::cerr << app_->help();
+                return 2;
+            }
             if (active.size() > 1) {
-                std::cerr << "[FAIL] Multiple subcommands detected: ";
+                std::cerr << "error: several subcommands given: ";
                 for (size_t i = 0; i < active.size(); ++i) {
                     if (i)
                         std::cerr << ", ";
@@ -676,7 +788,7 @@ int YamsCLI::run(int argc, char* argv[]) {
                 if (isSearch) {
                     for (const auto& name : active) {
                         if (name != "search") {
-                            std::cerr << "Hint: If '" << name
+                            std::cerr << "hint: if '" << name
                                       << "' is your search term, use --query (e.g., "
                                          "`yams search --query "
                                       << name << "`).\n";
@@ -684,7 +796,7 @@ int YamsCLI::run(int argc, char* argv[]) {
                         }
                     }
                 }
-                return 1;
+                return 2;
             }
         }
 
@@ -702,11 +814,26 @@ int YamsCLI::run(int argc, char* argv[]) {
                                         std::chrono::steady_clock::now() - runStart));
         return 0;
     } catch (const CLI::ParseError& e) {
-        return app_->exit(e);
+        // --help and --version exit 0 through CLI11; RuntimeError carries a
+        // command's own exit code and has already reported its error.
+        if (e.get_exit_code() == static_cast<int>(CLI::ExitCodes::Success))
+            return app_->exit(e);
+        if (dynamic_cast<const CLI::RuntimeError*>(&e) != nullptr)
+            return e.get_exit_code();
+        // The first registered command, skipping values of global options
+        // such as `--data-dir /tmp`.
+        std::string command;
+        for (int i = 1; i < argc; ++i) {
+            if (argv[i] != nullptr && CommandRegistry::isRegisteredTopLevelCommand(argv[i])) {
+                command = argv[i];
+                break;
+            }
+        }
+        std::cerr << "error: " << e.what() << "\nhint: run `yams "
+                  << (command.empty() ? "" : command + " ") << "--help`\n";
+        return 2;
     } catch (const std::exception& e) {
-        // Always provide a user-facing error even if logging is off
-        std::cerr << "[FAIL] Unexpected error: " << e.what() << "\n";
-        spdlog::error("Unexpected error: {}", e.what());
+        std::cerr << "error: unexpected: " << e.what() << "\n";
         return 1;
     }
 }

@@ -17,6 +17,7 @@
 #include <yams/cli/time_filters.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/ui_helpers.hpp>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compressor_interface.h>
@@ -110,10 +111,8 @@ public:
 
         cmd->callback([this]() {
             auto result = execute();
-            if (!result) {
-                spdlog::error("Command failed: {}", result.error().message);
-                throw CLI::RuntimeError(1);
-            }
+            if (!result)
+                failCommand(result.error());
         });
     }
 
@@ -356,10 +355,13 @@ public:
                 if (smart) {
                     return render(smart.value());
                 }
-                // If smart fails, fall back to the generic get request with the name
-                spdlog::debug(
-                    "get --name: smart resolution failed ({}); continuing with generic get",
-                    smart.error().message);
+                // A name that matched nothing or several documents is final; the
+                // generic by-name get would pick the newest of several matches.
+                if (!yams::cli::is_transport_failure(smart.error())) {
+                    return smart.error();
+                }
+                spdlog::debug("get --name: transport failure ({}); retrying generic get",
+                              smart.error().message);
             }
 
             auto gres = rsvc.get(dreq, ropts);

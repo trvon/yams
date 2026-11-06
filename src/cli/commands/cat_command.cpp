@@ -109,6 +109,24 @@ public:
             ropts.requestTimeoutMs = 60000;
             yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlan, ropts);
 
+            // An unindexed file on disk: print it as is.
+            auto catLocalFile = [&]() -> Result<void> {
+                std::ifstream file(name_, std::ios::binary);
+                if (!file)
+                    return Error{ErrorCode::IOError, "cannot read " + name_};
+                std::string content;
+                if (maxBytes_ != 0 && !slice_.active()) {
+                    content.resize(static_cast<std::size_t>(
+                        std::min<std::uint64_t>(maxBytes_, std::filesystem::file_size(name_))));
+                    file.read(content.data(), static_cast<std::streamsize>(content.size()));
+                    content.resize(static_cast<std::size_t>(file.gcount()));
+                } else {
+                    content.assign(std::istreambuf_iterator<char>(file), {});
+                }
+                std::cout << sliceContent(content, slice_, maxBytes_);
+                return Result<void>();
+            };
+
             auto renderResponse = [&](const yams::daemon::GetResponse& resp) -> Result<void> {
                 if (!resp.hasContent) {
                     return Error{ErrorCode::NotFound, "Document content not found"};
@@ -149,7 +167,16 @@ public:
                 if (smart) {
                     return renderResponse(smart.value());
                 }
-                spdlog::debug("cat: getByNameSmart fallback ({})", smart.error().message);
+                // A name that matched nothing or several documents is final; the
+                // generic by-name get would pick the newest of several matches.
+                if (!yams::cli::is_transport_failure(smart.error())) {
+                    if (smart.error().code == ErrorCode::NotFound &&
+                        std::filesystem::exists(name_)) {
+                        return catLocalFile();
+                    }
+                    return smart.error();
+                }
+                spdlog::debug("cat: getByNameSmart transport failure ({})", smart.error().message);
             } else {
                 return Error{ErrorCode::InvalidArgument, "No document specified"};
             }
@@ -157,20 +184,7 @@ public:
             auto gres = rsvc.get(dreq, ropts);
             if (!gres) {
                 if (!name_.empty() && std::filesystem::exists(name_)) {
-                    std::ifstream file(name_, std::ios::binary);
-                    if (file) {
-                        std::string content;
-                        if (maxBytes_ != 0 && !slice_.active()) {
-                            content.resize(static_cast<std::size_t>(std::min<std::uint64_t>(
-                                maxBytes_, std::filesystem::file_size(name_))));
-                            file.read(content.data(), static_cast<std::streamsize>(content.size()));
-                            content.resize(static_cast<std::size_t>(file.gcount()));
-                        } else {
-                            content.assign(std::istreambuf_iterator<char>(file), {});
-                        }
-                        std::cout << sliceContent(content, slice_, maxBytes_);
-                        return Result<void>();
-                    }
+                    return catLocalFile();
                 }
                 return gres.error();
             }

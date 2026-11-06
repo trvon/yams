@@ -184,6 +184,12 @@ public:
      */
     void setPendingCommand(ICommand* cmd);
 
+    /// A command-specific hint printed under the error when the command fails.
+    void setErrorHint(std::string hint) { errorHint_ = std::move(hint); }
+
+    /// The registered command or alias nearest to `typed`, or empty when none is close.
+    static std::string closestCommandName(std::string_view typed);
+
     /**
      * Find the magic_numbers.json file in standard locations
      */
@@ -242,6 +248,12 @@ private:
     RunParsePlan buildRunParsePlan(int argc, char* argv[],
                                    const std::vector<std::string>& topLevelCommands) const;
     void parseRunPlan(const RunParsePlan& plan);
+    // Arguments no command recognises, found by parsing `plan` with every
+    // callback removed so nothing runs.
+    std::vector<std::string> unrecognizedArguments(const RunParsePlan& plan,
+                                                   std::string_view subcmd) const;
+    int reportUnrecognizedArguments(const std::vector<std::string>& extra,
+                                    std::string_view subcmd) const;
     void applyParsedLogLevel();
     void applyParsedDataDirPrecedence();
     void runConfigMigrationPreflight(std::string_view subcmd);
@@ -277,7 +289,9 @@ private:
     RetrievalOutputConfig retrievalOutputConfig_;
 
     // Deferred execution: a single command to run post-parse
+    void printCommandError(const Error& error) const;
     ICommand* pendingCommand_ = nullptr;
+    std::string errorHint_;
 };
 
 } // namespace yams::cli

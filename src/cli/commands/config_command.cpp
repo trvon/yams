@@ -442,8 +442,7 @@ private:
             if (config.find(key_) != config.end()) {
                 std::cout << config[key_] << "\n";
             } else {
-                return Error{ErrorCode::InvalidArgument,
-                             "Key '" + key_ + "' not found in configuration"};
+                return Error{ErrorCode::NotFound, "Key '" + key_ + "' not found in configuration"};
             }
 
             return Result<void>();

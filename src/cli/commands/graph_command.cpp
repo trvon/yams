@@ -876,7 +876,6 @@ private:
                                                .verbose = verbose_,
                                                .cwd = invocationCwd_});
         if (!r) {
-            std::cerr << "Graph error: " << r.error().message << "\n";
             if (!name_.empty() &&
                 r.error().message.find("Document not found with name") != std::string::npos) {
                 printGraphNotFoundHints(name_);

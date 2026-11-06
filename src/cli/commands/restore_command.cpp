@@ -7,6 +7,7 @@
 #include <regex>
 #include <yams/cli/command.h>
 #include <yams/cli/ui_helpers.hpp>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/common/fs_utils.h>
 #include <yams/common/pattern_utils.h>
@@ -59,10 +60,8 @@ public:
 
         cmd->callback([this]() {
             auto result = execute();
-            if (!result) {
-                spdlog::error("Command failed: {}", result.error().message);
-                throw CLI::RuntimeError(1);
-            }
+            if (!result)
+                failCommand(result.error());
         });
     }
 

@@ -13,9 +13,9 @@ struct CommandCatalogEntry {
 };
 
 #ifdef YAMS_BUILD_MCP_SERVER
-inline constexpr std::array<CommandCatalogEntry, 26> kTopLevelCommands = {{
+inline constexpr std::array<CommandCatalogEntry, 28> kTopLevelCommands = {{
 #else
-inline constexpr std::array<CommandCatalogEntry, 25> kTopLevelCommands = {{
+inline constexpr std::array<CommandCatalogEntry, 27> kTopLevelCommands = {{
 #endif
     {"init", "Initialize YAMS storage and configuration"},
     {"add", "Add files or content to YAMS"},
@@ -42,6 +42,8 @@ inline constexpr std::array<CommandCatalogEntry, 25> kTopLevelCommands = {{
     {"prune", "Remove build artifacts, logs, cache, and temporary files"},
     {"graph", "Explore the knowledge graph"},
     {"diff", "Compare snapshots and paths"},
+    {"tune", "Tune relevance and manage policy state"},
+    {"p2p", "Sync corpora directly between daemons"},
 #ifdef YAMS_BUILD_MCP_SERVER
     {"serve", "Start MCP server"},
 #endif

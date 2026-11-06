@@ -149,7 +149,10 @@ bool CommandRegistry::registerMinimalCommandSet(YamsCLI* cli, std::string_view c
 }
 
 bool CommandRegistry::isRegisteredTopLevelCommand(std::string_view commandName) {
-    if (commandName == "rm" || commandName == "ls") {
+    // CLI11 aliases declared by the commands themselves. The registry test
+    // checks every name in `yams --help` against this gate.
+    constexpr auto kAliases = std::to_array<std::string_view>({"rm", "ls", "stats", "plugins"});
+    if (std::find(kAliases.begin(), kAliases.end(), commandName) != kAliases.end()) {
         return true;
     }
     return containsRegistration(commandName, kCoreCommandRegistrations) ||
