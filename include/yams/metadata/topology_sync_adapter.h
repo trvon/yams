@@ -535,7 +535,11 @@ private:
     }
 
     template <typename Record> Result<void> publish(const std::string& key, const Record& record) {
-        const std::string dump = nlohmann::json(record).dump();
+        auto encoded = memory_sync::encodeRecordJson(record);
+        if (!encoded) {
+            return encoded.error();
+        }
+        const std::string& dump = encoded.value();
         std::vector<std::byte> bytes(dump.size());
         std::memcpy(bytes.data(), dump.data(), dump.size());
         auto published = sync_.publishIfChanged(key, bytes);

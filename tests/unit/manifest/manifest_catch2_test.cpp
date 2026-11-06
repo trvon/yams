@@ -616,3 +616,31 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager performance benchmark",
     double manifestRatio = static_cast<double>(serializeResult.value().size()) / manifest.fileSize;
     CHECK((manifestRatio < 0.1)); // < 10%
 }
+
+// An empty file has no chunks, and older stores wrote a zero-chunk manifest for it. isValid()
+// required a chunk and a non-zero size, so every such manifest deserialized as ManifestInvalid:
+// the empty document could not be read back, and memory-sync backfill skipped it as corrupt.
+TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager accepts the manifest of an empty file",
+                 "[manifest][catch2]") {
+    Manifest empty;
+    empty.fileHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    empty.fileSize = 0;
+    empty.originalName = "README.md";
+    CHECK(empty.isValid());
+
+    auto serialized = manager->serialize(empty);
+    REQUIRE(serialized.has_value());
+    auto restored = manager->deserialize(serialized.value());
+    REQUIRE(restored.has_value());
+    CHECK(restored.value().fileSize == 0);
+    CHECK(restored.value().chunks.empty());
+
+    // A non-empty size with no chunks, or chunks for an empty size, still describe no file.
+    Manifest sizeWithoutChunks = empty;
+    sizeWithoutChunks.fileSize = 10;
+    CHECK_FALSE(sizeWithoutChunks.isValid());
+    Manifest chunksWithoutSize = empty;
+    chunksWithoutSize.chunks.push_back(
+        manifest::ChunkRef{.hash = std::string(64, 'a'), .offset = 0, .size = 4});
+    CHECK_FALSE(chunksWithoutSize.isValid());
+}

@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include <yams/api/content_store_builder.h>
 #include <yams/memory_sync/content_blob_sync.h>
 #include <yams/storage/storage_backend.h>
 #include <yams/storage/storage_engine.h>
@@ -279,4 +280,28 @@ TEST_CASE("content blob winner pass reports a failure and a deferral from the sa
     REQUIRE(pass.deferredKeys.size() == 1);
     CHECK(pass.deferredKeys.front() == lateKey);
     CHECK(pass.applied == 0);
+}
+
+// An empty file is a valid document whose content hash is SHA-256 of nothing. The API content
+// store has no chunks to describe for it and answers ManifestInvalid, so backfill reported every
+// empty document as an unrecoverable blob and skipped it.
+TEST_CASE("content blob adapter publishes empty content from an API content store",
+          "[memory-sync][content-blob]") {
+    TempDirGuard temp;
+    auto store = yams::api::ContentStoreBuilder::createDefault(temp.path / "api-store");
+    REQUIRE(store.has_value());
+    auto& apiStore = *store.value();
+    MemorySyncService sync{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    ContentBlobSyncAdapter adapter{apiStore, sync};
+
+    const std::vector<std::byte> empty;
+    const auto emptyHash = digest(empty);
+    REQUIRE(emptyHash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    (void)apiStore.storeBytes(empty);
+
+    const auto published = adapter.publishExisting(emptyHash);
+    INFO((published ? std::string("ok") : published.error().message));
+    REQUIRE(published.has_value());
+    REQUIRE(sync.syncOnce().has_value());
+    CHECK(sync.readCached("content-blob/" + emptyHash).has_value());
 }

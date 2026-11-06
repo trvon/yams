@@ -98,10 +98,16 @@ struct Manifest {
 
     // Validation using ranges
     [[nodiscard]] bool isValid() const noexcept {
-        return !fileHash.empty() && fileHash.length() == HASH_STRING_SIZE && !chunks.empty() &&
-               fileSize > 0 && std::all_of(chunks.begin(), chunks.end(), [](const auto& chunk) {
-                   return chunk.isValid();
-               });
+        if (fileHash.length() != HASH_STRING_SIZE) {
+            return false;
+        }
+        // An empty file has no chunks. Older stores wrote this zero-chunk manifest for it, and
+        // rejecting it made every empty document unreadable. Size and chunks must still agree.
+        if (fileSize == 0 || chunks.empty()) {
+            return fileSize == 0 && chunks.empty();
+        }
+        return std::all_of(chunks.begin(), chunks.end(),
+                           [](const auto& chunk) { return chunk.isValid(); });
     }
 
     // Calculate total size from chunks

@@ -684,8 +684,10 @@ TEST_CASE("Memory sync vector backfill retries a backend validation failure with
     CHECK(status.value().apply.publishFailedCycles > 0);
 
     // The same error code is not enough to classify a row as unpublishable. Once the
-    // backend recovers, the unchanged source generation must still be retried.
+    // backend recovers, the unchanged source generation must still be retried. A failing domain
+    // backs off, so the retry comes once its backoff (cleared here) has passed.
     rejection->rejectBlobs = false;
+    origin.manager->testingExpireMemorySyncBackfillSchedule();
     origin.backfill(4);
     view.refresh();
     CHECK(view.published("embedding/model/retry-chunk"));
@@ -1320,4 +1322,109 @@ TEST_CASE("Memory sync apply retries a deferred record as soon as its prerequisi
     }
     applyUntilEdge(reader, writer.sourceKey(), writer.targetKey());
     CHECK(reader.deferredTopology() == 0);
+}
+
+// A graph node that can never publish pinned the node cursor: publishNode threw on every cycle,
+// so the topology sweep never finished and no later node reached peers. Node labels come from
+// extracted text, which is not always UTF-8, and record size is bounded by the typed limits.
+TEST_CASE("Memory sync topology backfill publishes nodes past an unpublishable one",
+          "[daemon][memory-sync][backfill][topology]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    memory_sync::MemorySyncLimits limits;
+    limits.maxValueBytes = 4096;
+    MeshNode origin{root.path, "origin", sharedStore, MeshNode::KgReads::Uncounted, limits};
+    SharedStoreView view{sharedStore};
+
+    const bool invalidText = GENERATE(true, false);
+    CAPTURE(invalidText);
+    metadata::KGNode bad{.nodeKey = "entity:bad", .type = "alpha"};
+    // 0x94 is a Windows-1252 closing quote: not valid UTF-8 on its own.
+    bad.label = invalidText ? std::string("quote\x94here") : std::string(8192, 'x');
+    const auto badId = origin.kgStore->upsertNode(bad);
+    REQUIRE(badId.has_value());
+    const auto later = origin.addNode("entity:later", "alpha");
+
+    origin.backfill(4);
+    view.refresh();
+    CHECK_FALSE(view.published(topologyNodeKey(bad.nodeKey)));
+    CHECK(view.published(topologyNodeKey(later.nodeKey)));
+
+    // A skipped record is not an outbound failure.
+    const auto status = origin.manager->getMemorySyncStatus();
+    REQUIRE(status.has_value());
+    CHECK(status.value().apply.publishFailedCycles == 0);
+}
+
+// Same for an edge: one that can never publish must not keep later edges behind the cursor.
+TEST_CASE("Memory sync topology backfill publishes edges past an unpublishable one",
+          "[daemon][memory-sync][backfill][topology]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    MeshNode origin{root.path, "origin", sharedStore};
+    SharedStoreView view{sharedStore};
+
+    const auto a = origin.addNode("entity:a", "alpha");
+    const auto b = origin.addNode("entity:b", "alpha");
+    const metadata::KGEdge bad{
+        .srcNodeId = a.id, .dstNodeId = b.id, .relation = std::string("rel\x9C"), .weight = 1.0F};
+    REQUIRE(origin.kgStore->addEdge(bad).has_value());
+    origin.addEdge(b, a);
+
+    origin.backfill(8);
+    view.refresh();
+    CHECK(view.published(topologyNodeKey(a.nodeKey)));
+    CHECK(view.published(topologyNodeKey(b.nodeKey)));
+    CHECK(view.published(topologyEdgeKey(b.nodeKey, a.nodeKey)));
+    const auto status = origin.manager->getMemorySyncStatus();
+    REQUIRE(status.has_value());
+    CHECK(status.value().apply.publishFailedCycles == 0);
+}
+
+// A domain whose failure is not per-record (a backend outage, a writer history that needs a
+// bootstrap) failed again on every 5-second cycle, logging a warning each time: 31,704 of them
+// in one daemon log. It now backs off exponentially and is retried once the backoff passes.
+TEST_CASE("Memory sync backfill backs off a domain that keeps failing",
+          "[daemon][memory-sync][backfill][retry]") {
+    const VectorStoreEnv vectorEnv;
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    struct RejectingBackend final : storage::FilesystemBackend {
+        bool reject{true};
+        int rejected{0};
+        Result<void> store(std::string_view key, std::span<const std::byte> value) override {
+            if (reject && key.starts_with("blob/")) {
+                ++rejected;
+                return Error{ErrorCode::InvalidArgument, "backend rejected the write"};
+            }
+            return FilesystemBackend::store(key, value);
+        }
+    };
+    auto backend = std::make_unique<RejectingBackend>();
+    storage::BackendConfig config;
+    config.localPath = sharedStore;
+    REQUIRE(backend->initialize(config).has_value());
+    auto* rejection = backend.get();
+    MeshNode origin{root.path, "origin",          sharedStore, MeshNode::KgReads::Uncounted,
+                    {},        std::move(backend)};
+    SharedStoreView view{sharedStore};
+    auto vectors = attachVectorDb(origin);
+    REQUIRE(vectors->insertVectorChecked(makeVector("retry-chunk", '1', "model")).has_value());
+
+    origin.backfill(1);
+    const int firstCycle = rejection->rejected;
+    REQUIRE(firstCycle > 0);
+    // Further cycles inside the backoff do not touch the failing domain again.
+    origin.backfill(10);
+    CHECK(rejection->rejected == firstCycle);
+
+    // Once the backoff passes, the domain is retried and recovers.
+    rejection->reject = false;
+    origin.manager->testingExpireMemorySyncBackfillSchedule();
+    origin.backfill(4);
+    view.refresh();
+    CHECK(view.published("embedding/model/retry-chunk"));
 }

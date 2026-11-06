@@ -1167,6 +1167,24 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         }
         using Phase = MemorySyncBackfillState::TopologyPhase;
         metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
+        // A record that can never publish (text that is not UTF-8, a record over the typed
+        // resident limit, an invalid key) is skipped so the pass reaches the records behind it,
+        // as documents and vectors are. Other failures throw so the item is retried later. A
+        // changed record advances the graph generation and is reached by the next pass.
+        const auto skipUnpublishable = [&](const Error& error, std::string_view kind,
+                                           std::int64_t id) {
+            if (!isUnrecoverableBlobFailure(error.code) &&
+                error.code != ErrorCode::InvalidArgument) {
+                return false;
+            }
+            if (state.topologySweepPasses == 0) {
+                spdlog::warn("[ServiceManager] memory_sync backfill skipping topology {} {} "
+                             "(unpublishable): {}",
+                             kind, id, error.message);
+            }
+            notifyMemorySyncStage("backfill.skip_topology");
+            return true;
+        };
         while (!shouldStop()) {
             switch (state.topologyPhase) {
                 case Phase::Nodes: {
@@ -1180,7 +1198,11 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                     }
                     const auto& node = nodes.value().front();
                     if (auto published = adapter.publishNode(node); !published) {
-                        throw std::runtime_error(published.error().message);
+                        if (!skipUnpublishable(published.error(), "node", node.id)) {
+                            throw std::runtime_error(published.error().message);
+                        }
+                        state.topologyNodeIdCursor = node.id;
+                        return true;
                     }
                     state.topologyNodeIdCursor = node.id;
                     ++nodesPublished;
@@ -1216,7 +1238,11 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                     if (auto published = adapter.publishEdgeWithEndpoints(*source.value(), edge,
                                                                           *target.value());
                         !published) {
-                        throw std::runtime_error(published.error().message);
+                        if (!skipUnpublishable(published.error(), "edge", edge.id)) {
+                            throw std::runtime_error(published.error().message);
+                        }
+                        state.topologyEdgeIdCursor = edge.id;
+                        return true;
                     }
                     state.topologyEdgeIdCursor = edge.id;
                     ++edgesPublished;
@@ -1231,6 +1257,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                         // has changed, so records created, changed, or deleted behind the
                         // cursors are published or retracted by it.
                         state.topologyPhase = Phase::Nodes;
+                        ++state.topologySweepPasses;
                         state.topologyNodeIdCursor = 0;
                         state.topologyEdgeIdCursor = 0;
                         state.topologyRetractionKeyCursor.clear();
@@ -1270,6 +1297,53 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     constexpr std::size_t kDomainCount = 4;
     std::array<bool, kDomainCount> domainDone{};
     bool domainFailed = false;
+    const auto domainName = [](Domain domain) -> std::string_view {
+        switch (domain) {
+            case Domain::Documents:
+                return "documents";
+            case Domain::CommittedVectors:
+                return "committed_vectors";
+            case Domain::Vectors:
+                return "vectors";
+            case Domain::Topology:
+                return "topology";
+        }
+        return "unknown";
+    };
+    const auto cycleStart = std::chrono::steady_clock::now();
+    // Domains still backing off from earlier failures sit out this cycle.
+    for (std::size_t i = 0; i < kDomainCount; ++i) {
+        if (cycleStart < state.domainBackoff[i].notBefore) {
+            domainDone[i] = true;
+        }
+    }
+    const auto recordDomainFailure = [&](Domain domain, std::string message) {
+        domainFailed = true;
+        auto& backoff = state.domainBackoff[static_cast<std::size_t>(domain)];
+        ++backoff.failures;
+        constexpr auto kBase = std::chrono::seconds{5};
+        constexpr auto kCap = std::chrono::seconds{600};
+        const auto shift = std::min<std::uint32_t>(backoff.failures - 1, 7);
+        const auto wait = std::min<std::chrono::seconds>(kBase * (1U << shift), kCap);
+        backoff.notBefore = std::chrono::steady_clock::now() + wait;
+        // Log the first failure, a changed error, and then only as the backoff doubles.
+        const bool powerOfTwo = (backoff.failures & (backoff.failures - 1)) == 0;
+        if (backoff.failures == 1 || message != backoff.lastError || powerOfTwo) {
+            spdlog::warn("[ServiceManager] memory_sync backfill domain {} failed ({} in a row, "
+                         "retrying in {}s): {}",
+                         domainName(domain), backoff.failures, wait.count(), message);
+        }
+        backoff.lastError = std::move(message);
+    };
+    const auto recordDomainProgress = [&](Domain domain) {
+        auto& backoff = state.domainBackoff[static_cast<std::size_t>(domain)];
+        if (backoff.failures > 0) {
+            spdlog::info("[ServiceManager] memory_sync backfill domain {} recovered after {} "
+                         "failure(s)",
+                         domainName(domain), backoff.failures);
+        }
+        backoff = {};
+    };
     while (!shouldStop()) {
         const Domain firstSweep = state.nextSweep;
         const Domain secondSweep =
@@ -1283,6 +1357,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                 continue;
             }
             bool published = false;
+            bool failed = false;
             try {
                 switch (domain) {
                     case Domain::Documents:
@@ -1299,12 +1374,14 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                         break;
                 }
             } catch (const std::exception& error) {
-                domainFailed = true;
-                spdlog::warn("[ServiceManager] memory_sync backfill domain failed: {}",
-                             error.what());
+                failed = true;
+                recordDomainFailure(domain, error.what());
             } catch (...) {
-                domainFailed = true;
-                spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
+                failed = true;
+                recordDomainFailure(domain, "unknown error");
+            }
+            if (!failed) {
+                recordDomainProgress(domain);
             }
             if (published) {
                 served = domain;

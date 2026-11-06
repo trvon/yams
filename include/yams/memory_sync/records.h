@@ -196,4 +196,17 @@ inline Result<std::string> recordIndexKey(MemoryStore store, std::string_view id
            record.entryHash;
 }
 
+/// Serializes a replicated record. Record text comes from local paths, metadata values and
+/// extracted text, which are not always UTF-8, and nlohmann::json throws on such bytes. Reporting
+/// it as InvalidData lets a caller skip the record instead of failing the whole publish pass.
+/// The bytes are not rewritten: a replaced character would replicate a different path or label.
+template <typename Record> inline Result<std::string> encodeRecordJson(const Record& record) {
+    try {
+        return nlohmann::json(record).dump();
+    } catch (const nlohmann::json::type_error& error) {
+        return Error{ErrorCode::InvalidData,
+                     std::string("record text is not valid UTF-8: ") + error.what()};
+    }
+}
+
 } // namespace yams::memory_sync
