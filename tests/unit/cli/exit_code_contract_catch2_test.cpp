@@ -7,6 +7,8 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -121,10 +123,26 @@ TEST_CASE("Failed invocations exit non-zero", "[cli][exit-code][contract]") {
         const auto cli = builtYamsCli();
         if (cli.empty())
             SKIP("MESON_BUILD_ROOT is not set; run through meson test");
-        for (const std::string sub : {"keygen", "list-keys", "revoke", "token", "api-key"}) {
+        // Required arguments are supplied so each stub's callback actually runs.
+        for (const std::string sub :
+             {"keygen", "list-keys", "revoke some-key-id", "token", "api-key --name probe"}) {
             INFO("auth " << sub);
-            CHECK(runSubprocess("\"" + cli.string() + "\" auth " + sub) != 0);
+            CHECK(runSubprocess("\"" + cli.string() + "\" auth " + sub) == 1);
         }
+    }
+    SECTION("global options without a command are a usage error") {
+        const auto r = runCli({"yams", "--data-dir", corpus.data, "--json"});
+        CHECK(r.rc == 2);
+        CHECK(r.err.find("Usage") != std::string::npos);
+    }
+    SECTION("an unknown option is rejected before the command runs") {
+        // config set writes from its parse callback.
+        const auto r = runCli({"yams", "--data-dir", corpus.data, "config", "set",
+                               "cli.budget_chars", "7", "--no-such-flag"});
+        CHECK(r.rc == 2);
+        std::ifstream config(corpus.root / "config.toml");
+        const std::string written((std::istreambuf_iterator<char>(config)), {});
+        CHECK(written.find("budget_chars") == std::string::npos);
     }
     SECTION("an unknown flag after a subcommand is rejected") {
         const auto r =

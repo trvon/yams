@@ -101,6 +101,41 @@ namespace fs = std::filesystem;
 namespace yams::cli {
 // NOTE: KG store is now managed as an instance member on YamsCLI (kgStore_)
 
+namespace {
+
+void clearCallbacks(CLI::App& app) {
+    app.preparse_callback(std::function<void(std::size_t)>{});
+    app.parse_complete_callback(std::function<void()>{});
+    app.final_callback(std::function<void()>{});
+    for (auto* sub : app.get_subcommands([](const CLI::App*) { return true; })) {
+        if (sub != nullptr)
+            clearCallbacks(*sub);
+    }
+}
+
+} // namespace
+
+std::vector<std::string> YamsCLI::unrecognizedArguments(const RunParsePlan& plan,
+                                                        std::string_view subcmd) const {
+    YamsCLI probe(executor_);
+    probe.registerCommandsForRun(subcmd);
+    clearCallbacks(*probe.app_);
+    try {
+        probe.parseRunPlan(plan);
+    } catch (const CLI::ParseError&) {
+        return {}; // the real parse reports it
+    }
+    return probe.app_->remaining(true);
+}
+
+int YamsCLI::reportUnrecognizedArguments(const std::vector<std::string>& extra,
+                                         std::string_view subcmd) const {
+    std::cerr << "error: unknown option '" << extra.front() << "'\n"
+              << "hint: run `yams " << (subcmd.empty() ? "" : std::string(subcmd) + " ")
+              << "--help` for the accepted options\n";
+    return 2;
+}
+
 void YamsCLI::setPendingCommand(ICommand* cmd) {
     pendingCommand_ = cmd;
 }
@@ -658,17 +693,19 @@ int YamsCLI::run(int argc, char* argv[]) {
             std::cerr << "\n";
             return 2;
         }
+        // prefix_command() leaves options no command recognised in remaining().
+        // CLI11 runs command callbacks during parse, so check a callback-free
+        // parse first: `daemon stop --nope` must fail before it stops anything.
+        if (const auto extra = unrecognizedArguments(parsePlan, routedSubcmd); !extra.empty()) {
+            return reportUnrecognizedArguments(extra, routedSubcmd);
+        }
+
         registerCommandsForRun(routedSubcmd);
         parseRunPlan(parsePlan);
 
-        // prefix_command() leaves options no command recognised in remaining();
-        // dropping them silently would run the command with different arguments.
+        // Backstop for anything the validation parse could not see.
         if (const auto extra = app_->remaining(true); !extra.empty()) {
-            std::cerr << "error: unknown option '" << extra.front() << "'\n"
-                      << "hint: run `yams "
-                      << (routedSubcmd.empty() ? "" : std::string(routedSubcmd) + " ")
-                      << "--help` for the accepted options\n";
-            return 2;
+            return reportUnrecognizedArguments(extra, routedSubcmd);
         }
 
         // Disallow multiple top-level subcommands (e.g., "yams search graph"),
@@ -679,6 +716,11 @@ int YamsCLI::run(int argc, char* argv[]) {
                 if (sub && sub->count() > 0) {
                     active.push_back(sub->get_name());
                 }
+            }
+            // Global options alone (`yams --json`) run nothing; that is a usage error.
+            if (active.empty() && pendingCommand_ == nullptr) {
+                std::cerr << app_->help();
+                return 2;
             }
             if (active.size() > 1) {
                 std::cerr << "[FAIL] Multiple subcommands detected: ";
