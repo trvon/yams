@@ -271,6 +271,11 @@ TEST_CASE("VectorSchemaMigration adds and backfills embedding_dim on a V2 databa
     CHECK(scalar(db.db, "SELECT embedding_dim FROM vectors WHERE chunk_id = 'chunk_a'") == 4);
     CHECK(scalar(db.db, "SELECT embedding_dim FROM vectors WHERE chunk_id = 'chunk_b'") == 3);
     CHECK(scalar(db.db, "SELECT COUNT(*) FROM vectors") == 2);
+    // The embedding bytes and their document survive, not just the row count.
+    CHECK(scalar(db.db, "SELECT HEX(embedding) = '0000803F000000400000404000008040' AND "
+                        "document_hash = 'doc_a' FROM vectors WHERE chunk_id = 'chunk_a'") == 1);
+    CHECK(scalar(db.db, "SELECT HEX(embedding) = '0000803F0000004000004040' AND "
+                        "document_hash = 'doc_b' FROM vectors WHERE chunk_id = 'chunk_b'") == 1);
     CHECK(VectorSchemaMigration::detectVersion(db.db) ==
           VectorSchemaMigration::SchemaVersion::V2_3);
 
@@ -302,7 +307,8 @@ TEST_CASE("SqliteVecBackend upgrades a V2 database on open and keeps its vectors
     auto record = backend.getVector("chunk_a");
     REQUIRE(record.has_value());
     REQUIRE(record.value().has_value());
-    CHECK(record.value()->embedding.size() == 4);
+    CHECK(record.value()->embedding == std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f});
+    CHECK(record.value()->document_hash == "doc_a");
     CHECK(record.value()->content == "alpha");
 }
 
