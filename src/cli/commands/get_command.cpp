@@ -355,10 +355,13 @@ public:
                 if (smart) {
                     return render(smart.value());
                 }
-                // If smart fails, fall back to the generic get request with the name
-                spdlog::debug(
-                    "get --name: smart resolution failed ({}); continuing with generic get",
-                    smart.error().message);
+                // A name that matched nothing or several documents is final; the
+                // generic by-name get would pick the newest of several matches.
+                if (!yams::cli::is_transport_failure(smart.error())) {
+                    return smart.error();
+                }
+                spdlog::debug("get --name: transport failure ({}); retrying generic get",
+                              smart.error().message);
             }
 
             auto gres = rsvc.get(dreq, ropts);

@@ -248,6 +248,12 @@ private:
     RunParsePlan buildRunParsePlan(int argc, char* argv[],
                                    const std::vector<std::string>& topLevelCommands) const;
     void parseRunPlan(const RunParsePlan& plan);
+    // Arguments no command recognises, found by parsing `plan` with every
+    // callback removed so nothing runs.
+    std::vector<std::string> unrecognizedArguments(const RunParsePlan& plan,
+                                                   std::string_view subcmd) const;
+    int reportUnrecognizedArguments(const std::vector<std::string>& extra,
+                                    std::string_view subcmd) const;
     void applyParsedLogLevel();
     void applyParsedDataDirPrecedence();
     void runConfigMigrationPreflight(std::string_view subcmd);
