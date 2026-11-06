@@ -1357,6 +1357,17 @@ TEST_CASE("Durable replace leaves no partial object when the copy fails",
         auto result = yams::downloader::detail::copyFileDurablyReplacing(unreadable, dst);
         CHECK_FALSE(result.ok());
         CHECK_FALSE(fs::exists(dst));
+        CHECK(fs::is_empty(dst.parent_path())); // no temporary file left either
+    }
+    SECTION("repeated copies to one destination leave only the destination") {
+        const auto src = dir / "staging";
+        std::ofstream(src, std::ios::binary) << "bytes";
+        REQUIRE(yams::downloader::detail::copyFileDurablyReplacing(src, dst).ok());
+        REQUIRE(yams::downloader::detail::copyFileDurablyReplacing(src, dst).ok());
+        std::size_t entries = 0;
+        for ([[maybe_unused]] const auto& e : fs::directory_iterator(dst.parent_path()))
+            ++entries;
+        CHECK(entries == 1);
     }
     SECTION("a successful copy replaces the destination and leaves no temporary file") {
         const auto src = dir / "staging";

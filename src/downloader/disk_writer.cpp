@@ -15,10 +15,13 @@
 
 #include <spdlog/spdlog.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <random>
 #include <system_error>
 
 #include <filesystem>
@@ -405,7 +408,13 @@ namespace detail {
 Expected<void> copyFileDurablyReplacing(const fs::path& src, const fs::path& dst) {
     // Write beside dst and rename into place: copying straight onto dst left a truncated file at
     // the content-addressed path when the copy failed, and that path is trusted by name.
-    const auto temp = dst.parent_path() / (dst.filename().string() + ".partial");
+    // Each call gets its own temp file: two jobs publishing the same hash must not share one, or
+    // one rename could publish a file the other is still writing.
+    static std::atomic<std::uint64_t> sequence{0};
+    static const std::uint64_t processSalt = std::random_device{}();
+    const auto temp =
+        dst.parent_path() / (dst.filename().string() + ".partial." + std::to_string(processSalt) +
+                             "." + std::to_string(sequence.fetch_add(1)));
     const auto fail = [&](Error error) -> Expected<void> {
         std::error_code ec;
         fs::remove(temp, ec);
@@ -414,7 +423,7 @@ Expected<void> copyFileDurablyReplacing(const fs::path& src, const fs::path& dst
     {
         std::ifstream is(src, std::ios::binary);
         if (!is.good()) {
-            return Error{ErrorCode::IoError, "copy: failed to open source: " + src.string()};
+            return fail(Error{ErrorCode::IoError, "copy: failed to open source: " + src.string()});
         }
         std::ofstream os(temp, std::ios::binary | std::ios::trunc);
         if (!os.good()) {
@@ -443,12 +452,21 @@ Expected<void> copyFileDurablyReplacing(const fs::path& src, const fs::path& dst
     if (auto synced = fsync_file(temp); !synced.ok()) {
         return fail(synced.error());
     }
+#if defined(_WIN32)
+    // Replace explicitly: the standard library's rename is not guaranteed to overwrite here.
+    if (MoveFileExW(temp.wstring().c_str(), dst.wstring().c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
+        return fail(Error{ErrorCode::IoError, "copy: rename into place failed for " + dst.string() +
+                                                  ": error " + std::to_string(GetLastError())});
+    }
+#else
     std::error_code ec;
     fs::rename(temp, dst, ec);
     if (ec) {
         return fail(Error{ErrorCode::IoError, "copy: rename into place failed for " + dst.string() +
                                                   ": " + ec.message()});
     }
+#endif
     return fsync_dir(dst.parent_path());
 }
 
