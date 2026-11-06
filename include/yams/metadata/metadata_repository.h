@@ -1074,6 +1074,10 @@ public:
     Result<void> applyDocumentPathMetadata(
         int64_t documentId,
         const std::vector<std::pair<std::string, std::optional<std::string>>>& changes);
+    /// Set the file name and extension of a document's live location at `path`. Path-aware
+    /// listings read these from the location, not from the documents row.
+    Result<void> setDocumentPathName(int64_t documentId, const std::string& path,
+                                     const std::string& fileName, const std::string& fileExtension);
 
     std::shared_ptr<KnowledgeGraphStore> getKnowledgeGraphStore() const {
         return std::atomic_load_explicit(&kgStore_, std::memory_order_acquire);

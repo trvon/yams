@@ -660,10 +660,10 @@ TEST_CASE("KG orphan cleanup finishes when more than a page of nodes is orphaned
 
 // `yams repair --downloads` turns documents whose path is a URL into downloaded files: the path
 // becomes the file name and the URL moves to source_url with host and scheme tags.
-TEST_CASE("Download repair rewrites URL paths and records their source",
+TEST_CASE("Download repair keeps URL paths and records their source",
           "[daemon][repair][downloads][catch2]") {
     ScanHarness h(0);
-    const auto addUrlDoc = [&](const std::string& url, char fill) {
+    const auto addUrlDoc = [&](const std::string& url, char fill, bool withLocation) {
         yams::metadata::DocumentInfo doc;
         doc.filePath = url;
         doc.fileName = url;
@@ -671,10 +671,13 @@ TEST_CASE("Download repair rewrites URL paths and records their source",
         doc.mimeType = "text/html";
         auto id = h.repo->insertDocument(doc);
         REQUIRE(id.has_value());
+        if (withLocation)
+            REQUIRE(h.repo->recordDocumentPath(doc, id.value(), {}).has_value());
         return id.value();
     };
-    const auto first = addUrlDoc("https://a.example/x/report.pdf?dl=1", 'a');
-    const auto second = addUrlDoc("https://b.example/y/report.pdf", 'b');
+    // The first has a live path head, as current ingest creates; the second is a legacy row.
+    const auto first = addUrlDoc("https://a.example/x/report.pdf?dl=1", 'a', true);
+    const auto second = addUrlDoc("https://b.example/y/report.pdf", 'b', false);
     RepairServiceContext ctx;
     ctx.getMetadataRepo = [r = h.repo] { return r; };
     RepairService::Config cfg;
@@ -716,6 +719,35 @@ TEST_CASE("Download repair rewrites URL paths and records their source",
         CHECK(result.succeeded == 2);
         CHECK(doc.value()->filePath == "https://a.example/x/report.pdf?dl=1");
         CHECK(other.value()->filePath == "https://b.example/y/report.pdf");
+
+        // Path-aware listings read the name from the live location, and the location carries
+        // the mirrored tags.
+        yams::metadata::DocumentQueryOptions options;
+        options.usePathLocations = true;
+        options.currentPathsOnly = true;
+        options.tags = {"host:a.example"};
+        auto listed = h.repo->queryDocumentsForListProjection(options);
+        REQUIRE(listed.has_value());
+        REQUIRE_FALSE(listed.value().empty());
+        for (const auto& d : listed.value()) {
+            CHECK(d.id == first);
+            CHECK(d.fileName == "report.pdf");
+            CHECK(d.fileExtension == ".pdf");
+        }
+        auto locations = h.repo->getDocumentPathReferences(first);
+        REQUIRE(locations.has_value());
+        std::size_t heads = 0;
+        for (const auto& location : locations.value()) {
+            auto located = h.repo->getDocumentPathMetadata(location.filePath, first);
+            REQUIRE(located.has_value());
+            if (!located.value())
+                continue; // a legacy row with no location metadata
+            ++heads;
+            CHECK(located.value()->count("tag:host:a.example") == 1);
+            CHECK(located.value()->count("tag:scheme:https") == 1);
+            CHECK(located.value()->count("tag:downloaded") == 1);
+        }
+        CHECK(heads >= 1);
 
         // A second run finds nothing left to repair.
         const auto again = service.testing_repairDownloads(/*dryRun=*/false);
