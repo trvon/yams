@@ -5,18 +5,27 @@
 
 #include "../../common/test_helpers_catch2.h"
 
+#include <sqlite3.h>
+#include <boost/asio/io_context.hpp>
+#include <yams/api/content_store.h>
+#include <yams/api/content_store_builder.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/metadata/connection_pool.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 using yams::daemon::RepairScanCursor;
@@ -358,4 +367,293 @@ TEST_CASE("Repair progress survives a retry sweep that queues nothing",
     REQUIRE(h.service->testing_startupScanDue()); // the sweep queued work, so a retry is armed
     CHECK(h.service->testing_runStartupScanPass().empty());
     CHECK(h.service->testing_repairProgress() == std::pair<std::uint64_t, std::uint64_t>{2, 2});
+}
+
+namespace {
+using yams::Result;
+// Content store where only existence matters: present, missing, or the check itself fails.
+class ExistenceStore final : public yams::api::IContentStore {
+public:
+    std::set<std::string> present;
+    std::set<std::string> failing;
+
+    Result<bool> exists(const std::string& hash) const override {
+        if (failing.contains(hash))
+            return yams::Error{yams::ErrorCode::IOError, "storage temporarily unavailable"};
+        return present.contains(hash);
+    }
+
+    template <typename T> static Result<T> no() {
+        return yams::Error{yams::ErrorCode::NotImplemented, "not used by this test"};
+    }
+    Result<yams::api::StoreResult> store(const std::filesystem::path&,
+                                         const yams::api::ContentMetadata&,
+                                         yams::api::ProgressCallback) override {
+        return no<yams::api::StoreResult>();
+    }
+    Result<yams::api::RetrieveResult> retrieve(const std::string&, const std::filesystem::path&,
+                                               yams::api::ProgressCallback) override {
+        return no<yams::api::RetrieveResult>();
+    }
+    Result<yams::api::StoreResult> storeStream(std::istream&, const yams::api::ContentMetadata&,
+                                               yams::api::ProgressCallback) override {
+        return no<yams::api::StoreResult>();
+    }
+    Result<yams::api::RetrieveResult> retrieveStream(const std::string&, std::ostream&,
+                                                     yams::api::ProgressCallback) override {
+        return no<yams::api::RetrieveResult>();
+    }
+    Result<yams::api::StoreResult> storeBytes(std::span<const std::byte>,
+                                              const yams::api::ContentMetadata&) override {
+        return no<yams::api::StoreResult>();
+    }
+    Result<std::vector<std::byte>> retrieveBytes(const std::string&) override {
+        return no<std::vector<std::byte>>();
+    }
+    Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string&, std::size_t) override {
+        return no<std::vector<std::byte>>();
+    }
+    Result<RawContent> retrieveRaw(const std::string&) override { return no<RawContent>(); }
+    std::future<Result<RawContent>> retrieveRawAsync(const std::string&) override {
+        return std::async(std::launch::deferred, [] { return no<RawContent>(); });
+    }
+    Result<bool> remove(const std::string&) override { return no<bool>(); }
+    Result<yams::api::ContentMetadata> getMetadata(const std::string&) const override {
+        return no<yams::api::ContentMetadata>();
+    }
+    Result<void> updateMetadata(const std::string&, const yams::api::ContentMetadata&) override {
+        return yams::Error{yams::ErrorCode::NotImplemented, "not used"};
+    }
+    std::vector<Result<yams::api::StoreResult>>
+    storeBatch(const std::vector<std::filesystem::path>&,
+               const std::vector<yams::api::ContentMetadata>&) override {
+        return {};
+    }
+    std::vector<Result<bool>> removeBatch(const std::vector<std::string>&) override { return {}; }
+    yams::api::ContentStoreStats getStats() const override { return {}; }
+    yams::api::HealthStatus checkHealth() const override { return {}; }
+    Result<void> verify(yams::api::ProgressCallback) override { return {}; }
+    Result<void> compact(yams::api::ProgressCallback) override { return {}; }
+    Result<void> garbageCollect(yams::api::ProgressCallback) override { return {}; }
+};
+
+std::unique_ptr<RepairService> serviceWithStore(ScanHarness& h,
+                                                std::shared_ptr<ExistenceStore> store) {
+    RepairServiceContext ctx;
+    ctx.getMetadataRepo = [r = h.repo] { return r; };
+    ctx.getContentStore = [store] { return store; };
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = h.tmp.path();
+    return std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+}
+
+bool documentExists(ScanHarness& h, int i) {
+    auto doc = h.repo->getDocumentByHash(h.hashes[i]);
+    REQUIRE(doc.has_value());
+    return doc.value().has_value();
+}
+} // namespace
+
+// `yams repair --orphans` deletes metadata whose content blob is gone. It is destructive, so only
+// documents whose blob is known to be missing may go.
+TEST_CASE("Orphan cleanup deletes metadata only for documents whose blob is missing",
+          "[daemon][repair][orphans][catch2]") {
+    ScanHarness h(3);
+    auto store = std::make_shared<ExistenceStore>();
+    store->present = {h.hashes[0], h.hashes[2]};
+    auto service = serviceWithStore(h, store);
+
+    SECTION("a dry run reports the orphan and deletes nothing") {
+        const auto result = service->testing_cleanOrphanedMetadata(/*dryRun=*/true);
+        CHECK(result.skipped == 1);
+        CHECK(result.succeeded == 0);
+        CHECK(documentExists(h, 1));
+    }
+    SECTION("a real run deletes only the orphan") {
+        const auto result = service->testing_cleanOrphanedMetadata(/*dryRun=*/false);
+        CHECK(result.succeeded == 1);
+        CHECK(documentExists(h, 0));
+        CHECK_FALSE(documentExists(h, 1));
+        CHECK(documentExists(h, 2));
+    }
+}
+
+// A failed existence check is not evidence the blob is gone: a transient storage error must not
+// turn into deleted metadata.
+TEST_CASE("Orphan cleanup keeps documents whose blob existence cannot be checked",
+          "[daemon][repair][orphans][catch2]") {
+    ScanHarness h(2);
+    auto store = std::make_shared<ExistenceStore>();
+    store->present = {h.hashes[0]};
+    store->failing = {h.hashes[1]};
+    auto service = serviceWithStore(h, store);
+
+    const auto result = service->testing_cleanOrphanedMetadata(/*dryRun=*/false);
+    CHECK(result.succeeded == 0);
+    CHECK(result.failed == 1);
+    CHECK(documentExists(h, 0));
+    CHECK(documentExists(h, 1));
+}
+
+namespace {
+// A real content store under <dataDir>/storage holding one multi-chunk document, plus a planted
+// object file nothing references.
+struct ChunkStoreHarness {
+    ScanHarness h{0};
+    std::unique_ptr<yams::api::IContentStore> store;
+    std::string documentHash;
+    std::vector<std::byte> payload;
+    std::filesystem::path planted;
+
+    ChunkStoreHarness() {
+        auto built = yams::api::ContentStoreBuilder()
+                         .withStoragePath(h.tmp.path() / "storage")
+                         .withChunkSize(65536)
+                         .withCompression(false)
+                         .withDeduplication(true)
+                         .build();
+        INFO((built ? std::string{} : built.error().message));
+        REQUIRE(built);
+        store = std::move(built.value());
+        payload.resize(1024 * 1024);
+        std::uint32_t x = 2463534242U;
+        for (auto& b : payload) {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            b = static_cast<std::byte>(x & 0xFF);
+        }
+        auto stored = store->storeBytes(payload);
+        REQUIRE(stored);
+        documentHash = stored.value().contentHash;
+        planted = h.tmp.path() / "storage" / "objects" / "ff" / std::string(62, 'e');
+        std::filesystem::create_directories(planted.parent_path());
+        std::ofstream(planted, std::ios::binary) << "orphaned";
+    }
+
+    std::filesystem::path refsDb() const { return h.tmp.path() / "storage" / "refs.db"; }
+
+    // Simulate reference-count drift on one of the document's chunks.
+    std::string driftOneChunk() {
+        sqlite3* db = nullptr;
+        REQUIRE(sqlite3_open(refsDb().string().c_str(), &db) == SQLITE_OK);
+        sqlite3_stmt* stmt = nullptr;
+        REQUIRE(sqlite3_prepare_v2(db,
+                                   "SELECT block_hash FROM block_references WHERE ref_count > 0 "
+                                   "AND block_hash <> ? ORDER BY block_hash LIMIT 1",
+                                   -1, &stmt, nullptr) == SQLITE_OK);
+        sqlite3_bind_text(stmt, 1, documentHash.c_str(), -1, SQLITE_TRANSIENT);
+        REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+        std::string chunk = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        sqlite3_finalize(stmt);
+        const auto sql =
+            "UPDATE block_references SET ref_count = 0 WHERE block_hash = '" + chunk + "'";
+        REQUIRE(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(db);
+        return chunk;
+    }
+
+    std::filesystem::path objectPath(const std::string& hash) const {
+        return h.tmp.path() / "storage" / "objects" / hash.substr(0, 2) / hash.substr(2);
+    }
+
+    std::unique_ptr<RepairService> service() {
+        RepairServiceContext ctx;
+        ctx.getMetadataRepo = [r = h.repo] { return r; };
+        RepairService::Config cfg;
+        cfg.enable = true;
+        cfg.dataDir = h.tmp.path();
+        return std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+    }
+};
+} // namespace
+
+// `yams repair --chunks` deletes object files nothing references. A manifest is a reference even
+// when refs.db has drifted to zero for one of its chunks; deleting it would lose the document.
+TEST_CASE("Chunk cleanup keeps chunks a manifest references despite reference-count drift",
+          "[daemon][repair][chunks][catch2]") {
+    ChunkStoreHarness c;
+    const auto drifted = c.driftOneChunk();
+    REQUIRE(std::filesystem::exists(c.objectPath(drifted)));
+
+    const auto result = c.service()->testing_cleanOrphanedChunks(/*dryRun=*/false);
+    INFO(result.message);
+    CHECK_FALSE(std::filesystem::exists(c.planted));
+    CHECK(std::filesystem::exists(c.objectPath(drifted)));
+    auto back = c.store->retrieveBytes(c.documentHash);
+    REQUIRE(back);
+    CHECK(back.value() == c.payload);
+}
+
+// If any manifest cannot be read, the set of referenced chunks is unknown: delete nothing.
+TEST_CASE("Chunk cleanup deletes nothing when a manifest cannot be parsed",
+          "[daemon][repair][chunks][catch2]") {
+    ChunkStoreHarness c;
+    (void)c.driftOneChunk();
+    const auto corrupt =
+        c.h.tmp.path() / "storage" / "manifests" / "00" / (std::string(62, '0') + ".manifest");
+    std::filesystem::create_directories(corrupt.parent_path());
+    std::ofstream(corrupt, std::ios::binary) << "not a manifest";
+
+    const auto result = c.service()->testing_cleanOrphanedChunks(/*dryRun=*/false);
+    INFO(result.message);
+    CHECK(result.succeeded == 0);
+    CHECK(result.failed >= 1);
+    CHECK(std::filesystem::exists(c.planted));
+}
+
+// With a WriteCoordinator the orphan node deletes are batched and applied after the scan, so the
+// scan must not rewind its paging offset as if they had already happened: a full page of
+// orphans would then be re-read forever, appending the same deletes without bound.
+TEST_CASE("KG orphan cleanup finishes when more than a page of nodes is orphaned",
+          "[daemon][repair][kg][catch2]") {
+    ScanHarness h(0);
+    auto kgRes = yams::metadata::makeSqliteKnowledgeGraphStore(*h.pool);
+    REQUIRE(kgRes);
+    std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg = std::move(kgRes.value());
+    constexpr int kOrphans = 1200; // more than two 500-node scan pages
+    for (int i = 0; i < kOrphans; ++i) {
+        yams::metadata::KGNode node;
+        node.nodeKey = "doc:orphan-" + std::to_string(i);
+        node.type = "document";
+        REQUIRE(kg->upsertNode(node));
+    }
+
+    boost::asio::io_context io;
+    yams::daemon::WriteCoordinator::Config config;
+    config.maxBatchSize = 64;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    config.channelCapacity = 64;
+    yams::daemon::WriteCoordinator coordinator(io, kg, {}, config);
+    coordinator.start();
+    std::thread writer([&io] { io.run(); });
+
+    RepairServiceContext ctx;
+    ctx.getMetadataRepo = [r = h.repo] { return r; };
+    ctx.getKgStore = [kg] { return kg; };
+    ctx.getWriteCoordinator = [&coordinator] { return &coordinator; };
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = h.tmp.path();
+    RepairService service(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+
+    auto run =
+        std::async(std::launch::async, [&] { return service.testing_cleanOrphanedKgEntries(); });
+    const bool finished = run.wait_for(std::chrono::seconds(60)) == std::future_status::ready;
+    CHECK(finished);
+    if (finished) {
+        const auto [scanned, deleted, errors] = run.get();
+        CHECK(deleted == static_cast<std::uint64_t>(kOrphans));
+        CHECK(errors == 0);
+        CHECK(scanned < static_cast<std::uint64_t>(3 * kOrphans));
+        auto remaining = kg->findNodesByType("document", 2000, 0);
+        REQUIRE(remaining);
+        CHECK(remaining.value().empty());
+    }
+    coordinator.shutdown();
+    io.stop();
+    writer.join();
+    if (!finished)
+        std::_Exit(1); // the scan is still looping on another thread; do not hang the suite
 }

@@ -18,6 +18,7 @@
 #include <queue>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
@@ -349,6 +350,19 @@ public:
     static std::string extractorFingerprint(
         const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors);
 #if defined(YAMS_TESTING)
+    /// Run the orphaned knowledge-graph cleanup; returns {nodesScanned, nodesDeleted, errors}.
+    std::tuple<std::uint64_t, std::uint64_t, std::uint64_t> testing_cleanOrphanedKgEntries() {
+        const auto stats = cleanOrphanedKgEntries(false, false, {});
+        return {stats.nodesScanned, stats.nodesDeleted, stats.errors};
+    }
+    /// Run the orphaned-chunk cleanup (`yams repair --chunks`).
+    RepairOperationResult testing_cleanOrphanedChunks(bool dryRun) {
+        return cleanOrphanedChunks(dryRun, false, {});
+    }
+    /// Run the orphaned-metadata cleanup (`yams repair --orphans`).
+    RepairOperationResult testing_cleanOrphanedMetadata(bool dryRun) {
+        return cleanOrphanedMetadata(dryRun, false, false, {});
+    }
     /// Run the MIME repair operation (not a dry run).
     RepairOperationResult testing_repairMimeTypes() { return repairMimeTypes(false, false, {}); }
     /// Count documents as handled, as the drain loop does.
