@@ -128,19 +128,6 @@ template <typename T> T extractColumn(const Statement& stmt, int column) {
     }
 }
 
-/**
- * @brief Extract columns into entity using fold expression with index_sequence
- */
-template <HasEntityTraits Entity, std::size_t... Is>
-void extractColumnsImpl(const Statement& stmt, Entity& e, std::index_sequence<Is...>) {
-    const auto& cols = EntityTraits<Entity>::columns;
-    // Fold expression: extract each column into corresponding member
-    ((e.*(std::get<Is>(cols).member) =
-          extractColumn<std::remove_reference_t<decltype(e.*(std::get<Is>(cols).member))>>(stmt,
-                                                                                           Is)),
-     ...);
-}
-
 } // namespace detail
 
 // ============================================================================

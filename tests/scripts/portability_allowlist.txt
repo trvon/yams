@@ -4,16 +4,16 @@
 #   portability/path-cstr   sqlite3_open* filename via bare .c_str() (use .string().c_str())
 #   portability/env-read    raw getenv read outside the config boundary
 include/yams/cli/cli_perf_trace.h:13:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:443:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:454:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:464:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:616:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:429:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:440:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:450:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:602:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:612:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:614:portability/env-read # reviewed raw environment read
 include/yams/cli/daemon_helpers.h:626:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:628:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:640:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:731:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:934:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:939:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:717:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:920:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:925:portability/env-read # reviewed raw environment read
 include/yams/cli/ui_helpers.hpp:127:portability/env-read # reviewed raw environment read
 include/yams/cli/ui_helpers.hpp:130:portability/env-read # reviewed raw environment read
 include/yams/cli/ui_helpers.hpp:390:portability/env-read # reviewed raw environment read
@@ -81,9 +81,7 @@ src/cli/commands/doctor/plugin_trust.cpp:29:portability/env-read # reviewed raw 
 src/cli/commands/repair_command.cpp:284:portability/env-read # reviewed raw environment read
 src/cli/commands/search_command.cpp:1072:portability/env-read # reviewed raw environment read
 src/cli/commands/search_command.cpp:1080:portability/env-read # reviewed raw environment read
-src/cli/commands/session_command.cpp:39:portability/env-read # reviewed raw environment read
-src/cli/commands/session_command.cpp:40:portability/env-read # reviewed raw environment read
-src/cli/commands/session_command.cpp:581:portability/env-read # reviewed raw environment read
+src/cli/commands/session_command.cpp:525:portability/env-read # reviewed raw environment read
 src/cli/commands/update_command.cpp:510:portability/env-read # reviewed raw environment read
 src/cli/commands/watch_command.cpp:91:portability/env-read # reviewed raw environment read
 src/cli/doctor_checks.cpp:111:portability/env-read # reviewed raw environment read

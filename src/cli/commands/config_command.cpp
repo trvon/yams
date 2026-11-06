@@ -288,31 +288,6 @@ private:
     bool clearS3FallbackLocalDataDir_ = false;
     int s3R2TtlSeconds_ = 0;
 
-    // Template helper for setting single config value with validation
-    template <typename Validator = std::nullptr_t>
-    Result<void> setConfigValue(const std::string& key, const std::string& value,
-                                Validator validator = nullptr) {
-        try {
-            if constexpr (!std::is_same_v<Validator, std::nullptr_t>) {
-                auto validationResult = validator(key, value);
-                if (!validationResult) {
-                    return validationResult;
-                }
-            }
-
-            auto result = writeConfigValue(key, value);
-            if (!result)
-                return result;
-
-            std::cout << ui::status_ok("Updated " + key + " = " + value + " in " +
-                                       getConfigPath().string())
-                      << "\n";
-            return Result<void>();
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
-        }
-    }
-
     // Template helper for setting multiple config key-value pairs from a map/vector
     Result<void>
     setMultipleConfigs(const std::vector<std::pair<std::string, std::string>>& configs) {

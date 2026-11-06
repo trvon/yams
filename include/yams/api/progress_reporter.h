@@ -48,7 +48,6 @@ public:
     [[nodiscard]] Progress getProgress() const;
     [[nodiscard]] uint64_t getBytesProcessed() const;
     [[nodiscard]] uint64_t getTotalBytes() const;
-    [[nodiscard]] double getPercentage() const;
     [[nodiscard]] bool isComplete() const;
 
     // Cancellation support
@@ -59,9 +58,6 @@ public:
     // Reset progress
     void reset();
     void reset(uint64_t totalBytes);
-
-    // Get elapsed time
-    [[nodiscard]] std::chrono::milliseconds getElapsedTime() const;
 
     // Create sub-reporter for a portion of work
     std::unique_ptr<ProgressReporter> createSubReporter(uint64_t subTotalBytes);

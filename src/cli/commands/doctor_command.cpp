@@ -396,9 +396,6 @@ private:
 
     using R2KeychainStatus = doctor::R2ConfigStatus;
 
-    static R2KeychainStatus evaluateR2KeychainStatus() {
-        return doctor::DoctorContext::evaluateR2Config();
-    }
     // Run a blocking function with a console spinner and timeout.
     // Returns optional result; nullopt indicates timeout.
     std::optional<Result<void>> runWithSpinner(const std::string& label,
@@ -429,14 +426,6 @@ private:
         }
     }
 
-    static void setEnvIfUnset(const char* key, int value) {
-        if (!yams::config::getenv_optional(key)) {
-            const auto rendered = std::to_string(value);
-            if (!yams::config::set_environment(key, rendered.c_str())) {
-                spdlog::debug("Unable to set doctor environment default for {}", key);
-            }
-        }
-    }
     void runRepair() {
         if (fixAll_) {
             fixEmbeddings_ = true;

@@ -782,20 +782,6 @@ resolve_default_pid_path(const std::optional<std::filesystem::path>& runtimeOver
 #endif
 }
 
-std::filesystem::path get_state_home_for_daemon_log() {
-    auto stateDir = get_state_dir();
-    if (stateDir.empty()) {
-        return {};
-    }
-#ifdef _WIN32
-    // get_state_dir() returns %LOCALAPPDATA%\yams\state. Return
-    // %LOCALAPPDATA% so callers can append /yams without doubling it.
-    return stateDir.parent_path().parent_path();
-#else
-    return stateDir.parent_path();
-#endif
-}
-
 } // namespace
 
 std::filesystem::path get_daemon_runtime_dir() {

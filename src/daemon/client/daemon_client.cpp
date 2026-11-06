@@ -2361,12 +2361,6 @@ void CircuitBreaker::transitionTo(State newState) {
     consecutiveSuccesses_ = 0;
 }
 
-bool CircuitBreaker::shouldTransitionToHalfOpen() const {
-    auto now = std::chrono::steady_clock::now();
-    auto timeSinceOpen = std::chrono::duration_cast<std::chrono::seconds>(now - openedAt_);
-    return timeSinceOpen >= config_.openTimeout;
-}
-
 void DaemonClient::setStreamingEnabled(bool enabled) {
     if (pImpl) {
         pImpl->config_.enableChunkedResponses = enabled;

@@ -32,53 +32,6 @@ enum class ContentStoreError {
     Unknown
 };
 
-// Convert content store error to string
-constexpr const char* contentStoreErrorToString(ContentStoreError error) {
-    switch (error) {
-        case ContentStoreError::None:
-            return "No error";
-        case ContentStoreError::FileNotFound:
-            return "File not found";
-        case ContentStoreError::PermissionDenied:
-            return "Permission denied";
-        case ContentStoreError::StorageFull:
-            return "Storage full";
-        case ContentStoreError::CorruptedContent:
-            return "Corrupted content";
-        case ContentStoreError::HashMismatch:
-            return "Hash mismatch";
-        case ContentStoreError::InvalidHash:
-            return "Invalid hash";
-        case ContentStoreError::InvalidMetadata:
-            return "Invalid metadata";
-        case ContentStoreError::NetworkError:
-            return "Network error";
-        case ContentStoreError::OperationCancelled:
-            return "Operation cancelled";
-        case ContentStoreError::OperationInProgress:
-            return "Operation in progress";
-        case ContentStoreError::TooManyOperations:
-            return "Too many concurrent operations";
-        case ContentStoreError::CompressionError:
-            return "Compression error";
-        case ContentStoreError::DecompressionError:
-            return "Decompression error";
-        case ContentStoreError::SerializationError:
-            return "Serialization error";
-        case ContentStoreError::DeserializationError:
-            return "Deserialization error";
-        case ContentStoreError::IntegrityCheckFailed:
-            return "Integrity check failed";
-        case ContentStoreError::UnsupportedOperation:
-            return "Unsupported operation";
-        case ContentStoreError::InvalidConfiguration:
-            return "Invalid configuration";
-        case ContentStoreError::Unknown:
-            return "Unknown error";
-    }
-    return "Unknown error";
-}
-
 // Content store exception
 class ContentStoreException : public std::runtime_error {
 public:

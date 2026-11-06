@@ -493,7 +493,6 @@ public:
 
 private:
     void transitionTo(State newState);
-    bool shouldTransitionToHalfOpen() const;
 
     State state_ = State::Closed;
     Config config_;

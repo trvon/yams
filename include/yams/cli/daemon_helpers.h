@@ -289,20 +289,6 @@ public:
 
     const Config& config() const { return cfg_; }
 
-    // Mark a specific client as bad so that it reconnects on next use.
-    void mark_bad(size_t client_id) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        for (auto& e : entries_) {
-            if (e->id == client_id) {
-                if (e->client) {
-                    e->client->disconnect();
-                }
-                e->last_used = std::chrono::steady_clock::now();
-                break;
-            }
-        }
-    }
-
 private:
     static constexpr size_t npos = static_cast<size_t>(-1);
 

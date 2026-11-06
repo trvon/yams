@@ -374,10 +374,4 @@ BinaryContentHandler::ProcessingStats BinaryContentHandler::getStats() const noe
                            .totalBytesProcessed = totalBytesProcessed_.load()};
 }
 
-std::unordered_set<std::string> getBinaryFileExtensions() {
-    return {".exe",    ".dll", ".so",  ".dylib", ".bin", ".dat", ".db",
-            ".sqlite", ".zip", ".tar", ".gz",    ".bz2", ".xz",  ".7z",
-            ".rar",    ".iso", ".img", ".dmg",   ".pkg", ".deb", ".rpm"};
-}
-
 } // namespace yams::content

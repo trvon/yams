@@ -95,20 +95,6 @@ public:
         return state_ == State::Connected || state_ == State::WritingHeader ||
                state_ == State::StreamingChunks;
     }
-    void validate_operation(Operation op) const {
-        switch (op) {
-            case Operation::Read:
-                if (!can_read())
-                    throw std::runtime_error("Invalid read in state");
-                break;
-            case Operation::Write:
-                if (!can_write())
-                    throw std::runtime_error("Invalid write in state");
-                break;
-            default:
-                break;
-        }
-    }
 
     // Debugging helper
     static const char* to_string(State s) noexcept;

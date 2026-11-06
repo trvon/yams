@@ -497,14 +497,4 @@ bool isMetadataComplete(const ExtendedVideoMetadata& metadata) {
            !metadata.container.empty();
 }
 
-std::vector<std::pair<uint32_t, uint32_t>> getCommonResolutions() {
-    return {
-        {720, 480},   // SD
-        {1280, 720},  // 720p
-        {1920, 1080}, // 1080p
-        {2560, 1440}, // 1440p
-        {3840, 2160}  // 4K
-    };
-}
-
 } // namespace yams::content

@@ -123,13 +123,6 @@ uint64_t ProgressReporter::getTotalBytes() const {
     return pImpl->totalBytes.load();
 }
 
-double ProgressReporter::getPercentage() const {
-    uint64_t total = pImpl->totalBytes.load();
-    if (total == 0)
-        return 0.0;
-    return static_cast<double>(pImpl->bytesProcessed.load()) / total * 100.0;
-}
-
 bool ProgressReporter::isComplete() const {
     uint64_t total = pImpl->totalBytes.load();
     return total > 0 && pImpl->bytesProcessed.load() >= total;
@@ -172,11 +165,6 @@ void ProgressReporter::reset(uint64_t totalBytes) {
         pImpl->currentOperation.clear();
     }
     pImpl->notifyProgress();
-}
-
-std::chrono::milliseconds ProgressReporter::getElapsedTime() const {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
-                                                                 pImpl->startTime);
 }
 
 std::unique_ptr<ProgressReporter> ProgressReporter::createSubReporter(uint64_t subTotalBytes) {

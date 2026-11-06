@@ -986,15 +986,6 @@ inline std::string severity_text(Severity sev, std::string_view text, bool with_
     return colorize(result, color);
 }
 
-// Classify a numeric value against thresholds (low = good, high = bad)
-inline Severity classify_threshold(double value, double warn_threshold, double bad_threshold) {
-    if (value >= bad_threshold)
-        return Severity::Bad;
-    if (value >= warn_threshold)
-        return Severity::Warn;
-    return Severity::Good;
-}
-
 // ============================================================================
 // Progress bar with stats helper
 // ============================================================================

@@ -35,62 +35,6 @@ struct PinItem {
 
 static std::mutex
     sessionMutex_; // Global mutex for JSON access in multi-threaded contexts (e.g., MCP)
-static std::filesystem::path resolveStateFile() {
-    const char* xdgState = std::getenv("XDG_STATE_HOME");
-    const char* home = std::getenv("HOME");
-    std::filesystem::path base;
-    if (xdgState && *xdgState) {
-        base = std::filesystem::path(xdgState) / "yams";
-    } else if (home && *home) {
-        base = std::filesystem::path(home) / ".local" / "state" / "yams";
-    } else {
-        base = std::filesystem::current_path() / ".yams_state";
-    }
-    std::error_code ec;
-    yams::common::ensureDirectories(base);
-    (void)ec;
-    return base / "pinned.json";
-}
-
-static std::vector<PinItem> loadPins() {
-    std::lock_guard<std::mutex> lock(sessionMutex_);
-    std::vector<PinItem> out;
-    auto f = resolveStateFile();
-    if (!std::filesystem::exists(f))
-        return out;
-    std::ifstream in(f);
-    if (!in.good())
-        return out;
-    try {
-        json j;
-        in >> j;
-        if (j.is_array()) {
-            for (const auto& e : j) {
-                PinItem it;
-                it.path = e.value("path", "");
-                if (e.contains("tags"))
-                    it.tags = e.at("tags").get<std::vector<std::string>>();
-                if (e.contains("metadata"))
-                    it.metadata = e.at("metadata").get<std::map<std::string, std::string>>();
-                if (!it.path.empty())
-                    out.push_back(std::move(it));
-            }
-        }
-    } catch (...) {
-        // ignore parse errors
-    }
-    return out;
-}
-
-static void savePins(const std::vector<PinItem>& pins) {
-    std::lock_guard<std::mutex> lock(sessionMutex_);
-    json j = json::array();
-    for (const auto& p : pins) {
-        j.push_back({{"path", p.path}, {"tags", p.tags}, {"metadata", p.metadata}});
-    }
-    std::ofstream out(resolveStateFile());
-    out << j.dump(2) << std::endl;
-}
 
 class SessionCommand final : public ICommand {
 public:
