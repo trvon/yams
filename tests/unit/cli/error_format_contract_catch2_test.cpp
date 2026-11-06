@@ -33,9 +33,16 @@ TEST_CASE("Usage errors use one format and exit 2", "[cli][errors][contract]") {
     EmbeddedCorpus corpus("yams_error_format_");
 
     SECTION("missing required selector") {
+        // corpus.run puts `--data-dir <dir>` first; the hint must name `get`.
         const auto r = corpus.run({"get"});
         CHECK(r.rc == 2);
         checkFormat(r);
+        CHECK(r.err.find("`yams get --help`") != std::string::npos);
+    }
+    SECTION("the -F hint quotes the pattern for the shell") {
+        const auto r = corpus.run({"grep", "a\"(["});
+        CHECK(r.rc == 2);
+        CHECK(r.err.find("yams grep -F 'a\"(['") != std::string::npos);
     }
     SECTION("empty search query") {
         const auto r = corpus.run({"search", ""});

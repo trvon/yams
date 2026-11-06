@@ -820,9 +820,11 @@ int YamsCLI::run(int argc, char* argv[]) {
             return app_->exit(e);
         if (dynamic_cast<const CLI::RuntimeError*>(&e) != nullptr)
             return e.get_exit_code();
+        // The first registered command, skipping values of global options
+        // such as `--data-dir /tmp`.
         std::string command;
         for (int i = 1; i < argc; ++i) {
-            if (argv[i] != nullptr && argv[i][0] != '-') {
+            if (argv[i] != nullptr && CommandRegistry::isRegisteredTopLevelCommand(argv[i])) {
                 command = argv[i];
                 break;
             }

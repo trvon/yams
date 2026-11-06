@@ -748,8 +748,7 @@ public:
                     if (errMsg.find("regex") != std::string::npos ||
                         errMsg.find("Mismatched") != std::string::npos) {
                         if (cli_)
-                            cli_->setErrorHint("for literal text, retry with -F: yams grep -F \"" +
-                                               pattern_ + "\"");
+                            cli_->setErrorHint(literalRetryHint(pattern_));
                         return Error{ErrorCode::InvalidArgument, errMsg};
                     }
                     return gres.error();
@@ -800,6 +799,26 @@ private:
                pattern_.find("\\s") != std::string::npos ||
                pattern_.find("\\w") != std::string::npos ||
                (!pattern_.empty() && (pattern_.front() == '^' || pattern_.back() == '$'));
+    }
+
+    // "retry with -F" hint with the pattern single-quoted for a POSIX shell.
+    // A pattern with control bytes is left out rather than echoed raw.
+    static std::string literalRetryHint(const std::string& pattern) {
+        const bool printable = std::none_of(pattern.begin(), pattern.end(), [](char c) {
+            const auto u = static_cast<unsigned char>(c);
+            return u < 0x20 || u == 0x7f;
+        });
+        if (!printable)
+            return "for literal text, retry with -F";
+        std::string quoted = "'";
+        for (const char c : pattern) {
+            if (c == '\'')
+                quoted += "'\\''";
+            else
+                quoted += c;
+        }
+        quoted += "'";
+        return "for literal text, retry with -F: yams grep -F " + quoted;
     }
 
     // Helper to explain regex/literal mode without over-claiming that the user made a mistake.
