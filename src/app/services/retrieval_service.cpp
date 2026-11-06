@@ -532,14 +532,32 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
     if (name.empty())
         return Error{ErrorCode::InvalidArgument, "empty name"};
 
-    // 1) Try resolver (e.g., DocumentService::resolveNameToHash)
-    if (resolver) {
+    // 1) Resolver (DocumentService::resolveNameToHash). It falls back to
+    //    contains-path patterns and picks the newest of several matches, so its
+    //    answer counts only when that document's path or basename is exactly
+    //    `name`. Globs and loose names go through the stages below.
+    if (resolver && name.find_first_of("*?") == std::string::npos) {
         auto rh = resolver(name);
         if (rh) {
-            GetOptions greq_opts;
-            greq_opts.hash = rh.value();
-            greq_opts.metadataOnly = !includeContent;
-            return get(greq_opts, opts);
+            GetOptions meta_opts;
+            meta_opts.hash = rh.value();
+            meta_opts.metadataOnly = true;
+            auto meta = get(meta_opts, opts);
+            if (meta) {
+                const auto& path = meta.value().path;
+                const std::string suffix = "/" + name;
+                const bool exact =
+                    path == name || meta.value().name == name ||
+                    (path.size() > suffix.size() &&
+                     path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0);
+                if (exact) {
+                    if (!includeContent)
+                        return meta;
+                    GetOptions greq_opts;
+                    greq_opts.hash = rh.value();
+                    return get(greq_opts, opts);
+                }
+            }
         }
     }
 
@@ -692,6 +710,9 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
         lreq_opts.namePattern = pat;
         lreq_opts.limit = limit;
         lreq_opts.pathsOnly = false;
+        // Newest first by default; oldest first when asked, so the limit never
+        // drops the version the caller wants.
+        lreq_opts.reverse = oldest;
         auto lr = list(lreq_opts, opts);
         if (!lr)
             return {};

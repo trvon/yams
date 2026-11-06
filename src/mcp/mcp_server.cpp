@@ -359,113 +359,9 @@ void MCPServer::recordEarlyFeatureUse() {
 #if !defined(YAMS_WASI)
 boost::asio::awaitable<Result<MCPGetByNameResponse>>
 MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
-    // Path-first resolution: if explicit path provided or name includes a subpath,
-    // use document service to resolve exact path or suffix, then retrieve by hash.
-    if (!req.path.empty() ||
-        (req.name.find('/') != std::string::npos || req.name.find('\\') != std::string::npos)) {
-        auto docService = documentService_;
-        if (!docService) {
-            docService = app::services::makeDocumentService(appContext_);
-            if (docService) {
-                documentService_ = docService;
-            }
-        }
-        if (!docService) {
-            co_return Error{ErrorCode::NotInitialized, "Document service not available"};
-        }
-
-        const std::string wanted = !req.path.empty() ? req.path : req.name;
-        std::vector<app::services::DocumentEntry> matches;
-
-        auto tryList = [&](const std::string& pattern) {
-            app::services::ListDocumentsRequest lreq;
-            lreq.pattern = pattern;
-            lreq.limit = 10000;
-            lreq.pathsOnly = false;
-            auto lr = docService->list(lreq);
-            if (lr && !lr.value().documents.empty()) {
-                for (const auto& d : lr.value().documents)
-                    matches.push_back(d);
-            }
-            return !matches.empty();
-        };
-
-        // Exact path first
-        tryList(wanted);
-        // Suffix match if allowed and no exact match
-        if (matches.empty() && req.subpath) {
-            tryList(std::string("%/") + wanted);
-        }
-        // Contains anywhere as a last resort before returning NotFound
-        if (matches.empty() && !tryList(std::string("%") + wanted + "%")) {
-            // If a path-like query yields no results, fail explicitly instead of falling
-            // through. This makes the behavior more predictable for callers.
-            co_return Error{ErrorCode::NotFound, "document not found by path: " + wanted};
-        }
-
-        // Disambiguate
-        if (req.latest || req.oldest) {
-            std::sort(matches.begin(), matches.end(),
-                      [](const auto& a, const auto& b) { return a.indexed < b.indexed; });
-            const auto pick = req.latest ? matches.back() : matches.front();
-            // Retrieve content by hash via shared daemon client
-            if (auto ensure = ensureDaemonClient(); !ensure) {
-                co_return ensure.error();
-            }
-            yams::app::services::RetrievalOptions ropts;
-            ropts.socketPath = daemon_client_config_.socketPath;
-            yams::app::services::GetOptions greq;
-            greq.hash = pick.hash;
-            greq.metadataOnly = false;
-            auto grres = retrieval_svc_->get(greq, ropts);
-            if (!grres)
-                co_return grres.error();
-            auto gr = std::move(grres).value();
-            MCPGetByNameResponse out;
-            out.size = gr.size;
-            out.hash = std::move(gr.hash);
-            out.name = std::move(gr.name);
-            out.path = std::move(gr.path);
-            out.mimeType = std::move(gr.mimeType);
-            if (!gr.content.empty()) {
-                constexpr std::size_t MAX_BYTES = std::size_t{1} * 1024 * 1024;
-                out.content = gr.content.size() <= MAX_BYTES ? std::move(gr.content)
-                                                             : gr.content.substr(0, MAX_BYTES);
-            }
-            co_return out;
-        }
-
-        // If not choosing latest/oldest, prefer exact match by path equality
-        auto exactIt = std::find_if(matches.begin(), matches.end(),
-                                    [&](const auto& d) { return d.path == wanted; });
-        const auto chosen = (exactIt != matches.end()) ? *exactIt : matches.front();
-
-        // Retrieve content by hash via shared daemon client
-        if (auto ensure = ensureDaemonClient(); !ensure) {
-            co_return ensure.error();
-        }
-        yams::app::services::RetrievalOptions ropts;
-        ropts.socketPath = daemon_client_config_.socketPath;
-        yams::app::services::GetOptions greq;
-        greq.hash = chosen.hash;
-        greq.metadataOnly = false;
-        auto grres = retrieval_svc_->get(greq, ropts);
-        if (!grres)
-            co_return grres.error();
-        auto gr = std::move(grres).value();
-        MCPGetByNameResponse out;
-        out.size = gr.size;
-        out.hash = std::move(gr.hash);
-        out.name = std::move(gr.name);
-        out.path = std::move(gr.path);
-        out.mimeType = std::move(gr.mimeType);
-        if (!gr.content.empty()) {
-            constexpr std::size_t MAX_BYTES = std::size_t{1} * 1024 * 1024;
-            out.content = gr.content.size() <= MAX_BYTES ? std::move(gr.content)
-                                                         : gr.content.substr(0, MAX_BYTES);
-        }
-        co_return out;
-    }
+    // Paths and names share one resolver (exact path, path suffix, basename,
+    // unique loose match); it never picks one of several matches on its own.
+    const std::string wanted = !req.path.empty() ? req.path : req.name;
 
     // Reuse shared daemon client to avoid per-request connection overhead
     auto clientRes = requireDaemonClient();
@@ -486,7 +382,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
         return Error{ErrorCode::NotInitialized, "Document service not available"};
     };
 
-    auto r = rsvc.getByNameSmart(req.name, req.oldest, true, /*useSession*/ false, std::string{},
+    auto r = rsvc.getByNameSmart(wanted, req.oldest, true, /*useSession*/ false, std::string{},
                                  ropts, resolver);
 
     // getByNameSmart is the only resolver: an unknown or ambiguous name is an

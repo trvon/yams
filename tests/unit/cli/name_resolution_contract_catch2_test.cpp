@@ -6,6 +6,7 @@
 #include <yams/cli/yams_cli.h>
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -132,4 +133,40 @@ TEST_CASE("A loose name that matches several documents is ambiguous",
         CHECK(uniqueRc == 0);
         CHECK(uniqueOut == "gamma body\n");
     }
+}
+
+TEST_CASE("update --name with a loose name or glob refuses several matches",
+          "[cli][name-resolution][contract]") {
+    EmbeddedCorpus corpus;
+    corpus.add("report-alpha.txt", "alpha\n");
+    corpus.add("report-beta.txt", "beta\n");
+
+    for (const std::string name : {"report", "report-*.txt"}) {
+        DYNAMIC_SECTION("update --name " << name) {
+            const auto [rc, out] = runCli(
+                {"yams", "--data-dir", corpus.data, "update", "--name", name, "--metadata", "k=v"});
+            INFO(out);
+            CHECK(rc != 0);
+            CHECK(out.find("updated successfully") == std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("A relative path resolves by suffix of the stored path",
+          "[cli][name-resolution][contract]") {
+    EmbeddedCorpus corpus;
+    const auto dir = corpus.root / "tree" / "sub";
+    std::filesystem::create_directories(dir);
+    {
+        std::ofstream file(dir / "leaf.txt");
+        file << "leaf body\n";
+    }
+    const auto [added, addOut] = runCli({"yams", "--data-dir", corpus.data, "add",
+                                         (dir / "leaf.txt").string(), "--no-embeddings", "--sync"});
+    INFO(addOut);
+    REQUIRE(added == 0);
+
+    const auto [rc, out] = runCli({"yams", "--data-dir", corpus.data, "cat", "sub/leaf.txt"});
+    CHECK(rc == 0);
+    CHECK(out == "leaf body\n");
 }
