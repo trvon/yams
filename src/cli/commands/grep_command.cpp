@@ -746,8 +746,10 @@ public:
                     std::string errMsg = gres.error().message;
                     if (errMsg.find("regex") != std::string::npos ||
                         errMsg.find("Mismatched") != std::string::npos) {
-                        std::cerr << "\nError: " << errMsg << "\n";
-                        printLiteralTextHint();
+                        if (cli_)
+                            cli_->setErrorHint("for literal text, retry with -F: yams grep -F \"" +
+                                               pattern_ + "\"");
+                        return Error{ErrorCode::InvalidArgument, errMsg};
                     }
                     return gres.error();
                 }

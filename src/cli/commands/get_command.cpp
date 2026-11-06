@@ -17,6 +17,7 @@
 #include <yams/cli/time_filters.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/ui_helpers.hpp>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compressor_interface.h>
@@ -110,10 +111,8 @@ public:
 
         cmd->callback([this]() {
             auto result = execute();
-            if (!result) {
-                spdlog::error("Command failed: {}", result.error().message);
-                throw CLI::RuntimeError(1);
-            }
+            if (!result)
+                failCommand(result.error());
         });
     }
 
