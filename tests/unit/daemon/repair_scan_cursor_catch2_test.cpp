@@ -149,8 +149,12 @@ struct ScanHarness {
         // first-run retry remove it.
         // Binary, as the service writes it: text mode turns \n into \r\n on Windows, which reads
         // back as a changed extractor set.
-        std::ofstream(tmp.path() / "repair-extractor-set", std::ios::binary)
-            << RepairService::extractorFingerprint({});
+        {
+            std::ofstream marker(tmp.path() / "repair-extractor-set", std::ios::binary);
+            REQUIRE(marker.is_open());
+            marker << RepairService::extractorFingerprint({});
+            REQUIRE(marker.good());
+        }
         service = std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
     }
     ~ScanHarness() {
