@@ -18,6 +18,7 @@
 
 #include <spdlog/spdlog.h>
 #include <yams/core/assert.hpp>
+#include <yams/core/thread_name.h>
 
 #include <algorithm>
 #include <chrono>
@@ -208,6 +209,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
     try {
         for (std::size_t i = 0; i < workerCount; ++i) {
             workers_.emplace_back([this, i, jobSlots]() {
+                yams::setCurrentThreadName("yams-work-" + std::to_string(i));
                 tlsWorkerJobSlot = &jobSlots->slots[i];
                 {
                     std::lock_guard<std::mutex> stateLock(workerStateMutex_);

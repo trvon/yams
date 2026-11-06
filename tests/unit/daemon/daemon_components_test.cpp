@@ -689,3 +689,23 @@ TEST_CASE("WorkCoordinator status reads are safe while it stops", "[daemon][work
     CHECK_FALSE(coordinator.isRunning());
     CHECK(coordinator.getWorkerCount() == 0);
 }
+
+#if defined(__linux__)
+// Every daemon thread was named "yams-daemon": YAMS_SET_THREAD_NAME only reached Tracy, and the
+// pools never named their threads, so top -H and perf could not tell 57 threads apart.
+TEST_CASE("WorkCoordinator names its worker threads", "[daemon][work-coordinator]") {
+    WorkCoordinator coordinator;
+    coordinator.start(2);
+    std::size_t named = 0;
+    for (const auto& task : std::filesystem::directory_iterator("/proc/self/task")) {
+        std::ifstream comm(task.path() / "comm");
+        std::string name;
+        std::getline(comm, name);
+        if (name.starts_with("yams-work-"))
+            ++named;
+    }
+    coordinator.stop();
+    coordinator.join();
+    CHECK(named == 2);
+}
+#endif

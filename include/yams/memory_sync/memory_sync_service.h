@@ -22,6 +22,7 @@
 #include <vector>
 
 // pi-lens-ignore: fatal error
+#include <yams/core/thread_name.h>
 #include <yams/core/types.h>
 #include <yams/memory_sync/lifecycle_drain.h>
 #include <yams/memory_sync/memory_sync.h>
@@ -301,7 +302,10 @@ public:
         namespaceCleaned_.store(false, std::memory_order_release);
         workerRunning_.store(true, std::memory_order_release);
         try {
-            worker_ = std::thread([this] { workerLoop(); });
+            worker_ = std::thread([this] {
+                yams::setCurrentThreadName("yams-memory-sync");
+                workerLoop();
+            });
         } catch (const std::exception& e) {
             workerRunning_.store(false, std::memory_order_release);
             return Error{ErrorCode::InternalError, e.what()};

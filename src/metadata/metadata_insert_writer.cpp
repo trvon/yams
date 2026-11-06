@@ -1,3 +1,4 @@
+#include <yams/core/thread_name.h>
 #include <yams/metadata/metadata_insert_writer.h>
 
 #include <spdlog/spdlog.h>
@@ -43,7 +44,10 @@ MetadataInsertWriter::MetadataInsertWriter(std::shared_ptr<MetadataRepository> r
     if (options_.maxBatchCount == 0) {
         options_.maxBatchCount = 1;
     }
-    worker_ = std::thread([this] { run(); });
+    worker_ = std::thread([this] {
+        yams::setCurrentThreadName("yams-meta-writer");
+        run();
+    });
 }
 
 MetadataInsertWriter::~MetadataInsertWriter() {

@@ -8,6 +8,8 @@
  * automatically disabled when TRACY_ENABLE is not defined.
  */
 
+#include <yams/core/thread_name.h>
+
 #ifdef TRACY_ENABLE
 #include <tracy/Tracy.hpp>
 
@@ -64,8 +66,12 @@ template <typename T> constexpr auto plotValue(T v) {
 #define YAMS_FRAME_MARK_START(name) FrameMarkStart(name)
 #define YAMS_FRAME_MARK_END(name) FrameMarkEnd(name)
 
-// Thread naming
-#define YAMS_SET_THREAD_NAME(name) tracy::SetThreadName(name)
+// Thread naming: the OS name (top -H, perf, gdb) and Tracy's.
+#define YAMS_SET_THREAD_NAME(name)                                                                 \
+    do {                                                                                           \
+        ::yams::setCurrentThreadName(name);                                                        \
+        tracy::SetThreadName(name);                                                                \
+    } while (0)
 
 // Memory tracking
 #define YAMS_ALLOC(ptr, size) TracyAlloc(ptr, size)
@@ -124,8 +130,8 @@ template <typename T> constexpr auto plotValue(T v) {
 #define YAMS_FRAME_MARK_START(name)
 #define YAMS_FRAME_MARK_END(name)
 
-// Thread naming
-#define YAMS_SET_THREAD_NAME(name)
+// Thread naming: the OS name still matters without Tracy (top -H, perf, gdb).
+#define YAMS_SET_THREAD_NAME(name) ::yams::setCurrentThreadName(name)
 
 #define YAMS_ALLOC(ptr, size)
 #define YAMS_FREE(ptr)

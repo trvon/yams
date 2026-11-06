@@ -22,6 +22,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/compression/compressor_interface.h>
 #include <yams/core/atomic_utils.h>
+#include <yams/core/thread_name.h>
 
 namespace {
 
@@ -333,6 +334,7 @@ struct WALManager::Impl {
     }
 
     void backgroundSync() {
+        yams::setCurrentThreadName("yams-wal-sync");
         while (running) {
             auto lockStart = std::chrono::steady_clock::now();
             std::unique_lock lock(stateMutex);

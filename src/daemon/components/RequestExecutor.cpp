@@ -2,6 +2,8 @@
 // Copyright (c) 2024-2026 YAMS Project Contributors
 
 #include "yams/daemon/components/RequestExecutor.h"
+#include <yams/core/thread_name.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 #include <spdlog/spdlog.h>
 
@@ -41,16 +43,7 @@ RequestExecutor::~RequestExecutor() {
 }
 
 std::size_t RequestExecutor::defaultThreadCount() {
-    if (const char* env = std::getenv("YAMS_REQUEST_THREADS")) {
-        try {
-            auto v = std::stoul(env);
-            if (v >= 1 && v <= 64)
-                return v;
-        } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
-        }
-    }
-    return std::max<std::size_t>(4, std::thread::hardware_concurrency() / 2);
+    return TuneAdvisor::requestExecutorThreads();
 }
 
 void RequestExecutor::start(std::optional<std::size_t> numThreads) {
@@ -64,6 +57,7 @@ void RequestExecutor::start(std::optional<std::size_t> numThreads) {
 
     for (std::size_t i = 0; i < count; ++i) {
         workers_.emplace_back([this, i]() {
+            yams::setCurrentThreadName("yams-req-" + std::to_string(i));
             activeWorkers_.fetch_add(1, std::memory_order_release);
             for (;;) {
                 try {

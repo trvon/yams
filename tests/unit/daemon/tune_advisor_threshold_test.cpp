@@ -1066,3 +1066,31 @@ TEST_CASE("Embed job channel capacity is bounded by the post-ingest queue",
     TuneAdvisor::setPostIngestQueueMax(10);
     CHECK(TuneAdvisor::embedJobChannelCapacity() == 256);
 }
+
+// RequestExecutor and the search runtime pool sized themselves from hardware_concurrency()
+// directly. They now come from TuneAdvisor, with the same defaults, so the tuning model (and
+// tests) control every daemon pool.
+TEST_CASE("Request and search pool sizes come from TuneAdvisor",
+          "[daemon][tune][advisor][catch2]") {
+    struct Restore {
+        unsigned hw{TuneAdvisor::hardwareConcurrency()};
+        ~Restore() {
+            TuneAdvisor::setHardwareConcurrencyForTests(hw);
+            TuneAdvisor::setRequestExecutorThreads(0);
+            TuneAdvisor::setSearchRuntimeThreads(0);
+        }
+    } restore;
+    yams::test::ScopedEnvVar requestThreads{"YAMS_REQUEST_THREADS", std::nullopt};
+
+    TuneAdvisor::setHardwareConcurrencyForTests(32);
+    CHECK(TuneAdvisor::requestExecutorThreads() == 16);
+    CHECK(TuneAdvisor::searchRuntimeThreads() == 8);
+    TuneAdvisor::setHardwareConcurrencyForTests(4);
+    CHECK(TuneAdvisor::requestExecutorThreads() == 4);
+    CHECK(TuneAdvisor::searchRuntimeThreads() == 2);
+
+    TuneAdvisor::setRequestExecutorThreads(6);
+    TuneAdvisor::setSearchRuntimeThreads(3);
+    CHECK(TuneAdvisor::requestExecutorThreads() == 6);
+    CHECK(TuneAdvisor::searchRuntimeThreads() == 3);
+}
