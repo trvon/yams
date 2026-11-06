@@ -72,7 +72,9 @@ struct DocumentFixture {
         auto pid = std::to_string(::getpid());
         auto timestamp =
             std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-        testDir_ = std::filesystem::temp_directory_path() /
+        // Canonical: macOS temp is a /var -> /private/var symlink and Windows temp can be an 8.3
+        // short name; the code under test reports canonical paths.
+        testDir_ = std::filesystem::weakly_canonical(std::filesystem::temp_directory_path()) /
                    ("document_service_test_" + pid + "_" + timestamp);
 
         std::error_code ec;
@@ -507,7 +509,7 @@ TEST_CASE("DocumentService keeps identical content paths independently addressab
         auto aliases = fixture.documentService_->list(query);
         REQUIRE(aliases);
         REQUIRE(aliases.value().documents.size() == 1);
-        CHECK(aliases.value().documents.front().path == alias.string());
+        CHECK(aliases.value().documents.front().path == alias.generic_string());
         CHECK(aliases.value().documents.front().hash == fixture.testHash1_);
         CHECK(aliases.value().documents.front().metadata.at("worktree") == "other-worktree");
         query.pattern = original.string();
@@ -540,7 +542,7 @@ TEST_CASE("DocumentService keeps identical content paths independently addressab
         auto aliases = fixture.documentService_->list(query);
         REQUIRE(aliases);
         REQUIRE(aliases.value().documents.size() == 1);
-        CHECK(aliases.value().documents.front().path == alias.string());
+        CHECK(aliases.value().documents.front().path == alias.generic_string());
 
         // A retired canonical path must not fall back to its shared content row
         // and delete the remaining alias on a second attempt.
@@ -573,7 +575,7 @@ TEST_CASE("DocumentService keeps identical content paths independently addressab
         auto remaining = fixture.documentService_->list(query);
         REQUIRE(remaining);
         REQUIRE(remaining.value().documents.size() == 1);
-        CHECK(remaining.value().documents.front().path == original.string());
+        CHECK(remaining.value().documents.front().path == original.generic_string());
     }
 
     SECTION("An explicit hash still stages and deletes corpus-wide metadata with keepRefs") {
@@ -661,9 +663,9 @@ TEST_CASE("DocumentService graph versions remain navigable after content reversi
     query.maxDepth = 2;
     auto response = graph->query(query);
     REQUIRE(response);
-    CHECK(response.value().originNode.node.nodeKey == "path:logical:" + path.string());
+    CHECK(response.value().originNode.node.nodeKey == "path:logical:" + path.generic_string());
     CHECK_FALSE(response.value().originNode.snapshotId.has_value());
-    CHECK(response.value().originNode.normalizedPath == path.string());
+    CHECK(response.value().originNode.normalizedPath == path.generic_string());
     std::set<std::string> visibleHashes;
     for (const auto& node : response.value().allConnectedNodes) {
         if (node.nodeMetadata.node.nodeKey.starts_with("blob:"))

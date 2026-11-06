@@ -183,8 +183,10 @@ private:
 
 struct GrepFixture {
     GrepFixture() {
-        tmpDir_ =
-            std::filesystem::temp_directory_path() / ("grep_test_" + std::to_string(::getpid()));
+        // Canonical: macOS temp is a /var -> /private/var symlink and Windows temp can be an 8.3
+        // short name; the code under test reports canonical paths.
+        tmpDir_ = std::filesystem::weakly_canonical(std::filesystem::temp_directory_path()) /
+                  ("grep_test_" + std::to_string(::getpid()));
         std::filesystem::create_directories(tmpDir_);
 
         db_ = std::make_unique<Database>();

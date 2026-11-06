@@ -12,7 +12,8 @@ using namespace yams::cli;
 
 namespace {
 struct TempRepo {
-    RepoPath root = std::filesystem::temp_directory_path() /
+    // Canonical: macOS temp is a /var -> /private/var symlink, and the CLI canonicalizes roots.
+    RepoPath root = std::filesystem::weakly_canonical(std::filesystem::temp_directory_path()) /
                     ("yams-cli-repo-" +
                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     TempRepo() {
