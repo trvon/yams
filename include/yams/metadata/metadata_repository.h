@@ -1068,6 +1068,12 @@ public:
     Result<std::vector<DocumentInfo>> getDocumentPathReferences(int64_t documentId);
     Result<std::optional<std::unordered_map<std::string, MetadataValue>>>
     getDocumentPathMetadata(const std::string& path, int64_t documentId);
+    /// Apply metadata changes to every live location of a document. A location's metadata is
+    /// authoritative for path-aware tag and metadata filters, so updates written only to the
+    /// metadata table stay invisible there. A value sets the key; nullopt removes it.
+    Result<void> applyDocumentPathMetadata(
+        int64_t documentId,
+        const std::vector<std::pair<std::string, std::optional<std::string>>>& changes);
 
     std::shared_ptr<KnowledgeGraphStore> getKnowledgeGraphStore() const {
         return std::atomic_load_explicit(&kgStore_, std::memory_order_acquire);

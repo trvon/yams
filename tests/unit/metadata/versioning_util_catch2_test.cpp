@@ -558,3 +558,46 @@ TEST_CASE_METHOD(VersioningFixture, "Prune candidates match dotted metadata exte
     REQUIRE(candidates.size() == 1);
     CHECK(candidates.front().category == "logs");
 }
+
+// `yams update --tag` and the MCP update tool wrote tags only to the metadata table. With path
+// heads, a location's metadata_json is authoritative (never NULL), so tag and metadata filters
+// never saw them: list --tags returned nothing after a successful update.
+TEST_CASE_METHOD(VersioningFixture, "Updating a document's metadata reaches every live location",
+                 "[versioning][metadata][path-locations][update]") {
+    auto repo = makeRepo();
+    REQUIRE(repo->supportsDocumentPaths());
+    auto original = makeDocInfo("/repo/main/notes.txt", "update-location-hash", "notes.txt");
+    auto id = repo->insertDocument(original);
+    REQUIRE(id);
+    REQUIRE(repo->recordDocumentPath(original, id.value(), {{"owner", MetadataValue("main")}}));
+    auto alias = makeDocInfo("/repo/lane/notes.txt", original.sha256Hash, "notes.txt");
+    REQUIRE(repo->insertDocument(alias));
+    REQUIRE(repo->recordDocumentPath(alias, id.value(), {}));
+
+    const auto taggedPaths = [&](const std::string& tag) {
+        DocumentQueryOptions options;
+        options.usePathLocations = true;
+        options.currentPathsOnly = true;
+        options.tags = {tag};
+        auto documents = repo->queryDocuments(options);
+        REQUIRE(documents);
+        std::vector<std::string> paths;
+        for (const auto& doc : documents.value())
+            paths.push_back(doc.filePath);
+        std::sort(paths.begin(), paths.end());
+        return paths;
+    };
+    REQUIRE(taggedPaths("team-red").empty());
+
+    REQUIRE(repo->applyDocumentPathMetadata(
+        id.value(), {{"tag:team-red", std::string("team-red")}, {"owner", std::string("ops")}}));
+    CHECK(taggedPaths("team-red") == std::vector<std::string>{alias.filePath, original.filePath});
+    auto metadata = repo->getDocumentPathMetadata(original.filePath, id.value());
+    REQUIRE(metadata);
+    REQUIRE(metadata.value());
+    CHECK(metadata.value()->at("owner").asString() == "ops");
+    CHECK(metadata.value()->at("series_key").asString() == original.filePath); // untouched
+
+    REQUIRE(repo->applyDocumentPathMetadata(id.value(), {{"tag:team-red", std::nullopt}}));
+    CHECK(taggedPaths("team-red").empty());
+}

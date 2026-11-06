@@ -3127,6 +3127,30 @@ public:
             }
         }
 
+        // Path-aware tag and metadata filters read each location's own metadata, which is
+        // authoritative there; mirror the update onto every live location of the document.
+        {
+            std::vector<std::pair<std::string, std::optional<std::string>>> locationChanges;
+            for (const auto& [k, v] : req.keyValues)
+                locationChanges.emplace_back(k, v);
+            for (const auto& p : req.pairs) {
+                if (const auto pos = p.find('='); pos != std::string::npos)
+                    locationChanges.emplace_back(p.substr(0, pos), p.substr(pos + 1));
+            }
+            for (const auto& tag : req.addTags)
+                locationChanges.emplace_back("tag:" + tag, tag);
+            for (const auto& tag : req.removeTags)
+                locationChanges.emplace_back("tag:" + tag, std::nullopt);
+            if (!locationChanges.empty()) {
+                if (auto mirrored =
+                        ctx_.metadataRepo->applyDocumentPathMetadata(target.id, locationChanges);
+                    !mirrored) {
+                    errors.push_back("Failed to update location metadata: " +
+                                     mirrored.error().message);
+                }
+            }
+        }
+
         resp.success = (errors.empty() || !req.atomic);
         resp.updatesApplied = count;
         return resp;

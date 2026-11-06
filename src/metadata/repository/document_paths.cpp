@@ -230,4 +230,48 @@ MetadataRepository::getDocumentPathMetadata(const std::string& path, int64_t doc
     });
 }
 
+Result<void> MetadataRepository::applyDocumentPathMetadata(
+    int64_t documentId,
+    const std::vector<std::pair<std::string, std::optional<std::string>>>& changes) {
+    if (!hasDocumentPaths_ || changes.empty())
+        return {};
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+        return db.transaction([&]() -> Result<void> {
+            auto select = db.prepare("SELECT file_path, metadata_json FROM document_path_heads "
+                                     "WHERE document_id = ? AND deleted = 0");
+            if (!select)
+                return select.error();
+            YAMS_TRY(select.value().bind(1, documentId));
+            std::vector<std::pair<std::string, std::string>> rows;
+            while (true) {
+                YAMS_TRY_UNWRAP(row, select.value().step());
+                if (!row)
+                    break;
+                rows.emplace_back(select.value().getString(0), select.value().getString(1));
+            }
+            for (auto& [path, encoded] : rows) {
+                auto values = nlohmann::json::parse(encoded, nullptr, false);
+                if (!values.is_object())
+                    return Error{ErrorCode::InvalidData, "Invalid per-path metadata for " + path};
+                for (const auto& [key, value] : changes) {
+                    if (value)
+                        values[key] = *value;
+                    else
+                        values.erase(key);
+                }
+                auto update = db.prepare(
+                    "UPDATE document_path_heads SET metadata_json = ? WHERE file_path = ?");
+                if (!update)
+                    return update.error();
+                YAMS_TRY(update.value().bindAll(values.dump(), path));
+                YAMS_TRY(update.value().execute());
+            }
+            return Result<void>{};
+        });
+    });
+    if (result)
+        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    return result;
+}
+
 } // namespace yams::metadata
