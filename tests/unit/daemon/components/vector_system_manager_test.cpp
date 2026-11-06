@@ -394,14 +394,19 @@ TEST_CASE("VectorSystemManager getName returns component name",
 
 namespace {
 
+// The CI unit lanes set YAMS_VDB_IN_MEMORY, YAMS_SQLITE_VEC_SKIP_INIT and YAMS_DISABLE_VECTORS.
+// The migration tests need a real vectors.db on disk, written by the seed and read back by the
+// manager under test, so they clear those flags for the whole test.
+struct OnDiskVectors {
+    yams::test::ScopedEnvVar inMemory{"YAMS_VDB_IN_MEMORY", std::nullopt};
+    yams::test::ScopedEnvVar vecInit{"YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt};
+    yams::test::ScopedEnvVar vectors{"YAMS_DISABLE_VECTORS", std::nullopt};
+    yams::test::ScopedEnvVar vectorDb{"YAMS_DISABLE_VECTOR_DB", std::nullopt};
+};
+
 // Writes vectors.db at `dim` with one document vector, as an older install would have.
 void seedVectorDb(const std::filesystem::path& dataDir, std::size_t dim,
                   const std::string& modelId = "old-space") {
-    // The CI test lanes set YAMS_SQLITE_VEC_SKIP_INIT and YAMS_DISABLE_VECTORS, which skip
-    // creating vector tables; the seed needs real tables to write an older install's vectors.db.
-    yams::test::ScopedEnvVar vecInitOn{"YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt};
-    yams::test::ScopedEnvVar vectorsOn{"YAMS_DISABLE_VECTORS", std::nullopt};
-    yams::test::ScopedEnvVar vectorsOnAlias{"YAMS_DISABLE_VECTOR_DB", std::nullopt};
     yams::vector::VectorDatabaseConfig cfg;
     cfg.database_path = (dataDir / "vectors.db").string();
     cfg.embedding_dim = dim;
@@ -462,6 +467,7 @@ std::int64_t countVectorsWithModel(const std::filesystem::path& dataDir,
 TEST_CASE_METHOD(VectorSystemManagerFixture,
                  "VectorSystemManager recreates vector tables when the embedding space changes dim",
                  "[daemon][components][vector][migrate][catch2]") {
+    OnDiskVectors onDisk;
     seedVectorDb(tempDir, 1024);
     REQUIRE(ConfigResolver::readDbEmbeddingDim((tempDir / "vectors.db").string()) == 1024U);
 
@@ -483,6 +489,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
 TEST_CASE_METHOD(VectorSystemManagerFixture,
                  "VectorSystemManager keeps vectors when no migration target or same dim",
                  "[daemon][components][vector][migrate][catch2]") {
+    OnDiskVectors onDisk;
     seedVectorDb(tempDir, 384);
     SECTION("same dim and same identity") {
         auto deps = makeDeps();
@@ -507,6 +514,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
 TEST_CASE_METHOD(VectorSystemManagerFixture,
                  "VectorSystemManager recreates vector tables when the space identity changes",
                  "[daemon][components][vector][migrate][catch2]") {
+    OnDiskVectors onDisk;
     seedVectorDb(tempDir, 384, "simeon-config-v1:old");
     const auto vdbPath = (tempDir / "vectors.db").string();
     REQUIRE(ConfigResolver::readDbForeignEmbeddingSpace(vdbPath, "simeon-static-v1:new") ==
@@ -526,6 +534,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
 TEST_CASE_METHOD(VectorSystemManagerFixture,
                  "VectorSystemManager does not migrate a static store to a fallback encoder",
                  "[daemon][components][vector][migrate][catch2]") {
+    OnDiskVectors onDisk;
     const std::string staticSpace = "simeon-static-v1:yams-static-bge-c4-256.smstat:abc:dim=256";
     seedVectorDb(tempDir, 256, staticSpace);
 
@@ -549,6 +558,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
 TEST_CASE_METHOD(VectorSystemManagerFixture,
                  "VectorSystemManager keeps a migration pending across a restart",
                  "[daemon][components][vector][migrate][catch2]") {
+    OnDiskVectors onDisk;
     seedVectorDb(tempDir, 1024);
     auto makeMigratingDeps = [this] {
         auto deps = makeDeps();
@@ -580,6 +590,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture,
 TEST_CASE_METHOD(VectorSystemManagerFixture,
                  "VectorSystemManager removes vectors from other spaces when identities are mixed",
                  "[daemon][components][vector][migrate][catch2]") {
+    OnDiskVectors onDisk;
     seedVectorDb(tempDir, 384, "new-space");
     addVector(tempDir, 384, "hash-b", "old-space");
     REQUIRE(countVectorsWithModel(tempDir, "old-space") == 1);
