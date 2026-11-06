@@ -178,9 +178,6 @@ public:
     Result<void> removeFromIndex(int64_t) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
-    Result<void> removeFromIndexByHash(const std::string&) override {
-        return Error{ErrorCode::NotImplemented, "NI"};
-    }
     Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }

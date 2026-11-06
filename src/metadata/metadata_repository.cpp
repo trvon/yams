@@ -1396,64 +1396,6 @@ Result<void> MetadataRepository::removeFromIndex(int64_t documentId) {
     return result;
 }
 
-Result<void> MetadataRepository::removeFromIndexByHash(const std::string& hash) {
-    auto result =
-        executeQuery<std::optional<int64_t>>([&](Database& db) -> Result<std::optional<int64_t>> {
-            // First check if FTS5 is available
-            auto fts5Result = db.hasFTS5();
-            if (!fts5Result)
-                return fts5Result.error();
-
-            if (!fts5Result.value()) {
-                return std::optional<int64_t>{};
-            }
-
-            // Get document ID from hash first
-            auto stmtResult = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, hash);
-            if (!bindResult)
-                return bindResult.error();
-
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
-
-            if (!stepResult.value()) {
-                // Document not found - treat as success (already removed/doesn't exist)
-                return std::optional<int64_t>{};
-            }
-
-            int64_t docId = stmt.getInt64(0);
-
-            // Now remove from FTS5 index
-            auto delStmtResult = db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
-            if (!delStmtResult)
-                return delStmtResult.error();
-
-            Statement delStmt = std::move(delStmtResult).value();
-            auto delBindResult = delStmt.bind(1, docId);
-            if (!delBindResult)
-                return delBindResult.error();
-
-            YAMS_TRY(delStmt.execute());
-            return std::optional<int64_t>{docId};
-        });
-
-    if (!result) {
-        return result.error();
-    }
-
-    if (result.value().has_value()) {
-        eraseFtsIndexedId(result.value().value());
-    }
-    invalidateQueryCache();
-    return {};
-}
-
 Result<size_t>
 MetadataRepository::removeFromIndexByHashBatch(const std::vector<std::string>& hashes) {
     if (hashes.empty()) {

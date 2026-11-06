@@ -388,7 +388,6 @@ public:
                                                      const std::string& content,
                                                      const std::string& contentType) = 0;
     virtual Result<void> removeFromIndex(int64_t documentId) = 0;
-    virtual Result<void> removeFromIndexByHash(const std::string& hash) = 0;
     virtual Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>& hashes) = 0;
     virtual Result<bool> hasFtsEntry(int64_t documentId) = 0;
     virtual Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() = 0;
@@ -744,7 +743,6 @@ public:
                                              const std::string& content,
                                              const std::string& contentType) override;
     Result<void> removeFromIndex(int64_t documentId) override;
-    Result<void> removeFromIndexByHash(const std::string& hash) override;
     Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>& hashes) override;
     Result<bool> hasFtsEntry(int64_t documentId) override;
     Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() override;
