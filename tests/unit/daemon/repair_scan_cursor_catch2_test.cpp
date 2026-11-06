@@ -5,7 +5,9 @@
 
 #include "../../common/test_helpers_catch2.h"
 
+#include <sqlite3.h>
 #include <yams/api/content_store.h>
+#include <yams/api/content_store_builder.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/extraction/content_extractor.h>
@@ -487,4 +489,111 @@ TEST_CASE("Orphan cleanup keeps documents whose blob existence cannot be checked
     CHECK(result.failed == 1);
     CHECK(documentExists(h, 0));
     CHECK(documentExists(h, 1));
+}
+
+namespace {
+// A real content store under <dataDir>/storage holding one multi-chunk document, plus a planted
+// object file nothing references.
+struct ChunkStoreHarness {
+    ScanHarness h{0};
+    std::unique_ptr<yams::api::IContentStore> store;
+    std::string documentHash;
+    std::vector<std::byte> payload;
+    std::filesystem::path planted;
+
+    ChunkStoreHarness() {
+        auto built = yams::api::ContentStoreBuilder()
+                         .withStoragePath(h.tmp.path() / "storage")
+                         .withChunkSize(65536)
+                         .withCompression(false)
+                         .withDeduplication(true)
+                         .build();
+        INFO((built ? std::string{} : built.error().message));
+        REQUIRE(built);
+        store = std::move(built.value());
+        payload.resize(1024 * 1024);
+        std::uint32_t x = 2463534242U;
+        for (auto& b : payload) {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            b = static_cast<std::byte>(x & 0xFF);
+        }
+        auto stored = store->storeBytes(payload);
+        REQUIRE(stored);
+        documentHash = stored.value().contentHash;
+        planted = h.tmp.path() / "storage" / "objects" / "ff" / std::string(62, 'e');
+        std::filesystem::create_directories(planted.parent_path());
+        std::ofstream(planted, std::ios::binary) << "orphaned";
+    }
+
+    std::filesystem::path refsDb() const { return h.tmp.path() / "storage" / "refs.db"; }
+
+    // Simulate reference-count drift on one of the document's chunks.
+    std::string driftOneChunk() {
+        sqlite3* db = nullptr;
+        REQUIRE(sqlite3_open(refsDb().string().c_str(), &db) == SQLITE_OK);
+        sqlite3_stmt* stmt = nullptr;
+        REQUIRE(sqlite3_prepare_v2(db,
+                                   "SELECT block_hash FROM block_references WHERE ref_count > 0 "
+                                   "AND block_hash <> ? ORDER BY block_hash LIMIT 1",
+                                   -1, &stmt, nullptr) == SQLITE_OK);
+        sqlite3_bind_text(stmt, 1, documentHash.c_str(), -1, SQLITE_TRANSIENT);
+        REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+        std::string chunk = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        sqlite3_finalize(stmt);
+        const auto sql =
+            "UPDATE block_references SET ref_count = 0 WHERE block_hash = '" + chunk + "'";
+        REQUIRE(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(db);
+        return chunk;
+    }
+
+    std::filesystem::path objectPath(const std::string& hash) const {
+        return h.tmp.path() / "storage" / "objects" / hash.substr(0, 2) / hash.substr(2);
+    }
+
+    std::unique_ptr<RepairService> service() {
+        RepairServiceContext ctx;
+        ctx.getMetadataRepo = [r = h.repo] { return r; };
+        RepairService::Config cfg;
+        cfg.enable = true;
+        cfg.dataDir = h.tmp.path();
+        return std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+    }
+};
+} // namespace
+
+// `yams repair --chunks` deletes object files nothing references. A manifest is a reference even
+// when refs.db has drifted to zero for one of its chunks; deleting it would lose the document.
+TEST_CASE("Chunk cleanup keeps chunks a manifest references despite reference-count drift",
+          "[daemon][repair][chunks][catch2]") {
+    ChunkStoreHarness c;
+    const auto drifted = c.driftOneChunk();
+    REQUIRE(std::filesystem::exists(c.objectPath(drifted)));
+
+    const auto result = c.service()->testing_cleanOrphanedChunks(/*dryRun=*/false);
+    INFO(result.message);
+    CHECK_FALSE(std::filesystem::exists(c.planted));
+    CHECK(std::filesystem::exists(c.objectPath(drifted)));
+    auto back = c.store->retrieveBytes(c.documentHash);
+    REQUIRE(back);
+    CHECK(back.value() == c.payload);
+}
+
+// If any manifest cannot be read, the set of referenced chunks is unknown: delete nothing.
+TEST_CASE("Chunk cleanup deletes nothing when a manifest cannot be parsed",
+          "[daemon][repair][chunks][catch2]") {
+    ChunkStoreHarness c;
+    (void)c.driftOneChunk();
+    const auto corrupt =
+        c.h.tmp.path() / "storage" / "manifests" / "00" / (std::string(62, '0') + ".manifest");
+    std::filesystem::create_directories(corrupt.parent_path());
+    std::ofstream(corrupt, std::ios::binary) << "not a manifest";
+
+    const auto result = c.service()->testing_cleanOrphanedChunks(/*dryRun=*/false);
+    INFO(result.message);
+    CHECK(result.succeeded == 0);
+    CHECK(result.failed >= 1);
+    CHECK(std::filesystem::exists(c.planted));
 }

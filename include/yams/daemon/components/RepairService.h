@@ -349,6 +349,10 @@ public:
     static std::string extractorFingerprint(
         const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors);
 #if defined(YAMS_TESTING)
+    /// Run the orphaned-chunk cleanup (`yams repair --chunks`).
+    RepairOperationResult testing_cleanOrphanedChunks(bool dryRun) {
+        return cleanOrphanedChunks(dryRun, false, {});
+    }
     /// Run the orphaned-metadata cleanup (`yams repair --orphans`).
     RepairOperationResult testing_cleanOrphanedMetadata(bool dryRun) {
         return cleanOrphanedMetadata(dryRun, false, false, {});

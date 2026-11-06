@@ -6,6 +6,7 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/resource/plugin_content_extractor_adapter.h>
 #include <yams/extraction/external_plugin_extractor.hpp>
+#include <yams/manifest/manifest_manager.h>
 #include <yams/metadata/document_metadata.h>
 
 #include <yams/compat/thread_stop_compat.h>
@@ -2954,17 +2955,28 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
                      zeroRefCount);
     }
 
-    // Get referenced hashes
+    // Get referenced hashes. A failed query leaves the set incomplete, and everything outside it
+    // would look orphaned: refuse to delete anything.
     std::set<std::string> referencedHashes;
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT block_hash FROM block_references WHERE ref_count > 0";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            if (hash)
-                referencedHashes.insert(hash);
+    {
+        sqlite3_stmt* stmt = nullptr;
+        const char* sql = "SELECT block_hash FROM block_references WHERE ref_count > 0";
+        int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+        if (rc == SQLITE_OK) {
+            while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+                const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                if (hash)
+                    referencedHashes.insert(hash);
+            }
+            sqlite3_finalize(stmt);
         }
-        sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) {
+            sqlite3_close(db);
+            result.failed = 1;
+            result.message = "Refused: could not read block references from refs.db; no chunks "
+                             "deleted";
+            return result;
+        }
     }
 
     if (progress) {
@@ -2972,67 +2984,54 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
         ev.phase = "repairing";
         ev.operation = "chunks";
         ev.message = "Loaded " + std::to_string(referencedHashes.size()) +
-                     " referenced hashes, scanning filesystem...";
+                     " referenced hashes, scanning manifests...";
         progress(ev);
     }
 
-    // Scan manifests for additional references
-    size_t manifestDirsScanned = 0;
-    if (fs::exists(objectsPath)) {
-        for (const auto& dirEntry : fs::directory_iterator(objectsPath)) {
-            if (!fs::is_directory(dirEntry))
-                continue;
-            ++manifestDirsScanned;
-            if (progress && manifestDirsScanned % 64 == 0) {
-                RepairEvent ev;
-                ev.phase = "repairing";
-                ev.operation = "chunks";
-                ev.message =
-                    "Scanning manifests (" + std::to_string(manifestDirsScanned) + " dirs)...";
-                progress(ev);
-            }
-            for (const auto& fileEntry : fs::directory_iterator(dirEntry.path())) {
-                if (!fs::is_regular_file(fileEntry))
+    // Every manifest is a reference to its chunks (and to the whole-file object), even when
+    // refs.db has drifted. Manifests live under storage/manifests; older stores kept some next to
+    // the objects. Parse them with the real deserializer; if any cannot be read, the referenced
+    // set is unknown and nothing may be deleted.
+    std::size_t manifestsRead = 0;
+    std::size_t manifestFailures = 0;
+    {
+        manifest::ManifestManager manifests(manifest::ManifestManager::Config{});
+        const auto collect = [&](const fs::path& root) {
+            std::error_code ec;
+            if (!fs::exists(root, ec))
+                return;
+            for (fs::recursive_directory_iterator it(root, ec), endIt; !ec && it != endIt;
+                 it.increment(ec)) {
+                if (!it->is_regular_file(ec) || it->path().extension() != ".manifest")
                     continue;
-                std::string filename = fileEntry.path().filename().string();
-                if (filename.size() > 9 && filename.substr(filename.size() - 9) == ".manifest") {
-                    try {
-                        std::ifstream mf(fileEntry.path(), std::ios::binary);
-                        if (!mf)
-                            continue;
-                        std::vector<char> data((std::istreambuf_iterator<char>(mf)),
-                                               std::istreambuf_iterator<char>());
-                        if (data.size() >= 28 && data[0] == 'Y' && data[1] == 'M' &&
-                            data[2] == 'N' && data[3] == 'F') {
-                            size_t pos = 24;
-                            uint32_t numChunks = 0;
-                            if (pos + 4 <= data.size()) {
-                                std::memcpy(&numChunks, data.data() + pos, 4);
-                                pos += 4;
-                            }
-                            for (uint32_t i = 0; i < numChunks && pos + 4 <= data.size(); ++i) {
-                                uint32_t hashLen = 0;
-                                std::memcpy(&hashLen, data.data() + pos, 4);
-                                pos += 4;
-                                if (hashLen > 0 && hashLen < 256 && pos + hashLen <= data.size()) {
-                                    referencedHashes.insert(
-                                        std::string(data.data() + pos, hashLen));
-                                    pos += hashLen + 16;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::debug("RepairService: failed to parse block references for {}: {}",
-                                      fileEntry.path().string(), e.what());
-                    } catch (...) {
-                        spdlog::debug("RepairService: failed to parse block references for {}",
-                                      fileEntry.path().string());
-                    }
+                std::ifstream in(it->path(), std::ios::binary);
+                std::vector<char> raw((std::istreambuf_iterator<char>(in)),
+                                      std::istreambuf_iterator<char>());
+                auto parsed = in.bad() ? Result<manifest::Manifest>(ErrorCode::IOError)
+                                       : manifests.deserialize(std::as_bytes(std::span(raw)));
+                if (!parsed) {
+                    ++manifestFailures;
+                    spdlog::warn("[RepairService] chunks: cannot read manifest {}: {}",
+                                 it->path().string(), parsed.error().message);
+                    continue;
                 }
+                ++manifestsRead;
+                referencedHashes.insert(parsed.value().fileHash);
+                for (const auto& chunk : parsed.value().chunks)
+                    referencedHashes.insert(chunk.hash);
             }
-        }
+            if (ec)
+                ++manifestFailures;
+        };
+        collect(cfg_.dataDir / "storage" / "manifests");
+        collect(objectsPath);
+    }
+    if (manifestFailures > 0) {
+        sqlite3_close(db);
+        result.failed = manifestFailures;
+        result.message = "Refused: " + std::to_string(manifestFailures) +
+                         " manifest(s) could not be read; no chunks deleted";
+        return result;
     }
 
     // Find orphaned chunks
