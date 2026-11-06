@@ -1105,24 +1105,6 @@ private:
         }
     };
 
-    static void
-    mergeTagsIntoMetadata(const std::vector<std::string>& tags,
-                          std::unordered_map<std::string, metadata::MetadataValue>& metadata) {
-        if (tags.empty())
-            return;
-
-        for (const auto& tag : tags) {
-            if (tag.empty())
-                continue;
-            std::string key = tag.starts_with("tag:") ? tag : ("tag:" + tag);
-            if (metadata.find(key) != metadata.end())
-                continue;
-            metadata::MetadataValue metaVal;
-            metaVal.value = tag;
-            metadata.emplace(std::move(key), std::move(metaVal));
-        }
-    }
-
     Result<void> listMetadataValues() {
         // Start spinner early (before any blocking operations)
         bool showSpinner =
@@ -1872,61 +1854,6 @@ private:
                                                 .indexedAfter = indexedAfter_,
                                                 .indexedBefore = indexedBefore_};
         return yams::cli::applyDocTimeFilters(doc, filters);
-    }
-
-    bool applyChangeFilters(const metadata::DocumentInfo& doc) {
-        // If no change filters are specified, include all documents
-        if (!showChanges_ && sinceTime_.empty() && !showDeleted_) {
-            return true;
-        }
-
-        auto now = std::chrono::system_clock::now();
-
-        // Handle --changes flag (show recent modifications in last 24h or specified window)
-        if (showChanges_) {
-            auto windowTime = TimeParser::parse(changeWindow_);
-            if (!windowTime) {
-                // Default to 24 hours if parsing fails
-                windowTime = now - std::chrono::hours(24);
-            }
-
-            // Check if document was modified, created, or indexed recently
-            bool recentlyChanged = (doc.modifiedTime >= windowTime.value()) ||
-                                   (doc.createdTime >= windowTime.value()) ||
-                                   (doc.indexedTime >= windowTime.value());
-
-            if (!recentlyChanged) {
-                return false;
-            }
-        }
-
-        // Handle --since filter
-        if (!sinceTime_.empty()) {
-            auto sinceTimePoint = TimeParser::parse(sinceTime_);
-            if (!sinceTimePoint) {
-                spdlog::warn("Invalid since time: {}", sinceTime_);
-                return true; // Don't filter on invalid input
-            }
-
-            // Check if any timestamp is after the since time
-            bool changedSince = (doc.modifiedTime >= sinceTimePoint.value()) ||
-                                (doc.createdTime >= sinceTimePoint.value()) ||
-                                (doc.indexedTime >= sinceTimePoint.value());
-
-            if (!changedSince) {
-                return false;
-            }
-        }
-
-        // Handle --show-deleted flag
-        if (!showDeleted_) {
-            // Check if file still exists on filesystem
-            if (!std::filesystem::exists(doc.filePath)) {
-                return false; // Filter out deleted files unless explicitly requested
-            }
-        }
-
-        return true;
     }
 
     bool applyFileTypeFilters(const metadata::DocumentInfo& doc) {

@@ -96,11 +96,6 @@ public:
     const daemon::ResolvedEmbeddingConfig& getResolvedEmbeddingConfig();
 
     /**
-     * Check if embedding generator already exists (without creating it)
-     */
-    bool hasEmbeddingGenerator() const { return embeddingGenerator_ != nullptr; }
-
-    /**
      * Get the connection pool instance
      */
     std::shared_ptr<metadata::ConnectionPool> getConnectionPool() const { return connectionPool_; }
@@ -168,11 +163,6 @@ public:
      */
     Result<std::unordered_map<std::string, std::vector<metadata::MetadataValueCount>>>
     fastMetadataValueCounts(const std::vector<std::string>& keys, int limit = 10000);
-
-    /**
-     * Whether storage is initialized
-     */
-    bool isStorageInitialized() const { return static_cast<bool>(contentStore_); }
 
     /**
      * Register a command

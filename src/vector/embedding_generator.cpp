@@ -458,59 +458,6 @@ std::vector<float> normalizeEmbedding(const std::vector<float>& embedding) {
     return normalized;
 }
 
-std::vector<std::vector<float>>
-normalizeEmbeddings(const std::vector<std::vector<float>>& embeddings) {
-    std::vector<std::vector<float>> normalized;
-    normalized.reserve(embeddings.size());
-
-    for (const auto& embedding : embeddings) {
-        normalized.push_back(normalizeEmbedding(embedding));
-    }
-
-    return normalized;
-}
-
-double computeMagnitude(const std::vector<float>& embedding) {
-    double magnitude = 0.0;
-    for (float val : embedding) {
-        magnitude += static_cast<double>(val) * static_cast<double>(val);
-    }
-    return std::sqrt(magnitude);
-}
-
-bool validateEmbedding(const std::vector<float>& embedding, size_t expected_dim) {
-    if (embedding.size() != expected_dim) {
-        return false;
-    }
-
-    for (float val : embedding) {
-        if (!std::isfinite(val)) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-std::string embeddingToString(const std::vector<float>& embedding, size_t max_values) {
-    std::ostringstream oss;
-    oss << "[";
-
-    size_t count = std::min(max_values, embedding.size());
-    for (size_t i = 0; i < count; ++i) {
-        if (i > 0)
-            oss << ", ";
-        oss << std::fixed << std::setprecision(4) << embedding[i];
-    }
-
-    if (embedding.size() > max_values) {
-        oss << ", ... (" << embedding.size() << " total)";
-    }
-
-    oss << "]";
-    return oss.str();
-}
-
 std::vector<std::string> getAvailableModels(const std::string& models_dir) {
     std::vector<std::string> models;
 

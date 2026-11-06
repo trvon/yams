@@ -459,16 +459,6 @@ void CompressionErrorHandler::setDegradedMode(bool degraded) noexcept {
     pImpl->setDegradedMode(degraded);
 }
 
-CompressionError CompressionErrorHandler::fromException(const std::exception& ex,
-                                                        CompressionAlgorithm algorithm,
-                                                        const std::string& operation) {
-    auto error = CompressionError::create(ErrorCode::InternalError, ErrorSeverity::Error, operation,
-                                          ex.what());
-
-    error.algorithm = algorithm;
-    return error;
-}
-
 ErrorSeverity CompressionErrorHandler::mapErrorCodeToSeverity(ErrorCode code) noexcept {
     switch (code) {
         case ErrorCode::Success:

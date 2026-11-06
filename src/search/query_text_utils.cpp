@@ -179,29 +179,6 @@ const std::array<std::string_view, 19>& defaultQueryEntityTypes() {
     return kDefaultEntityTypes;
 }
 
-bool looksLikeCompactBiomedicalSymbol(std::string_view input) {
-    size_t alphaCount = 0;
-    size_t digitCount = 0;
-    size_t upperCount = 0;
-    for (unsigned char c : input) {
-        if (std::isalpha(c)) {
-            ++alphaCount;
-            if (std::isupper(c)) {
-                ++upperCount;
-            }
-        } else if (std::isdigit(c)) {
-            ++digitCount;
-        }
-    }
-    if (input.size() < 2 || input.size() > 24 || alphaCount == 0) {
-        return false;
-    }
-    if (digitCount > 0 && upperCount > 0) {
-        return true;
-    }
-    return upperCount >= 2 && alphaCount == upperCount && input.size() <= 8;
-}
-
 std::string canonicalizeEntityType(std::string_view rawType, std::string_view rawText) {
     static const std::unordered_map<std::string, std::string> kTypeAliases = {
         {"org", "organization"},  {"company", "organization"}, {"institution", "organization"},

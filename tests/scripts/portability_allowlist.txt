@@ -4,24 +4,19 @@
 #   portability/path-cstr   sqlite3_open* filename via bare .c_str() (use .string().c_str())
 #   portability/env-read    raw getenv read outside the config boundary
 include/yams/cli/cli_perf_trace.h:13:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:455:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:466:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:476:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:587:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:798:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:808:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:810:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:822:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:924:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:1127:portability/env-read # reviewed raw environment read
-include/yams/cli/daemon_helpers.h:1132:portability/env-read # reviewed raw environment read
-include/yams/cli/ui_helpers.hpp:101:portability/env-read # reviewed raw environment read
-include/yams/cli/ui_helpers.hpp:105:portability/env-read # reviewed raw environment read
-include/yams/cli/ui_helpers.hpp:107:portability/env-read # reviewed raw environment read
-include/yams/cli/ui_helpers.hpp:109:portability/env-read # reviewed raw environment read
-include/yams/cli/ui_helpers.hpp:153:portability/env-read # reviewed raw environment read
-include/yams/cli/ui_helpers.hpp:156:portability/env-read # reviewed raw environment read
-include/yams/cli/ui_helpers.hpp:416:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:429:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:440:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:450:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:602:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:612:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:614:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:626:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:717:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:920:portability/env-read # reviewed raw environment read
+include/yams/cli/daemon_helpers.h:925:portability/env-read # reviewed raw environment read
+include/yams/cli/ui_helpers.hpp:127:portability/env-read # reviewed raw environment read
+include/yams/cli/ui_helpers.hpp:130:portability/env-read # reviewed raw environment read
+include/yams/cli/ui_helpers.hpp:390:portability/env-read # reviewed raw environment read
 include/yams/common/test_utils.h:14:portability/env-read # reviewed raw environment read
 include/yams/common/test_utils.h:30:portability/env-read # reviewed raw environment read
 include/yams/common/test_utils.h:31:portability/env-read # reviewed raw environment read
@@ -32,7 +27,7 @@ include/yams/daemon/resource/gpu_info.h:368:portability/env-read # reviewed raw 
 include/yams/daemon/resource/gpu_info.h:385:portability/env-read # reviewed raw environment read
 include/yams/daemon/resource/gpu_info.h:439:portability/env-read # reviewed raw environment read
 include/yams/mcp/tool_registry.h:31:portability/env-read # reviewed raw environment read
-include/yams/metadata/connection_pool.h:293:portability/jthread # feature-test guarded std::jthread
+include/yams/metadata/connection_pool.h:288:portability/jthread # feature-test guarded std::jthread
 include/yams/metadata/metadata_repository.h:70:portability/env-read # reviewed raw environment read
 plugins/glint/gliner_session.cpp:37:portability/env-read # reviewed raw environment read
 plugins/onnx/model_provider.cpp:88:portability/env-read # reviewed raw environment read
@@ -53,20 +48,19 @@ plugins/onnx/model_provider.cpp:786:portability/env-read # reviewed raw environm
 plugins/onnx/model_provider.cpp:792:portability/env-read # reviewed raw environment read
 plugins/onnx/model_provider.cpp:845:portability/env-read # reviewed raw environment read
 plugins/onnx/model_provider.cpp:853:portability/env-read # reviewed raw environment read
-plugins/onnx/model_provider.cpp:1350:portability/env-read # reviewed raw environment read
-plugins/onnx/model_provider.cpp:1654:portability/env-read # reviewed raw environment read
-plugins/onnx/model_provider.cpp:1656:portability/env-read # reviewed raw environment read
-plugins/onnx/model_provider.cpp:1709:portability/env-read # reviewed raw environment read
+plugins/onnx/model_provider.cpp:1357:portability/env-read # reviewed raw environment read
+plugins/onnx/model_provider.cpp:1661:portability/env-read # reviewed raw environment read
+plugins/onnx/model_provider.cpp:1663:portability/env-read # reviewed raw environment read
+plugins/onnx/model_provider.cpp:1716:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_gpu_provider.h:27:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_gpu_provider.h:32:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_gpu_provider.h:45:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_gpu_provider.h:56:portability/env-read # reviewed raw environment read
-plugins/onnx/onnx_gpu_provider.h:67:portability/env-read # reviewed raw environment read
-plugins/onnx/onnx_gpu_provider.h:116:portability/env-read # reviewed raw environment read
-plugins/onnx/onnx_gpu_provider.h:283:portability/env-read # reviewed raw environment read
-plugins/onnx/onnx_gpu_provider.h:320:portability/env-read # reviewed raw environment read
-plugins/onnx/onnx_gpu_provider.h:342:portability/env-read # reviewed raw environment read
-plugins/onnx/onnx_gpu_provider.h:343:portability/env-read # reviewed raw environment read
+plugins/onnx/onnx_gpu_provider.h:105:portability/env-read # reviewed raw environment read
+plugins/onnx/onnx_gpu_provider.h:272:portability/env-read # reviewed raw environment read
+plugins/onnx/onnx_gpu_provider.h:309:portability/env-read # reviewed raw environment read
+plugins/onnx/onnx_gpu_provider.h:331:portability/env-read # reviewed raw environment read
+plugins/onnx/onnx_gpu_provider.h:332:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_plugin.cpp:69:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_plugin.cpp:73:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_plugin.cpp:78:portability/env-read # reviewed raw environment read
@@ -75,7 +69,7 @@ plugins/ort_runtime/ort_runtime_loader.cpp:137:portability/env-read # reviewed r
 plugins/ort_runtime/ort_runtime_loader.cpp:140:portability/env-read # reviewed raw environment read
 plugins/ort_runtime/ort_runtime_loader.cpp:148:portability/env-read # reviewed raw environment read
 src/app/services/document_service.cpp:1254:portability/env-read # reviewed raw environment read
-src/app/services/search_service.cpp:510:portability/env-read # reviewed raw environment read
+src/app/services/search_service.cpp:514:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:19:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:21:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:72:portability/env-read # reviewed raw environment read
@@ -85,13 +79,10 @@ src/cli/commands/add_command.cpp:267:portability/env-read # reviewed raw environ
 src/cli/commands/doctor/checks/model_check.cpp:16:portability/env-read # reviewed raw environment read
 src/cli/commands/doctor/plugin_trust.cpp:29:portability/env-read # reviewed raw environment read
 src/cli/commands/repair_command.cpp:284:portability/env-read # reviewed raw environment read
-src/cli/commands/search_command.cpp:1108:portability/env-read # reviewed raw environment read
-src/cli/commands/search_command.cpp:1116:portability/env-read # reviewed raw environment read
-src/cli/commands/session_command.cpp:39:portability/env-read # reviewed raw environment read
-src/cli/commands/session_command.cpp:40:portability/env-read # reviewed raw environment read
-src/cli/commands/session_command.cpp:581:portability/env-read # reviewed raw environment read
-src/cli/commands/session_command.cpp:767:portability/env-read # reviewed raw environment read
-src/cli/commands/update_command.cpp:586:portability/env-read # reviewed raw environment read
+src/cli/commands/search_command.cpp:1088:portability/env-read # reviewed raw environment read
+src/cli/commands/search_command.cpp:1096:portability/env-read # reviewed raw environment read
+src/cli/commands/session_command.cpp:525:portability/env-read # reviewed raw environment read
+src/cli/commands/update_command.cpp:510:portability/env-read # reviewed raw environment read
 src/cli/commands/watch_command.cpp:91:portability/env-read # reviewed raw environment read
 src/cli/doctor_checks.cpp:111:portability/env-read # reviewed raw environment read
 src/cli/hot_cold_utils.h:13:portability/env-read # reviewed raw environment read
@@ -112,11 +103,11 @@ src/daemon/components/RequestDispatcher.cpp:600:portability/env-read # reviewed 
 src/daemon/components/RequestExecutor.cpp:44:portability/env-read # reviewed raw environment read
 src/daemon/components/dispatcher/request_dispatcher_models.cpp:38:portability/env-read # reviewed raw environment read
 src/mcp/stdio_transport.cpp:46:portability/env-read # reviewed raw environment read
-src/metadata/connection_pool.cpp:1009:portability/jthread # feature-test guarded std::jthread
+src/metadata/connection_pool.cpp:999:portability/jthread # feature-test guarded std::jthread
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path
-src/metadata/metadata_repository.cpp:1517:portability/env-read # reviewed raw environment read
-src/metadata/migration.cpp:1566:portability/env-read # reviewed raw environment read
+src/metadata/metadata_repository.cpp:1502:portability/env-read # reviewed raw environment read
+src/metadata/migration.cpp:1561:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:89:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:103:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:120:portability/env-read # reviewed raw environment read
@@ -126,7 +117,7 @@ src/metadata/versioning_util.cpp:101:portability/env-read # reviewed raw environ
 src/plugins/plugin_repo_client.cpp:62:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:408:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:421:portability/env-read # reviewed raw environment read
-src/search/search_engine.cpp:2810:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:2804:portability/env-read # reviewed raw environment read
 src/search/search_lexical_pipeline.cpp:556:portability/env-read # reviewed raw environment read
 src/storage/compressed_storage_engine.cpp:636:portability/env-read # reviewed raw environment read
 src/storage/object_storage_plugin_loader.cpp:126:portability/env-read # reviewed raw environment read
@@ -134,8 +125,8 @@ src/storage/object_storage_plugin_loader.cpp:130:portability/env-read # reviewed
 src/storage/reference_counter.cpp:215:portability/env-read # reviewed raw environment read
 src/storage/reference_counter.cpp:272:portability/env-read # reviewed raw environment read
 src/storage/reference_db.cpp:43:portability/env-read # reviewed raw environment read
-src/storage/reference_db.cpp:231:portability/env-read # reviewed raw environment read
-src/storage/reference_db.cpp:372:portability/path-cstr # std::string filename, not filesystem::path
+src/storage/reference_db.cpp:225:portability/env-read # reviewed raw environment read
+src/storage/reference_db.cpp:366:portability/path-cstr # std::string filename, not filesystem::path
 src/storage/s3_signer.cpp:83:portability/env-read # reviewed raw environment read
 src/storage/s3_signer.cpp:159:portability/env-read # reviewed raw environment read
 src/storage/s3_signer.cpp:161:portability/env-read # reviewed raw environment read

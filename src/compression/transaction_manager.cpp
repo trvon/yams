@@ -96,6 +96,7 @@ public:
     ~Impl() { stop(); }
 
     Result<void> start() {
+        std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
         if (running_.load()) {
             return Error{ErrorCode::InvalidState, "Transaction manager already running"};
         }
@@ -113,6 +114,7 @@ public:
     }
 
     void stop() {
+        std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
         if (!running_.load()) {
             return;
         }
@@ -559,6 +561,9 @@ private:
 
     // Running state
     std::atomic<bool> running_{false};
+    // Serializes start() and stop(). Checking running_ and then setting it let concurrent
+    // starts all pass and assign worker threads to the same members. Worker loops never take it.
+    std::mutex lifecycleMutex_;
 
     // Transactions
     mutable std::shared_mutex txMutex_;

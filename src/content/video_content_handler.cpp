@@ -455,45 +455,6 @@ std::unique_ptr<VideoContentHandler> createVideoHandler(VideoProcessingConfig co
     return std::make_unique<VideoContentHandler>(std::move(config));
 }
 
-bool isVideoFile(const std::filesystem::path& path) {
-    const std::string ext = path.extension().string();
-    return std::ranges::find(videoExtensions, ext) != videoExtensions.end();
-}
-
-VideoFormat getVideoFormatFromExtension(std::string_view extension) {
-    if (extension == ".mp4" || extension == ".m4v")
-        return VideoFormat::MP4;
-    if (extension == ".avi")
-        return VideoFormat::AVI;
-    if (extension == ".mkv")
-        return VideoFormat::MKV;
-    if (extension == ".mov")
-        return VideoFormat::MOV;
-    if (extension == ".wmv")
-        return VideoFormat::WMV;
-    if (extension == ".flv")
-        return VideoFormat::FLV;
-    if (extension == ".webm")
-        return VideoFormat::WEBM;
-    if (extension == ".ogv")
-        return VideoFormat::OGV;
-    if (extension == ".asf")
-        return VideoFormat::ASF;
-    if (extension == ".rm")
-        return VideoFormat::RM;
-    if (extension == ".rmvb")
-        return VideoFormat::RMVB;
-    if (extension == ".3gp")
-        return VideoFormat::_3GP;
-    if (extension == ".ts")
-        return VideoFormat::TS;
-    if (extension == ".mts")
-        return VideoFormat::MTS;
-    if (extension == ".m2ts")
-        return VideoFormat::M2TS;
-    return VideoFormat::Unknown;
-}
-
 std::vector<std::string> getExtensionsForFormat(VideoFormat format) {
     switch (format) {
         case VideoFormat::MP4:
@@ -531,32 +492,9 @@ std::vector<std::string> getExtensionsForFormat(VideoFormat format) {
     }
 }
 
-std::optional<uint64_t> estimateBitrate(size_t fileSize, double durationSeconds) {
-    if (durationSeconds <= 0)
-        return std::nullopt;
-    return static_cast<uint64_t>((fileSize * 8) / durationSeconds);
-}
-
 bool isMetadataComplete(const ExtendedVideoMetadata& metadata) {
     return metadata.width > 0 && metadata.height > 0 && metadata.durationSeconds > 0 &&
            !metadata.container.empty();
-}
-
-std::vector<std::pair<uint32_t, uint32_t>> getCommonResolutions() {
-    return {
-        {720, 480},   // SD
-        {1280, 720},  // 720p
-        {1920, 1080}, // 1080p
-        {2560, 1440}, // 1440p
-        {3840, 2160}  // 4K
-    };
-}
-
-bool isStandardResolution(uint32_t width, uint32_t height) {
-    const auto resolutions = getCommonResolutions();
-    return std::ranges::any_of(resolutions, [width, height](const auto& res) {
-        return res.first == width && res.second == height;
-    });
 }
 
 } // namespace yams::content

@@ -310,28 +310,6 @@ SchemaValidation validateVecSchema(const fs::path& dbPath) {
 // Database File Operations
 // ============================================================================
 
-Result<void> ensureDbFile(const fs::path& dbPath) {
-    try {
-        if (!fs::exists(dbPath)) {
-            // Create parent directories if needed
-            yams::common::ensureDirectories(dbPath.parent_path());
-
-            // Create empty file
-            std::ofstream file(dbPath);
-            file.flush();
-            file.close();
-        }
-
-        if (!fs::exists(dbPath)) {
-            return Error{ErrorCode::IOError, "Failed to create database file"};
-        }
-
-        return Result<void>();
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::IOError, e.what()};
-    }
-}
-
 void writeVectorSentinel(const fs::path& dataDir, size_t dim) {
     try {
         nlohmann::json sentinel;

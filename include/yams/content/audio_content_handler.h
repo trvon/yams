@@ -121,17 +121,8 @@ struct ExtendedAudioMetadata : public AudioMetadata {
     bool hasVariableBitrate = false;
     float confidence = 1.0f;
 
-    // C++20: Helper methods with concepts
-    template <std::convertible_to<std::string> T> void setTag(const std::string& key, T&& value) {
-        tags[key] = std::forward<T>(value);
-    }
-
     [[nodiscard]] bool hasBasicInfo() const noexcept {
         return artist.has_value() && title.has_value();
-    }
-
-    [[nodiscard]] bool hasAlbumArt() const noexcept {
-        return albumArt.has_value() && !albumArt->empty();
     }
 
     [[nodiscard]] std::string getDisplayName() const {
@@ -213,18 +204,6 @@ public:
     Result<void> validate(const std::filesystem::path& path) const override;
 
     /**
-     * @brief Get processing configuration
-     */
-    [[nodiscard]] const AudioProcessingConfig& getAudioConfig() const noexcept {
-        return audioConfig_;
-    }
-
-    /**
-     * @brief Update processing configuration
-     */
-    void setAudioConfig(AudioProcessingConfig config) noexcept { audioConfig_ = std::move(config); }
-
-    /**
      * @brief Cancel all ongoing processing
      */
     void cancelProcessing() noexcept { stopProcessing_ = true; }
@@ -254,8 +233,6 @@ public:
 
 private:
     // C++20: consteval for compile-time constants
-    static consteval size_t maxAudioFileSize() noexcept { return 1024 * 1024 * 1024; } // 1GB
-    static consteval size_t minAudioFileSize() noexcept { return 1024; }               // 1KB
     static consteval std::chrono::milliseconds maxProcessingTime() noexcept {
         return std::chrono::milliseconds{60000};
     }

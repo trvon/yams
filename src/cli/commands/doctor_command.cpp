@@ -344,14 +344,6 @@ private:
     static void printSummary(const std::string& title, const std::vector<StepResult>& steps) {
         doctor::DoctorRender::printSummary(std::cout, title, steps);
     }
-    // Step helpers to make doctor logic composable (delegating to extracted utilities)
-    Result<void> touchDbFile(const std::filesystem::path& dbPath) {
-        return vecutil::ensureDbFile(dbPath);
-    }
-
-    // Legacy lock helpers kept for reference; no-ops now
-    Result<void> acquireMaintenanceLock(const std::filesystem::path&) { return Result<void>(); }
-    void releaseMaintenanceLock(const std::filesystem::path&) {}
 
     // Stop the daemon gracefully if it is running (best-effort)
     void ensureDaemonStopped() {
@@ -377,40 +369,12 @@ private:
         }
     }
 
-    Result<void> openDbMinimal(yams::vector::SqliteVecBackend& be,
-                               const std::filesystem::path& dbPath, int timeout_ms) {
-        // Ensure minimal, fast open with deferred vec init
-        setEnvIfUnset("YAMS_SQLITE_VEC_SKIP_INIT", 1);
-        setEnvIfUnset("YAMS_SQLITE_MINIMAL_PRAGMAS", 1);
-        auto openOpt = runWithSpinner(
-            "Opening vectors.db", [&]() { return be.initialize(dbPath.string()); }, timeout_ms);
-        if (!openOpt)
-            return Error{ErrorCode::Timeout, "open timeout"};
-        return *openOpt;
-    }
-
     Result<void> initVecModule(yams::vector::SqliteVecBackend& be, int timeout_ms) {
         auto vecOpt = runWithSpinner(
             "Initializing sqlite-vec", [&]() { return be.ensureVecLoaded(); }, timeout_ms);
         if (!vecOpt)
             return Error{ErrorCode::Timeout, "vec init timeout"};
         return *vecOpt;
-    }
-
-    Result<void> createVecSchema(yams::vector::SqliteVecBackend& be, size_t dim, int timeout_ms) {
-        auto cr = runWithSpinner(
-            "Creating vector tables", [&]() { return be.createTables(dim); }, timeout_ms);
-        if (!cr)
-            return Error{ErrorCode::Timeout, "create tables timeout"};
-        return *cr;
-    }
-
-    Result<void> dropVecSchema(yams::vector::SqliteVecBackend& be, int timeout_ms) {
-        auto dr = runWithSpinner(
-            "Dropping existing vector tables", [&]() { return be.dropTables(); }, timeout_ms);
-        if (!dr)
-            return Error{ErrorCode::Timeout, "drop tables timeout"};
-        return *dr;
     }
 
     static void writeVectorSentinel(const std::filesystem::path& dataDir, size_t dim) {
@@ -432,9 +396,6 @@ private:
 
     using R2KeychainStatus = doctor::R2ConfigStatus;
 
-    static R2KeychainStatus evaluateR2KeychainStatus() {
-        return doctor::DoctorContext::evaluateR2Config();
-    }
     // Run a blocking function with a console spinner and timeout.
     // Returns optional result; nullopt indicates timeout.
     std::optional<Result<void>> runWithSpinner(const std::string& label,
@@ -465,14 +426,6 @@ private:
         }
     }
 
-    static void setEnvIfUnset(const char* key, int value) {
-        if (!yams::config::getenv_optional(key)) {
-            const auto rendered = std::to_string(value);
-            if (!yams::config::set_environment(key, rendered.c_str())) {
-                spdlog::debug("Unable to set doctor environment default for {}", key);
-            }
-        }
-    }
     void runRepair() {
         if (fixAll_) {
             fixEmbeddings_ = true;

@@ -138,12 +138,6 @@ void Statement::bind(int index, std::string_view value) {
     }
 }
 
-void Statement::bindNull(int index) {
-    if (sqlite3_bind_null(stmt_, index) != SQLITE_OK) {
-        throw std::runtime_error("Failed to bind null parameter");
-    }
-}
-
 // Execute and fetch results with retry for transient lock errors
 bool Statement::step() {
     auto backoff = std::chrono::milliseconds(kInitialBackoffMs);

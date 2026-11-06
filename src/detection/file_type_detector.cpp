@@ -892,95 +892,6 @@ Result<void> FileTypeDetector::loadPatternsFromFile(const std::filesystem::path&
     }
 }
 
-Result<size_t> FileTypeDetector::loadPatternsFromDatabase(metadata::Database& db) {
-    auto stmtResult =
-        db.prepare("SELECT pattern_hex, offset, file_type, mime_type, description, confidence "
-                   "FROM file_patterns ORDER BY confidence DESC");
-    if (!stmtResult)
-        return stmtResult.error();
-
-    auto stmt = std::move(stmtResult).value();
-    std::lock_guard<std::mutex> lock(pImpl->patternsMutex);
-    size_t count = 0;
-
-    while (true) {
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        if (!stepResult.value())
-            break;
-
-        FilePattern pattern;
-        pattern.patternHex = stmt.getString(0);
-        pattern.offset = stmt.getInt(1);
-        pattern.fileType = stmt.getString(2);
-        pattern.mimeType = stmt.getString(3);
-        pattern.description = stmt.getString(4);
-        pattern.confidence = static_cast<float>(stmt.getDouble(5));
-
-        auto bytesResult = hexToBytes(pattern.patternHex);
-        if (bytesResult) {
-            pattern.pattern = bytesResult.value();
-            pImpl->patterns.push_back(pattern);
-            count++;
-        }
-    }
-
-    return count;
-}
-
-Result<size_t> FileTypeDetector::savePatternsToDatabase(metadata::Database& db) {
-    size_t count = 0;
-
-    auto transactionResult = db.transaction([this, &db, &count]() -> Result<void> {
-        // Clear existing patterns
-        auto clearResult = db.execute("DELETE FROM file_patterns");
-        if (!clearResult)
-            return clearResult.error();
-
-        // Insert new patterns
-        auto stmtResult =
-            db.prepare("INSERT INTO file_patterns (pattern, pattern_hex, offset, file_type, "
-                       "mime_type, description, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)");
-        if (!stmtResult)
-            return stmtResult.error();
-
-        auto stmt = std::move(stmtResult).value();
-        std::lock_guard<std::mutex> lock(pImpl->patternsMutex);
-
-        for (const auto& pattern : pImpl->patterns) {
-            auto bindResult =
-                stmt.bindAll(std::span<const std::byte>(pattern.pattern), pattern.patternHex,
-                             static_cast<int>(pattern.offset), pattern.fileType, pattern.mimeType,
-                             pattern.description, pattern.confidence);
-            if (!bindResult)
-                return bindResult.error();
-
-            auto execResult = stmt.execute();
-            if (!execResult)
-                return execResult.error();
-
-            stmt.reset();
-            count++;
-        }
-
-        // Update version info
-        auto versionResult = db.execute(
-            "INSERT OR REPLACE INTO file_patterns_version (id, version, updated_time, source) "
-            "VALUES (1, '1.0', strftime('%s', 'now'), 'FileTypeDetector')");
-        if (!versionResult)
-            return versionResult.error();
-
-        return Result<void>();
-    });
-
-    if (!transactionResult) {
-        return transactionResult.error();
-    }
-
-    return count;
-}
-
 Result<void> FileTypeDetector::addPattern(const FilePattern& pattern) {
     if (pattern.pattern.empty() || pattern.fileType.empty()) {
         return Error{ErrorCode::InvalidArgument, "Invalid pattern"};
@@ -1007,14 +918,6 @@ void FileTypeDetector::clearCache() {
 FileTypeDetector::CacheStats FileTypeDetector::getCacheStats() const {
     std::lock_guard<std::mutex> lock(pImpl->cacheMutex);
     return pImpl->cacheStats;
-}
-
-bool FileTypeDetector::hasLibMagic() const {
-#ifdef YAMS_HAS_LIBMAGIC
-    return pImpl->magicCookie != nullptr;
-#else
-    return false;
-#endif
 }
 
 std::string FileTypeDetector::getMimeTypeFromExtension(const std::string& extension) {

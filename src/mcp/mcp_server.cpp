@@ -357,53 +357,6 @@ void MCPServer::recordEarlyFeatureUse() {
  */
 
 #if !defined(YAMS_WASI)
-boost::asio::awaitable<Result<MCPGetByNameResponse>>
-MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
-    // Paths and names share one resolver (exact path, path suffix, basename,
-    // unique loose match); it never picks one of several matches on its own.
-    const std::string wanted = !req.path.empty() ? req.path : req.name;
-
-    // Reuse shared daemon client to avoid per-request connection overhead
-    auto clientRes = requireDaemonClient();
-    if (!clientRes)
-        co_return clientRes.error();
-    auto& rsvc = *retrieval_svc_;
-    auto ropts = detail::makeMcpRetrievalOptions(daemon_client_config_);
-    auto docService = documentService_;
-    if (!docService) {
-        docService = app::services::makeDocumentService(appContext_);
-        if (docService) {
-            documentService_ = docService;
-        }
-    }
-    auto resolver = [docService](const std::string& nm) -> Result<std::string> {
-        if (docService)
-            return docService->resolveNameToHash(nm);
-        return Error{ErrorCode::NotInitialized, "Document service not available"};
-    };
-
-    auto r = rsvc.getByNameSmart(wanted, req.oldest, true, /*useSession*/ false, std::string{},
-                                 ropts, resolver);
-
-    // getByNameSmart is the only resolver: an unknown or ambiguous name is an
-    // error, never the closest-looking document.
-    if (!r)
-        co_return r.error();
-    yams::daemon::GetResponse gr = std::move(r).value();
-
-    MCPGetByNameResponse out;
-    out.size = gr.size;
-    out.hash = std::move(gr.hash);
-    out.name = std::move(gr.name);
-    out.path = std::move(gr.path);
-    out.mimeType = std::move(gr.mimeType);
-    if (!gr.content.empty()) {
-        constexpr std::size_t MAX_BYTES = std::size_t{1} * 1024 * 1024;
-        out.content = gr.content.size() <= MAX_BYTES ? std::move(gr.content)
-                                                     : gr.content.substr(0, MAX_BYTES);
-    }
-    co_return out;
-}
 
 boost::asio::awaitable<Result<MCPDeleteByNameResponse>>
 MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
@@ -425,40 +378,6 @@ MCPServer::handleDeleteByName(const MCPDeleteByNameRequest& req) {
         if (result.success) {
             out.deleted.push_back(result.name.empty() ? result.hash : result.name);
         }
-    }
-    co_return out;
-}
-
-boost::asio::awaitable<yams::Result<yams::mcp::MCPCatDocumentResponse>>
-yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& req) {
-    // Reuse shared daemon client to avoid per-request connection overhead
-    auto clientRes = requireDaemonClient();
-    if (!clientRes)
-        co_return clientRes.error();
-    auto ropts = detail::makeMcpRetrievalOptions(daemon_client_config_);
-
-    yams::app::services::GetOptions dreq;
-    dreq.hash = req.hash;
-    dreq.name = req.name;
-    dreq.byName = !req.name.empty();
-    dreq.raw = req.rawContent;
-    dreq.extract = req.extractText;
-    dreq.latest = req.latest;
-    dreq.oldest = req.oldest;
-    dreq.metadataOnly = false; // cat always needs content
-
-    auto gres = retrieval_svc_->get(dreq, ropts);
-    if (!gres) {
-        co_return gres.error();
-    }
-
-    const auto& r = gres.value();
-    MCPCatDocumentResponse out;
-    out.size = r.size;
-    out.hash = r.hash;
-    out.name = r.name;
-    if (r.hasContent) {
-        out.content = r.content;
     }
     co_return out;
 }
@@ -1219,29 +1138,10 @@ MCPServer::handleSemanticDedupe(const MCPSemanticDedupeRequest& req) {
 
 // ---------------- Lifecycle helper implementations ----------------
 
-bool MCPServer::isMethodAllowedBeforeInitialization(const std::string& method) const {
-    static const std::unordered_set<std::string> allowed = {
-        "initialize", "exit",
-        // readonly discovery before full init
-        "tools/list", "resources/list", "resources/read", "prompts/list", "prompts/get",
-        // logging notifications (client -> server)
-        "notifications/log"};
-    return allowed.count(method) > 0;
-}
-
 void MCPServer::markClientInitialized() {
     spdlog::info("MCP marking client as initialized");
     initializedNotificationSeen_.store(true);
     initialized_.store(true);
-}
-
-void MCPServer::handleExitRequest() {
-    spdlog::info("MCP server received 'exit' request");
-    exitRequested_.store(true);
-    running_.store(false);
-    if (transport_) {
-        transport_->close();
-    }
 }
 
 json MCPServer::buildServerCapabilities() const {
@@ -1271,14 +1171,6 @@ json MCPServer::buildServerCapabilities() const {
     }
 
     return caps;
-}
-
-void MCPServer::scheduleAutoReady() {
-    // Intentionally no-op: readiness requires explicit client lifecycle messages.
-}
-
-bool MCPServer::shouldAutoInitialize() const {
-    return false;
 }
 
 } // namespace yams::mcp

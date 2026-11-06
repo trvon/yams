@@ -180,9 +180,6 @@ public:
                                  int timeoutMs = 0, bool keepHot = true, bool warmup = true);
     bool startEmbeddingWarmupIfConfigured();
     std::shared_ptr<yams::search::SearchEngine> getSearchEngineSnapshot() const;
-    SearchEngineSnapshot getSearchEngineStatusSnapshot() const {
-        return searchEngineManager_.getSnapshot();
-    }
     const std::string& getEmbeddingModelName() const { return embeddingLifecycle_.modelName(); }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
         return vectorSystemManager_ ? vectorSystemManager_->getVectorDatabase() : nullptr;
@@ -274,8 +271,6 @@ public:
     }
     void onSearchRequestFinished() { searchAdmission_.onFinished(); }
     void onSearchRequestRejected() { searchAdmission_.onRejected(); }
-    std::uint32_t getSearchActiveRequests() const { return searchAdmission_.active(); }
-    SearchAdmissionController& getSearchAdmissionController() { return searchAdmission_; }
     void onSnapshotPersisted() { metricsPublisher_.onSnapshotPersisted(); }
     std::uint64_t getSnapshotsPersistedCount() const {
         return metricsPublisher_.snapshotsPersistedCount();
@@ -308,14 +303,11 @@ public:
         metricsPublisher_.publishIngest(queued, active);
     }
     void publishIngestQueued(std::size_t queued) { metricsPublisher_.publishQueued(queued); }
-    void publishIngestActive(std::size_t active) { metricsPublisher_.publishActive(active); }
     void setIngestWorkerTarget(std::size_t target) { metricsPublisher_.setWorkerTarget(target); }
-    std::size_t ingestWorkerTarget() const { return metricsPublisher_.workerTarget(); }
     IngestMetricsSnapshot getIngestMetricsSnapshot() const {
         auto s = metricsPublisher_.snapshot();
         return {s.queued, s.active, s.target};
     }
-    IngestMetricsPublisher& getIngestMetricsPublisher() { return metricsPublisher_; }
     void enqueuePostIngest(const std::string& hash, const std::string& mime);
     void enqueuePostIngestBatch(const std::vector<std::string>& hashes, const std::string& mime);
     void enqueuePostIngestTasks(std::vector<PostIngestQueue::Task> tasks);
@@ -616,7 +608,6 @@ public:
     TopologyTelemetrySnapshot getTopologyTelemetrySnapshot() const {
         return topologyManager_.getTelemetrySnapshot();
     }
-    bool isTopologyRebuildInProgress() const { return topologyManager_.isRebuildInProgress(); }
     TopologyManager& getTopologyManager() { return topologyManager_; }
 
     void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
@@ -649,13 +640,10 @@ public:
 
     // PBI-088: New component accessors
     PluginManager* getPluginManager() const { return pluginManager_.get(); }
-    VectorSystemManager* getVectorSystemManager() const { return vectorSystemManager_.get(); }
     DatabaseManager* getDatabaseManager() const { return databaseManager_.get(); }
     SearchComponent* getSearchComponent() const { return searchComponent_.get(); }
 
     std::size_t getWorkerActive() const { return metricsPublisher_.workerActive(); }
-    std::size_t getWorkerPosted() const { return metricsPublisher_.workerPosted(); }
-    std::size_t getWorkerCompleted() const { return metricsPublisher_.workerCompleted(); }
     std::size_t getWorkerThreads() const {
         return workCoordinator_ ? workCoordinator_->getWorkerCount() : 0;
     }
@@ -747,7 +735,6 @@ public:
         return vectorDb ? vectorDb->getConfig().database_path : std::string{};
     }
     Result<bool> adoptModelProviderFromHosts(const std::string& preferredName = "");
-    bool isEmbeddingsAutoOnAdd() const { return embeddingLifecycle_.isAutoOnAdd(); }
 
     boost::asio::awaitable<Result<size_t>> autoloadPluginsNow();
     boost::asio::awaitable<void> preloadPreferredModelIfConfigured();
@@ -768,15 +755,6 @@ public:
     void clearModelProviderError();
 
     boost::asio::awaitable<void> co_enableEmbeddingsAndRebuild();
-
-    bool triggerSearchEngineRebuildIfNeeded();
-
-    bool requestSearchEngineRebuild(const std::string& reason, bool includeVector = true,
-                                    bool waitForDrain = true) {
-        return searchEngineManager_.requestRebuild(reason, includeVector, waitForDrain);
-    }
-
-    bool isSearchEngineAwaitingDrain() const { return searchEngineManager_.isAwaitingDrain(); }
 
     Result<void> ensureEmbeddingGeneratorFor(const std::string& modelName);
 

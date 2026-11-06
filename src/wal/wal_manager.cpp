@@ -931,13 +931,6 @@ uint64_t WALManager::getCurrentSequence() const {
     return pImpl->sequenceNumber.load();
 }
 
-size_t WALManager::getPendingEntries() const {
-    auto lockStart = std::chrono::steady_clock::now();
-    std::shared_lock lock(pImpl->stateMutex);
-    pImpl->recordSharedLockWait(std::chrono::steady_clock::now() - lockStart);
-    return pImpl->pendingEntries.size();
-}
-
 std::filesystem::path WALManager::getCurrentLogPath() const {
     auto lockStart = std::chrono::steady_clock::now();
     std::shared_lock lock(pImpl->stateMutex);

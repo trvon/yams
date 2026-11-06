@@ -691,14 +691,6 @@ std::string P2pConnection::peerNodeId() const {
 std::string P2pConnection::localNodeId() const {
     return impl_ ? impl_->localNodeId : std::string{};
 }
-std::uint16_t P2pConnection::localPort() const {
-    if (!impl_) {
-        return 0;
-    }
-    boost::system::error_code error;
-    const auto endpoint = impl_->stream->next_layer().local_endpoint(error);
-    return error ? 0 : endpoint.port();
-}
 void P2pConnection::close() noexcept {
     if (impl_) {
         impl_->close();

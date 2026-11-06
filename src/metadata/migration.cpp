@@ -783,11 +783,6 @@ MigrationBuilder& MigrationBuilder::upFunction(std::function<Result<void>(Databa
     return *this;
 }
 
-MigrationBuilder& MigrationBuilder::downFunction(std::function<Result<void>(Database&)> func) {
-    migration_.downFunc = std::move(func);
-    return *this;
-}
-
 MigrationBuilder& MigrationBuilder::wrapInTransaction(bool enabled) {
     migration_.wrapInTransaction = enabled;
     return *this;

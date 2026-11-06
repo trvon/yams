@@ -216,34 +216,12 @@ struct ExtendedVideoMetadata : public VideoMetadata {
         return width > 0 && height > 0 && durationSeconds > 0;
     }
 
-    [[nodiscard]] bool hasThumbnail() const noexcept {
-        return thumbnail.has_value() && !thumbnail->empty();
-    }
-
     [[nodiscard]] std::string getDisplayName() const {
         if (author && title)
             return yams::fmt_format("{} - {}", *author, *title);
         if (title)
             return *title;
         return yams::fmt_format("{}x{} {}s", width, height, static_cast<int>(durationSeconds));
-    }
-
-    [[nodiscard]] double getAspectRatio() const noexcept {
-        return height > 0 ? static_cast<double>(width) / height : 0.0;
-    }
-
-    [[nodiscard]] std::string getResolutionCategory() const noexcept {
-        if (height >= 2160)
-            return "4K";
-        if (height >= 1440)
-            return "1440p";
-        if (height >= 1080)
-            return "1080p";
-        if (height >= 720)
-            return "720p";
-        if (height >= 480)
-            return "480p";
-        return "SD";
     }
 };
 
@@ -314,18 +292,6 @@ public:
     Result<void> validate(const std::filesystem::path& path) const override;
 
     /**
-     * @brief Get processing configuration
-     */
-    [[nodiscard]] const VideoProcessingConfig& getVideoConfig() const noexcept {
-        return videoConfig_;
-    }
-
-    /**
-     * @brief Update processing configuration
-     */
-    void setVideoConfig(VideoProcessingConfig config) noexcept { videoConfig_ = std::move(config); }
-
-    /**
      * @brief Cancel all ongoing processing
      */
     void cancelProcessing() noexcept { stopProcessing_ = true; }
@@ -356,10 +322,6 @@ public:
 
 private:
     // C++20: consteval for compile-time constants
-    static consteval size_t maxVideoFileSize() noexcept {
-        return 10ULL * 1024 * 1024 * 1024;
-    } // 10GB
-    static consteval size_t minVideoFileSize() noexcept { return 1024; } // 1KB
     static consteval std::chrono::milliseconds maxProcessingTime() noexcept {
         return std::chrono::milliseconds{300000}; // 5 minutes
     }

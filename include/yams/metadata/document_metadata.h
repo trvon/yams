@@ -13,26 +13,7 @@
 
 namespace yams::metadata {
 
-namespace detail {
-
-template <typename E, std::size_t N>
-constexpr std::string_view enumToStringImpl(E value,
-                                            const std::pair<E, std::string_view> (&map)[N]) {
-    for (const auto& [k, v] : map)
-        if (k == value)
-            return v;
-    return "Unknown";
-}
-
-template <typename E, std::size_t N>
-constexpr E enumFromStringImpl(std::string_view name,
-                               const std::pair<E, std::string_view> (&map)[N]) {
-    for (const auto& [k, v] : map)
-        if (v == name)
-            return k;
-    return static_cast<E>(-1);
-}
-} // namespace detail
+namespace detail {} // namespace detail
 
 /**
  * @brief Document extraction status
@@ -336,8 +317,6 @@ struct SearchHistoryEntry {
     std::string userContext;            ///< Optional user/session identifier
 
     // Legacy Unix accessor removed
-
-    void setQueryTime(int64_t unixTime) { queryTime = yams::features::fromUnixTime(unixTime); }
 };
 
 /**
@@ -415,8 +394,6 @@ struct SavedQuery {
     // Legacy Unix accessors removed
 
     void setCreatedTime(int64_t unixTime) { createdTime = yams::features::fromUnixTime(unixTime); }
-
-    void setLastUsed(int64_t unixTime) { lastUsed = yams::features::fromUnixTime(unixTime); }
 };
 
 /**
@@ -427,11 +404,6 @@ struct DocumentMetadata {
     std::optional<DocumentContent> content;                  ///< Extracted content (if available)
     std::unordered_map<std::string, MetadataValue> metadata; ///< Key-value metadata
     std::vector<DocumentRelationship> relationships;         ///< Document relationships
-
-    /**
-     * @brief Add metadata entry
-     */
-    void addMetadata(const std::string& key, const MetadataValue& value) { metadata[key] = value; }
 
     /**
      * @brief Get metadata entry
@@ -446,13 +418,6 @@ struct DocumentMetadata {
      */
     [[nodiscard]] bool hasMetadata(const std::string& key) const {
         return metadata.find(key) != metadata.end();
-    }
-
-    /**
-     * @brief Add relationship
-     */
-    void addRelationship(const DocumentRelationship& relationship) {
-        relationships.push_back(relationship);
     }
 
     /**

@@ -249,9 +249,6 @@ private:
     std::shared_ptr<yams::daemon::DaemonClient> client_; // optional shared client
     std::shared_ptr<yams::daemon::DaemonClient>
     getOrCreateClient(const RetrievalOptions& opts) const;
-
-    // Check if FTS5 index is ready for queries (PBI-040, task 040-1)
-    bool isFTS5Ready(const RetrievalOptions& opts) const;
 };
 
 /// Pick the document a hash prefix names from hash-search results. Results whose hash does not

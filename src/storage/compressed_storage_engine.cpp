@@ -773,14 +773,6 @@ Result<uint64_t> CompressedStorageEngine::getBlockSize(std::string_view hash) co
     return pImpl->getBlockSize(hash);
 }
 
-Result<uint64_t> CompressedStorageEngine::getCompressedSize(std::string_view key) const {
-    return pImpl->getBlockSize(key);
-}
-
-Result<uint64_t> CompressedStorageEngine::getUncompressedSize(std::string_view key) const {
-    return pImpl->size(key);
-}
-
 // Required StorageEngine interface methods
 StorageStats CompressedStorageEngine::getStats() const noexcept {
     return pImpl->getStats();

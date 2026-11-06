@@ -660,9 +660,6 @@ private:
         return collectDaemonPidsForPattern(pattern);
     }
 
-    static bool isAnyDaemonProcessRunning() {
-        return !collectDaemonPidsForPattern("yams-daemon").empty();
-    }
 #else
     std::string resolveSocketPathForLiveDaemon(const std::string& preferredSocket,
                                                const std::string& pidFilePath,

@@ -25,10 +25,6 @@ SearchExecutionContext defaultSearchExecutionContext() noexcept {
     return context;
 }
 
-const SearchExecutionContext* getSearchExecutionContext() noexcept {
-    return t_context ? &*t_context : nullptr;
-}
-
 SearchExecutionContext currentSearchExecutionContext() noexcept {
     return t_context.value_or(defaultSearchExecutionContext());
 }

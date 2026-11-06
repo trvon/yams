@@ -118,20 +118,6 @@ public:
     Result<void> loadPatternsFromFile(const std::filesystem::path& patternsFile);
 
     /**
-     * @brief Load patterns from database
-     * @param db Database connection
-     * @return Number of patterns loaded or error
-     */
-    Result<size_t> loadPatternsFromDatabase(metadata::Database& db);
-
-    /**
-     * @brief Save patterns to database
-     * @param db Database connection
-     * @return Number of patterns saved or error
-     */
-    Result<size_t> savePatternsToDatabase(metadata::Database& db);
-
-    /**
      * @brief Add custom pattern
      * @param pattern Pattern to add
      * @return Success or error
@@ -159,11 +145,6 @@ public:
         size_t maxSize = 0;
     };
     CacheStats getCacheStats() const;
-
-    /**
-     * @brief Check if libmagic is available
-     */
-    bool hasLibMagic() const;
 
     /**
      * @brief Get MIME type from file extension

@@ -68,11 +68,6 @@ private:
     async_read_exact(boost::asio::local::stream_protocol::socket& socket, size_t size,
                      std::chrono::milliseconds timeout);
 
-    // Helper to write all data with timeout
-    boost::asio::awaitable<Result<void>>
-    async_write_all(boost::asio::local::stream_protocol::socket& socket,
-                    const std::vector<uint8_t>& data, std::chrono::milliseconds timeout);
-
     // Unified receive loop for both non-chunked and chunked responses
     boost::asio::awaitable<Result<void>, boost::asio::any_io_executor>
     receive_frames(boost::asio::local::stream_protocol::socket& socket, MessageFramer& framer,

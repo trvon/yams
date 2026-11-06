@@ -33,10 +33,6 @@ public:
         : channel_(std::move(channel)), executor_(std::move(executor)), config_(std::move(config)) {
     }
 
-    void setSingleItemProcessor(ProcessFn processor) { singleProcessor_ = std::move(processor); }
-
-    void setBatchProcessor(BatchProcessFn processor) { batchProcessor_ = std::move(processor); }
-
     boost::asio::awaitable<void> run(std::atomic<bool>& stop) {
         boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
         auto idleDelay = config_.minBackoff;

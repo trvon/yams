@@ -243,15 +243,10 @@ public:
     // --- Adopted Interface Accessors ---
 
     std::shared_ptr<IModelProvider> getModelProvider() const;
-    std::string getAdoptedProviderPluginName() const;
 
     const std::vector<std::shared_ptr<extraction::IContentExtractor>>&
     getContentExtractors() const {
         return contentExtractors_;
-    }
-
-    const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& getEntityProviders() const {
-        return entityProviders_;
     }
 
     const std::vector<std::shared_ptr<AbiEntityExtractorAdapter>>& getEntityExtractors() const {
@@ -279,11 +274,6 @@ public:
      * @brief Get embedding model name (set after successful adoption).
      */
     std::string getEmbeddingModelName() const;
-
-    /**
-     * @brief Set embedding model name.
-     */
-    void setEmbeddingModelName(const std::string& name);
 
     /**
      * @brief Get embedding dimension from model provider.

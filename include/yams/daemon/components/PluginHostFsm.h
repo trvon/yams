@@ -5,8 +5,6 @@
 #include <string>
 #include <vector>
 
-#include <tinyfsm.hpp>
-
 namespace yams::daemon {
 
 enum class PluginHostState { NotInitialized, ScanningDirectories, LoadingPlugins, Ready, Failed };
@@ -37,113 +35,55 @@ struct PluginLoadFailedEvent {
     std::string error;
 };
 
-namespace detail {
-
-struct PHNotInitialized;
-struct PHScanningDirectories;
-struct PHLoadingPlugins;
-struct PHReady;
-struct PHFailed;
-
-struct PluginHostMachine : tinyfsm::MooreMachine<PluginHostMachine> {
-    inline static PluginHostSnapshot snap{};
-
-    virtual void react(const PluginScanStartedEvent&);
-    virtual void react(const PluginLoadedEvent&);
-    virtual void react(const PluginUnloadedEvent&);
-    virtual void react(const AllPluginsLoadedEvent&);
-    virtual void react(const PluginLoadRejectedEvent&);
-    virtual void react(const PluginLoadFailedEvent&);
-};
-
-struct PHNotInitialized : PluginHostMachine {
-    void entry() { snap.state = PluginHostState::NotInitialized; }
-};
-
-struct PHScanningDirectories : PluginHostMachine {
-    void entry() { snap.state = PluginHostState::ScanningDirectories; }
-};
-
-struct PHLoadingPlugins : PluginHostMachine {
-    void entry() { snap.state = PluginHostState::LoadingPlugins; }
-};
-
-struct PHReady : PluginHostMachine {
-    void entry() { snap.state = PluginHostState::Ready; }
-};
-
-struct PHFailed : PluginHostMachine {
-    void entry() { snap.state = PluginHostState::Failed; }
-};
-
-inline void PluginHostMachine::react(const PluginScanStartedEvent&) {
-    transit<PHScanningDirectories>();
-}
-
-inline void PluginHostMachine::react(const PluginLoadedEvent& ev) {
-    if (std::find(snap.loadedPlugins.begin(), snap.loadedPlugins.end(), ev.name) ==
-        snap.loadedPlugins.end()) {
-        snap.loadedPlugins.push_back(ev.name);
-    }
-    snap.loadedCount = snap.loadedPlugins.size();
-    transit<PHLoadingPlugins>();
-}
-
-inline void PluginHostMachine::react(const PluginUnloadedEvent& ev) {
-    std::erase(snap.loadedPlugins, ev.name);
-    snap.loadedCount = snap.loadedPlugins.size();
-    transit<PHReady>();
-}
-
-inline void PluginHostMachine::react(const AllPluginsLoadedEvent& ev) {
-    snap.loadedCount = ev.count;
-    transit<PHReady>();
-}
-
-inline void PluginHostMachine::react(const PluginLoadRejectedEvent& ev) {
-    snap.lastError = ev.error;
-    transit<PHReady>();
-}
-
-inline void PluginHostMachine::react(const PluginLoadFailedEvent& ev) {
-    snap.lastError = ev.error;
-    transit<PHFailed>();
-}
-
-} // namespace detail
-} // namespace yams::daemon
-
-namespace tinyfsm {
-template <> inline void Fsm<yams::daemon::detail::PluginHostMachine>::set_initial_state() {
-    current_state_ptr = &_state_instance<yams::daemon::detail::PHNotInitialized>::value;
-}
-} // namespace tinyfsm
-
-namespace yams::daemon {
-
+// Per-instance state. This was a tinyfsm machine, whose state is static, so every PluginManager in
+// a process shared one plugin-host state and each one's construction reset the others.
+// Transitions are unchanged: every event applies from every state.
 class PluginHostFsm {
 public:
-    PluginHostFsm() {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        detail::PluginHostMachine::snap = {};
-        detail::PluginHostMachine::start();
-    }
+    PluginHostFsm() = default;
 
     PluginHostSnapshot snapshot() const {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        return detail::PluginHostMachine::snap;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return snap_;
     }
 
     template <typename E> void dispatch(const E& ev) {
-        std::lock_guard<std::mutex> lock(sharedMutex());
-        detail::PluginHostMachine::dispatch(ev);
+        std::lock_guard<std::mutex> lock(mutex_);
+        apply(ev);
     }
 
 private:
-    static std::mutex& sharedMutex() {
-        static std::mutex mutex;
-        return mutex;
+    void apply(const PluginScanStartedEvent&) {
+        snap_.state = PluginHostState::ScanningDirectories;
     }
+    void apply(const PluginLoadedEvent& ev) {
+        if (std::find(snap_.loadedPlugins.begin(), snap_.loadedPlugins.end(), ev.name) ==
+            snap_.loadedPlugins.end()) {
+            snap_.loadedPlugins.push_back(ev.name);
+        }
+        snap_.loadedCount = snap_.loadedPlugins.size();
+        snap_.state = PluginHostState::LoadingPlugins;
+    }
+    void apply(const PluginUnloadedEvent& ev) {
+        std::erase(snap_.loadedPlugins, ev.name);
+        snap_.loadedCount = snap_.loadedPlugins.size();
+        snap_.state = PluginHostState::Ready;
+    }
+    void apply(const AllPluginsLoadedEvent& ev) {
+        snap_.loadedCount = ev.count;
+        snap_.state = PluginHostState::Ready;
+    }
+    void apply(const PluginLoadRejectedEvent& ev) {
+        snap_.lastError = ev.error;
+        snap_.state = PluginHostState::Ready;
+    }
+    void apply(const PluginLoadFailedEvent& ev) {
+        snap_.lastError = ev.error;
+        snap_.state = PluginHostState::Failed;
+    }
+
+    mutable std::mutex mutex_;
+    PluginHostSnapshot snap_{};
 };
 
 } // namespace yams::daemon

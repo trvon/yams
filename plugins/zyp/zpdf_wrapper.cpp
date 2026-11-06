@@ -137,21 +137,6 @@ int Document::pageCount() const {
     return count >= 0 ? count : 0;
 }
 
-std::optional<PageInfo> Document::pageInfo(int pageNum) const {
-    if (!handle_) {
-        return std::nullopt;
-    }
-
-    PageInfo info{};
-    int result = zpdf_get_page_info(static_cast<ZpdfDocument*>(handle_), pageNum, &info.width,
-                                    &info.height, &info.rotation);
-
-    if (result != 0) {
-        return std::nullopt;
-    }
-    return info;
-}
-
 TextBuffer Document::extractPage(int pageNum) const {
     if (!handle_) {
         return {};
@@ -170,29 +155,6 @@ TextBuffer Document::extractAll() const {
 
     size_t len = 0;
     uint8_t* data = zpdf_extract_all(static_cast<ZpdfDocument*>(handle_), &len);
-
-    return TextBuffer(data, len);
-}
-
-TextBuffer Document::extractAllParallel() const {
-    if (!handle_) {
-        return {};
-    }
-
-    size_t len = 0;
-    uint8_t* data = zpdf_extract_all_parallel(static_cast<ZpdfDocument*>(handle_), &len);
-
-    return TextBuffer(data, len);
-}
-
-TextBuffer Document::extractAllReadingOrder() const {
-    if (!handle_) {
-        return {};
-    }
-
-    size_t len = 0;
-    uint8_t* data =
-        zpdf_extract_all_reading_order_parallel(static_cast<ZpdfDocument*>(handle_), &len);
 
     return TextBuffer(data, len);
 }

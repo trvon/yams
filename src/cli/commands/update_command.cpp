@@ -479,11 +479,6 @@ Result<void> UpdateCommand::executeLocal() {
     return Result<void>();
 }
 
-Result<metadata::MetadataValue> UpdateCommand::parseMetadataValue(const std::string& value) {
-    // Simple implementation - in reality this might parse JSON or other formats
-    return metadata::MetadataValue(value);
-}
-
 void UpdateCommand::parseArguments(const std::vector<std::string>& args) {
     // Simple argument parsing for testing
     for (size_t i = 0; i < args.size(); i++) {
@@ -504,77 +499,6 @@ void UpdateCommand::parseArguments(const std::vector<std::string>& args) {
             }
         }
     }
-}
-
-Result<metadata::DocumentInfo> UpdateCommand::resolveNameToDocument(const std::string& name) {
-    // Use injected repository if available (for testing)
-    auto metadataRepo = metadataRepo_;
-    if (!metadataRepo && cli_) {
-        metadataRepo = cli_->getMetadataRepository();
-    }
-    if (!metadataRepo) {
-        return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
-    }
-
-    // First try as a path suffix (for real files)
-    auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%/" + name);
-    if (documentsResult && !documentsResult.value().empty()) {
-        const auto& results = documentsResult.value();
-        if (results.size() > 1) {
-            // Multiple documents with the same name
-            std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
-            for (const auto& doc : results) {
-                std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " << doc.filePath
-                          << std::endl;
-            }
-            return Error{
-                ErrorCode::InvalidOperation,
-                "Multiple documents with the same name. Please use hash to specify which one."};
-        }
-        return results[0];
-    }
-
-    // Try exact path match
-    documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, name);
-    if (documentsResult && !documentsResult.value().empty()) {
-        return documentsResult.value()[0];
-    }
-
-    // For stdin documents or when path search fails, search all documents and match by fileName
-    auto allDocsResult = metadataRepo->getDocumentCount();
-    if (!allDocsResult) {
-        return Error{allDocsResult.error().code, allDocsResult.error().message};
-    }
-
-    // Use search to find by name (works for both file and stdin documents)
-    auto searchResult = metadataRepo->search(name, 100, 0);
-    if (searchResult) {
-        std::vector<metadata::DocumentInfo> matchingDocs;
-        for (const auto& result : searchResult.value().results) {
-            // SearchResult contains document directly
-            const auto& doc = result.document;
-            // Check if fileName matches exactly
-            if (doc.fileName == name) {
-                matchingDocs.push_back(doc);
-            }
-        }
-
-        if (!matchingDocs.empty()) {
-            if (matchingDocs.size() > 1) {
-                std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
-                for (const auto& doc : matchingDocs) {
-                    std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " << doc.filePath
-                              << std::endl;
-                }
-                return Error{
-                    ErrorCode::InvalidOperation,
-                    "Multiple documents with the same name. Please use hash to specify which one."};
-            }
-            return matchingDocs[0];
-        }
-    }
-
-    return Error{ErrorCode::NotFound, "No document found with name: " + name};
 }
 
 // Smart resolution mirroring get_by_name behavior used in MCP server

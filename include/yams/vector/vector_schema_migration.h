@@ -85,16 +85,6 @@ public:
     static Result<void> migrateV2_2ToV2_3(sqlite3* db);
 
     /**
-     * @brief Rollback V2 migration (restore V1 schema)
-     *
-     * Only works if backup tables exist.
-     *
-     * @param db SQLite database handle
-     * @return Success or error
-     */
-    static Result<void> rollbackV2ToV1(sqlite3* db);
-
-    /**
      * @brief Check if migration backup tables exist
      * @param db SQLite database handle
      * @return true if backup tables exist

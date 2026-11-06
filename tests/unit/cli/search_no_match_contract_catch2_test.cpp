@@ -27,4 +27,14 @@ TEST_CASE("search --json reports lexical hits", "[cli][search][no-match][contrac
         REQUIRE(j.contains("lexical_hits"));
         CHECK(j.at("lexical_hits").get<int>() == 0);
     }
+    SECTION("grouped JSON reports it too") {
+        for (const auto* query : {"ledger", "zzqxqzzqxq"}) {
+            const auto r = corpus.run({"--json", "search", "--json-grouped", query});
+            INFO(query << ": " << r.out << r.err);
+            REQUIRE(r.rc == 0);
+            const auto j = nlohmann::json::parse(r.out);
+            REQUIRE(j.contains("lexical_hits"));
+            CHECK((j.at("lexical_hits").get<int>() > 0) == (std::string(query) == "ledger"));
+        }
+    }
 }

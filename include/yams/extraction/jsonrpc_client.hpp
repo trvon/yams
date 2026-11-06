@@ -90,16 +90,6 @@ public:
         return next_id_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    /**
-     * @brief Reset the stdout buffer read position
-     *
-     * Useful when recovering from errors or starting fresh communication.
-     */
-    void reset_buffer_position() noexcept {
-        std::lock_guard lock{mutex_};
-        read_pos_ = 0;
-    }
-
 private:
     /**
      * @brief Read the next complete JSON response from stdout buffer

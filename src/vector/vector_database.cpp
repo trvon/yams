@@ -1561,10 +1561,6 @@ Result<void> VectorDatabase::persistIndexChecked() {
     return pImpl->persistIndexChecked();
 }
 
-bool VectorDatabase::rebuildIndex() {
-    return pImpl->buildIndex();
-}
-
 bool VectorDatabase::beginBulkLoad() {
     return beginBulkLoadChecked().has_value();
 }
@@ -1756,15 +1752,6 @@ double VectorDatabase::computeCosineSimilarity(const std::vector<float>& a,
     return vector_utils::computeCosineSimilarity(a, b);
 }
 
-// Factory function
-std::unique_ptr<VectorDatabase> createVectorDatabase(const VectorDatabaseConfig& config) {
-    auto db = std::make_unique<VectorDatabase>(config);
-    if (!db->initialize()) {
-        return nullptr;
-    }
-    return db;
-}
-
 // Utility functions
 namespace utils {
 
@@ -1809,16 +1796,6 @@ bool validateVectorRecord(const VectorRecord& record, size_t expected_dim) {
     }
 
     return true;
-}
-
-double similarityToDistance(double similarity) {
-    // Convert cosine similarity [-1, 1] to distance [0, 2]
-    return 1.0 - similarity;
-}
-
-double distanceToSimilarity(double distance) {
-    // Convert distance [0, 2] to cosine similarity [-1, 1]
-    return 1.0 - distance;
 }
 
 } // namespace utils

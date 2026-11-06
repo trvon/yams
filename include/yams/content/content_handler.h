@@ -221,9 +221,7 @@ struct ContentResult {
     std::vector<std::string> warnings; ///< Non-fatal issues
 
     // Helper methods
-    [[nodiscard]] bool hasText() const { return text.has_value() && !text->empty(); }
     [[nodiscard]] bool hasMetadata() const { return !metadata.empty(); }
-    [[nodiscard]] size_t getContentSize() const { return text ? text->size() : 0; }
     [[nodiscard]] bool isSuccess() const { return isComplete && warnings.empty(); }
 };
 

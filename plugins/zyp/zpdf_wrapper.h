@@ -101,9 +101,6 @@ public:
     /** Cap the bytes one page's extraction may decompress (0 = unlimited). */
     void setPageDecompressLimit(size_t limit);
 
-    /** Get page information */
-    [[nodiscard]] std::optional<PageInfo> pageInfo(int pageNum) const;
-
     /** Extract text from a single page */
     [[nodiscard]] TextBuffer extractPage(int pageNum) const;
 
@@ -121,14 +118,6 @@ public:
     [[nodiscard]] static TextBuffer extractAllParallelized(std::span<const uint8_t> data,
                                                            int numThreads = 0,
                                                            size_t pageDecompressLimit = 0);
-
-    /** Alias for extractAll(); named for backward compatibility.
-     *  Note: despite the name this is sequential, not parallel;
-     *        use extractAllParallelized() for true parallelism. */
-    [[nodiscard]] TextBuffer extractAllParallel() const;
-
-    /** Extract text in visual reading order (experimental) */
-    [[nodiscard]] TextBuffer extractAllReadingOrder() const;
 
     /** Check if document handle is valid */
     [[nodiscard]] bool valid() const;

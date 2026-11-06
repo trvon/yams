@@ -192,16 +192,6 @@ public:
     void setDegradedMode(bool degraded) noexcept;
 
     /**
-     * @brief Create compression error from exception
-     * @param ex Exception that occurred
-     * @param algorithm Algorithm that was being used
-     * @param operation Operation that failed
-     * @return Compression error
-     */
-    static CompressionError fromException(const std::exception& ex, CompressionAlgorithm algorithm,
-                                          const std::string& operation);
-
-    /**
      * @brief Create compression error from result
      * @param result Failed result
      * @param algorithm Algorithm that was being used

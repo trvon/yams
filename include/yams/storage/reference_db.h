@@ -26,7 +26,6 @@ public:
     void bind(int index, int64_t value);
     void bind(int index, const std::string& value);
     void bind(int index, std::string_view value);
-    void bindNull(int index);
 
     bool step();
     void execute();

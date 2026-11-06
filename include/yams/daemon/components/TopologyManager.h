@@ -137,10 +137,6 @@ public:
         return publishedEpoch_.load(std::memory_order_acquire);
     }
 
-    void setPublishedEpoch(std::uint64_t epoch) {
-        publishedEpoch_.store(epoch, std::memory_order_release);
-    }
-
     [[nodiscard]] bool tryScheduleRebuild();
 
     // Audit-fix #1: throttle between rebuild *completions*. Set the minimum
@@ -151,9 +147,6 @@ public:
     // succeeds. Default 0 = no throttle (current behavior).
     void setRebuildMinIntervalMs(std::int64_t millis) noexcept {
         rebuildMinIntervalMs_.store(millis, std::memory_order_release);
-    }
-    [[nodiscard]] std::int64_t getRebuildMinIntervalMs() const noexcept {
-        return rebuildMinIntervalMs_.load(std::memory_order_acquire);
     }
     void setRoutingRepresentativeCount(std::size_t count) noexcept {
         routingRepresentativeCount_.store(std::max<std::size_t>(1, count),
@@ -218,14 +211,6 @@ public:
         featureComposition_ = std::move(composition);
     }
     void clearScheduled();
-
-    void setAutoRebuildEnabled(bool enabled) {
-        autoRebuildEnabled_.store(enabled, std::memory_order_release);
-    }
-
-    [[nodiscard]] bool autoRebuildEnabled() const {
-        return autoRebuildEnabled_.load(std::memory_order_acquire);
-    }
 
     // Phase G: optional adaptive tuner. When set and enabled, each
     // rebuildArtifacts() call may pull a new engine arm (within cooldown)

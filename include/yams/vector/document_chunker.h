@@ -163,7 +163,6 @@ public:
     size_t estimateTokenCount(const std::string& text) const;
     std::vector<size_t> findSentenceBoundaries(const std::string& text) const;
     std::vector<size_t> findParagraphBoundaries(const std::string& text) const;
-    std::vector<size_t> findWordBoundaries(const std::string& text) const;
 
     // Error handling
     std::string getLastError() const;
@@ -209,7 +208,6 @@ protected:
                                           const std::string& document_hash) override;
 
 private:
-    std::vector<std::string> splitIntoSentences(const std::string& text) const;
     bool isSentenceEnd(const std::string& text, size_t pos) const;
 };
 
@@ -309,11 +307,6 @@ std::string detectLanguage(const std::string& text);
  * Calculate semantic coherence of a chunk
  */
 double calculateSemanticCoherence(const std::string& text);
-
-/**
- * Find natural breaking points in text
- */
-std::vector<size_t> findNaturalBreaks(const std::string& text);
 
 /**
  * Merge overlapping chunks

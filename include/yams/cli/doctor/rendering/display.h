@@ -16,8 +16,6 @@ namespace yams::cli::doctor {
 /// Displays daemon status information: R2 credentials, embedding runtime,
 /// knowledge graph counts, live repair progress, and loaded plugins.
 struct DoctorDisplay {
-    static void renderR2Credentials(std::ostream& os, YamsCLI* cli, RecommendationBuilder& recs);
-    static void renderEmbeddingRuntime(std::ostream& os, const daemon::StatusResponse& status);
     static void renderKnowledgeGraph(std::ostream& os, YamsCLI* cli, RecommendationBuilder& recs);
     static void renderLiveRepairProgress(std::ostream& os, YamsCLI* cli);
 };

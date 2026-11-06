@@ -252,18 +252,6 @@ ConnectionFsm::ConnectionFsm(ConnectionFsm&&) noexcept = default;
 ConnectionFsm& ConnectionFsm::operator=(ConnectionFsm&&) noexcept = default;
 
 // Public configuration API (kept light-weight)
-void ConnectionFsm::set_header_timeout_ms(uint32_t ms) noexcept {
-    if (auto* impl = impl_.get())
-        impl->cfg.header_timeout_ms = ms;
-}
-void ConnectionFsm::set_payload_timeout_ms(uint32_t ms) noexcept {
-    if (auto* impl = impl_.get())
-        impl->cfg.payload_timeout_ms = ms;
-}
-void ConnectionFsm::set_idle_timeout_ms(uint32_t ms) noexcept {
-    if (auto* impl = impl_.get())
-        impl->cfg.idle_timeout_ms = ms;
-}
 void ConnectionFsm::set_max_retries(std::size_t n) noexcept {
     if (auto* impl = impl_.get())
         impl->cfg.max_retries = n;
@@ -271,17 +259,6 @@ void ConnectionFsm::set_max_retries(std::size_t n) noexcept {
 void ConnectionFsm::enable_metrics(bool on) noexcept {
     if (auto* impl = impl_.get())
         impl->cfg.enable_metrics = on;
-}
-void ConnectionFsm::set_write_cap_bytes(std::size_t bytes) noexcept {
-    if (auto* impl = impl_.get())
-        impl->write_cap_bytes = bytes;
-}
-void ConnectionFsm::set_backpressure_watermarks(uint32_t low_percent,
-                                                uint32_t high_percent) noexcept {
-    if (auto* impl = impl_.get()) {
-        impl->low_wm_percent = low_percent;
-        impl->high_wm_percent = high_percent;
-    }
 }
 
 bool ConnectionFsm::transition(State next, [[maybe_unused]] const char* reason) noexcept {
@@ -422,17 +399,6 @@ void ConnectionFsm::on_readable(std::size_t) {
         auto next = impl->current->on_readable();
         if (next.has)
             transition(to_public(next.state), "on_readable:state_impl");
-    }
-}
-
-void ConnectionFsm::on_writable(std::size_t) {
-    // Writes are driven by higher-level events; ignore spurious signals in other states
-    switch (state_) {
-        case State::WritingHeader:
-        case State::StreamingChunks:
-            break; // ok
-        default:
-            break; // ignore
     }
 }
 
@@ -669,16 +635,6 @@ bool ConnectionFsm::backpressured() const noexcept {
     if (auto* impl = impl_.get())
         return impl->backpressured;
     return false;
-}
-
-std::size_t ConnectionFsm::write_capacity_remaining() const noexcept {
-    if (auto* impl = impl_.get()) {
-        const std::size_t cap = impl->write_cap_bytes ? impl->write_cap_bytes : (2 * 1024 * 1024);
-        if (impl->write_bytes >= cap)
-            return 0;
-        return cap - impl->write_bytes;
-    }
-    return 0;
 }
 
 } // namespace yams::daemon

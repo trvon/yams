@@ -647,21 +647,6 @@ ValidationScope::~ValidationScope() noexcept {
     }
 }
 
-void ValidationScope::setOriginalData(std::span<const std::byte> data) {
-    originalData_.assign(data.begin(), data.end());
-    hasOriginal_ = true;
-}
-
-void ValidationScope::setCompressionResult(const CompressionResult& result) {
-    compressionResult_ = std::make_unique<CompressionResult>(result);
-    hasCompressed_ = true;
-}
-
-void ValidationScope::setDecompressedData(std::span<const std::byte> data) {
-    decompressedData_.assign(data.begin(), data.end());
-    hasDecompressed_ = true;
-}
-
 const ValidationResult& ValidationScope::result() const noexcept {
     return result_;
 }

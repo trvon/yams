@@ -420,6 +420,18 @@ Expected<void> copyFileDurablyReplacing(const fs::path& src, const fs::path& dst
         fs::remove(temp, ec);
         return error;
     };
+    // Streams cannot tell a read error from end of file on every platform (libc++ opens a
+    // directory and then reports EOF), so require a regular file and check the byte count.
+    std::error_code statEc;
+    if (!fs::is_regular_file(src, statEc)) {
+        return fail(
+            Error{ErrorCode::IoError, "copy: source is not a regular file: " + src.string()});
+    }
+    const auto expectedSize = fs::file_size(src, statEc);
+    if (statEc) {
+        return fail(Error{ErrorCode::IoError, "copy: cannot size source: " + src.string()});
+    }
+    std::uintmax_t copied = 0;
     {
         std::ifstream is(src, std::ios::binary);
         if (!is.good()) {
@@ -434,6 +446,7 @@ Expected<void> copyFileDurablyReplacing(const fs::path& src, const fs::path& dst
             is.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
             const std::streamsize got = is.gcount();
             if (got > 0) {
+                copied += static_cast<std::uintmax_t>(got);
                 os.write(buffer.data(), got);
                 if (!os.good()) {
                     return fail(
@@ -441,7 +454,7 @@ Expected<void> copyFileDurablyReplacing(const fs::path& src, const fs::path& dst
                 }
             }
         }
-        if (!is.eof()) {
+        if (!is.eof() || copied != expectedSize) {
             return fail(Error{ErrorCode::IoError, "copy: read failed for source: " + src.string()});
         }
         os.flush();

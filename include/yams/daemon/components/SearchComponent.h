@@ -78,11 +78,6 @@ public:
     bool forceRebuild();
 
     /**
-     * Get the document count at last successful build.
-     */
-    uint64_t getLastBuildDocCount() const { return lastBuildDocCount_.load(); }
-
-    /**
      * Record a successful build with current corpus size.
      * Called by ServiceManager after search engine build completes.
      */

@@ -998,28 +998,6 @@ boost::asio::awaitable<Response> RequestHandler::process_request(const Request& 
                                                         "Request processor not set");
 }
 
-boost::asio::awaitable<std::optional<Response>>
-RequestHandler::process_streaming_request(const Request& request) {
-    if (!processor_) {
-        co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotImplemented,
-                                                            "Request processor not set");
-    }
-
-    // Check if we should use streaming for this request: initialize via processor
-    if (can_stream_request(request)) {
-        // Initialize streaming; processor may return std::nullopt to indicate chunked mode
-        co_return co_await processor_->process_streaming(request);
-    }
-
-    // Fall back to regular processing (unary)
-    if (processor_) {
-        auto r = co_await processor_->process(request);
-        co_return std::optional<Response>{std::move(r)};
-    }
-    co_return std::optional<Response>{yams::daemon::dispatch::makeErrorResponse(
-        ErrorCode::NotImplemented, "Request processor not set")};
-}
-
 bool RequestHandler::can_stream_request(const Request& request) const {
     if (!processor_) {
         return false;

@@ -281,18 +281,6 @@ public:
     std::uint64_t directoriesAdded() const { return directoriesAdded_.load(); }
     std::uint64_t filesProcessed() const { return filesProcessed_.load(); }
     std::uint64_t directoriesProcessed() const { return directoriesProcessed_.load(); }
-    void incFilesAdded(std::uint64_t count = 1) {
-        filesAdded_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incDirectoriesAdded(std::uint64_t count = 1) {
-        directoriesAdded_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incFilesProcessed(std::uint64_t count = 1) {
-        filesProcessed_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incDirectoriesProcessed(std::uint64_t count = 1) {
-        directoriesProcessed_.fetch_add(count, std::memory_order_relaxed);
-    }
     double latencyMsEma() const { return latencyMsEma_.load(); }
     double ratePerSecEma() const { return ratePerSecEma_.load(); }
     std::size_t capacity() const { return capacity_.load(std::memory_order_relaxed); }
@@ -337,7 +325,6 @@ public:
     // Stage concurrency limits (dynamic via TuneAdvisor)
     static std::size_t maxExtractionConcurrent();
     static std::size_t maxKgConcurrent();
-    static std::size_t maxSymbolConcurrent();
     static std::size_t maxEntityConcurrent();
     static std::size_t maxTitleConcurrent();
 
@@ -389,7 +376,6 @@ public:
     /// Explicitly enable or disable KG dispatch. Unlike pauseStage(), disabling dispatch marks
     /// KG as outside the active pipeline contract; temporary pauses continue buffering work.
     void setKnowledgeGraphEnabled(bool enabled);
-    [[nodiscard]] bool isKnowledgeGraphEnabled() const;
 
     /// Pause all processing stages (emergency shutdown)
     void pauseAll();
@@ -582,15 +568,6 @@ private:
             }
         }
         return false;
-    }
-
-    [[nodiscard]] bool allStagesStarted() const {
-        for (std::size_t i = 0; i < kStageCount; ++i) {
-            if (!stageStarted_[i].load(std::memory_order_acquire)) {
-                return false;
-            }
-        }
-        return true;
     }
 
     [[nodiscard]] bool allStagesStopped() const {

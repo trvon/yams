@@ -241,6 +241,8 @@ private:
         int64_t elapsedMs{0};
         std::string method{"search"};
         std::string traceId;
+        // Documents matched by a text component; absent when the backend did not report it.
+        std::optional<int64_t> lexicalHits;
     };
 
     struct GroupedSearchResults {
@@ -271,6 +273,12 @@ private:
         ctx.elapsedMs = resp.elapsed.count();
         ctx.method = "daemon";
         ctx.traceId = resp.traceId;
+        if (auto it = resp.searchStats.find("lexical_hits"); it != resp.searchStats.end()) {
+            try {
+                ctx.lexicalHits = std::stoll(it->second);
+            } catch (const std::exception&) {
+            }
+        }
         return ctx;
     }
 
@@ -576,6 +584,8 @@ private:
             output["execution_time_ms"] = ctx.elapsedMs;
             if (!ctx.traceId.empty())
                 output["trace_id"] = ctx.traceId;
+            if (ctx.lexicalHits)
+                output["lexical_hits"] = *ctx.lexicalHits;
 
             nlohmann::json results = nlohmann::json::array();
             for (const auto& item : deduplicated) {
@@ -588,8 +598,8 @@ private:
             return Result<void>();
         }
 
-        // Human-readable output
-        if (deduplicated.empty()) {
+        // Human-readable output. Grouped JSON reaches here too and must stay a JSON document.
+        if (deduplicated.empty() && !jsonOutput_) {
             std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
             emitTagHint();
             emitNoResultsGuidance();
@@ -642,12 +652,18 @@ private:
                 output["query"] = ctx.query;
                 output["method"] = ctx.method;
                 output["total_groups"] = groups.size();
+                if (ctx.lexicalHits)
+                    output["lexical_hits"] = *ctx.lexicalHits;
                 nlohmann::json groupsArr = nlohmann::json::array();
                 for (auto& group : groups) {
                     groupsArr.push_back(makeGroupedSearchJson(group.path, group.versions));
                 }
                 output["groups"] = groupsArr;
                 std::cout << output.dump(2) << std::endl;
+                // stdout holds only the JSON document, as in the flat JSON branch.
+                for (std::size_t i = 0; i < deduplicated.size(); ++i)
+                    noteOutputResult(std::cout);
+                return Result<void>();
             } else {
                 renderGroupedHumanResults(groups);
             }
@@ -736,42 +752,6 @@ private:
         double whitespaceRatio{0.0};
         std::string sanitized;
     };
-
-    SnippetAssessment assessSnippet(std::string_view snippet) const {
-        SnippetAssessment assessment;
-        if (snippet.empty()) {
-            return assessment;
-        }
-        std::string cleaned;
-        cleaned.reserve(snippet.size());
-        size_t printable = 0;
-        size_t whitespace = 0;
-        for (unsigned char c : snippet) {
-            if (c == '\n' || c == '\r' || c == '\t') {
-                whitespace++;
-                cleaned.push_back(' ');
-                continue;
-            }
-            if (c >= 0x20 && c < 0x7F) {
-                printable++;
-                if (std::isspace(c)) {
-                    whitespace++;
-                    if (!cleaned.empty() && cleaned.back() == ' ') {
-                        continue;
-                    }
-                    cleaned.push_back(' ');
-                } else {
-                    cleaned.push_back(static_cast<char>(c));
-                }
-            }
-        }
-        const double total = static_cast<double>(snippet.size());
-        const double denominator = std::max(total, 1.0);
-        assessment.printableRatio = printable / denominator;
-        assessment.whitespaceRatio = whitespace / denominator;
-        assessment.sanitized = std::move(cleaned);
-        return assessment;
-    }
 
     std::string formatSnippet(const UnifiedItem& item, size_t maxLength) {
         auto formatted = ui::format_text_snippet(item.snippet, maxLength, 0.65, true);

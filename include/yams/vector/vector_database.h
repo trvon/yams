@@ -93,7 +93,6 @@ public:
     bool hasReusablePersistedSearchIndex() const;
     bool optimizeIndex();
     bool persistIndex();
-    bool rebuildIndex();
     bool beginBulkLoad();
     bool finalizeBulkLoad();
 
@@ -160,15 +159,11 @@ private:
     std::unique_ptr<Impl> pImpl;
 };
 
-std::unique_ptr<VectorDatabase> createVectorDatabase(const VectorDatabaseConfig& config = {});
-
 namespace utils {
 
 std::vector<float> normalizeVector(const std::vector<float>& vec);
 std::string generateChunkId(const std::string& document_hash, size_t chunk_index);
 bool validateVectorRecord(const VectorRecord& record, size_t expected_dim);
-double similarityToDistance(double similarity);
-double distanceToSimilarity(double distance);
 
 } // namespace utils
 

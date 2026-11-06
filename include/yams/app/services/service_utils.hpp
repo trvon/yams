@@ -69,10 +69,6 @@ inline int64_t toEpochSeconds(const std::chrono::system_clock::time_point& tp) {
     return yams::common::timePointToEpochSeconds(tp);
 }
 
-inline const char* toFileType(const std::string& mime) {
-    return isTextMime(mime) ? "text" : "binary";
-}
-
 inline std::string globToSqlLike(const std::string& glob) {
     if (glob.empty())
         return "%";

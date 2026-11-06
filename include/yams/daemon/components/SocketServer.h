@@ -63,16 +63,9 @@ public:
 
     void setWriterBudget(std::size_t bytes);
 
-    // Optional: allow safe rebinding of the dispatcher after startup.
-    void setDispatcher(RequestDispatcher* dispatcher) {
-        std::lock_guard<std::mutex> lk(dispatcherMutex_);
-        dispatcher_ = dispatcher;
-    }
-
     // Metrics
     size_t activeConnections() const { return activeConnections_.load(); }
     uint64_t totalConnections() const { return totalConnections_.load(); }
-    uint64_t connectionToken() const { return connectionToken_.load(); }
 
     // Proxy metrics
     size_t proxyActiveConnections() const { return proxyActiveConnections_.load(); }
@@ -88,9 +81,6 @@ public:
     // Resize the connection slot semaphore. Grows immediately, shrinks gracefully via debt
     // tracking. Returns true if resize succeeded (or was a no-op), false on error.
     bool resizeConnectionSlots(size_t newSize);
-
-    // Get current slot limit (approximate, may be slightly stale under high contention)
-    size_t getConnectionSlotLimit() const { return slotLimit_.load(std::memory_order_relaxed); }
 
     // Check slot utilization: activeConnections / slotLimit (0.0 to 1.0+ if overcommitted)
     double getSlotUtilization() const;

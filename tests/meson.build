@@ -2322,14 +2322,13 @@ if catch2_dep.found()
 #API Test Suites(Catch2) - content store API tests
 #Migrated from GTest as part of yams - 3s4 / api
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-#API submodule tests(content store, content store builder, semantic search API)
+#API submodule tests(content store, content store builder)
 #Migrated from GTest as part of yams - 3s4 / api
   catch2_test_table += [{
     'name': 'api_submodule',
     'sources': files(
       'unit/api/content_store_catch2_test.cpp',
       'unit/api/content_store_builder_compression_catch2_test.cpp',
-      'unit/api/semantic_search_api_catch2_test.cpp',
     ),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'api', 'concurrency'],
@@ -2858,6 +2857,15 @@ if catch2_dep.found()
     'sources': files('unit/core/magic_numbers_test.cpp'),
     'deps': core_test_deps,
     'suite': ['catch2', 'unit', 'core', 'magic'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
+    'name': 'core_task',
+    'target': 'core_task',
+    'sources': files('unit/core/task_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'core', 'task'],
     'timeout': 60,
   }]
 

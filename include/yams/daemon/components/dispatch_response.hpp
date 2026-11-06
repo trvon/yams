@@ -201,30 +201,7 @@ struct SearchResultMapper {
     }
 };
 
-struct GraphNodeMapper {
-    template <typename SvcNode> static GraphNode fromServiceNode(const SvcNode& node) {
-        GraphNode graphNode;
-        graphNode.nodeId = node.nodeId;
-        graphNode.nodeKey = node.nodeKey;
-        graphNode.label = node.label.value_or("");
-        graphNode.type = node.type.value_or("");
-        return graphNode;
-    }
-
-    template <typename SvcNodeMetadata>
-    static GraphNode fromServiceNodeMetadata(const SvcNodeMetadata& meta, int64_t distance = 0) {
-        GraphNode graphNode;
-        graphNode.nodeId = meta.node.nodeId;
-        graphNode.nodeKey = meta.node.nodeKey;
-        graphNode.label = meta.node.label.value_or("");
-        graphNode.type = meta.node.type.value_or("");
-        graphNode.documentHash = meta.documentHash.value_or("");
-        graphNode.documentPath = meta.documentPath.value_or("");
-        graphNode.snapshotId = meta.snapshotId.value_or("");
-        graphNode.distance = distance;
-        return graphNode;
-    }
-};
+struct GraphNodeMapper {};
 
 struct KGNodeMapper {
     static GraphNode fromKGNode(const yams::metadata::KGNode& node,
@@ -310,15 +287,6 @@ struct GraphQueryResponseMapper {
             }
             edges.push_back(GraphEdgeMapper::fromServiceEdge(edge));
         }
-    }
-
-    static GraphQueryResponse makeEmptyResponse(bool kgAvailable = true, std::string warning = "") {
-        GraphQueryResponse resp;
-        resp.kgAvailable = kgAvailable;
-        resp.warning = std::move(warning);
-        resp.originNode.nodeId = -1;
-        resp.originNode.distance = 0;
-        return resp;
     }
 
     static void setOriginNode(GraphQueryResponse& resp, int64_t nodeId, std::string nodeKey,

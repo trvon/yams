@@ -67,7 +67,6 @@ public:
 
     [[nodiscard]] const std::vector<Arm>& arms() const noexcept { return arms_; }
     [[nodiscard]] std::uint64_t totalPulls() const noexcept { return totalPulls_; }
-    [[nodiscard]] RewardSource lastRewardSource() const noexcept { return lastRewardSource_; }
     [[nodiscard]] double explorationC() const noexcept { return explorationC_; }
 
     // Arm id that is currently the best exploitation choice (highest mean reward).

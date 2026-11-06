@@ -4892,22 +4892,6 @@ ORDER BY rowid
         return records;
     }
 
-    Result<std::vector<std::vector<VectorRecord>>>
-    bruteForceSearchBatchUnlocked(const std::vector<std::vector<float>>& query_embeddings, size_t k,
-                                  float similarity_threshold) {
-        std::vector<std::vector<VectorRecord>> results;
-        results.reserve(query_embeddings.size());
-        for (const auto& query_embedding : query_embeddings) {
-            auto result = bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
-                                                   std::nullopt, {}, {});
-            if (!result) {
-                return result.error();
-            }
-            results.push_back(std::move(result.value()));
-        }
-        return results;
-    }
-
     Config config_;
     std::string db_path_;
     sqlite3* db_ = nullptr;

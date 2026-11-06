@@ -33,9 +33,7 @@ public:
     ContentStoreBuilder& withCompressionType(const std::string& type);
     ContentStoreBuilder& withCompressionLevel(size_t level);
     ContentStoreBuilder& withDeduplication(bool enable);
-    ContentStoreBuilder& withMaxConcurrentOperations(size_t max);
     ContentStoreBuilder& withIntegrityChecks(bool enable);
-    ContentStoreBuilder& withGarbageCollectionInterval(std::chrono::seconds interval);
     ContentStoreBuilder&
     withDiskPressurePolicy(const storage::DiskPressurePolicy& policy,
                            storage::DiskSpaceProbe probe = storage::probeDiskSpace);
@@ -43,15 +41,10 @@ public:
     // Component injection (for testing and customization)
     ContentStoreBuilder& withStorageEngine(std::shared_ptr<storage::IStorageEngine> engine);
     ContentStoreBuilder& withChunker(std::shared_ptr<chunking::IChunker> chunker);
-    ContentStoreBuilder& withHasher(std::shared_ptr<crypto::IHasher> hasher);
-    ContentStoreBuilder& withManifestManager(std::shared_ptr<manifest::IManifestManager> manager);
     ContentStoreBuilder& withReferenceCounter(std::shared_ptr<storage::IReferenceCounter> counter);
 
     // Build the content store
     [[nodiscard]] Result<std::unique_ptr<IContentStore>> build();
-
-    // Build with validation
-    [[nodiscard]] Result<std::unique_ptr<IContentStore>> buildAndValidate();
 
     // Static factory methods
     static Result<std::unique_ptr<IContentStore>>
@@ -59,8 +52,6 @@ public:
 
     static Result<std::unique_ptr<IContentStore>>
     createFromConfig(const ContentStoreConfig& config);
-
-    static Result<std::unique_ptr<IContentStore>> createInMemory();
 
 private:
     struct Impl;

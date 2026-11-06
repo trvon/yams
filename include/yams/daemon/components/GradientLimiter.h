@@ -56,9 +56,6 @@ public:
     /// @param success Whether job completed successfully
     void onJobComplete(std::chrono::nanoseconds rtt, bool success);
 
-    /// Called when a job starts (after acquire)
-    void onJobStart();
-
     /// Called when a job ends (before onJobComplete)
     void onJobEnd();
 

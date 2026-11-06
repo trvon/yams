@@ -65,10 +65,6 @@ public:
     listSnapshots(const ListSnapshotsRequest& req) {
         return call<ListSnapshotsRequest>(req);
     }
-    boost::asio::awaitable<Result<RestoreCollectionResponse>>
-    restoreCollection(const RestoreCollectionRequest& req) {
-        return call<RestoreCollectionRequest>(req);
-    }
     boost::asio::awaitable<Result<RestoreSnapshotResponse>>
     restoreSnapshot(const RestoreSnapshotRequest& req) {
         return call<RestoreSnapshotRequest>(req);
@@ -155,11 +151,6 @@ public:
 
     // Streaming grep helper method
     boost::asio::awaitable<Result<GrepResponse>> streamingGrep(const GrepRequest& req);
-
-    boost::asio::awaitable<Result<void>>
-    streamingGetToFile(const GetInitRequest& req, const std::filesystem::path& outputPath) {
-        return getToFile(req, outputPath);
-    }
 
     boost::asio::awaitable<Result<void>> getToFile(const GetInitRequest& req,
                                                    const std::filesystem::path& outputPath) {
@@ -370,7 +361,6 @@ public:
     static Result<void> startDaemon(const ClientConfig& config = {});
 
     // Path resolution helper (matches daemon's path resolution)
-    static std::filesystem::path resolveSocketPath();
     // Config-first path resolution: prefer env/config, then fall back to defaults
     static std::filesystem::path resolveSocketPathConfigFirst();
 
@@ -495,9 +485,6 @@ public:
 
     explicit CircuitBreaker(const Config& config = Config{});
 
-    // Check if request should be allowed
-    bool shouldAllow();
-
     // Record result
     void recordSuccess();
     void recordFailure();
@@ -506,7 +493,6 @@ public:
 
 private:
     void transitionTo(State newState);
-    bool shouldTransitionToHalfOpen() const;
 
     State state_ = State::Closed;
     Config config_;

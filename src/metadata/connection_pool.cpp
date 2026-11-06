@@ -946,16 +946,6 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
     cv_.notify_one();
 }
 
-void ConnectionPool::refreshNext() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!available_.empty()) {
-        auto conn = std::move(available_.front());
-        available_.pop();
-        conn->returned_ = true; // Prevent destructor deadlock
-        totalConnections_--;
-    }
-}
-
 void ConnectionPool::refreshAll() {
     std::lock_guard<std::mutex> lock(mutex_);
 
