@@ -14,6 +14,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+# These drive POSIX shell scripts. On Windows runners `bash` resolves to the WSL launcher,
+# which has no distribution installed, so every case would fail before reaching the script.
+@unittest.skipIf(os.name == "nt", "POSIX shell scripts; bash on Windows runners is the WSL stub")
 class NativeLinuxLaneTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

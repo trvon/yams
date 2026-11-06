@@ -27,6 +27,9 @@ std::unique_ptr<ICommand> createStatusCommand();
 
 TEST_CASE("add --changed detects a missing snapshot path and fails closed without a daemon",
           "[cli][retrieval][path-retirement]") {
+#if defined(_WIN32)
+    SKIP("Git-aware CLI reads currently require a POSIX host");
+#endif
     using namespace yams;
     const auto root = std::filesystem::canonical(test::make_temp_dir("cli-path-retirement-"));
     struct Cleanup {

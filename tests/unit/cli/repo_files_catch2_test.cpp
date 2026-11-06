@@ -10,6 +10,14 @@
 
 using namespace yams::cli;
 
+#if defined(_WIN32)
+// repo_files runs git through a POSIX process helper and throws "Git-aware CLI reads currently
+// require a POSIX host" on Windows by design.
+TEST_CASE("CLI repo files require a POSIX host", "[cli][repo]") {
+    SKIP("Git-aware CLI reads currently require a POSIX host");
+}
+#else
+
 namespace {
 struct TempRepo {
     // Canonical: macOS temp is a /var -> /private/var symlink, and the CLI canonicalizes roots.
@@ -238,3 +246,5 @@ TEST_CASE("CLI live grep keeps requested context at a global cap", "[cli][live]"
     CHECK(result.hits[0].contextBefore == std::vector<std::string>{"before"});
     CHECK(result.hits[0].contextAfter == std::vector<std::string>{"after"});
 }
+
+#endif // !_WIN32

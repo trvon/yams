@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -344,7 +345,11 @@ TEST_CASE("loadSharedStaticEmbeddingTable sees a table replaced at the same path
     REQUIRE(first != nullptr);
     const auto firstIdentity = staticEmbeddingSpaceIdentity(path);
 
+    const auto firstWrite = std::filesystem::last_write_time(path);
     writeTinyStaticTable(path, /*bump=*/3);
+    // The cache is keyed by size and mtime; a real re-download lands later. Rewriting within one
+    // timestamp tick (coarse on Windows) with the same size would otherwise look unchanged.
+    std::filesystem::last_write_time(path, firstWrite + std::chrono::seconds(2));
     CHECK(staticEmbeddingSpaceIdentity(path) != firstIdentity);
 
     std::error_code ec;
