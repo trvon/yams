@@ -2514,7 +2514,7 @@ void PostIngestQueue::initializeChannels() {
     titleChannel_ = bus.get_or_create_channel<InternalEventBus::TitleExtractionJob>(
         "title_extraction", boundedStageChannelCapacity(4096));
     embedChannel_ = bus.get_or_create_channel<InternalEventBus::EmbedJob>(
-        "embed_jobs", std::max<std::size_t>(TuneAdvisor::embedChannelCapacity(), 256));
+        "embed_jobs", TuneAdvisor::embedJobChannelCapacity());
     spdlog::info("[PostIngestQueue] Cached {} EventBus channel pointers", 7);
 }
 

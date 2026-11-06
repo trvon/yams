@@ -2020,6 +2020,14 @@ uint32_t TuneAdvisor::embedChannelCapacity() {
     return 8192; // Increased from 2048 to handle bulk ingest
 }
 
+uint32_t TuneAdvisor::embedJobChannelCapacity() {
+    uint32_t capacity = embedChannelCapacity();
+    if (const auto postIngest = postIngestQueueMax(); postIngest > 0) {
+        capacity = std::min(capacity, postIngest);
+    }
+    return std::max<uint32_t>(256u, capacity);
+}
+
 void TuneAdvisor::setEmbedChannelCapacity(uint32_t v) {
     embedChannelCapacityOverride_.store(std::clamp(v, 256u, 65536u), std::memory_order_relaxed);
 }

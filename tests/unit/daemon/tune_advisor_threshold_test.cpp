@@ -1039,3 +1039,30 @@ TEST_CASE("cpuHighThresholdPercent setter overrides profile and env",
         TuneAdvisor::resetCpuHighThresholdPercentOverride();
     }
 }
+
+// Five call sites created the embed_jobs channel with three different capacity formulas. The
+// channel bus keeps the first one, so the post-ingest queue's 8192 silently won over the
+// embedding service's clamp to the post-ingest queue size, and a warning was logged on every
+// start. One function now sizes the channel for every creator.
+TEST_CASE("Embed job channel capacity is bounded by the post-ingest queue",
+          "[daemon][tune][advisor][catch2]") {
+    struct Restore {
+        uint32_t embed{TuneAdvisor::embedChannelCapacity()};
+        ~Restore() {
+            TuneAdvisor::setEmbedChannelCapacity(embed);
+            TuneAdvisor::setPostIngestQueueMax(0); // 0 clears the override
+        }
+    } restore;
+
+    TuneAdvisor::setEmbedChannelCapacity(8192);
+    TuneAdvisor::setPostIngestQueueMax(1000);
+    CHECK(TuneAdvisor::embedJobChannelCapacity() == 1000);
+
+    TuneAdvisor::setPostIngestQueueMax(20000);
+    CHECK(TuneAdvisor::embedJobChannelCapacity() == 8192);
+
+    // Never below the channel's floor.
+    TuneAdvisor::setEmbedChannelCapacity(256);
+    TuneAdvisor::setPostIngestQueueMax(10);
+    CHECK(TuneAdvisor::embedJobChannelCapacity() == 256);
+}

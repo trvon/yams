@@ -773,6 +773,10 @@ public:
     // Get the current embed channel capacity (for sizing the queue)
     static uint32_t embedChannelCapacity();
     static void setEmbedChannelCapacity(uint32_t v);
+    // Capacity of the shared embed_jobs channel. Every creator uses this: the channel bus keeps
+    // the first capacity it sees, so creators that disagreed silently overrode each other.
+    // Bounded by the post-ingest queue so a full channel cannot buffer more jobs than it.
+    static uint32_t embedJobChannelCapacity();
 
     // Ingest channel capacity (store_document_tasks). Clamp to post-ingest queue max to avoid
     // unbounded buffering of document payloads under governor backpressure.

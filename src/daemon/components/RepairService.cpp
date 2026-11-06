@@ -694,7 +694,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             job.fromRepair = true; // counted into repair_embeddings_generated as it commits
             static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                    "embed_jobs", TuneAdvisor::embedChannelCapacity());
+                    "embed_jobs", TuneAdvisor::embedJobChannelCapacity());
             bool queued = co_await queueWithBackoff(embedQ, std::move(job), timer, running_,
                                                     "embed", missingEmbeddings.size(), 50, 1000);
             if (queued) {
@@ -3506,7 +3506,7 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
         co_return result;
     }
 
-    const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
+    const uint32_t embedCap = TuneAdvisor::embedJobChannelCapacity();
     auto embedQ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", embedCap);
     const std::size_t batchSize = std::max<std::size_t>(1u, cfg_.maxBatch);
@@ -3684,7 +3684,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         return result;
     }
 
-    const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
+    const uint32_t embedCap = TuneAdvisor::embedJobChannelCapacity();
     auto embedQ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", embedCap);
 
