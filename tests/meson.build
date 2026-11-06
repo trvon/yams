@@ -2322,7 +2322,7 @@ if catch2_dep.found()
 #API Test Suites(Catch2) - content store API tests
 #Migrated from GTest as part of yams - 3s4 / api
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-#API submodule tests(content store, semantic search API)
+#API submodule tests(content store, content store builder, semantic search API)
 #Migrated from GTest as part of yams - 3s4 / api
   catch2_test_table += [{
     'name': 'api_submodule',
