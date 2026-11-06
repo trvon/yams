@@ -25,6 +25,7 @@
 #include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store.h>
+#include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -1753,4 +1754,24 @@ TEST_CASE("InternalEventBus records capacity disagreements on channel reuse",
     // assertion cannot depend on which cases ran first.
     bus.remove_channel(kProbe);
     CHECK(bus.capacity_mismatches().size() == before);
+}
+
+// Scheduled auto-repair runs only while the daemon is idle. Agents (MCP clients, local models)
+// keep connections open between requests, so an open connection must not count as busy; an
+// executing request, queued repair work or a repair already in progress must.
+TEST_CASE("Auto-repair treats executing requests, not open connections, as busy",
+          "[daemon][background][auto-repair]") {
+    yams::daemon::DaemonStats stats;
+    stats.activeConnections.store(4);
+    CHECK(yams::daemon::BackgroundTaskManager::autoRepairMayRun(stats, false));
+
+    stats.activeNonHealthRequests.store(1);
+    CHECK_FALSE(yams::daemon::BackgroundTaskManager::autoRepairMayRun(stats, false));
+    stats.activeNonHealthRequests.store(0);
+
+    stats.repairQueueDepth.store(3);
+    CHECK_FALSE(yams::daemon::BackgroundTaskManager::autoRepairMayRun(stats, false));
+    stats.repairQueueDepth.store(0);
+
+    CHECK_FALSE(yams::daemon::BackgroundTaskManager::autoRepairMayRun(stats, true));
 }

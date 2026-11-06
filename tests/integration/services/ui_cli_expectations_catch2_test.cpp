@@ -767,7 +767,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: update metadata then delete b
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: rm confirmation happens before daemon delete",
-                 "[integration][services][ui-cli][delete]") {
+                 "[integration][services][ui-cli][delete][batch3d]") {
     start();
 
     const auto sourcePath = root() / "ingest" / "rm-confirm.txt";

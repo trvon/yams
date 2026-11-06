@@ -819,6 +819,14 @@ void BackgroundTaskManager::launchDocumentRetentionTask() {
     }
 }
 
+bool BackgroundTaskManager::autoRepairMayRun(const DaemonStats& stats,
+                                             bool repairInProgress) noexcept {
+    // Executing requests, not open connections: an agent holding an idle connection must not
+    // block scheduled repair.
+    return stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 0 &&
+           stats.repairQueueDepth.load(std::memory_order_relaxed) == 0 && !repairInProgress;
+}
+
 void BackgroundTaskManager::launchAutoRepairTask() {
     auto self = deps_.serviceManager.lock();
     if (!self) {
@@ -922,21 +930,8 @@ void BackgroundTaskManager::launchAutoRepairTask() {
                     }
 
                     const auto& state = self->getState();
-                    const bool queueEmpty =
-                        state.stats.repairQueueDepth.load(std::memory_order_relaxed) == 0;
-                    // Executing requests, not open connections: an agent holding
-                    // an idle connection must not block scheduled repair.
-                    const bool busy =
-                        state.stats.activeNonHealthRequests.load(std::memory_order_relaxed) > 0;
-
                     auto canRunAuto = [&]() {
-                        if (busy)
-                            return false;
-                        if (!queueEmpty)
-                            return false;
-                        if (rs->isRepairInProgress())
-                            return false;
-                        return true;
+                        return autoRepairMayRun(state.stats, rs->isRepairInProgress());
                     };
 
                     auto runPlan = [&](const std::string& tier,
