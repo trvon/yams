@@ -2136,11 +2136,20 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
     }
 
     std::vector<int64_t> orphanedIds;
+    std::size_t uncheckable = 0;
     for (const auto& doc : docsResult.value()) {
         auto existsResult = store->exists(doc.sha256Hash);
-        if (!existsResult || !existsResult.value())
+        if (!existsResult) {
+            // A failed check is not evidence the blob is gone; never delete on it.
+            ++uncheckable;
+            spdlog::warn("[RepairService] Orphan check skipped {}: {}", doc.sha256Hash,
+                         existsResult.error().message);
+            continue;
+        }
+        if (!existsResult.value())
             orphanedIds.push_back(doc.id);
     }
+    result.failed += uncheckable;
 
     result.processed = docsResult.value().size();
 
@@ -2166,6 +2175,10 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
         result.message = "Cleaned " + std::to_string(result.succeeded) + " orphans";
     }
 
+    if (uncheckable > 0) {
+        result.message +=
+            ", " + std::to_string(uncheckable) + " kept because their content could not be checked";
+    }
     if (salvagedCount > 0) {
         result.message +=
             ", salvaged " + std::to_string(salvagedCount) + " documents from corrupt DBs";

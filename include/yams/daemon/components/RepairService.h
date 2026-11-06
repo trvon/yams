@@ -349,6 +349,10 @@ public:
     static std::string extractorFingerprint(
         const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors);
 #if defined(YAMS_TESTING)
+    /// Run the orphaned-metadata cleanup (`yams repair --orphans`).
+    RepairOperationResult testing_cleanOrphanedMetadata(bool dryRun) {
+        return cleanOrphanedMetadata(dryRun, false, false, {});
+    }
     /// Run the MIME repair operation (not a dry run).
     RepairOperationResult testing_repairMimeTypes() { return repairMimeTypes(false, false, {}); }
     /// Count documents as handled, as the drain loop does.

@@ -5,6 +5,7 @@
 
 #include "../../common/test_helpers_catch2.h"
 
+#include <yams/api/content_store.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/extraction/content_extractor.h>
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <set>
 #include <string>
@@ -358,4 +360,131 @@ TEST_CASE("Repair progress survives a retry sweep that queues nothing",
     REQUIRE(h.service->testing_startupScanDue()); // the sweep queued work, so a retry is armed
     CHECK(h.service->testing_runStartupScanPass().empty());
     CHECK(h.service->testing_repairProgress() == std::pair<std::uint64_t, std::uint64_t>{2, 2});
+}
+
+namespace {
+using yams::Result;
+// Content store where only existence matters: present, missing, or the check itself fails.
+class ExistenceStore final : public yams::api::IContentStore {
+public:
+    std::set<std::string> present;
+    std::set<std::string> failing;
+
+    Result<bool> exists(const std::string& hash) const override {
+        if (failing.contains(hash))
+            return yams::Error{yams::ErrorCode::IOError, "storage temporarily unavailable"};
+        return present.contains(hash);
+    }
+
+    template <typename T> static Result<T> no() {
+        return yams::Error{yams::ErrorCode::NotImplemented, "not used by this test"};
+    }
+    Result<yams::api::StoreResult> store(const std::filesystem::path&,
+                                         const yams::api::ContentMetadata&,
+                                         yams::api::ProgressCallback) override {
+        return no<yams::api::StoreResult>();
+    }
+    Result<yams::api::RetrieveResult> retrieve(const std::string&, const std::filesystem::path&,
+                                               yams::api::ProgressCallback) override {
+        return no<yams::api::RetrieveResult>();
+    }
+    Result<yams::api::StoreResult> storeStream(std::istream&, const yams::api::ContentMetadata&,
+                                               yams::api::ProgressCallback) override {
+        return no<yams::api::StoreResult>();
+    }
+    Result<yams::api::RetrieveResult> retrieveStream(const std::string&, std::ostream&,
+                                                     yams::api::ProgressCallback) override {
+        return no<yams::api::RetrieveResult>();
+    }
+    Result<yams::api::StoreResult> storeBytes(std::span<const std::byte>,
+                                              const yams::api::ContentMetadata&) override {
+        return no<yams::api::StoreResult>();
+    }
+    Result<std::vector<std::byte>> retrieveBytes(const std::string&) override {
+        return no<std::vector<std::byte>>();
+    }
+    Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string&, std::size_t) override {
+        return no<std::vector<std::byte>>();
+    }
+    Result<RawContent> retrieveRaw(const std::string&) override { return no<RawContent>(); }
+    std::future<Result<RawContent>> retrieveRawAsync(const std::string&) override {
+        return std::async(std::launch::deferred, [] { return no<RawContent>(); });
+    }
+    Result<bool> remove(const std::string&) override { return no<bool>(); }
+    Result<yams::api::ContentMetadata> getMetadata(const std::string&) const override {
+        return no<yams::api::ContentMetadata>();
+    }
+    Result<void> updateMetadata(const std::string&, const yams::api::ContentMetadata&) override {
+        return yams::Error{yams::ErrorCode::NotImplemented, "not used"};
+    }
+    std::vector<Result<yams::api::StoreResult>>
+    storeBatch(const std::vector<std::filesystem::path>&,
+               const std::vector<yams::api::ContentMetadata>&) override {
+        return {};
+    }
+    std::vector<Result<bool>> removeBatch(const std::vector<std::string>&) override { return {}; }
+    yams::api::ContentStoreStats getStats() const override { return {}; }
+    yams::api::HealthStatus checkHealth() const override { return {}; }
+    Result<void> verify(yams::api::ProgressCallback) override { return {}; }
+    Result<void> compact(yams::api::ProgressCallback) override { return {}; }
+    Result<void> garbageCollect(yams::api::ProgressCallback) override { return {}; }
+};
+
+std::unique_ptr<RepairService> serviceWithStore(ScanHarness& h,
+                                                std::shared_ptr<ExistenceStore> store) {
+    RepairServiceContext ctx;
+    ctx.getMetadataRepo = [r = h.repo] { return r; };
+    ctx.getContentStore = [store] { return store; };
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = h.tmp.path();
+    return std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+}
+
+bool documentExists(ScanHarness& h, int i) {
+    auto doc = h.repo->getDocumentByHash(h.hashes[i]);
+    REQUIRE(doc.has_value());
+    return doc.value().has_value();
+}
+} // namespace
+
+// `yams repair --orphans` deletes metadata whose content blob is gone. It is destructive, so only
+// documents whose blob is known to be missing may go.
+TEST_CASE("Orphan cleanup deletes metadata only for documents whose blob is missing",
+          "[daemon][repair][orphans][catch2]") {
+    ScanHarness h(3);
+    auto store = std::make_shared<ExistenceStore>();
+    store->present = {h.hashes[0], h.hashes[2]};
+    auto service = serviceWithStore(h, store);
+
+    SECTION("a dry run reports the orphan and deletes nothing") {
+        const auto result = service->testing_cleanOrphanedMetadata(/*dryRun=*/true);
+        CHECK(result.skipped == 1);
+        CHECK(result.succeeded == 0);
+        CHECK(documentExists(h, 1));
+    }
+    SECTION("a real run deletes only the orphan") {
+        const auto result = service->testing_cleanOrphanedMetadata(/*dryRun=*/false);
+        CHECK(result.succeeded == 1);
+        CHECK(documentExists(h, 0));
+        CHECK_FALSE(documentExists(h, 1));
+        CHECK(documentExists(h, 2));
+    }
+}
+
+// A failed existence check is not evidence the blob is gone: a transient storage error must not
+// turn into deleted metadata.
+TEST_CASE("Orphan cleanup keeps documents whose blob existence cannot be checked",
+          "[daemon][repair][orphans][catch2]") {
+    ScanHarness h(2);
+    auto store = std::make_shared<ExistenceStore>();
+    store->present = {h.hashes[0]};
+    store->failing = {h.hashes[1]};
+    auto service = serviceWithStore(h, store);
+
+    const auto result = service->testing_cleanOrphanedMetadata(/*dryRun=*/false);
+    CHECK(result.succeeded == 0);
+    CHECK(result.failed == 1);
+    CHECK(documentExists(h, 0));
+    CHECK(documentExists(h, 1));
 }
