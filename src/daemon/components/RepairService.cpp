@@ -831,6 +831,16 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
             if (vectorDb) {
                 embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
                 haveEmbeddedSnapshot = true;
+                // Vector rows of a document whose derivation is open describe superseded text:
+                // it still needs embedding, as hasDocumentEmbeddingByHash() reports.
+                if (auto open = meta->getOpenEmbeddingDerivationHashes(); open) {
+                    for (const auto& hash : open.value()) {
+                        embeddedHashes.erase(hash);
+                    }
+                } else {
+                    haveEmbeddedSnapshot = false; // fall back to the per-document check
+                    embeddedHashes.clear();
+                }
             }
         }
 

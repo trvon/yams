@@ -1046,6 +1046,31 @@ Result<bool> MetadataRepository::hasDocumentEmbeddingByHash(const std::string& h
     });
 }
 
+Result<std::unordered_set<std::string>> MetadataRepository::getOpenEmbeddingDerivationHashes() {
+    return executeReadQuery<std::unordered_set<std::string>>(
+        [&](Database& db) -> Result<std::unordered_set<std::string>> {
+            auto stmtResult = db.prepare(R"(
+            SELECT d.sha256_hash
+            FROM documents d
+            JOIN document_embedding_derivations ded ON ded.document_id = d.id
+            WHERE ded.completed = 0
+        )");
+            if (!stmtResult)
+                return stmtResult.error();
+            auto& stmt = stmtResult.value();
+            std::unordered_set<std::string> hashes;
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                hashes.insert(stmt.getString(0));
+            }
+            return hashes;
+        });
+}
+
 Result<void> MetadataRepository::updateDocumentExtractionStatus(int64_t documentId,
                                                                 bool contentExtracted,
                                                                 ExtractionStatus status,
