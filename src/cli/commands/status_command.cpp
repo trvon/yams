@@ -50,6 +50,7 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("status", getDescription());
+        cmd->alias("stats");
 
         cmd->add_flag("--json", jsonOutput_, "Output in JSON format");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information");
@@ -89,18 +90,6 @@ public:
             }
             exitOnError(execute(), "Status command");
         });
-
-        // Provide a 'stats' alias that maps to the same implementation
-        // Mirrors flags and behavior to ease migration from the old stats command
-        auto* stats = app.add_subcommand("stats", getDescription());
-        stats->add_flag("--json", jsonOutput_, "Output in JSON format");
-        stats->add_flag("-v,--verbose", verbose_, "Show detailed information");
-        stats->add_flag("--no-physical", noPhysical_,
-                        "Skip physical size fallback scan; use daemon stats only");
-        stats->add_flag(
-            "--corpus", corpusStats_,
-            "Show corpus statistics for search tuning (doc counts, content type ratios, coverage)");
-        stats->callback([this]() { exitOnError(execute(), "Stats (alias)"); });
     }
 
     Result<void> execute() override {

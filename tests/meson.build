@@ -2109,6 +2109,10 @@ if catch2_dep.found()
 #Migrated from GTest as part of yams - 3s4 / yams - cli
   cli_test_deps = [version_generated_dep, catch2_dep, catch2_main_dep] + test_deps
   cli_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
+  if get_option('build-mcp-server')
+    # command_catalog.h sizes its table on this; keep tests and the CLI on one definition.
+    cli_test_cpp_args += ['-DYAMS_BUILD_MCP_SERVER=1']
+  endif
 
   catch2_cli_common_exe = executable('catch2_cli_common',
     version_header,

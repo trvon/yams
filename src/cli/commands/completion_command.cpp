@@ -176,7 +176,11 @@ std::vector<CompletionSubcommand> collectDirectSubcommands(const CLI::App* app) 
         if (description.empty()) {
             description = describeCommand(name);
         }
-        children.push_back({name, std::move(description)});
+        children.push_back({name, description});
+        // Aliases (`plugins`, `stats`, `rm`, `ls`) complete like their command.
+        for (const auto& alias : sub->get_aliases()) {
+            children.push_back({alias, description});
+        }
     }
     return children;
 }
