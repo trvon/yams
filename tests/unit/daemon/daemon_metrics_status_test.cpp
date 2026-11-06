@@ -3424,6 +3424,46 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(err.message == "Provide either 'path' or 'content' + 'name'");
     }
 
+    SECTION("add document rejects a path that does not exist") {
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        drainStoreDocumentTasks();
+
+        AddDocumentRequest req;
+        req.path = (makeTempDir("yams_documents_missing_path_") / "no-such-file.txt").string();
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        CHECK(std::get<ErrorResponse>(resp).code == ErrorCode::NotFound);
+        auto channel = getStoreDocumentTaskChannel();
+        InternalEventBus::StoreDocumentTask task;
+        CHECK_FALSE(channel->try_pop(task));
+    }
+
+    SECTION("add document rejects a missing path while daemon is initializing") {
+        DaemonConfig notReadyCfg;
+        notReadyCfg.dataDir = makeTempDir("yams_documents_missing_path_not_ready_");
+        StubLifecycle notReadyLifecycle(LifecycleState::Starting);
+        StateComponent notReadyState;
+        notReadyState.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        notReadyState.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm notReadyLifecycleFsm;
+        ServiceManager notReadySvc(notReadyCfg, notReadyState, notReadyLifecycleFsm);
+        RequestDispatcher notReadyDispatcher(&notReadyLifecycle, &notReadySvc, &notReadyState);
+        drainStoreDocumentTasks();
+
+        AddDocumentRequest req;
+        req.path = (notReadyCfg.dataDir / "no-such-file.txt").string();
+
+        auto resp = dispatchRequest(notReadyDispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        CHECK(std::get<ErrorResponse>(resp).code == ErrorCode::NotFound);
+        auto channel = getStoreDocumentTaskChannel();
+        InternalEventBus::StoreDocumentTask task;
+        CHECK_FALSE(channel->try_pop(task));
+    }
+
     SECTION("add document uses async single-file path by default when ready") {
         ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
         drainStoreDocumentTasks();
