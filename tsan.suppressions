@@ -73,3 +73,10 @@ race:boost::asio::detail::ref_count_down
 # for clang only, so gcc reports races between separate connections on the same database.
 race:walIndexTryHdr
 race:walIndexWriteHdr
+
+# OpenSSL 3.x internal hashtable (crypto/hashtable/hashtable.c, used by the provider name
+# map that EVP fetches consult). Readers are lock-free under RCU, so TSAN sees ossl_ht_get's
+# memcmp racing ossl_ht_insert's memcpy. libcrypto is not TSAN-instrumented; first seen with
+# OpenSSL 3.6.5 from concurrent SHA256Hasher construction in storage_engine tests.
+race:ossl_ht_get
+race:ossl_ht_insert
