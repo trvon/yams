@@ -241,6 +241,8 @@ private:
         int64_t elapsedMs{0};
         std::string method{"search"};
         std::string traceId;
+        // Documents matched by a text component; absent when the backend did not report it.
+        std::optional<int64_t> lexicalHits;
     };
 
     struct GroupedSearchResults {
@@ -271,6 +273,12 @@ private:
         ctx.elapsedMs = resp.elapsed.count();
         ctx.method = "daemon";
         ctx.traceId = resp.traceId;
+        if (auto it = resp.searchStats.find("lexical_hits"); it != resp.searchStats.end()) {
+            try {
+                ctx.lexicalHits = std::stoll(it->second);
+            } catch (const std::exception&) {
+            }
+        }
         return ctx;
     }
 
@@ -576,6 +584,8 @@ private:
             output["execution_time_ms"] = ctx.elapsedMs;
             if (!ctx.traceId.empty())
                 output["trace_id"] = ctx.traceId;
+            if (ctx.lexicalHits)
+                output["lexical_hits"] = *ctx.lexicalHits;
 
             nlohmann::json results = nlohmann::json::array();
             for (const auto& item : deduplicated) {

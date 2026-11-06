@@ -152,6 +152,26 @@ TEST_CASE("SearchEngine returns lexical results without Simeon backend injected"
     }
 }
 
+// Fused scores are normalised to the top hit, so the score alone cannot say whether anything
+// matched. lexical_hits counts the documents a text component matched.
+TEST_CASE("SearchEngine reports how many documents matched the query text",
+          "[search][simeon][integration][catch2]") {
+    auto corpus = makeCorpus(kCorpus);
+    auto engine = makeEngine(corpus, makeLexicalOnlyConfig());
+    SearchParams params;
+    params.limit = 10;
+
+    auto present = engine->searchWithResponse("beta", params);
+    REQUIRE(present.has_value());
+    REQUIRE(present.value().debugStats.count("lexical_hits") == 1);
+    CHECK(present.value().debugStats.at("lexical_hits") == "3");
+
+    auto absent = engine->searchWithResponse("zzqxqzzqxq", params);
+    REQUIRE(absent.has_value());
+    REQUIRE(absent.value().debugStats.count("lexical_hits") == 1);
+    CHECK(absent.value().debugStats.at("lexical_hits") == "0");
+}
+
 TEST_CASE("SearchEngine injected with Simeon backend returns results while still building",
           "[search][simeon][integration][catch2]") {
     auto corpus = makeCorpus(kCorpus);

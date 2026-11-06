@@ -69,7 +69,7 @@ plugins/ort_runtime/ort_runtime_loader.cpp:137:portability/env-read # reviewed r
 plugins/ort_runtime/ort_runtime_loader.cpp:140:portability/env-read # reviewed raw environment read
 plugins/ort_runtime/ort_runtime_loader.cpp:148:portability/env-read # reviewed raw environment read
 src/app/services/document_service.cpp:1254:portability/env-read # reviewed raw environment read
-src/app/services/search_service.cpp:510:portability/env-read # reviewed raw environment read
+src/app/services/search_service.cpp:514:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:19:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:21:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:72:portability/env-read # reviewed raw environment read
@@ -79,8 +79,8 @@ src/cli/commands/add_command.cpp:267:portability/env-read # reviewed raw environ
 src/cli/commands/doctor/checks/model_check.cpp:16:portability/env-read # reviewed raw environment read
 src/cli/commands/doctor/plugin_trust.cpp:29:portability/env-read # reviewed raw environment read
 src/cli/commands/repair_command.cpp:284:portability/env-read # reviewed raw environment read
-src/cli/commands/search_command.cpp:1072:portability/env-read # reviewed raw environment read
-src/cli/commands/search_command.cpp:1080:portability/env-read # reviewed raw environment read
+src/cli/commands/search_command.cpp:1082:portability/env-read # reviewed raw environment read
+src/cli/commands/search_command.cpp:1090:portability/env-read # reviewed raw environment read
 src/cli/commands/session_command.cpp:525:portability/env-read # reviewed raw environment read
 src/cli/commands/update_command.cpp:510:portability/env-read # reviewed raw environment read
 src/cli/commands/watch_command.cpp:91:portability/env-read # reviewed raw environment read

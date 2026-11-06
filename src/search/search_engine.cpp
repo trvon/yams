@@ -2827,6 +2827,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     preFusionDocIds = collectUniqueComponentDocIds(allComponentResults);
     preFusionSignals = buildPreFusionSignalMap(allComponentResults);
+    // Fused scores are normalised to the top hit, so a query that matches no indexed term can
+    // still return results scored 1.0. Report how many documents a text component matched.
+    {
+        std::unordered_set<std::string> lexicalDocs;
+        for (const auto& comp : allComponentResults) {
+            if (comp.source == ComponentResult::Source::Text ||
+                comp.source == ComponentResult::Source::SimeonText) {
+                lexicalDocs.insert(comp.documentHash);
+            }
+        }
+        response.debugStats["lexical_hits"] = std::to_string(lexicalDocs.size());
+    }
 
     // Join per-query traces back to the active simeon encoder recipe.
     {
