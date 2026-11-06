@@ -261,20 +261,26 @@ inline bool excludeRetrievalPath(std::string_view path, const RetrievalOutputCon
     if (explicitNoteSelector)
         return false;
     (void)query;
-    const auto normalized =
-        std::filesystem::absolute(std::filesystem::path(path)).lexically_normal().generic_string();
+    const auto absolute = std::filesystem::absolute(std::filesystem::path(path)).lexically_normal();
+    const auto normalized = absolute.generic_string();
+    // A drive-less pattern ("/tmp/", the defaults) matches on any drive. On Windows
+    // absolute("/tmp/x") is "D:/tmp/x", which a drive-less root never matched. Identical on POSIX.
+    const auto withoutDrive =
+        (absolute.root_directory() / absolute.relative_path()).generic_string();
     for (const auto& pattern : config.excludePaths) {
         if (pattern.empty() || pattern.starts_with("~/")) // expanded by the config loader
             continue;
+        const auto patternPath = std::filesystem::path(pattern);
+        const auto& candidate = patternPath.has_root_name() ? normalized : withoutDrive;
         if (pattern.find_first_of("*?") != std::string::npos) {
-            if (retrievalGlobMatches(normalized, pattern) ||
-                retrievalGlobMatches("/" + normalized, pattern))
+            if (retrievalGlobMatches(candidate, pattern) ||
+                retrievalGlobMatches("/" + candidate, pattern))
                 return true;
         } else {
-            auto root = std::filesystem::path(pattern).lexically_normal().generic_string();
+            auto root = patternPath.lexically_normal().generic_string();
             while (root.size() > 1 && root.back() == '/')
                 root.pop_back();
-            if (normalized == root || normalized.starts_with(root + "/"))
+            if (candidate == root || candidate.starts_with(root + "/"))
                 return true;
         }
     }
