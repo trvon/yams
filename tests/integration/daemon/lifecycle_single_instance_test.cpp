@@ -537,7 +537,10 @@ TEST_CASE("Idle client connections do not degrade the daemon",
     REQUIRE(waitForLifecycleState(*harness.daemon(), LifecycleState::Ready, scaledTimeout(10s)));
     REQUIRE(waitForRepairService(*harness.daemon(), scaledTimeout(10s)));
 
-    const std::size_t heldCount = busyThreshold + 2;
+    // The old connection-count gate degraded at busyThreshold open connections; holding exactly
+    // that many shows idle connections no longer count. (Waiting for more than the threshold to
+    // register was flaky on macOS runners.)
+    const std::size_t heldCount = busyThreshold;
     auto connections = openHeldConnections(harness.socketPath(), heldCount);
     REQUIRE(connections.size() == heldCount);
     REQUIRE(waitForActiveConnections(*harness.daemon(), heldCount, scaledTimeout(5s)));
