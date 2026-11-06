@@ -2841,7 +2841,10 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
             if (nodes.size() < kBatchSize)
                 break;
 
-            if (!dryRun && deletedNodesInBatch > 0) {
+            // Rewind only when the deletes already happened. Batched deletes are applied after the
+            // scan, so the rows are still there; rewinding would re-read a page of orphans
+            // forever, appending the same deletes without bound.
+            if (!dryRun && deletedNodesInBatch > 0 && !orphanDeleteBatch) {
                 if (offset >= deletedNodesInBatch) {
                     offset -= deletedNodesInBatch;
                 } else {

@@ -6,21 +6,26 @@
 #include "../../common/test_helpers_catch2.h"
 
 #include <sqlite3.h>
+#include <boost/asio/io_context.hpp>
 #include <yams/api/content_store.h>
 #include <yams/api/content_store_builder.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/metadata/connection_pool.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 using yams::daemon::RepairScanCursor;
@@ -596,4 +601,59 @@ TEST_CASE("Chunk cleanup deletes nothing when a manifest cannot be parsed",
     CHECK(result.succeeded == 0);
     CHECK(result.failed >= 1);
     CHECK(std::filesystem::exists(c.planted));
+}
+
+// With a WriteCoordinator the orphan node deletes are batched and applied after the scan, so the
+// scan must not rewind its paging offset as if they had already happened: a full page of
+// orphans would then be re-read forever, appending the same deletes without bound.
+TEST_CASE("KG orphan cleanup finishes when more than a page of nodes is orphaned",
+          "[daemon][repair][kg][catch2]") {
+    ScanHarness h(0);
+    auto kgRes = yams::metadata::makeSqliteKnowledgeGraphStore(*h.pool);
+    REQUIRE(kgRes);
+    std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg = std::move(kgRes.value());
+    constexpr int kOrphans = 1200; // more than two 500-node scan pages
+    for (int i = 0; i < kOrphans; ++i) {
+        yams::metadata::KGNode node;
+        node.nodeKey = "doc:orphan-" + std::to_string(i);
+        node.type = "document";
+        REQUIRE(kg->upsertNode(node));
+    }
+
+    boost::asio::io_context io;
+    yams::daemon::WriteCoordinator::Config config;
+    config.maxBatchSize = 64;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    config.channelCapacity = 64;
+    yams::daemon::WriteCoordinator coordinator(io, kg, {}, config);
+    coordinator.start();
+    std::thread writer([&io] { io.run(); });
+
+    RepairServiceContext ctx;
+    ctx.getMetadataRepo = [r = h.repo] { return r; };
+    ctx.getKgStore = [kg] { return kg; };
+    ctx.getWriteCoordinator = [&coordinator] { return &coordinator; };
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = h.tmp.path();
+    RepairService service(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+
+    auto run =
+        std::async(std::launch::async, [&] { return service.testing_cleanOrphanedKgEntries(); });
+    const bool finished = run.wait_for(std::chrono::seconds(60)) == std::future_status::ready;
+    CHECK(finished);
+    if (finished) {
+        const auto [scanned, deleted, errors] = run.get();
+        CHECK(deleted == static_cast<std::uint64_t>(kOrphans));
+        CHECK(errors == 0);
+        CHECK(scanned < static_cast<std::uint64_t>(3 * kOrphans));
+        auto remaining = kg->findNodesByType("document", 2000, 0);
+        REQUIRE(remaining);
+        CHECK(remaining.value().empty());
+    }
+    coordinator.shutdown();
+    io.stop();
+    writer.join();
+    if (!finished)
+        std::_Exit(1); // the scan is still looping on another thread; do not hang the suite
 }
