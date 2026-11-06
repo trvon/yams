@@ -168,6 +168,7 @@ public:
         // Stop command
         auto* stop = daemon->add_subcommand("stop", "Stop the YAMS daemon");
         stop->add_option("--socket", socketPath_, "Socket path for daemon communication");
+        stop->add_option("--pid-file", pidFile_, "PID file path");
         stop->add_flag("--force", force_, "Force stop (kill -9)");
 
         stop->callback([this]() {
@@ -186,6 +187,7 @@ public:
         // Restart command
         auto* restart = daemon->add_subcommand("restart", "Restart the YAMS daemon");
         restart->add_option("--socket", socketPath_, "Socket path for daemon communication");
+        restart->add_option("--pid-file", pidFile_, "PID file path");
         restart->add_flag("--force", force_, "Force stop (kill -9)");
 
         restart->callback([this]() { restartDaemon(); });
@@ -193,6 +195,8 @@ public:
         // Doctor subcommand
         auto* doctor =
             daemon->add_subcommand("doctor", "Diagnose daemon IPC and environment issues");
+        doctor->add_option("--socket", socketPath_, "Socket path for daemon communication");
+        doctor->add_option("--pid-file", pidFile_, "PID file path");
         doctor->callback([this]() { doctorDaemon(); });
 
         // Log subcommand

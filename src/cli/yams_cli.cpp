@@ -635,6 +635,12 @@ int YamsCLI::run(int argc, char* argv[]) {
             }
         }
 
+        if (argc <= 1) {
+            registerCommandsForRun("");
+            std::cerr << app_->help();
+            return 2;
+        }
+
         auto parsePlan = buildRunParsePlan(argc, argv, kCommands);
         if (parsePlan.argv.empty()) {
             parsePlan.argc = argc;
@@ -654,6 +660,16 @@ int YamsCLI::run(int argc, char* argv[]) {
         }
         registerCommandsForRun(routedSubcmd);
         parseRunPlan(parsePlan);
+
+        // prefix_command() leaves options no command recognised in remaining();
+        // dropping them silently would run the command with different arguments.
+        if (const auto extra = app_->remaining(true); !extra.empty()) {
+            std::cerr << "error: unknown option '" << extra.front() << "'\n"
+                      << "hint: run `yams "
+                      << (routedSubcmd.empty() ? "" : std::string(routedSubcmd) + " ")
+                      << "--help` for the accepted options\n";
+            return 2;
+        }
 
         // Disallow multiple top-level subcommands (e.g., "yams search graph"),
         // which can accidentally treat query terms as commands.

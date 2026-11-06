@@ -1554,6 +1554,13 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
 
             // Keep directory/recursive routing, but never convert a requested
             // synchronous acknowledgement into a queued-success response.
+            if (!req.path.empty()) {
+                std::error_code existsEc;
+                if (!std::filesystem::exists(req.path, existsEc)) {
+                    co_return yams::daemon::dispatch::makeErrorResponse(
+                        ErrorCode::NotFound, "Path not found: " + req.path);
+                }
+            }
             const bool isDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
             const bool synchronousRequested =
                 req.waitForProcessing ||
