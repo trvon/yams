@@ -285,6 +285,33 @@ TEST_CASE("Startup scan only queues documents the repair batch would act on",
     CHECK_FALSE(h.service->testing_startupScanDue());
 }
 
+// A document whose extraction never completed has no text, so it also has no embedding, and the
+// scan queued it for embedding on every sweep. Embedding failed for lack of content, repair marked
+// it Failed, and the next sweep queued it again: nine such documents on the dev corpus reached 62
+// to 160 attempts. Once repair has given up on it, it is terminal like a failed extraction, until
+// something that could extract it changes.
+TEST_CASE("Startup scan stops re-queuing an unextracted document repair has given up on",
+          "[daemon][repair][scan][terminal][catch2]") {
+    ScanHarness h(2);
+    REQUIRE(h.repo->updateDocumentExtractionStatus(h.ids[0], false,
+                                                   yams::metadata::ExtractionStatus::Pending));
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        REQUIRE(
+            h.repo->updateDocumentRepairStatus(h.hashes[0], yams::metadata::RepairStatus::Failed));
+    }
+    const auto queued = h.service->testing_runStartupScanPass();
+    CHECK_FALSE(h.queuedIn(queued, h.hashes[0]));
+    CHECK(h.queuedIn(queued, h.hashes[1]));
+
+    // Before repair gives up, the document is still retried.
+    ScanHarness fresh(1);
+    REQUIRE(fresh.repo->updateDocumentExtractionStatus(fresh.ids[0], false,
+                                                       yams::metadata::ExtractionStatus::Pending));
+    REQUIRE(fresh.repo->updateDocumentRepairStatus(fresh.hashes[0],
+                                                   yams::metadata::RepairStatus::Failed));
+    CHECK(fresh.queuedIn(fresh.service->testing_runStartupScanPass(), fresh.hashes[0]));
+}
+
 TEST_CASE("Startup scan retries terminal documents once the extractor set changes",
           "[daemon][repair][scan][terminal][catch2]") {
     ScanHarness h(1);
