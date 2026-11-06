@@ -28,7 +28,8 @@ void validateDispatch(SearchEngineState state, const Event& ev, const char* mess
 } // namespace
 
 // Transitions match the former tinyfsm machine:
-// - RebuildStarted enters Building from any state.
+// - RebuildStarted enters Building. Callers must not send it while already Building: debug
+//   builds reject that with YAMS_DCHECK, and release builds re-enter Building.
 // - RebuildCompleted and RebuildFailed apply only in Building (to Ready / Failed).
 // - RebuildRequested is rejected in Building and AwaitingDrain. Otherwise a drain-gated request
 //   enters AwaitingDrain and an immediate one hands its reason to the rebuild callback.

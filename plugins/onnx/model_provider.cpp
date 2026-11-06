@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include <future>
 #include <optional>
 #include <thread>
+#include <unordered_map>
 #include "../ort_runtime/ort_runtime_loader.h"
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -291,8 +293,11 @@ struct ProviderCtx {
     yams_model_load_progress_cb progress_cb = nullptr;
     void* progress_user = nullptr;
     std::unique_ptr<yams::daemon::OnnxModelPool> pool;
-    std::unique_ptr<yams::daemon::OnnxColbertSession> colbert;   // ColBERT session
-    std::unordered_map<std::string, State> model_states;         // per-model FSM
+    std::unique_ptr<yams::daemon::OnnxColbertSession> colbert; // ColBERT session
+    std::unordered_map<std::string, State> model_states;       // per-model FSM
+    // Bumped by every unload. A load publishes its result only if the generation it started with
+    // is still current, so a load that finishes after an unload cannot mark the model Ready.
+    std::unordered_map<std::string, std::uint64_t> model_generation;
     std::unordered_map<std::string, FailureInfo> model_failures; // failure tracking
     bool ready = false;
     bool disabled = false;
@@ -1030,6 +1035,7 @@ struct ProviderSingleton {
                 }
 
                 // FSM: if already loading/ready, return OK
+                std::uint64_t loadGeneration = 0;
                 {
                     std::lock_guard<std::mutex> lk(c->mu);
                     auto& st = c->model_states[modelIdStr];
@@ -1053,6 +1059,7 @@ struct ProviderSingleton {
                         return YAMS_ERR_INTERNAL;
                     }
                     st = ProviderCtx::State::Loading;
+                    loadGeneration = c->model_generation[modelIdStr];
                 }
                 spdlog::info("[ONNX Plugin] load_model: starting load for '{}'", model_id);
                 emit_progress(c, model_id, YAMS_MODEL_PHASE_PROBE, "probe");
@@ -1063,6 +1070,14 @@ struct ProviderSingleton {
                 if (r) {
                     {
                         std::lock_guard<std::mutex> lk(c->mu);
+                        // unload_model() ran while this load was in flight and already
+                        // published Unloaded. Publishing Ready now would make later loads skip
+                        // the reload.
+                        if (c->model_generation[modelIdStr] != loadGeneration) {
+                            spdlog::info("[ONNX Plugin] load_model: '{}' was unloaded during load",
+                                         model_id);
+                            return YAMS_OK;
+                        }
                         c->model_states[modelIdStr] = ProviderCtx::State::Ready;
                         c->clearFailure(modelIdStr);
                     }
@@ -1080,6 +1095,9 @@ struct ProviderSingleton {
                     std::string errMsg = r.error().message;
                     {
                         std::lock_guard<std::mutex> lk(c->mu);
+                        if (c->model_generation[modelIdStr] != loadGeneration) {
+                            return YAMS_OK;
+                        }
                         c->model_states[modelIdStr] = ProviderCtx::State::Failed;
                         c->recordFailure(modelIdStr, errMsg);
                     }
@@ -1121,6 +1139,7 @@ struct ProviderSingleton {
             // load_model() returns early for a model marked Ready, so a model left Ready after
             // unload could never be loaded again.
             std::lock_guard<std::mutex> lk(c->mu);
+            ++c->model_generation[model_id];
             if (auto it = c->model_states.find(model_id); it != c->model_states.end())
                 it->second = ProviderCtx::State::Unloaded;
             return YAMS_OK;
