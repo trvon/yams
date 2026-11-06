@@ -1,11 +1,9 @@
 yams_api_lib = static_library('yams_api',
   [
     'content_store_impl.cpp',
-    'async_content_store.cpp',
     'content_metadata.cpp',
     'content_store_builder.cpp',
     'progress_reporter.cpp',
-    'semantic_search_api.cpp',
   ],
   dependencies: [
     dependency('yams_core'),
