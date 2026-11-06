@@ -467,7 +467,6 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
         co_return out;
     }
 
-    // Try smart retrieval first, then fallback to base-name list + fuzzy selection
     // Reuse shared daemon client to avoid per-request connection overhead
     auto clientRes = requireDaemonClient();
     if (!clientRes)
@@ -490,98 +489,11 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     auto r = rsvc.getByNameSmart(req.name, req.oldest, true, /*useSession*/ false, std::string{},
                                  ropts, resolver);
 
-    yams::daemon::GetResponse gr;
-    if (r) {
-        gr = std::move(r).value();
-    } else {
-        // Fallback path: search by base filename using list + simple fuzzy
-        auto tryList = [&](const std::string& pat) -> std::optional<yams::daemon::ListResponse> {
-            yams::app::services::ListOptions lreq;
-            lreq.namePattern = pat; // SQL LIKE pattern
-            lreq.limit = 500;
-            lreq.pathsOnly = false;
-            auto lres = rsvc.list(lreq, ropts);
-            if (lres && !lres.value().items.empty())
-                return lres.value();
-            return std::nullopt;
-        };
-        auto bestMatch = [&](const std::vector<yams::daemon::ListEntry>& items)
-            -> std::optional<yams::daemon::ListEntry> {
-            if (items.empty())
-                return std::nullopt;
-            if (req.latest || req.oldest) {
-                const yams::daemon::ListEntry* chosen = nullptr;
-                for (const auto& it : items) {
-                    if (!chosen) {
-                        chosen = &it;
-                    } else if (req.oldest) {
-                        if (it.indexed < chosen->indexed)
-                            chosen = &it;
-                    } else {
-                        if (it.indexed > chosen->indexed)
-                            chosen = &it;
-                    }
-                }
-                return chosen ? std::optional<yams::daemon::ListEntry>(*chosen) : std::nullopt;
-            }
-            auto scoreName = [&](const std::string& base) -> int {
-                if (base == req.name)
-                    return 1000;
-                if (base.size() >= req.name.size() && base.rfind(req.name, 0) == 0)
-                    return 800;
-                if (base.find(req.name) != std::string::npos)
-                    return 600;
-                int dl = static_cast<int>(std::abs((long)(base.size() - req.name.size())));
-                return 400 - std::min(200, dl * 10);
-            };
-            int bestScore = -1;
-            const yams::daemon::ListEntry* chosen = nullptr;
-            for (const auto& it : items) {
-                std::string b;
-                try {
-                    b = std::filesystem::path(it.path).filename().string();
-                } catch (...) {
-                    b = it.name;
-                }
-                int sc = scoreName(b);
-                if (sc > bestScore) {
-                    bestScore = sc;
-                    chosen = &it;
-                }
-            }
-            return chosen ? std::optional<yams::daemon::ListEntry>(*chosen) : std::nullopt;
-        };
-
-        std::optional<yams::daemon::ListResponse> lr;
-        // Exact base-name
-        lr = tryList(std::string("%/") + req.name);
-        // Stem match
-        if (!lr) {
-            std::string stem = req.name;
-            try {
-                stem = std::filesystem::path(req.name).stem().string();
-            } catch (...) {
-                spdlog::debug("Unable to derive document-name stem for '{}'", req.name);
-            }
-            lr = tryList(std::string("%/") + stem + "%");
-        }
-        // Anywhere contains
-        if (!lr)
-            lr = tryList(std::string("%") + req.name + "%");
-
-        if (!lr || lr->items.empty())
-            co_return Error{ErrorCode::NotFound, "document not found by name"};
-        auto cand = bestMatch(lr->items);
-        if (!cand)
-            co_return Error{ErrorCode::NotFound, "document not found by name"};
-        yams::app::services::GetOptions greq;
-        greq.hash = std::move(cand->hash);
-        greq.metadataOnly = false;
-        auto grres = rsvc.get(greq, ropts);
-        if (!grres)
-            co_return grres.error();
-        gr = std::move(grres).value();
-    }
+    // getByNameSmart is the only resolver: an unknown or ambiguous name is an
+    // error, never the closest-looking document.
+    if (!r)
+        co_return r.error();
+    yams::daemon::GetResponse gr = std::move(r).value();
 
     MCPGetByNameResponse out;
     out.size = gr.size;

@@ -601,7 +601,11 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
                 const auto& docs = res.value();
                 if (docs.size() == 1)
                     return docs[0].sha256Hash;
-                // Multiple matches: pick by latest/oldest or first
+                if (!latest_ && !oldest_) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "glob '" + nm + "' matches " + std::to_string(docs.size()) +
+                                     " documents; pass --latest, --oldest or --hash"};
+                }
                 const metadata::DocumentInfo* chosen = &docs[0];
                 if (latest_ || oldest_) {
                     for (const auto& d : docs) {
@@ -660,85 +664,10 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
 
     auto grr = rsvc.getByNameSmart(nm, pickOldest, includeContent, useSession, sessionName, ropts,
                                    resolver);
-    if (grr) {
-        return grr.value().hash;
+    if (!grr) {
+        return grr.error();
     }
-
-    // Fallback: try common list patterns via RetrievalService (daemon)
-    auto tryList = [&](const std::string& pat) -> std::optional<yams::daemon::ListResponse> {
-        yams::app::services::ListOptions lreq;
-        lreq.namePattern = pat;
-        lreq.limit = 500;
-        lreq.pathsOnly = false;
-        auto lr = rsvc.list(lreq, ropts);
-        if (lr && !lr.value().items.empty())
-            return lr.value();
-        return std::nullopt;
-    };
-
-    std::optional<yams::daemon::ListResponse> lr;
-    lr = tryList(std::string("%/") + nm);
-    if (!lr) {
-        std::string stem = nm;
-        try {
-            stem = std::filesystem::path(nm).stem().string();
-        } catch (const std::exception& ex) {
-            // Intentional best-effort path; keep the primary operation unaffected.
-            spdlog::debug("Update: failed to derive stem for '{}': {}", nm, ex.what());
-        } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
-            spdlog::debug("Update: failed to derive stem for '{}'", nm);
-        }
-        lr = tryList(std::string("%/") + stem + "%");
-    }
-    if (!lr)
-        lr = tryList(std::string("%") + nm + "%");
-    if (!lr || lr->items.empty())
-        return Error{ErrorCode::NotFound, "No matching documents"};
-
-    // Disambiguate
-    const yams::daemon::ListEntry* chosen = nullptr;
-    if (latest_ || oldest_) {
-        for (const auto& it : lr->items) {
-            if (!chosen)
-                chosen = &it;
-            else if (oldest_) {
-                if (it.indexed < chosen->indexed)
-                    chosen = &it;
-            } else {
-                if (it.indexed > chosen->indexed)
-                    chosen = &it;
-            }
-        }
-    } else {
-        auto scoreName = [&](const std::string& base) -> int {
-            if (base == nm)
-                return 1000;
-            if (base.size() >= nm.size() && base.rfind(nm, 0) == 0)
-                return 800;
-            if (base.find(nm) != std::string::npos)
-                return 600;
-            int dl = static_cast<int>(std::abs((long)(base.size() - nm.size())));
-            return 400 - std::min(200, dl * 10);
-        };
-        int best = -1;
-        for (const auto& it : lr->items) {
-            std::string b;
-            try {
-                b = std::filesystem::path(it.path).filename().string();
-            } catch (...) {
-                b = it.name;
-            }
-            int sc = scoreName(b);
-            if (sc > best) {
-                best = sc;
-                chosen = &it;
-            }
-        }
-    }
-    if (!chosen)
-        return Error{ErrorCode::NotFound, "No matching documents"};
-    return chosen->hash;
+    return grr.value().hash;
 }
 
 // Factory function
