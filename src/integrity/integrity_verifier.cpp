@@ -139,6 +139,10 @@ struct IntegrityVerifier::Impl {
     std::atomic<bool> running{false};
     std::atomic<bool> paused{false};
     std::atomic<bool> shouldStop{false};
+    // Serializes start, stop, pause and resume so a transition cannot act on a newer run: a stop
+    // that had already published running=false could otherwise set shouldStop on a run a
+    // concurrent start had just begun. running/paused stay atomic for lock-free status reads.
+    std::mutex lifecycleMutex;
 
     // Rate limiting
     std::unique_ptr<RateLimiter> rateLimiter;
@@ -387,16 +391,15 @@ IntegrityVerifier::IntegrityVerifier(IntegrityVerifier&&) noexcept = default;
 IntegrityVerifier& IntegrityVerifier::operator=(IntegrityVerifier&&) noexcept = default;
 
 Result<void> IntegrityVerifier::startBackgroundVerification() {
-    // Claim the start atomically: checking running and then setting it let concurrent starts
-    // all report success.
-    bool expected = false;
-    if (!pImpl->running.compare_exchange_strong(expected, true)) {
+    std::lock_guard<std::mutex> lifecycle(pImpl->lifecycleMutex);
+    if (pImpl->running) {
         return Result<void>(ErrorCode::OperationInProgress);
     }
 
     try {
         pImpl->shouldStop = false;
         pImpl->paused = false;
+        pImpl->running = true;
 
         spdlog::info("Started integrity verification with {} concurrent threads",
                      pImpl->config.maxConcurrentVerifications);
@@ -410,12 +413,14 @@ Result<void> IntegrityVerifier::startBackgroundVerification() {
 }
 
 Result<void> IntegrityVerifier::stopBackgroundVerification() {
-    if (!pImpl->running.exchange(false)) {
+    std::lock_guard<std::mutex> lifecycle(pImpl->lifecycleMutex);
+    if (!pImpl->running) {
         return {};
     }
 
     try {
         pImpl->shouldStop = true;
+        pImpl->running = false;
 
         spdlog::info("Stopped integrity verification");
         return {};
@@ -426,6 +431,7 @@ Result<void> IntegrityVerifier::stopBackgroundVerification() {
 }
 
 Result<void> IntegrityVerifier::pauseVerification() {
+    std::lock_guard<std::mutex> lifecycle(pImpl->lifecycleMutex);
     if (!pImpl->running) {
         return Result<void>(ErrorCode::InvalidOperation);
     }
@@ -436,6 +442,7 @@ Result<void> IntegrityVerifier::pauseVerification() {
 }
 
 Result<void> IntegrityVerifier::resumeVerification() {
+    std::lock_guard<std::mutex> lifecycle(pImpl->lifecycleMutex);
     if (!pImpl->running) {
         return Result<void>(ErrorCode::InvalidOperation);
     }
