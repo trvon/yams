@@ -337,3 +337,50 @@ TEST_CASE("RetrievalService testing helpers map GetInit and Search options",
     CHECK(out.sessionName == search.sessionName);
     CHECK(out.globalSearch == search.globalSearch);
 }
+
+namespace {
+yams::daemon::SearchResult hashResult(const std::string& hash, const std::string& path,
+                                      int64_t indexed) {
+    yams::daemon::SearchResult r;
+    r.path = path;
+    r.metadata["hash"] = hash;
+    r.metadata["indexed"] = std::to_string(indexed);
+    return r;
+}
+} // namespace
+
+TEST_CASE("Hash prefix selection resolves unique, ambiguous and preferred matches",
+          "[retrieval][service][hash-prefix]") {
+    const std::string a = "abcdef0011" + std::string(54, '1');
+    const std::string b = "abcdef0022" + std::string(54, '2');
+    const std::string other = "ffffff0000" + std::string(54, '3');
+
+    SECTION("a single match resolves; prefixes are case-insensitive") {
+        auto r = selectHashPrefixMatch({hashResult(a, "/a", 1), hashResult(other, "/o", 2)},
+                                       "ABCDEF00", false, false);
+        REQUIRE(r);
+        CHECK(r.value() == a);
+    }
+    SECTION("one document at several paths is one match, not an ambiguity") {
+        // Path heads list a shared document once per location, all with the same hash.
+        auto r = selectHashPrefixMatch(
+            {hashResult(a, "/repo/main/f.txt", 1), hashResult(a, "/repo/lane/f.txt", 2)},
+            "abcdef00", false, false);
+        REQUIRE(r);
+        CHECK(r.value() == a);
+    }
+    SECTION("two documents are ambiguous unless a preference picks one") {
+        const std::vector<yams::daemon::SearchResult> both{hashResult(a, "/a", 10),
+                                                           hashResult(b, "/b", 20)};
+        auto ambiguous = selectHashPrefixMatch(both, "abcdef00", false, false);
+        REQUIRE_FALSE(ambiguous);
+        CHECK(ambiguous.error().code == yams::ErrorCode::InvalidOperation);
+        CHECK(selectHashPrefixMatch(both, "abcdef00", false, true).value() == b);
+        CHECK(selectHashPrefixMatch(both, "abcdef00", true, false).value() == a);
+    }
+    SECTION("results that do not start with the prefix are ignored") {
+        auto r = selectHashPrefixMatch({hashResult(other, "/o", 1)}, "abcdef00", false, false);
+        REQUIRE_FALSE(r);
+        CHECK(r.error().code == yams::ErrorCode::NotFound);
+    }
+}
