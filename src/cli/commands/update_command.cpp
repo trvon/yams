@@ -70,10 +70,17 @@ void UpdateCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
 
 Result<void> UpdateCommand::execute() {
     try {
+        // Resolve --name here with the strict resolver and send only the hash:
+        // the daemon's by-name lookup picks the newest of several matches.
+        if (hash_.empty() && !name_.empty()) {
+            auto hr = resolveNameToHashSmart(name_);
+            if (!hr)
+                return hr.error();
+            hash_ = hr.value();
+        }
         if (cli_) {
             yams::daemon::UpdateDocumentRequest dreq;
             dreq.hash = hash_;
-            dreq.name = name_;
 
             // Parse metadata key=value pairs
             for (const auto& kv : metadata_) {
@@ -222,10 +229,16 @@ Result<void> UpdateCommand::execute() {
 // New: non-blocking async implementation leveraging DaemonClient coroutines
 boost::asio::awaitable<Result<void>> UpdateCommand::executeAsync() {
     try {
+        // See execute(): never let the daemon resolve --name.
+        if (hash_.empty() && !name_.empty()) {
+            auto hr = resolveNameToHashSmart(name_);
+            if (!hr)
+                co_return hr.error();
+            hash_ = hr.value();
+        }
         if (cli_) {
             yams::daemon::UpdateDocumentRequest dreq;
             dreq.hash = hash_;
-            dreq.name = name_;
 
             for (const auto& kv : metadata_) {
                 auto pos = kv.find('=');
