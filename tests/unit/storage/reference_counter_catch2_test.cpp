@@ -105,10 +105,10 @@ TEST_CASE("ReferenceCounter initialize retries while another connection holds th
     std::filesystem::remove(dbPath.string() + "-wal");
     std::filesystem::remove(dbPath.string() + "-shm");
 
+    // Report the constructor's error with the failure: INFO after the assertion was never shown,
+    // so a failure on CI said nothing about which error escaped the retry loop.
+    INFO("constructor failed: " << initError.value_or("<no error>"));
     REQUIRE_FALSE(initError.has_value());
-    if (initError) {
-        INFO("constructor failed: " << *initError);
-    }
 }
 
 struct GarbageCollectorFixture {
