@@ -2181,6 +2181,7 @@ if catch2_dep.found()
       'unit/cli/init_command_catch2_test.cpp',
       'unit/cli/list_command_catch2_test.cpp',
       'unit/cli/name_resolution_contract_catch2_test.cpp',
+      'unit/cli/status_data_dir_catch2_test.cpp',
       'unit/cli/update_command_catch2_test.cpp',
     ),
     include_directories: incs,
