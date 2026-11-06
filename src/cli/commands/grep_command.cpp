@@ -630,7 +630,8 @@ public:
                         if (minimalMode_) {
                             renderDaemonMinimalMatches(resp.matches, relationSummaries);
                         } else {
-                            renderDaemonRichMatches(resp.matches, relationSummaries);
+                            renderDaemonRichMatches(resp.matches, relationSummaries,
+                                                    resp.searchStats, resp.totalMatches);
                         }
                     }
 
@@ -1209,7 +1210,9 @@ private:
     }
 
     void renderDaemonRichMatches(const std::vector<daemon::GrepMatch>& matches,
-                                 const RelationSummaryMap& relationSummaries) const {
+                                 const RelationSummaryMap& relationSummaries,
+                                 const std::map<std::string, std::string>& searchStats = {},
+                                 uint64_t totalMatches = 0) const {
         const auto groups = buildDaemonRichFileMatches(matches, relationSummaries);
 
         size_t regexCount = 0;
@@ -1227,14 +1230,32 @@ private:
             summary += " (" + std::to_string(regexCount) + " regex, " +
                        std::to_string(semanticCount) + " semantic)";
         }
-        const auto capped = static_cast<std::size_t>(
-            std::count_if(groups.begin(), groups.end(), [this](const RichFileMatches& g) {
-                return maxCount_ > 0 && g.regexMatches >= maxCount_;
-            }));
-        if (capped > 0) {
-            summary += "; " + std::to_string(capped) + " file" + (capped != 1 ? "s" : "") +
-                       " stopped at " + std::to_string(maxCount_) +
-                       " matches per file (raise with -m)";
+        // The daemon returns at most result_window_limit match lines in total,
+        // after the per-file -m cap; say so when it cut the output.
+        std::size_t windowTruncated = 0;
+        if (auto it = searchStats.find("result_window_truncated"); it != searchStats.end()) {
+            try {
+                windowTruncated = std::stoull(it->second);
+            } catch (...) {
+            }
+        }
+        if (windowTruncated > 0) {
+            summary +=
+                "; showing the first " + std::to_string(matches.size()) + " of " +
+                std::to_string(std::max<uint64_t>(totalMatches, matches.size() + windowTruncated)) +
+                " (use -l to list every matching file)";
+        } else {
+            // Every record is present, so a file with -m records hit the cap. Several
+            // matches on one line count once here, so this can miss a cap, never invent one.
+            const auto capped = static_cast<std::size_t>(
+                std::count_if(groups.begin(), groups.end(), [this](const RichFileMatches& g) {
+                    return maxCount_ > 0 && g.regexMatches >= maxCount_;
+                }));
+            if (capped > 0) {
+                summary += "; " + std::to_string(capped) + " file" + (capped != 1 ? "s" : "") +
+                           " stopped at " + std::to_string(maxCount_) +
+                           " matches per file (raise with -m)";
+            }
         }
         renderSummaryLine(summary, !matches.empty());
     }

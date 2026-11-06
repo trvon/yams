@@ -36,6 +36,21 @@ TEST_CASE("grep says when the per-file match cap cut output", "[cli][grep][outpu
     CHECK((r.out + r.err).find("per file") != std::string::npos);
 }
 
+TEST_CASE("grep says when the daemon result window cut output", "[cli][grep][output]") {
+    EmbeddedCorpus corpus("yams_grep_window_");
+    std::string body;
+    for (int i = 0; i < 15; ++i)
+        body += "needle " + std::to_string(i) + "\n";
+    corpus.addText("first.txt", body);
+    corpus.addText("second.txt", body);
+
+    const auto r = corpus.run({"grep", "needle"});
+    INFO(r.out << r.err);
+    REQUIRE(r.rc == 0);
+    // 30 matching lines, at most 20 returned: the summary must not read as complete.
+    CHECK(r.out.find("of 30") != std::string::npos);
+}
+
 TEST_CASE("paths outside the working directory display in full", "[cli][grep][output]") {
     const auto cwd = std::filesystem::temp_directory_path() / "yams_display_cwd";
     const auto other =
