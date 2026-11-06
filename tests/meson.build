@@ -2178,6 +2178,7 @@ if catch2_dep.found()
       'unit/cli/delete_command_catch2_test.cpp',
       'unit/cli/download_command_catch2_test.cpp',
       'unit/cli/exit_code_contract_catch2_test.cpp',
+      'unit/cli/grep_output_contract_catch2_test.cpp',
       'unit/cli/init_command_catch2_test.cpp',
       'unit/cli/list_command_catch2_test.cpp',
       'unit/cli/name_resolution_contract_catch2_test.cpp',
