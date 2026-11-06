@@ -473,6 +473,13 @@ public:
     // retrieval paths frequently block on SQLite/disk work even when CPU usage is moderate.
     // Environment: YAMS_WORK_COORDINATOR_THREADS
     static uint32_t workCoordinatorThreads();
+    // Request executor (IPC request handling) threads. Default max(4, hw/2); the legacy
+    // YAMS_REQUEST_THREADS overlay (1-64) still applies. Test override via the setter.
+    static uint32_t requestExecutorThreads();
+    static void setRequestExecutorThreads(uint32_t n);
+    // Search engine runtime pool threads. Default hw/2 clamped to [2, 8].
+    static uint32_t searchRuntimeThreads();
+    static void setSearchRuntimeThreads(uint32_t n);
     static void setWorkCoordinatorThreads(uint32_t n);
 
     // Recommended thread count based on CPU budget. backgroundFactor in (0,1].
@@ -773,6 +780,10 @@ public:
     // Get the current embed channel capacity (for sizing the queue)
     static uint32_t embedChannelCapacity();
     static void setEmbedChannelCapacity(uint32_t v);
+    // Capacity of the shared embed_jobs channel. Every creator uses this: the channel bus keeps
+    // the first capacity it sees, so creators that disagreed silently overrode each other.
+    // Bounded by the post-ingest queue so a full channel cannot buffer more jobs than it.
+    static uint32_t embedJobChannelCapacity();
 
     // Ingest channel capacity (store_document_tasks). Clamp to post-ingest queue max to avoid
     // unbounded buffering of document payloads under governor backpressure.
@@ -891,6 +902,8 @@ private:
     static inline std::atomic<uint32_t> storagePoolSizeOverride_{0};
     static inline std::atomic<uint32_t> ingestBacklogPerWorkerOverride_{0};
     static inline std::atomic<uint32_t> workCoordinatorThreadsOverride_{0};
+    static inline std::atomic<uint32_t> requestExecutorThreadsOverride_{0};
+    static inline std::atomic<uint32_t> searchRuntimeThreadsOverride_{0};
     // Defaults: prefer internal event bus by default; config/env can override
     static inline std::atomic<bool> useInternalBusRepair_{true};
     static inline std::atomic<bool> useInternalBusPostIngest_{true};

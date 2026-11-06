@@ -95,13 +95,7 @@ EffectiveEmbeddingServiceConfig EmbeddingService::effectiveConcurrencyPolicy() c
 
 Result<void> EmbeddingService::initialize() {
     YAMS_ZONE_SCOPED_N("Embedding::initialize");
-    // Use configurable channel capacity from TuneAdvisor
-    std::size_t capacity = static_cast<std::size_t>(TuneAdvisor::embedChannelCapacity());
-    std::size_t postIngestCap = static_cast<std::size_t>(TuneAdvisor::postIngestQueueMax());
-    if (postIngestCap > 0) {
-        capacity = std::min(capacity, postIngestCap);
-    }
-    capacity = std::max<std::size_t>(256u, capacity);
+    const std::size_t capacity = TuneAdvisor::embedJobChannelCapacity();
     auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", capacity);
     std::atomic_store_explicit(&embedChannel_, channel, std::memory_order_release);

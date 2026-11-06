@@ -1,6 +1,8 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/SearchEngineManager.h>
+#include <yams/daemon/components/thread_pool_naming.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
@@ -33,11 +35,6 @@ std::uint64_t nextLexicalDeltaEpoch(std::atomic<std::uint64_t>& counter) {
 }
 
 constexpr std::size_t kMaxRecentLexicalDeltaDocs = 256;
-
-std::size_t searchRuntimeThreadCount() {
-    const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
-    return std::clamp<std::size_t>(hardwareThreads / 2u, 2u, 8u);
-}
 
 std::string normalizeTopologyToken(std::string raw) {
     raw.erase(std::remove_if(raw.begin(), raw.end(),
@@ -121,7 +118,9 @@ SearchEngineManager::SearchEngineManager()
     : compatibilityEnvironment_(yams::search::snapshotLegacySearchEnvironment()),
       runtimePolicy_(std::make_unique<RuntimePolicy>(
           RuntimePolicy{ConfigResolver::resolveTopologyRoutingPolicy()})),
-      runtimeExecutor_(searchRuntimeThreadCount()) {}
+      runtimeExecutor_(TuneAdvisor::searchRuntimeThreads()) {
+    nameThreadPoolWorkers(runtimeExecutor_, TuneAdvisor::searchRuntimeThreads(), "yams-search-");
+}
 
 SearchEngineManager::~SearchEngineManager() {
     runtimeExecutor_.stop();

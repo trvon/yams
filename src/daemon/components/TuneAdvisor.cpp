@@ -1003,6 +1003,41 @@ void TuneAdvisor::setWorkCoordinatorThreads(uint32_t n) {
                                           std::memory_order_relaxed);
 }
 
+uint32_t TuneAdvisor::requestExecutorThreads() {
+    if (const uint32_t ov = requestExecutorThreadsOverride_.load(std::memory_order_relaxed);
+        ov != 0) {
+        return ov;
+    }
+    if (const char* s = compatibilityEnvironment("YAMS_REQUEST_THREADS")) {
+        try {
+            const auto v = std::stoul(s);
+            if (v >= 1 && v <= 64)
+                return static_cast<uint32_t>(v);
+        } catch (const std::exception&) {
+            ignoreInvalidEnvParseFailure();
+        }
+    }
+    return std::max<uint32_t>(4u, hardwareConcurrency() / 2u);
+}
+
+void TuneAdvisor::setRequestExecutorThreads(uint32_t n) {
+    requestExecutorThreadsOverride_.store(n == 0 ? 0 : std::clamp<uint32_t>(n, 1u, 64u),
+                                          std::memory_order_relaxed);
+}
+
+uint32_t TuneAdvisor::searchRuntimeThreads() {
+    if (const uint32_t ov = searchRuntimeThreadsOverride_.load(std::memory_order_relaxed);
+        ov != 0) {
+        return ov;
+    }
+    return std::clamp<uint32_t>(hardwareConcurrency() / 2u, 2u, 8u);
+}
+
+void TuneAdvisor::setSearchRuntimeThreads(uint32_t n) {
+    searchRuntimeThreadsOverride_.store(n == 0 ? 0 : std::clamp<uint32_t>(n, 1u, 64u),
+                                        std::memory_order_relaxed);
+}
+
 uint32_t TuneAdvisor::recommendedThreads(double backgroundFactor, uint32_t hardMax) {
     return recommendedThreadsForHw(hardwareConcurrency(), backgroundFactor, hardMax);
 }
@@ -2018,6 +2053,14 @@ uint32_t TuneAdvisor::embedChannelCapacity() {
         }
     }
     return 8192; // Increased from 2048 to handle bulk ingest
+}
+
+uint32_t TuneAdvisor::embedJobChannelCapacity() {
+    uint32_t capacity = embedChannelCapacity();
+    if (const auto postIngest = postIngestQueueMax(); postIngest > 0) {
+        capacity = std::min(capacity, postIngest);
+    }
+    return std::max<uint32_t>(256u, capacity);
 }
 
 void TuneAdvisor::setEmbedChannelCapacity(uint32_t v) {

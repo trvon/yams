@@ -1,6 +1,7 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/core/thread_name.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
@@ -104,6 +105,7 @@ void CheckpointManager::launchCheckpointLoop() {
     // blocking stop()), but the loop itself is immune to executor pressure.
     auto stopFlag = deps_.stopRequested;
     checkpointThread_ = std::thread([this, stopFlag]() {
+        yams::setCurrentThreadName("yams-checkpoint");
         using namespace std::chrono_literals;
         std::unique_lock lock(cvMutex_);
         // Initial 30s warmup (matches the prior asio-based timing).

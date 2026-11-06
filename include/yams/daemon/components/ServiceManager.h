@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -485,8 +486,14 @@ public:
     /// Let the next apply cycle reach the rate-limited outbound backfill immediately, so a test
     /// can drive a bounded number of full sync cycles without wall-clock waits.
     void testingExpireMemorySyncBackfillSchedule() {
-        std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
-        nextMemorySyncBackfill_ = {};
+        {
+            std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
+            nextMemorySyncBackfill_ = {};
+        }
+        std::lock_guard<std::mutex> lock(memorySyncBackfillMutex_);
+        for (auto& backoff : memorySyncBackfillState_.domainBackoff) {
+            backoff.notBefore = {};
+        }
     }
     /// Keep background apply cycles from running the outbound backfill, so a test that drives
     /// backfill by hand sees only its own cycles.
@@ -1151,9 +1158,21 @@ private:
         std::int64_t topologyNodeIdCursor{0};
         std::int64_t topologyEdgeIdCursor{0};
         std::string topologyRetractionKeyCursor;
+        // Completed topology passes; a record that can never publish is reported on the first.
+        std::uint64_t topologySweepPasses{0};
         SweepGeneration topologySweep;
         std::size_t itemBudgetPerCycle{256};
         std::chrono::milliseconds timeBudgetPerCycle{100};
+        // A domain that throws sits out until notBefore. The wait doubles with each consecutive
+        // failure (from the 5 s cycle up to 10 min) and resets once the domain makes progress or
+        // runs out of work, so a failure that is not per-record (backend outage, writer history
+        // that needs a bootstrap) is not retried and logged on every cycle.
+        struct DomainBackoff {
+            std::uint32_t failures{0};
+            std::chrono::steady_clock::time_point notBefore{};
+            std::string lastError;
+        };
+        std::array<DomainBackoff, 4> domainBackoff{};
     } memorySyncBackfillState_;
     std::chrono::steady_clock::time_point nextMemorySyncBackfill_{};
     // Inbound apply skips a cycle whose adapter inputs match the last settled pass (complete, no

@@ -1744,6 +1744,7 @@ if catch2_dep.found()
       catch2_dep,
       catch2_main_dep,
       dependency('nlohmann_json'),
+      dependency('yams_api'),
       dependency('yams_storage_engine'),
       dependency('yams_crypto'),
       dependency('yams_memory_sync'),

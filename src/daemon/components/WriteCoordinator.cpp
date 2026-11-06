@@ -441,7 +441,8 @@ void WriteCoordinator::recordSourceApply(const std::string& source, std::uint64_
 }
 
 boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
-    YAMS_SET_THREAD_NAME("yams-write-coordinator");
+    // No thread name here: this coroutine runs on the shared WorkCoordinator executor and can
+    // resume on any of its workers, so naming "this thread" would mislabel a pool worker.
     spdlog::info("[WriteCoordinator] Writer loop started");
     auto pollTimer = wakeTimer_;
 

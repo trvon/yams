@@ -1,3 +1,4 @@
+#include <yams/core/thread_name.h>
 #include <yams/metadata/content_index_writer.h>
 
 #include <stdexcept>
@@ -20,7 +21,10 @@ ContentIndexWriter::ContentIndexWriter(std::shared_ptr<MetadataRepository> repo)
     if (!repo_) {
         throw std::invalid_argument("ContentIndexWriter requires a MetadataRepository");
     }
-    worker_ = std::thread([this] { run(); });
+    worker_ = std::thread([this] {
+        yams::setCurrentThreadName("yams-fts-writer");
+        run();
+    });
 }
 
 ContentIndexWriter::~ContentIndexWriter() {

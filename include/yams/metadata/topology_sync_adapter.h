@@ -44,7 +44,7 @@ public:
 
     Result<void> publishNode(const KGNode& node) {
         if (node.nodeKey.empty()) {
-            return Error{ErrorCode::InvalidArgument, "topology node key must not be empty"};
+            return Error{ErrorCode::InvalidData, "topology node key must not be empty"};
         }
         memory_sync::TopologyNodeRecord record;
         record.nodeKey = node.nodeKey;
@@ -68,7 +68,7 @@ public:
     Result<void> publishEdge(std::string_view sourceNodeKey, const KGEdge& edge,
                              std::string_view targetNodeKey) {
         if (sourceNodeKey.empty() || targetNodeKey.empty() || edge.relation.empty()) {
-            return Error{ErrorCode::InvalidArgument,
+            return Error{ErrorCode::InvalidData,
                          "topology edge requires source, relation, and target"};
         }
         memory_sync::TopologyEdgeRecord record;
@@ -534,8 +534,19 @@ private:
         return store_.hasEdgeByKeys(record.sourceNodeKey, record.targetNodeKey, record.relation);
     }
 
+    // Failures that belong to the record itself (no key, text that is not UTF-8, larger than the
+    // resident publish limit) are InvalidData: retrying cannot help, so backfill skips them.
+    // Everything else, including a backend that rejects the write, is left for a later retry.
     template <typename Record> Result<void> publish(const std::string& key, const Record& record) {
-        const std::string dump = nlohmann::json(record).dump();
+        auto encoded = memory_sync::encodeRecordJson(record);
+        if (!encoded) {
+            return encoded.error();
+        }
+        const std::string& dump = encoded.value();
+        if (dump.size() > sync_.maxPublishValueBytes()) {
+            return Error{ErrorCode::InvalidData,
+                         "topology record exceeds the resident publish limit"};
+        }
         std::vector<std::byte> bytes(dump.size());
         std::memcpy(bytes.data(), dump.data(), dump.size());
         auto published = sync_.publishIfChanged(key, bytes);

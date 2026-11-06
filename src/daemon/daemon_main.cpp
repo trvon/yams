@@ -811,15 +811,11 @@ int main(int argc, char* argv[]) {
                      config.instrumentation.mslStackLogWarnBytes / (1024ULL * 1024ULL));
     }
 
-    // Configure FSM metrics based on log level
-    // Enable FSM metrics only for debug or trace levels to avoid introducing new tags
-    {
-        bool enableFsmMetrics = (config.logLevel == "debug" || config.logLevel == "trace");
-        yams::daemon::FsmMetricsRegistry::instance().setEnabled(enableFsmMetrics);
-        if (enableFsmMetrics) {
-            spdlog::debug("FSM metrics collection enabled");
-        }
-    }
+    // Connection FSM counters stay on at every log level. They are sharded relaxed atomics, and
+    // status reports them unconditionally: gating them on debug logging made status show zero
+    // transitions and bytes for a daemon that was serving requests. Tracy plots have their own
+    // switch (ConnectionFsm::enable_metrics) and are no-ops without a profiling build.
+    yams::daemon::FsmMetricsRegistry::instance().setEnabled(true);
 
     clear_session_index_on_start();
 

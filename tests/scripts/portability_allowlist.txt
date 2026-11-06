@@ -100,10 +100,9 @@ src/daemon/components/LifecycleComponent.cpp:808:portability/env-read # reviewed
 src/daemon/components/LifecycleComponent.cpp:818:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestDispatcher.cpp:597:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestDispatcher.cpp:600:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestExecutor.cpp:44:portability/env-read # reviewed raw environment read
 src/daemon/components/dispatcher/request_dispatcher_models.cpp:38:portability/env-read # reviewed raw environment read
 src/mcp/stdio_transport.cpp:46:portability/env-read # reviewed raw environment read
-src/metadata/connection_pool.cpp:999:portability/jthread # feature-test guarded std::jthread
+src/metadata/connection_pool.cpp:1000:portability/jthread # feature-test guarded std::jthread
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path
 src/metadata/metadata_repository.cpp:1502:portability/env-read # reviewed raw environment read

@@ -944,6 +944,9 @@ public:
     reconcileDocumentEmbeddingStatusByHashes(const std::vector<std::string>& embeddedHashes,
                                              const std::string& modelId = "") override;
     Result<bool> hasDocumentEmbeddingByHash(const std::string& hash) override;
+    /// Hashes of documents whose embedding derivation is open: content changed under an embed,
+    /// so any vector rows they still have describe superseded text and need re-embedding.
+    Result<std::unordered_set<std::string>> getOpenEmbeddingDerivationHashes();
 
     // Extraction status operations (avoid read-modify-write)
     Result<void> updateDocumentExtractionStatus(int64_t documentId, bool contentExtracted,

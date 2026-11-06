@@ -45,6 +45,7 @@
 #endif
 
 #include "../../../include/yams/daemon/components/ServiceManager.h"
+#include <yams/daemon/components/thread_pool_naming.h>
 
 #include "service_manager/bootstrap_status.h"
 #include <boost/asio/awaitable.hpp>
@@ -398,6 +399,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     // Kept separate from the event-loop pool so heavy disk ops never stall async work.
     try {
         blockingPool_ = std::make_unique<boost::asio::thread_pool>(1);
+        nameThreadPoolWorkers(*blockingPool_, 1, "yams-blocking-");
         spdlog::debug("[ServiceManager] Blocking thread pool created (1 worker)");
     } catch (const std::exception& e) {
         spdlog::error("Failed to initialize blocking thread pool: {}", e.what());

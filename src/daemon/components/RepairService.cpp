@@ -3,6 +3,7 @@
 #include <yams/daemon/components/db_salvage.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
 #include <yams/daemon/components/RepairService.h>
+#include <yams/daemon/components/thread_pool_naming.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/resource/plugin_content_extractor_adapter.h>
 #include <yams/extraction/external_plugin_extractor.hpp>
@@ -211,6 +212,7 @@ struct RepairThreadPool {
                 threads = 1;
             threads = std::max(threads + 1, 2u);
             pool_ = std::make_unique<boost::asio::thread_pool>(threads);
+            nameThreadPoolWorkers(*pool_, threads, "yams-repair-");
             spdlog::debug("[RepairThreadPool] Initialized with {} threads", threads);
         });
         return pool_->get_executor();
@@ -694,7 +696,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             job.fromRepair = true; // counted into repair_embeddings_generated as it commits
             static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                    "embed_jobs", TuneAdvisor::embedChannelCapacity());
+                    "embed_jobs", TuneAdvisor::embedJobChannelCapacity());
             bool queued = co_await queueWithBackoff(embedQ, std::move(job), timer, running_,
                                                     "embed", missingEmbeddings.size(), 50, 1000);
             if (queued) {
@@ -831,6 +833,16 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
             if (vectorDb) {
                 embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
                 haveEmbeddedSnapshot = true;
+                // Vector rows of a document whose derivation is open describe superseded text:
+                // it still needs embedding, as hasDocumentEmbeddingByHash() reports.
+                if (auto open = meta->getOpenEmbeddingDerivationHashes(); open) {
+                    for (const auto& hash : open.value()) {
+                        embeddedHashes.erase(hash);
+                    }
+                } else {
+                    haveEmbeddedSnapshot = false; // fall back to the per-document check
+                    embeddedHashes.clear();
+                }
             }
         }
 
@@ -876,11 +888,18 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
                 if (d.repairStatus == yams::metadata::RepairStatus::Processing) {
                     continue;
                 }
-                // Extraction ran and produced nothing (a binary blob): there is no content to
-                // embed or index. Terminal until the extractor set changes, or an explicit
-                // repair asks for it.
+                // Extraction ran and produced nothing (a binary blob), or never completed and an
+                // embedding attempt already failed for it: there is no content to embed or
+                // index, and queuing it again only fails the same way. One failure is
+                // conclusive while there is no text (repair_attempts counts status writes, not
+                // attempts, so it is not a usable budget here); once extraction produces content
+                // the document is retried as usual. Terminal until the extractor set changes, or
+                // an explicit repair asks for it.
+                const bool embeddingFailedWithoutText =
+                    d.repairStatus == yams::metadata::RepairStatus::Failed;
                 if (!extractorsChanged && !d.contentExtracted &&
-                    d.extractionStatus == yams::metadata::ExtractionStatus::Failed) {
+                    (d.extractionStatus == yams::metadata::ExtractionStatus::Failed ||
+                     embeddingFailedWithoutText)) {
                     continue;
                 }
                 bool missingEmb = false;
@@ -3501,7 +3520,7 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
         co_return result;
     }
 
-    const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
+    const uint32_t embedCap = TuneAdvisor::embedJobChannelCapacity();
     auto embedQ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", embedCap);
     const std::size_t batchSize = std::max<std::size_t>(1u, cfg_.maxBatch);
@@ -3679,7 +3698,7 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         return result;
     }
 
-    const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
+    const uint32_t embedCap = TuneAdvisor::embedJobChannelCapacity();
     auto embedQ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", embedCap);
 

@@ -16,6 +16,7 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/vector/vector_database.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -108,6 +109,8 @@ struct ScanHarness {
     std::vector<int64_t> ids;
     std::unique_ptr<RepairService> service;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> extractors;
+    // Optional: when set, the scan takes its embedded-document snapshot from vector rows.
+    std::shared_ptr<yams::vector::VectorDatabase> vectors;
     // The unit lanes disable vectors through any of these; this harness needs embeddings on.
     yams::test::ScopedEnvVar vectorsOn{"YAMS_DISABLE_VECTORS", std::nullopt};
     yams::test::ScopedEnvVar vectorsOnAlias{"YAMS_DISABLE_VECTOR_DB", std::nullopt};
@@ -141,6 +144,7 @@ struct ScanHarness {
         RepairServiceContext ctx;
         ctx.getMetadataRepo = [r = repo] { return r; };
         ctx.getContentExtractors = [this] { return extractors; };
+        ctx.getVectorDatabase = [this] { return vectors; };
         RepairService::Config cfg;
         cfg.enable = true;
         cfg.dataDir = tmp.path();
@@ -283,6 +287,68 @@ TEST_CASE("Startup scan only queues documents the repair batch would act on",
                                                    yams::metadata::ExtractionStatus::Pending));
     CHECK(h.service->testing_runStartupScanPass().empty());
     CHECK_FALSE(h.service->testing_startupScanDue());
+}
+
+// A document whose extraction never completed has no text, so it also has no embedding, and the
+// scan queued it for embedding on every sweep. Embedding failed for lack of content, repair marked
+// it Failed, and the next sweep queued it again: nine such documents on the dev corpus reached 62
+// to 160 attempts. After one failed embedding attempt it is terminal like a failed extraction,
+// until it has text or something that could extract it changes.
+TEST_CASE("Startup scan stops re-queuing an unextracted document repair has given up on",
+          "[daemon][repair][scan][terminal][catch2]") {
+    ScanHarness h(2);
+    REQUIRE(h.repo->updateDocumentExtractionStatus(h.ids[0], false,
+                                                   yams::metadata::ExtractionStatus::Pending));
+    // One failed embedding attempt writes Processing and then Failed.
+    REQUIRE(
+        h.repo->updateDocumentRepairStatus(h.hashes[0], yams::metadata::RepairStatus::Processing));
+    REQUIRE(h.repo->updateDocumentRepairStatus(h.hashes[0], yams::metadata::RepairStatus::Failed));
+    const auto queued = h.service->testing_runStartupScanPass();
+    CHECK_FALSE(h.queuedIn(queued, h.hashes[0]));
+    CHECK(h.queuedIn(queued, h.hashes[1]));
+
+    // Once extraction produces text, the document is retried as usual.
+    ScanHarness withText(1);
+    REQUIRE(withText.repo->updateDocumentRepairStatus(withText.hashes[0],
+                                                      yams::metadata::RepairStatus::Failed));
+    CHECK(withText.queuedIn(withText.service->testing_runStartupScanPass(), withText.hashes[0]));
+}
+
+// A document whose embedding derivation is still open (its content changed under an in-flight
+// embed) keeps has_embedding = 0, but its superseded vector rows remain. The scan took its
+// "already embedded" snapshot from vector rows, so it never queued such a document, its
+// derivation stayed open, and the startup embedding reconcile ran over every document on every
+// start: nine documents on the dev corpus.
+TEST_CASE("Startup scan re-embeds a document whose embedding derivation is still open",
+          "[daemon][repair][scan][catch2]") {
+    yams::test::ScopedEnvVar skipVecInit{"YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt};
+    yams::test::ScopedEnvVar inMemory{"YAMS_VDB_IN_MEMORY", std::nullopt};
+    ScanHarness h(2);
+    yams::vector::VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.create_if_missing = true;
+    config.use_in_memory = true;
+    config.search_engine = yams::vector::VectorSearchEngine::ExactScan;
+    h.vectors = std::make_shared<yams::vector::VectorDatabase>(config);
+    REQUIRE(h.vectors->initializeChecked().has_value());
+    for (int i = 0; i < 2; ++i) {
+        yams::vector::VectorRecord record;
+        record.chunk_id = "chunk-" + std::to_string(i);
+        record.document_hash = h.hashes[i];
+        record.model_id = "m";
+        record.embedding = {1.0F, 0.0F, 0.0F, 0.0F};
+        record.embedding_dim = 4;
+        record.content = "text";
+        REQUIRE(h.vectors->insertVectorChecked(record).has_value());
+        REQUIRE(h.repo->updateDocumentEmbeddingStatusByHash(h.hashes[i], true, "m"));
+    }
+    // Document 0's content changed under an embed: its derivation is open again.
+    REQUIRE(h.repo->beginDocumentEmbeddingDerivation(h.hashes[0], "recipe").has_value());
+
+    const auto queued = h.service->testing_runStartupScanPass();
+    CHECK(h.queuedIn(queued, h.hashes[0]));
+    CHECK_FALSE(h.queuedIn(queued, h.hashes[1]));
 }
 
 TEST_CASE("Startup scan retries terminal documents once the extractor set changes",

@@ -25,6 +25,7 @@
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/thread_pool_naming.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/socket_utils.h>
 #include <yams/daemon/resource/resource_pool.h>
@@ -689,3 +690,49 @@ TEST_CASE("WorkCoordinator status reads are safe while it stops", "[daemon][work
     CHECK_FALSE(coordinator.isRunning());
     CHECK(coordinator.getWorkerCount() == 0);
 }
+
+#if defined(__linux__)
+// Every daemon thread was named "yams-daemon": YAMS_SET_THREAD_NAME only reached Tracy, and the
+// pools never named their threads, so top -H and perf could not tell 57 threads apart.
+TEST_CASE("WorkCoordinator names its worker threads", "[daemon][work-coordinator]") {
+    const auto countNamed = [](std::string_view prefix) {
+        std::size_t named = 0;
+        for (const auto& task : std::filesystem::directory_iterator("/proc/self/task")) {
+            std::ifstream comm(task.path() / "comm");
+            std::string name;
+            std::getline(comm, name);
+            if (name.starts_with(prefix))
+                ++named;
+        }
+        return named;
+    };
+    WorkCoordinator coordinator;
+    coordinator.start(2);
+    // start() returns once the threads exist, not once each has run its first line, so wait
+    // (bounded) for both names to appear rather than reading /proc once.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (countNamed("yams-work-") < 2 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    CHECK(countNamed("yams-work-") == 2);
+    coordinator.stop();
+    coordinator.join();
+}
+
+// A boost::asio::thread_pool creates its threads internally, so pools built on it (search
+// runtime, repair, blocking I/O) stayed unnamed. nameThreadPoolWorkers() returns only after every
+// worker has named itself.
+TEST_CASE("Thread pool workers are named on construction", "[daemon][thread-names]") {
+    boost::asio::thread_pool pool(3);
+    nameThreadPoolWorkers(pool, 3, "yams-tpool-");
+    std::size_t named = 0;
+    for (const auto& task : std::filesystem::directory_iterator("/proc/self/task")) {
+        std::ifstream comm(task.path() / "comm");
+        std::string name;
+        std::getline(comm, name);
+        if (name.starts_with("yams-tpool-"))
+            ++named;
+    }
+    CHECK(named == 3);
+    pool.join();
+}
+#endif

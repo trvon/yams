@@ -44,18 +44,11 @@
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 
-#ifdef __linux__
-#include <sys/prctl.h>
-#endif
 #include <yams/profiling.h>
 
 namespace {
 void set_current_thread_name(const std::string& name) {
-#ifdef __linux__
-    prctl(PR_SET_NAME, name.c_str(), 0, 0, 0);
-#elif __APPLE__
-    pthread_setname_np(name.c_str());
-#endif
+    yams::setCurrentThreadName(name);
 }
 
 yams::Result<void> validate_socket_path_preflight(const std::filesystem::path& socketPath) {

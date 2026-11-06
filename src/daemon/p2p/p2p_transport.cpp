@@ -2,6 +2,7 @@
 // Copyright 2026 YAMS Contributors
 
 #define YAMS_DAEMON_TEST_HOOKS_IMPL 1
+#include <yams/core/thread_name.h>
 #include <yams/daemon/p2p/p2p_transport.h>
 #include <yams/profiling.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
@@ -887,6 +888,7 @@ public:
         generation.fetch_add(1, std::memory_order_acq_rel);
         running.store(true, std::memory_order_release);
         acceptThread = std::thread([this] {
+            yams::setCurrentThreadName("yams-p2p-accept");
             try {
                 acceptLoop();
             } catch (const std::exception& error) {
@@ -957,6 +959,7 @@ public:
             auto completed = std::make_shared<std::atomic<bool>>(false);
             sessionWorkers.push_back(
                 SessionWorker{.thread = std::thread([this, session, completed] {
+                                  yams::setCurrentThreadName("yams-p2p-session");
                                   gSessionWorkerOwner = this;
                                   handleSession(session, completed);
                                   gSessionWorkerOwner = nullptr;
