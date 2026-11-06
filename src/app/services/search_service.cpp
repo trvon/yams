@@ -2442,9 +2442,11 @@ private:
                         seenHashes.insert(item.hash);
                     }
                 }
+                std::size_t overlayAdded = 0;
                 for (auto& item : overlayResults) {
                     if (!item.hash.empty() && seenHashes.insert(item.hash).second) {
                         resp.results.push_back(std::move(item));
+                        ++overlayAdded;
                     }
                 }
                 std::sort(resp.results.begin(), resp.results.end(),
@@ -2458,7 +2460,8 @@ private:
                     resp.results.resize(searchReq.limit);
                 }
                 resp.total = resp.results.size();
-                resp.searchStats[kLexicalHitsStat] = std::to_string(resp.total);
+                // Count every full-text match, not the limited page, plus overlay-only matches.
+                resp.searchStats[kLexicalHitsStat] = std::to_string(res.totalCount + overlayAdded);
                 resp.searchStats["lexical_overlay_candidates_added"] =
                     std::to_string(overlayResults.size());
             }

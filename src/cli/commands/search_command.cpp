@@ -598,8 +598,8 @@ private:
             return Result<void>();
         }
 
-        // Human-readable output
-        if (deduplicated.empty()) {
+        // Human-readable output. Grouped JSON reaches here too and must stay a JSON document.
+        if (deduplicated.empty() && !jsonOutput_) {
             std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
             emitTagHint();
             emitNoResultsGuidance();
@@ -652,12 +652,18 @@ private:
                 output["query"] = ctx.query;
                 output["method"] = ctx.method;
                 output["total_groups"] = groups.size();
+                if (ctx.lexicalHits)
+                    output["lexical_hits"] = *ctx.lexicalHits;
                 nlohmann::json groupsArr = nlohmann::json::array();
                 for (auto& group : groups) {
                     groupsArr.push_back(makeGroupedSearchJson(group.path, group.versions));
                 }
                 output["groups"] = groupsArr;
                 std::cout << output.dump(2) << std::endl;
+                // stdout holds only the JSON document, as in the flat JSON branch.
+                for (std::size_t i = 0; i < deduplicated.size(); ++i)
+                    noteOutputResult(std::cout);
+                return Result<void>();
             } else {
                 renderGroupedHumanResults(groups);
             }
