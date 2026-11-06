@@ -356,11 +356,19 @@ TEST_CASE("Daemon shutdown after operations", "[daemon][shutdown][lifecycle]") {
             REQUIRE(result.has_value());
         }
 
+        // Adds are accepted for asynchronous ingest; wait until all five are listed.
         ListRequest listReq;
         listReq.limit = 10;
-        auto listResult = yams::cli::run_sync(client.list(listReq), 5s);
-        REQUIRE(listResult.has_value());
-        REQUIRE((listResult.value().items.size() >= 5));
+        std::size_t listed = 0;
+        for (auto deadline = std::chrono::steady_clock::now() + 10s;
+             std::chrono::steady_clock::now() < deadline; std::this_thread::sleep_for(50ms)) {
+            auto listResult = yams::cli::run_sync(client.list(listReq), 5s);
+            REQUIRE(listResult.has_value());
+            listed = listResult.value().items.size();
+            if (listed >= 5)
+                break;
+        }
+        REQUIRE((listed >= 5));
 
         auto shutdownResult = yams::cli::run_sync(client.shutdown(true), 5s);
         REQUIRE(shutdownResult.has_value());
@@ -412,7 +420,12 @@ TEST_CASE("Daemon shutdown under load", "[daemon][shutdown][stress]") {
             });
         }
 
-        std::this_thread::sleep_for(200ms);
+        // Shut down once load is actually flowing. A fixed 200 ms raced slow (TSAN, coverage)
+        // builds, where no add had completed yet and the test saw zero successful operations.
+        for (auto deadline = std::chrono::steady_clock::now() + 10s;
+             successfulOps.load() == 0 && std::chrono::steady_clock::now() < deadline;) {
+            std::this_thread::sleep_for(10ms);
+        }
 
         auto shutdownResult = yams::cli::run_sync(client.shutdown(true), 5s);
         REQUIRE(shutdownResult.has_value());
