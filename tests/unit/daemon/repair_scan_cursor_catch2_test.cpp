@@ -147,7 +147,9 @@ struct ScanHarness {
         cfg.maxPendingRepairs = maxPending;
         // A data dir that already finished a sweep with no extractors; tests that need the
         // first-run retry remove it.
-        std::ofstream(tmp.path() / "repair-extractor-set")
+        // Binary, as the service writes it: text mode turns \n into \r\n on Windows, which reads
+        // back as a changed extractor set.
+        std::ofstream(tmp.path() / "repair-extractor-set", std::ios::binary)
             << RepairService::extractorFingerprint({});
         service = std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
     }

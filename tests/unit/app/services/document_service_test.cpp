@@ -675,6 +675,12 @@ TEST_CASE("DocumentService graph versions remain navigable after content reversi
     auto history = graph->getPathHistory({.path = path.string()});
     REQUIRE(history);
     CHECK(history.value().history.size() == 3);
+    // History is keyed by the normalized path, so another spelling of it (backslashes on
+    // Windows, a ./ segment anywhere) finds the same history.
+    auto respelled =
+        graph->getPathHistory({.path = (fixture.testDir_ / "." / "history.txt").string()});
+    REQUIRE(respelled);
+    CHECK(respelled.value().history.size() == 3);
     auto head = fixture.metadataRepo_->findDocumentByExactPath(path.string());
     REQUIRE(head);
     REQUIRE(head.value());
