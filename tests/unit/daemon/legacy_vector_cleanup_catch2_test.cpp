@@ -22,6 +22,8 @@ struct CleanupHarness {
     yams::test::TempDirGuard tmp{"yams_legacy_vectors_"};
     yams::test::ScopedEnvVar vectorsOn{"YAMS_DISABLE_VECTORS", std::nullopt};
     yams::test::ScopedEnvVar vectorsOnAlias{"YAMS_DISABLE_VECTOR_DB", std::nullopt};
+    // CI sets this too; without it the vector tables are never created.
+    yams::test::ScopedEnvVar vecInitOn{"YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt};
     std::unique_ptr<metadata::ConnectionPool> pool;
     std::shared_ptr<metadata::MetadataRepository> repo;
     std::unique_ptr<vector::VectorDatabase> vectors;

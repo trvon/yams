@@ -397,6 +397,11 @@ namespace {
 // Writes vectors.db at `dim` with one document vector, as an older install would have.
 void seedVectorDb(const std::filesystem::path& dataDir, std::size_t dim,
                   const std::string& modelId = "old-space") {
+    // The CI test lanes set YAMS_SQLITE_VEC_SKIP_INIT and YAMS_DISABLE_VECTORS, which skip
+    // creating vector tables; the seed needs real tables to write an older install's vectors.db.
+    yams::test::ScopedEnvVar vecInitOn{"YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt};
+    yams::test::ScopedEnvVar vectorsOn{"YAMS_DISABLE_VECTORS", std::nullopt};
+    yams::test::ScopedEnvVar vectorsOnAlias{"YAMS_DISABLE_VECTOR_DB", std::nullopt};
     yams::vector::VectorDatabaseConfig cfg;
     cfg.database_path = (dataDir / "vectors.db").string();
     cfg.embedding_dim = dim;
