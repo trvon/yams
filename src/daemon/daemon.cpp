@@ -807,12 +807,12 @@ bool YamsDaemon::sampleInitWaiterAdmission() const {
 
 uint32_t YamsDaemon::runLoopWaitMs(bool daemonIdle, bool externalShutdownFlag, uint32_t tickMs,
                                    uint32_t idleTickMs) noexcept {
-    // The external shutdown flag is set from a signal handler and only polled here, so the
-    // wait bounds SIGTERM latency: 50 ms while busy. While idle the loop ran at 20 wakes/s for
-    // nothing; cap the idle wait at kIdleShutdownPollMs instead (2 wakes/s, half a second of
-    // worst-case shutdown latency on an idle daemon).
+    // The external shutdown flag is set from a signal handler and only polled here (a handler
+    // cannot safely notify the condition variable), so the wait bounds SIGTERM latency: 50 ms
+    // while busy. While idle the loop ran at 20 wakes/s for nothing; cap the idle wait at
+    // kIdleShutdownPollMs instead: 5 wakes/s, at most 200 ms of shutdown latency.
     constexpr uint32_t kShutdownPollMs = 50;
-    constexpr uint32_t kIdleShutdownPollMs = 500;
+    constexpr uint32_t kIdleShutdownPollMs = 200;
     if (externalShutdownFlag) {
         return daemonIdle ? std::min(idleTickMs, kIdleShutdownPollMs) : kShutdownPollMs;
     }
