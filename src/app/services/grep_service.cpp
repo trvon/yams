@@ -1015,8 +1015,8 @@ public:
                         gm.matchType =
                             req.literalText ? std::string("literal") : std::string("regex");
                         gm.confidence = 1.0;
-                        if (req.lineNumbers)
-                            gm.lineNumber = ln_counter;
+                        // Always report the real line; lineNumbers only controls display.
+                        gm.lineNumber = ln_counter;
                         gm.line = yams::common::sanitizeUtf8(line);
                         localMatchRenderNs += static_cast<std::uint64_t>(
                             std::chrono::duration_cast<std::chrono::nanoseconds>(GrepClock::now() -

@@ -1107,9 +1107,12 @@ private:
                 std::cout << ui::colorize("  ...", ui::Ansi::DIM) << std::endl;
             }
 
-            std::cout << "  "
-                      << ui::colorize(std::to_string(match.lineNumber) + ":", ui::Ansi::CYAN)
-                      << " ";
+            std::cout << "  ";
+            // Semantic hits have no line; never print a placeholder number.
+            if (match.lineNumber > 0) {
+                std::cout << ui::colorize(std::to_string(match.lineNumber) + ":", ui::Ansi::CYAN)
+                          << " ";
+            }
             if (!match.prefixText.empty()) {
                 std::cout << ui::colorize(match.prefixText, match.prefixColor) << " ";
             }
@@ -1223,6 +1226,15 @@ private:
         if (regexCount > 0 && semanticCount > 0) {
             summary += " (" + std::to_string(regexCount) + " regex, " +
                        std::to_string(semanticCount) + " semantic)";
+        }
+        const auto capped = static_cast<std::size_t>(
+            std::count_if(groups.begin(), groups.end(), [this](const RichFileMatches& g) {
+                return maxCount_ > 0 && g.regexMatches >= maxCount_;
+            }));
+        if (capped > 0) {
+            summary += "; " + std::to_string(capped) + " file" + (capped != 1 ? "s" : "") +
+                       " stopped at " + std::to_string(maxCount_) +
+                       " matches per file (raise with -m)";
         }
         renderSummaryLine(summary, !matches.empty());
     }
