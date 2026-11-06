@@ -991,6 +991,7 @@ bool MemorySyncLoop::verifiedEnvelope(const std::string& envelopeHash,
 }
 
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
+    lastSyncReusedCompleteScan_ = false;
     if (control_.isCancelled && control_.isCancelled()) {
         discardSweep();
         return Error{ErrorCode::OperationCancelled, "memory sync reconciliation cancelled"};
@@ -1167,6 +1168,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
         completeScan_->writes == countedBackend_->writes() &&
         completeScan_->quarantineGeneration == durableQuarantineGeneration_) {
         guard.keep = true;
+        lastSyncReusedCompleteScan_ = true;
         return merged_;
     }
     if (!sweepDirectory_.empty() && scanCursor_.empty()) {

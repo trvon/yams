@@ -378,6 +378,11 @@ public:
     [[nodiscard]] std::map<std::string, MemoryIndexRecord> adapterState() const;
 
     [[nodiscard]] CommittedState committedState() const;
+    /// True when the last sync() returned the previous complete scan unchanged (an exclusive
+    /// backend with no writes or quarantine changes since): committed state did not change.
+    [[nodiscard]] bool lastSyncReusedCompleteScan() const noexcept {
+        return lastSyncReusedCompleteScan_;
+    }
 
     /// Bounded snapshot of current quarantine reasons (cleared each scan page).
     [[nodiscard]] std::map<std::string, std::string> quarantinedReasons() const;
@@ -846,6 +851,7 @@ private:
     std::unique_ptr<WriteCountingBackend> countedBackend_;
     storage::IStorageBackend* backend_;
     std::optional<CompleteScanStamp> completeScan_;
+    bool lastSyncReusedCompleteScan_{false};
     NodeId nodeId_;
     std::string corpusId_;
     std::uint64_t corpusEpoch_{0};

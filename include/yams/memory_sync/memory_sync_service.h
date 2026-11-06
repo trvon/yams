@@ -892,6 +892,13 @@ public:
         return now <= completed ? 0 : static_cast<std::uint64_t>(now - completed);
     }
 
+#if defined(YAMS_TESTING)
+    /// Test-only: the committed snapshot IPC readers currently see.
+    std::shared_ptr<const MemorySyncLoop::CommittedState> testing_committedSnapshot() const {
+        return committedSnapshot();
+    }
+#endif
+
     Result<std::map<std::string, MemoryIndexRecord>> syncOnce() {
         if (const auto* callbackSnapshot = activeCallbackSnapshot()) {
             return *callbackSnapshot;
@@ -907,7 +914,7 @@ public:
                 fullRecoveryCompleted_.store(false, std::memory_order_release);
             }
             quarantineChanged = generation != loop_.durableQuarantineGeneration();
-            if (result || quarantineChanged) {
+            if ((result && !reusedUnchangedScan()) || quarantineChanged) {
                 refreshCommittedState();
             }
         }
@@ -1073,6 +1080,17 @@ private:
 
     /// Refresh the committed snapshot from the loop. Callers must hold loopMutex_
     /// so the loop state is quiescent while it is copied.
+    /// The last sync reused the previous complete scan, so the published snapshot is still
+    /// current. Copying the committed state (every merged record and cached blob) on every
+    /// unchanged cycle was most of the worker's idle CPU. Callers must hold loopMutex_.
+    bool reusedUnchangedScan() const {
+        if (!loop_.lastSyncReusedCompleteScan()) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(snapshotMutex_);
+        return committed_ != nullptr;
+    }
+
     void refreshCommittedState() {
         auto state = std::make_shared<MemorySyncLoop::CommittedState>(loop_.committedState());
         std::lock_guard<std::mutex> lock(snapshotMutex_);
@@ -1244,7 +1262,7 @@ private:
                     fullRecoveryCompleted_.store(true, std::memory_order_release);
                 }
                 quarantineChanged = generation != loop_.durableQuarantineGeneration();
-                if (completedSweep || quarantineChanged) {
+                if ((completedSweep && !reusedUnchangedScan()) || quarantineChanged) {
                     refreshCommittedState();
                 }
             }
