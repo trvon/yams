@@ -101,6 +101,22 @@ public:
         try {
             const bool cliOneShot = yams::cli::cli_one_shot_enabled();
 
+            if (cli_ && cli_->hasExplicitDataDir()) {
+                std::error_code storeEc;
+                const auto dataDir = cli_->getDataPath();
+                if (!std::filesystem::exists(dataDir / "yams.db", storeEc)) {
+                    if (jsonOutput_) {
+                        std::cout << nlohmann::json{{"status", "not_initialized"},
+                                                    {"dataDir", dataDir.string()}}
+                                         .dump()
+                                  << std::endl;
+                    }
+                    co_return Error{ErrorCode::NotInitialized,
+                                    "no YAMS store at " + dataDir.string() +
+                                        "; run `yams --data-dir " + dataDir.string() + " init`"};
+                }
+            }
+
             // Try daemon-first for quick status snapshot
             {
                 const auto explicitDataDir = (cli_ && cli_->hasExplicitDataDir())
@@ -125,6 +141,21 @@ public:
                     }
                     if (st) {
                         auto s = st.value();
+                        if (!explicitDataDir.empty() && !s.dataDir.empty()) {
+                            std::error_code ec;
+                            const auto served = std::filesystem::weakly_canonical(s.dataDir, ec);
+                            const auto wanted =
+                                std::filesystem::weakly_canonical(explicitDataDir, ec);
+                            if (served != wanted) {
+                                co_return Error{ErrorCode::InvalidState,
+                                                "the daemon on this socket serves " + s.dataDir +
+                                                    ", not " + explicitDataDir.string()};
+                            }
+                        }
+                        const std::string reportedDataDir =
+                            !s.dataDir.empty()
+                                ? s.dataDir
+                                : (cli_ ? cli_->getDataPath().string() : std::string{});
                         auto getCount = [&](const char* key) -> uint64_t {
                             auto it = s.requestCounts.find(key);
                             return it != s.requestCounts.end() ? it->second : 0ULL;
@@ -147,8 +178,8 @@ public:
                             j["version"] = s.version;
                             j["uptimeSeconds"] = s.uptimeSeconds;
                             j["requestsProcessed"] = s.requestsProcessed;
-                            if (!s.dataDir.empty())
-                                j["dataDir"] = s.dataDir;
+                            if (!reportedDataDir.empty())
+                                j["dataDir"] = reportedDataDir;
                             if (!s.metadataDbPath.empty())
                                 j["metadataDbPath"] = s.metadataDbPath;
                             if (!s.vectorDbPath.empty())
@@ -527,6 +558,9 @@ public:
                             }
                             std::cout << section_header("Overview") << "\n\n";
                             render_rows(std::cout, overview);
+                            // Paths are useful only in full, so this line is never truncated.
+                            if (!reportedDataDir.empty())
+                                std::cout << "  Data dir     " << reportedDataDir << "\n";
 
                             // Resources with progress bars
                             std::cout << "\n" << section_header("Resources") << "\n\n";
@@ -1223,13 +1257,9 @@ public:
                     std::cout
                         << R"({"status": "not_initialized", "message": "YAMS not initialized"})"
                         << std::endl;
-                } else {
-                    std::cout << "YAMS System Status\n";
-                    std::cout << "==================\n";
-                    std::cout << "✗ Not initialized\n";
-                    std::cout << "  → Run 'yams init' to get started\n";
                 }
-                co_return Result<void>();
+                co_return Error{ErrorCode::NotInitialized,
+                                "YAMS is not initialized; run `yams init`"};
             }
             auto store = cli_->getContentStore();
             auto metadataRepo = cli_->getMetadataRepository();
