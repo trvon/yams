@@ -48,10 +48,10 @@ plugins/onnx/model_provider.cpp:786:portability/env-read # reviewed raw environm
 plugins/onnx/model_provider.cpp:792:portability/env-read # reviewed raw environment read
 plugins/onnx/model_provider.cpp:845:portability/env-read # reviewed raw environment read
 plugins/onnx/model_provider.cpp:853:portability/env-read # reviewed raw environment read
-plugins/onnx/model_provider.cpp:1350:portability/env-read # reviewed raw environment read
-plugins/onnx/model_provider.cpp:1654:portability/env-read # reviewed raw environment read
-plugins/onnx/model_provider.cpp:1656:portability/env-read # reviewed raw environment read
-plugins/onnx/model_provider.cpp:1709:portability/env-read # reviewed raw environment read
+plugins/onnx/model_provider.cpp:1357:portability/env-read # reviewed raw environment read
+plugins/onnx/model_provider.cpp:1661:portability/env-read # reviewed raw environment read
+plugins/onnx/model_provider.cpp:1663:portability/env-read # reviewed raw environment read
+plugins/onnx/model_provider.cpp:1716:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_gpu_provider.h:27:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_gpu_provider.h:32:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_gpu_provider.h:45:portability/env-read # reviewed raw environment read

@@ -98,6 +98,9 @@ private:
     // and falls back to a best-effort synchronous send otherwise.
 
     std::atomic<TransportState> state_{TransportState::Connected};
+    // Moves to Disconnected or Error unless the transport is Closing. close() is terminal: a
+    // receive() already past its loop check must not overwrite it.
+    void leaveUnlessClosing(TransportState next) noexcept;
     std::atomic<bool>* externalShutdown_{nullptr};
     std::atomic<size_t> errorCount_{0};
 

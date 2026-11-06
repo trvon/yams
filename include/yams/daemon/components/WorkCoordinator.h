@@ -351,6 +351,8 @@ public:
     }
 
 private:
+    /// Publishes "not running" to status readers before the worker vector is cleared.
+    void markStoppedBeforeClearingWorkers() noexcept;
     void registerDetachedCancellationSignal(
         const std::shared_ptr<boost::asio::cancellation_signal>& signal,
         boost::asio::any_io_executor executor);
@@ -373,8 +375,10 @@ private:
     /// Worker thread pool running io_context.run()
     std::vector<std::thread> workers_;
 
-    /// Flag to track if start() has been called
-    bool started_ = false;
+    /// Set once start() has spawned its workers; cleared before the worker vector is. Status
+    /// readers (isRunning(), getWorkerCount()) run on other threads and read only these atomics.
+    std::atomic<bool> started_{false};
+    std::atomic<std::size_t> workerCount_{0};
 
     /// Count of workers currently inside io_context::run().
     std::atomic<std::size_t> activeWorkers_{0};

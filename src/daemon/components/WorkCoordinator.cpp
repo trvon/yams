@@ -140,7 +140,7 @@ struct WorkCoordinator::ProgressProbeState {
 };
 
 WorkCoordinator::WorkCoordinator()
-    : ioContext_(std::make_shared<boost::asio::io_context>()), started_(false),
+    : ioContext_(std::make_shared<boost::asio::io_context>()),
       progressProbeState_(std::make_shared<ProgressProbeState>()),
       highPriorityStrand_(ioContext_->get_executor()),
       normalPriorityStrand_(ioContext_->get_executor()),
@@ -170,8 +170,8 @@ WorkCoordinator::~WorkCoordinator() {
                 }
             }
         }
+        markStoppedBeforeClearingWorkers();
         workers_.clear();
-        started_ = false;
     }
     try {
         spdlog::debug("[WorkCoordinator] Destroyed");
@@ -274,7 +274,8 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                 joinCV_.notify_all();
             });
         }
-        started_ = true;
+        workerCount_.store(workers_.size(), std::memory_order_release);
+        started_.store(true, std::memory_order_release);
         requestProgressProbe();
         spdlog::info("[WorkCoordinator] Started with {} worker threads", workerCount);
     } catch (const std::exception& e) {
@@ -412,8 +413,8 @@ void WorkCoordinator::join() {
             }
         }
     }
+    markStoppedBeforeClearingWorkers();
     workers_.clear();
-    started_ = false;
     try {
         spdlog::info("[WorkCoordinator] All workers joined");
     } catch (...) {
@@ -580,8 +581,8 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout,
         }
     }
 
+    markStoppedBeforeClearingWorkers();
     workers_.clear();
-    started_ = false;
     try {
         spdlog::info("[WorkCoordinator] joinWithTimeout complete (success={})", completed);
     } catch (...) {
@@ -646,8 +647,8 @@ void WorkCoordinator::abandonWorkersForShutdown() {
             }
         }
     }
+    markStoppedBeforeClearingWorkers();
     workers_.clear();
-    started_ = false;
 }
 
 void WorkCoordinator::requestProgressProbe() noexcept {
@@ -710,11 +711,17 @@ boost::asio::strand<boost::asio::io_context::executor_type> WorkCoordinator::mak
 }
 
 bool WorkCoordinator::isRunning() const noexcept {
-    return started_ && !workers_.empty();
+    return started_.load(std::memory_order_acquire) &&
+           workerCount_.load(std::memory_order_acquire) > 0;
+}
+
+void WorkCoordinator::markStoppedBeforeClearingWorkers() noexcept {
+    started_.store(false, std::memory_order_release);
+    workerCount_.store(0, std::memory_order_release);
 }
 
 std::size_t WorkCoordinator::getWorkerCount() const noexcept {
-    return workers_.size();
+    return workerCount_.load(std::memory_order_acquire);
 }
 
 } // namespace yams::daemon

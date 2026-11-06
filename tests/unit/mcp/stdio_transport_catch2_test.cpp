@@ -278,3 +278,40 @@ TEST_CASE_METHOD(StdioTransportFixture, "StdioTransport - Complex JSON message",
     CHECK(params["name"] == "search");
     CHECK(params.contains("arguments"));
 }
+
+namespace {
+// Empty input whose availability check closes the transport on one chosen poll. receive() polls
+// in_avail() (and so showmanyc()) once per idle iteration before giving up as Disconnected.
+class CloseOnPollBuf : public std::stringbuf {
+public:
+    CloseOnPollBuf(yams::mcp::StdioTransport& transport, int closeOnPoll)
+        : transport_(transport), closeOnPoll_(closeOnPoll) {}
+
+protected:
+    std::streamsize showmanyc() override {
+        if (++polls_ == closeOnPoll_)
+            transport_.close();
+        return 0;
+    }
+
+private:
+    yams::mcp::StdioTransport& transport_;
+    int closeOnPoll_;
+    int polls_{0};
+};
+} // namespace
+
+// close() is terminal. A receive() already past its loop check used to overwrite Closing with
+// Disconnected (or Error), so the transport stopped reporting that it had been closed.
+TEST_CASE_METHOD(StdioTransportFixture, "StdioTransport - close during receive stays closed",
+                 "[mcp][transport][stdio][catch2]") {
+    // The 201st poll is the last one before the idle limit gives up.
+    CloseOnPollBuf input(*transport, 201);
+    std::cin.rdbuf(&input);
+
+    auto result = transport->receive();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(transport->getState() == yams::mcp::TransportState::Closing);
+    CHECK_FALSE(transport->isConnected());
+    std::cin.rdbuf(originalCin);
+}

@@ -144,6 +144,7 @@ public:
     ~Impl() { stop(); }
 
     Result<void> start() {
+        std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
         if (running_.load()) {
             return Error{ErrorCode::InvalidState, "Recovery manager already running"};
         }
@@ -168,6 +169,7 @@ public:
     }
 
     void stop() {
+        std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
         if (!running_.load()) {
             return;
         }
@@ -465,6 +467,9 @@ private:
 
     // Worker threads
     std::atomic<bool> running_{false};
+    // Serializes start() and stop(). Checking running_ and then setting it let concurrent
+    // starts all pass and assign worker threads to the same members. Worker loops never take it.
+    std::mutex lifecycleMutex_;
     std::vector<std::thread> workers_;
 
     // Recovery queue

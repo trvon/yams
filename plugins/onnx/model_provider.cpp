@@ -1116,7 +1116,14 @@ struct ProviderSingleton {
             if (!c->ready || !c->pool)
                 return YAMS_ERR_INTERNAL;
             auto r = c->pool->unloadModel(model_id);
-            return r ? YAMS_OK : YAMS_ERR_NOT_FOUND;
+            if (!r)
+                return YAMS_ERR_NOT_FOUND;
+            // load_model() returns early for a model marked Ready, so a model left Ready after
+            // unload could never be loaded again.
+            std::lock_guard<std::mutex> lk(c->mu);
+            if (auto it = c->model_states.find(model_id); it != c->model_states.end())
+                it->second = ProviderCtx::State::Unloaded;
+            return YAMS_OK;
         };
 
         vtable.is_model_loaded = [](void* self, const char* model_id,

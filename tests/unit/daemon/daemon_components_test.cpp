@@ -659,3 +659,33 @@ TEST_CASE("Daemon components: ResourceGovernor backpressure policy helpers",
     // Leave singleton policy state neutral for subsequent tests.
     governor.reportDbLockContention(0, 1);
 }
+
+// SocketServer, IngestService and PostIngestQueue call isRunning() from their own threads while
+// the service manager stops and joins the coordinator. started_ was a plain bool and the worker
+// vector was read without a lock.
+TEST_CASE("WorkCoordinator status reads are safe while it stops", "[daemon][work-coordinator]") {
+    WorkCoordinator coordinator;
+    coordinator.start(2);
+    REQUIRE(coordinator.isRunning());
+    REQUIRE(coordinator.getWorkerCount() == 2);
+
+    std::atomic<bool> done{false};
+    std::atomic<bool> sawRunning{false};
+    std::thread reader([&] {
+        while (!done.load(std::memory_order_acquire)) {
+            if (coordinator.isRunning())
+                sawRunning.store(true);
+            (void)coordinator.getWorkerCount();
+        }
+    });
+    while (!sawRunning.load())
+        std::this_thread::yield();
+
+    coordinator.stop();
+    coordinator.join();
+    done.store(true, std::memory_order_release);
+    reader.join();
+
+    CHECK_FALSE(coordinator.isRunning());
+    CHECK(coordinator.getWorkerCount() == 0);
+}

@@ -387,14 +387,16 @@ IntegrityVerifier::IntegrityVerifier(IntegrityVerifier&&) noexcept = default;
 IntegrityVerifier& IntegrityVerifier::operator=(IntegrityVerifier&&) noexcept = default;
 
 Result<void> IntegrityVerifier::startBackgroundVerification() {
-    if (pImpl->running) {
+    // Claim the start atomically: checking running and then setting it let concurrent starts
+    // all report success.
+    bool expected = false;
+    if (!pImpl->running.compare_exchange_strong(expected, true)) {
         return Result<void>(ErrorCode::OperationInProgress);
     }
 
     try {
         pImpl->shouldStop = false;
         pImpl->paused = false;
-        pImpl->running = true;
 
         spdlog::info("Started integrity verification with {} concurrent threads",
                      pImpl->config.maxConcurrentVerifications);
@@ -408,13 +410,12 @@ Result<void> IntegrityVerifier::startBackgroundVerification() {
 }
 
 Result<void> IntegrityVerifier::stopBackgroundVerification() {
-    if (!pImpl->running) {
+    if (!pImpl->running.exchange(false)) {
         return {};
     }
 
     try {
         pImpl->shouldStop = true;
-        pImpl->running = false;
 
         spdlog::info("Stopped integrity verification");
         return {};

@@ -1,6 +1,9 @@
 // Catch2 tests for Transaction Manager
 // Migrated from GTest: transaction_manager_test.cpp
 
+#include <atomic>
+#include <latch>
+#include <vector>
 #include <catch2/catch_test_macros.hpp>
 
 #include <random>
@@ -401,4 +404,37 @@ TEST_CASE_METHOD(TransactionManagerFixture, "TransactionManager - DiagnosticsOut
     CHECK(diagnostics.find("Transaction Manager Diagnostics") != std::string::npos);
     CHECK(diagnostics.find("Active Transactions: 2") != std::string::npos);
     CHECK(diagnostics.find("Status: Running") != std::string::npos);
+}
+
+namespace {
+// Runs start() from several threads released together and returns how many succeeded.
+template <typename Start> int concurrentStartSuccesses(Start start, int threads = 4) {
+    std::latch go(threads);
+    std::atomic<int> ok{0};
+    std::vector<std::thread> workers;
+    for (int i = 0; i < threads; ++i) {
+        workers.emplace_back([&] {
+            go.arrive_and_wait();
+            if (start())
+                ok.fetch_add(1);
+        });
+    }
+    for (auto& t : workers)
+        t.join();
+    return ok.load();
+}
+} // namespace
+
+// start() checked running_ and set it separately, so concurrent starts could all pass and each
+// spawn a cleanup thread into the same std::thread member.
+TEST_CASE("TransactionManager - concurrent start admits exactly one",
+          "[compression][transaction][lifecycle]") {
+    TransactionConfig config;
+    config.enableTransactionLog = true;
+    auto handler = std::make_shared<CompressionErrorHandler>(ErrorHandlingConfig{});
+    for (int round = 0; round < 20; ++round) {
+        TransactionManager manager(config, handler);
+        CHECK(concurrentStartSuccesses([&] { return manager.start().has_value(); }) == 1);
+        manager.stop();
+    }
 }

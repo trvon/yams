@@ -235,7 +235,7 @@ MessageResult StdioTransport::receive() {
                     return Error{ErrorCode::NetworkError, "External shutdown requested"};
                 }
                 if (idleIterations++ >= kTestingIdleSpinLimit) {
-                    state_.store(TransportState::Disconnected);
+                    leaveUnlessClosing(TransportState::Disconnected);
                     return Error{ErrorCode::NetworkError, "No stdin data available"};
                 }
                 std::this_thread::yield();
@@ -247,7 +247,7 @@ MessageResult StdioTransport::receive() {
             if (!std::getline(in, line)) {
                 recordError();
                 if (!shouldRetryAfterError()) {
-                    state_.store(TransportState::Disconnected);
+                    leaveUnlessClosing(TransportState::Disconnected);
                     return Error{ErrorCode::NetworkError, "No stdin data available"};
                 }
                 std::this_thread::yield();
@@ -264,7 +264,7 @@ MessageResult StdioTransport::receive() {
 
                 if (std::cin.eof()) {
                     spdlog::info("StdioTransport: EOF on stdin; treating as client disconnect");
-                    state_.store(TransportState::Disconnected);
+                    leaveUnlessClosing(TransportState::Disconnected);
                     return Error{ErrorCode::NetworkError, "EOF on stdin"};
                 }
 
@@ -292,7 +292,7 @@ MessageResult StdioTransport::receive() {
                 spdlog::error("StdioTransport: Failed to parse JSON: {}", line);
                 recordError();
                 if (!shouldRetryAfterError())
-                    state_.store(TransportState::Error);
+                    leaveUnlessClosing(TransportState::Error);
                 return parsed.error();
             }
             resetErrorCount();
@@ -303,11 +303,17 @@ MessageResult StdioTransport::receive() {
         spdlog::error("StdioTransport: Invalid message format (expected NDJSON): {}", line);
         recordError();
         if (!shouldRetryAfterError())
-            state_.store(TransportState::Error);
+            leaveUnlessClosing(TransportState::Error);
         return Error{ErrorCode::InvalidData, "Invalid message format - expected NDJSON"};
     }
 
     return Error{ErrorCode::NetworkError, "Transport closed during receive"};
+}
+
+void StdioTransport::leaveUnlessClosing(TransportState next) noexcept {
+    auto current = state_.load();
+    while (current != TransportState::Closing && !state_.compare_exchange_weak(current, next)) {
+    }
 }
 
 bool StdioTransport::shouldRetryAfterError() const noexcept {
