@@ -1,3 +1,4 @@
+#include <optional>
 #include <catch2/catch_test_macros.hpp>
 
 #include <sqlite3.h>
@@ -359,19 +360,28 @@ struct BlockRefsStore {
         sqlite3_close(db);
         return row;
     }
-    std::int64_t blockSize(const std::string& hash) const {
+    // A block_references column for one block; nullopt when the column is NULL.
+    std::optional<std::int64_t> column(const std::string& hash, const char* name) const {
         sqlite3* db = nullptr;
         REQUIRE(sqlite3_open(refs().string().c_str(), &db) == SQLITE_OK);
         sqlite3_stmt* st = nullptr;
-        REQUIRE(sqlite3_prepare_v2(db,
-                                   "SELECT block_size FROM block_references WHERE block_hash = ?",
-                                   -1, &st, nullptr) == SQLITE_OK);
+        const auto sql =
+            std::string("SELECT ") + name + " FROM block_references WHERE block_hash = ?";
+        REQUIRE(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
         sqlite3_bind_text(st, 1, hash.c_str(), -1, SQLITE_TRANSIENT);
         REQUIRE(sqlite3_step(st) == SQLITE_ROW);
-        const auto value = sqlite3_column_int64(st, 0);
+        std::optional<std::int64_t> value;
+        if (sqlite3_column_type(st, 0) != SQLITE_NULL)
+            value = sqlite3_column_int64(st, 0);
         sqlite3_finalize(st);
         sqlite3_close(db);
         return value;
+    }
+    std::optional<std::int64_t> blockSize(const std::string& hash) const {
+        return column(hash, "block_size");
+    }
+    std::optional<std::int64_t> uncompressedSize(const std::string& hash) const {
+        return column(hash, "uncompressed_size");
     }
     void setBlockSize(const std::string& hash, std::int64_t size) const {
         sqlite3* db = nullptr;
@@ -420,5 +430,6 @@ TEST_CASE("Block reference repair corrects drifted sizes and leaves correct rows
         CHECK(result.value().errors == 0);
         CHECK(result.value().blocksUpdated == 1);
         CHECK(s.blockSize(hash) == original);
+        CHECK(s.uncompressedSize(hash) == uncompressed);
     }
 }
