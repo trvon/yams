@@ -21,6 +21,13 @@ public:
         std::exception_ptr exception_;
         std::coroutine_handle<> continuation_{};
 
+        Task get_return_object() {
+            return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+
+        // Start immediately so fire-and-forget tasks run without explicit await
+        std::suspend_never initial_suspend() noexcept { return {}; }
+
         // Final suspend resumes the awaiting continuation (if any).
         struct final_awaiter {
             bool await_ready() const noexcept { return false; }
@@ -35,6 +42,8 @@ public:
         final_awaiter final_suspend() noexcept { return {}; }
 
         template <typename U> void return_value(U&& value) { value_ = std::forward<U>(value); }
+
+        void unhandled_exception() { exception_ = std::current_exception(); }
     };
 
     using handle_type = std::coroutine_handle<promise_type>;
@@ -111,6 +120,13 @@ public:
         std::exception_ptr exception_{};
         std::coroutine_handle<> continuation_{};
 
+        Task get_return_object() {
+            return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+
+        // Start immediately so fire-and-forget tasks run without explicit await
+        std::suspend_never initial_suspend() noexcept { return {}; }
+
         struct final_awaiter {
             bool await_ready() const noexcept { return false; }
             std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
@@ -120,6 +136,9 @@ public:
             void await_resume() const noexcept {}
         };
         final_awaiter final_suspend() noexcept { return {}; }
+
+        void return_void() noexcept {}
+        void unhandled_exception() { exception_ = std::current_exception(); }
     };
 
     using handle_type = std::coroutine_handle<promise_type>;

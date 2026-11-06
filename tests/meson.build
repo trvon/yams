@@ -2861,6 +2861,15 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'core_task',
+    'target': 'core_task',
+    'sources': files('unit/core/task_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'core', 'task'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'core_uuid',
     'target': 'core_uuid',
     'sources': files('unit/core/uuid_test.cpp'),
