@@ -106,8 +106,16 @@ struct Manifest {
         if (fileSize == 0 || chunks.empty()) {
             return fileSize == 0 && chunks.empty();
         }
-        return std::all_of(chunks.begin(), chunks.end(),
-                           [](const auto& chunk) { return chunk.isValid(); });
+        // The chunks must describe exactly fileSize bytes; a manifest whose sizes do not add up
+        // would reconstruct the wrong content.
+        std::uint64_t total = 0;
+        for (const auto& chunk : chunks) {
+            if (!chunk.isValid() || total > fileSize || chunk.size > fileSize - total) {
+                return false;
+            }
+            total += chunk.size;
+        }
+        return total == fileSize;
     }
 
     // Calculate total size from chunks

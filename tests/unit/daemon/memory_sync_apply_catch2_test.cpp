@@ -1428,3 +1428,41 @@ TEST_CASE("Memory sync backfill backs off a domain that keeps failing",
     view.refresh();
     CHECK(view.published("embedding/model/retry-chunk"));
 }
+
+// Only a record that can never publish may be skipped. A backend that rejects a write (or a sync
+// service without an identity) also answers InvalidArgument; skipping on that code consumed the
+// record, so it was never published once the backend recovered.
+TEST_CASE("Memory sync topology backfill retries a node the backend rejected",
+          "[daemon][memory-sync][backfill][topology][retry]") {
+    TempRoot root;
+    const auto sharedStore = root.path / "shared-store";
+    fs::create_directories(sharedStore);
+    struct RejectingBackend final : storage::FilesystemBackend {
+        bool reject{true};
+        Result<void> store(std::string_view key, std::span<const std::byte> value) override {
+            if (reject && key.starts_with("blob/")) {
+                return Error{ErrorCode::InvalidArgument, "backend rejected the write"};
+            }
+            return FilesystemBackend::store(key, value);
+        }
+    };
+    auto backend = std::make_unique<RejectingBackend>();
+    storage::BackendConfig config;
+    config.localPath = sharedStore;
+    REQUIRE(backend->initialize(config).has_value());
+    auto* rejection = backend.get();
+    MeshNode origin{root.path, "origin",          sharedStore, MeshNode::KgReads::Uncounted,
+                    {},        std::move(backend)};
+    SharedStoreView view{sharedStore};
+    const auto node = origin.addNode("entity:retry", "alpha");
+
+    origin.backfill(2);
+    view.refresh();
+    REQUIRE_FALSE(view.published(topologyNodeKey(node.nodeKey)));
+
+    rejection->reject = false;
+    origin.manager->testingExpireMemorySyncBackfillSchedule();
+    origin.backfill(4);
+    view.refresh();
+    CHECK(view.published(topologyNodeKey(node.nodeKey)));
+}

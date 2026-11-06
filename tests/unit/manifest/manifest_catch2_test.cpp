@@ -643,4 +643,14 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager accepts the manifest of a
     chunksWithoutSize.chunks.push_back(
         manifest::ChunkRef{.hash = std::string(64, 'a'), .offset = 0, .size = 4});
     CHECK_FALSE(chunksWithoutSize.isValid());
+
+    // Chunk sizes that do not add up to the file size describe a different file.
+    Manifest mismatched = empty;
+    mismatched.fileSize = 10;
+    mismatched.chunks.push_back(
+        manifest::ChunkRef{.hash = std::string(64, 'a'), .offset = 0, .size = 4});
+    CHECK_FALSE(mismatched.isValid());
+    mismatched.chunks.push_back(
+        manifest::ChunkRef{.hash = std::string(64, 'b'), .offset = 4, .size = 6});
+    CHECK(mismatched.isValid());
 }

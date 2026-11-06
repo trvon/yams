@@ -1168,14 +1168,14 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         using Phase = MemorySyncBackfillState::TopologyPhase;
         metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
         // A record that can never publish (text that is not UTF-8, a record over the typed
-        // resident limit, an invalid key) is skipped so the pass reaches the records behind it,
-        // as documents and vectors are. Other failures throw so the item is retried later. A
+        // resident limit, an invalid key; the adapter reports these as InvalidData) is skipped
+        // so the pass reaches the records behind it, as documents and vectors are. Other
+        // failures, including a backend that rejects the write, throw so the item is retried. A
         // changed record advances the graph generation and is reached by the next pass.
         const auto skipUnpublishable = [&](const Error& error, std::string_view kind,
                                            std::int64_t id) {
-            if (!isUnrecoverableBlobFailure(error.code) &&
-                error.code != ErrorCode::InvalidArgument) {
-                return false;
+            if (!isUnrecoverableBlobFailure(error.code)) {
+                return false; // includes InvalidArgument from a backend that rejected the write
             }
             if (state.topologySweepPasses == 0) {
                 spdlog::warn("[ServiceManager] memory_sync backfill skipping topology {} {} "

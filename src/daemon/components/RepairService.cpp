@@ -886,16 +886,18 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
                 if (d.repairStatus == yams::metadata::RepairStatus::Processing) {
                     continue;
                 }
-                // Extraction ran and produced nothing (a binary blob), or never completed and
-                // repair has already given up on the document: there is no content to embed or
-                // index, and queuing it for embedding only fails again. Terminal until the
-                // extractor set changes, or an explicit repair asks for it.
-                const bool repairGaveUp =
-                    d.repairStatus == yams::metadata::RepairStatus::Failed &&
-                    d.repairAttempts >= std::max<std::int32_t>(cfg_.maxRetries, 1);
+                // Extraction ran and produced nothing (a binary blob), or never completed and an
+                // embedding attempt already failed for it: there is no content to embed or
+                // index, and queuing it again only fails the same way. One failure is
+                // conclusive while there is no text (repair_attempts counts status writes, not
+                // attempts, so it is not a usable budget here); once extraction produces content
+                // the document is retried as usual. Terminal until the extractor set changes, or
+                // an explicit repair asks for it.
+                const bool embeddingFailedWithoutText =
+                    d.repairStatus == yams::metadata::RepairStatus::Failed;
                 if (!extractorsChanged && !d.contentExtracted &&
                     (d.extractionStatus == yams::metadata::ExtractionStatus::Failed ||
-                     repairGaveUp)) {
+                     embeddingFailedWithoutText)) {
                     continue;
                 }
                 bool missingEmb = false;
