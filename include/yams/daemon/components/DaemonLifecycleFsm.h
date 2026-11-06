@@ -64,12 +64,19 @@ public:
                               const std::string& reason = std::string());
     bool isSubsystemDegraded(const std::string& name) const;
     std::map<std::string, bool> degradedSubsystems() const {
-        MutexLock lock(sharedMutex());
+        MutexLock lock(mutex_);
         return degraded_;
     }
     std::string degradationReason(const std::string& name) const;
 
 private:
+    void enterLocked(LifecycleState next);
+    void applyLocked(const BootstrappedEvent&);
+    void applyLocked(const HealthyEvent&);
+    void applyLocked(const DegradedEvent&);
+    void applyLocked(const FailureEvent&);
+    void applyLocked(const ShutdownRequestedEvent&);
+    void applyLocked(const StoppedEvent&);
     void setSubsystemDegradedLocked(const std::string& name, bool degraded,
                                     const std::string& reason);
 
@@ -79,11 +86,10 @@ private:
     using MutexLock = std::lock_guard<std::mutex>;
 #endif
 
-    static std::mutex& sharedMutex() {
-        static std::mutex mutex;
-        return mutex;
-    }
-
+    // Per-instance: the daemon and EmbeddedServiceHost each own one. This was a tinyfsm machine
+    // with static state, so every lifecycle in a process shared one state.
+    mutable std::mutex mutex_;
+    LifecycleSnapshot snap_{};
     std::map<std::string, bool> degraded_;
     std::map<std::string, std::string> degradeReasons_;
 };
