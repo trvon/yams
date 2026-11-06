@@ -2387,6 +2387,9 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
             sourceUrl = doc.filePath;
         if (sourceUrl.empty())
             continue;
+        // Already repaired: the URL stays the path, so source_url marks a finished document.
+        if (auto prior = meta->getMetadata(doc.id, "source_url"); prior && prior.value())
+            continue;
 
         result.processed++;
         if (dryRun) {
@@ -2399,8 +2402,9 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
         auto dotPos = filename.rfind('.');
         if (dotPos != std::string::npos)
             ext = filename.substr(dotPos);
-        doc.fileName = filename;
-        doc.filePath = std::move(filename);
+        // Keep the URL as the path: it is unique and its path-derived columns stay valid.
+        // A bare file name would collide across URLs (two report.pdf downloads).
+        doc.fileName = std::move(filename);
         doc.fileExtension = std::move(ext);
 
         {
@@ -2423,6 +2427,16 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
             if (!scheme.empty())
                 metaFacade.setMetadata(doc.id, "tag:scheme:" + scheme,
                                        metadata::MetadataValue("scheme:" + scheme));
+            // Path-aware tag filters read path metadata, so mirror the tags there too.
+            std::vector<std::pair<std::string, std::optional<std::string>>> pathChanges{
+                {"source_url", sourceUrl}, {"tag:downloaded", std::string("downloaded")}};
+            if (!host.empty())
+                pathChanges.emplace_back("tag:host:" + host, "host:" + host);
+            if (!scheme.empty())
+                pathChanges.emplace_back("tag:scheme:" + scheme, "scheme:" + scheme);
+            if (auto mirrored = meta->applyDocumentPathMetadata(doc.id, pathChanges); !mirrored)
+                spdlog::debug("RepairService: failed to mirror download tags for {}: {}", sourceUrl,
+                              mirrored.error().message);
         } catch (const std::exception& e) {
             spdlog::debug("RepairService: failed to persist download metadata for {}: {}",
                           sourceUrl, e.what());
