@@ -4161,3 +4161,29 @@ TEST_CASE("Verification cache stays bounded and misses verify again",
     // Capacity 1 cannot hold both, so the second pass verifies again rather than trusting.
     CHECK(reader.testingVerifyAttempts() == firstPass + 2);
 }
+
+// A pre-delete intent is cancelled when the local deletion it guarded did not happen. Only an
+// intent that was never prepared may be dropped; cancelling must not touch the record itself.
+TEST_CASE("cancelStagedErase drops an unprepared intent and keeps the record",
+          "[memory-sync][tombstone][outbox][cancel]") {
+    BackendFixture fixture{"erase-outbox-cancel"};
+    MemorySyncLoop loop{fixture.backend, "writer"};
+    REQUIRE(loop.publish("user/keep", bytes("value")).has_value());
+    REQUIRE(loop.stageErase("user/keep", "keep", false).has_value());
+    REQUIRE(loop.pendingErases().value().size() == 1);
+
+    REQUIRE(loop.cancelStagedErase("user/keep").has_value());
+    CHECK(loop.pendingErases().value().empty());
+    REQUIRE(loop.syncFully().has_value());
+    CHECK(loop.hasMergedRecord("user/keep"));
+
+    // Cancelling again, or cancelling a key with no intent, is a no-op.
+    CHECK(loop.cancelStagedErase("user/keep").has_value());
+    CHECK(loop.cancelStagedErase("user/never-staged").has_value());
+
+    // The cancellation is durable across a restart.
+    MemorySyncLoop restarted{fixture.backend, "writer"};
+    CHECK(restarted.pendingErases().value().empty());
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK(restarted.hasMergedRecord("user/keep"));
+}

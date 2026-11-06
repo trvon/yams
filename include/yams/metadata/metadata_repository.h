@@ -388,7 +388,6 @@ public:
                                                      const std::string& content,
                                                      const std::string& contentType) = 0;
     virtual Result<void> removeFromIndex(int64_t documentId) = 0;
-    virtual Result<void> removeFromIndexByHash(const std::string& hash) = 0;
     virtual Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>& hashes) = 0;
     virtual Result<bool> hasFtsEntry(int64_t documentId) = 0;
     virtual Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() = 0;
@@ -744,7 +743,6 @@ public:
                                              const std::string& content,
                                              const std::string& contentType) override;
     Result<void> removeFromIndex(int64_t documentId) override;
-    Result<void> removeFromIndexByHash(const std::string& hash) override;
     Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>& hashes) override;
     Result<bool> hasFtsEntry(int64_t documentId) override;
     Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() override;
@@ -1074,6 +1072,10 @@ public:
     Result<void> applyDocumentPathMetadata(
         int64_t documentId,
         const std::vector<std::pair<std::string, std::optional<std::string>>>& changes);
+    /// Set the file name and extension of a document's live location at `path`. Path-aware
+    /// listings read these from the location, not from the documents row.
+    Result<void> setDocumentPathName(int64_t documentId, const std::string& path,
+                                     const std::string& fileName, const std::string& fileExtension);
 
     std::shared_ptr<KnowledgeGraphStore> getKnowledgeGraphStore() const {
         return std::atomic_load_explicit(&kgStore_, std::memory_order_acquire);

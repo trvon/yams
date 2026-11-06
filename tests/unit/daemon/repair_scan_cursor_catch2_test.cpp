@@ -147,8 +147,14 @@ struct ScanHarness {
         cfg.maxPendingRepairs = maxPending;
         // A data dir that already finished a sweep with no extractors; tests that need the
         // first-run retry remove it.
-        std::ofstream(tmp.path() / "repair-extractor-set")
-            << RepairService::extractorFingerprint({});
+        // Binary, as the service writes it: text mode turns \n into \r\n on Windows, which reads
+        // back as a changed extractor set.
+        {
+            std::ofstream marker(tmp.path() / "repair-extractor-set", std::ios::binary);
+            REQUIRE(marker.is_open());
+            marker << RepairService::extractorFingerprint({});
+            REQUIRE(marker.good());
+        }
         service = std::make_unique<RepairService>(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
     }
     ~ScanHarness() {
@@ -656,4 +662,101 @@ TEST_CASE("KG orphan cleanup finishes when more than a page of nodes is orphaned
     writer.join();
     if (!finished)
         std::_Exit(1); // the scan is still looping on another thread; do not hang the suite
+}
+
+// `yams repair --downloads` turns documents whose path is a URL into downloaded files: the path
+// becomes the file name and the URL moves to source_url with host and scheme tags.
+TEST_CASE("Download repair keeps URL paths and records their source",
+          "[daemon][repair][downloads][catch2]") {
+    ScanHarness h(0);
+    const auto addUrlDoc = [&](const std::string& url, char fill, bool withLocation) {
+        yams::metadata::DocumentInfo doc;
+        doc.filePath = url;
+        doc.fileName = url;
+        doc.sha256Hash = std::string(64, fill);
+        doc.mimeType = "text/html";
+        auto id = h.repo->insertDocument(doc);
+        REQUIRE(id.has_value());
+        if (withLocation)
+            REQUIRE(h.repo->recordDocumentPath(doc, id.value(), {}).has_value());
+        return id.value();
+    };
+    // The first has a live path head, as current ingest creates; the second is a legacy row.
+    const auto first = addUrlDoc("https://a.example/x/report.pdf?dl=1", 'a', true);
+    const auto second = addUrlDoc("https://b.example/y/report.pdf", 'b', false);
+    RepairServiceContext ctx;
+    ctx.getMetadataRepo = [r = h.repo] { return r; };
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = h.tmp.path();
+    RepairService service(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+
+    SECTION("a dry run changes nothing") {
+        const auto result = service.testing_repairDownloads(/*dryRun=*/true);
+        CHECK(result.processed == 2);
+        CHECK(result.succeeded == 0);
+        auto doc = h.repo->getDocument(first);
+        REQUIRE(doc.has_value());
+        REQUIRE(doc.value().has_value());
+        CHECK(doc.value()->filePath == "https://a.example/x/report.pdf?dl=1");
+    }
+    SECTION("a real run moves the URL into metadata") {
+        const auto result = service.testing_repairDownloads(/*dryRun=*/false);
+        INFO(result.message);
+        auto doc = h.repo->getDocument(first);
+        REQUIRE(doc.value().has_value());
+        CHECK(doc.value()->fileName == "report.pdf");
+        CHECK(doc.value()->fileExtension == ".pdf");
+        auto url = h.repo->getMetadata(first, "source_url");
+        REQUIRE(url.has_value());
+        REQUIRE(url.value().has_value());
+        CHECK(url.value()->asString() == "https://a.example/x/report.pdf?dl=1");
+        auto host = h.repo->getMetadata(first, "tag:host:a.example");
+        REQUIRE(host.has_value());
+        CHECK(host.value().has_value());
+
+        // Both documents keep distinct paths even though their file names match.
+        auto other = h.repo->getDocument(second);
+        REQUIRE(other.value().has_value());
+        auto otherUrl = h.repo->getMetadata(second, "source_url");
+        REQUIRE(otherUrl.has_value());
+        REQUIRE(otherUrl.value().has_value());
+        CHECK(otherUrl.value()->asString() == "https://b.example/y/report.pdf");
+        CHECK(result.succeeded == 2);
+        CHECK(doc.value()->filePath == "https://a.example/x/report.pdf?dl=1");
+        CHECK(other.value()->filePath == "https://b.example/y/report.pdf");
+
+        // Path-aware listings read the name from the live location, and the location carries
+        // the mirrored tags.
+        yams::metadata::DocumentQueryOptions options;
+        options.usePathLocations = true;
+        options.currentPathsOnly = true;
+        options.tags = {"host:a.example"};
+        auto listed = h.repo->queryDocumentsForListProjection(options);
+        REQUIRE(listed.has_value());
+        REQUIRE_FALSE(listed.value().empty());
+        for (const auto& d : listed.value()) {
+            CHECK(d.id == first);
+            CHECK(d.fileName == "report.pdf");
+            CHECK(d.fileExtension == ".pdf");
+        }
+        auto locations = h.repo->getDocumentPathReferences(first);
+        REQUIRE(locations.has_value());
+        std::size_t heads = 0;
+        for (const auto& location : locations.value()) {
+            auto located = h.repo->getDocumentPathMetadata(location.filePath, first);
+            REQUIRE(located.has_value());
+            if (!located.value())
+                continue; // a legacy row with no location metadata
+            ++heads;
+            CHECK(located.value()->count("tag:host:a.example") == 1);
+            CHECK(located.value()->count("tag:scheme:https") == 1);
+            CHECK(located.value()->count("tag:downloaded") == 1);
+        }
+        CHECK(heads >= 1);
+
+        // A second run finds nothing left to repair.
+        const auto again = service.testing_repairDownloads(/*dryRun=*/false);
+        CHECK(again.processed == 0);
+    }
 }

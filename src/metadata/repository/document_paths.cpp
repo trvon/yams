@@ -274,4 +274,25 @@ Result<void> MetadataRepository::applyDocumentPathMetadata(
     return result;
 }
 
+Result<void> MetadataRepository::setDocumentPathName(int64_t documentId, const std::string& path,
+                                                     const std::string& fileName,
+                                                     const std::string& fileExtension) {
+    if (!hasDocumentPaths_)
+        return {};
+    const auto normalized = computePathDerivedValues(path).normalizedPath;
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+        auto update = db.prepare("UPDATE document_path_heads SET file_name = ?, file_extension = ? "
+                                 "WHERE document_id = ? AND file_path = ? AND deleted = 0");
+        if (!update)
+            return update.error();
+        YAMS_TRY(update.value().bindAll(fileName, fileExtension, documentId, normalized));
+        return update.value().execute();
+    });
+    if (result) {
+        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+        invalidatePathCache(normalized);
+    }
+    return result;
+}
+
 } // namespace yams::metadata

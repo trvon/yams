@@ -1337,3 +1337,52 @@ TEST_CASE("HTTP header parsing edge cases", "[downloader][http][edge]") {
         CHECK(parsed.etag->empty());
     }
 }
+
+// The cross-device fallback copies a finished download into its content-addressed path. That path
+// is trusted by name: once something exists there, later downloads of the same hash are skipped.
+// A failed copy must therefore leave nothing at the destination, never a truncated object.
+TEST_CASE("Durable replace leaves no partial object when the copy fails",
+          "[downloader][disk][replace]") {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() /
+                     ("yams_dl_replace_" +
+                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(dir);
+    const auto dst = dir / "ab" / "cdef";
+    fs::create_directories(dst.parent_path());
+
+    SECTION("an unreadable source leaves no destination") {
+        const auto unreadable = dir / "a-directory-not-a-file";
+        fs::create_directories(unreadable);
+        auto result = yams::downloader::detail::copyFileDurablyReplacing(unreadable, dst);
+        CHECK_FALSE(result.ok());
+        CHECK_FALSE(fs::exists(dst));
+        CHECK(fs::is_empty(dst.parent_path())); // no temporary file left either
+    }
+    SECTION("repeated copies to one destination leave only the destination") {
+        const auto src = dir / "staging";
+        std::ofstream(src, std::ios::binary) << "bytes";
+        REQUIRE(yams::downloader::detail::copyFileDurablyReplacing(src, dst).ok());
+        REQUIRE(yams::downloader::detail::copyFileDurablyReplacing(src, dst).ok());
+        std::size_t entries = 0;
+        for ([[maybe_unused]] const auto& e : fs::directory_iterator(dst.parent_path()))
+            ++entries;
+        CHECK(entries == 1);
+    }
+    SECTION("a successful copy replaces the destination and leaves no temporary file") {
+        const auto src = dir / "staging";
+        std::ofstream(src, std::ios::binary) << "new bytes";
+        std::ofstream(dst, std::ios::binary) << "old";
+        auto result = yams::downloader::detail::copyFileDurablyReplacing(src, dst);
+        REQUIRE(result.ok());
+        std::ifstream in(dst, std::ios::binary);
+        std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(content == "new bytes");
+        std::size_t entries = 0;
+        for ([[maybe_unused]] const auto& e : fs::directory_iterator(dst.parent_path()))
+            ++entries;
+        CHECK(entries == 1);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}

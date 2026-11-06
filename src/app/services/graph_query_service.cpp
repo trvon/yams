@@ -255,8 +255,10 @@ public:
                 Error(ErrorCode::InvalidState, "Knowledge graph store not available"));
         }
 
-        // Use KG store's fetchPathHistory helper
-        auto historyResult = kgStore_->fetchPathHistory(req.path, req.limit);
+        // History is keyed by the normalized path, as ingest records it; a raw spelling
+        // (backslashes on Windows, a ./ segment) would match nothing.
+        const auto logicalPath = metadata::computePathDerivedValues(req.path).normalizedPath;
+        auto historyResult = kgStore_->fetchPathHistory(logicalPath, req.limit);
         if (!historyResult) {
             return Result<PathHistoryResponse>(historyResult.error());
         }

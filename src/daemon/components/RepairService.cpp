@@ -2387,6 +2387,9 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
             sourceUrl = doc.filePath;
         if (sourceUrl.empty())
             continue;
+        // Already repaired: the URL stays the path, so source_url marks a finished document.
+        if (auto prior = meta->getMetadata(doc.id, "source_url"); prior && prior.value())
+            continue;
 
         result.processed++;
         if (dryRun) {
@@ -2399,35 +2402,63 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
         auto dotPos = filename.rfind('.');
         if (dotPos != std::string::npos)
             ext = filename.substr(dotPos);
-        doc.fileName = filename;
-        doc.filePath = std::move(filename);
+        // Keep the URL as the path: it is unique and its path-derived columns stay valid.
+        // A bare file name would collide across URLs (two report.pdf downloads).
+        doc.fileName = std::move(filename);
         doc.fileExtension = std::move(ext);
 
         {
             metadata::MetadataOpScope opScope("repair_download_url_update");
-            if (auto up = meta->updateDocument(doc); up) {
-                result.succeeded++;
-            } else {
+            if (auto up = meta->updateDocument(doc); !up) {
                 result.failed++;
+                continue;
             }
         }
+        // Path-aware listings read the name from the live location, not the documents row.
+        if (auto named =
+                meta->setDocumentPathName(doc.id, doc.filePath, doc.fileName, doc.fileExtension);
+            !named) {
+            spdlog::debug("RepairService: failed to rename download location {}: {}", sourceUrl,
+                          named.error().message);
+            result.failed++;
+            continue;
+        }
 
+        // Path-aware tag filters read location metadata, so the tags go there too.
+        const auto host = extract_host(sourceUrl);
+        const auto scheme = extract_scheme(sourceUrl);
+        std::vector<std::pair<std::string, std::optional<std::string>>> pathChanges{
+            {"source_url", sourceUrl}, {"tag:downloaded", std::string("downloaded")}};
+        if (!host.empty())
+            pathChanges.emplace_back("tag:host:" + host, "host:" + host);
+        if (!scheme.empty())
+            pathChanges.emplace_back("tag:scheme:" + scheme, "scheme:" + scheme);
+        if (auto mirrored = meta->applyDocumentPathMetadata(doc.id, pathChanges); !mirrored) {
+            spdlog::debug("RepairService: failed to mirror download tags for {}: {}", sourceUrl,
+                          mirrored.error().message);
+            result.failed++;
+            continue;
+        }
+
+        // source_url marks the document repaired, so it is written only after the updates above
+        // succeeded, and last; a failed document is retried by the next run.
         try {
-            metaFacade.setMetadata(doc.id, "source_url", metadata::MetadataValue(sourceUrl));
             metaFacade.setMetadata(doc.id, "tag:downloaded", metadata::MetadataValue("downloaded"));
-            auto host = extract_host(sourceUrl);
-            auto scheme = extract_scheme(sourceUrl);
             if (!host.empty())
                 metaFacade.setMetadata(doc.id, "tag:host:" + host,
                                        metadata::MetadataValue("host:" + host));
             if (!scheme.empty())
                 metaFacade.setMetadata(doc.id, "tag:scheme:" + scheme,
                                        metadata::MetadataValue("scheme:" + scheme));
+            metaFacade.setMetadata(doc.id, "source_url", metadata::MetadataValue(sourceUrl));
+            result.succeeded++;
         } catch (const std::exception& e) {
             spdlog::debug("RepairService: failed to persist download metadata for {}: {}",
                           sourceUrl, e.what());
+            result.failed++;
         } catch (...) {
             spdlog::debug("RepairService: failed to persist download metadata for {}", sourceUrl);
+            result.failed++;
         }
     }
 

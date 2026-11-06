@@ -355,6 +355,10 @@ public:
         const auto stats = cleanOrphanedKgEntries(false, false, {});
         return {stats.nodesScanned, stats.nodesDeleted, stats.errors};
     }
+    /// Run the download-path repair (`yams repair --downloads`).
+    RepairOperationResult testing_repairDownloads(bool dryRun) {
+        return repairDownloads(dryRun, false, {});
+    }
     /// Run the orphaned-chunk cleanup (`yams repair --chunks`).
     RepairOperationResult testing_cleanOrphanedChunks(bool dryRun) {
         return cleanOrphanedChunks(dryRun, false, {});
