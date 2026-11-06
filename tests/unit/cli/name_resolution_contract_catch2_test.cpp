@@ -158,7 +158,7 @@ TEST_CASE("A relative path resolves by suffix of the stored path",
     const auto dir = corpus.root / "tree" / "sub";
     std::filesystem::create_directories(dir);
     {
-        std::ofstream file(dir / "leaf.txt");
+        std::ofstream file(dir / "leaf.txt", std::ios::binary);
         file << "leaf body\n";
     }
     const auto [added, addOut] = runCli({"yams", "--data-dir", corpus.data, "add",
