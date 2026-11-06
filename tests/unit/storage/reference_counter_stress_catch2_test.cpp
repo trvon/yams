@@ -158,7 +158,8 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent mix
     CHECK((successCount.load() > numThreads * opsPerThread * 0.99));
 }
 
-TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent transactions",
+TEST_CASE_METHOD(ReferenceCounterStressFixture,
+                 "ReferenceCounter concurrent transactions under stress",
                  "[storage][refcount][stress][slow][transaction][catch2]") {
     constexpr int numThreads = 12;
     constexpr int txnsPerThread = 50;

@@ -405,32 +405,10 @@ RetrievalService::getChunkedBuffer(const GetInitOptions& req_opts, std::size_t c
     return ChunkedGetResult{fake, std::move(content)};
 }
 
-Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashPrefix,
-                                                        bool preferOldest, bool preferLatest,
-                                                        const RetrievalOptions& opts,
-                                                        std::size_t limit) const {
-    if (hashPrefix.size() < 6 || hashPrefix.size() > 64) {
-        return Error{ErrorCode::InvalidArgument,
-                     "Hash prefix must be between 6 and 64 hexadecimal characters."};
-    }
-
-    yams::daemon::SearchRequest sreq;
-    sreq.query = hashPrefix;
-    sreq.hashQuery = hashPrefix;
-    sreq.searchType = "hash";
-    sreq.limit = static_cast<uint32_t>(std::max<std::size_t>(limit, 1));
-    sreq.showHash = true;
-    sreq.pathsOnly = false;
-
-    auto client = getOrCreateClient(opts);
-    auto searchResult = runClientCallWithTimeout<yams::daemon::SearchResponse>(
-        opts, "search",
-        [client, sreq = std::move(sreq)]() { return client->streamingSearch(sreq); });
-    if (!searchResult)
-        return searchResult.error();
-
-    const auto& resp = searchResult.value();
-    if (resp.results.empty()) {
+Result<std::string> selectHashPrefixMatch(const std::vector<yams::daemon::SearchResult>& results,
+                                          const std::string& hashPrefix, bool preferOldest,
+                                          bool preferLatest) {
+    if (results.empty()) {
         return Error{ErrorCode::NotFound, "No documents match the provided hash prefix."};
     }
 
@@ -442,9 +420,9 @@ Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashP
     };
 
     std::vector<Candidate> matches;
-    matches.reserve(resp.results.size());
+    matches.reserve(results.size());
 
-    for (const auto& item : resp.results) {
+    for (const auto& item : results) {
         auto hashIt = item.metadata.find("hash");
         if (hashIt == item.metadata.end())
             continue;
@@ -468,6 +446,10 @@ Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashP
             }
         }
 
+        // One document listed at several locations is still one match.
+        if (std::any_of(matches.begin(), matches.end(),
+                        [&](const Candidate& c) { return c.hash == hash; }))
+            continue;
         matches.push_back(Candidate{&item, std::move(hash), item.path, indexed});
     }
 
@@ -519,6 +501,34 @@ Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashP
     }
 
     return chosen->hash;
+}
+
+Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashPrefix,
+                                                        bool preferOldest, bool preferLatest,
+                                                        const RetrievalOptions& opts,
+                                                        std::size_t limit) const {
+    if (hashPrefix.size() < 6 || hashPrefix.size() > 64) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Hash prefix must be between 6 and 64 hexadecimal characters."};
+    }
+
+    yams::daemon::SearchRequest sreq;
+    sreq.query = hashPrefix;
+    sreq.hashQuery = hashPrefix;
+    sreq.searchType = "hash";
+    sreq.limit = static_cast<uint32_t>(std::max<std::size_t>(limit, 1));
+    sreq.showHash = true;
+    sreq.pathsOnly = false;
+
+    auto client = getOrCreateClient(opts);
+    auto searchResult = runClientCallWithTimeout<yams::daemon::SearchResponse>(
+        opts, "search",
+        [client, sreq = std::move(sreq)]() { return client->streamingSearch(sreq); });
+    if (!searchResult)
+        return searchResult.error();
+
+    return selectHashPrefixMatch(searchResult.value().results, hashPrefix, preferOldest,
+                                 preferLatest);
 }
 
 } // namespace yams::app::services
