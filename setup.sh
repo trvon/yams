@@ -1234,3 +1234,10 @@ else
 	echo "To compile, run: meson compile -C ${BUILD_DIR}"
 	echo "To install, run: meson install -C ${BUILD_DIR}"
 fi
+if [[ "${BUILD_TYPE_MESON_LOWER}" == "release" || "${BUILD_TYPE_MESON_LOWER}" == "debugoptimized" ]]; then
+	# -Ddebug=true here means -g (symbols for packaging), not a debug build: the binaries are
+	# -O3 with NDEBUG. A plain install ships the symbols (hundreds of MB per binary).
+	echo "Note: this build keeps debug symbols (-g) for packaging; a plain install ships them."
+	echo "  Stripped install:        meson install -C ${BUILD_DIR} --strip"
+	echo "  Keep symbols separately: meson install -C ${BUILD_DIR} && sudo bash scripts/split-debug-symbols.sh <prefix> <prefix>/lib/debug"
+fi
