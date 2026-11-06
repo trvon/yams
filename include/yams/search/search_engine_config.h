@@ -323,17 +323,6 @@ struct SearchEngineConfig {
         TopologySnapshot,
     } graphCommunitySource = GraphCommunitySource::ReciprocalEdges;
 
-    [[nodiscard]] static constexpr const char*
-    topologyExpansionSourceToString(TopologyExpansionSource source) noexcept {
-        switch (source) {
-            case TopologyExpansionSource::Clusters:
-                return "clusters";
-            case TopologyExpansionSource::GraphNeighbors:
-                return "graph_neighbors";
-        }
-        return "clusters";
-    }
-
     /// Min edge weight for graph_neighbors expansion (search path).
     float topologyGraphNeighborMinScore = 0.25f;
     /// Prefer reciprocal semantic_neighbor edges when expanding graph neighbors.

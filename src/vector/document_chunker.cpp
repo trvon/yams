@@ -417,28 +417,6 @@ std::vector<size_t> DocumentChunker::findParagraphBoundaries(const std::string& 
     return boundaries;
 }
 
-std::vector<size_t> DocumentChunker::findWordBoundaries(const std::string& text) const {
-    std::vector<size_t> boundaries;
-
-    bool in_word = false;
-    for (size_t i = 0; i < text.size(); ++i) {
-        bool is_space = std::isspace(text[i]);
-
-        if (in_word && is_space) {
-            boundaries.push_back(i);
-            in_word = false;
-        } else if (!in_word && !is_space) {
-            in_word = true;
-        }
-    }
-
-    if (!text.empty()) {
-        boundaries.push_back(text.size());
-    }
-
-    return boundaries;
-}
-
 std::string DocumentChunker::getLastError() const {
     return last_error_;
 }
@@ -906,34 +884,6 @@ double calculateSemanticCoherence(const std::string& text) {
     return std::max(0.0, std::min(1.0, coherence));
 }
 
-std::vector<size_t> findNaturalBreaks(const std::string& text) {
-    std::vector<size_t> breaks;
-
-    // Find paragraph breaks
-    size_t pos = 0;
-    while ((pos = text.find("\n\n", pos)) != std::string::npos) {
-        breaks.push_back(pos);
-        pos += 2;
-    }
-
-    // Find section breaks (markdown headers)
-    // Note: std::regex does not support multiline mode (where ^ matches start of line).
-    // We simulate it by matching start of string or newline.
-    std::regex header_regex(R"((?:^|\n)#{1,6}\s+[^\n]*)");
-    auto begin = std::sregex_iterator(text.begin(), text.end(), header_regex);
-    auto end = std::sregex_iterator();
-
-    for (auto& it = begin; it != end; ++it) {
-        breaks.push_back(it->position());
-    }
-
-    // Sort and remove duplicates
-    std::sort(breaks.begin(), breaks.end());
-    breaks.erase(std::unique(breaks.begin(), breaks.end()), breaks.end());
-
-    return breaks;
-}
-
 std::vector<DocumentChunk> mergeOverlappingChunks(const std::vector<DocumentChunk>& chunks,
                                                   double overlap_threshold) {
     if (chunks.empty()) {
@@ -1099,31 +1049,6 @@ std::string createChunkingSummary(const std::vector<DocumentChunk>& chunks) {
 
 SentenceBasedChunker::SentenceBasedChunker(const ChunkingConfig& config) : DocumentChunker(config) {
     config_.strategy = ChunkingStrategy::SENTENCE_BASED;
-}
-
-std::vector<std::string> SentenceBasedChunker::splitIntoSentences(const std::string& text) const {
-    std::vector<std::string> sentences;
-    auto boundaries = findSentenceBoundaries(text);
-
-    size_t start = 0;
-    for (size_t boundary : boundaries) {
-        if (boundary > start) {
-            std::string sentence = text.substr(start, boundary - start);
-            // Trim whitespace
-            while (!sentence.empty() && std::isspace(sentence.back())) {
-                sentence.pop_back();
-            }
-            while (!sentence.empty() && std::isspace(sentence.front())) {
-                sentence.erase(0, 1);
-            }
-            if (!sentence.empty()) {
-                sentences.push_back(sentence);
-            }
-        }
-        start = boundary;
-    }
-
-    return sentences;
 }
 
 bool SentenceBasedChunker::isSentenceEnd(const std::string& text, size_t pos) const {

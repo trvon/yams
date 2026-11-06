@@ -160,10 +160,6 @@ std::size_t PostIngestQueue::maxKgConcurrent() {
     return static_cast<std::size_t>(TuneAdvisor::postKgConcurrent());
 }
 
-std::size_t PostIngestQueue::maxSymbolConcurrent() {
-    return static_cast<std::size_t>(TuneAdvisor::postSymbolConcurrent());
-}
-
 std::size_t PostIngestQueue::maxEntityConcurrent() {
     return static_cast<std::size_t>(TuneAdvisor::postEntityConcurrent());
 }
@@ -573,10 +569,6 @@ void PostIngestQueue::setKnowledgeGraphEnabled(bool enabled) {
         spdlog::info("[PostIngestQueue] KnowledgeGraph dispatch {}",
                      enabled ? "enabled" : "disabled");
     }
-}
-
-bool PostIngestQueue::isKnowledgeGraphEnabled() const {
-    return knowledgeGraphEnabled_.load(std::memory_order_acquire);
 }
 
 void PostIngestQueue::pauseAll() {

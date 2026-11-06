@@ -183,26 +183,6 @@ void EmbeddingService::enqueueRepairStatusUpdate(
                  hashes.size(), source);
 }
 
-void EmbeddingService::enqueueEmbeddingCompletion(
-    std::vector<metadata::EmbeddingDerivationToken> tokens, std::string modelName) {
-    if (tokens.empty() || !meta_) {
-        return;
-    }
-    if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
-        auto batch = std::make_unique<WriteBatch>();
-        batch->source = "EmbeddingService::completion";
-        CompleteDocumentEmbeddingsByHashesOp op;
-        op.modelName = std::move(modelName);
-        op.derivations = std::move(tokens);
-        batch->ops.emplace_back(std::move(op));
-        coord->enqueue(std::move(batch));
-        return;
-    }
-    spdlog::warn("EmbeddingService: WriteCoordinator unavailable; dropping {} embedding "
-                 "completion updates",
-                 tokens.size());
-}
-
 void EmbeddingService::shutdown() {
     YAMS_ZONE_SCOPED_N("Embedding::shutdown");
     bool alreadyStopped = false;

@@ -44,37 +44,6 @@ public:
     updateLatestSchemaAdditive(const std::filesystem::path& configPath, bool makeBackup = true,
                                bool dryRun = false);
 
-    // Compatibility wrappers for pre-v3 naming.
-    Result<void> migrateToV2(const std::filesystem::path& configPath, bool createBackup = true) {
-        return migrateToLatest(configPath, createBackup);
-    }
-
-    Result<void> createDefaultV2Config(const std::filesystem::path& configPath) {
-        return createDefaultLatestConfig(configPath);
-    }
-
-    Result<void> validateV2Config(const std::filesystem::path& configPath) {
-        return validateLatestConfig(configPath);
-    }
-
-    static std::vector<MigrationEntry> getV1ToV2MigrationMap() {
-        return getV1ToLatestMigrationMap();
-    }
-
-    static std::map<std::string, std::map<std::string, std::string>> getV2ConfigDefaults() {
-        return getLatestConfigDefaults();
-    }
-
-    static std::map<std::string, std::map<std::string, std::string>> getV2AdditiveDefaults() {
-        return getLatestAdditiveDefaults();
-    }
-
-    Result<std::vector<std::string>> updateV2SchemaAdditive(const std::filesystem::path& configPath,
-                                                            bool makeBackup = true,
-                                                            bool dryRun = false) {
-        return updateLatestSchemaAdditive(configPath, makeBackup, dryRun);
-    }
-
     Result<std::map<std::string, std::map<std::string, std::string>>>
     parseTomlConfig(const std::filesystem::path& path);
 

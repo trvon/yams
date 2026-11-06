@@ -25,10 +25,6 @@ inline void require_can_write(const ConnectionFsm& fsm, const char* context = nu
     }
 }
 
-inline void validate_op(const ConnectionFsm& fsm, ConnectionFsm::Operation op) {
-    fsm.validate_operation(op);
-}
-
 } // namespace fsm_helpers
 } // namespace daemon
 } // namespace yams

@@ -76,21 +76,6 @@ struct CompressionHeader {
     [[nodiscard]] bool validate() const noexcept;
 
     /**
-     * @brief Check if a specific flag is set
-     * @param flag Flag to check
-     * @return True if the flag is set
-     */
-    [[nodiscard]] constexpr bool hasFlag(CompressionFlags flag) const noexcept {
-        return (flags & static_cast<uint8_t>(flag)) != 0;
-    }
-
-    /**
-     * @brief Set a compression flag
-     * @param flag Flag to set
-     */
-    constexpr void setFlag(CompressionFlags flag) noexcept { flags |= static_cast<uint8_t>(flag); }
-
-    /**
      * @brief Get compression ratio
      * @return Ratio of original to compressed size
      */
@@ -173,23 +158,10 @@ public:
     [[nodiscard]] std::span<const std::byte> compressedData() const noexcept;
 
     /**
-     * @brief Get complete block (header + data)
-     * @return Complete block data
-     */
-    [[nodiscard]] std::span<const std::byte> fullData() const noexcept { return data_; }
-
-    /**
      * @brief Validate block integrity
      * @return True if block is valid
      */
     [[nodiscard]] bool validate() const;
-
-    /**
-     * @brief Check if block contains compressed data
-     * @param data Data to check
-     * @return True if data appears to be a compressed block
-     */
-    [[nodiscard]] static bool isCompressedBlock(std::span<const std::byte> data);
 
 private:
     CompressionHeader header_;

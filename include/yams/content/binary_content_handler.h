@@ -69,16 +69,6 @@ struct BinaryAnalysisResult {
 
     // C++20: Helper methods
     [[nodiscard]] bool hasStrings() const noexcept { return !extractedStrings.empty(); }
-
-    [[nodiscard]] bool hasHashes() const noexcept { return !hashes.empty(); }
-
-    [[nodiscard]] size_t totalStringLength() const noexcept {
-        size_t total = 0;
-        for (const auto& str : extractedStrings) {
-            total += str.length();
-        }
-        return total;
-    }
 };
 
 /**
@@ -138,20 +128,6 @@ public:
      * @brief Validate binary file before processing
      */
     Result<void> validate(const std::filesystem::path& path) const override;
-
-    /**
-     * @brief Get processing configuration
-     */
-    [[nodiscard]] const BinaryProcessingConfig& getBinaryConfig() const noexcept {
-        return binaryConfig_;
-    }
-
-    /**
-     * @brief Update processing configuration
-     */
-    void setBinaryConfig(BinaryProcessingConfig config) noexcept {
-        binaryConfig_ = std::move(config);
-    }
 
     /**
      * @brief Get processing statistics
@@ -218,13 +194,6 @@ private:
     [[nodiscard]] bool detectPossibleText(std::span<const std::byte> data) const noexcept;
 
     /**
-     * @brief Legacy function name for compatibility
-     */
-    [[nodiscard]] bool mightContainText(std::span<const std::byte> data) const noexcept {
-        return detectPossibleText(data);
-    }
-
-    /**
      * @brief Calculate Shannon entropy
      */
     [[nodiscard]] size_t calculateEntropy(std::span<const std::byte> data) const noexcept;
@@ -234,13 +203,6 @@ private:
      */
     [[nodiscard]] std::tuple<bool, bool, bool>
     detectFileCharacteristics(std::span<const std::byte> data) const noexcept;
-
-    /**
-     * @brief Extract file header information
-     */
-    [[nodiscard]] std::unordered_map<std::string, std::string>
-    extractHeaderInfo(std::span<const std::byte> data,
-                      const detection::FileSignature& signature) const;
 
     /**
      * @brief Build ContentResult from analysis

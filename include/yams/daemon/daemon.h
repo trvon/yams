@@ -270,7 +270,6 @@ public:
     enum class PathType { Socket, PidFile, LogFile };
     static std::filesystem::path resolveSystemPath(PathType type);
     static bool canWriteToDirectory(const std::filesystem::path& dir);
-    static std::filesystem::path getXDGRuntimeDir();
     DaemonConfig config_;
     StateComponent state_;
     std::unique_ptr<LifecycleComponent> lifecycleManager_;
@@ -349,7 +348,6 @@ public:
     // On-demand plugin autoload bridge
     Result<size_t> autoloadPluginsNow();
     ServiceManager* getServiceManager() const { return serviceManager_.get(); }
-    void requestReload() { reloadRequested_.store(true, std::memory_order_relaxed); }
     void reloadTuningConfig();
 
     void snapshotTuningProfileForRuntime();

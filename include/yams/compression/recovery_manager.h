@@ -87,11 +87,6 @@ struct RecoveryOperationResult {
     std::vector<std::string> diagnostics;                      ///< Diagnostic information
 
     /**
-     * @brief Check if recovery was successful
-     */
-    [[nodiscard]] bool isSuccessful() const noexcept { return status == RecoveryStatus::Success; }
-
-    /**
      * @brief Format result as string
      */
     [[nodiscard]] std::string format() const;

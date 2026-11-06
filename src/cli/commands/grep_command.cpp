@@ -786,11 +786,6 @@ private:
         }
     }
 
-    // Helper to count lines in file
-    size_t countLines(const std::string& content) const {
-        return std::count(content.begin(), content.end(), '\n') + 1;
-    }
-
     bool patternLooksIntentionallyRegex() const {
         return pattern_.find('|') != std::string::npos ||
                pattern_.find(".*") != std::string::npos ||

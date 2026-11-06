@@ -143,19 +143,6 @@ void extractColumnsImpl(const Statement& stmt, Entity& e, std::index_sequence<Is
 
 } // namespace detail
 
-/**
- * @brief Extract all columns from Statement into an entity
- *
- * Uses compile-time column metadata to map statement columns to struct members.
- *
- * @param stmt The executed statement positioned at a result row
- * @param e The entity to populate
- */
-template <HasEntityTraits Entity> void extractColumns(const Statement& stmt, Entity& e) {
-    constexpr auto N = std::tuple_size_v<typename EntityTraits<Entity>::columns_tuple>;
-    detail::extractColumnsImpl(stmt, e, std::make_index_sequence<N>{});
-}
-
 // ============================================================================
 // Column Binding Helpers
 // ============================================================================

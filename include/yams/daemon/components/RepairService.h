@@ -566,27 +566,6 @@ private:
     virtual std::shared_ptr<GraphComponent> getGraphComponentForScheduling() const;
     virtual std::shared_ptr<metadata::KnowledgeGraphStore> getKgStoreForScheduling() const;
 
-    // ── Token gating ──
-    bool tryAcquireToken() {
-        if (cfg_.maintenanceTokens == 0)
-            return true;
-        auto cur = tokens_.load();
-        while (cur > 0) {
-            if (tokens_.compare_exchange_weak(cur, cur - 1))
-                return true;
-        }
-        return false;
-    }
-    void releaseToken() {
-        if (cfg_.maintenanceTokens == 0)
-            return;
-        auto cur = tokens_.load();
-        while (cur < cfg_.maintenanceTokens) {
-            if (tokens_.compare_exchange_weak(cur, cur + 1))
-                return;
-        }
-    }
-
     // ── Progress helper ──
     // Count documents taken off the queue and handled; published as repairProcessed.
     void noteRepairResolved(std::uint64_t documents);

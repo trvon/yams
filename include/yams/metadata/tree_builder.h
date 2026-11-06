@@ -59,8 +59,6 @@ public:
      */
     void addEntry(TreeEntry entry);
 
-    void addEntries(std::vector<TreeEntry> entries);
-
     /**
      * @brief Get all entries in this tree node
      * @return Sorted vector of entries

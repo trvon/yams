@@ -89,16 +89,6 @@ public:
                           const std::string& hash)
         : std::runtime_error(message), error_(error), contentHash_(hash) {}
 
-    [[nodiscard]] ContentStoreError getError() const noexcept { return error_; }
-
-    [[nodiscard]] const std::optional<std::string>& getContentHash() const noexcept {
-        return contentHash_;
-    }
-
-    [[nodiscard]] const char* errorString() const noexcept {
-        return contentStoreErrorToString(error_);
-    }
-
 private:
     ContentStoreError error_;
     std::optional<std::string> contentHash_;
@@ -119,9 +109,6 @@ public:
         : ContentStoreException(ContentStoreError::StorageFull, message),
           availableBytes_(availableBytes), requiredBytes_(requiredBytes) {}
 
-    [[nodiscard]] uint64_t getAvailableBytes() const noexcept { return availableBytes_; }
-    [[nodiscard]] uint64_t getRequiredBytes() const noexcept { return requiredBytes_; }
-
 private:
     uint64_t availableBytes_;
     uint64_t requiredBytes_;
@@ -135,38 +122,9 @@ public:
         : ContentStoreException(ContentStoreError::HashMismatch, message, expectedHash),
           expectedHash_(expectedHash), actualHash_(actualHash) {}
 
-    [[nodiscard]] const std::string& getExpectedHash() const noexcept { return expectedHash_; }
-    [[nodiscard]] const std::string& getActualHash() const noexcept { return actualHash_; }
-
 private:
     std::string expectedHash_;
     std::string actualHash_;
 };
-
-// Convert generic error code to content store error
-constexpr ContentStoreError toContentStoreError(ErrorCode error) {
-    switch (error) {
-        case ErrorCode::Success:
-            return ContentStoreError::None;
-        case ErrorCode::FileNotFound:
-            return ContentStoreError::FileNotFound;
-        case ErrorCode::PermissionDenied:
-            return ContentStoreError::PermissionDenied;
-        case ErrorCode::CorruptedData:
-            return ContentStoreError::CorruptedContent;
-        case ErrorCode::StorageFull:
-            return ContentStoreError::StorageFull;
-        case ErrorCode::NetworkError:
-            return ContentStoreError::NetworkError;
-        case ErrorCode::HashMismatch:
-            return ContentStoreError::HashMismatch;
-        case ErrorCode::OperationCancelled:
-            return ContentStoreError::OperationCancelled;
-        case ErrorCode::OperationInProgress:
-            return ContentStoreError::OperationInProgress;
-        default:
-            return ContentStoreError::Unknown;
-    }
-}
 
 } // namespace yams::api

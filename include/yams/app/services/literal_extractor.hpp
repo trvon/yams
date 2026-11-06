@@ -31,12 +31,6 @@ struct LiteralExtractor {
 private:
     /// Check if a character is a regex metacharacter
     static bool isMetaChar(char c);
-
-    /// Extract the longest contiguous literal substring
-    static std::string extractLongestLiteral(std::string_view pattern, bool* found);
-
-    /// Split pattern into literal and non-literal segments
-    static std::vector<std::string> extractAllLiterals(std::string_view pattern);
 };
 
 /// Literal string search helper.
@@ -59,9 +53,6 @@ public:
 
     /// Get the pattern being searched for
     std::string_view pattern() const { return pattern_; }
-
-    /// Check if using fast path (std::string::find)
-    bool usesFastPath() const { return useFastPath_; }
 
 private:
     std::string pattern_;

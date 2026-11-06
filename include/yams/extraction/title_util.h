@@ -28,8 +28,6 @@ struct DocumentSections {
         std::size_t endOffset = 0;
     };
     std::vector<Section> sections;
-
-    bool has_abstract() const noexcept { return !abstract.empty(); }
 };
 
 DocumentSections detectDocumentSections(std::string_view text);

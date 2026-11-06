@@ -109,42 +109,6 @@ private:
     bool applyConfig_ = false; // when true, write detected dims into config
     bool executed_ = false;
 
-    // Helper function to check if a command exists in PATH
-    bool commandExists(const std::string& cmd) const {
-        const auto environmentPath = yams::config::getenv_optional("PATH");
-        if (!environmentPath)
-            return false;
-        const auto& path_env = *environmentPath;
-
-#ifdef _WIN32
-        std::stringstream ss(path_env);
-        std::string dir;
-        while (std::getline(ss, dir, ';')) {
-            fs::path full_path = fs::path(dir) / cmd;
-            // On Windows, check for .exe extension if not present
-            if (full_path.extension() != ".exe")
-                full_path += ".exe";
-
-            if (fs::exists(full_path) && fs::is_regular_file(full_path)) {
-                return true;
-            }
-        }
-#else
-        std::stringstream ss(path_env);
-        std::string dir;
-        while (std::getline(ss, dir, ':')) {
-            fs::path full_path = fs::path(dir) / cmd;
-            if (fs::exists(full_path) && fs::is_regular_file(full_path)) {
-                struct stat st;
-                if (stat(full_path.c_str(), &st) == 0 && (st.st_mode & S_IXUSR)) {
-                    return true;
-                }
-            }
-        }
-#endif
-        return false;
-    }
-
     // Simple JSON loader
     static nlohmann::json load_json_file(const fs::path& p) {
         try {
@@ -288,51 +252,6 @@ private:
         } catch (const std::exception& e) {
             return Error{ErrorCode::WriteError, e.what()};
         }
-    }
-
-    // Helper function for safe command execution
-    int executeCommand(const std::vector<std::string>& args) const {
-        if (args.empty())
-            return -1;
-
-#ifdef _WIN32
-        std::vector<const char*> argv;
-        for (const auto& arg : args) {
-            argv.push_back(arg.c_str());
-        }
-        argv.push_back(nullptr);
-
-        intptr_t status = _spawnvp(_P_WAIT, argv[0], argv.data());
-        return (int)status;
-#else
-        // Convert to char* array for execvp
-        std::vector<char*> argv;
-        for (const auto& arg : args) {
-            argv.push_back(const_cast<char*>(arg.c_str()));
-        }
-        argv.push_back(nullptr);
-
-        pid_t pid = fork();
-        if (pid == 0) {
-            // Child process
-            execvp(argv[0], argv.data());
-            // exec failed: do not run inherited buffered I/O, C++ cleanup or
-            // atexit handlers in the forked child of a multithreaded process.
-            ::_exit(127);
-        } else if (pid > 0) {
-            // Parent process - wait for child
-            int status;
-            waitpid(pid, &status, 0);
-            if (WIFEXITED(status)) {
-                return WEXITSTATUS(status);
-            }
-            return -1;
-        } else {
-            // Fork failed
-            std::cerr << "Fork failed" << std::endl;
-            return -1;
-        }
-#endif
     }
 
     // Helper function to validate paths for safety
@@ -1434,70 +1353,6 @@ Default download location: <data-dir>/models/<model-name>/
 Note: Default retrieval embeddings use built-in Simeon and do not require a model download.
       Models are stored in the unified YAMS data directory for consistency.
 )";
-    }
-
-    // Build a Hugging Face resolve URL for a given repo and revision
-    static std::string buildHfUrl(const std::string& repo, const std::string& revision) {
-        const std::string rev = revision.empty() ? std::string("main") : revision;
-        return std::string("https://huggingface.co/") + repo + "/resolve/" + rev +
-               "/onnx/model.onnx";
-    }
-
-    // Find model.onnx for a repo/revision in the local HF cache (no network)
-    static fs::path findInHfCache(const std::string& repo, const std::string& revision) {
-        const auto home = yams::config::getenv_optional("HOME");
-        const std::string homeDir = home.value_or("");
-        const auto hfhome = yams::config::getenv_optional("HF_HOME");
-        const auto ycache = yams::config::getenv_optional("YAMS_ONNX_HF_CACHE");
-
-        std::vector<fs::path> roots;
-        if (ycache)
-            roots.emplace_back(*ycache);
-        if (hfhome) {
-            roots.emplace_back(*hfhome);
-            roots.emplace_back(fs::path(*hfhome) / "hub");
-        }
-        if (!homeDir.empty()) {
-            roots.emplace_back(fs::path(homeDir) / ".cache" / "huggingface");
-            roots.emplace_back(fs::path(homeDir) / ".cache" / "huggingface" / "hub");
-        }
-
-        // HF cache repo dir format: models--org--name
-        std::string repo_dir = "models--";
-        for (char c : repo)
-            repo_dir += (c == '/') ? std::string("--") : std::string(1, c);
-        const std::string rev = revision.empty() ? std::string("main") : revision;
-
-        for (const auto& root : roots) {
-            std::error_code ec;
-            fs::path base = root / repo_dir;
-            if (!fs::exists(base, ec))
-                continue;
-
-            // Prefer refs/<rev> to map to snapshot hash under snapshots/
-            fs::path snapdir = base / "snapshots" / rev;
-            fs::path ref = base / "refs" / rev;
-            if (fs::exists(ref, ec)) {
-                try {
-                    std::ifstream in(ref);
-                    std::string hash;
-                    std::getline(in, hash);
-                    if (!hash.empty())
-                        snapdir = base / "snapshots" / hash;
-                } catch (...) {
-                    spdlog::debug("Optional HF cache ref unavailable; using requested revision");
-                }
-            }
-            if (fs::exists(snapdir, ec)) {
-                for (auto& p : fs::recursive_directory_iterator(snapdir, ec)) {
-                    if (!p.is_regular_file())
-                        continue;
-                    if (p.path().filename() == "model.onnx")
-                        return p.path();
-                }
-            }
-        }
-        return {};
     }
 };
 

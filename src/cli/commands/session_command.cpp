@@ -597,11 +597,6 @@ private:
         }
         return j;
     }
-    static void saveSessionJson(const std::string& name, const json& j) {
-        auto p = sessionsDir() / (name + ".json");
-        std::ofstream out(p);
-        out << j.dump(2) << std::endl;
-    }
     static void setCurrent(const std::string& name) {
         std::lock_guard<std::mutex> lock(sessionMutex_);
         json idx;
@@ -753,106 +748,6 @@ private:
             std::cout << "Materialized: " << j["materialized"].size() << "\n";
         }
         return {};
-    }
-
-    Result<void> doPin(bool add) {
-        if (pinPath_.empty()) {
-            return Result<void>(Error{ErrorCode::InvalidArgument, "--path is required"});
-        }
-
-        // Normalize path to absolute to satisfy daemon (expand ~, make absolute, normalize slashes)
-        auto normalizePathPattern = [](const std::string& input) -> std::string {
-            std::string s = input;
-            if (!s.empty() && s[0] == '~') {
-                const char* home = std::getenv("HOME");
-                if (home && *home) {
-                    if (s.size() == 1) {
-                        s = std::string(home);
-                    } else if (s.size() > 1 && (s[1] == '/' || s[1] == '\\')) {
-                        s = std::string(home) + s.substr(1);
-                    }
-                }
-            }
-#ifdef _WIN32
-            std::replace(s.begin(), s.end(), '\\', '/');
-#endif
-            std::filesystem::path p(s);
-            if (p.is_relative()) {
-                p = std::filesystem::absolute(p);
-            }
-            return p.generic_string();
-        };
-        std::string normPath = normalizePathPattern(pinPath_);
-
-        // Load existing pins and update local list first
-        auto pins = loadPins();
-        if (add) {
-            PinItem it{normPath, pinTags_, {}};
-            for (const auto& p : pinMetaPairs_) {
-                auto pos = p.find('=');
-                if (pos != std::string::npos)
-                    it.metadata[p.substr(0, pos)] = p.substr(pos + 1);
-            }
-            // ensure 'pinned' tag is present
-            if (std::find(it.tags.begin(), it.tags.end(), "pinned") == it.tags.end())
-                it.tags.push_back("pinned");
-            // de-dup by path
-            pins.erase(std::remove_if(pins.begin(), pins.end(),
-                                      [&](const PinItem& e) { return e.path == it.path; }),
-                       pins.end());
-            pins.push_back(std::move(it));
-        } else {
-            pins.erase(std::remove_if(pins.begin(), pins.end(),
-                                      [&](const PinItem& e) { return e.path == normPath; }),
-                       pins.end());
-        }
-        savePins(pins);
-
-        // Reflect pins into repository metadata via DocumentService
-        auto appContext = cli_->getAppContext();
-        if (!appContext) {
-            return Result<void>(Error{ErrorCode::NotInitialized, "CLI context not initialized"});
-        }
-        auto doc = app::services::makeDocumentService(*appContext);
-        if (!doc) {
-            return Result<void>(Error{ErrorCode::NotInitialized, "Document service not available"});
-        }
-        // List matching documents by glob-like pattern
-        app::services::ListDocumentsRequest lreq;
-        lreq.pattern = normPath;
-        lreq.limit = 10000; // reasonable cap
-        auto lres = doc->list(lreq);
-        if (!lres) {
-            spdlog::warn("session {}: list failed: {}", add ? "pin" : "unpin",
-                         lres.error().message);
-        } else {
-            std::size_t updated = 0;
-            for (const auto& d : lres.value().documents) {
-                app::services::UpdateMetadataRequest u;
-                u.name = d.name; // update by name
-                if (add) {
-                    u.addTags.push_back("pinned");
-                    for (const auto& p : pinMetaPairs_) {
-                        auto pos = p.find('=');
-                        if (pos != std::string::npos)
-                            u.keyValues[p.substr(0, pos)] = p.substr(pos + 1);
-                    }
-                    // also set pinned=true metadata
-                    u.keyValues["pinned"] = "true";
-                } else {
-                    u.removeTags.push_back("pinned");
-                    u.keyValues["pinned"] = "false";
-                }
-                auto ur = doc->updateMetadata(u);
-                if (ur && ur.value().success)
-                    ++updated;
-                else if (!ur) {
-                    spdlog::debug("updateMetadata failed for {}: {}", d.name, ur.error().message);
-                }
-            }
-            std::cout << (add ? "Pinned " : "Unpinned ") << updated << " item(s)." << std::endl;
-        }
-        return Result<void>();
     }
 
     Result<void> doWarm() {

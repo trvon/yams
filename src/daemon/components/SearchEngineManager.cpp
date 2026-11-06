@@ -150,26 +150,6 @@ void SearchEngineManager::noteLexicalDeltaQueued(std::size_t documentCount) {
     nextLexicalDeltaEpoch(lexicalDeltaQueuedEpoch_);
 }
 
-void SearchEngineManager::noteLexicalDeltaQueuedHash(std::string hash) {
-    if (hash.empty()) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(lexicalDeltaMutex_);
-    pendingLexicalDeltaHashes_.push_back(std::move(hash));
-}
-
-void SearchEngineManager::noteLexicalDeltaQueuedHashes(const std::vector<std::string>& hashes) {
-    if (hashes.empty()) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(lexicalDeltaMutex_);
-    for (const auto& hash : hashes) {
-        if (!hash.empty()) {
-            pendingLexicalDeltaHashes_.push_back(hash);
-        }
-    }
-}
-
 void SearchEngineManager::noteLexicalDeltaPublished(std::size_t documentCount) {
     if (documentCount == 0) {
         return;

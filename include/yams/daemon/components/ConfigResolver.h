@@ -685,18 +685,6 @@ public:
      * @return Timeout in milliseconds
      */
     static int readTimeoutMs(const char* envName, int defaultMs, int minMs);
-
-    /**
-     * @brief Read vector index max_elements from config/env.
-     *
-     * Checks in order:
-     * 1. YAMS_VECTOR_MAX_ELEMENTS environment variable
-     * 2. vector_database.max_elements from config file
-     * 3. Default value (100000)
-     *
-     * @return Maximum number of vectors for the index
-     */
-    static size_t readVectorMaxElements();
 };
 
 } // namespace yams::daemon

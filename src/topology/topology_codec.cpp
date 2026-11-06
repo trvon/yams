@@ -203,11 +203,6 @@ class ByteWriter {
 public:
     void writeU8(uint8_t v) { buf_.push_back(static_cast<std::byte>(v)); }
 
-    void writeU16(uint16_t v) {
-        buf_.push_back(static_cast<std::byte>(v & 0xFF));
-        buf_.push_back(static_cast<std::byte>((v >> 8) & 0xFF));
-    }
-
     void writeU32(uint32_t v) {
         for (int i = 0; i < 4; ++i) {
             buf_.push_back(static_cast<std::byte>((v >> (i * 8)) & 0xFF));
@@ -272,16 +267,6 @@ public:
             return Error{ErrorCode::InvalidData, "Truncated U8 in topology binary"};
         }
         return static_cast<uint8_t>(data_[pos_++]);
-    }
-
-    Result<uint16_t> readU16() {
-        if (!hasRemaining(2)) {
-            return Error{ErrorCode::InvalidData, "Truncated U16 in topology binary"};
-        }
-        uint16_t v = static_cast<uint8_t>(data_[pos_]) |
-                     (static_cast<uint16_t>(static_cast<uint8_t>(data_[pos_ + 1])) << 8);
-        pos_ += 2;
-        return v;
     }
 
     Result<uint32_t> readU32() {

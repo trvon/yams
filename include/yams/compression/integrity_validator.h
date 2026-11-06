@@ -238,24 +238,6 @@ public:
     ~ValidationScope() noexcept;
 
     /**
-     * @brief Set original data for validation
-     * @param data Original data
-     */
-    void setOriginalData(yams::span<const std::byte> data);
-
-    /**
-     * @brief Set compression result for validation
-     * @param result Compression result
-     */
-    void setCompressionResult(const CompressionResult& result);
-
-    /**
-     * @brief Set decompressed data for validation
-     * @param data Decompressed data
-     */
-    void setDecompressedData(yams::span<const std::byte> data);
-
-    /**
      * @brief Get validation result
      * @return Validation result (only valid after operation completes)
      */

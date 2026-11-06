@@ -42,16 +42,6 @@ std::vector<int32_t> OnnxTextPreprocessor::tokenize(const std::string& text) {
     return tokens;
 }
 
-std::vector<std::vector<int32_t>>
-OnnxTextPreprocessor::tokenizeBatch(const std::vector<std::string>& texts) {
-    std::vector<std::vector<int32_t>> batch_tokens;
-    batch_tokens.reserve(texts.size());
-    for (const auto& text : texts) {
-        batch_tokens.push_back(tokenize(text));
-    }
-    return batch_tokens;
-}
-
 std::vector<int32_t> OnnxTextPreprocessor::truncateTokens(const std::vector<int32_t>& tokens,
                                                           size_t max_length) {
     if (tokens.size() <= max_length) {
@@ -101,23 +91,6 @@ OnnxTextPreprocessor::generateAttentionMask(const std::vector<int32_t>& tokens) 
         attention_mask.push_back(token == pad_token_id ? 0 : 1);
     }
     return attention_mask;
-}
-
-size_t OnnxTextPreprocessor::getVocabSize() const {
-    return vocab_to_id_.size();
-}
-
-bool OnnxTextPreprocessor::isValidToken(int32_t token_id) const {
-    return token_id >= 0 && token_id < static_cast<int32_t>(vocab_to_id_.size());
-}
-
-std::string OnnxTextPreprocessor::decodeToken(int32_t token_id) const {
-    for (const auto& [token, id] : vocab_to_id_) {
-        if (id == token_id) {
-            return token;
-        }
-    }
-    return config_.model_settings.unk_token;
 }
 
 void OnnxTextPreprocessor::initializeBasicVocab() {

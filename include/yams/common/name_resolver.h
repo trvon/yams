@@ -120,19 +120,4 @@ inline Result<std::string> resolve_name(yams::metadata::MetadataRepository& repo
     return Error{ErrorCode::NotFound, "No document found for given name"};
 }
 
-// Resolve either hash(prefix) or name according to flags.
-inline Result<std::string> resolve_hash_or_name(yams::metadata::MetadataRepository& repo,
-                                                const std::string& hash, const std::string& name,
-                                                bool latest = false, bool oldest = false) {
-    if (!hash.empty()) {
-        if (hash.size() == 64 && std::all_of(hash.begin(), hash.end(), is_hex)) {
-            return hash; // full hash
-        }
-        return resolve_hash_prefix(repo, hash);
-    }
-    if (!name.empty())
-        return resolve_name(repo, name, latest, oldest);
-    return Error{ErrorCode::InvalidArgument, "No hash or name provided"};
-}
-
 } // namespace yams::common

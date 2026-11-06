@@ -807,28 +807,6 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
     return Error{ErrorCode::NotFound, "no document named '" + name + "'"};
 }
 
-// PBI-040, task 040-1: Check if FTS5 index is ready for queries
-bool RetrievalService::isFTS5Ready(const RetrievalOptions& opts) const {
-    try {
-        auto client = getOrCreateClient(opts);
-        auto fastOpts = opts;
-        fastOpts.requestTimeoutMs = 500;
-        auto status = runClientCallWithTimeout<yams::daemon::StatusResponse>(
-            fastOpts, "status", [client]() { return client->status(); });
-        if (!status) {
-            return false; // Status query failed -> not ready
-        }
-
-        // Consider FTS5 ready if queue depth is low (< 100 tasks)
-        // Threshold balances responsiveness vs. false negatives
-        constexpr uint32_t kReadyThreshold = 100;
-        return status.value().postIngestQueueDepth < kReadyThreshold;
-
-    } catch (...) {
-        return false; // Any error -> assume not ready
-    }
-}
-
 Result<yams::daemon::SearchResponse> RetrievalService::search(const SearchOptions& req_opts,
                                                               const RetrievalOptions& opts) const {
     auto req = makeSearchRequest(req_opts);

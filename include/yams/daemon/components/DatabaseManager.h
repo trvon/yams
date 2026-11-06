@@ -181,9 +181,6 @@ public:
      */
     void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal);
 
-    std::shared_ptr<yams::wal::WALManager> getWalManager() const {
-        return std::atomic_load_explicit(&walManager_, std::memory_order_acquire);
-    }
     std::shared_ptr<WalMetricsProvider> getWalMetricsProvider() const {
         return std::atomic_load_explicit(&walMetricsProvider_, std::memory_order_acquire);
     }

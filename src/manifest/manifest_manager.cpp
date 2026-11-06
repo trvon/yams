@@ -655,38 +655,6 @@ std::string ManifestManager::detectMimeType(const std::filesystem::path& path) {
     return it != mimeTypes.end() ? it->second : "application/octet-stream";
 }
 
-Result<FileInfo> ManifestManager::getFileInfo(const std::filesystem::path& path) {
-    try {
-        if (!std::filesystem::exists(path)) {
-            return Result<FileInfo>(ErrorCode::FileNotFound);
-        }
-
-        auto fileSize = std::filesystem::file_size(path);
-        auto lastWrite = std::filesystem::last_write_time(path);
-
-        // Calculate file hash
-        auto hasher = crypto::createSHA256Hasher();
-        auto fileHash = hasher->hashFile(path);
-
-        // Convert file time to system_clock time_point
-        auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-            lastWrite - std::filesystem::file_time_type::clock::now() +
-            std::chrono::system_clock::now());
-
-        FileInfo info{.hash = fileHash,
-                      .size = fileSize,
-                      .mimeType = detectMimeType(path),
-                      .createdAt = sctp,
-                      .originalName = path.filename().string()};
-
-        return Result<FileInfo>(std::move(info));
-
-    } catch (const std::exception& e) {
-        spdlog::error("Failed to get file info for {}: {}", path.string(), e.what());
-        return Result<FileInfo>(ErrorCode::Unknown);
-    }
-}
-
 uint32_t ManifestManager::calculateChecksum(const Manifest& manifest) const {
     // Simple CRC32 implementation for manifest checksum
     // In a real implementation, you'd use a proper CRC32 library

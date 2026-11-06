@@ -21,13 +21,6 @@ public:
         std::exception_ptr exception_;
         std::coroutine_handle<> continuation_{};
 
-        Task get_return_object() {
-            return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
-
-        // Start immediately so fire-and-forget tasks run without explicit await
-        std::suspend_never initial_suspend() noexcept { return {}; }
-
         // Final suspend resumes the awaiting continuation (if any).
         struct final_awaiter {
             bool await_ready() const noexcept { return false; }
@@ -42,8 +35,6 @@ public:
         final_awaiter final_suspend() noexcept { return {}; }
 
         template <typename U> void return_value(U&& value) { value_ = std::forward<U>(value); }
-
-        void unhandled_exception() { exception_ = std::current_exception(); }
     };
 
     using handle_type = std::coroutine_handle<promise_type>;
@@ -120,13 +111,6 @@ public:
         std::exception_ptr exception_{};
         std::coroutine_handle<> continuation_{};
 
-        Task get_return_object() {
-            return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
-
-        // Start immediately so fire-and-forget tasks run without explicit await
-        std::suspend_never initial_suspend() noexcept { return {}; }
-
         struct final_awaiter {
             bool await_ready() const noexcept { return false; }
             std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
@@ -136,9 +120,6 @@ public:
             void await_resume() const noexcept {}
         };
         final_awaiter final_suspend() noexcept { return {}; }
-
-        void return_void() noexcept {}
-        void unhandled_exception() { exception_ = std::current_exception(); }
     };
 
     using handle_type = std::coroutine_handle<promise_type>;
@@ -199,32 +180,6 @@ public:
 private:
     handle_type handle_{};
 };
-
-// Converts a std::future<T> to a yams::Task<T>.
-// This implementation spawns a thread to wait for the future to become ready.
-// This is not the most efficient way, but it works for bridging non-async code.
-template <typename T> Task<T> from_future(std::future<T> future) {
-    if (future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        co_return future.get();
-    }
-
-    struct future_awaiter {
-        std::future<T> fut;
-
-        bool await_ready() const noexcept { return false; }
-
-        void await_suspend(std::coroutine_handle<> h) {
-            std::thread([this, h]() {
-                fut.wait();
-                h.resume();
-            }).detach();
-        }
-
-        T await_resume() { return fut.get(); }
-    };
-
-    co_return co_await future_awaiter{std::move(future)};
-}
 
 } // namespace yams
 

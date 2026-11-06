@@ -377,23 +377,9 @@ Result<ColbertEmbeddings> OnnxColbertSession::encodeQuery(const std::string& que
     return pImpl_->encode(query, true);
 }
 
-Result<ColbertEmbeddings> OnnxColbertSession::encodeDocument(const std::string& document) {
-    return pImpl_->encode(document, false);
-}
-
 Result<std::vector<ColbertEmbeddings>>
 OnnxColbertSession::encodeDocuments(const std::vector<std::string>& documents) {
     return pImpl_->encodeBatch(documents);
-}
-
-Result<std::vector<float>>
-OnnxColbertSession::encodeDocumentEmbedding(const std::string& document) {
-    auto encoded = pImpl_->encode(document, false);
-    if (!encoded)
-        return encoded.error();
-    auto pooled = pImpl_->maxPoolEmbeddings(encoded.value(), tokenDim_);
-    pImpl_->normalizeEmbedding(pooled);
-    return pooled;
 }
 
 Result<std::vector<std::vector<float>>>

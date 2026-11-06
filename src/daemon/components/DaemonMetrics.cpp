@@ -2454,31 +2454,4 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
     }
 }
 
-EmbeddingServiceInfo DaemonMetrics::getEmbeddingServiceInfo() const {
-    EmbeddingServiceInfo info;
-    try {
-        if (services_) {
-            auto provider = services_->getModelProvider();
-            if (provider && provider->isAvailable()) {
-                info.available = true;
-                try {
-                    auto loaded = provider->getLoadedModels();
-                    info.modelsLoaded = static_cast<int>(loaded.size());
-                } catch (...) {
-                    spdlog::debug(
-                        "[DaemonMetrics] best-effort metric probe failed with unknown exception");
-                }
-            }
-        }
-    } catch (...) {
-        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
-    }
-#ifdef YAMS_USE_ONNX_RUNTIME
-    info.onnxRuntimeEnabled = true;
-#else
-    info.onnxRuntimeEnabled = false;
-#endif
-    return info;
-}
-
 } // namespace yams::daemon

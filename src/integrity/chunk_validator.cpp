@@ -153,23 +153,6 @@ ValidationReport ChunkValidator::validateManifest(
     return report;
 }
 
-Result<void> ChunkValidator::validateDuringReconstruction(const manifest::ChunkRef& chunkRef,
-                                                          std::span<const std::byte> chunkData) {
-    if (!config_.enableValidation) {
-        return Result<void>();
-    }
-
-    auto result = validateChunkInternal(chunkData, chunkRef.hash, chunkRef.offset, chunkRef.size);
-
-    if (!result.isValid) {
-        return Result<void>(Error{ErrorCode::ValidationError,
-                                  yamsfmt::format("Chunk validation failed at offset {}: {}",
-                                                  chunkRef.offset, result.errorMessage)});
-    }
-
-    return Result<void>();
-}
-
 std::vector<ChunkValidationResult> ChunkValidator::validateChunks(
     const std::vector<std::pair<std::span<const std::byte>, std::string>>& chunks) {
     std::vector<ChunkValidationResult> results;
@@ -212,14 +195,6 @@ std::vector<ChunkValidationResult> ChunkValidator::validateChunks(
     return results;
 }
 
-std::future<ValidationReport> ChunkValidator::validateManifestAsync(
-    const manifest::Manifest& manifest,
-    const std::function<Result<std::vector<std::byte>>(const std::string&)>& chunkProvider) {
-    return std::async(std::launch::async, [this, manifest, chunkProvider]() {
-        return validateManifest(manifest, chunkProvider);
-    });
-}
-
 std::string ChunkValidator::calculateHash(std::span<const std::byte> data) {
     auto hasher = crypto::createSHA256Hasher();
     hasher->init();
@@ -260,10 +235,6 @@ ChunkValidationResult ChunkValidator::validateChunkInternal(std::span<const std:
         std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
     return result;
-}
-
-std::unique_ptr<IChunkValidator> createChunkValidator(ChunkValidationConfig config) {
-    return std::make_unique<ChunkValidator>(std::move(config));
 }
 
 } // namespace yams::integrity

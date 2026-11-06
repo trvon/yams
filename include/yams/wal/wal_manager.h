@@ -98,7 +98,6 @@ public:
 
     // Get current state
     [[nodiscard]] uint64_t getCurrentSequence() const;
-    [[nodiscard]] size_t getPendingEntries() const;
     [[nodiscard]] std::filesystem::path getCurrentLogPath() const;
 
     // Statistics

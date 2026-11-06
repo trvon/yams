@@ -237,60 +237,6 @@ RepairManager::queryCandidatesForPrune(metadata::MetadataRepository& repo,
     return candidates;
 }
 
-Result<PruneResult> RepairManager::pruneFiles(const PruneConfig& config,
-                                              std::function<void(uint64_t, uint64_t)> progress) {
-    if (!repo_) {
-        return Error{ErrorCode::InvalidArgument, "MetadataRepository not initialized"};
-    }
-
-    if (!config.dryRun) {
-        return Error{ErrorCode::InvalidArgument,
-                     "apply-mode prune must use the document deletion service"};
-    }
-
-    auto docsResult = repo_->queryDocuments(metadata::DocumentQueryOptions{});
-    if (!docsResult) {
-        spdlog::error("Failed to query documents: {}", docsResult.error().message);
-        return docsResult.error();
-    }
-
-    auto& allDocs = docsResult.value();
-    spdlog::info("Prune: scanning {} documents", allDocs.size());
-
-    auto candidates = buildPruneCandidates(allDocs, config, nullptr);
-    spdlog::info("Prune: found {} candidates (dry_run={})", candidates.size(), config.dryRun);
-
-    PruneResult result;
-    uint64_t processed = 0;
-    const uint64_t total = candidates.size();
-
-    for (const auto& candidate : candidates) {
-        // Report progress
-        if (progress && processed % 100 == 0) {
-            progress(processed, total);
-        }
-
-        // Track category stats
-        result.categoryCounts[candidate.category]++;
-        result.categorySizes[candidate.category] += candidate.fileSize;
-
-        result.filesDeleted++;
-        result.totalBytesFreed += candidate.fileSize;
-
-        processed++;
-    }
-
-    // Final progress report
-    if (progress) {
-        progress(total, total);
-    }
-
-    spdlog::info("Prune complete: deleted={} failed={} bytes_freed={}", result.filesDeleted,
-                 result.filesFailed, result.totalBytesFreed);
-
-    return result;
-}
-
 // ============================================================================
 // Path Tree Repair Operations
 // ============================================================================

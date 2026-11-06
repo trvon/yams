@@ -1281,60 +1281,6 @@ private:
         return Result<void>{};
     }
 
-    std::string promptForModel(const fs::path& dataPath) {
-        // Build choice items
-        std::vector<ChoiceItem> items;
-        const auto& embeddingModels = init_assets::embeddingModels();
-        items.reserve(embeddingModels.size());
-        for (const auto& m : embeddingModels) {
-            ChoiceItem ci;
-            ci.value = m.name;
-            ci.label = m.name + " (" + std::to_string(m.size_mb) +
-                       " MB, dim=" + std::to_string(m.dimensions) + ")";
-            ci.description = m.description;
-            items.push_back(std::move(ci));
-        }
-
-        size_t defaultIndex = 0; // first model default
-        // Prefer a nomic* model as default if present (future friendly heuristic)
-        for (size_t i = 0; i < embeddingModels.size(); ++i) {
-            if (embeddingModels[i].name.find("nomic-embed-text") != std::string::npos) {
-                defaultIndex = i;
-                break;
-            }
-        }
-
-        size_t chosenIdx = prompt_choice("\nChoose an embedding model:", items,
-                                         ChoiceOptions{.defaultIndex = defaultIndex,
-                                                       .allowEmpty = true,
-                                                       .retryOnInvalid = true});
-
-        const auto& selectedModel = embeddingModels[chosenIdx];
-
-        // Check if model already exists
-        fs::path modelDir = dataPath / "models" / selectedModel.name;
-        fs::path modelPath = modelDir / "model.onnx";
-
-        if (fs::exists(modelPath)) {
-            std::cout << "\nModel already present: " << modelPath.string() << "\n";
-        } else {
-            // Ask if user wants to download now
-            bool downloadNow = prompt_yes_no("\nDownload this model now? [Y/n]: ",
-                                             YesNoOptions{.defaultYes = true});
-
-            if (downloadNow) {
-                auto result = downloadModelFiles(selectedModel, modelDir);
-                if (!result) {
-                    spdlog::warn("Model download failed: {}", result.error().message);
-                    printLaterCommand("yams model download " + selectedModel.name);
-                }
-            } else {
-                printLaterCommand("yams model download " + selectedModel.name);
-            }
-        }
-        return selectedModel.name;
-    }
-
     bool downloadModel(const EmbeddingModel& /*model*/, const fs::path& /*outputDir*/) {
         return false;
     }

@@ -265,27 +265,6 @@ namespace embedding_utils {
 std::vector<float> normalizeEmbedding(const std::vector<float>& embedding);
 
 /**
- * Normalize batch of embeddings
- */
-std::vector<std::vector<float>>
-normalizeEmbeddings(const std::vector<std::vector<float>>& embeddings);
-
-/**
- * Compute embedding magnitude
- */
-double computeMagnitude(const std::vector<float>& embedding);
-
-/**
- * Validate embedding dimensions and values
- */
-bool validateEmbedding(const std::vector<float>& embedding, size_t expected_dim);
-
-/**
- * Convert embedding to string representation (for debugging)
- */
-std::string embeddingToString(const std::vector<float>& embedding, size_t max_values = 10);
-
-/**
  * Get available models in models directory
  */
 std::vector<std::string> getAvailableModels(const std::string& models_dir = "models");

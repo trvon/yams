@@ -737,42 +737,6 @@ private:
         std::string sanitized;
     };
 
-    SnippetAssessment assessSnippet(std::string_view snippet) const {
-        SnippetAssessment assessment;
-        if (snippet.empty()) {
-            return assessment;
-        }
-        std::string cleaned;
-        cleaned.reserve(snippet.size());
-        size_t printable = 0;
-        size_t whitespace = 0;
-        for (unsigned char c : snippet) {
-            if (c == '\n' || c == '\r' || c == '\t') {
-                whitespace++;
-                cleaned.push_back(' ');
-                continue;
-            }
-            if (c >= 0x20 && c < 0x7F) {
-                printable++;
-                if (std::isspace(c)) {
-                    whitespace++;
-                    if (!cleaned.empty() && cleaned.back() == ' ') {
-                        continue;
-                    }
-                    cleaned.push_back(' ');
-                } else {
-                    cleaned.push_back(static_cast<char>(c));
-                }
-            }
-        }
-        const double total = static_cast<double>(snippet.size());
-        const double denominator = std::max(total, 1.0);
-        assessment.printableRatio = printable / denominator;
-        assessment.whitespaceRatio = whitespace / denominator;
-        assessment.sanitized = std::move(cleaned);
-        return assessment;
-    }
-
     std::string formatSnippet(const UnifiedItem& item, size_t maxLength) {
         auto formatted = ui::format_text_snippet(item.snippet, maxLength, 0.65, true);
         if (formatted) {

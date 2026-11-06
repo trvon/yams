@@ -63,14 +63,6 @@ public:
                                 const yams::topology::ClusterArtifact& cluster,
                                 const std::unordered_set<std::string>& scopedPaths,
                                 const std::filesystem::path& cwd) const;
-    // Compatibility helper for one-off callers. Avoid invoking this inside per-cluster loops;
-    // prefer the batched helpers above so document-path memoization and membership precomputation
-    // stay effective.
-    TopologyClusterStats
-    collectTopologyClusterStats(const yams::topology::TopologyArtifactBatch& snapshot,
-                                const yams::topology::ClusterArtifact& cluster,
-                                const std::unordered_set<std::string>* scopedPaths = nullptr,
-                                const std::filesystem::path* cwd = nullptr) const;
 
 private:
     Result<void> ensureReadContext() const;

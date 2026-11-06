@@ -222,10 +222,6 @@ std::vector<std::string> EmbeddingService::getAvailableModels() const {
     return availableModels;
 }
 
-Result<void> EmbeddingService::generateEmbeddingForDocument(const std::string& documentHash) {
-    return generateEmbeddingsForDocuments({documentHash});
-}
-
 bool EmbeddingService::startRepairAsync() {
     std::lock_guard<std::mutex> lock(workerMutex_);
     if (repairRunning_) {
@@ -303,11 +299,6 @@ void EmbeddingService::stopRepair() {
     if (local.joinable()) {
         local.join();
     }
-}
-
-bool EmbeddingService::isRepairRunning() const {
-    std::lock_guard<std::mutex> lock(workerMutex_);
-    return repairRunning_;
 }
 
 void EmbeddingService::triggerRepairIfNeeded() {

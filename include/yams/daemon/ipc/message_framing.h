@@ -181,7 +181,6 @@ public:
 private:
     size_t max_message_size_;
 
-    Result<std::vector<uint8_t>> serialize_message(const Message& message);
     Result<Message> deserialize_message(std::span<const uint8_t> data);
 
     // CRC32 checksum calculation

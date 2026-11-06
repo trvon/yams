@@ -320,7 +320,6 @@ public:
     }
 
     bool is_loaded() const { return loaded_; }
-    bool is_unigram() const { return is_unigram_; }
 
     int cls_token_id() const { return cls_token_id_; }
     int sep_token_id() const { return sep_token_id_; }

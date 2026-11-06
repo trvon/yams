@@ -1020,13 +1020,7 @@ std::string_view::size_type ci_find(std::string_view haystack, std::string_view 
 } // namespace
 
 #if YAMS_HAS_RANGES
-namespace ranges_helpers {
-template <typename Range, typename Predicate>
-auto filter_not_empty(const Range& range, Predicate pred) {
-    return range | std::views::filter(pred) |
-           std::views::transform([](const auto& elem) { return elem; });
-}
-} // namespace ranges_helpers
+namespace ranges_helpers {} // namespace ranges_helpers
 #endif
 
 // ============================================================================

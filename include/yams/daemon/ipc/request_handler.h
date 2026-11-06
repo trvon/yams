@@ -259,10 +259,6 @@ private:
 
     [[nodiscard]] boost::asio::awaitable<Response> process_request(const Request& request);
 
-    // Process request with streaming support
-    [[nodiscard]] boost::asio::awaitable<std::optional<Response>>
-    process_streaming_request(const Request& request);
-
     // Check if the processor can handle streaming for this request
     [[nodiscard]] bool can_stream_request(const Request& request) const;
 

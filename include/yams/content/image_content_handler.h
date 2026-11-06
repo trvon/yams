@@ -97,17 +97,6 @@ struct ExtendedImageMetadata : public ImageMetadata {
     std::vector<std::string> keywords;
     std::vector<std::string> faces; // Detected face regions
     float confidence = 1.0f;        // Detection confidence from FileTypeDetector
-
-    // C++20: Helper methods with concepts
-    template <std::convertible_to<std::string> T> void addKeyword(T&& keyword) {
-        keywords.emplace_back(std::forward<T>(keyword));
-    }
-
-    [[nodiscard]] bool hasLocation() const noexcept { return gpsCoordinates.has_value(); }
-
-    [[nodiscard]] bool hasCameraInfo() const noexcept {
-        return cameraModel.has_value() || lens.has_value();
-    }
 };
 
 /**
@@ -161,18 +150,6 @@ public:
      * @brief Validate image file before processing
      */
     Result<void> validate(const std::filesystem::path& path) const override;
-
-    /**
-     * @brief Get processing configuration
-     */
-    [[nodiscard]] const ImageProcessingConfig& getImageConfig() const noexcept {
-        return imageConfig_;
-    }
-
-    /**
-     * @brief Update processing configuration
-     */
-    void setImageConfig(ImageProcessingConfig config) noexcept { imageConfig_ = std::move(config); }
 
 private:
     // C++20: Use consteval for compile-time validation

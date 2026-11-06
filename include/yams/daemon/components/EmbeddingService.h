@@ -164,8 +164,6 @@ private:
     void enqueueRepairStatusUpdate(std::vector<std::string> hashes, metadata::RepairStatus status,
                                    std::string source,
                                    std::vector<metadata::EmbeddingDerivationToken> tokens);
-    void enqueueEmbeddingCompletion(std::vector<metadata::EmbeddingDerivationToken> tokens,
-                                    std::string modelName);
 
     const EmbeddingServiceConfig config_;
     const EffectiveEmbeddingServiceConfig effectiveConfig_;

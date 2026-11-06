@@ -47,8 +47,6 @@ public:
         yams::vector::batchmetrics::set_effective_tokens(budgetTokens_);
     }
 
-    std::size_t currentBudgetTokens() const { return budgetTokens_; }
-
     // Pack a batch of documents under the current token budget.
     // Returns how many docs were selected starting from index startIdx.
     template <typename GetTextFn>

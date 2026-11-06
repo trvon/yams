@@ -256,11 +256,6 @@ void SearchEngineFsm::dispatch(const SearchEngineIndexingDrainedEvent& ev) {
     }
 }
 
-bool SearchEngineFsm::hasRebuildPending() const {
-    std::lock_guard<std::mutex> lock(sharedMutex());
-    return detail::SearchEngineMachine::snap.rebuildPending;
-}
-
 void SearchEngineFsm::syncAtomicState() {
     state_.store(detail::SearchEngineMachine::snap.state, std::memory_order_release);
 }

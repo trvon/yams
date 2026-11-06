@@ -490,9 +490,6 @@ public:
     // Optional: force refresh cache now (used by periodic ticker)
     void refresh();
 
-    // Centralized embedding/ONNX provider status for stats/status callers
-    EmbeddingServiceInfo getEmbeddingServiceInfo() const;
-
     // Set SocketServer (called after SocketServer is created, which happens after DaemonMetrics)
     void setSocketServer(const SocketServer* socketServer);
 

@@ -120,18 +120,6 @@ inline std::string unquote(std::string val) {
 // Tilde expansion
 std::filesystem::path expand_tilde(const std::string& path);
 
-// Terminal sanitization
-std::string sanitize_for_terminal(std::string_view in);
-
-// Time parsing
-inline std::chrono::milliseconds parse_ms(std::string_view s) {
-    try {
-        return std::chrono::milliseconds(std::stol(std::string(s)));
-    } catch (...) {
-        return std::chrono::milliseconds(0);
-    }
-}
-
 /// Parse common config boolean spellings. Unknown or empty values return fallback.
 inline bool parse_bool(std::string_view value, bool fallback = false) {
     std::string normalized(value);
@@ -258,9 +246,6 @@ std::filesystem::path get_daemon_status_file();
 
 /// Returns the effective daemon PID file path, including platform defaults.
 std::filesystem::path resolve_daemon_pid_file_path();
-
-/// Returns the effective daemon log file path, including platform defaults.
-std::filesystem::path resolve_daemon_log_file_path();
 
 // ============================================================================
 // Ordinary flat-TOML config parsing and writing utilities

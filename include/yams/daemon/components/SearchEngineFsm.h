@@ -70,7 +70,6 @@ public:
     bool isAwaitingDrain() const {
         return state_.load(std::memory_order_acquire) == SearchEngineState::AwaitingDrain;
     }
-    bool hasRebuildPending() const;
 
 private:
     void syncAtomicState();

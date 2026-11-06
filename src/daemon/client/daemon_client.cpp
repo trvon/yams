@@ -2053,10 +2053,6 @@ DaemonClient::updateDocument(const UpdateDocumentRequest& req) {
     co_return Error{ErrorCode::InvalidData, "Missing UpdateDocumentResponse in stream"};
 }
 
-std::filesystem::path DaemonClient::resolveSocketPath() {
-    return yams::daemon::socket_utils::resolve_socket_path();
-}
-
 std::filesystem::path DaemonClient::resolveSocketPathConfigFirst() {
     return yams::daemon::socket_utils::resolve_socket_path_config_first();
 }
@@ -2332,23 +2328,6 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
 // Circuit Breaker implementation
 CircuitBreaker::CircuitBreaker(const Config& config)
     : config_(config), lastStateChange_(std::chrono::steady_clock::now()) {}
-
-bool CircuitBreaker::shouldAllow() {
-    if (state_ == State::Closed) {
-        return true;
-    }
-
-    if (state_ == State::Open) {
-        if (shouldTransitionToHalfOpen()) {
-            transitionTo(State::HalfOpen);
-            return true;
-        }
-        return false;
-    }
-
-    // HalfOpen - allow limited requests
-    return true;
-}
 
 void CircuitBreaker::recordSuccess() {
     if (state_ == State::HalfOpen) {

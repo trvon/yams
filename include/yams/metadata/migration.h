@@ -326,7 +326,6 @@ public:
 
     // Custom functions
     MigrationBuilder& upFunction(std::function<Result<void>(Database&)> func);
-    MigrationBuilder& downFunction(std::function<Result<void>(Database&)> func);
     MigrationBuilder& wrapInTransaction(bool enabled);
 
     // Build the migration

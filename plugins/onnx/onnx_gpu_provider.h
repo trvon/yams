@@ -52,17 +52,6 @@ inline int envInt(const char* name, int fallback) {
     }
 }
 
-inline size_t envSizeT(const char* name, size_t fallback) {
-    const char* v = std::getenv(name);
-    if (!v || !v[0])
-        return fallback;
-    try {
-        return static_cast<size_t>(std::stoull(v));
-    } catch (...) {
-        return fallback;
-    }
-}
-
 inline std::optional<size_t> envSizeTOpt(const char* name) {
     const char* v = std::getenv(name);
     if (!v || !v[0])

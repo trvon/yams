@@ -33,11 +33,9 @@ public:
     ~OnnxColbertSession();
 
     Result<ColbertEmbeddings> encodeQuery(const std::string& query);
-    Result<ColbertEmbeddings> encodeDocument(const std::string& document);
     Result<std::vector<ColbertEmbeddings>>
     encodeDocuments(const std::vector<std::string>& documents);
 
-    Result<std::vector<float>> encodeDocumentEmbedding(const std::string& document);
     Result<std::vector<std::vector<float>>>
     encodeDocumentEmbeddings(const std::vector<std::string>& documents);
 
@@ -45,7 +43,6 @@ public:
 
     std::string getName() const { return modelName_; }
     size_t getMaxSequenceLength() const { return maxSequenceLength_; }
-    size_t getTokenDim() const { return tokenDim_; }
 
     bool isValid() const;
 

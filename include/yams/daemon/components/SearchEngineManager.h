@@ -169,8 +169,6 @@ public:
     void setEmbeddingBackend(std::string backend) { embeddingBackend_ = std::move(backend); }
 
     void noteLexicalDeltaQueued(std::size_t documentCount = 1);
-    void noteLexicalDeltaQueuedHash(std::string hash);
-    void noteLexicalDeltaQueuedHashes(const std::vector<std::string>& hashes);
     void noteLexicalDeltaPublished(std::size_t documentCount);
     [[nodiscard]] LexicalDeltaSnapshot getLexicalDeltaSnapshot() const noexcept;
     [[nodiscard]] std::vector<std::string> getRecentLexicalDeltaHashes() const;

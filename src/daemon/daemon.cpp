@@ -1394,13 +1394,6 @@ bool YamsDaemon::canWriteToDirectory(const std::filesystem::path& dir) {
     return false;
 }
 
-std::filesystem::path YamsDaemon::getXDGRuntimeDir() {
-    auto runtimeDir = yams::config::get_runtime_dir();
-    std::error_code ec;
-    yams::common::ensureDirectories(runtimeDir, ec);
-    return runtimeDir;
-}
-
 // getXDGStateHome() moved to anonymous namespace helper above
 
 #ifdef YAMS_TESTING

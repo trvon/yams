@@ -169,16 +169,6 @@ inline void accumulateComponentScore(SearchResult& result, ComponentResult::Sour
     }
 }
 
-inline std::string documentIdFromComponent(const ComponentResult& comp) noexcept {
-    if (!comp.filePath.empty()) {
-        return comp.filePath;
-    }
-    if (!comp.documentHash.empty()) {
-        return comp.documentHash;
-    }
-    return {};
-}
-
 inline constexpr std::string_view kSimeonLexicalScoreTimingKey = "simeon_lexical_score";
 
 struct SearchResponse {

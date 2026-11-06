@@ -122,30 +122,6 @@ public:
     // Note: std::generator requires C++23 or coroutine TS
     // std::generator<Chunk> chunkStream(yams::span<const std::byte> data);
 
-    // Process chunks without storing all data
-    template <ChunkProcessor F>
-    void processChunks(yams::span<const std::byte> data, F&& processor) {
-        auto hasher = crypto::createSHA256Hasher();
-        RabinWindow window;
-        size_t pos = 0;
-
-        while (pos < data.size()) {
-            auto [chunkEnd, shouldBreak] = findChunkBoundary(data, pos, window);
-            size_t chunkSize = chunkEnd - pos;
-
-            // Create chunk reference
-            auto chunkSpan = data.subspan(pos, chunkSize);
-            auto hash = hasher->hash(chunkSpan);
-
-            ChunkRef ref{.hash = std::move(hash), .offset = pos, .size = chunkSize};
-
-            // Process chunk
-            processor(ref, chunkSpan);
-
-            pos = chunkEnd;
-        }
-    }
-
 private:
     struct RabinWindow {
         std::array<std::byte, 48> window{};
@@ -177,12 +153,6 @@ struct DeduplicationStats {
     size_t uniqueSize = 0;
     size_t chunkCount = 0;
     size_t uniqueChunks = 0;
-
-    constexpr double getRatio() const {
-        return totalSize > 0
-                   ? 1.0 - (static_cast<double>(uniqueSize) / static_cast<double>(totalSize))
-                   : 0.0;
-    }
 };
 
 DeduplicationStats calculateDeduplication(const std::vector<Chunk>& chunks);

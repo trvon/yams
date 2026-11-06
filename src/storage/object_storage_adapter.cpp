@@ -284,11 +284,4 @@ std::string to_json(const ObjectMetadata& md) {
     return os.str();
 }
 
-PutOptions parse_put_options(const char* /*json*/) {
-    return PutOptions{};
-}
-GetOptions parse_get_options(const char* /*json*/) {
-    return GetOptions{};
-}
-
 } // namespace yams::plugins::adapter

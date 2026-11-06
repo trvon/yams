@@ -3858,14 +3858,6 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
     }
 }
 
-bool ServiceManager::triggerSearchEngineRebuildIfNeeded() {
-    // Delegate to SearchComponent for corpus monitoring and rebuild triggering
-    if (searchComponent_) {
-        return searchComponent_->checkAndTriggerRebuildIfNeeded();
-    }
-    return false;
-}
-
 boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured() {
     // Skip if the active provider already reached an operational state. This prevents
     // lazy/on-demand providers from being moved back into a synthetic loading state after plugin

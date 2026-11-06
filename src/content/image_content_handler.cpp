@@ -536,51 +536,6 @@ std::unique_ptr<ImageContentHandler> createImageHandler(ImageProcessingConfig co
     return std::make_unique<ImageContentHandler>(std::move(config));
 }
 
-// Helper function implementations
-bool isImageFile(const std::filesystem::path& path) {
-    auto& detector = detection::FileTypeDetector::instance();
-    auto result = detector.detectFromFile(path);
-
-    if (result) {
-        const auto& signature = result.value();
-        return signature.mimeType.starts_with("image/") || signature.fileType == "image";
-    }
-
-    // Fallback to extension-based detection
-    static const std::unordered_set<std::string> imageExtensions{
-        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg", ".ico", ".psd"};
-
-    auto ext = path.extension().string();
-    std::ranges::transform(ext, ext.begin(), ::tolower);
-    return imageExtensions.contains(ext);
-}
-
-ImageFormat getImageFormatFromExtension(std::string_view extension) {
-    std::string lowerExt{extension};
-    std::ranges::transform(lowerExt, lowerExt.begin(), ::tolower);
-
-    if (lowerExt == ".jpg" || lowerExt == ".jpeg")
-        return ImageFormat::JPEG;
-    if (lowerExt == ".png")
-        return ImageFormat::PNG;
-    if (lowerExt == ".gif")
-        return ImageFormat::GIF;
-    if (lowerExt == ".bmp")
-        return ImageFormat::BMP;
-    if (lowerExt == ".tiff" || lowerExt == ".tif")
-        return ImageFormat::TIFF;
-    if (lowerExt == ".webp")
-        return ImageFormat::WEBP;
-    if (lowerExt == ".svg")
-        return ImageFormat::SVG;
-    if (lowerExt == ".ico")
-        return ImageFormat::ICO;
-    if (lowerExt == ".psd")
-        return ImageFormat::PSD;
-
-    return ImageFormat::Unknown;
-}
-
 std::vector<std::string> getExtensionsForFormat(ImageFormat format) {
     switch (format) {
         case ImageFormat::JPEG:

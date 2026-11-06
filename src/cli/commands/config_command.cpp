@@ -313,21 +313,6 @@ private:
         }
     }
 
-    // Template helper for setting multiple config values
-    template <typename... Pairs> Result<void> setConfigValues(Pairs&&... pairs) {
-        try {
-            auto results = {setConfigValue(std::forward<Pairs>(pairs).first,
-                                           std::forward<Pairs>(pairs).second)...};
-            for (const auto& result : results) {
-                if (!result)
-                    return result;
-            }
-            return Result<void>();
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
-        }
-    }
-
     // Template helper for setting multiple config key-value pairs from a map/vector
     Result<void>
     setMultipleConfigs(const std::vector<std::pair<std::string, std::string>>& configs) {
@@ -341,17 +326,6 @@ private:
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
         }
-    }
-
-    // Template helper for showing status with config values
-    template <typename ConfigMap>
-    void printStatusSection(const std::string& title, const ConfigMap& items) {
-        std::cout << title << "\n";
-        std::cout << std::string(title.length(), '=') << "\n\n";
-        for (const auto& [label, value] : items) {
-            std::cout << label << ": " << value << "\n";
-        }
-        std::cout << "\n";
     }
 
     // Template helper for enable/disable operations

@@ -275,9 +275,7 @@ private:
     void sendResponse(const nlohmann::json& message);
 
     // --- Initialization / lifecycle helpers ---
-    bool isMethodAllowedBeforeInitialization(const std::string& method) const;
     void markClientInitialized(); // Accept canonical and compatibility initialized notifications
-    void handleExitRequest();     // Graceful handling of 'exit' to set exitRequested_
     // Cancellation helpers
     void registerCancelable(const nlohmann::json& id);
     void cancelRequest(const nlohmann::json& id);
@@ -290,8 +288,6 @@ private:
     void sendProgress(const std::string& phase, double percent, const std::string& message = "",
                       std::optional<nlohmann::json> progressToken = std::nullopt);
     // Spec-defined lifecycle placeholders; no automatic ready transition is performed.
-    void scheduleAutoReady();
-    bool shouldAutoInitialize() const;
     // Record that a feature was used prior to client 'initialized'
     void recordEarlyFeatureUse();
 
@@ -463,12 +459,8 @@ private:
     boost::asio::awaitable<Result<MCPDoctorResponse>> handleDoctor(const MCPDoctorRequest& req);
     boost::asio::awaitable<Result<MCPAddDirectoryResponse>>
     handleAddDirectory(const MCPAddDirectoryRequest& req);
-    boost::asio::awaitable<Result<MCPGetByNameResponse>>
-    handleGetByName(const MCPGetByNameRequest& req);
     boost::asio::awaitable<Result<MCPDeleteByNameResponse>>
     handleDeleteByName(const MCPDeleteByNameRequest& req);
-    boost::asio::awaitable<Result<MCPCatDocumentResponse>>
-    handleCatDocument(const MCPCatDocumentRequest& req);
     boost::asio::awaitable<Result<MCPUpdateMetadataResponse>>
     handleUpdateMetadata(const MCPUpdateMetadataRequest& req);
     boost::asio::awaitable<Result<MCPRestoreCollectionResponse>>

@@ -109,9 +109,6 @@ struct Manifest {
         return std::accumulate(chunks.begin(), chunks.end(), uint64_t{0},
                                [](uint64_t acc, const auto& chunk) { return acc + chunk.size; });
     }
-
-    // Get chunk count
-    [[nodiscard]] size_t getChunkCount() const noexcept { return chunks.size(); }
 };
 
 // Manifest statistics
@@ -256,7 +253,6 @@ public:
 
     // Utility methods
     static std::string detectMimeType(const std::filesystem::path& path);
-    static Result<FileInfo> getFileInfo(const std::filesystem::path& path);
 
 protected:
     // Helper method for template functions to update statistics
@@ -286,26 +282,6 @@ requires std::same_as<std::ranges::range_value_t<R>, ChunkRef>
 class ManifestStream {
 public:
     explicit ManifestStream(R&& chunks) : chunks_(std::forward<R>(chunks)) {}
-
-    // Process chunks in batches for memory efficiency
-    template <typename F> void processBatches(size_t batchSize, F&& processor) {
-        // Manual chunking for C++20 compatibility
-        std::vector<typename std::ranges::range_value_t<R>> batch;
-        batch.reserve(batchSize);
-
-        for (auto&& chunk : chunks_) {
-            batch.push_back(chunk);
-            if (batch.size() == batchSize) {
-                processor(batch);
-                batch.clear();
-            }
-        }
-
-        // Process remaining batch
-        if (!batch.empty()) {
-            processor(batch);
-        }
-    }
 
 private:
     R chunks_;

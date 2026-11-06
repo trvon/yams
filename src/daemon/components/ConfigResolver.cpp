@@ -2317,48 +2317,4 @@ int ConfigResolver::readTimeoutMs(const char* envName, int defaultMs, int minMs)
     return defaultMs;
 }
 
-size_t ConfigResolver::readVectorMaxElements() {
-    constexpr size_t kDefaultMaxElements = 100000;
-    constexpr size_t kMinMaxElements = 1000;
-    constexpr size_t kMaxMaxElements = 10000000; // 10M reasonable upper bound
-
-    // 1. Environment variable takes precedence
-    if (auto value = yams::config::read_env_size("YAMS_VECTOR_MAX_ELEMENTS").value) {
-        if (*value >= kMinMaxElements && *value <= kMaxMaxElements) {
-            spdlog::info("[ConfigResolver] Using YAMS_VECTOR_MAX_ELEMENTS={}", *value);
-            return *value;
-        }
-        spdlog::warn(
-            "[ConfigResolver] YAMS_VECTOR_MAX_ELEMENTS={} out of range [{}, {}], using default",
-            *value, kMinMaxElements, kMaxMaxElements);
-    }
-
-    // 2. Config file
-    auto cfgPath = resolveDefaultConfigPath();
-    if (!cfgPath.empty()) {
-        try {
-            auto kv = yams::config::parse_simple_toml(cfgPath);
-            auto it = kv.find("vector_database.max_elements");
-            if (it != kv.end() && !it->second.empty()) {
-                size_t val = std::stoull(it->second);
-                if (val >= kMinMaxElements && val <= kMaxMaxElements) {
-                    spdlog::info(
-                        "[ConfigResolver] Using vector_database.max_elements={} from config", val);
-                    return val;
-                }
-                spdlog::warn(
-                    "[ConfigResolver] vector_database.max_elements={} out of range, using default",
-                    val);
-            }
-        } catch (const std::exception& error) {
-            spdlog::debug("Invalid vector_database.max_elements config: {}", error.what());
-        } catch (...) {
-            spdlog::debug("Invalid vector_database.max_elements config: unknown error");
-        }
-    }
-
-    // 3. Default
-    return kDefaultMaxElements;
-}
-
 } // namespace yams::daemon

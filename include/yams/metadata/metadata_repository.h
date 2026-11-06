@@ -782,14 +782,6 @@ public:
     // ==========================================================================
 
     /**
-     * @brief Get IDF (Inverse Document Frequency) score for a term
-     * IDF = log(N / df) where N = total docs, df = docs containing term
-     * Returns 0.0 if term not found or corpus empty.
-     * @param term The term to look up (case-sensitive, should be lowercased)
-     */
-    [[nodiscard]] Result<float> getTermIDF(const std::string& term);
-
-    /**
      * @brief Get IDF scores for multiple terms in batch
      * More efficient than individual lookups for query processing.
      * @param terms Vector of terms to look up
@@ -797,25 +789,6 @@ public:
      */
     [[nodiscard]] Result<std::unordered_map<std::string, float>>
     getTermIDFBatch(const std::vector<std::string>& terms);
-
-    /**
-     * @brief Update term statistics during FTS5 indexing
-     * Called after indexing a document to update term frequencies.
-     * @param terms Map of term -> count in the document
-     */
-    Result<void> updateTermStats(const std::unordered_map<std::string, int64_t>& terms);
-
-    /**
-     * @brief Update corpus-level statistics
-     * Called after document additions/deletions to update totals.
-     */
-    Result<void> updateCorpusTermStats();
-
-    /**
-     * @brief Get total number of documents for IDF computation
-     * Uses cached corpus_term_stats table.
-     */
-    [[nodiscard]] Result<int64_t> getCorpusDocumentCount();
 
     // Bulk operations
     Result<std::vector<DocumentInfo>> findDocumentsByHashPrefix(const std::string& hashPrefix,
@@ -992,15 +965,6 @@ public:
     Result<void> checkpointWal() override;
     Result<void> checkpointWalTruncate() override;
 
-    /**
-     * @brief Refresh all idle connections in the pool (PBI-079)
-     *
-     * Discards all idle connections, forcing new connections to be created.
-     * This invalidates cached SQLite query plans and prepared statements,
-     * ensuring queries see the latest database state after WAL checkpoint.
-     */
-    void refreshAllConnections();
-
     // Path tree operations (PBI-051 scaffold)
     Result<std::optional<PathTreeNode>> findPathTreeNode(int64_t parentId,
                                                          std::string_view pathSegment) override;
@@ -1051,10 +1015,6 @@ public:
 
     using TreeDiffAppliedCallback =
         std::function<Result<void>(int64_t, const std::vector<TreeChangeRecord>&)>;
-
-    void setTreeDiffAppliedCallback(TreeDiffAppliedCallback callback) {
-        treeDiffAppliedCallback_ = std::move(callback);
-    }
 
     void setGraphComponent(std::shared_ptr<yams::daemon::GraphComponent> graphComponent);
 
@@ -1252,8 +1212,6 @@ private:
     void updateQueryCache(const std::string& key, const SearchResults& results) const;
     void invalidateQueryCache() const;
     std::optional<std::vector<int64_t>> getCachedFtsIndexedIds() const;
-    std::optional<std::vector<uint8_t>>
-    getCachedFtsIndexedStates(std::span<const int64_t> docIds) const;
     void setCachedFtsIndexedIds(const std::vector<int64_t>& docIds) const;
     void noteFtsIndexedId(int64_t docId) const;
     void eraseFtsIndexedId(int64_t docId) const;
@@ -1577,27 +1535,12 @@ public:
 
     // Document filtering
     MetadataQueryBuilder& withExtension(const std::string& extension);
-    MetadataQueryBuilder& withMimeType(const std::string& mimeType);
-    MetadataQueryBuilder& withPathContaining(const std::string& pathFragment);
     MetadataQueryBuilder& modifiedAfter(std::chrono::system_clock::time_point time);
     MetadataQueryBuilder& modifiedBefore(std::chrono::system_clock::time_point time);
     MetadataQueryBuilder& indexedAfter(std::chrono::system_clock::time_point time);
-    MetadataQueryBuilder& withContentExtracted(bool extracted);
-    MetadataQueryBuilder& withExtractionStatus(ExtractionStatus status);
-
-    // Metadata filtering
-    MetadataQueryBuilder& withMetadata(const std::string& key, const std::string& value);
-    MetadataQueryBuilder& withMetadataKey(const std::string& key);
-
-    // Content filtering
-    MetadataQueryBuilder& withContentLanguage(const std::string& language);
-    MetadataQueryBuilder& withMinContentLength(int64_t minLength);
-    MetadataQueryBuilder& withMaxContentLength(int64_t maxLength);
 
     // Sorting and pagination
     MetadataQueryBuilder& orderByModified(bool ascending = false);
-    MetadataQueryBuilder& orderByIndexed(bool ascending = false);
-    MetadataQueryBuilder& orderBySize(bool ascending = false);
     MetadataQueryBuilder& limit(int count);
     MetadataQueryBuilder& offset(int count);
 

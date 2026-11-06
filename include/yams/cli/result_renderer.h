@@ -611,21 +611,6 @@ private:
 // ==========================================================================
 
 /**
- * @brief Create a renderer for search results with default configuration
- */
-inline auto createSearchResultRenderer(const std::string& pathFilter = "",
-                                       OutputFormat format = OutputFormat::Verbose,
-                                       bool showHash = false, bool showFullHash = false) {
-    RenderConfig config;
-    config.pathFilter = pathFilter;
-    config.format = format;
-    config.showHash = showHash;
-    config.showFullHash = showFullHash;
-    config.showScores = true;
-    return ResultRenderer<MetadataSearchResultAdapter>{config};
-}
-
-/**
  * @brief Create a renderer for document listings with default configuration
  */
 inline auto createDocumentRenderer(const std::string& pathFilter = "",
@@ -637,34 +622,6 @@ inline auto createDocumentRenderer(const std::string& pathFilter = "",
     config.showHash = showHash;
     config.showTimestamps = showTimestamps;
     return ResultRenderer<DocumentInfoResultAdapter>{config};
-}
-
-/**
- * @brief Create a renderer for hybrid search results with default configuration
- */
-inline auto createHybridSearchResultRenderer(const std::string& pathFilter = "",
-                                             OutputFormat format = OutputFormat::Verbose,
-                                             bool showHash = false, bool showFullHash = false,
-                                             bool showTimestamps = false) {
-    RenderConfig config;
-    config.pathFilter = pathFilter;
-    config.format = format;
-    config.showHash = showHash;
-    config.showFullHash = showFullHash;
-    config.showScores = true;
-    config.showTimestamps = showTimestamps;
-    return ResultRenderer<SearchResultItemAdapter>{config};
-}
-
-/**
- * @brief Create a renderer for simple file paths
- */
-inline auto createPathRenderer(const std::string& pathFilter = "",
-                               OutputFormat format = OutputFormat::PathsOnly) {
-    RenderConfig config;
-    config.pathFilter = pathFilter;
-    config.format = format;
-    return ResultRenderer<FilePathAdapter>{config};
 }
 
 } // namespace yams::cli

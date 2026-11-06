@@ -569,10 +569,6 @@ VectorEnvironmentPolicy resolve_vector_environment(bool configuredEnabled) {
     return policy;
 }
 
-std::string sanitize_for_terminal(std::string_view in) {
-    return yams::common::sanitizeForTerminal(in);
-}
-
 std::filesystem::path expand_tilde(const std::string& path) {
     if (!path.empty() && path[0] == '~') {
         if (const auto home = getenv_copy("HOME"); !home.empty()) {
@@ -819,32 +815,6 @@ std::filesystem::path resolve_daemon_pid_file_path() {
         return resolved.value().pidFile.value;
     }
     throw std::invalid_argument(resolved.error().message);
-}
-
-std::filesystem::path resolve_daemon_log_file_path() {
-#ifdef _WIN32
-    if (auto stateHome = get_state_home_for_daemon_log(); !stateHome.empty()) {
-        auto logDir = stateHome / "yams";
-        yams::common::ensureDirectories(logDir);
-        if (can_write_to_directory(logDir)) {
-            return logDir / "daemon.log";
-        }
-    }
-    return std::filesystem::temp_directory_path() / "yams-daemon.log";
-#else
-    if (geteuid() == 0 && can_write_to_directory("/var/log")) {
-        return std::filesystem::path("/var/log/yams-daemon.log");
-    }
-    if (auto stateHome = get_state_home_for_daemon_log(); !stateHome.empty()) {
-        auto logDir = stateHome / "yams";
-        yams::common::ensureDirectories(logDir);
-        if (can_write_to_directory(logDir)) {
-            return logDir / "daemon.log";
-        }
-    }
-    return std::filesystem::path("/tmp") /
-           ("yams-daemon-" + std::to_string(static_cast<unsigned long long>(getuid())) + ".log");
-#endif
 }
 
 std::filesystem::path get_daemon_plugin_trust_file() {
