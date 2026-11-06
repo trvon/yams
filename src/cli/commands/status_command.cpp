@@ -1254,9 +1254,11 @@ public:
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
                 if (jsonOutput_) {
-                    std::cout
-                        << R"({"status": "not_initialized", "message": "YAMS not initialized"})"
-                        << std::endl;
+                    std::cout << nlohmann::json{{"status", "not_initialized"},
+                                                {"message", "YAMS not initialized"},
+                                                {"dataDir", cli_->getDataPath().string()}}
+                                     .dump()
+                              << std::endl;
                 }
                 co_return Error{ErrorCode::NotInitialized,
                                 "YAMS is not initialized; run `yams init`"};
@@ -1637,6 +1639,9 @@ private:
 
     void outputJson(const StatusInfo& info) {
         std::cout << "{\n";
+        std::cout << "  \"dataDir\": "
+                  << nlohmann::json(cli_ ? cli_->getDataPath().string() : info.storagePath).dump()
+                  << ",\n";
         std::cout << "  \"storage\": {\n";
         std::cout << "    \"healthy\": " << (info.storageHealthy ? "true" : "false") << ",\n";
         std::cout << "    \"totalDocuments\": " << info.totalDocuments << ",\n";
@@ -1783,6 +1788,9 @@ private:
 
         std::cout << section_header("Overview") << "\n\n";
         render_rows(std::cout, overview);
+        // Same untruncated line as the daemon view.
+        if (cli_)
+            std::cout << "  Data dir     " << cli_->getDataPath().string() << "\n";
 
         std::vector<Row> worker;
         if (info.workerThreads > 0) {
