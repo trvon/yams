@@ -180,6 +180,7 @@ int64_t applyPathSeriesVersioning(MetadataRepository& repo, const std::string& f
 
             auto isLatestRes = repo.getMetadata(d.id, "is_latest");
             if (isLatestRes && isLatestRes.value().has_value() &&
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 isLatestRes.value().value().asBoolean()) {
                 prevLatestHint = d;
                 updateVersionFromDoc(d);
@@ -215,6 +216,7 @@ int64_t applyPathSeriesVersioning(MetadataRepository& repo, const std::string& f
         if (auto latestRes = repo.getMetadata(newDocumentId, "is_latest");
             latestRes && latestRes.value().has_value()) {
             spdlog::info("Versioning: verification new_id={} latest={}", newDocumentId,
+                         // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                          latestRes.value()->asBoolean());
         }
 
@@ -222,6 +224,7 @@ int64_t applyPathSeriesVersioning(MetadataRepository& repo, const std::string& f
             if (auto prevRes = repo.getMetadata(prevLatestHint->id, "is_latest");
                 prevRes && prevRes.value().has_value()) {
                 spdlog::info("Versioning: verification prev_id={} latest={}", prevLatestHint->id,
+                             // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                              prevRes.value()->asBoolean());
             }
         }

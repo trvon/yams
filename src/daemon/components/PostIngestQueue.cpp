@@ -2673,6 +2673,7 @@ PostIngestQueue::getCachedDocumentInfo(const std::string& hash) {
 
     auto result = meta_->getDocumentByHash(hash);
     if (result && result.value().has_value()) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         auto info = *result.value();
         metadataCache_.infoCache.put(hash, info);
         return info;

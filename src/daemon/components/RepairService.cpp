@@ -1264,6 +1264,7 @@ RepairService::MissingWorkFlags RepairService::analyzeMissingWorkForHash(
         return flags;
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     const auto& d = docRes.value().value();
     if (d.repairStatus == yams::metadata::RepairStatus::Processing) {
         return flags;
@@ -1936,6 +1937,7 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
             TuningManager::notifyWakeup();
             auto docRes = meta->getDocument(s.docId);
             if (docRes && docRes.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 auto doc = docRes.value().value();
                 doc.repairAttempts = s.repairAttempts + 1;
                 doc.repairAttemptedAt = std::chrono::time_point_cast<std::chrono::seconds>(
@@ -2047,6 +2049,7 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
             // Increment repair attempts
             auto docRes = meta->getDocument(s.docId);
             if (docRes && docRes.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 auto doc = docRes.value().value();
                 doc.repairAttempts = s.repairAttempts + 1;
                 doc.repairAttemptedAt = std::chrono::time_point_cast<std::chrono::seconds>(
@@ -2307,6 +2310,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
                     continue;
                 }
 
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 auto doc = *docResult.value();
                 const bool oldWasText = detector.isTextMimeType(doc.mimeType);
                 const bool newIsText = detector.isTextMimeType(mimeType);

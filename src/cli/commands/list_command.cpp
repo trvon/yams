@@ -989,6 +989,7 @@ private:
                 // Handle content snippet and extraction status
                 doc.extractionStatus = docEntry.extractionStatus;
                 if (docEntry.snippet) {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     doc.contentSnippet = docEntry.snippet.value();
                     doc.hasContent = true;
                 }

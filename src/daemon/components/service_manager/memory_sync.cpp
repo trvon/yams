@@ -503,6 +503,7 @@ Result<memory_sync::ApplyStagePass> ServiceManager::applyMemorySyncContentBlobs(
     memory_sync::ApplyStagePass out;
     out.deferredKeys = std::move(pass.value().deferredKeys);
     if (pass.value().failure) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         out.failure = pass.value().failure->message;
     }
     return out;
@@ -1504,6 +1505,7 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
                 return Error{ErrorCode::InvalidState,
                              "memory_sync S3 resolution returned no backend config"};
             }
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             resolvedS3Config = *storageDecision.value().backendConfig;
         }
 

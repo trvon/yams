@@ -1337,6 +1337,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
                 } else if (kg_) {
                     auto nodeRes = kg_->getNodeByKey(nodeKey);
                     if (nodeRes && nodeRes.value().has_value()) {
+                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                         nodeId = nodeRes.value()->id;
                         nodeKeyToId[nodeKey] = nodeId;
                     }
@@ -1386,6 +1387,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
         } else if (kg_) {
             auto nodeRes = kg_->getNodeByKey(deferred.nodeKey);
             if (nodeRes && nodeRes.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 nodeId = nodeRes.value()->id;
                 nodeKeyToId[deferred.nodeKey] = nodeId;
             }

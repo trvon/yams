@@ -213,6 +213,7 @@ collectSemanticNeighbors(yams::metadata::KnowledgeGraphStore& kgStore,
     if (!nodeResult || !nodeResult.value().has_value()) {
         return std::nullopt;
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     const auto nodeId = nodeResult.value()->id;
     auto edgeResult = kgStore.getEdgesBidirectional(nodeId, kSemanticNeighborRelation, edgeLimit);
     if (!edgeResult) {

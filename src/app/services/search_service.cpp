@@ -977,6 +977,7 @@ public:
             if (!di.value().has_value()) {
                 co_return Error{ErrorCode::NotFound, "document not found by hash"};
             }
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             auto info = *di.value();
 
             // If already extracted, nothing to do
@@ -1976,6 +1977,7 @@ private:
 
             for (size_t i = 0; i < n; ++i) {
                 if (slots[i].has_value()) {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     resp.results.push_back(std::move(*slots[i]));
                 }
             }

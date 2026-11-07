@@ -199,6 +199,7 @@ public:
             return response;
         }
 
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         std::int64_t originNodeId = originNodeIdResult.value().value();
 
         // Step 2: Hydrate origin node metadata
@@ -293,6 +294,7 @@ public:
             std::string nodeKey = "blob:" + hashOrNameOrSnapshot;
             auto nodeResult = kgStore_->getNodeByKey(nodeKey);
             if (nodeResult && nodeResult.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 return std::optional<std::int64_t>{nodeResult.value()->id};
             }
         }
@@ -305,11 +307,14 @@ public:
 
         if (nameDocIdResult && nameDocIdResult.value().has_value()) {
             // Get document hash then blob node
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             auto hashResult = kgStore_->getDocumentHashById(nameDocIdResult.value().value());
             if (hashResult && hashResult.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 std::string nodeKey = "blob:" + hashResult.value().value();
                 auto nodeResult = kgStore_->getNodeByKey(nodeKey);
                 if (nodeResult && nodeResult.value().has_value()) {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     return std::optional<std::int64_t>{nodeResult.value()->id};
                 }
             }
@@ -319,6 +324,7 @@ public:
         std::string snapshotNodeKey = "snapshot:" + hashOrNameOrSnapshot;
         auto snapshotNodeResult = kgStore_->getNodeByKey(snapshotNodeKey);
         if (snapshotNodeResult && snapshotNodeResult.value().has_value()) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             return std::optional<std::int64_t>{snapshotNodeResult.value()->id};
         }
 
@@ -357,6 +363,7 @@ private:
                 if (!logical)
                     return logical.error();
                 if (logical.value())
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     return std::optional<std::int64_t>{logical.value()->id};
             }
             return resolveToNodeId(req.documentName.value());
@@ -387,6 +394,7 @@ private:
                 Error(ErrorCode::NotFound, "Node not found: " + std::to_string(nodeId)));
         }
 
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         const auto& node = nodeResult.value().value();
         metadata.node.nodeId = node.id;
         metadata.node.nodeKey = node.nodeKey;
@@ -411,6 +419,7 @@ private:
                 if (metadataRepo_) {
                     auto docResult = metadataRepo_->getDocumentByHash(hash);
                     if (docResult && docResult.value().has_value()) {
+                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                         const auto& doc = docResult.value().value();
                         metadata.documentPath = doc.filePath;
 
@@ -427,7 +436,9 @@ private:
             if (metadataRepo_) {
                 auto docResult = metadataRepo_->getDocumentByHash(hash);
                 if (docResult && docResult.value().has_value()) {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     metadata.documentId = docResult.value()->id;
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     metadata.documentPath = docResult.value()->filePath;
                 }
             }

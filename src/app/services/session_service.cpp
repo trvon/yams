@@ -380,6 +380,7 @@ public:
         if (!nodeResult || !nodeResult.value().has_value())
             return std::nullopt;
 
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         const auto& node = nodeResult.value().value();
         TreeBranchInfo info;
         info.path = node.fullPath;

@@ -2015,6 +2015,7 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
                 failedGatherHashes.push_back(hash);
                 continue;
             }
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             candidates.push_back({hash, std::move(*docInfoRes.value()), prepared});
         } catch (const std::exception& e) {
             spdlog::error("EmbeddingService: exception gathering {}: {}", hash, e.what());

@@ -908,6 +908,7 @@ private:
         dreq.globalSearch = !shouldUseSessionScope();
         dreq.useSession = shouldUseSessionScope();
         if (shouldUseSessionScope()) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             dreq.sessionName = *sessionOverride_;
         }
         if (!collection_.empty()) {

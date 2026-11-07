@@ -171,16 +171,19 @@ void VectorFixRepair::render(std::ostream& os, const Result& r, bool jsonOutput)
         if (r.fixed) {
             nlohmann::json j;
             j["status"] = "fixed";
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             j["db_dim"] = *r.dbDim;
             j["previous_model"] = r.modelName;
             if (r.modelDim)
                 j["previous_model_dim"] = *r.modelDim;
             j["new_model"] = r.matchingModel;
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             j["new_model_dim"] = *r.dbDim;
             os << j.dump() << "\n";
         } else if (r.mismatch) {
             nlohmann::json j;
             j["status"] = "error";
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             j["db_dim"] = *r.dbDim;
             j["model"] = r.modelName;
             if (r.modelDim)
@@ -192,8 +195,10 @@ void VectorFixRepair::render(std::ostream& os, const Result& r, bool jsonOutput)
         } else {
             nlohmann::json j;
             j["status"] = "ok";
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             j["db_dim"] = *r.dbDim;
             j["model"] = r.modelName;
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             j["model_dim"] = *r.modelDim;
             j["mismatch"] = false;
             os << j.dump() << "\n";
@@ -223,8 +228,11 @@ void VectorFixRepair::render(std::ostream& os, const Result& r, bool jsonOutput)
         os << "\n" << status_ok("Found matching model: " + r.matchingModel) << "\n";
         os << "\n" << status_ok("Config updated") << "\n";
         os << "  embeddings.preferred_model = \"" << r.matchingModel << "\"\n";
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         os << "  embeddings.embedding_dim = " << *r.dbDim << "\n";
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         os << "  vector_database.embedding_dim = " << *r.dbDim << "\n";
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         os << "  vector_index.dimension = " << *r.dbDim << "\n\n";
         os << "Restart daemon to apply: yams daemon restart\n";
     }

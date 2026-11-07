@@ -1302,13 +1302,16 @@ SimeonLexicalBackend::QuerySession::score(std::span<const std::int64_t> document
         return scored.error();
     }
     RescoreDecision result;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     result.recipe_name = scores_->value().recipe_name;
     result.scores.reserve(documentIds.size());
     for (const auto id : documentIds) {
         const auto found = backend_.doc_id_to_index_.find(id);
-        result.scores.push_back(found == backend_.doc_id_to_index_.end()
-                                    ? 0.0F
-                                    : scores_->value().scores[found->second]);
+        result.scores.push_back(
+            found == backend_.doc_id_to_index_.end()
+                ? 0.0F
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                : scores_->value().scores[found->second]);
     }
     return result;
 }
@@ -1330,7 +1333,9 @@ SimeonLexicalBackend::QuerySession::searchTop(std::size_t limit) {
         return scored.error();
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     out.recipe_name = scores_->value().recipe_name;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     const auto& scores = scores_->value().scores;
     if (scores.size() != index_to_doc_id_.size()) {
         return Error{ErrorCode::InternalError, "SimeonLexicalBackend: direct score size mismatch"};

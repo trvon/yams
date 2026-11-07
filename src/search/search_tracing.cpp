@@ -811,6 +811,7 @@ nlohmann::json buildGraphDocProbeJson(const std::shared_ptr<metadata::KnowledgeG
             if (!nodeRes || !nodeRes.value().has_value()) {
                 continue;
             }
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             const auto& node = *nodeRes.value();
             nodeLabelSamples.push_back({
                 {"node_id", nodeIdVal},

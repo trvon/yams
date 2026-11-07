@@ -1210,6 +1210,7 @@ public:
                                                                    : old_record->embedding_dim;
                     old_rowids[idx] = existing_rowid;
                     if (old_dims[idx]) {
+                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                         vec0_affected_dims.insert(*old_dims[idx]);
                     }
                 }

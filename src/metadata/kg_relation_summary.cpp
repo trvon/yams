@@ -153,6 +153,7 @@ std::optional<KGRelationSummary> collectFileRelationSummary(KnowledgeGraphStore*
             continue;
         }
 
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         const auto nodeId = nodeResult.value()->id;
         if (seenNodeIds.insert(nodeId).second) {
             nodeIds.push_back(nodeId);
