@@ -800,7 +800,7 @@ CheckpointManager* ServiceManager::getCheckpointManager() const noexcept {
 }
 
 ServiceManager::~ServiceManager() {
-    shutdown();
+    ServiceManager::shutdown();
     if (ingestService_) {
         try {
             ingestService_->stop();

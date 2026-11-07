@@ -1096,7 +1096,6 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
     }
 
     std::vector<float> full(doc_count_, 0.0f);
-    const char* recipe_label = "Bm25SabSmooth";
 
     // Build query profile from the primary index for routing decisions.
     simeon::QueryProfile profile;
@@ -1148,7 +1147,7 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
     strategy_router_->route(query, profile, evidence,
                             std::span<simeon::RetrievalStrategy* const>(pool),
                             std::span<float>{full});
-    recipe_label = "StrategyRouted";
+    const char* recipe_label = "StrategyRouted";
 
     // Blend concept scores when available.
     if (concept_index_ && cfg_.concept_weight > 0.0f) {
@@ -1232,7 +1231,6 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
     } else {
         // Unrecognized or unavailable arm: fall back to plain SAB.
         index_->score(query, std::span<float>{full});
-        recipe_label = "Bm25SabSmooth";
     }
 
     // Blend concept scores when available.

@@ -1377,6 +1377,8 @@ private:
     // Default to using daemon-reported physical sizes only; do not local-scan unless opted in
     bool noPhysical_ = true;
 
+    // One per command; grouped for reading.
+    // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
     struct StatusInfo {
         // Storage
         bool storageHealthy = false;

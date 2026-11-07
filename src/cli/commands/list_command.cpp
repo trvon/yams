@@ -1107,8 +1107,8 @@ private:
 
     Result<void> listMetadataValues() {
         // Start spinner early (before any blocking operations)
-        bool showSpinner =
-            !cli_->getJsonOutput() && format_ != "json" && format_ != "csv" && format_ != "minimal";
+        bool showSpinner = cli_ && !cli_->getJsonOutput() && format_ != "json" &&
+                           format_ != "csv" && format_ != "minimal";
         std::shared_ptr<ui::SpinnerRunner> spinner =
             showSpinner ? std::make_shared<ui::SpinnerRunner>() : nullptr;
         if (spinner) {

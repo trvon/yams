@@ -811,6 +811,7 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
     try {
         auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
         if (!meta) {
+            // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores): read by ~Report via reference
             end = End::Finished;
             co_return;
         }

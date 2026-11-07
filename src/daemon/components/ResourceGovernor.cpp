@@ -75,6 +75,9 @@ ProcessMemory readProcessMemory() {
     size_t n = 0;
     while ((n = std::fread(buf, 1, sizeof(buf), file)) > 0) {
         text.append(buf, n);
+        if (n < sizeof(buf)) {
+            break; // EOF or error; another read would be undefined for the stream
+        }
     }
     std::fclose(file);
     mem = parseProcStatusMemory(text);

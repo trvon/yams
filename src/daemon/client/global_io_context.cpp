@@ -206,6 +206,7 @@ void GlobalIOContext::restart() {
     unsigned int thread_count = static_cast<unsigned int>(TuneAdvisor::recommendedThreads());
     thread_count = std::max(thread_count, 2u);
     thread_count = std::min(thread_count, 16u);
+    // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores): read by the TSAN-only log below
     const auto configured_thread_count = thread_count;
     thread_count = sanitize_thread_count_for_tsan(thread_count);
     if constexpr (kTsanBuild) {

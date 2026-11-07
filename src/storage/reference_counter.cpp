@@ -965,7 +965,7 @@ ReferenceCounter::Transaction::Transaction(ReferenceCounter* counter, int64_t id
 
 ReferenceCounter::Transaction::~Transaction() {
     try {
-        rollback();
+        Transaction::rollback();
     } catch (...) { // NOLINT(bugprone-empty-catch)
         // Suppress exceptions in destructor.
     }

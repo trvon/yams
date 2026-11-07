@@ -355,14 +355,6 @@ public:
         // Alias for the compiled regex (used by worker lambdas).
         const auto& re = *grepRe;
 
-        // Resolve context windows
-        int beforeContext = req.context > 0 ? req.context : req.beforeContext;
-        int afterContext = req.context > 0 ? req.context : req.afterContext;
-        if (beforeContext < 0)
-            beforeContext = 0;
-        if (afterContext < 0)
-            afterContext = 0;
-
         // Stage caps and timeouts (env-overridable)
         auto getenv_int = [](const char* key, int defaultValue) -> int {
             if (const auto value = yams::config::read_env_int(key).value) {
@@ -379,14 +371,12 @@ public:
 
         if (!req.useSession) {
             max_docs_hot = std::min(max_docs_hot, 128);
-            max_docs_cold = std::min(max_docs_cold, 20);
             budget_ms = std::min(budget_ms, 3000);
         }
 
         const int activeRequests = std::clamp(activeGuard.active(), 1, 4);
         if (activeRequests > 1) {
             max_docs_hot = std::max(64, max_docs_hot / activeRequests);
-            max_docs_cold = std::max(16, max_docs_cold / activeRequests);
             budget_ms = std::max(2000, budget_ms / activeRequests);
         }
         MetadataTelemetry metadataTelemetry;

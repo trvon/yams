@@ -337,7 +337,6 @@ public:
                             if (storedDimOpt && *storedDimOpt > 0 && *storedDimOpt == got) {
                                 // Update expected dimension to match storage schema
                                 config_.embedding_dim = *storedDimOpt;
-                                validated = true;
                                 break; // re-run validation loop below
                             }
                         }

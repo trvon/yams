@@ -675,7 +675,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 // Best effort; leave whatever the snapshot populated.
             }
         }
-        if (!metrics_) {
+        if (!metrics_ && state_) {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
             res.running = true;
             res.version = YAMS_VERSION_STRING;

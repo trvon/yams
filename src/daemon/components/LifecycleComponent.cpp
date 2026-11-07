@@ -113,7 +113,7 @@ LifecycleComponent::LifecycleComponent(YamsDaemon* daemon, std::filesystem::path
 
 LifecycleComponent::~LifecycleComponent() {
     // Ensure shutdown is called, although the owner should call it explicitly.
-    shutdown();
+    LifecycleComponent::shutdown();
 }
 
 Result<void> LifecycleComponent::initialize() {

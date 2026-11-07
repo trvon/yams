@@ -62,7 +62,7 @@ EmbeddingService::EmbeddingService(std::shared_ptr<api::IContentStore> store,
       strand_(coordinator_->makeStrand()) {}
 
 EmbeddingService::~EmbeddingService() {
-    shutdown();
+    EmbeddingService::shutdown();
 }
 
 namespace {

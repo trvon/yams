@@ -193,7 +193,7 @@ public:
 
             try {
                 yams::daemon::ClientConfig cfg;
-                if (cli_->hasExplicitDataDir()) {
+                if (cli_ && cli_->hasExplicitDataDir()) {
                     cfg.dataDir = cli_->getDataPath();
                 }
                 cfg.enableChunkedResponses = false;

@@ -49,7 +49,7 @@ bool readSmallFile(const char* path, std::string& out, std::size_t maxBytes = 40
     std::size_t n = 0;
     while ((n = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
         out.append(buffer, n);
-        if (out.size() > maxBytes) {
+        if (out.size() > maxBytes || n < sizeof(buffer)) {
             break;
         }
     }

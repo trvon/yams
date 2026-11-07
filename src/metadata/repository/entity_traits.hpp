@@ -383,6 +383,7 @@ template <HasEntityTraits Entity> constexpr std::string buildColumnList() {
     constexpr auto N = std::tuple_size_v<typename EntityTraits<Entity>::columns_tuple>;
 
     [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage): `columns` is a static constexpr tuple
         ((result += (Is > 0 ? ", " : ""), result += std::string(std::get<Is>(cols).name)), ...);
     }(std::make_index_sequence<N>{});
 
@@ -412,6 +413,8 @@ template <HasEntityTraits Entity> std::string buildInsertSql() {
     [&]<std::size_t... Is>(std::index_sequence<Is...>) {
         (([&] {
              using Col = std::tuple_element_t<Is, typename EntityTraits<Entity>::columns_tuple>;
+             // `columns` is a static constexpr tuple.
+             // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
              const auto& col = std::get<Is>(cols);
              if constexpr (Col::kAutoIncrement && Col::kIsPrimaryKey) {
                  return; // Skip auto-increment primary keys
@@ -445,6 +448,8 @@ template <HasEntityTraits Entity> std::string buildUpdateSql() {
     [&]<std::size_t... Is>(std::index_sequence<Is...>) {
         (([&] {
              using Col = std::tuple_element_t<Is, typename EntityTraits<Entity>::columns_tuple>;
+             // `columns` is a static constexpr tuple.
+             // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
              const auto& col = std::get<Is>(cols);
              if constexpr (Col::kIsPrimaryKey) {
                  return; // Skip primary key in SET clause
