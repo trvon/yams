@@ -563,3 +563,87 @@ TEST_CASE("BEIR loader drops grade-0 qrels from relevant sets", "[bench][retriev
     REQUIRE(queries.size() == 1); // q2 has no relevant documents
     CHECK(queries[0].relevantDocIds == std::set<std::string>{"d1"});
 }
+
+namespace {
+
+yams::bench::BEIRDataset subsetFixture() {
+    yams::bench::BEIRDataset ds;
+    for (int i = 0; i < 40; ++i) {
+        const auto id = "d" + std::to_string(i);
+        ds.documents.emplace(id, yams::bench::BEIRDocument{.id = id, .title = "", .text = id});
+    }
+    // q<i> is relevant to d<2i> and d<2i+1>; d39 is judged non-relevant everywhere.
+    for (int q = 0; q < 10; ++q) {
+        const auto qid = "q" + std::to_string(q);
+        ds.queries.emplace(qid, yams::bench::BEIRQuery{.id = qid, .text = qid});
+        ds.qrels.emplace(qid,
+                         yams::bench::BEIRQrel{.docId = "d" + std::to_string(2 * q), .score = 1});
+        ds.qrels.emplace(
+            qid, yams::bench::BEIRQrel{.docId = "d" + std::to_string(2 * q + 1), .score = 2});
+        ds.qrels.emplace(qid, yams::bench::BEIRQrel{.docId = "d39", .score = 0});
+    }
+    return ds;
+}
+
+} // namespace
+
+TEST_CASE("Benchmark subset keeps every relevant document of sampled queries",
+          "[bench][retrieval][subset]") {
+    const auto full = subsetFixture();
+    yams::bench::BenchmarkSubsetSpec spec{.maxDocs = 12, .maxQueries = 4, .seed = 7};
+    yams::bench::BenchmarkSubsetStats stats;
+    auto subset = yams::bench::selectBenchmarkSubset(full, spec, &stats);
+    REQUIRE(subset.has_value());
+    const auto& ds = subset.value();
+
+    CHECK(ds.queries.size() == 4);
+    CHECK(ds.documents.size() == 12);
+    CHECK(stats.relevantDocs == 8);
+    CHECK(stats.fillerDocs == 4);
+    for (const auto& [qid, _] : ds.queries) {
+        auto range = full.qrels.equal_range(qid);
+        for (auto it = range.first; it != range.second; ++it) {
+            if (it->second.score > 0) {
+                CHECK(ds.documents.count(it->second.docId) == 1); // R is never truncated
+            }
+        }
+    }
+    CHECK(yams::bench::benchmarkSubsetLabel(spec) == "seeded:7");
+}
+
+TEST_CASE("Benchmark subset is reproducible per seed and not ID-ordered",
+          "[bench][retrieval][subset]") {
+    const auto full = subsetFixture();
+    auto pick = [&](std::uint64_t seed) {
+        yams::bench::BenchmarkSubsetSpec spec{.maxDocs = 10, .maxQueries = 3, .seed = seed};
+        auto r = yams::bench::selectBenchmarkSubset(full, spec);
+        REQUIRE(r.has_value());
+        std::set<std::string> ids;
+        for (const auto& [id, _] : r.value().queries) {
+            ids.insert(id);
+        }
+        return ids;
+    };
+    CHECK(pick(1) == pick(1));
+    bool differs = false;
+    for (std::uint64_t seed = 2; seed < 10 && !differs; ++seed) {
+        differs = pick(seed) != pick(1);
+    }
+    CHECK(differs);
+}
+
+TEST_CASE("Benchmark subset without caps returns the full dataset", "[bench][retrieval][subset]") {
+    const auto full = subsetFixture();
+    yams::bench::BenchmarkSubsetSpec spec;
+    auto r = yams::bench::selectBenchmarkSubset(full, spec);
+    REQUIRE(r.has_value());
+    CHECK(r.value().documents.size() == full.documents.size());
+    CHECK(r.value().qrels.size() == full.qrels.size());
+    CHECK(yams::bench::benchmarkSubsetLabel(spec) == "full");
+}
+
+TEST_CASE("Benchmark subset fails when no relevant set fits", "[bench][retrieval][subset]") {
+    const auto full = subsetFixture();
+    yams::bench::BenchmarkSubsetSpec spec{.maxDocs = 1, .maxQueries = 2};
+    CHECK_FALSE(yams::bench::selectBenchmarkSubset(full, spec).has_value());
+}

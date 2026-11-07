@@ -229,6 +229,29 @@ std::size_t applyBenchmarkDocumentMetadata(yams::metadata::IMetadataRepository& 
 yams::Result<BEIRDataset> loadBenchmarkManifestDataset(const std::string& datasetName,
                                                        const std::filesystem::path& manifestRoot);
 
+// Seeded subset of a judged dataset. Queries are sampled first; every
+// relevant document of a sampled query is kept, so R stays complete, and the
+// rest of the document budget is a seeded random sample of the corpus.
+struct BenchmarkSubsetSpec {
+    std::optional<int> maxDocs;
+    std::optional<int> maxQueries;
+    std::uint64_t seed = 42;
+};
+
+struct BenchmarkSubsetStats {
+    std::size_t sampledQueries = 0;
+    std::size_t skippedQueries = 0; // relevant set did not fit the document budget
+    std::size_t relevantDocs = 0;
+    std::size_t fillerDocs = 0;
+};
+
+// "full" when no cap applies, else "seeded:<seed>". Part of the index cache key.
+std::string benchmarkSubsetLabel(const BenchmarkSubsetSpec& spec);
+
+yams::Result<BEIRDataset> selectBenchmarkSubset(const BEIRDataset& full,
+                                                const BenchmarkSubsetSpec& spec,
+                                                BenchmarkSubsetStats* stats = nullptr);
+
 struct RetrievalMetrics {
     double mrr = 0.0;
     double recallAtK = 0.0;

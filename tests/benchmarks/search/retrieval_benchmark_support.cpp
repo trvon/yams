@@ -1660,6 +1660,126 @@ Result<BEIRDataset> loadBenchmarkManifestDataset(const std::string& datasetName,
     return dataset;
 }
 
+namespace {
+
+// Fisher-Yates over mt19937_64 output. std::shuffle and the std
+// distributions differ between standard libraries; this does not.
+void seededShuffle(std::vector<std::string>& items, std::mt19937_64& rng) {
+    for (std::size_t i = items.size(); i > 1; --i) {
+        std::swap(items[i - 1], items[rng() % i]);
+    }
+}
+
+} // namespace
+
+std::string benchmarkSubsetLabel(const BenchmarkSubsetSpec& spec) {
+    if (!spec.maxDocs && !spec.maxQueries) {
+        return "full";
+    }
+    return "seeded:" + std::to_string(spec.seed);
+}
+
+Result<BEIRDataset> selectBenchmarkSubset(const BEIRDataset& full, const BenchmarkSubsetSpec& spec,
+                                          BenchmarkSubsetStats* stats) {
+    BenchmarkSubsetStats local;
+    BenchmarkSubsetStats& st = stats ? *stats : local;
+    st = {};
+
+    // Positive judgments per query, limited to documents that exist.
+    std::map<std::string, std::set<std::string>> relevantByQuery;
+    for (const auto& [qid, qrel] : full.qrels) {
+        if (qrel.score > 0 && full.queries.count(qid) > 0 && full.documents.count(qrel.docId) > 0) {
+            relevantByQuery[qid].insert(qrel.docId);
+        }
+    }
+
+    BEIRDataset out;
+    out.name = full.name;
+    out.basePath = full.basePath;
+
+    if (!spec.maxDocs && !spec.maxQueries) {
+        out = full;
+        st.sampledQueries = relevantByQuery.size();
+        for (const auto& [_, docs] : relevantByQuery) {
+            st.relevantDocs += docs.size();
+        }
+        return out;
+    }
+
+    std::mt19937_64 rng(spec.seed);
+    const std::size_t docBudget =
+        spec.maxDocs ? static_cast<std::size_t>(*spec.maxDocs) : full.documents.size();
+    const std::size_t queryBudget =
+        spec.maxQueries ? static_cast<std::size_t>(*spec.maxQueries) : relevantByQuery.size();
+
+    std::vector<std::string> queryOrder;
+    queryOrder.reserve(relevantByQuery.size());
+    for (const auto& [qid, _] : relevantByQuery) {
+        queryOrder.push_back(qid);
+    }
+    seededShuffle(queryOrder, rng);
+
+    std::set<std::string> included;
+    std::set<std::string> sampled;
+    for (const auto& qid : queryOrder) {
+        if (sampled.size() >= queryBudget) {
+            break;
+        }
+        const auto& docs = relevantByQuery.at(qid);
+        std::size_t added = 0;
+        for (const auto& d : docs) {
+            added += included.count(d) == 0 ? 1 : 0;
+        }
+        if (included.size() + added > docBudget) {
+            ++st.skippedQueries; // never truncate a relevant set
+            continue;
+        }
+        included.insert(docs.begin(), docs.end());
+        sampled.insert(qid);
+    }
+    if (sampled.empty()) {
+        return Error{ErrorCode::InvalidArgument,
+                     "benchmark subset: no query's relevant set fits the document budget"};
+    }
+    st.sampledQueries = sampled.size();
+    st.relevantDocs = included.size();
+
+    std::vector<std::string> fillerOrder;
+    fillerOrder.reserve(full.documents.size());
+    for (const auto& [id, _] : full.documents) {
+        if (included.count(id) == 0) {
+            fillerOrder.push_back(id);
+        }
+    }
+    seededShuffle(fillerOrder, rng);
+    for (const auto& id : fillerOrder) {
+        if (included.size() >= docBudget) {
+            break;
+        }
+        included.insert(id);
+        ++st.fillerDocs;
+    }
+
+    for (const auto& id : included) {
+        out.documents.emplace(id, full.documents.at(id));
+    }
+    for (const auto& qid : sampled) {
+        out.queries.emplace(qid, full.queries.at(qid));
+        auto range = full.qrels.equal_range(qid);
+        for (auto it = range.first; it != range.second; ++it) {
+            if (included.count(it->second.docId) > 0) {
+                out.qrels.emplace(qid, it->second);
+            }
+        }
+    }
+    for (const auto& entity : full.kgEntities) {
+        if (included.count(entity.docId) > 0) {
+            out.kgEntities.push_back(entity);
+        }
+    }
+    return out;
+}
+
 std::string canonicalResultDocId(const TestQuery& query, const std::string& fileName) {
     if (!query.useDocIds) {
         return fileName;
