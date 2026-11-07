@@ -1,0 +1,27 @@
+# Commits that landed on experimental without Signed-off-by before the auto sign-off hook
+# (56ca5db9, 2026-11-03). Shared history is not rewritten; lint.sh dco skips exactly these.
+# One full SHA per line; '#' starts a comment.
+e9b61780a867f7d09568c99d82e6d2ed54ca7362 # 2026-10-31 feat(cli): bound retrieval output and track worktree freshness
+5257e478e16faa8014e2d49c5b787f467e91d245 # 2026-11-03 fix(policy): keep reader and portability ratchets precise
+552b889cff87c08f5b26a06c4702e56854d87634 # 2026-11-03 fix(detection): reject weak-text binary classifications
+3a3ef69ee5b19314f8b9ddcd38a157a6547cbb74 # 2026-11-03 test(cli): isolate config and wire service fixture executors
+d866f44a703c9b313712118771cb0775cbd280ba # 2026-11-03 fix(dispatch): retain caller work through worker completion cleanup
+90f47b103d4afb81d46f8ed79673983c9c8d5731 # 2026-11-03 fix(storage): stop oversized optional listing probes early
+bf8a452e2cca300e62331e35220157e9cc6bda4f # 2026-11-03 fix(service): bind fallible ingestion and metadata results
+794bb5079db91e3475f017fb6f4897d3fa26cece # 2026-11-03 fix(service): preserve live locations during retirement and retention
+583d265389b99ea7e9613158294a3ab116f342ee # 2026-11-03 fix(retrieval): apply literal-safe basename globs before pagination
+35b7e72f8361baa5cef421c5b8dfc5e93b7faeb1 # 2026-11-03 feat(ipc): add typed exact-location unlink with capability checks
+efc63e08b0bd564d5a500f4417f660392326ee77 # 2026-11-03 fix(grep): project shared content onto current scoped locations
+58e475bf2f86ed9863419f180d4e9526961c88d3 # 2026-11-03 fix(config): require an explicit static embedding table selection
+4348bb95eb748601a66a9f6fce089253c2a8c6e0 # 2026-11-03 fix(cli): require typed unlink for incremental worktree ingestion
+3ab6fe8a68fb77c69df3cafcd22a2cb7972235fd # 2026-11-03 feat(cli): persist validated static model selections before success
+fb9f378f78d29b6f653dd131166ac6f90f9c2c26 # 2026-11-03 fix(ipc): make socket cleanup and analyzer qualifications explicit
+7cb5952e7ac6c9f8eea67749870a2ac49773168a # 2026-11-03 fix(init): keep automatic model setup offline and default to no
+4200dd7bf4e994258acec0295c5fca712310aaa1 # 2026-11-03 refactor(cli): own model environment snapshots and error unwinding
+c75afe2c52d3609d1f32aa626bfc55fc40de0f66 # 2026-11-03 fix(dispatch): reject synchronous adds before deferred queue acceptance
+c50eaa639f21881118438cb60515b627c9de4542 # 2026-11-03 docs(cli): document bounded retrieval and qualified verification
+60b386311c157245b644c42003339bd0fecdd5b5 # 2026-11-03 fix(daemon): serialize init-waiter ownership with start and stop
+6284cbfe873fe5a13f39f55487f69b46d043f2df # 2026-11-03 fix(daemon): check main-loop entry and stop completion at exit
+93ab9f71bd934558ce63dfd3f8c8ea6f8196effe # 2026-11-03 fix(daemon): let remote shutdown wait for an in-flight close
+ac466186a20874b76f8e0044b9ddaa3688d18e8a # 2026-11-03 docs(validation): distinguish fast-smoke checks from broader failures
+05c62e89552014292d2626adc188355e4b0b6508 # 2026-11-03 refactor(daemon): share one init-waiter body between runLoop and test helper
