@@ -2355,6 +2355,14 @@ static float parseFloatEnvOrDefault(const char* key, float defaultValue) {
     }
 }
 
+// Required embedded-document coverage in percent (YAMS_BENCH_MIN_EMBED_COVERAGE,
+// default 100). Non-finite or unparsable values fall back to the default.
+static double requiredEmbedCoveragePct() {
+    const double raw =
+        static_cast<double>(parseFloatEnvOrDefault("YAMS_BENCH_MIN_EMBED_COVERAGE", 100.0F));
+    return std::isfinite(raw) ? std::clamp(raw, 0.0, 100.0) : 100.0;
+}
+
 static std::string sanitizeLabelForFilename(const std::string& value) {
     std::string out;
     out.reserve(value.size());
@@ -7566,6 +7574,7 @@ struct BenchFixture {
                 bool haveProgressSnapshot = false;
                 int stableCount = 0;
                 bool embeddingDrainSatisfied = false;
+                const double minCoverage = requiredEmbedCoveragePct();
                 auto embedStartTime = std::chrono::steady_clock::now();
                 auto lastEmbedProgressTime = embedStartTime;
 
@@ -7714,10 +7723,12 @@ struct BenchFixture {
                         // IMPORTANT: Require minimum 90% coverage to prevent premature exit from
                         // transient queue drain (e.g., between embedding batches)
                         const double coverage = observedSnapshot.coverageFor(corpusSize);
-                        constexpr double MIN_COVERAGE_THRESHOLD = 90.0;
+                        // A lower configured floor must be able to end the wait; the final gate
+                        // below still rejects anything under the floor.
+                        const double minStableCoverage = std::min(90.0, minCoverage);
                         if (observedSnapshot.hasQueueMetrics && stableCount >= 40 &&
                             observedSnapshot.queueDrained() && observedSnapshot.docsEmbedded > 0 &&
-                            coverage >= MIN_COVERAGE_THRESHOLD) {
+                            coverage >= minStableCoverage) {
                             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::steady_clock::now() - embedStartTime)
                                                .count();
@@ -7872,10 +7883,6 @@ struct BenchFixture {
                     // index, not retrieval. YAMS_BENCH_MIN_EMBED_COVERAGE (percent) relaxes
                     // it for corpora with documents that have nothing to embed.
                     setupTimings.embeddingCoveragePct = finalCoverage;
-                    const double minCoverage =
-                        std::clamp(static_cast<double>(parseFloatEnvOrDefault(
-                                       "YAMS_BENCH_MIN_EMBED_COVERAGE", 100.0F)),
-                                   0.0, 100.0);
                     if (finalCoverage + 1e-9 < minCoverage) {
                         throw std::runtime_error(
                             "Embedding coverage " + std::to_string(finalCoverage) +
@@ -7912,13 +7919,10 @@ struct BenchFixture {
                         }
                     }
                 } else {
-                    spdlog::warn("Final status check failed after embedding wait: {}",
-                                 finalStatus.error().message);
-                    if (!embeddingDrainSatisfied) {
-                        throw std::runtime_error("Final status check failed after embedding wait; "
-                                                 "cannot verify embedding drain. "
-                                                 "Benchmark results would be unreliable.");
-                    }
+                    // Coverage and vector-DB readiness cannot be verified without it.
+                    throw std::runtime_error("Final status check failed after embedding wait (" +
+                                             finalStatus.error().message +
+                                             "); cannot verify index readiness.");
                 }
             } else {
                 spdlog::info("Vectors disabled - skipping embedding generation wait");
