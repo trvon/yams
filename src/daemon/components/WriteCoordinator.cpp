@@ -115,11 +115,11 @@ WriteCoordinator::WriteCoordinator(boost::asio::io_context& ioc,
                                    std::shared_ptr<metadata::MetadataRepository> metadataRepo)
     : WriteCoordinator(ioc, std::move(kgStore), std::move(metadataRepo), Config{}) {}
 
+// A failed shutdown must not return while coroutines still use this object;
+// std::terminate is the safe outcome.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 WriteCoordinator::~WriteCoordinator() {
-    try {
-        shutdown();
-    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
-    }
+    shutdown();
 }
 
 void WriteCoordinator::registerEmbeddingAcknowledgementsLocked(WriteBatch& batch) {

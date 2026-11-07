@@ -693,7 +693,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
-        if (!metrics_) {
+        if (!metrics_ && state_) {
             // Align boolean readiness with lifecycle readiness in non-metrics path
             try {
                 auto lifecycleSnapshot =

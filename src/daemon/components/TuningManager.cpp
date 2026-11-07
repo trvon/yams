@@ -24,12 +24,12 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
-#include <yams/daemon/resource/onnx_registry_spdlog_sink.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/daemon/resource/onnx_registry_spdlog_sink.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/profiling.h>
@@ -112,11 +112,11 @@ TuningManager::TuningManager(ServiceManager* sm, StateComponent* state,
     installOnnxRegistrySpdlogSink();
 }
 
+// A failed shutdown must not return while coroutines still use this object;
+// std::terminate is the safe outcome.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 TuningManager::~TuningManager() {
-    try {
-        stop();
-    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
-    }
+    stop();
 }
 
 void TuningManager::start() {

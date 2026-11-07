@@ -784,11 +784,11 @@ void DaemonMetrics::setSocketServer(const SocketServer* socketServer) {
     }
 }
 
+// A failed shutdown must not return while coroutines still use this object;
+// std::terminate is the safe outcome.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 DaemonMetrics::~DaemonMetrics() {
-    try {
-        stopPolling();
-    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
-    }
+    stopPolling();
 }
 
 void DaemonMetrics::startPolling() {

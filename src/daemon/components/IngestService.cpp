@@ -121,11 +121,11 @@ IngestService::IngestService(ServiceManager* sm, WorkCoordinator* coordinator)
     : sm_(sm), coordinator_(coordinator), strand_(coordinator_->makeStrand()),
       wake_(std::make_shared<WakeState>(strand_)) {}
 
+// A failed shutdown must not return while coroutines still use this object;
+// std::terminate is the safe outcome.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 IngestService::~IngestService() {
-    try {
-        stop();
-    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
-    }
+    stop();
 }
 
 void IngestService::notifyWakeup() {

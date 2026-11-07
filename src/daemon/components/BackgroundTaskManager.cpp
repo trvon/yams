@@ -65,14 +65,14 @@ BackgroundTaskManager::BackgroundTaskManager(Dependencies deps)
     }
 }
 
+// A failed shutdown must not return while coroutines still use this object;
+// std::terminate is the safe outcome.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 BackgroundTaskManager::~BackgroundTaskManager() {
-    try {
-        if (running_.load(std::memory_order_acquire)) {
-            stop();
-        } else {
-            requestStopAndQuiesceTrackedCoroutines();
-        }
-    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
+    if (running_.load(std::memory_order_acquire)) {
+        stop();
+    } else {
+        requestStopAndQuiesceTrackedCoroutines();
     }
 }
 
