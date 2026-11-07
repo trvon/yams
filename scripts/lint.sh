@@ -425,13 +425,24 @@ lint_dco() {
     from=$(git merge-base HEAD origin/main 2>/dev/null || echo "HEAD~1")
   fi
   local missing=0
+  # Commits that predate the auto sign-off hook are listed by SHA; see the file's header.
+  local exempt_file="$REPO_ROOT/scripts/ci/dco-exempt-commits.txt"
+  local -A exempt=()
+  if [[ -f "$exempt_file" ]]; then
+    while read -r sha _; do
+      [[ -n "$sha" && "$sha" != \#* ]] && exempt["$sha"]=1
+    done < "$exempt_file"
+  fi
   while read -r commit; do
+    [[ -n "${exempt[$commit]:-}" ]] && continue
     if ! git log -1 --format=%B "$commit" | grep -qE '^Signed-off-by: .+ <.+@.+>$'; then
       err "Missing Signed-off-by in commit $commit"
       git log -1 --format=%B "$commit" | sed 's/^/    /' >&2
       missing=1
     fi
-  done < <(git rev-list "$from..$to" 2>/dev/null)
+  # Merge commits are skipped: GitHub creates them from the merge button and they cannot carry
+  # a sign-off; the commits they bring in are checked individually.
+  done < <(git rev-list --no-merges "$from..$to" 2>/dev/null)
   if (( missing )); then
     err "dco: one or more commits missing sign-off"; return 1
   fi
