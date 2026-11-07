@@ -97,7 +97,7 @@ namespace {
 double computeDCG(const std::vector<int>& grades, int k) {
     double dcg = 0.0;
     for (int i = 0; i < std::min(k, static_cast<int>(grades.size())); ++i) {
-        dcg += (std::pow(2.0, grades[i]) - 1.0) / std::log2(i + 2.0);
+        dcg += static_cast<double>(grades[i]) / std::log2(i + 2.0);
     }
     return dcg;
 }
@@ -107,11 +107,17 @@ double computeIDCG(std::vector<int> grades, int k) {
     return computeDCG(grades, k);
 }
 
+const std::set<std::string>& relevantSet(const TestQuery& query) {
+    return query.useDocIds ? query.relevantDocIds : query.relevantFiles;
+}
+
+// Grades of every relevant document, for the ideal DCG.
 std::vector<int> collectAllGrades(const TestQuery& query) {
     std::vector<int> allGrades;
-    allGrades.reserve(query.relevanceGrades.size());
-    for (const auto& [_, grade] : query.relevanceGrades) {
-        allGrades.push_back(grade);
+    for (const auto& docId : relevantSet(query)) {
+        if (const int grade = relevanceGradeForQuery(query, docId); grade > 0) {
+            allGrades.push_back(grade);
+        }
     }
     return allGrades;
 }
@@ -1460,6 +1466,9 @@ std::vector<TestQuery> BEIRCorpusLoader::generateTestQueries() {
 
         auto range = dataset.qrels.equal_range(queryId);
         for (auto it = range.first; it != range.second; ++it) {
+            if (it->second.score <= 0) {
+                continue; // judged non-relevant
+            }
             query.relevantDocIds.insert(it->second.docId);
             query.relevanceGrades[it->second.docId] = it->second.score;
         }
@@ -1663,16 +1672,24 @@ std::string canonicalResultDocId(const TestQuery& query, const std::string& file
     return docId;
 }
 
-bool isRelevantDocForQuery(const TestQuery& query, const std::string& docId) {
-    if (docId.empty()) {
-        return false;
-    }
+namespace {
+
+bool inRelevantSet(const TestQuery& query, const std::string& docId) {
     if (query.useDocIds) {
         return query.relevantDocIds.count(docId) > 0;
     }
     return query.relevantFiles.count(docId) > 0 || query.relevantFiles.count(docId + ".txt") > 0;
 }
 
+} // namespace
+
+// trec_eval semantics: a document is relevant when its grade is above 0.
+bool isRelevantDocForQuery(const TestQuery& query, const std::string& docId) {
+    return !docId.empty() && relevanceGradeForQuery(query, docId) > 0;
+}
+
+// Grade from the qrels; a document in the relevant set without a grade is
+// grade 1, anything else is 0.
 int relevanceGradeForQuery(const TestQuery& query, const std::string& docId) {
     if (auto it = query.relevanceGrades.find(docId); it != query.relevanceGrades.end()) {
         return it->second;
@@ -1683,7 +1700,7 @@ int relevanceGradeForQuery(const TestQuery& query, const std::string& docId) {
             return it->second;
         }
     }
-    return 0;
+    return inRelevantSet(query, docId) ? 1 : 0;
 }
 
 QueryScoreSample scoreRankedDocIds(const TestQuery& query,
@@ -1721,21 +1738,20 @@ QueryScoreSample scoreRankedDocIds(const TestQuery& query,
         sample.reciprocalRank = 1.0 / static_cast<double>(sample.firstRelevantRank);
     }
 
-    const auto relevantTotal =
-        query.useDocIds ? query.relevantDocIds.size() : query.relevantFiles.size();
+    // Denominators follow trec_eval: R (all relevant documents) for recall and
+    // AP, k for precision, whatever the ranking returned.
+    const auto allGrades = collectAllGrades(query);
+    const auto relevantTotal = allGrades.size();
     if (relevantTotal > 0) {
         sample.recallAtK =
             static_cast<double>(sample.numRelevantInTopK) / static_cast<double>(relevantTotal);
+        sample.averagePrecision = averagePrecision / static_cast<double>(relevantTotal);
     }
-    if (topK > 0) {
+    if (metricK > 0) {
         sample.precisionAtK =
-            static_cast<double>(sample.numRelevantInTopK) / static_cast<double>(topK);
-    }
-    if (sample.numRelevantSeen > 0) {
-        sample.averagePrecision = averagePrecision / static_cast<double>(sample.numRelevantSeen);
+            static_cast<double>(sample.numRelevantInTopK) / static_cast<double>(metricK);
     }
 
-    const auto allGrades = collectAllGrades(query);
     const double dcg = computeDCG(sample.retrievedGrades, k);
     const double idcg = computeIDCG(allGrades, k);
     sample.ndcgAtK = (idcg > 0.0) ? dcg / idcg : 0.0;
