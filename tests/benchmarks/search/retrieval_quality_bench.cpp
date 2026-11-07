@@ -13,6 +13,7 @@
     YAMS_BENCH_TOPK=N                 - Retrieve top K results (default: 10)
     YAMS_BENCH_DATASET=<name>         - Use synthetic, BEIR, or local-manifest dataset
     YAMS_BENCH_DATASET_PATH=...       - Path to BEIR directory or benchmark_manifest.json root
+    YAMS_BENCH_MIN_EMBED_COVERAGE=P   - Fail setup below P% embedded docs (default: 100)
     YAMS_BENCH_SUBSET_SEED=N          - Seed for BEIR subsets when CORPUS_SIZE/NUM_QUERIES cap
                                         them (default: 42). Queries are sampled first; their
                                         relevant docs are kept whole, filler docs are random.
@@ -4946,6 +4947,7 @@ struct BenchFixture {
         int64_t vectorIndexPersistMs = 0;
         int64_t vectorIndexReusableProbeMs = 0;
         std::uint64_t vectorIndexReusableProbeCount = 0;
+        double embeddingCoveragePct = -1.0; // -1: not measured (warm cache or vectors off)
         int64_t setupTotalMs = 0;
     };
 
@@ -7866,15 +7868,22 @@ struct BenchFixture {
                         embeddingDrainSatisfied = true;
                     }
 
-                    if (finalDocsEmbedded == 0) {
-                        spdlog::warn("No embedded documents present after embedding wait");
-                    } else if (finalCoverage < 90.0) {
-                        spdlog::error("WARNING: Low document embedding coverage ({:.1f}%) will "
-                                      "degrade retrieval "
-                                      "quality!",
-                                      finalCoverage);
-                        spdlog::error(
-                            "Consider reducing corpus size or increasing embed channel capacity.");
+                    // Hard gate: a partly embedded corpus measures the readiness of the
+                    // index, not retrieval. YAMS_BENCH_MIN_EMBED_COVERAGE (percent) relaxes
+                    // it for corpora with documents that have nothing to embed.
+                    setupTimings.embeddingCoveragePct = finalCoverage;
+                    const double minCoverage =
+                        std::clamp(static_cast<double>(parseFloatEnvOrDefault(
+                                       "YAMS_BENCH_MIN_EMBED_COVERAGE", 100.0F)),
+                                   0.0, 100.0);
+                    if (finalCoverage + 1e-9 < minCoverage) {
+                        throw std::runtime_error(
+                            "Embedding coverage " + std::to_string(finalCoverage) +
+                            "% is below the required " + std::to_string(minCoverage) +
+                            "% (docs_embedded=" + std::to_string(finalDocsEmbedded) + " of " +
+                            std::to_string(corpusSize) +
+                            "). Results would not be valid; set "
+                            "YAMS_BENCH_MIN_EMBED_COVERAGE to accept a lower floor.");
                     }
 
                     if (!vectorDbReady) {
@@ -7890,10 +7899,16 @@ struct BenchFixture {
                                 }
                                 if (ready) {
                                     spdlog::info("Vector DB is now ready after guard wait");
+                                    vectorDbReady = true;
                                     break;
                                 }
                             }
                             std::this_thread::sleep_for(500ms);
+                        }
+                        if (!vectorDbReady) {
+                            throw std::runtime_error(
+                                "Vector DB not ready 30s after embedding drain; results would "
+                                "not be valid.");
                         }
                     }
                 } else {
@@ -8885,6 +8900,7 @@ struct BenchFixture {
                   {"reusable_probe_ms", setupTimings.vectorIndexReusableProbeMs},
                   {"reusable_probe_count", setupTimings.vectorIndexReusableProbeCount}}},
                 {"setup_total_ms", setupTimings.setupTotalMs},
+                {"embedding_coverage_pct", setupTimings.embeddingCoveragePct},
                 {"dataset", datasetName},
                 {"subset", subsetLabel},
                 {"corpus_size", corpusSize},
