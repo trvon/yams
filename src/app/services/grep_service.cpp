@@ -355,14 +355,6 @@ public:
         // Alias for the compiled regex (used by worker lambdas).
         const auto& re = *grepRe;
 
-        // Resolve context windows
-        int beforeContext = req.context > 0 ? req.context : req.beforeContext;
-        int afterContext = req.context > 0 ? req.context : req.afterContext;
-        if (beforeContext < 0)
-            beforeContext = 0;
-        if (afterContext < 0)
-            afterContext = 0;
-
         // Stage caps and timeouts (env-overridable)
         auto getenv_int = [](const char* key, int defaultValue) -> int {
             if (const auto value = yams::config::read_env_int(key).value) {
@@ -373,20 +365,17 @@ public:
         // PERFORMANCE: Lower default limits to prevent timeouts on large repos
         // Users can override with environment variables if needed
         int max_docs_hot = getenv_int("YAMS_GREP_MAX_DOCS_HOT", 500);
-        int max_docs_cold = getenv_int("YAMS_GREP_MAX_DOCS_COLD", 50);
         int budget_ms = getenv_int("YAMS_GREP_TIME_BUDGET_MS", 10000);
         const int max_total_results = getenv_int("YAMS_GREP_MAX_RESULTS", 1000);
 
         if (!req.useSession) {
             max_docs_hot = std::min(max_docs_hot, 128);
-            max_docs_cold = std::min(max_docs_cold, 20);
             budget_ms = std::min(budget_ms, 3000);
         }
 
         const int activeRequests = std::clamp(activeGuard.active(), 1, 4);
         if (activeRequests > 1) {
             max_docs_hot = std::max(64, max_docs_hot / activeRequests);
-            max_docs_cold = std::max(16, max_docs_cold / activeRequests);
             budget_ms = std::max(2000, budget_ms / activeRequests);
         }
         MetadataTelemetry metadataTelemetry;

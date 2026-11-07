@@ -234,7 +234,7 @@ struct ConnectionFsm::Impl {
     int retries{0};
     // Phase 2: write backpressure queue (bytes only; payload owned by higher layers)
     std::size_t write_bytes{0};
-    std::size_t write_cap_bytes{2 * 1024 * 1024};
+    std::size_t write_cap_bytes{2ULL * 1024 * 1024};
     uint32_t low_wm_percent{50};
     uint32_t high_wm_percent{85};
     bool backpressured{false};
@@ -532,19 +532,8 @@ void ConnectionFsm::on_close_request() {
 void ConnectionFsm::on_response_complete(bool close_after) {
     // If we are streaming or just wrote a header/payload and persistent connection is desired,
     // transition back to Connected to allow the next request. Otherwise go to Closing.
-    switch (state_) {
-        case State::WritingHeader:
-        case State::StreamingChunks:
-            transition(close_after ? State::Closing : State::Connected,
-                       close_after ? "on_response_complete:close"
-                                   : "on_response_complete:keepalive");
-            break;
-        default:
-            transition(close_after ? State::Closing : State::Connected,
-                       close_after ? "on_response_complete:close"
-                                   : "on_response_complete:keepalive");
-            break;
-    }
+    transition(close_after ? State::Closing : State::Connected,
+               close_after ? "on_response_complete:close" : "on_response_complete:keepalive");
 }
 
 const char* ConnectionFsm::to_string(State s) noexcept {
@@ -593,7 +582,8 @@ void ConnectionFsm::on_write_queued(std::size_t bytes) noexcept {
     if (bytes == 0)
         return;
     if (auto* impl = impl_.get()) {
-        const std::size_t cap = impl->write_cap_bytes ? impl->write_cap_bytes : (2 * 1024 * 1024);
+        const std::size_t cap =
+            impl->write_cap_bytes ? impl->write_cap_bytes : (2ULL * 1024 * 1024);
         const std::size_t before = impl->write_bytes;
         impl->write_bytes = std::min(before + bytes, cap);
         const std::size_t percent = cap ? (impl->write_bytes * 100) / cap : 0;
@@ -612,7 +602,8 @@ void ConnectionFsm::on_write_queued(std::size_t bytes) noexcept {
 
 void ConnectionFsm::on_write_flushed(std::size_t bytes) noexcept {
     if (auto* impl = impl_.get()) {
-        const std::size_t cap = impl->write_cap_bytes ? impl->write_cap_bytes : (2 * 1024 * 1024);
+        const std::size_t cap =
+            impl->write_cap_bytes ? impl->write_cap_bytes : (2ULL * 1024 * 1024);
         if (bytes >= impl->write_bytes)
             impl->write_bytes = 0;
         else

@@ -76,6 +76,7 @@ std::vector<uint32_t> sessionOrder(
                            : groups[std::string_view{document->sessionId}];
         group.members.push_back(index);
         if (times[index].has_value() &&
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             (!group.earliest.has_value() || *times[index] < *group.earliest)) {
             group.earliest = times[index];
         }

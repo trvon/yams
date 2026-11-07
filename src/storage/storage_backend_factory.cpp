@@ -795,12 +795,14 @@ Result<std::vector<std::byte>> FilesystemBackend::retrieve(std::string_view key)
         return Result<std::vector<std::byte>>(Error{ErrorCode::ChunkNotFound});
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     std::ifstream file(longPath(*resolved.value()), std::ios::binary | std::ios::ate);
     if (!file && isHierarchicalKey(key)) {
         // A concurrent migration may have moved the legacy file after it was resolved.
         auto retried = resolveExisting(key);
         if (retried && retried.value()) {
             file.clear();
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             file.open(longPath(*retried.value()), std::ios::binary | std::ios::ate);
         }
     }
@@ -1047,6 +1049,7 @@ Result<void> FilesystemBackend::visitKeys(std::string_view prefix, Visitor&& vis
             const auto relative = plainPath(entry.path()).lexically_relative(start).parent_path();
             for (const auto& component : relative) {
                 // Directories were validated on the way down.
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 key += *decodeDirectory(component.string());
                 key += '/';
             }

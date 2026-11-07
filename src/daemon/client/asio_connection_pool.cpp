@@ -401,6 +401,7 @@ bool socket_looks_healthy(AsioConnection::socket_t& socket) {
     }
     if (pfd.revents & POLLIN) {
         char buf{};
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): MSG_DONTWAIT never blocks
         ssize_t n = ::recv(fd, &buf, 1, MSG_PEEK | MSG_DONTWAIT);
         if (n == 0) {
             return false;

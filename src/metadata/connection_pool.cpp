@@ -334,8 +334,8 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
         std::chrono::steady_clock::time_point startedAt_;
     } waitingGuard(*this);
 
-    const size_t reservedConns =
-        static_cast<size_t>(config_.maxConnections * config_.reservedConnectionsPct);
+    const size_t reservedConns = static_cast<size_t>(static_cast<float>(config_.maxConnections) *
+                                                     config_.reservedConnectionsPct);
     const size_t effectiveMaxConnections =
         (priority == ConnectionPriority::High)
             ? config_.maxConnections

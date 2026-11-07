@@ -176,7 +176,7 @@ void RefCountCheck::render(std::ostream& os, const Result& r) {
     os << "  " << status_ok("Total references: ") << format_number(r.totalReferences) << "\n";
 
     if (r.totalBytes > 0) {
-        double mb = r.totalBytes / (1024.0 * 1024.0);
+        double mb = static_cast<double>(r.totalBytes) / (1024.0 * 1024.0);
         std::ostringstream s;
         s << std::fixed << std::setprecision(1) << mb << " MB";
         os << "  " << status_ok("Total block bytes: ") << s.str() << "\n";
@@ -186,7 +186,7 @@ void RefCountCheck::render(std::ostream& os, const Result& r) {
         os << "  " << status_warning("Unreferenced blocks: ")
            << format_number(r.unreferencedBlocks);
         if (r.unreferencedBytes > 0) {
-            double mb = r.unreferencedBytes / (1024.0 * 1024.0);
+            double mb = static_cast<double>(r.unreferencedBytes) / (1024.0 * 1024.0);
             std::ostringstream s;
             s << std::fixed << std::setprecision(1) << mb << " MB";
             os << " (" << s.str() << " reclaimable)";

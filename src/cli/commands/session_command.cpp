@@ -9,6 +9,7 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/common/fs_utils.h>
+#include <yams/config/config_helpers.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -522,8 +523,8 @@ private:
     static std::filesystem::path sessionsDir() { return yams::cli::session_store::sessions_dir(); }
     static std::filesystem::path indexPath() { return yams::cli::session_store::index_path(); }
     static std::optional<std::string> currentSession() {
-        if (const char* env = std::getenv("YAMS_SESSION_CURRENT"); env && *env) {
-            return std::string(env);
+        if (auto env = yams::config::getenv_nonempty("YAMS_SESSION_CURRENT")) {
+            return env;
         }
         return yams::cli::session_store::current_session();
     }
@@ -535,7 +536,7 @@ private:
                 std::ifstream in(p);
                 if (in.good())
                     in >> j;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
@@ -550,7 +551,7 @@ private:
                 std::ifstream in(ip);
                 if (in.good())
                     in >> idx;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
@@ -614,7 +615,7 @@ private:
             size_t selCount = svc ? svc->listPathSelectors(*cur).size()
                                   : (j.contains("selectors") ? j["selectors"].size() : 0);
             auto mat =
-                svc ? svc->listMaterialized(*cur) : std::vector<app::services::MaterializedItem>{};
+                svc ? svc->listMaterialized(cur) : std::vector<app::services::MaterializedItem>{};
             std::cout << "Selectors: " << selCount << std::endl;
             std::cout << "Materialized: " << mat.size() << std::endl;
         }
@@ -898,7 +899,7 @@ private:
         std::vector<std::string> out;
 
         if (emitMaterialized_) {
-            auto items = svc->listMaterialized(*cur);
+            auto items = svc->listMaterialized(cur);
             for (const auto& m : items) {
                 if (emitKind_ == "paths")
                     out.push_back(m.path);

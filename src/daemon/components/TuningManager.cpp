@@ -24,12 +24,12 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
-#include <yams/daemon/resource/onnx_registry_spdlog_sink.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/daemon/resource/onnx_registry_spdlog_sink.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/profiling.h>
@@ -112,6 +112,9 @@ TuningManager::TuningManager(ServiceManager* sm, StateComponent* state,
     installOnnxRegistrySpdlogSink();
 }
 
+// A failed shutdown must not return while coroutines still use this object;
+// std::terminate is the safe outcome.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 TuningManager::~TuningManager() {
     stop();
 }
@@ -1213,7 +1216,7 @@ bool TuningManager::tick_once() {
                 // Check with ResourceGovernor if scaling is allowed
                 if (TuneAdvisor::enableResourceGovernor() &&
                     !governor.canScaleUp("ipc", scaleStep)) {
-                    maxSize = ipcStats.current_size; // Don't grow
+                    maxSize = static_cast<int32_t>(ipcStats.current_size); // Don't grow
                 }
                 target = std::min(target, maxSize);
                 int32_t delta = target - static_cast<int32_t>(ipcStats.current_size);
@@ -1258,7 +1261,7 @@ bool TuningManager::tick_once() {
                 // Check with ResourceGovernor if scaling is allowed
                 if (TuneAdvisor::enableResourceGovernor() &&
                     !governor.canScaleUp("ipc_io", scaleStep)) {
-                    maxSize = ioStats.current_size; // Don't grow
+                    maxSize = static_cast<int32_t>(ioStats.current_size); // Don't grow
                 }
                 target = std::min(target, maxSize);
                 int32_t delta = target - static_cast<int32_t>(ioStats.current_size);

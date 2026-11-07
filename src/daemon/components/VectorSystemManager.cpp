@@ -92,7 +92,7 @@ void markVectorInitAttempted(StateComponent* state, bool attempted) noexcept {
 VectorSystemManager::VectorSystemManager(Dependencies deps) : deps_(std::move(deps)) {}
 
 VectorSystemManager::~VectorSystemManager() {
-    shutdown();
+    VectorSystemManager::shutdown();
 }
 
 Result<void> VectorSystemManager::initialize() {

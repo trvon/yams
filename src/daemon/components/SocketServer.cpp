@@ -101,8 +101,10 @@ bool SocketServer::mainSocketEmergencyGuardRejects() const {
 
 void SocketServer::closeAcceptedSocket(local::socket& socket) const {
     boost::system::error_code shutdown_ec;
+    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
     socket.shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
     boost::system::error_code close_ec;
+    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
     socket.close(close_ec);
 }
 
@@ -112,7 +114,7 @@ SocketServer::backoffAfterReject(std::chrono::milliseconds delay) const {
     timer.expires_after(delay);
     try {
         co_await timer.async_wait(use_awaitable);
-    } catch (const boost::system::system_error&) {
+    } catch (const boost::system::system_error&) { // NOLINT(bugprone-empty-catch)
         // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
@@ -240,7 +242,7 @@ RequestHandler::Config SocketServer::makeHandlerConfig(bool isProxy,
             handlerConfig.worker_executor = dispatcher->getWorkerExecutor();
             handlerConfig.cli_executor = dispatcher->getCliExecutor();
             handlerConfig.worker_job_signal = dispatcher->getWorkerJobSignal();
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
@@ -335,9 +337,8 @@ Result<void> SocketServer::start() {
         if (!sockPath.is_absolute()) {
             try {
                 sockPath = std::filesystem::absolute(sockPath);
-            } catch (...) {
-                // NOLINTNEXTLINE(bugprone-empty-catch): best-effort fallback keeps original path.
-                // fallback: keep original
+            } catch (...) { // NOLINT(bugprone-empty-catch)
+                // Best-effort fallback: keep the original path.
             }
         }
 
@@ -510,7 +511,7 @@ Result<void> SocketServer::start() {
                               std::chrono::steady_clock::now() - state_->stats.startTime)
                               .count();
                 state_->initDurationsMs.emplace("ipc_server", static_cast<uint64_t>(ms));
-            } catch (
+            } catch (  // NOLINT(bugprone-empty-catch)
                 ...) { // NOLINT(bugprone-empty-catch): metrics recording must not fail startup.
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
@@ -546,7 +547,7 @@ Result<void> SocketServer::stop() {
         // Request stop on all active connections via stop_source
         try {
             stop_source_.request_stop();
-        } catch (
+        } catch (  // NOLINT(bugprone-empty-catch)
             ...) { // NOLINT(bugprone-empty-catch): stop request is best-effort during shutdown.
             // Intentional best-effort path; keep the primary operation unaffected.
         }
@@ -592,12 +593,10 @@ Result<void> SocketServer::stop() {
                     if (!proxyAcceptor_)
                         return;
                     boost::system::error_code ec;
-                    // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via
-                    // ec.
+                    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                     proxyAcceptor_->cancel(ec);
                     if (proxyAcceptor_->is_open())
-                        // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports
-                        // via ec.
+                        // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                         proxyAcceptor_->close(ec);
                 });
             } catch (const std::exception& e) {
@@ -745,8 +744,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                         try {
                             boost::system::error_code rebuild_ec;
                             if (activeAcceptor)
-                                // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload
-                                // reports via ec.
+                                // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                                 activeAcceptor->close(rebuild_ec);
                             std::filesystem::path rebuildPath;
                             if (isProxy) {
@@ -813,7 +811,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                     timer.expires_after(backoff_ms);
                     try {
                         co_await timer.async_wait(use_awaitable);
-                    } catch (
+                    } catch (                                 // NOLINT(bugprone-empty-catch)
                         const boost::system::system_error&) { // NOLINT(bugprone-empty-catch): timer
                                                               // cancellation is expected.
                         // Intentional best-effort path; keep the primary operation unaffected.
@@ -1086,13 +1084,11 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                                          conn_token, age_s, lifetime.count());
                             if (sock && sock->is_open()) {
                                 boost::system::error_code shutdown_ec;
-                                // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload
-                                // reports via ec.
+                                // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                                 sock->shutdown(boost::asio::socket_base::shutdown_both,
                                                shutdown_ec);
                                 boost::system::error_code cancel_ec;
-                                // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload
-                                // reports via ec.
+                                // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                                 sock->cancel(cancel_ec);
                             }
                             boost::asio::post(completion_exec,
@@ -1337,8 +1333,7 @@ std::size_t SocketServer::close_sockets_on_executor(
                     // shutdown() wakes pending I/O without touching Asio's reactor cancel path;
                     // cancel() has hit a null descriptor_state under UBSAN during teardown.
                     boost::system::error_code shutdown_ec;
-                    // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via
-                    // ec.
+                    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                     sock->shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
                 }
             });

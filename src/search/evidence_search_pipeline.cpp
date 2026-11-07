@@ -218,8 +218,10 @@ EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
         }
         if (evidence.topology.has_value()) {
             const double confidence =
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 std::clamp(static_cast<double>(evidence.topology->confidence), 0.0, 1.0);
             const double adjustment =
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 std::clamp(static_cast<double>(evidence.topology->scoreAdjustment), -1.0, 1.0);
             const double topologyContribution = confidence * adjustment;
             result.score += topologyContribution;

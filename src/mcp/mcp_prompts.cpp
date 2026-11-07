@@ -217,7 +217,7 @@ MessageResult MCPServer::handlePromptGet(const nlohmann::json& id, const std::st
                 std::stringstream buf;
                 buf << in.rdbuf();
                 return makeResponse({assistantMsg(buf.str())});
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // fall through
             }
         }
@@ -344,7 +344,7 @@ json yams::mcp::MCPServer::listPrompts() {
                 builtins.push_back(std::move(t));
                 seen.insert(name);
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // best effort
         }
     }

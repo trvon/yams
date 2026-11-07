@@ -164,11 +164,13 @@ std::optional<yams::metadata::SearchResults> makeDirectSimeonLexicalResults(
         }
 
         yams::metadata::SearchResult row;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         row.document = *docResult.value();
         row.score = -static_cast<double>(candidate.score);
 
         auto contentResult = metadataRepo->getContent(candidate.document_id);
         if (contentResult && contentResult.value()) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             const auto& text = contentResult.value()->contentText;
             constexpr size_t kSnippetChars = 240;
             row.snippet = text.substr(0, std::min(kSnippetChars, text.size()));

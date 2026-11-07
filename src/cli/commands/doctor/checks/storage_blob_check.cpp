@@ -131,7 +131,7 @@ void StorageBlobCheck::render(std::ostream& os, const Result& r) {
 
     os << "  " << status_ok("Storage objects: ") << format_number(r.storageObjects) << " objects";
     if (r.storageBytes > 0) {
-        double mb = r.storageBytes / (1024.0 * 1024.0);
+        double mb = static_cast<double>(r.storageBytes) / (1024.0 * 1024.0);
         std::ostringstream s;
         s << std::fixed << std::setprecision(1) << mb << " MB";
         os << " (" << s.str() << ")";

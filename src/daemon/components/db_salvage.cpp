@@ -255,6 +255,9 @@ Result<void> runIntegrityCheck(sqlite3* db, std::vector<std::string>& diagnostic
         if (rowCount >= 32)
             break;
     }
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+        diagnostics.push_back(std::string("integrity_check step failed: ") + sqlite3_errmsg(db));
+    }
     sqlite3_finalize(stmt);
     return {};
 }

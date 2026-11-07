@@ -795,7 +795,8 @@ public:
                 const auto& bytes = chunkData.value();
                 const std::size_t remaining = maxBytes - reconstructed.size();
                 const std::size_t take = std::min<std::size_t>(bytes.size(), remaining);
-                reconstructed.insert(reconstructed.end(), bytes.begin(), bytes.begin() + take);
+                reconstructed.insert(reconstructed.end(), bytes.begin(),
+                                     bytes.begin() + static_cast<std::ptrdiff_t>(take));
             }
 
             updateStats(0, 0, reconstructed.size(), 0, 0, 1, 0);

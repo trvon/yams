@@ -68,6 +68,7 @@ void PluginCheck::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
 
     void* handle = dlopen(target.string().c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
         const char* dlErr = dlerror();
         os << "  [FAIL] dlopen: " << (dlErr ? dlErr : "unknown") << "\n";
         return;
@@ -91,8 +92,10 @@ void PluginCheck::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
     std::string iface = cfg.ifaceId.empty() ? std::string("model_provider_v1") : cfg.ifaceId;
     uint32_t ivers = (cfg.ifaceVersion == 0 ? 1u : cfg.ifaceVersion);
     using GetIfaceFn = int (*)(const char*, uint32_t, void**);
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
     dlerror();
     auto get_iface = reinterpret_cast<GetIfaceFn>(dlsym(handle, "yams_plugin_get_interface"));
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
     const char* dlerr = dlerror();
     if (dlerr || !get_iface) {
         os << "  Interface: [SKIP] get_interface symbol not found\n";

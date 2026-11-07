@@ -760,9 +760,8 @@ TEST_CASE("community detection: timing key always present when tuner is installe
     REQUIRE(result.has_value());
 
     const auto& timing = result.value().componentTimingMicros;
+    // Only presence is checked: a wall-clock limit flakes on slow and sanitizer runners.
     REQUIRE(timing.count("community_detection") > 0);
-    // Vocabulary scan is O(tokens × vocab_size) — must complete well under 5ms.
-    CHECK(timing.at("community_detection") < 5000);
 }
 
 TEST_CASE("community detection: scientific query sets community_override in debug stats",

@@ -1377,6 +1377,8 @@ private:
     // Default to using daemon-reported physical sizes only; do not local-scan unless opted in
     bool noPhysical_ = true;
 
+    // One per command; grouped for reading.
+    // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
     struct StatusInfo {
         // Storage
         bool storageHealthy = false;
@@ -1544,7 +1546,8 @@ private:
                         info.workerQueued = itQ->second;
                     if (info.workerThreads > 0)
                         info.workerUtilPct =
-                            static_cast<uint64_t>((100.0 * info.workerActive) / info.workerThreads);
+                            static_cast<uint64_t>((100.0 * static_cast<double>(info.workerActive)) /
+                                                  static_cast<double>(info.workerThreads));
                     auto itWatch = s.requestCounts.find("watch_enabled");
                     if (itWatch != s.requestCounts.end()) {
                         info.watchKnown = true;

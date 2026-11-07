@@ -42,14 +42,14 @@ ClientTransportMode resolve_transport_mode(const ClientConfig& config) {
 
     bool autoProbe = false;
 
-    if (const char* env = std::getenv("YAMS_EMBEDDED"); env && *env) {
-        if (is_true(env)) {
+    if (const auto env = yams::config::getenv_nonempty("YAMS_EMBEDDED")) {
+        if (is_true(env->c_str())) {
             return ClientTransportMode::InProcess;
         }
-        if (is_false(env)) {
+        if (is_false(env->c_str())) {
             return ClientTransportMode::Socket;
         }
-        if (is_auto(env)) {
+        if (is_auto(env->c_str())) {
             autoProbe = true;
         }
     }
@@ -71,7 +71,7 @@ ClientTransportMode resolve_transport_mode(const ClientConfig& config) {
         }
     }
 
-    if (const char* inDaemon = std::getenv("YAMS_IN_DAEMON"); inDaemon && *inDaemon) {
+    if (yams::config::getenv_nonempty("YAMS_IN_DAEMON")) {
         return ClientTransportMode::Socket;
     }
 

@@ -82,7 +82,7 @@ static std::vector<std::string> parseInterfacesFromManifest(const std::string& m
                 }
             }
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     return out;
 }
@@ -93,7 +93,7 @@ AbiPluginLoader::HandleInfo::~HandleInfo() {
         if (shutdown) {
             try {
                 shutdown();
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
         dlclose(handle);
@@ -126,7 +126,7 @@ std::vector<std::filesystem::path> AbiPluginLoader::trustList() const {
                 }
             }
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     return std::vector<std::filesystem::path>(trusted.begin(), trusted.end());
 }
@@ -187,7 +187,7 @@ AbiPluginLoader::scanTarget(const std::filesystem::path& file) const {
         sr.name = stem;
         sr.version = "";
         sr.abiVersion = 0;
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     return Result<ScanResult>(std::move(sr));
 }
@@ -227,7 +227,7 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
         bool looks_like_yams = false;
         try {
             looks_like_yams = (fname.rfind("libyams_", 0) == 0) || (fname.rfind("yams_", 0) == 0);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         if (!looks_like_yams) {
             if (namePolicy == NamePolicy::Spec && !isBundledRuntimeDependency(fname)) {
@@ -246,7 +246,7 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
                     return;
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
 #endif
 
@@ -325,6 +325,7 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
 
     void* handle = dlopen(canon.string().c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
         const char* err = dlerror();
         std::string msg = std::string("dlopen failed: ") + (err ? err : "unknown");
         recordSkip(msg);
@@ -334,8 +335,10 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
     void* host_ctx = nullptr;
     using init2_t = int (*)(const char*, const void*);
     using init1_t = int (*)(const char*);
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
     dlerror(); // clear
     auto init2 = reinterpret_cast<init2_t>(dlsym(handle, "yams_plugin_init"));
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
     const char* init_err = dlerror();
     if (!init_err && init2) {
         // Build a minimal host context for the plugin
@@ -353,8 +356,10 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
         }
     } else {
         // Fallback to legacy one-argument init if present
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
         dlerror(); // clear again
         auto init1 = reinterpret_cast<init1_t>(dlsym(handle, "yams_plugin_init"));
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
         const char* init1_err = dlerror();
         if (!init1_err && init1) {
             int rc = init1(configJson.c_str());
@@ -374,9 +379,11 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
     // Attempt to fetch manifest JSON and derive metadata
     try {
         using GetManifestFn = const char* (*)();
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
         dlerror();
         auto get_manifest =
             reinterpret_cast<GetManifestFn>(dlsym(handle, "yams_plugin_get_manifest_json"));
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
         const char* dlerr = dlerror();
         if (!dlerr && get_manifest) {
             const char* mj = get_manifest();
@@ -396,11 +403,11 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
                     if (std::regex_search(hi->info.manifestJson, m, verRe)) {
                         hi->info.version = m[1].str();
                     }
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
             }
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     if (declaresRemovedSymbolExtractor(hi->info.interfaces)) {
         // A stale install artifact, not an error: say once per process which file to delete.
@@ -458,7 +465,7 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
             dlclose(handle);
             return Result<ScanResult>(existingHandle->info);
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 #endif
 
@@ -505,8 +512,10 @@ Result<std::string> AbiPluginLoader::health(const std::string& name) const {
     }
     void* handle = handleInfo->handle;
     using HealthFn = int (*)(char**);
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
     dlerror();
     auto get_health = reinterpret_cast<HealthFn>(dlsym(handle, "yams_plugin_get_health_json"));
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
     const char* dlerr = dlerror();
     if (!get_health || dlerr) {
         return Error{ErrorCode::NotImplemented, "Health endpoint not available"};
@@ -694,8 +703,10 @@ Result<void*> AbiPluginLoader::getInterface(const std::string& name, const std::
     }
     void* handle = handleInfo->handle;
     using GetIfaceFn = int (*)(const char*, uint32_t, void**);
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
     dlerror();
     auto get_iface = reinterpret_cast<GetIfaceFn>(dlsym(handle, "yams_plugin_get_interface"));
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
     const char* dlerr = dlerror();
     if (!get_iface || dlerr) {
         return Error{ErrorCode::InvalidArgument, "ABI interface function not found"};

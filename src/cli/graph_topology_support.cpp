@@ -150,6 +150,7 @@ std::string GraphTopologySupport::resolveDocumentPathByHash(const std::string& h
         return {};
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     auto filePath = docRes.value()->filePath;
     documentPathByHashCache_.emplace(hash, filePath);
     return filePath;

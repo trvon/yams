@@ -126,6 +126,7 @@ json MCPServer::readResource(const std::string& uri) {
             if (!st.value().has_value()) {
                 return makeJsonResourceResult(uri, json{{"error", "status unavailable"}});
             }
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             return makeJsonResourceResult(uri, daemonStatusToJson(*st.value()));
         } catch (...) {
             return makeJsonResourceResult(uri, json{{"error", "status exception"}});

@@ -330,6 +330,7 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
             if (diagnostics) {
                 mergeVectorSearchDiagnostics(*diagnostics, sample);
             }
+            params.diagnostics = nullptr; // `sample` ends with this call
             return records;
         };
         auto vectorRecords = search();

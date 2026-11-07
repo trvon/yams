@@ -27,7 +27,7 @@ std::string normalizeSlashes(const std::string& path) {
                 result = norm.generic_string();
             }
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // Fall back to slash normalized string if lexically_normal/canon fails (e.g., on non-UTF8).
     }
     return result;

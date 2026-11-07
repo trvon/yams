@@ -1252,7 +1252,7 @@ private:
         if (auto it = searchStats.find("result_window_truncated"); it != searchStats.end()) {
             try {
                 windowTruncated = std::stoull(it->second);
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
         if (windowTruncated > 0) {

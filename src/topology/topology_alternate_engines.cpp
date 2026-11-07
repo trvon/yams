@@ -227,8 +227,9 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                                          : 0.0;
         cluster.densityScore =
             possibleEdges > 0.0 ? static_cast<double>(internalEdgeCount) / possibleEdges : 0.0;
-        cluster.bridgeMass =
-            members.empty() ? 0.0 : static_cast<double>(bridgeCount) / members.size();
+        cluster.bridgeMass = members.empty() ? 0.0
+                                             : static_cast<double>(bridgeCount) /
+                                                   static_cast<double>(members.size());
         cluster.protectedPairCount = protectedPairCount;
         cluster.preservedProtectedPairCount = preservedProtectedPairCount;
         cluster.medoid = ClusterRepresentative{.clusterId = clusterId,

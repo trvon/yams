@@ -9,13 +9,16 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <fstream>
+#include <iomanip>
 #include <map>
 #include <optional>
 #include <ranges>
 #include <shared_mutex>
 #include <sstream>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -25,6 +28,19 @@
 #include <yams/core/thread_name.h>
 
 namespace {
+
+// Thread-safe replacement for std::localtime + std::put_time.
+std::string formatLocalTime(std::time_t t, const char* format) {
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&tm, format);
+    return out.str();
+}
 
 bool isCompressedWalLog(const std::filesystem::path& path) {
     return path.extension() == ".zst" && path.stem().extension() == ".log";
@@ -49,7 +65,7 @@ bool isEmptyWalSegment(const std::filesystem::path& path) {
         return true;
     }
     std::ifstream in(path, std::ios::binary);
-    std::array<char, 64 * 1024> buffer{};
+    std::array<char, 64ULL * 1024> buffer{};
     std::uintmax_t remaining = size;
     while (remaining > 0) {
         const auto count =
@@ -313,7 +329,7 @@ struct WALManager::Impl {
         auto timeT = std::chrono::system_clock::to_time_t(timestamp);
 
         std::stringstream filename;
-        filename << "wal_" << std::put_time(std::localtime(&timeT), "%Y%m%d_%H%M%S") << "_"
+        filename << "wal_" << formatLocalTime(timeT, "%Y%m%d_%H%M%S") << "_"
                  << sequenceNumber.load() << ".log";
 
         currentLogPath = config.walDirectory / filename.str();
@@ -569,7 +585,7 @@ Result<void> WALManager::initialize() {
         try {
             uint64_t seq = std::stoull(stem.substr(lastUnderscore + 1));
             maxSeq = std::max(maxSeq, seq);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Ignore parsing errors for unexpected filenames
         }
     }

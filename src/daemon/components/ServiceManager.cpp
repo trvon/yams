@@ -800,7 +800,7 @@ CheckpointManager* ServiceManager::getCheckpointManager() const noexcept {
 }
 
 ServiceManager::~ServiceManager() {
-    shutdown();
+    ServiceManager::shutdown();
     if (ingestService_) {
         try {
             ingestService_->stop();
@@ -1052,7 +1052,7 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
         if (barrierPromise) {
             try {
                 barrierPromise->set_value();
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
         self->serviceFsm_.dispatch(InitializationFailedEvent{error.what()});
@@ -1062,7 +1062,7 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
         if (barrierPromise) {
             try {
                 barrierPromise->set_value();
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
         self->serviceFsm_.dispatch(
