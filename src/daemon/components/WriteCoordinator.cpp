@@ -187,9 +187,8 @@ void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
     }
     if (rejectedForShutdown) {
         // `batch` is moved only on the enqueue branch, which leaves rejectedForShutdown false.
-        // NOLINTNEXTLINE(bugprone-use-after-move)
         spdlog::warn("[WriteCoordinator] Dropping batch from '{}' after shutdown requested",
-                     batch->source);
+                     batch->source); // NOLINT(bugprone-use-after-move)
         failEmbeddingAcknowledgements(
             *batch, Error{ErrorCode::SystemShutdown, "WriteCoordinator is shutting down"});
         return;

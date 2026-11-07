@@ -72,8 +72,8 @@ src/app/services/document_service.cpp:1254:portability/env-read # reviewed raw e
 src/app/services/search_service.cpp:514:portability/env-read # reviewed raw environment read
 src/benchmarks/internal_event_bus_benchmark.cpp:15:portability/env-read # reviewed raw environment read
 src/cli/commands/add_command.cpp:267:portability/env-read # reviewed raw environment read
-src/cli/commands/search_command.cpp:1090:portability/env-read # reviewed raw environment read
-src/cli/commands/search_command.cpp:1098:portability/env-read # reviewed raw environment read
+src/cli/commands/search_command.cpp:1091:portability/env-read # reviewed raw environment read
+src/cli/commands/search_command.cpp:1099:portability/env-read # reviewed raw environment read
 src/cli/commands/update_command.cpp:512:portability/env-read # reviewed raw environment read
 src/cli/hot_cold_utils.h:13:portability/env-read # reviewed raw environment read
 src/daemon/components/DaemonMetrics.cpp:173:portability/env-read # reviewed raw environment read

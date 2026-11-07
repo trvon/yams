@@ -616,7 +616,6 @@ public:
         auto searchExecutionContext =
             buildSearchExecutionContext(ctx_, normalizedReq, normalizedReq.query);
         // Only trivially copyable fields (counters, flags, freshness) are read after this move.
-        // NOLINTNEXTLINE(bugprone-use-after-move)
         search::SearchExecutionContextGuard searchExecutionContextGuard(
             std::move(searchExecutionContext));
         (void)searchExecutionContextGuard;
@@ -873,6 +872,7 @@ public:
             auto resp = std::move(result).value();
             const bool metadataOnlyResult = resp.type == "metadata";
             resp.searchStats["search_active_requests"] =
+                // NOLINTNEXTLINE(bugprone-use-after-move): see the guard above
                 std::to_string(searchExecutionContext.activeRequests);
             resp.searchStats["search_queued_requests"] =
                 std::to_string(searchExecutionContext.queuedRequests);

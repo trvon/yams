@@ -276,7 +276,8 @@ private:
         if (auto it = resp.searchStats.find("lexical_hits"); it != resp.searchStats.end()) {
             try {
                 ctx.lexicalHits = std::stoll(it->second);
-            } catch (const std::exception&) {
+            } catch (const std::exception&) { // NOLINT(bugprone-empty-catch)
+                // A malformed count leaves lexicalHits unset.
             }
         }
         return ctx;
