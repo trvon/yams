@@ -94,6 +94,8 @@ std::string topologySignalKindName(BenchmarkTopologySignalKind kind) {
 
 namespace {
 
+// Linear gain, as in trec_eval ndcg_cut (and so pytrec_eval/BEIR): "Gain values are the
+// relevance values in the qrels file." Not the 2^rel - 1 gain of Burges et al.
 double computeDCG(const std::vector<int>& grades, int k) {
     double dcg = 0.0;
     for (int i = 0; i < std::min(k, static_cast<int>(grades.size())); ++i) {

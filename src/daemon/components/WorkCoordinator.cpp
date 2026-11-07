@@ -159,7 +159,11 @@ WorkCoordinator::~WorkCoordinator() {
         }
         try {
             stop();
-        } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
+        } catch (...) {
+            // A destructor must not throw. stop() may have thrown before releasing the work
+            // guard, so stop the context here or the join below would wait forever.
+            ioContext_->stop();
+            workGuard_.reset();
         }
 
         // Ensure all worker threads are joined before destruction.
