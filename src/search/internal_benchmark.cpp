@@ -644,7 +644,7 @@ BenchmarkComparison InternalBenchmark::compare(const BenchmarkResults& baseline,
     BenchmarkComparison cmp;
     cmp.mrrDelta = current.mrr - baseline.mrr;
     cmp.recallDelta = current.recallAtK - baseline.recallAtK;
-    cmp.latencyDelta = current.latency.meanMs - baseline.latency.meanMs;
+    cmp.latencyDelta = static_cast<float>(current.latency.meanMs - baseline.latency.meanMs);
 
     // Determine if regression or improvement
     cmp.isRegression = cmp.mrrDelta < -regressionThreshold;

@@ -161,7 +161,7 @@ struct WALFile::Impl {
             return Result<void>(ErrorCode::Unknown);
         }
 #else
-        if (ftruncate(fd, newSize) < 0) {
+        if (ftruncate(fd, static_cast<off_t>(newSize)) < 0) {
             return Result<void>(ErrorCode::Unknown);
         }
 #endif
@@ -282,7 +282,7 @@ Result<void> WALFile::close() {
 #ifdef _WIN32
             _chsize_s(pImpl->fd, static_cast<__int64>(pImpl->writePos));
 #else
-            ftruncate(pImpl->fd, pImpl->writePos);
+            ftruncate(pImpl->fd, static_cast<off_t>(pImpl->writePos));
 #endif
         }
 

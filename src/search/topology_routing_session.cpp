@@ -153,7 +153,8 @@ selectTopologyRoutesForNarrowing(const std::vector<yams::topology::ClusterRoute>
         }
     }
 
-    selection.routes.assign(routes.begin(), routes.begin() + selectedCount);
+    selection.routes.assign(routes.begin(),
+                            routes.begin() + static_cast<std::ptrdiff_t>(selectedCount));
     if (selectedCount < routes.size()) {
         selection.boundaryScoreMargin = static_cast<float>(routes[selectedCount - 1].routeScore -
                                                            routes[selectedCount].routeScore);

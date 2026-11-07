@@ -65,7 +65,8 @@ bool shouldVacuumSqlite(std::uint64_t databaseBytes, std::uint64_t pageCount,
     const auto logicalBytes = pageCount * pageSize;
     const auto reclaimableTailBytes =
         databaseBytes > logicalBytes ? databaseBytes - logicalBytes : 0;
-    const auto reclaimablePageRatio = static_cast<double>(freePageCount) / pageCount;
+    const auto reclaimablePageRatio =
+        static_cast<double>(freePageCount) / static_cast<double>(pageCount);
     const auto reclaimableTailRatio =
         static_cast<double>(reclaimableTailBytes) / static_cast<double>(databaseBytes);
     return (reclaimablePageBytes >= policy.minReclaimableBytes &&

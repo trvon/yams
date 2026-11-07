@@ -3157,7 +3157,8 @@ private:
         sqlite3_bind_text(stmt_insert_, 2, record.document_hash.c_str(), -1, SQLITE_TRANSIENT);
 
         sqlite3_bind_blob(stmt_insert_, 3, record.embedding.data(),
-                          record.embedding.size() * sizeof(float), SQLITE_TRANSIENT);
+                          static_cast<int>(record.embedding.size() * sizeof(float)),
+                          SQLITE_TRANSIENT);
 
         size_t effective_dim =
             record.embedding_dim > 0 ? record.embedding_dim : record.embedding.size();
@@ -4338,7 +4339,8 @@ private:
         };
         const auto selectionStart = std::chrono::steady_clock::now();
         if (scores.size() > approxK) {
-            std::nth_element(scores.begin(), scores.begin() + approxK, scores.end(), cmp);
+            std::nth_element(scores.begin(), scores.begin() + static_cast<std::ptrdiff_t>(approxK),
+                             scores.end(), cmp);
             scores.resize(approxK);
         }
         std::sort(scores.begin(), scores.end(), cmp);

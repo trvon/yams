@@ -1580,7 +1580,7 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
         }
     } else {
         spdlog::debug("[PostIngestQueue] KG batch submitted {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
-                      jobs.size(), ms, ms / jobs.size());
+                      jobs.size(), ms, ms / static_cast<double>(jobs.size()));
     }
 }
 

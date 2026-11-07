@@ -641,7 +641,7 @@ std::vector<std::string> getExtensionsForFormat(ArchiveFormat format) {
 std::optional<double> estimateCompressionRatio(size_t compressedSize, size_t uncompressedSize) {
     if (uncompressedSize == 0)
         return std::nullopt;
-    return static_cast<double>(compressedSize) / uncompressedSize;
+    return static_cast<double>(compressedSize) / static_cast<double>(uncompressedSize);
 }
 
 bool isMetadataComplete(const ArchiveMetadata& metadata) {

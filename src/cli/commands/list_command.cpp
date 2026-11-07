@@ -391,7 +391,7 @@ public:
                     doc.info.filePath = e.path;
                     doc.info.sha256Hash = e.hash;
                     doc.info.fileExtension = e.extension;
-                    doc.info.fileSize = e.size;
+                    doc.info.fileSize = static_cast<int64_t>(e.size);
                     doc.info.mimeType = e.mimeType;
 
                     // Convert timestamps (seconds precision)
@@ -965,7 +965,7 @@ private:
                 doc.info.filePath = docEntry.path;
                 doc.info.sha256Hash = docEntry.hash;
                 doc.info.fileExtension = docEntry.extension;
-                doc.info.fileSize = docEntry.size;
+                doc.info.fileSize = static_cast<int64_t>(docEntry.size);
                 doc.info.mimeType = docEntry.mimeType;
 
                 // Convert timestamps (seconds precision)

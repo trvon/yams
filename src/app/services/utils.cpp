@@ -313,7 +313,7 @@ std::string createSnippet(const std::string& content, size_t maxLength, bool pre
     size_t cut = maxLength;
     if (preserveWordBoundary) {
         // Try to find the last space within the last 30% of the window
-        size_t windowStart = static_cast<size_t>(maxLength * 0.7);
+        size_t windowStart = static_cast<size_t>(static_cast<double>(maxLength) * 0.7);
         size_t pos = cleaned.rfind(' ', maxLength);
         if (pos != std::string::npos && pos >= windowStart) {
             cut = pos;

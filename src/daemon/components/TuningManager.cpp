@@ -1216,7 +1216,7 @@ bool TuningManager::tick_once() {
                 // Check with ResourceGovernor if scaling is allowed
                 if (TuneAdvisor::enableResourceGovernor() &&
                     !governor.canScaleUp("ipc", scaleStep)) {
-                    maxSize = ipcStats.current_size; // Don't grow
+                    maxSize = static_cast<int32_t>(ipcStats.current_size); // Don't grow
                 }
                 target = std::min(target, maxSize);
                 int32_t delta = target - static_cast<int32_t>(ipcStats.current_size);
@@ -1261,7 +1261,7 @@ bool TuningManager::tick_once() {
                 // Check with ResourceGovernor if scaling is allowed
                 if (TuneAdvisor::enableResourceGovernor() &&
                     !governor.canScaleUp("ipc_io", scaleStep)) {
-                    maxSize = ioStats.current_size; // Don't grow
+                    maxSize = static_cast<int32_t>(ioStats.current_size); // Don't grow
                 }
                 target = std::min(target, maxSize);
                 int32_t delta = target - static_cast<int32_t>(ioStats.current_size);

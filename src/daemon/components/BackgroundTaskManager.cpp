@@ -486,8 +486,10 @@ void BackgroundTaskManager::launchOrphanScanTask() {
                                     for (size_t i = 0; i < orphanIds.size(); i += BATCH_SIZE) {
                                         size_t batchEnd =
                                             std::min(i + BATCH_SIZE, orphanIds.size());
-                                        std::vector<int64_t> batch(orphanIds.begin() + i,
-                                                                   orphanIds.begin() + batchEnd);
+                                        std::vector<int64_t> batch(
+                                            orphanIds.begin() + static_cast<std::ptrdiff_t>(i),
+                                            orphanIds.begin() +
+                                                static_cast<std::ptrdiff_t>(batchEnd));
 
                                         Bus::Fts5Job orphanJob;
                                         orphanJob.ids = batch;

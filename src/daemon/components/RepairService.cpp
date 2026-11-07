@@ -3720,7 +3720,8 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         }
 
         const std::size_t end = std::min(i + batchSize, hashes.size());
-        std::vector<std::string> batch(hashes.begin() + i, hashes.begin() + end);
+        std::vector<std::string> batch(hashes.begin() + static_cast<std::ptrdiff_t>(i),
+                                       hashes.begin() + static_cast<std::ptrdiff_t>(end));
         const std::size_t batchIndex = i / batchSize;
 
         submitRepairStatusUpdate(ctx_, meta, batch, metadata::RepairStatus::Processing,

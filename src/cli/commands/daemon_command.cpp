@@ -1439,10 +1439,11 @@ private:
                                     itT != s.requestCounts.end() ? itT->second : 0;
                                 std::size_t active = itA != s.requestCounts.end() ? itA->second : 0;
                                 std::size_t queued = itQ != s.requestCounts.end() ? itQ->second : 0;
-                                std::size_t util =
-                                    (threads > 0)
-                                        ? static_cast<std::size_t>((100.0 * active) / threads)
-                                        : 0;
+                                std::size_t util = (threads > 0)
+                                                       ? static_cast<std::size_t>(
+                                                             (100.0 * static_cast<double>(active)) /
+                                                             static_cast<double>(threads))
+                                                       : 0;
                                 std::cout << "  Worker Pool:  threads=" << threads
                                           << ", active=" << active << ", queued=" << queued
                                           << ", util=" << util << "%\n";

@@ -37,7 +37,7 @@ std::vector<ui::Row> renderPipelineStages(const StageInfo* stages, size_t count)
             if (st.dropped > 0)
                 val << " \xc2\xb7 " << st.dropped << " dropped";
         } else {
-            double frac = static_cast<double>(st.inflight) / st.limit;
+            double frac = static_cast<double>(st.inflight) / static_cast<double>(st.limit);
             val << progress_bar(frac, 8, "#", "\xe2\x96\x91", Ansi::GREEN, Ansi::YELLOW, Ansi::RED,
                                 true)
                 << " " << static_cast<int>(frac * 100) << "% (" << st.inflight << "/" << st.limit

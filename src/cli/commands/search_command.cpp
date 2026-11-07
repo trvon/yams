@@ -736,7 +736,8 @@ private:
 
         // Find last space before maxLength
         size_t lastSpace = result.rfind(' ', maxLength);
-        if (lastSpace != std::string::npos && lastSpace > maxLength * 0.7) {
+        if (lastSpace != std::string::npos &&
+            static_cast<double>(lastSpace) > static_cast<double>(maxLength) * 0.7) {
             return result.substr(0, lastSpace) + "...";
         }
 

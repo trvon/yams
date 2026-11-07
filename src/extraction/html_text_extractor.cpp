@@ -152,9 +152,10 @@ std::string HtmlTextExtractor::extractTextFromHtml(const std::string& html) {
 namespace {
 // Helper for case-insensitive find
 size_t find_caseless(const std::string& haystack, const std::string& needle, size_t offset = 0) {
-    auto it = std::search(
-        haystack.begin() + offset, haystack.end(), needle.begin(), needle.end(),
-        [](unsigned char c1, unsigned char c2) { return std::tolower(c1) == std::tolower(c2); });
+    auto it = std::search(haystack.begin() + static_cast<std::ptrdiff_t>(offset), haystack.end(),
+                          needle.begin(), needle.end(), [](unsigned char c1, unsigned char c2) {
+                              return std::tolower(c1) == std::tolower(c2);
+                          });
     if (it == haystack.end()) {
         return std::string::npos;
     }

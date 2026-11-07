@@ -551,7 +551,8 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
                 }
 
                 const auto& data = contentResult.value();
-                outFile.write(reinterpret_cast<const char*>(data.data()), data.size());
+                outFile.write(reinterpret_cast<const char*>(data.data()),
+                              static_cast<std::streamsize>(data.size()));
                 outFile.close();
 
                 response.restoredPaths.push_back(fullOutputPath.string());

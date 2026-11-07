@@ -68,8 +68,12 @@ std::vector<std::vector<float>> generateEmbeddingsAdaptiveSplit(
         }
 
         const size_t mid = batch.size() / 2;
-        auto left = run(std::vector<std::string>(batch.begin(), batch.begin() + mid), depth - 1);
-        auto right = run(std::vector<std::string>(batch.begin() + mid, batch.end()), depth - 1);
+        auto left = run(std::vector<std::string>(batch.begin(),
+                                                 batch.begin() + static_cast<std::ptrdiff_t>(mid)),
+                        depth - 1);
+        auto right = run(
+            std::vector<std::string>(batch.begin() + static_cast<std::ptrdiff_t>(mid), batch.end()),
+            depth - 1);
 
         if (left.empty() && right.empty()) {
             return {};
@@ -388,8 +392,8 @@ void EmbeddingService::triggerRepairIfNeeded() {
 
         // Extrapolate missing count if we only checked a sample
         if (checkedCount < totalDocs && missingCount > 0) {
-            float missingRate = static_cast<float>(missingCount) / checkedCount;
-            missingCount = static_cast<size_t>(missingRate * totalDocs);
+            float missingRate = static_cast<float>(missingCount) / static_cast<float>(checkedCount);
+            missingCount = static_cast<size_t>(missingRate * static_cast<float>(totalDocs));
         }
 
         if (missingCount == 0) {
@@ -527,8 +531,9 @@ void EmbeddingService::runRepair(const yams::compat::stop_token& stopToken) {
             }
 
             size_t end = std::min(i + batchSize, missingEmbeddings.size());
-            std::vector<std::string> batch(missingEmbeddings.begin() + i,
-                                           missingEmbeddings.begin() + end);
+            std::vector<std::string> batch(
+                missingEmbeddings.begin() + static_cast<std::ptrdiff_t>(i),
+                missingEmbeddings.begin() + static_cast<std::ptrdiff_t>(end));
 
             auto result = generateEmbeddingsInternal(batch, false);
             if (!result) {

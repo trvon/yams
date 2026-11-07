@@ -243,7 +243,7 @@ size_t BinaryContentHandler::calculateEntropy(std::span<const std::byte> data) c
 
     for (size_t freq : frequencies) {
         if (freq > 0) {
-            double probability = freq / dataSize;
+            double probability = static_cast<double>(freq) / dataSize;
             entropy -= probability * std::log2(probability);
         }
     }

@@ -599,7 +599,7 @@ bool isLikelyNaturalLanguageQuery(std::string_view query) {
             return false;
         }
         tokenCount++;
-        totalLen += token.size();
+        totalLen += static_cast<double>(token.size());
         int alphaCount = 0;
         for (unsigned char c : token) {
             if (isLikelyUtf8LetterByte(c)) {
