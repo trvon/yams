@@ -47,8 +47,11 @@ bool isExecutorStopped(const boost::asio::strand<boost::asio::any_io_executor>& 
 } // namespace
 
 AsioConnection::~AsioConnection() {
-    alive.store(false, std::memory_order_release);
-    closeSocketOnStrand(/*cancelFirst=*/true, /*resetSocket=*/true);
+    try {
+        alive.store(false, std::memory_order_release);
+        closeSocketOnStrand(/*cancelFirst=*/true, /*resetSocket=*/true);
+    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
+    }
 }
 
 void AsioConnection::close() {

@@ -289,12 +289,17 @@ public:
     }
 
     void remove(std::string_view url) noexcept override {
-        auto jr = loadFile();
-        if (!jr.ok())
-            return;
-        auto& root = jr.value();
-        root.erase(std::string(url));
-        (void)writeFile(root);
+        // Best effort, like the ignored writeFile result. json::dump throws on invalid UTF-8
+        // and fs::exists on permission errors.
+        try {
+            auto jr = loadFile();
+            if (!jr.ok())
+                return;
+            auto& root = jr.value();
+            root.erase(std::string(url));
+            (void)writeFile(root);
+        } catch (...) { // NOLINT(bugprone-empty-catch)
+        }
     }
 
 private:

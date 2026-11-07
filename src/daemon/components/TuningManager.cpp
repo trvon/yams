@@ -113,7 +113,10 @@ TuningManager::TuningManager(ServiceManager* sm, StateComponent* state,
 }
 
 TuningManager::~TuningManager() {
-    stop();
+    try {
+        stop();
+    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
+    }
 }
 
 void TuningManager::start() {

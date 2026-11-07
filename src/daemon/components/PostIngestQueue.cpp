@@ -194,6 +194,8 @@ PostIngestQueue::PostIngestQueue(
     }
 }
 
+// Teardown only locks, logs and waits; a throw here means a broken mutex or allocator.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 PostIngestQueue::~PostIngestQueue() {
     stop_.store(true, std::memory_order_release);
     cancelPendingKgJobs(true, "destructor shutdown");

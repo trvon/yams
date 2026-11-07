@@ -155,6 +155,8 @@ extractExplicitPathFromArgv(int argc, char* argv[],
 }
 } // namespace
 
+// An escaping exception reaches the fatal handlers installed below.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 int main(int argc, char* argv[]) {
     // Install fatal handlers as early as possible
     setup_fatal_handlers();

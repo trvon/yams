@@ -90,7 +90,10 @@ void prewarmReadPool(const std::shared_ptr<metadata::ConnectionPool>& readPool,
 DatabaseManager::DatabaseManager(Dependencies deps) : deps_(std::move(deps)) {}
 
 DatabaseManager::~DatabaseManager() {
-    shutdown();
+    try {
+        DatabaseManager::shutdown();
+    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
+    }
 }
 
 Result<void> DatabaseManager::initialize() {

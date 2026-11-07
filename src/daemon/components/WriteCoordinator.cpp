@@ -116,7 +116,10 @@ WriteCoordinator::WriteCoordinator(boost::asio::io_context& ioc,
     : WriteCoordinator(ioc, std::move(kgStore), std::move(metadataRepo), Config{}) {}
 
 WriteCoordinator::~WriteCoordinator() {
-    shutdown();
+    try {
+        shutdown();
+    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
+    }
 }
 
 void WriteCoordinator::registerEmbeddingAcknowledgementsLocked(WriteBatch& batch) {

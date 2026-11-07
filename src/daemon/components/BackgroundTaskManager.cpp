@@ -66,10 +66,13 @@ BackgroundTaskManager::BackgroundTaskManager(Dependencies deps)
 }
 
 BackgroundTaskManager::~BackgroundTaskManager() {
-    if (running_.load(std::memory_order_acquire)) {
-        stop();
-    } else {
-        requestStopAndQuiesceTrackedCoroutines();
+    try {
+        if (running_.load(std::memory_order_acquire)) {
+            stop();
+        } else {
+            requestStopAndQuiesceTrackedCoroutines();
+        }
+    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
     }
 }
 

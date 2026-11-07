@@ -157,7 +157,10 @@ WorkCoordinator::~WorkCoordinator() {
         } catch (...) {
             // Intentional best-effort path; keep the primary operation unaffected.
         }
-        stop();
+        try {
+            stop();
+        } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
+        }
 
         // Ensure all worker threads are joined before destruction.
         // The destructor is never executed on a worker thread (the ServiceManager owns the

@@ -785,7 +785,10 @@ void DaemonMetrics::setSocketServer(const SocketServer* socketServer) {
 }
 
 DaemonMetrics::~DaemonMetrics() {
-    stopPolling();
+    try {
+        stopPolling();
+    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
+    }
 }
 
 void DaemonMetrics::startPolling() {

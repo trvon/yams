@@ -645,6 +645,8 @@ bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
     }
 }
 
+// Only allocation or mutex failures can escape; terminating on those is intended.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 void ServiceManager::applyMemorySyncWinners() noexcept {
     YAMS_ZONE_SCOPED_N("memory_sync.cycle");
     memorySyncApplyAttempts_.fetch_add(1, std::memory_order_acq_rel);

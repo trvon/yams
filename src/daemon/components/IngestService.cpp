@@ -122,7 +122,10 @@ IngestService::IngestService(ServiceManager* sm, WorkCoordinator* coordinator)
       wake_(std::make_shared<WakeState>(strand_)) {}
 
 IngestService::~IngestService() {
-    stop();
+    try {
+        stop();
+    } catch (...) { // NOLINT(bugprone-empty-catch): a destructor must not throw
+    }
 }
 
 void IngestService::notifyWakeup() {
