@@ -433,8 +433,11 @@ lint_dco() {
       [[ -n "$sha" && "$sha" != \#* ]] && exempt["$sha"]=1
     done < "$exempt_file"
   fi
+  # Release Please commits are written by the github-actions bot, which cannot sign off.
+  local bot_email='41898282+github-actions[bot]@users.noreply.github.com'
   while read -r commit; do
     [[ -n "${exempt[$commit]:-}" ]] && continue
+    [[ "$(git log -1 --format=%ae "$commit")" == "$bot_email" ]] && continue
     if ! git log -1 --format=%B "$commit" | grep -qE '^Signed-off-by: .+ <.+@.+>$'; then
       err "Missing Signed-off-by in commit $commit"
       git log -1 --format=%B "$commit" | sed 's/^/    /' >&2
