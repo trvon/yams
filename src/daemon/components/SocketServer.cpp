@@ -101,8 +101,10 @@ bool SocketServer::mainSocketEmergencyGuardRejects() const {
 
 void SocketServer::closeAcceptedSocket(local::socket& socket) const {
     boost::system::error_code shutdown_ec;
+    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
     socket.shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
     boost::system::error_code close_ec;
+    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
     socket.close(close_ec);
 }
 
@@ -592,12 +594,10 @@ Result<void> SocketServer::stop() {
                     if (!proxyAcceptor_)
                         return;
                     boost::system::error_code ec;
-                    // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via
-                    // ec.
+                    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                     proxyAcceptor_->cancel(ec);
                     if (proxyAcceptor_->is_open())
-                        // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports
-                        // via ec.
+                        // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                         proxyAcceptor_->close(ec);
                 });
             } catch (const std::exception& e) {
@@ -745,8 +745,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                         try {
                             boost::system::error_code rebuild_ec;
                             if (activeAcceptor)
-                                // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload
-                                // reports via ec.
+                                // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                                 activeAcceptor->close(rebuild_ec);
                             std::filesystem::path rebuildPath;
                             if (isProxy) {
@@ -1086,13 +1085,11 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                                          conn_token, age_s, lifetime.count());
                             if (sock && sock->is_open()) {
                                 boost::system::error_code shutdown_ec;
-                                // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload
-                                // reports via ec.
+                                // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                                 sock->shutdown(boost::asio::socket_base::shutdown_both,
                                                shutdown_ec);
                                 boost::system::error_code cancel_ec;
-                                // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload
-                                // reports via ec.
+                                // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                                 sock->cancel(cancel_ec);
                             }
                             boost::asio::post(completion_exec,
@@ -1337,8 +1334,7 @@ std::size_t SocketServer::close_sockets_on_executor(
                     // shutdown() wakes pending I/O without touching Asio's reactor cancel path;
                     // cancel() has hit a null descriptor_state under UBSAN during teardown.
                     boost::system::error_code shutdown_ec;
-                    // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via
-                    // ec.
+                    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                     sock->shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
                 }
             });

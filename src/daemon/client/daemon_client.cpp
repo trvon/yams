@@ -602,6 +602,7 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
             }
 
             boost::system::error_code close_ec;
+            // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
             (void)sock.close(close_ec);
             if (close_ec)
                 log_client_debug("Connection probe socket close reported an error");

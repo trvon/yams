@@ -498,7 +498,9 @@ public:
             return;
         }
         boost::system::error_code ignored;
+        // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
         stream->next_layer().cancel(ignored);
+        // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
         stream->next_layer().close(ignored);
     }
 
@@ -1055,7 +1057,9 @@ public:
                         return;
                     }
                     boost::system::error_code ignored;
+                    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                     acceptor->cancel(ignored);
+                    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                     acceptor->close(ignored);
                 });
             } catch (...) {
@@ -1096,7 +1100,9 @@ public:
         if (acceptor) {
             boost::system::error_code ignored;
             // The accept thread is joined, so direct teardown is now race-free.
+            // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
             acceptor->cancel(ignored);
+            // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
             acceptor->close(ignored);
         }
         for (auto& worker : sessionWorkers) {

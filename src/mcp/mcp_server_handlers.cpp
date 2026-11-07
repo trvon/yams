@@ -2015,9 +2015,11 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
         boost::asio::local::stream_protocol::socket probe(exec);
         if (!sock.empty()) {
             boost::system::error_code bec;
+            // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
             (void)probe.connect(boost::asio::local::stream_protocol::endpoint(sock.string()), bec);
             connectable = !bec;
             boost::system::error_code closeError;
+            // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
             (void)probe.close(closeError);
         }
     } catch (...) {

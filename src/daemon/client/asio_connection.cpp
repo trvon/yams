@@ -264,8 +264,7 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             alive = false;
             boost::system::error_code close_ec;
             if (socket) {
-                // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via
-                // close_ec.
+                // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                 (void)socket->close(close_ec);
             }
             if (close_ec) {
