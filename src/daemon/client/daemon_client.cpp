@@ -76,6 +76,8 @@ void log_client_debug(const char* message) noexcept {
     try {
         spdlog::debug("{}", message);
     } catch (...) {
+        // Best-effort diagnostics must not turn cleanup into termination.
+        return;
     }
 }
 
@@ -83,6 +85,8 @@ void log_client_debug(const char* message, const std::exception& e) noexcept {
     try {
         spdlog::debug("{}: {}", message, e.what());
     } catch (...) {
+        // Best-effort diagnostics must not turn cleanup into termination.
+        return;
     }
 }
 
@@ -599,7 +603,9 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
             }
 
             boost::system::error_code close_ec;
-            sock.close(close_ec);
+            (void)sock.close(close_ec);
+            if (close_ec)
+                log_client_debug("Connection probe socket close reported an error");
             co_return Result<void>();
         } catch (const std::exception& e) {
             co_return Error{ErrorCode::NetworkError, e.what()};
@@ -1029,11 +1035,6 @@ void DaemonClient::StreamingListHandler::onHeaderReceived(const Response& header
 
             items_.push_back(item);
             count_++;
-
-            // Print result immediately if progressive output is enabled
-            if (pathsOnly_) {
-                std::cout << item.path << '\n';
-            }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
         // Store error
@@ -1112,11 +1113,6 @@ bool DaemonClient::StreamingListHandler::onChunkReceived(const Response& chunkRe
 
             items_.push_back(item);
             count_++;
-
-            // Print result immediately if progressive output is enabled
-            if (pathsOnly_) {
-                std::cout << item.path << '\n';
-            }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
         // Store error
@@ -1176,9 +1172,6 @@ void DaemonClient::StreamingListHandler::onComplete() {
     // Final processing when all chunks have been received
     if (!error_ && !pathsOnly_) {
         spdlog::debug("List complete: found {} items (of {} total)", count_, totalCount_);
-    }
-    if (!error_ && pathsOnly_ && count_ == 0) {
-        std::cout << "(no results)\n";
     }
 }
 
@@ -1293,9 +1286,6 @@ void DaemonClient::StreamingGrepHandler::onHeaderReceived(const Response& header
                 cnt++;
             }
             matches_.push_back(m);
-            if (pathsOnly_) {
-                std::cout << m.file << '\n';
-            }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
         error_ = makeErrorFromResponse(*errRes);
@@ -1349,9 +1339,6 @@ bool DaemonClient::StreamingGrepHandler::onChunkReceived(const Response& chunkRe
                 cnt++;
             }
             matches_.push_back(m);
-            if (pathsOnly_) {
-                std::cout << m.file << '\n';
-            }
         }
     } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
         error_ = makeErrorFromResponse(*errRes);
@@ -1370,9 +1357,6 @@ void DaemonClient::StreamingGrepHandler::onError(const Error& error) {
 void DaemonClient::StreamingGrepHandler::onComplete() {
     if (!error_ && !pathsOnly_) {
         spdlog::debug("Grep complete: {} matches across {} files", totalMatches_, filesSearched_);
-    }
-    if (!error_ && pathsOnly_ && matches_.empty()) {
-        std::cout << "(no results)\n";
     }
 }
 
@@ -2069,10 +2053,6 @@ DaemonClient::updateDocument(const UpdateDocumentRequest& req) {
     co_return Error{ErrorCode::InvalidData, "Missing UpdateDocumentResponse in stream"};
 }
 
-std::filesystem::path DaemonClient::resolveSocketPath() {
-    return yams::daemon::socket_utils::resolve_socket_path();
-}
-
 std::filesystem::path DaemonClient::resolveSocketPathConfigFirst() {
     return yams::daemon::socket_utils::resolve_socket_path_config_first();
 }
@@ -2349,23 +2329,6 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
 CircuitBreaker::CircuitBreaker(const Config& config)
     : config_(config), lastStateChange_(std::chrono::steady_clock::now()) {}
 
-bool CircuitBreaker::shouldAllow() {
-    if (state_ == State::Closed) {
-        return true;
-    }
-
-    if (state_ == State::Open) {
-        if (shouldTransitionToHalfOpen()) {
-            transitionTo(State::HalfOpen);
-            return true;
-        }
-        return false;
-    }
-
-    // HalfOpen - allow limited requests
-    return true;
-}
-
 void CircuitBreaker::recordSuccess() {
     if (state_ == State::HalfOpen) {
         consecutiveSuccesses_++;
@@ -2398,12 +2361,6 @@ void CircuitBreaker::transitionTo(State newState) {
     consecutiveSuccesses_ = 0;
 }
 
-bool CircuitBreaker::shouldTransitionToHalfOpen() const {
-    auto now = std::chrono::steady_clock::now();
-    auto timeSinceOpen = std::chrono::duration_cast<std::chrono::seconds>(now - openedAt_);
-    return timeSinceOpen >= config_.openTimeout;
-}
-
 void DaemonClient::setStreamingEnabled(bool enabled) {
     if (pImpl) {
         pImpl->config_.enableChunkedResponses = enabled;
@@ -2412,6 +2369,11 @@ void DaemonClient::setStreamingEnabled(bool enabled) {
 
 boost::asio::awaitable<Result<DeleteResponse>> DaemonClient::remove(const DeleteRequest& req) {
     co_return co_await call<DeleteRequest>(req);
+}
+
+boost::asio::awaitable<Result<DeleteResponse>>
+DaemonClient::unlinkPath(const UnlinkPathRequest& req) {
+    co_return co_await call<UnlinkPathRequest>(req);
 }
 
 } // namespace yams::daemon

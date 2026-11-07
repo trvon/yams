@@ -98,10 +98,24 @@ struct Manifest {
 
     // Validation using ranges
     [[nodiscard]] bool isValid() const noexcept {
-        return !fileHash.empty() && fileHash.length() == HASH_STRING_SIZE && !chunks.empty() &&
-               fileSize > 0 && std::all_of(chunks.begin(), chunks.end(), [](const auto& chunk) {
-                   return chunk.isValid();
-               });
+        if (fileHash.length() != HASH_STRING_SIZE) {
+            return false;
+        }
+        // An empty file has no chunks. Older stores wrote this zero-chunk manifest for it, and
+        // rejecting it made every empty document unreadable. Size and chunks must still agree.
+        if (fileSize == 0 || chunks.empty()) {
+            return fileSize == 0 && chunks.empty();
+        }
+        // The chunks must describe exactly fileSize bytes; a manifest whose sizes do not add up
+        // would reconstruct the wrong content.
+        std::uint64_t total = 0;
+        for (const auto& chunk : chunks) {
+            if (!chunk.isValid() || total > fileSize || chunk.size > fileSize - total) {
+                return false;
+            }
+            total += chunk.size;
+        }
+        return total == fileSize;
     }
 
     // Calculate total size from chunks
@@ -109,9 +123,6 @@ struct Manifest {
         return std::accumulate(chunks.begin(), chunks.end(), uint64_t{0},
                                [](uint64_t acc, const auto& chunk) { return acc + chunk.size; });
     }
-
-    // Get chunk count
-    [[nodiscard]] size_t getChunkCount() const noexcept { return chunks.size(); }
 };
 
 // Manifest statistics
@@ -256,7 +267,6 @@ public:
 
     // Utility methods
     static std::string detectMimeType(const std::filesystem::path& path);
-    static Result<FileInfo> getFileInfo(const std::filesystem::path& path);
 
 protected:
     // Helper method for template functions to update statistics
@@ -286,26 +296,6 @@ requires std::same_as<std::ranges::range_value_t<R>, ChunkRef>
 class ManifestStream {
 public:
     explicit ManifestStream(R&& chunks) : chunks_(std::forward<R>(chunks)) {}
-
-    // Process chunks in batches for memory efficiency
-    template <typename F> void processBatches(size_t batchSize, F&& processor) {
-        // Manual chunking for C++20 compatibility
-        std::vector<typename std::ranges::range_value_t<R>> batch;
-        batch.reserve(batchSize);
-
-        for (auto&& chunk : chunks_) {
-            batch.push_back(chunk);
-            if (batch.size() == batchSize) {
-                processor(batch);
-                batch.clear();
-            }
-        }
-
-        // Process remaining batch
-        if (!batch.empty()) {
-            processor(batch);
-        }
-    }
 
 private:
     R chunks_;

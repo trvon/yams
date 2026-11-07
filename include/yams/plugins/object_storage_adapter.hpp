@@ -21,8 +21,4 @@ std::string to_json(const PutOptions& opts);
 std::string to_json(const GetOptions& opts);
 std::string to_json(const ObjectMetadata& md);
 
-// Parse minimal fields; unrecognized fields are ignored.
-PutOptions parse_put_options(const char* json);
-GetOptions parse_get_options(const char* json);
-
 } // namespace yams::plugins::adapter

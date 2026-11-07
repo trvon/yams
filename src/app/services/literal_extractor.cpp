@@ -86,18 +86,6 @@ LiteralExtractor::ExtractionResult LiteralExtractor::extract(std::string_view pa
     return result;
 }
 
-std::string LiteralExtractor::extractLongestLiteral(std::string_view pattern, bool* found) {
-    auto result = extract(pattern, false);
-    if (found) {
-        *found = !result.literals.empty();
-    }
-    return result.empty() ? std::string{} : result.longest();
-}
-
-std::vector<std::string> LiteralExtractor::extractAllLiterals(std::string_view pattern) {
-    return extract(pattern, false).literals;
-}
-
 // --- Boyer-Moore-Horspool Implementation ---
 
 BMHSearcher::BMHSearcher(std::string_view pattern, bool ignoreCase)

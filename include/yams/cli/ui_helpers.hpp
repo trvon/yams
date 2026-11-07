@@ -93,27 +93,6 @@ inline bool stdout_is_tty() {
 #endif
 }
 
-inline bool unicode_supported() {
-#if defined(_WIN32)
-    if (GetConsoleOutputCP() == 65001) {
-        return true;
-    }
-    if (std::getenv("WT_SESSION") != nullptr) {
-        return true;
-    }
-#endif
-    const char* lc = std::getenv("LC_ALL");
-    if (!lc || !*lc)
-        lc = std::getenv("LC_CTYPE");
-    if (!lc || !*lc)
-        lc = std::getenv("LANG");
-    if (!lc)
-        return false;
-    std::string_view v{lc};
-    return v.find("UTF-8") != std::string_view::npos || v.find("utf8") != std::string_view::npos ||
-           v.find("utf-8") != std::string_view::npos;
-}
-
 // Colors enabled if:
 // - NO_COLOR is not set (https://no-color.org/)
 // - stdout is a TTY
@@ -136,11 +115,6 @@ inline void set_color_mode(ColorMode mode) {
 // Convenience setter used by CLI flags (true -> ForceOn, false -> ForceOff)
 inline void set_colors_enabled_override(bool enabled) {
     color_mode() = enabled ? ColorMode::ForceOn : ColorMode::ForceOff;
-}
-
-// Clear override and return to auto mode
-inline void clear_color_override() {
-    color_mode() = ColorMode::Auto;
 }
 
 inline bool colors_enabled() {
@@ -573,26 +547,6 @@ inline std::string format_number(uint64_t value, char separator = ',') {
     return result;
 }
 
-// Helper for formatting large numbers in compact "k/M/B" notation
-inline std::string format_number_compact(uint64_t value, int precision = 1) {
-    if (value < 1000)
-        return std::to_string(value);
-
-    const char* suffixes[] = {"", "k", "M", "B", "T"};
-    double val = static_cast<double>(value);
-    int suffix_idx = 0;
-
-    while (val >= 1000.0 && suffix_idx < 4) {
-        val /= 1000.0;
-        ++suffix_idx;
-    }
-
-    std::ostringstream oss;
-    int prec = (val < 10.0) ? precision : 0;
-    oss << std::fixed << std::setprecision(prec) << val << suffixes[suffix_idx];
-    return oss.str();
-}
-
 // Helper for formatting duration in human-readable form
 inline std::string format_duration(uint64_t seconds) {
     if (seconds == 0)
@@ -725,12 +679,6 @@ private:
     std::atomic<bool> running_{false};
 };
 
-inline void clear_stdout_line(std::ostream& os = std::cout) {
-    if (stdout_is_tty()) {
-        os << "\r\033[K" << std::flush;
-    }
-}
-
 class LiveLine {
 public:
     explicit LiveLine(std::ostream& os = std::cout) : os_(os), tty_(stdout_is_tty()) {}
@@ -789,11 +737,6 @@ private:
 inline std::string bullet(std::string_view text, int indent = 0) {
     std::string prefix(indent, ' ');
     return prefix + "• " + std::string(text);
-}
-
-inline std::string numbered_item(std::string_view text, int number, int indent = 0) {
-    std::string prefix(indent, ' ');
-    return prefix + std::to_string(number) + ". " + std::string(text);
 }
 
 // Key-value pair formatter
@@ -1011,79 +954,6 @@ inline std::string progress_bar(double fraction, int width = 30, bool show_perce
     return bar;
 }
 
-// Word wrap text to fit within width
-inline std::vector<std::string> wrap_text(std::string_view text, int width = -1) {
-    if (width <= 0)
-        width = terminal_width();
-
-    std::vector<std::string> lines;
-    std::string current_line;
-    std::string current_word;
-
-    for (char ch : text) {
-        if (ch == '\n') {
-            if (!current_word.empty()) {
-                if (!current_line.empty())
-                    current_line += ' ';
-                current_line += current_word;
-                current_word.clear();
-            }
-            lines.push_back(current_line);
-            current_line.clear();
-        } else if (ch == ' ' || ch == '\t') {
-            if (!current_word.empty()) {
-                if (!current_line.empty()) {
-                    if (static_cast<int>(visible_width(current_line + ' ' + current_word)) <=
-                        width) {
-                        current_line += ' ' + current_word;
-                    } else {
-                        lines.push_back(current_line);
-                        current_line = current_word;
-                    }
-                } else {
-                    current_line = current_word;
-                }
-                current_word.clear();
-            }
-        } else {
-            current_word.push_back(ch);
-        }
-    }
-
-    // Handle remaining word
-    if (!current_word.empty()) {
-        if (!current_line.empty()) {
-            if (static_cast<int>(visible_width(current_line + ' ' + current_word)) <= width) {
-                current_line += ' ' + current_word;
-            } else {
-                lines.push_back(current_line);
-                current_line = current_word;
-            }
-        } else {
-            current_line = current_word;
-        }
-    }
-
-    if (!current_line.empty()) {
-        lines.push_back(current_line);
-    }
-
-    return lines;
-}
-
-// Center text within width
-inline std::string center_text(std::string_view text, int width = -1) {
-    if (width <= 0)
-        width = terminal_width();
-
-    int text_width = static_cast<int>(visible_width(text));
-    if (text_width >= width)
-        return std::string(text);
-
-    int padding = (width - text_width) / 2;
-    return repeat(' ', static_cast<size_t>(padding)) + std::string(text);
-}
-
 // ============================================================================
 // Severity-based status helpers
 // ============================================================================
@@ -1116,20 +986,6 @@ inline std::string severity_text(Severity sev, std::string_view text, bool with_
     return colorize(result, color);
 }
 
-// Classify a numeric value against thresholds (low = good, high = bad)
-inline Severity classify_threshold(double value, double warn_threshold, double bad_threshold) {
-    if (value >= bad_threshold)
-        return Severity::Bad;
-    if (value >= warn_threshold)
-        return Severity::Warn;
-    return Severity::Good;
-}
-
-// Classify capacity utilization (high = bad, for queues/pools)
-inline Severity classify_utilization(double fraction, double warn = 0.75, double bad = 0.9) {
-    return classify_threshold(fraction, warn, bad);
-}
-
 // ============================================================================
 // Progress bar with stats helper
 // ============================================================================
@@ -1158,27 +1014,6 @@ progress_with_stats(double fraction, int bar_width = 10,
 // ============================================================================
 // Ratio display helpers
 // ============================================================================
-
-// Format a ratio with optional unit: "3/8 active"
-inline std::string format_ratio(uint64_t current, uint64_t total, std::string_view unit = "") {
-    std::ostringstream oss;
-    oss << current << "/" << total;
-    if (!unit.empty()) {
-        oss << " " << unit;
-    }
-    return oss.str();
-}
-
-// Format a ratio with percentage: "3/8 (38%)"
-inline std::string format_ratio_pct(uint64_t current, uint64_t total) {
-    std::ostringstream oss;
-    oss << current << "/" << total;
-    if (total > 0) {
-        double pct = static_cast<double>(current) * 100.0 / static_cast<double>(total);
-        oss << " (" << static_cast<int>(pct) << "%)";
-    }
-    return oss.str();
-}
 
 // ============================================================================
 // Attribute list formatter
@@ -1292,22 +1127,6 @@ struct BatchOperationStats {
             oss << ", skipped=" << skipped.load();
         }
         return oss.str();
-    }
-
-    // Format with color coding
-    std::string summary_colored() const {
-        std::string result = colorize("ok=" + std::to_string(succeeded.load()), Ansi::GREEN);
-        if (failed > 0) {
-            result += ", " + colorize("failed=" + std::to_string(failed.load()), Ansi::RED);
-        }
-        if (transient_retries > 0) {
-            result += ", " +
-                      colorize("retries=" + std::to_string(transient_retries.load()), Ansi::YELLOW);
-        }
-        if (skipped > 0) {
-            result += ", " + colorize("skipped=" + std::to_string(skipped.load()), Ansi::DIM);
-        }
-        return result;
     }
 };
 

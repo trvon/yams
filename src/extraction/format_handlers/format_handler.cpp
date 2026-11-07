@@ -146,18 +146,4 @@ Result<std::vector<std::pair<int, int>>> parseClosedRanges(const std::string& ex
     return ranges;
 }
 
-// Built-in handler stubs wiring
-// In Phase 1, we rely on existing extractors to provide text.
-// Specific handlers (text/markdown/html/code) can be registered here when implemented.
-// For now, this function is a no-op placeholder to keep linkage and call sites stable.
-void registerBuiltinHandlers(HandlerRegistry& registry) {
-    (void)registry;
-    // Example for future implementation:
-    // registry.registerHandler(std::make_shared<TextLineRangeHandler>());
-    // registry.registerHandler(std::make_shared<HtmlBasicHandler>());
-    // #if YAMS_HAS_PDF_SUPPORT
-    // registry.registerHandler(std::make_shared<PdfMvpHandler>());
-    // #endif
-}
-
 } // namespace yams::extraction::format

@@ -3,6 +3,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/init_assets.hpp>
 #include <yams/cli/prompt_util.h>
+#include <yams/cli/static_tables.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
@@ -10,29 +11,28 @@
 #include <yams/common/string_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/config/static_embedding_table.h>
 #include <yams/core/uuid.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/dim_resolver.h>
+#include <yams/vector/embedding_generator.h>
+#include <yams/vector/simeon_embedding_backend.h>
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
 #include <fmt/format.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cctype>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
-#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 #include <openssl/evp.h>
@@ -65,6 +65,12 @@ std::string formatInitSummary(const fs::path& configPath, const fs::path& dataPa
 
 size_t resolveModelDimension(std::string_view modelName) {
     if (modelName.empty() || modelName == "simeon-default" || modelName == "simeon") {
+        // An explicitly selected table supplies its dimension; unselected artifacts
+        // do not change the built-in 1024-dim encoder or an existing vector space.
+        auto backend = vector::makeSimeonBackend(vector::EmbeddingConfig{});
+        if (backend && backend->initialize() && backend->getEmbeddingDimension() > 0) {
+            return backend->getEmbeddingDimension();
+        }
         return 1024;
     }
     for (const auto& model : init_assets::embeddingModels()) {
@@ -96,6 +102,8 @@ public:
         cmd->add_flag("--auto", autoInit_, "Run setup with defaults for headless environments");
         cmd->add_flag("--force", force_, "Overwrite existing config/keys if already initialized");
         cmd->add_flag("--no-keygen", noKeygen_, "Skip authentication key generation");
+        cmd->add_flag("--no-static-table", noStaticTable_,
+                      "Do not download the static-embedding table for semantic search");
         cmd->add_flag("--print", printConfig_,
                       "Print resulting configuration to stdout (secrets masked)");
         cmd->add_flag("--enable-plugins", enablePlugins_,
@@ -108,7 +116,7 @@ public:
             auto result = execute();
             if (!result) {
                 spdlog::error("Initialization failed: {}", result.error().message);
-                std::exit(1);
+                throw CLI::RuntimeError(1);
             }
         });
     }
@@ -187,6 +195,9 @@ public:
 
             // Ensure we use the resolved dataPath in CLI
             cli_->setDataPath(dataPath);
+            // Simeon picks up a static-embedding table under this data dir (or the install's
+            // share/yams/models/static) when sizing the vector store.
+            vector::setStaticEmbeddingDataDirHint(dataPath);
 
             // 2) Create base directories
             createDirectoryIfMissing(dataPath);
@@ -258,6 +269,13 @@ public:
             } else {
                 enableVectorDB = true;
                 selectedModel = "simeon-default";
+            }
+
+            // An explicit selection must be recorded before resolving the vector
+            // dimension. Automatic/noninteractive initialization never downloads.
+            std::optional<fs::path> selectedStaticTable;
+            if (enableVectorDB && !colbertSelected && !noStaticTable_) {
+                selectedStaticTable = ensureStaticTable(dataPath, configPath);
             }
 
             // 6a) S3 Storage Setup
@@ -332,6 +350,13 @@ public:
             auto createResult = migrator->createDefaultLatestConfig(configPath);
             if (!createResult) {
                 return createResult;
+            }
+
+            if (selectedStaticTable) {
+                const auto selected = cli::selectStaticTable(*selectedStaticTable, configPath);
+                if (!selected) {
+                    return selected.error();
+                }
             }
 
             // Update the v3 config with user choices
@@ -454,6 +479,51 @@ private:
         std::cout << formatLaterCommand(command);
     }
 
+    // Only a recorded selection or an affirmative interactive answer is consent.
+    // Package/data-dir artifacts alone never opt in; headless setup stays offline.
+    std::optional<fs::path> ensureStaticTable(const fs::path& dataPath,
+                                              const fs::path& configPath) {
+        const auto configured =
+            config::parse_config_value(configPath, "embeddings.simeon", "static_table");
+        if (!configured.empty()) {
+            if (auto found = config::findStaticEmbeddingTable(fs::path(configured), dataPath)) {
+                if (vector::loadSharedStaticEmbeddingTable(*found)) {
+                    spdlog::info("Explicit static embedding table: {}", found->string());
+                    return found;
+                }
+            }
+            spdlog::warn("Configured static table is unavailable; no substitute is selected");
+        }
+        const auto* table = cli::findStaticTable(cli::kDefaultStaticTable);
+        if (!table) {
+            return std::nullopt;
+        }
+        const auto decision = cli::staticTableInitDecision(autoInit_, nonInteractive_);
+        bool download = decision.download;
+        if (decision.prompt) {
+            std::cout << "\nThe static embedding table (" << table->size_mb
+                      << " MB) improves semantic search and reranking.\n";
+            download = prompt_yes_no("Download it now? [y/N]: ",
+                                     YesNoOptions{.defaultYes = decision.defaultYes});
+        }
+        if (!download) {
+            std::cout << "Skipping the static table. Install it later with:\n  yams model download "
+                      << table->name << "\n";
+            return std::nullopt;
+        }
+        auto out = cli::downloadStaticTable(table->name, table->url, table->sha256, dataPath, {},
+                                            /*force=*/false);
+        if (!out) {
+            spdlog::warn("Static table download failed: {}", out.error().message);
+            std::cout << "Semantic search uses the built-in hash encoder for now. Retry with:\n"
+                         "  yams model download "
+                      << table->name << "\n";
+            return std::nullopt;
+        }
+        std::cout << "Static table installed: " << out.value().string() << "\n";
+        return out.value();
+    }
+
     static void printInitSummary(const fs::path& configPath, const fs::path& dataPath) {
         std::cout << formatInitSummary(configPath, dataPath);
     }
@@ -508,8 +578,9 @@ private:
     }
 
     void maybeBootstrapProjectSession() {
-        if (const char* envSession = std::getenv("YAMS_SESSION_CURRENT"); envSession && *envSession)
+        if (config::getenv_nonempty("YAMS_SESSION_CURRENT")) {
             return;
+        }
 
         std::error_code ec;
         fs::path cwd = fs::current_path(ec);
@@ -926,8 +997,9 @@ private:
         std::string out;
         out.resize(len * 2);
         for (size_t i = 0; i < len; ++i) {
-            out[2 * i] = kHex[(data[i] >> 4) & 0xF];
-            out[2 * i + 1] = kHex[(data[i]) & 0xF];
+            const auto value = static_cast<unsigned int>(data[i]);
+            out[2 * i] = kHex[(value >> 4U) & 0xFU];
+            out[2 * i + 1] = kHex[value & 0xFU];
         }
         return out;
     }
@@ -944,8 +1016,8 @@ private:
         try {
             namespace fs = std::filesystem;
             // Determine user plugin directory: ~/.local/lib/yams/plugins
-            fs::path userPlugins = fs::path(std::getenv("HOME") ? std::getenv("HOME") : "") /
-                                   ".local" / "lib" / "yams" / "plugins";
+            fs::path userPlugins =
+                fs::path(config::getenv_copy("HOME")) / ".local" / "lib" / "yams" / "plugins";
             yams::common::ensureDirectories(userPlugins);
             spdlog::info("Plugins directory: {}", userPlugins.string());
 
@@ -1051,216 +1123,6 @@ private:
         }
     }
 
-    // Download model using the unified downloader
-    Result<void> downloadModelFiles(const EmbeddingModel& model, const fs::path& outputDir) {
-        yams::common::ensureDirectories(outputDir);
-        fs::path modelFile = outputDir / "model.onnx";
-
-        // Check if already downloaded
-        if (fs::exists(modelFile)) {
-            std::cout << "  Model already exists at: " << modelFile.string() << "\n";
-            return Result<void>{};
-        }
-
-        // Setup downloader
-        yams::downloader::StorageConfig storage{};
-        try {
-            fs::path dataDir = cli_ ? cli_->getDataPath() : fs::path{};
-            if (!dataDir.empty()) {
-                storage.objectsDir = dataDir / "storage" / "objects";
-                storage.stagingDir = dataDir / "staging" / "downloader";
-            } else {
-                auto tmp = fs::temp_directory_path();
-                storage.objectsDir = tmp / "yams" / "objects";
-                storage.stagingDir = tmp / "yams" / "downloader";
-            }
-        } catch (...) {
-            try {
-                auto tmp = fs::temp_directory_path();
-                storage.objectsDir = tmp / "yams" / "objects";
-                storage.stagingDir = tmp / "yams" / "downloader";
-            } catch (...) {
-            }
-        }
-
-        yams::downloader::DownloaderConfig dcfg{};
-        auto manager = yams::downloader::makeDownloadManager(storage, dcfg);
-
-        // Download helper with progress
-        auto downloadFile = [&](const std::string& url, const fs::path& outPath,
-                                const std::string& label) -> Result<void> {
-            yams::downloader::DownloadRequest req{};
-            req.url = url;
-            req.storeOnly = true;
-            req.exportPath = outPath;
-
-            size_t lastLen = 0;
-            auto onProgress = [&label, &lastLen](const yams::downloader::ProgressEvent& ev) {
-                auto stageName = [](yams::downloader::ProgressStage s) {
-                    switch (s) {
-                        case yams::downloader::ProgressStage::Resolving:
-                            return "resolving";
-                        case yams::downloader::ProgressStage::Connecting:
-                            return "connecting";
-                        case yams::downloader::ProgressStage::Downloading:
-                            return "downloading";
-                        case yams::downloader::ProgressStage::Verifying:
-                            return "verifying";
-                        case yams::downloader::ProgressStage::Finalizing:
-                            return "finalizing";
-                        default:
-                            return "";
-                    }
-                };
-                float pct = ev.percentage.value_or(0.0f);
-                double done_mb = static_cast<double>(ev.downloadedBytes) / (1024.0 * 1024.0);
-                std::string content;
-                if (ev.totalBytes) {
-                    double total_mb = static_cast<double>(*ev.totalBytes) / (1024.0 * 1024.0);
-                    content = fmt::format("  {} {:11s} {:3.0f}% [{:.1f}/{:.1f} MB]", label,
-                                          stageName(ev.stage), pct, done_mb, total_mb);
-                } else {
-                    content =
-                        fmt::format("  {} {:11s} [{:.1f} MB]", label, stageName(ev.stage), done_mb);
-                }
-                std::string out = "\r" + content;
-                if (lastLen > content.size())
-                    out += std::string(lastLen - content.size(), ' ');
-                fmt::print("{}", out);
-                std::fflush(stdout);
-                lastLen = content.size();
-                if (ev.stage == yams::downloader::ProgressStage::Finalizing) {
-                    fmt::print("\n");
-                    lastLen = 0;
-                }
-            };
-
-            auto res = manager->download(req, onProgress, [] { return false; }, {});
-            if (!res.ok() || !res.value().success) {
-                std::string msg =
-                    res.ok() ? (res.value().error ? res.value().error->message : "download failed")
-                             : res.error().message;
-                return Error{ErrorCode::InternalError, label + ": " + msg};
-            }
-            return Result<void>{};
-        };
-
-        // Map model name to HuggingFace repo
-        auto getHfRepo = [](const std::string& name) -> std::string {
-            if (name == "mxbai-edge-colbert-v0-17m")
-                return "ryandono/mxbai-edge-colbert-v0-17m-onnx-int8";
-            if (name == "all-MiniLM-L6-v2")
-                return "sentence-transformers/all-MiniLM-L6-v2";
-            if (name == "multi-qa-MiniLM-L6-cos-v1")
-                return "sentence-transformers/multi-qa-MiniLM-L6-cos-v1";
-            if (name == "all-mpnet-base-v2")
-                return "sentence-transformers/all-mpnet-base-v2";
-            if (name == "embeddinggemma-300m")
-                return "onnx-community/embeddinggemma-300m-ONNX";
-            return "";
-        };
-
-        std::string repo = getHfRepo(model.name);
-        if (repo.empty()) {
-            return Error{ErrorCode::InvalidArgument, "Unknown model: " + model.name};
-        }
-
-        std::cout << "\n" << cli::ui::section_header("Embedding Model") << "\n";
-        std::cout << cli::ui::key_value("Model", model.name) << "\n";
-        std::cout << cli::ui::key_value("Size", "~" + std::to_string(model.size_mb) + " MB")
-                  << "\n\n";
-
-        // Download model.onnx (try multiple paths)
-        std::vector<std::string> modelPaths = {"onnx/model.onnx", "model.onnx"};
-        if (model.name == "mxbai-edge-colbert-v0-17m") {
-            modelPaths.insert(modelPaths.begin(), "onnx/model_quantized.onnx");
-        }
-        bool downloaded = false;
-        for (const auto& path : modelPaths) {
-            std::string url = "https://huggingface.co/" + repo + "/resolve/main/" + path;
-            auto result = downloadFile(url, modelFile, "model.onnx");
-            if (result) {
-                downloaded = true;
-                break;
-            }
-        }
-        if (!downloaded) {
-            return Error{ErrorCode::NetworkError, "Failed to download model.onnx"};
-        }
-
-        // Download optional companion files (best effort)
-        std::vector<std::pair<std::string, std::string>> companions = {
-            {"config.json", "config.json"},
-            {"tokenizer.json", "tokenizer.json"},
-            {"sentence_bert_config.json", "sentence_bert_config.json"}};
-        if (model.name == "mxbai-edge-colbert-v0-17m") {
-            companions.emplace_back("tokenizer_config.json", "tokenizer_config.json");
-            companions.emplace_back("special_tokens_map.json", "special_tokens_map.json");
-            companions.emplace_back("skiplist.json", "skiplist.json");
-        }
-        for (const auto& [filename, localName] : companions) {
-            std::string url = "https://huggingface.co/" + repo + "/resolve/main/" + filename;
-            (void)downloadFile(url, outputDir / localName, filename);
-        }
-
-        std::cout << ui::status_ok("Embedding model ready") << "\n";
-        return Result<void>{};
-    }
-
-    std::string promptForModel(const fs::path& dataPath) {
-        // Build choice items
-        std::vector<ChoiceItem> items;
-        const auto& embeddingModels = init_assets::embeddingModels();
-        items.reserve(embeddingModels.size());
-        for (const auto& m : embeddingModels) {
-            ChoiceItem ci;
-            ci.value = m.name;
-            ci.label = m.name + " (" + std::to_string(m.size_mb) +
-                       " MB, dim=" + std::to_string(m.dimensions) + ")";
-            ci.description = m.description;
-            items.push_back(std::move(ci));
-        }
-
-        size_t defaultIndex = 0; // first model default
-        // Prefer a nomic* model as default if present (future friendly heuristic)
-        for (size_t i = 0; i < embeddingModels.size(); ++i) {
-            if (embeddingModels[i].name.find("nomic-embed-text") != std::string::npos) {
-                defaultIndex = i;
-                break;
-            }
-        }
-
-        size_t chosenIdx = prompt_choice("\nChoose an embedding model:", items,
-                                         ChoiceOptions{.defaultIndex = defaultIndex,
-                                                       .allowEmpty = true,
-                                                       .retryOnInvalid = true});
-
-        const auto& selectedModel = embeddingModels[chosenIdx];
-
-        // Check if model already exists
-        fs::path modelDir = dataPath / "models" / selectedModel.name;
-        fs::path modelPath = modelDir / "model.onnx";
-
-        if (fs::exists(modelPath)) {
-            std::cout << "\nModel already present: " << modelPath.string() << "\n";
-        } else {
-            // Ask if user wants to download now
-            bool downloadNow = prompt_yes_no("\nDownload this model now? [Y/n]: ",
-                                             YesNoOptions{.defaultYes = true});
-
-            if (downloadNow) {
-                auto result = downloadModelFiles(selectedModel, modelDir);
-                if (!result) {
-                    spdlog::warn("Model download failed: {}", result.error().message);
-                    printLaterCommand("yams model download " + selectedModel.name);
-                }
-            } else {
-                printLaterCommand("yams model download " + selectedModel.name);
-            }
-        }
-        return selectedModel.name;
-    }
-
     bool downloadModel(const EmbeddingModel& /*model*/, const fs::path& /*outputDir*/) {
         return false;
     }
@@ -1294,6 +1156,8 @@ private:
                 storage.objectsDir = tmp / "yams" / "objects";
                 storage.stagingDir = tmp / "yams" / "downloader";
             } catch (...) {
+                spdlog::warn(
+                    "Could not resolve temporary downloader storage; optional download may fail");
             }
         }
 
@@ -1462,23 +1326,17 @@ private:
      *
      * Handles the prompt logic based on nonInteractive_ and autoInit_ flags:
      * - Interactive mode: prompts user for model selection
-     * - Auto mode: downloads default model without prompting
+     * - Auto mode: prints the download command; no ONNX model is fetched
      * - Non-interactive (non-auto): skips GLiNER setup entirely
      */
     void maybeSetupGlinerModel(const fs::path& dataPath, const fs::path& configPath) {
         std::string selectedGlinerModel;
 
         if (autoInit_) {
-            // Auto mode: download the small model by default
-            selectedGlinerModel = init_assets::glinerModels().front().name;
-            spdlog::info("Using default GLiNER model: {}", selectedGlinerModel);
-            fs::path glinerModelDir = dataPath / "models" / "gliner" / selectedGlinerModel;
-            auto result =
-                downloadGlinerModelFiles(init_assets::glinerModels().front(), glinerModelDir);
-            if (!result) {
-                spdlog::warn("GLiNER model download failed: {}", result.error().message);
-                spdlog::warn("You can download the model later with: yams model download --gliner");
-            }
+            // Headless setups get no ONNX models by default (hundreds of MB and the ONNX
+            // runtime); entity extraction stays opt-in.
+            printLaterCommand("yams model download --gliner " +
+                              init_assets::glinerModels().front().name);
         } else if (!nonInteractive_) {
             // Interactive mode: prompt user
             bool setupGliner =
@@ -1587,6 +1445,8 @@ private:
                 storage.objectsDir = tmp / "yams" / "objects";
                 storage.stagingDir = tmp / "yams" / "downloader";
             } catch (...) {
+                spdlog::warn(
+                    "Could not resolve temporary downloader storage; optional download may fail");
             }
         }
 
@@ -1738,24 +1598,16 @@ private:
      *
      * Handles the prompt logic based on nonInteractive_ and autoInit_ flags:
      * - Interactive mode: prompts user for model selection
-     * - Auto mode: downloads default model without prompting
+     * - Auto mode: prints the download command; no ONNX model is fetched
      * - Non-interactive (non-auto): skips reranker setup entirely
      */
     std::string maybeSetupRerankerModel(const fs::path& dataPath, const fs::path& configPath) {
         std::string selectedRerankerModel;
 
         if (autoInit_) {
-            // Auto mode: download the base model by default
-            selectedRerankerModel = init_assets::rerankerModels().front().name;
-            spdlog::info("Using default reranker model: {}", selectedRerankerModel);
-            fs::path rerankerModelDir = dataPath / "models" / "reranker" / selectedRerankerModel;
-            auto result =
-                downloadRerankerModelFiles(init_assets::rerankerModels().front(), rerankerModelDir);
-            if (!result) {
-                spdlog::warn("Reranker model download failed: {}", result.error().message);
-                spdlog::warn(
-                    "You can download the model later with: yams model download bge-reranker-base");
-            }
+            // Headless setups rerank with the built-in lexical and static-embedding terms; the
+            // ONNX cross-encoder (about 1 GB) stays opt-in.
+            printLaterCommand("yams model download " + init_assets::rerankerModels().front().name);
         } else if (!nonInteractive_) {
             // Interactive mode: prompt user
             bool setupReranker =
@@ -1951,10 +1803,10 @@ private:
      * @brief Writes the YAMS skill file to the specified agent skill directories.
      */
     void installAgentSkill(bool installClaude, bool installOpenCode) {
-        const char* home = std::getenv("HOME");
+        auto home = config::getenv_nonempty("HOME");
 #ifdef _WIN32
         if (!home) {
-            home = std::getenv("USERPROFILE");
+            home = config::getenv_nonempty("USERPROFILE");
         }
 #endif
         if (!home) {
@@ -1962,10 +1814,10 @@ private:
             return;
         }
 
-        fs::path homeDir(home);
+        fs::path homeDir(*home);
         fs::path configHome;
-        if (const char* xdgConfig = std::getenv("XDG_CONFIG_HOME"); xdgConfig && *xdgConfig) {
-            configHome = fs::path(xdgConfig);
+        if (const auto xdgConfig = config::getenv_nonempty("XDG_CONFIG_HOME")) {
+            configHome = fs::path(*xdgConfig);
         } else {
             configHome = homeDir / ".config";
         }
@@ -2012,6 +1864,7 @@ private:
     bool autoInit_ = false;
     bool force_ = false;
     bool noKeygen_ = false;
+    bool noStaticTable_ = false;
     bool printConfig_ = false;
     bool enablePlugins_ = false;
     std::string tuningProfile_{"balanced"};

@@ -183,8 +183,10 @@ private:
 
 struct GrepFixture {
     GrepFixture() {
-        tmpDir_ =
-            std::filesystem::temp_directory_path() / ("grep_test_" + std::to_string(::getpid()));
+        // Canonical: macOS temp is a /var -> /private/var symlink and Windows temp can be an 8.3
+        // short name; the code under test reports canonical paths.
+        tmpDir_ = std::filesystem::weakly_canonical(std::filesystem::temp_directory_path()) /
+                  ("grep_test_" + std::to_string(::getpid()));
         std::filesystem::create_directories(tmpDir_);
 
         db_ = std::make_unique<Database>();
@@ -238,7 +240,8 @@ struct GrepFixture {
         std::filesystem::remove_all(tmpDir_);
     }
 
-    void addDocument(std::string_view name, std::string_view content) {
+    void addDocument(std::string_view name, std::string_view content,
+                     const std::vector<std::string>& tags = {}) {
         auto path = tmpDir_ / name;
         std::filesystem::create_directories(path.parent_path());
         std::ofstream{path} << content;
@@ -246,6 +249,7 @@ struct GrepFixture {
         auto docService = makeDocumentService(ctx_);
         StoreDocumentRequest req;
         req.path = path.string();
+        req.tags = tags;
         REQUIRE(docService->store(req));
     }
 
@@ -758,6 +762,118 @@ TEST_CASE("GrepService - Broad regex grep does not stop at candidate cap",
     CHECK(res.value().totalMatches == 1);
     REQUIRE(res.value().filesWith.size() == 1);
     CHECK(res.value().filesWith.front().find("old_match.txt") != std::string::npos);
+}
+
+TEST_CASE("GrepService preserves shared-content locations across scoped and FTS candidates",
+          "[grep][service][scope][path-identity]") {
+    SKIP_GREP_ON_WINDOWS();
+    GrepFixture fixture;
+    fixture.addDocument("repo-a/shared.txt", "worktreeneedle shared content\n", {"canonical-only"});
+    fixture.addDocument("repo-b/shared.txt", "worktreeneedle shared content\n", {"alias-only"});
+    fixture.addHotContent("repo-a/shared.txt", "worktreeneedle shared content\n");
+    const auto first = fixture.tmpDir_ / "repo-a/shared.txt";
+    const auto second = fixture.tmpDir_ / "repo-b/shared.txt";
+    const auto a = fixture.repo_->findDocumentByExactPath(first.string());
+    const auto b = fixture.repo_->findDocumentByExactPath(second.string());
+    REQUIRE(a.has_value());
+    REQUIRE(a.value().has_value());
+    REQUIRE(b.has_value());
+    REQUIRE(b.value().has_value());
+    REQUIRE(a.value()->id == b.value()->id);
+    const auto fts = fixture.repo_->search("worktreeneedle", 10);
+    REQUIRE(fts.has_value());
+    REQUIRE(fts.value().isSuccess());
+    REQUIRE_FALSE(fts.value().results.empty());
+    GrepRequest request;
+    request.pattern = "worktreeneedle";
+    request.regexOnly = true;
+    request.literalText = true;
+    request.useSession = false;
+    SECTION("Unscoped literal grep retains both physical locations") {
+        const auto result = fixture.grep(request);
+        REQUIRE(result.has_value());
+        CHECK(result.value().filesWith.size() == 2);
+        CHECK(std::ranges::find(result.value().filesWith, first.string()) !=
+              result.value().filesWith.end());
+        CHECK(std::ranges::find(result.value().filesWith, second.string()) !=
+              result.value().filesWith.end());
+    }
+    SECTION("Multiple include patterns do not deduplicate by content ID") {
+        request.includePatterns = {"*/repo-a/*", "*/repo-b/*"};
+        const auto result = fixture.grep(request);
+        REQUIRE(result.has_value());
+        CHECK(result.value().filesWith.size() == 2);
+    }
+    SECTION("Question-mark globs retain both location projections") {
+        request.includePatterns = {"*/repo-?/shared.txt"};
+        const auto result = fixture.grep(request);
+        REQUIRE(result.has_value());
+        CHECK(result.value().filesWith.size() == 2);
+    }
+    SECTION("Scoped literal grep selects the alias, not the canonical sibling") {
+        request.scopePathPrefix = (fixture.tmpDir_ / "repo-b").string();
+        const auto result = fixture.grep(request);
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().filesWith.size() == 1);
+        CHECK(result.value().filesWith.front() == second.string());
+    }
+    SECTION("Scoped FTS candidates expand to current alias locations") {
+        request.scopePathPrefix = (fixture.tmpDir_ / "repo-b").string();
+        request.literalText = false;
+        const auto result = fixture.grep(request);
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().filesWith.size() == 1);
+        CHECK(result.value().filesWith.front() == second.string());
+    }
+    SECTION("Alias tags are selected from location metadata") {
+        request.scopePathPrefix = (fixture.tmpDir_ / "repo-b").string();
+        request.tags = {"alias-only"};
+        const auto result = fixture.grep(request);
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().filesWith.size() == 1);
+        CHECK(result.value().filesWith.front() == second.string());
+    }
+    SECTION("Canonical tags do not leak into sibling aliases") {
+        request.tags = {"canonical-only"};
+        const auto result = fixture.grep(request);
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().filesWith.size() == 1);
+        CHECK(result.value().filesWith.front() == first.string());
+    }
+    SECTION("Any-tag selection can match a noncanonical alias") {
+        request.scopePathPrefix = (fixture.tmpDir_ / "repo-b").string();
+        request.tags = {"absent-tag", "alias-only"};
+        const auto result = fixture.grep(request);
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().filesWith.size() == 1);
+        CHECK(result.value().filesWith.front() == second.string());
+    }
+    SECTION("All-tag selection cannot combine tags from distinct locations") {
+        request.tags = {"canonical-only", "alias-only"};
+        request.matchAllTags = true;
+        const auto result = fixture.grep(request);
+        REQUIRE(result.has_value());
+        CHECK(result.value().filesWith.empty());
+    }
+    SECTION("FTS cannot resurrect a retired canonical location") {
+        REQUIRE(fixture.repo_->retireDocumentPath(first.string()).has_value());
+        request.literalText = false;
+        const auto result = fixture.grep(request);
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().filesWith.size() == 1);
+        CHECK(result.value().filesWith.front() == second.string());
+    }
+    SECTION("Hybrid augmentation cannot leak canonical paths outside the scope") {
+        request.scopePathPrefix = (fixture.tmpDir_ / "repo-b").string();
+        request.regexOnly = false;
+        const auto result = fixture.grep(request);
+        REQUIRE(result.has_value());
+        REQUIRE_FALSE(result.value().filesWith.empty());
+        for (const auto& path : result.value().filesWith)
+            CHECK(path == second.string());
+        for (const auto& item : result.value().results)
+            CHECK(item.file == second.string());
+    }
 }
 
 TEST_CASE("GrepService - Workspace scope rejects generated retrieval artifacts",

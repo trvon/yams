@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <utility>
 #include <iostream>
 #include <sstream>
 #include <string_view>
@@ -39,11 +40,20 @@ struct CompletionPathEntry {
     std::vector<CompletionOption> options;
 };
 
+// Top-level aliases and the command whose options they complete with.
+constexpr std::array<std::pair<std::string_view, std::string_view>, 4> kCommandAliases = {{
+    {"plugins", "plugin"},
+    {"stats", "status"},
+    {"rm", "delete"},
+    {"ls", "list"},
+}};
+
 std::string canonicalizePath(std::string_view path) {
-    if (path == "plugins" || path.starts_with("plugins ")) {
-        std::string normalized(path);
-        normalized.replace(0, std::string("plugins").size(), "plugin");
-        return normalized;
+    for (const auto& [alias, command] : kCommandAliases) {
+        if (path == alias ||
+            (path.size() > alias.size() && path.starts_with(alias) && path[alias.size()] == ' ')) {
+            return std::string(command) + std::string(path.substr(alias.size()));
+        }
     }
     return std::string(path);
 }
@@ -176,7 +186,11 @@ std::vector<CompletionSubcommand> collectDirectSubcommands(const CLI::App* app) 
         if (description.empty()) {
             description = describeCommand(name);
         }
-        children.push_back({name, std::move(description)});
+        children.push_back({name, description});
+        // Aliases (`plugins`, `stats`, `rm`, `ls`) complete like their command.
+        for (const auto& alias : sub->get_aliases()) {
+            children.push_back({alias, description});
+        }
     }
     return children;
 }
@@ -347,9 +361,11 @@ std::string CompletionCommand::generateBashCompletion() const {
 
     oss << "_yams_normalize_path() {\n";
     oss << "    case \"$1\" in\n";
-    oss << "        plugins|plugins\\ *)\n";
-    oss << "            printf '%s' \"${1/plugins/plugin}\"\n";
-    oss << "            ;;\n";
+    for (const auto& [alias, command] : kCommandAliases) {
+        oss << "        " << alias << "|" << alias << "\\ *)\n";
+        oss << "            printf '%s' \"" << command << "${1#" << alias << "}\"\n";
+        oss << "            ;;\n";
+    }
     oss << "        *)\n";
     oss << "            printf '%s' \"$1\"\n";
     oss << "            ;;\n";
@@ -635,9 +651,11 @@ std::string CompletionCommand::generateZshCompletion() const {
 
     oss << "_yams_normalize_path() {\n";
     oss << "    case \"$1\" in\n";
-    oss << "        plugins|plugins\\ *)\n";
-    oss << "            print -r -- \"${1/plugins/plugin}\"\n";
-    oss << "            ;;\n";
+    for (const auto& [alias, command] : kCommandAliases) {
+        oss << "        " << alias << "|" << alias << "\\ *)\n";
+        oss << "            print -r -- \"" << command << "${1#" << alias << "}\"\n";
+        oss << "            ;;\n";
+    }
     oss << "        *)\n";
     oss << "            print -r -- \"$1\"\n";
     oss << "            ;;\n";
@@ -911,8 +929,11 @@ std::string CompletionCommand::generateFishCompletion() const {
 
     oss << "function __fish_yams_normalize_path\n";
     oss << "    switch \"$argv[1]\"\n";
-    oss << "        case plugins 'plugins *'\n";
-    oss << "            string replace -r '^plugins' 'plugin' -- \"$argv[1]\"\n";
+    for (const auto& [alias, command] : kCommandAliases) {
+        oss << "        case " << alias << " '" << alias << " *'\n";
+        oss << "            string replace -r '^" << alias << "' '" << command
+            << "' -- \"$argv[1]\"\n";
+    }
     oss << "        case '*'\n";
     oss << "            string join '' \"$argv[1]\"\n";
     oss << "    end\n";
@@ -1394,9 +1415,13 @@ std::string CompletionCommand::generatePowerShellCompletion() const {
 
     oss << "    function Normalize-YamsPath {\n";
     oss << "        param([string]$Path)\n";
-    oss << "        if ($Path -eq 'plugins' -or $Path.StartsWith('plugins ')) {\n";
-    oss << "            return ('plugin' + $Path.Substring('plugins'.Length))\n";
-    oss << "        }\n";
+    for (const auto& [alias, command] : kCommandAliases) {
+        oss << "        if ($Path -eq '" << alias << "' -or $Path.StartsWith('" << alias
+            << " ')) {\n";
+        oss << "            return ('" << command << "' + $Path.Substring('" << alias
+            << "'.Length))\n";
+        oss << "        }\n";
+    }
     oss << "        return $Path\n";
     oss << "    }\n\n";
 

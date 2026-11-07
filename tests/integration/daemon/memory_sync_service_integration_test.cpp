@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -281,6 +282,48 @@ makeFilesystemBackend(const std::filesystem::path& path) {
     return backend;
 }
 
+// Direct transport requires authenticated writers: generate a local writer key, trust it in a
+// manifest, and listen on a reserved loopback port.
+void configureDirectWriterAuth(yams::daemon::DaemonConfig& config) {
+    auto keys = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(keys.has_value());
+    const auto directory = config.dataDir / "read-auth";
+    std::filesystem::create_directories(directory);
+    const auto privateKey = directory / "writer-private.pem";
+    const auto publicKey = directory / "writer-public.pem";
+    const auto manifest = directory / "writers.json";
+    REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
+                privateKey, keys.value().privateKeyPem)
+                .has_value());
+    REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
+                publicKey, keys.value().publicKeyPem)
+                .has_value());
+    const nlohmann::json content{
+        {"schema_version", 1},
+        {"corpus_id", config.memorySync.corpusId},
+        {"corpus_epoch", config.memorySync.corpusEpoch},
+        {"local_key",
+         {{"writer_id", config.memorySync.nodeId},
+          {"key_id", "cold-read-v1"},
+          {"private_key_path", privateKey.string()}}},
+        {"trusted_writers", nlohmann::json::array({{{"writer_id", config.memorySync.nodeId},
+                                                    {"key_id", "cold-read-v1"},
+                                                    {"public_key_path", publicKey.string()}}})}};
+    REQUIRE(
+        yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(manifest, content.dump())
+            .has_value());
+    // The listener parser requires a real port; reserve an OS-selected local endpoint
+    // briefly instead of using the live daemon's default listener or weakening parsing.
+    boost::asio::io_context io;
+    boost::asio::ip::tcp::acceptor reserved{io, {boost::asio::ip::address_v4::loopback(), 0}};
+    const auto port = reserved.local_endpoint().port();
+    reserved.close();
+    config.memorySync.transport = "direct";
+    config.memorySync.listen = "127.0.0.1:" + std::to_string(port);
+    config.memorySync.writerAuthRequired = true;
+    config.memorySync.writerAuthManifestPath = manifest.string();
+}
+
 } // namespace
 
 TEST_CASE("Daemon refuses enabled memory sync when writer authentication cannot initialize",
@@ -532,7 +575,7 @@ sync_interval_ms = 25
 }
 
 TEST_CASE("Production document deletion also replicates content-byte deletion",
-          "[integration][daemon][memory-sync][deletion]") {
+          "[integration][daemon][memory-sync][deletion][path-identity]") {
     auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174020",
                                                 "delete-integrity-corpus");
     yams::test::DaemonHarness harness{std::move(options)};
@@ -593,6 +636,104 @@ TEST_CASE("Production document deletion also replicates content-byte deletion",
     clientConfig.autoStart = false;
     yams::daemon::DaemonClient client{clientConfig};
     REQUIRE(yams::cli::run_sync(client.connect(), 5s).has_value());
+
+    // A name-only deletion can retire a shared location without removing the corpus hash.
+    // Exercise the full dispatcher: its post-delete hooks must not turn that unlink into
+    // a replicated document/blob tombstone after the service has preserved the content.
+    auto sharedDocument = repository->getDocumentByHash(hash);
+    REQUIRE(sharedDocument.has_value());
+    REQUIRE(sharedDocument.value().has_value());
+    // The raw batch insert above bypasses production store's location publication.
+    // Adopt its canonical path before adding an alias so both are current locations.
+    REQUIRE(repository->recordDocumentPath(*sharedDocument.value(), sharedDocument.value()->id, {})
+                .has_value());
+    auto alias = *sharedDocument.value();
+    alias.filePath = "/local/corpus/delete-alias.md";
+    alias.fileName = "delete-alias.md";
+    REQUIRE(repository->recordDocumentPath(alias, alias.id, {}).has_value());
+    auto references = repository->getDocumentPathReferences(alias.id);
+    REQUIRE(references.has_value());
+    REQUIRE(references.value().size() == 2);
+    for (const auto& path : {std::string{"/local/corpus/delete-me.md"}, alias.filePath}) {
+        auto current = repository->findDocumentByExactPath(path);
+        REQUIRE(current.has_value());
+        REQUIRE(current.value().has_value());
+        CHECK(current.value()->filePath == path);
+        CHECK(current.value()->sha256Hash == hash);
+    }
+    yams::daemon::DeleteRequest unlinkRequest;
+    unlinkRequest.name = alias.filePath;
+    auto unlinked = yams::cli::run_sync(client.remove(unlinkRequest), 10s);
+    INFO("Unlink failure: " << (unlinked ? std::string{} : unlinked.error().message));
+    REQUIRE(unlinked.has_value());
+    CHECK(unlinked.value().successCount == 1);
+    auto retired = repository->findDocumentByExactPath(alias.filePath);
+    REQUIRE(retired.has_value());
+    CHECK_FALSE(retired.value().has_value());
+    auto original = repository->findDocumentByExactPath("/local/corpus/delete-me.md");
+    REQUIRE(original.has_value());
+    REQUIRE(original.value().has_value());
+    CHECK(original.value()->sha256Hash == hash);
+    auto retained = contentStore->exists(hash);
+    REQUIRE(retained.has_value());
+    CHECK(retained.value());
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK(peer.readCached(documentKey).has_value());
+    CHECK(peer.readCached(blobKey).has_value());
+
+    // The dedicated operation must also retire a sole location, without using keepRefs
+    // or converting it into corpus deletion. Dry-run and missing-path calls are harmless.
+    const auto capabilities = yams::cli::run_sync(client.status(), 10s);
+    REQUIRE(capabilities.has_value());
+    CHECK(capabilities.value().supportsPathUnlink);
+    auto soleReferences = repository->getDocumentPathReferences(alias.id);
+    REQUIRE(soleReferences.has_value());
+    REQUIRE(soleReferences.value().size() == 1);
+    yams::daemon::UnlinkPathRequest soleUnlink;
+    soleUnlink.path = "/local/corpus/delete-me.md";
+    soleUnlink.dryRun = true;
+    auto preview = yams::cli::run_sync(client.unlinkPath(soleUnlink), 10s);
+    INFO("Typed unlink failure: " << (preview ? std::string{} : preview.error().message));
+    REQUIRE(preview.has_value());
+    CHECK(preview.value().dryRun);
+    CHECK(preview.value().failureCount == 0);
+    auto emptyUnlink = soleUnlink;
+    emptyUnlink.path.clear();
+    auto empty = yams::cli::run_sync(client.unlinkPath(emptyUnlink), 10s);
+    CHECK_FALSE(empty.has_value());
+    if (!empty)
+        CHECK(empty.error().code == yams::ErrorCode::InvalidArgument);
+    auto afterPreview = repository->findDocumentByExactPath(soleUnlink.path);
+    REQUIRE(afterPreview.has_value());
+    REQUIRE(afterPreview.value().has_value());
+    auto missingUnlink = soleUnlink;
+    missingUnlink.path = "/not-indexed/delete-me.md";
+    auto missing = yams::cli::run_sync(client.unlinkPath(missingUnlink), 10s);
+    CHECK_FALSE(missing.has_value());
+    if (!missing)
+        CHECK(missing.error().code == yams::ErrorCode::NotFound);
+    soleUnlink.dryRun = false;
+    auto soleRemoved = yams::cli::run_sync(client.unlinkPath(soleUnlink), 10s);
+    REQUIRE(soleRemoved.has_value());
+    CHECK(soleRemoved.value().successCount == 1);
+    CHECK(soleRemoved.value().failureCount == 0);
+    auto gone = repository->findDocumentByExactPath(soleUnlink.path);
+    REQUIRE(gone.has_value());
+    CHECK_FALSE(gone.value().has_value());
+    auto contentRecord = repository->getDocumentByHash(hash);
+    REQUIRE(contentRecord.has_value());
+    REQUIRE(contentRecord.value().has_value());
+    auto blob = contentStore->exists(hash);
+    REQUIRE(blob.has_value());
+    CHECK(blob.value());
+    auto repeated = yams::cli::run_sync(client.unlinkPath(soleUnlink), 10s);
+    CHECK_FALSE(repeated.has_value());
+    if (!repeated)
+        CHECK(repeated.error().code == yams::ErrorCode::NotFound);
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK(peer.readCached(documentKey).has_value());
+    CHECK(peer.readCached(blobKey).has_value());
+
     yams::daemon::DeleteRequest deleteRequest;
     deleteRequest.hash = hash;
     const auto writerCounterBeforeDelete =
@@ -1096,44 +1237,7 @@ TEST_CASE("Daemon memory sync IPC reads off-resident authenticated winners",
     options.configureDaemon = [configure =
                                    std::move(configure)](yams::daemon::DaemonConfig& config) {
         configure(config);
-        auto keys = yams::memory_sync::generateWriterKeyPair();
-        REQUIRE(keys.has_value());
-        const auto directory = config.dataDir / "read-auth";
-        std::filesystem::create_directories(directory);
-        const auto privateKey = directory / "writer-private.pem";
-        const auto publicKey = directory / "writer-public.pem";
-        const auto manifest = directory / "writers.json";
-        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
-                    privateKey, keys.value().privateKeyPem)
-                    .has_value());
-        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(
-                    publicKey, keys.value().publicKeyPem)
-                    .has_value());
-        const nlohmann::json content{
-            {"schema_version", 1},
-            {"corpus_id", config.memorySync.corpusId},
-            {"corpus_epoch", config.memorySync.corpusEpoch},
-            {"local_key",
-             {{"writer_id", config.memorySync.nodeId},
-              {"key_id", "cold-read-v1"},
-              {"private_key_path", privateKey.string()}}},
-            {"trusted_writers",
-             nlohmann::json::array({{{"writer_id", config.memorySync.nodeId},
-                                     {"key_id", "cold-read-v1"},
-                                     {"public_key_path", publicKey.string()}}})}};
-        REQUIRE(yams::daemon::ServiceManager::__test_writeProtectedP2pPrivateKey(manifest,
-                                                                                 content.dump())
-                    .has_value());
-        // The listener parser requires a real port; reserve an OS-selected local endpoint
-        // briefly instead of using the live daemon's default listener or weakening parsing.
-        boost::asio::io_context io;
-        boost::asio::ip::tcp::acceptor reserved{io, {boost::asio::ip::address_v4::loopback(), 0}};
-        const auto port = reserved.local_endpoint().port();
-        reserved.close();
-        config.memorySync.transport = "direct";
-        config.memorySync.listen = "127.0.0.1:" + std::to_string(port);
-        config.memorySync.writerAuthRequired = true;
-        config.memorySync.writerAuthManifestPath = manifest.string();
+        configureDirectWriterAuth(config);
         config.memorySync.limits.maxCacheBytes = 8;
     };
     options.isolateEnvironment = true;
@@ -1773,8 +1877,11 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
 
     serviceManager->testingSetMemorySyncBackfillItemBudget(1);
     std::vector<std::string> stages;
-    serviceManager->testingSetMemorySyncStageObserver(
-        [&](std::string_view stage) { stages.emplace_back(stage); });
+    serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (tlsTestStageCaller) { // ignore the daemon worker's own cycle
+            stages.emplace_back(stage);
+        }
+    });
     yams::memory_sync::MemorySyncService peer{
         makeFilesystemBackend(harness.dataDir() / "shared-memory"),
         yams::memory_sync::MemorySyncConfig{"backfill-peer", 60'000, "backfill-budget-corpus", 1}};
@@ -1795,7 +1902,7 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
     // before the records derived from them, so the topology waits until every document is out.
     for (std::size_t cycle = 1; cycle <= hashes.size(); ++cycle) {
         stages.clear();
-        serviceManager->testingPublishMemorySyncBackfill();
+        asTestStageCaller([&] { serviceManager->testingPublishMemorySyncBackfill(); });
         INFO("cycle=" << cycle);
         CHECK(publishedDocuments() == cycle);
         CHECK_FALSE(observed("backfill.after_node"));
@@ -1805,7 +1912,7 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
     // second node within a bounded number of further cycles.
     stages.clear();
     for (int cycle = 0; cycle < 4 && !observed("backfill.after_edge"); ++cycle) {
-        serviceManager->testingPublishMemorySyncBackfill();
+        asTestStageCaller([&] { serviceManager->testingPublishMemorySyncBackfill(); });
     }
     CHECK(observed("backfill.after_node"));
     CHECK(observed("backfill.after_edge"));
@@ -1850,9 +1957,12 @@ TEST_CASE("Daemon memory sync backfill skips a poisoned blob and continues",
     serviceManager->__test_setContentStore(std::make_shared<ManifestPoisonedContentStore>(
         serviceManager->getContentStore(), hashes.front()));
     std::vector<std::string> stages;
-    serviceManager->testingSetMemorySyncStageObserver(
-        [&](std::string_view stage) { stages.emplace_back(stage); });
-    serviceManager->testingPublishMemorySyncBackfill();
+    serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (tlsTestStageCaller) { // ignore the daemon worker's own cycle
+            stages.emplace_back(stage);
+        }
+    });
+    asTestStageCaller([&] { serviceManager->testingPublishMemorySyncBackfill(); });
 
     CHECK(std::find(stages.begin(), stages.end(), "backfill.skip_document") != stages.end());
 
@@ -1862,6 +1972,71 @@ TEST_CASE("Daemon memory sync backfill skips a poisoned blob and continues",
         makeFilesystemBackend(harness.dataDir() / "shared-memory"),
         yams::memory_sync::MemorySyncConfig{"backfill-skip-peer", 60'000, "backfill-skip-corpus",
                                             1}};
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK_FALSE(peer.readCached("document/" + hashes.front()).has_value());
+    CHECK(peer.readCached("document/" + hashes.back()).has_value());
+
+    serviceManager->testingSetMemorySyncStageObserver({});
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+}
+
+// A blob larger than the resident publish limit can never replicate under the current
+// limits. Throwing on it pinned the backfill cursor, so every cycle re-read and re-hashed the
+// same oversized file and no later document ever replicated (seen live: 97 retries in 4.5 h
+// on an 18.5 MB PDF with a 16 MiB limit).
+TEST_CASE("Daemon memory sync backfill skips an oversized blob and continues",
+          "[integration][daemon][memory-sync][backfill][backfill-oversize]") {
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174042",
+                                                "backfill-oversize-corpus");
+    auto configure = std::move(options.configureDaemon);
+    options.configureDaemon = [configure =
+                                   std::move(configure)](yams::daemon::DaemonConfig& config) {
+        configure(config);
+        config.memorySync.limits.maxValueBytes = 2048;
+    };
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto repository = serviceManager->getMetadataRepo();
+    REQUIRE(repository != nullptr);
+
+    // The first document's content exceeds the 2 KiB publish limit; the second fits.
+    const std::vector<std::string> payloads{std::string(16 * 1024, 'x'), "backfill-small"};
+    std::vector<std::string> hashes;
+    std::vector<yams::metadata::BatchDocumentInsert> inserts;
+    for (std::size_t index = 0; index < payloads.size(); ++index) {
+        const auto payload = bytes(payloads[index]);
+        auto stored = serviceManager->getContentStore()->storeBytes(payload);
+        REQUIRE(stored.has_value());
+        hashes.push_back(stored.value().contentHash);
+        yams::metadata::BatchDocumentInsert item;
+        item.info.filePath = "/local/oversize-" + std::to_string(index) + ".md";
+        item.info.fileName = "oversize-" + std::to_string(index) + ".md";
+        item.info.fileExtension = ".md";
+        item.info.fileSize = static_cast<std::int64_t>(payload.size());
+        item.info.sha256Hash = stored.value().contentHash;
+        item.info.mimeType = "text/markdown";
+        inserts.push_back(std::move(item));
+    }
+    REQUIRE(repository->batchInsertDocumentsWithMetadata(inserts).has_value());
+
+    std::vector<std::string> stages;
+    serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (tlsTestStageCaller) { // ignore the daemon worker's own cycle
+            stages.emplace_back(stage);
+        }
+    });
+    asTestStageCaller([&] { serviceManager->testingPublishMemorySyncBackfill(); });
+
+    CHECK(std::find(stages.begin(), stages.end(), "backfill.skip_document") != stages.end());
+
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "shared-memory"),
+        yams::memory_sync::MemorySyncConfig{"backfill-oversize-peer", 60'000,
+                                            "backfill-oversize-corpus", 1}};
     REQUIRE(peer.syncOnce().has_value());
     CHECK_FALSE(peer.readCached("document/" + hashes.front()).has_value());
     CHECK(peer.readCached("document/" + hashes.back()).has_value());
@@ -2016,4 +2191,118 @@ auto_repair = false
     CHECK(std::filesystem::exists(persistentMarker));
     CHECK(std::filesystem::exists(otherSessionPath));
     CHECK((!std::filesystem::exists(sessionPath) || std::filesystem::is_empty(sessionPath)));
+}
+
+// Direct P2P recovers the local op store with a corpus-sized scan before it listens. On a
+// large store that took hours and, while it ran inside async init, kept search, ingest and
+// daemon readiness waiting. Recovery now runs in the background behind the governor.
+TEST_CASE("Daemon readiness and search do not wait for direct P2P recovery",
+          "[integration][daemon][memory-sync][p2p][p2p-recovery-background]") {
+    ScopedHostPressureSample hostPressure;
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::warn);
+
+    std::promise<void> enteredPromise;
+    auto entered = enteredPromise.get_future();
+    std::promise<void> releasePromise;
+    const auto released = releasePromise.get_future().share();
+    std::atomic<bool> enteredOnce{false};
+    yams::daemon::ServiceManager::testingSetDirectP2pRecoveryGate([&] {
+        if (!enteredOnce.exchange(true)) {
+            enteredPromise.set_value();
+        }
+        released.wait();
+    });
+    // Destroyed after the harness: the gate captures this test's promises.
+    struct ClearGate {
+        ~ClearGate() { yams::daemon::ServiceManager::testingSetDirectP2pRecoveryGate({}); }
+    } clearGate;
+
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174040",
+                                                "p2p-background-corpus");
+    auto configure = std::move(options.configureDaemon);
+    options.configureDaemon = [configure =
+                                   std::move(configure)](yams::daemon::DaemonConfig& config) {
+        configure(config);
+        configureDirectWriterAuth(config);
+    };
+    options.isolateEnvironment = true;
+    yams::test::DaemonHarness harness{std::move(options)};
+    // Destroyed before the harness, so shutdown never joins a recovery parked on the gate.
+    struct ReleaseGate {
+        std::promise<void>& promise;
+        bool released{false};
+        void release() {
+            if (!released) {
+                promise.set_value();
+                released = true;
+            }
+        }
+        ~ReleaseGate() { release(); }
+    } releaseGate{releasePromise};
+
+    REQUIRE(harness.start(30s));
+    REQUIRE(entered.wait_for(30s) == std::future_status::ready);
+    auto* manager = harness.daemon()->getServiceManager();
+    REQUIRE(manager != nullptr);
+
+    // Recovery is parked, yet the daemon is up and search builds.
+    const auto identityWhileRecovering = manager->getP2pIdentity();
+    CHECK_FALSE(identityWhileRecovering.has_value());
+    // Readiness flags have no wait primitive; poll with a tight bounded deadline.
+    const auto eventually = [](auto&& predicate) {
+        const auto deadline = std::chrono::steady_clock::now() + 30s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (predicate()) {
+                return true;
+            }
+            std::this_thread::sleep_for(20ms);
+        }
+        return predicate();
+    };
+    CHECK(eventually([&] {
+        return manager->getState().readiness.searchEngineReady.load(std::memory_order_acquire);
+    }));
+
+    // Once recovery completes, the listener is published.
+    releaseGate.release();
+    CHECK(eventually([&] { return manager->getP2pIdentity().has_value(); }));
+}
+
+// The recovery worker is a std::thread: an exception escaping it would terminate the daemon.
+// A throwing recovery must degrade "p2p" and leave the daemon serving.
+TEST_CASE("Direct P2P recovery that throws degrades P2P instead of terminating",
+          "[integration][daemon][memory-sync][p2p][p2p-recovery-throws]") {
+    ScopedHostPressureSample hostPressure;
+    yams::test::SpdlogLevelGuard logGuard;
+    spdlog::set_level(spdlog::level::off);
+    yams::daemon::ServiceManager::testingSetDirectP2pRecoveryGate(
+        [] { throw std::runtime_error("injected recovery failure"); });
+    struct ClearGate {
+        ~ClearGate() { yams::daemon::ServiceManager::testingSetDirectP2pRecoveryGate({}); }
+    } clearGate;
+
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174041",
+                                                "p2p-throwing-recovery-corpus");
+    auto configure = std::move(options.configureDaemon);
+    options.configureDaemon = [configure =
+                                   std::move(configure)](yams::daemon::DaemonConfig& config) {
+        configure(config);
+        configureDirectWriterAuth(config);
+    };
+    options.isolateEnvironment = true;
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+    const auto deadline = std::chrono::steady_clock::now() + 30s;
+    std::string reason;
+    while (std::chrono::steady_clock::now() < deadline) {
+        reason = harness.daemon()->getLifecycle().degradationReason("p2p");
+        if (!reason.empty()) {
+            break;
+        }
+        std::this_thread::sleep_for(20ms);
+    }
+    CHECK(reason.find("injected recovery failure") != std::string::npos);
+    CHECK_FALSE(harness.daemon()->getServiceManager()->getP2pIdentity().has_value());
+    CHECK(harness.daemon()->isRunning());
 }

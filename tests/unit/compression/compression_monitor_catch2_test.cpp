@@ -1,6 +1,7 @@
 // Catch2 tests for Compression Monitor
 // Migrated from GTest: compression_monitor_test.cpp
 
+#include <latch>
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
@@ -251,4 +252,36 @@ TEST_CASE_METHOD(CompressionMonitorFixture, "CompressionMonitor - CustomMetricCo
     monitor_->checkMetrics();
 
     CHECK(collectorCalls.load() > 0);
+}
+
+namespace {
+// Runs start() from several threads released together and returns how many succeeded.
+template <typename Start> int concurrentStartSuccesses(Start start, int threads = 4) {
+    std::latch go(threads);
+    std::atomic<int> ok{0};
+    std::vector<std::thread> workers;
+    for (int i = 0; i < threads; ++i) {
+        workers.emplace_back([&] {
+            go.arrive_and_wait();
+            if (start())
+                ok.fetch_add(1);
+        });
+    }
+    for (auto& t : workers)
+        t.join();
+    return ok.load();
+}
+} // namespace
+
+// start() checked running_ and set it separately, so concurrent starts could all pass and each
+// assign a monitor thread to the same std::thread member.
+TEST_CASE("CompressionMonitor - concurrent start admits exactly one",
+          "[compression][monitor][lifecycle]") {
+    MonitorConfig config;
+    config.metricsInterval = std::chrono::seconds(1);
+    for (int round = 0; round < 20; ++round) {
+        CompressionMonitor monitor(config);
+        CHECK(concurrentStartSuccesses([&] { return monitor.start().has_value(); }) == 1);
+        monitor.stop();
+    }
 }

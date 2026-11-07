@@ -35,7 +35,6 @@ public:
 
     // Testing interface
     void setHash(const std::string& hash) { hash_ = hash; }
-    void setName(const std::string& name) { name_ = name; }
     void setKey(const std::string& key) { metadata_.push_back(key + "="); }
     void setValue(const std::string& value) {
         if (!metadata_.empty() && metadata_.back().back() == '=') {
@@ -61,8 +60,6 @@ private:
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<api::IContentStore> contentStore_;
 
-    Result<metadata::MetadataValue> parseMetadataValue(const std::string& value);
-    Result<metadata::DocumentInfo> resolveNameToDocument(const std::string& name);
     Result<std::string> resolveNameToHashSmart(const std::string& name);
 };
 

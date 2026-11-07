@@ -21,8 +21,10 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
+#include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 
 using namespace yams::daemon;
@@ -76,6 +78,52 @@ private:
     spdlog::level::level_enum previousLevel_;
 };
 } // namespace
+
+TEST_CASE("Ingest stop waits for a scheduled but not yet running poller",
+          "[daemon][work_coordinator][ingest-drain]") {
+    SpdlogCaptureGuard logs;
+    WorkCoordinator coordinator;
+    std::promise<void> releaseWorker;
+    auto released = releaseWorker.get_future().share();
+    struct WorkerRelease {
+        std::promise<void>& promise;
+        bool done{false};
+        void release() {
+            if (!done) {
+                done = true;
+                promise.set_value();
+            }
+        }
+        ~WorkerRelease() { release(); }
+    } release{releaseWorker};
+    coordinator.start(1);
+    std::promise<void> entered;
+    auto enteredFuture = entered.get_future();
+    boost::asio::post(*coordinator.getIOContext(),
+                      [entered = std::move(entered), released]() mutable {
+                          entered.set_value();
+                          released.wait();
+                      });
+    REQUIRE(enteredFuture.wait_for(2s) == std::future_status::ready);
+    IngestService ingest(nullptr, &coordinator);
+    ingest.start();
+    std::promise<void> stopCalling;
+    auto stopCallingFuture = stopCalling.get_future();
+    auto stopped = std::async(std::launch::async, [&] {
+        stopCalling.set_value();
+        ingest.stop();
+    });
+    CHECK(stopCallingFuture.wait_for(2s) == std::future_status::ready);
+    // The only worker is deliberately held: completion is impossible until
+    // release. A short future deadline checks blocking, not a guessed sleep.
+    const bool returnedBeforePollerStarted = stopped.wait_for(25ms) == std::future_status::ready;
+    release.release();
+    REQUIRE(stopped.wait_for(2s) == std::future_status::ready);
+    stopped.get();
+    CHECK_FALSE(returnedBeforePollerStarted);
+    coordinator.stop();
+    coordinator.join();
+}
 
 TEST_CASE("WorkCoordinator lifecycle", "[daemon][work_coordinator][lifecycle]") {
     SECTION("Construct without starting") {
@@ -896,4 +944,81 @@ TEST_CASE("WorkCoordinator job scopes restore the enclosing job name",
 
     coordinator.stop();
     REQUIRE(coordinator.joinWithTimeout(5000ms));
+}
+
+TEST_CASE("WorkCoordinator stop releases idle workers past a detached strand that never suspends",
+          "[daemon][work_coordinator][shutdown][cancel]") {
+    // lt-safety A2.1 (was lt_red_detached_never_suspends). The coroutine's only co_await never
+    // suspends, so its strand cannot run the cancellation stop() posts. stop() must not let that
+    // one strand keep the idle workers inside run().
+    constexpr std::size_t kWorkers = 4;
+    constexpr auto kDrainBudget = 100ms;
+    WorkCoordinator coordinator;
+    coordinator.start(kWorkers);
+
+    auto entered = std::make_shared<std::atomic<bool>>(false);
+    auto release = std::make_shared<std::atomic<bool>>(false);
+    auto busy = [entered, release]() -> boost::asio::awaitable<void> {
+        entered->store(true, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + 20s;
+        while (!release->load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            const auto state = co_await boost::asio::this_coro::cancellation_state;
+            (void)state;
+            std::this_thread::sleep_for(1ms);
+        }
+    };
+    coordinator.spawnDetached(coordinator.getExecutor(), busy());
+    REQUIRE(
+        wait_for_condition(2000ms, 1ms, [&] { return entered->load(std::memory_order_acquire); }));
+
+    // The capture guard swaps spdlog's default logger; exiting workers log through it, so the
+    // guard must outlive the join.
+    SpdlogCaptureGuard capture;
+    const auto stopStart = std::chrono::steady_clock::now();
+    coordinator.stop(kDrainBudget);
+    CHECK((std::chrono::steady_clock::now() - stopStart >= kDrainBudget));
+
+    // The three idle workers leave run(); only the pinned one remains until release.
+    REQUIRE(
+        wait_for_condition(5000ms, 1ms, [&] { return coordinator.getActiveWorkerCount() <= 1; }));
+    CHECK((coordinator.getActiveWorkerCount() == 1));
+
+    release->store(true, std::memory_order_release);
+    REQUIRE(coordinator.joinWithTimeout(10s));
+    CHECK((coordinator.getActiveWorkerCount() == 0));
+    CHECK_FALSE(coordinator.isRunning());
+
+    const auto logs = capture.str();
+    INFO(logs);
+    CHECK((logs.find("did not run their cancellation") != std::string::npos));
+}
+
+TEST_CASE("WorkCoordinator stop does not wait the drain budget when every strand yields",
+          "[daemon][work_coordinator][shutdown][cancel]") {
+    WorkCoordinator coordinator;
+    coordinator.start(2);
+
+    auto started = std::make_shared<std::atomic<bool>>(false);
+    auto ioCtx = coordinator.getIOContext();
+    auto poller = [started, ioCtx]() -> boost::asio::awaitable<void> {
+        started->store(true, std::memory_order_release);
+        for (;;) {
+            boost::asio::steady_timer timer(*ioCtx);
+            timer.expires_after(5s);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+    };
+    coordinator.spawnDetached(coordinator.getExecutor(), poller());
+    REQUIRE(
+        wait_for_condition(2000ms, 1ms, [&] { return started->load(std::memory_order_acquire); }));
+
+    SpdlogCaptureGuard capture; // outlives the join: exiting workers log through it
+    // A generous budget: a suspended coroutine's strand runs the cancellation at once, so stop()
+    // must return long before it.
+    const auto stopStart = std::chrono::steady_clock::now();
+    coordinator.stop(30s);
+    CHECK((std::chrono::steady_clock::now() - stopStart < 30s));
+    REQUIRE(coordinator.joinWithTimeout(10s));
+    CHECK((capture.str().find("did not run their cancellation") == std::string::npos));
 }

@@ -338,6 +338,14 @@ int main(int argc, char* argv[]) {
                                      e.what());
                     }
                 }
+                if (daemonSection.find("auto_migrate_embeddings") != daemonSection.end()) {
+                    std::string v = daemonSection.at("auto_migrate_embeddings");
+                    for (auto& c : v) {
+                        c = static_cast<char>(std::tolower(c));
+                    }
+                    config.autoMigrateEmbeddings =
+                        !(v == "0" || v == "false" || v == "off" || v == "no");
+                }
                 if (daemonSection.find("auto_rebuild_on_dim_mismatch") != daemonSection.end()) {
                     std::string v = daemonSection.at("auto_rebuild_on_dim_mismatch");
                     for (auto& c : v) {
@@ -803,15 +811,11 @@ int main(int argc, char* argv[]) {
                      config.instrumentation.mslStackLogWarnBytes / (1024ULL * 1024ULL));
     }
 
-    // Configure FSM metrics based on log level
-    // Enable FSM metrics only for debug or trace levels to avoid introducing new tags
-    {
-        bool enableFsmMetrics = (config.logLevel == "debug" || config.logLevel == "trace");
-        yams::daemon::FsmMetricsRegistry::instance().setEnabled(enableFsmMetrics);
-        if (enableFsmMetrics) {
-            spdlog::debug("FSM metrics collection enabled");
-        }
-    }
+    // Connection FSM counters stay on at every log level. They are sharded relaxed atomics, and
+    // status reports them unconditionally: gating them on debug logging made status show zero
+    // transitions and bytes for a daemon that was serving requests. Tracy plots have their own
+    // switch (ConnectionFsm::enable_metrics) and are no-ops without a profiling build.
+    yams::daemon::FsmMetricsRegistry::instance().setEnabled(true);
 
     clear_session_index_on_start();
 
@@ -928,17 +932,24 @@ int main(int argc, char* argv[]) {
 
         // Run the main daemon loop on this thread (handles FSM ticks, metrics refresh, etc.)
         // The loop exits when stopRequested is set (via signal handler or daemon.stop())
-        spdlog::info("Calling daemon.runLoop()...");
-        daemon.runLoop();
-        spdlog::info("daemon.runLoop() returned");
+        spdlog::info("Calling daemon.runLoopChecked()...");
+        auto entry = daemon.runLoopChecked();
+        if (!entry) {
+            spdlog::error("Daemon main-loop entry failed: {}", entry.error().message);
+        }
+        spdlog::info("daemon.runLoopChecked() returned");
 
         // Log reason for exit
         spdlog::info("Main loop exiting: isRunning={}, isStopRequested={}, g_shutdown_requested={}",
                      daemon.isRunning(), daemon.isStopRequested(), g_shutdown_requested.load());
-        // Ensure proper cleanup
-        daemon.stop();
-
-        return 0;
+        // A remote shutdown caller may already own the close: wait for its checked completion
+        // (not merely running=false), and retry the close if that caller failed.
+        auto stopped = daemon.stopOrAwaitClose(std::chrono::seconds{30});
+        if (!stopped) {
+            spdlog::error("Daemon stop did not complete: {}", stopped.error().message);
+            return 1;
+        }
+        return entry ? 0 : 1;
 
     } catch (const std::exception& e) {
         spdlog::error("Daemon error: {}", e.what());

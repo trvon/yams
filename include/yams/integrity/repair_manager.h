@@ -105,12 +105,6 @@ public:
 
     [[nodiscard]] bool canRepair(const std::string& blockHash) const;
 
-    // Prune operations. Apply-mode deletion is owned by the app document service;
-    // this repair helper only supports dry-run candidate accounting.
-    [[nodiscard]] Result<PruneResult>
-    pruneFiles(const PruneConfig& config,
-               std::function<void(uint64_t current, uint64_t total)> progress = nullptr);
-
     /// Query metadata for prune candidates (static, doesn't need storage engine)
     [[nodiscard]] static std::vector<PruneCandidate>
     queryCandidatesForPrune(metadata::MetadataRepository& repo, const PruneConfig& config,

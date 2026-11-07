@@ -32,27 +32,8 @@ inline std::optional<HotColdMode> getEnvMode(const std::string& envVar) {
     return std::nullopt;
 }
 
-inline std::string modeToString(HotColdMode mode) {
-    switch (mode) {
-        case HotColdMode::HotOnly:
-            return "hot_only";
-        case HotColdMode::ColdOnly:
-            return "cold_only";
-        case HotColdMode::Auto:
-            return "auto";
-        default:
-            return "unknown";
-    }
-}
-
 inline HotColdMode getListMode() {
     if (auto mode = getEnvMode("YAMS_LIST_MODE"))
-        return *mode;
-    return HotColdMode::Auto;
-}
-
-inline HotColdMode getGrepMode() {
-    if (auto mode = getEnvMode("YAMS_GREP_MODE"))
         return *mode;
     return HotColdMode::Auto;
 }

@@ -5,8 +5,8 @@
 
 #include <algorithm>
 #include <climits>
-#include <limits>
 #include <cmath>
+#include <limits>
 #include <string_view>
 #include <unordered_map>
 
@@ -29,8 +29,15 @@ void appendRerankTextPart(std::string& out, const std::string& part) {
 std::string buildCrossRerankText(const SearchResult& result, std::string_view contentPreview,
                                  std::size_t textLimit) {
     std::string text;
-    appendRerankTextPart(text, result.document.fileName);
-    appendRerankTextPart(text, result.document.filePath);
+    // The directory path is left out: it is shared noise across candidates and took about half
+    // of a 256-char budget on the retrieval bench. Engine results may carry only filePath.
+    if (!result.document.fileName.empty()) {
+        appendRerankTextPart(text, result.document.fileName);
+    } else {
+        const auto& path = result.document.filePath;
+        const auto slash = path.find_last_of("/\\");
+        appendRerankTextPart(text, slash == std::string::npos ? path : path.substr(slash + 1));
+    }
     appendRerankTextPart(text, result.snippet);
     if (!contentPreview.empty() && text.size() < textLimit) {
         const size_t remaining = textLimit > text.size() ? textLimit - text.size() : size_t{0};
@@ -64,6 +71,7 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
     // One bounded preview query for the whole window; the previous per-result getContent()
     // read every document's full text only to keep its first textLimit characters.
     std::unordered_map<int64_t, std::string> previews;
+    std::unordered_map<std::string, std::string> previewsByHash;
     if (metadataRepo) {
         std::vector<int64_t> ids;
         ids.reserve(window);
@@ -83,6 +91,27 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
             }
             previews = std::move(fetched.value());
         }
+        // Hits without a metadata id (Simeon-lexical, vector) are resolved by hash.
+        std::vector<std::string> hashes;
+        for (size_t i = 0; i < window; ++i) {
+            if (results[i].document.id <= 0 && !results[i].document.sha256Hash.empty() &&
+                textLimit > 0 &&
+                buildCrossRerankText(results[i], {}, textLimit).size() < textLimit) {
+                hashes.push_back(results[i].document.sha256Hash);
+            }
+        }
+        if (!hashes.empty()) {
+            auto fetched = metadataRepo->batchGetDocumentsWithContentPreview(
+                hashes, static_cast<int>(std::min<std::size_t>(textLimit, INT_MAX)));
+            if (!fetched) {
+                outcome.status = CrossRerankOutcome::Status::Failed;
+                outcome.errorMessage = fetched.error().message;
+                return outcome;
+            }
+            for (auto& [hash, docAndPreview] : fetched.value()) {
+                previewsByHash.emplace(hash, std::move(docAndPreview.second));
+            }
+        }
     }
     std::vector<std::string> rerankTexts;
     rerankTexts.reserve(window);
@@ -92,6 +121,9 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
         std::string_view preview;
         if (const auto it = previews.find(results[i].document.id); it != previews.end()) {
             preview = it->second;
+        } else if (const auto hit = previewsByHash.find(results[i].document.sha256Hash);
+                   hit != previewsByHash.end()) {
+            preview = hit->second;
         }
         rerankTexts.push_back(buildCrossRerankText(results[i], preview, textLimit));
         originalScores.push_back(results[i].score);
@@ -119,7 +151,8 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
     auto [minIt, maxIt] = std::minmax_element(scores.begin(), scores.end());
     const float minScore = minIt != scores.end() && std::isfinite(*minIt) ? *minIt : 0.0F;
     const float maxScore = maxIt != scores.end() && std::isfinite(*maxIt) ? *maxIt : 0.0F;
-    float secondScore = 0.0F;
+    // Runner-up starts at minScore, not 0: scores may all be negative.
+    float secondScore = minScore;
     for (float score : scores) {
         if (!std::isfinite(score) || score >= maxScore) {
             continue;

@@ -1,11 +1,11 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/core/thread_name.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/components/VectorSystemManager.h>
-#include <yams/search/hotzone_manager.h>
 #include <yams/vector/vector_database.h>
 
 #include <boost/asio/awaitable.hpp>
@@ -88,10 +88,6 @@ bool CheckpointManager::checkpointNow() {
         success = false;
     }
 
-    if (config_.enable_hotzone_persistence && !checkpointHotzone()) {
-        success = false;
-    }
-
     return success;
 }
 
@@ -109,6 +105,7 @@ void CheckpointManager::launchCheckpointLoop() {
     // blocking stop()), but the loop itself is immune to executor pressure.
     auto stopFlag = deps_.stopRequested;
     checkpointThread_ = std::thread([this, stopFlag]() {
+        yams::setCurrentThreadName("yams-checkpoint");
         using namespace std::chrono_literals;
         std::unique_lock lock(cvMutex_);
         // Initial 30s warmup (matches the prior asio-based timing).
@@ -188,33 +185,6 @@ bool CheckpointManager::checkpointVectorIndex() {
         }
     } catch (const std::exception& e) {
         spdlog::warn("[CheckpointManager] Vector index checkpoint failed: {}", e.what());
-        stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    return false;
-}
-
-bool CheckpointManager::checkpointHotzone() {
-    if (!deps_.hotzoneManager) {
-        return true;
-    }
-
-    auto hotzonePath = config_.data_dir / "hotzone.json";
-
-    try {
-        if (deps_.hotzoneManager->save(hotzonePath)) {
-            auto now = std::chrono::system_clock::now();
-            auto epoch =
-                std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-            stats_.last_hotzone_checkpoint_epoch.store(static_cast<uint64_t>(epoch),
-                                                       std::memory_order_relaxed);
-            stats_.hotzone_checkpoints.fetch_add(1, std::memory_order_relaxed);
-
-            spdlog::debug("[CheckpointManager] Hotzone checkpoint completed");
-            return true;
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[CheckpointManager] Hotzone checkpoint failed: {}", e.what());
         stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);
     }
 

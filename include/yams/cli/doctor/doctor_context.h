@@ -110,7 +110,6 @@ public:
     // ── WAL helpers ─────────────────────────────────────────────────────────
 
     static uint64_t walFileSize(const std::filesystem::path& dataDir, const std::string& dbName);
-    static void forceWalCheckpointLocal(const std::filesystem::path& dbPath);
 
     // ── Repair helpers ──────────────────────────────────────────────────────
 

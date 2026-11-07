@@ -183,10 +183,8 @@ public:
         };
 
         auto* plugin = app.add_subcommand(getName(), getDescription());
+        plugin->alias("plugins");
         register_subs(plugin);
-        // Alias: "plugins" behaves the same as "plugin"
-        auto* plugins = app.add_subcommand("plugins", getDescription());
-        register_subs(plugins);
     }
 
     Result<void> execute() override { return Result<void>(); }

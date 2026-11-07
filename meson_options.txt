@@ -44,3 +44,8 @@ option('enable-re2', type: 'feature', value: 'auto', description: 'Use Google RE
 
 # C++20 Modules (experimental)
 option('enable-modules', type: 'boolean', value: false, description: 'Enable C++20 module compilation (experimental, requires GCC 13+/Clang 16+/MSVC 17.4+)')
+
+# Static-embedding table (Simeon SMSTAT01) installed to share/yams/models/static. Empty: none shipped.
+# Release builds fetch the pinned table first with the built CLI:
+#   yams model download <table> --output <dir>   (sha256-verified)
+option('static-embedding-table', type: 'string', value: '', description: 'Path to a Simeon SMSTAT01 static-embedding table to install under share/yams/models/static')

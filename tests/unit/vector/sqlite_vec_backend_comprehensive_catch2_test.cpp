@@ -242,7 +242,7 @@ int updateDuringGenerationTriggerMigration(unsigned event, void* context, void* 
         return 0;
     }
     const std::string_view statementSql(sql);
-    if (statementSql.find("CREATE TRIGGER IF NOT EXISTS vectors_index_generation_update_v2") !=
+    if (statementSql.find("CREATE TRIGGER IF NOT EXISTS vectors_index_generation_update_v3") !=
         std::string_view::npos) {
         update.sawSafeReplacement = true;
         auto* statementDb = sqlite3_db_handle(static_cast<sqlite3_stmt*>(statement));
@@ -260,7 +260,7 @@ int updateDuringGenerationTriggerMigration(unsigned event, void* context, void* 
     const bool unsafeLegacyCreate =
         statementSql.find("CREATE TRIGGER vectors_index_generation_update") !=
             std::string_view::npos &&
-        statementSql.find("vectors_index_generation_update_v2") == std::string_view::npos;
+        statementSql.find("vectors_index_generation_update_v3") == std::string_view::npos;
     const bool safeLegacyDrop =
         update.sawSafeReplacement && !update.sawProtectedInstall &&
         statementSql.find("DROP TRIGGER IF EXISTS vectors_index_generation_update") !=
@@ -1756,6 +1756,39 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend dropTables",
     REQUIRE_FALSE(backend.tablesExist());
 }
 
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend dropTables removes per-dim vec0 and entity vector tables",
+                 "[vector][backend][admin][migrate][catch2]") {
+    skipIfNeeded();
+    const auto dbPath = std::filesystem::temp_directory_path() /
+                        ("yams_drop_vec0_" + std::to_string(std::random_device{}()) + ".db");
+    {
+        SqliteVecBackend::Config config;
+        config.search_engine = VectorSearchEngine::Vec0L2;
+        SqliteVecBackend backend(config);
+        REQUIRE((backend.initialize(dbPath.string()).has_value()));
+        REQUIRE((backend.createTables(64).has_value()));
+        REQUIRE((backend.insertVector(createVectorRecord("drop_vec0", createEmbedding(64, 1.0f)))
+                     .has_value()));
+        REQUIRE((backend.dropTables().has_value()));
+        REQUIRE_FALSE(backend.tablesExist());
+    }
+    sqlite3* raw = nullptr;
+    REQUIRE(sqlite3_open(dbPath.string().c_str(), &raw) == SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(
+        sqlite3_prepare_v2(raw,
+                           "SELECT count(*) FROM sqlite_master WHERE name LIKE 'vectors_%_vec0%' "
+                           "OR name = 'entity_vectors'",
+                           -1, &stmt, nullptr) == SQLITE_OK);
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(stmt, 0) == 0);
+    sqlite3_finalize(stmt);
+    sqlite3_close(raw);
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
 // =============================================================================
 // Candidate Hashes Filtering Tests (Tiered search narrowing)
 // =============================================================================
@@ -2546,8 +2579,10 @@ TEST_CASE_METHOD(
     char* error = nullptr;
     REQUIRE((sqlite3_exec(initializer.getDbHandle(),
                           "DROP TRIGGER IF EXISTS vectors_index_generation_insert;"
+                          "DROP TRIGGER IF EXISTS vectors_index_generation_update_v3;"
                           "DROP TRIGGER IF EXISTS vectors_index_generation_update_v2;"
                           "DROP TRIGGER IF EXISTS vectors_index_generation_update;"
+                          "DROP TRIGGER IF EXISTS vectors_index_generation_delete_v2;"
                           "DROP TRIGGER IF EXISTS vectors_index_generation_delete;"
                           "DROP TABLE vector_index_generation;",
                           nullptr, nullptr, &error) == SQLITE_OK));

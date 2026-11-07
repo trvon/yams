@@ -22,6 +22,7 @@
 #include <vector>
 
 // pi-lens-ignore: fatal error
+#include <yams/core/thread_name.h>
 #include <yams/core/types.h>
 #include <yams/memory_sync/lifecycle_drain.h>
 #include <yams/memory_sync/memory_sync.h>
@@ -96,13 +97,43 @@ public:
             return current && earlier && *current == *earlier;
         }
 
-    private:
-        [[nodiscard]] std::optional<Rows> visible(const Rows& rows) const {
-            if (!view) {
-                return rows;
+        /// True when everything an adapter pass would read that `localOrigin` did not write is
+        /// unchanged. Records this node wrote came from its local state, so applying them back
+        /// is a no-op; an inbound pass only needs to run for a peer's change.
+        [[nodiscard]] bool sameForeignInputsAs(const AdapterInputs& previous,
+                                               std::string_view localOrigin) const {
+            if (localOrigin.empty()) {
+                return sameAs(previous);
             }
+            if (winners.instance != previous.winners.instance ||
+                winners.foreignGeneration != previous.winners.foreignGeneration || !overlays ||
+                !previous.overlays) {
+                return false;
+            }
+            if (overlays == previous.overlays || *overlays == *previous.overlays) {
+                return true;
+            }
+            const auto current = visible(*overlays, localOrigin);
+            const auto earlier = visible(*previous.overlays, localOrigin);
+            return current && earlier && *current == *earlier;
+        }
+
+    private:
+        [[nodiscard]] std::optional<Rows> visible(const Rows& rows,
+                                                  std::string_view skipOrigin = {}) const {
             Rows out;
+            if (!view) {
+                for (const auto& [key, record] : rows) {
+                    if (skipOrigin.empty() || record.origin != skipOrigin) {
+                        out.emplace(key, record);
+                    }
+                }
+                return out;
+            }
             for (const auto& [key, record] : rows) {
+                if (!skipOrigin.empty() && record.origin == skipOrigin) {
+                    continue;
+                }
                 auto committed = view->find(key);
                 if (committed) {
                     continue;
@@ -271,7 +302,10 @@ public:
         namespaceCleaned_.store(false, std::memory_order_release);
         workerRunning_.store(true, std::memory_order_release);
         try {
-            worker_ = std::thread([this] { workerLoop(); });
+            worker_ = std::thread([this] {
+                yams::setCurrentThreadName("yams-memory-sync");
+                workerLoop();
+            });
         } catch (const std::exception& e) {
             workerRunning_.store(false, std::memory_order_release);
             return Error{ErrorCode::InternalError, e.what()};
@@ -858,6 +892,13 @@ public:
         return now <= completed ? 0 : static_cast<std::uint64_t>(now - completed);
     }
 
+#if defined(YAMS_TESTING)
+    /// Test-only: the committed snapshot IPC readers currently see.
+    std::shared_ptr<const MemorySyncLoop::CommittedState> testing_committedSnapshot() const {
+        return committedSnapshot();
+    }
+#endif
+
     Result<std::map<std::string, MemoryIndexRecord>> syncOnce() {
         if (const auto* callbackSnapshot = activeCallbackSnapshot()) {
             return *callbackSnapshot;
@@ -873,7 +914,7 @@ public:
                 fullRecoveryCompleted_.store(false, std::memory_order_release);
             }
             quarantineChanged = generation != loop_.durableQuarantineGeneration();
-            if (result || quarantineChanged) {
+            if ((result && !reusedUnchangedScan()) || quarantineChanged) {
                 refreshCommittedState();
             }
         }
@@ -1039,6 +1080,17 @@ private:
 
     /// Refresh the committed snapshot from the loop. Callers must hold loopMutex_
     /// so the loop state is quiescent while it is copied.
+    /// The last sync reused the previous complete scan, so the published snapshot is still
+    /// current. Copying the committed state (every merged record and cached blob) on every
+    /// unchanged cycle was most of the worker's idle CPU. Callers must hold loopMutex_.
+    bool reusedUnchangedScan() const {
+        if (!loop_.lastSyncReusedCompleteScan()) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(snapshotMutex_);
+        return committed_ != nullptr;
+    }
+
     void refreshCommittedState() {
         auto state = std::make_shared<MemorySyncLoop::CommittedState>(loop_.committedState());
         std::lock_guard<std::mutex> lock(snapshotMutex_);
@@ -1210,7 +1262,7 @@ private:
                     fullRecoveryCompleted_.store(true, std::memory_order_release);
                 }
                 quarantineChanged = generation != loop_.durableQuarantineGeneration();
-                if (completedSweep || quarantineChanged) {
+                if ((completedSweep && !reusedUnchangedScan()) || quarantineChanged) {
                     refreshCommittedState();
                 }
             }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <optional>
@@ -32,6 +33,14 @@ public:
     void wait() {
         std::unique_lock lock(mutex_);
         cv_.wait(lock, [this] { return stopped_; });
+    }
+
+    /// Bounded wait. Returns false when the loop has not completed within `budget`, which is
+    /// the case when its io_context was stopped first and the frame is abandoned at a
+    /// suspension point until that io_context is destroyed.
+    [[nodiscard]] bool waitFor(std::chrono::milliseconds budget) {
+        std::unique_lock lock(mutex_);
+        return cv_.wait_for(lock, budget, [this] { return stopped_; });
     }
 
     void complete() {

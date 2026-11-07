@@ -30,14 +30,6 @@ void TreeNode::addEntry(TreeEntry entry) {
     sorted_ = false;
 }
 
-void TreeNode::addEntries(std::vector<TreeEntry> entries) {
-    entries_.reserve(entries_.size() + entries.size());
-    for (auto& e : entries)
-        entries_.push_back(std::move(e));
-    cachedHash_.reset();
-    sorted_ = false;
-}
-
 void TreeNode::ensureSorted() const {
     if (!sorted_) {
         std::sort(entries_.begin(), entries_.end());

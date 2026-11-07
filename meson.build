@@ -1000,6 +1000,20 @@ endif
 sql_install_dir = join_paths(get_option('datadir'), 'yams', 'sql')
 install_data('sql/reference_schema.sql', install_dir: sql_install_dir, install_tag: 'runtime')
 
+static_embedding_table = get_option('static-embedding-table')
+if static_embedding_table != ''
+  if not fs.is_file(static_embedding_table)
+    error('static-embedding-table does not name a file: ' + static_embedding_table)
+  endif
+  if not static_embedding_table.endswith('.smstat')
+    error('static-embedding-table must be a .smstat file: ' + static_embedding_table)
+  endif
+  install_data(static_embedding_table,
+    install_dir: join_paths(get_option('datadir'), 'yams', 'models', 'static'),
+    install_tag: 'runtime')
+  message('Static-embedding table: ' + static_embedding_table)
+endif
+
 # macOS: Meson installs dylibs with absolute install names; keep the private
 # libyams_onnx_resource @rpath-relative so staged/unzipped trees run in place.
 if host_machine.system() == 'darwin' and not wasi_enabled

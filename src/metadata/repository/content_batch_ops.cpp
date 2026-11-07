@@ -789,6 +789,71 @@ MetadataRepository::batchGetContentPreview(const std::vector<int64_t>& documentI
         });
 }
 
+Result<std::unordered_map<std::string, double>>
+MetadataRepository::bm25ForDocuments(const std::vector<std::string>& terms,
+                                     const std::vector<std::string>& documentHashes) {
+    std::string match;
+    for (const auto& term : terms) {
+        if (term.empty()) {
+            continue;
+        }
+        if (!match.empty()) {
+            match += " OR ";
+        }
+        match.push_back('"');
+        for (char c : term) {
+            if (c == '"') {
+                match.push_back('"');
+            }
+            match.push_back(c);
+        }
+        match.push_back('"');
+    }
+    if (match.empty() || documentHashes.empty()) {
+        return std::unordered_map<std::string, double>{};
+    }
+
+    return executeReadQuery<std::unordered_map<std::string, double>>(
+        [&](Database& db) -> Result<std::unordered_map<std::string, double>> {
+            // rowid IN keeps FTS5 scoring to the given documents.
+            std::string sql =
+                "SELECT d.sha256_hash, bm25(documents_fts, 1.0, 10.0) FROM documents_fts "
+                "JOIN documents d ON d.id = documents_fts.rowid "
+                "WHERE documents_fts MATCH ? AND documents_fts.rowid IN "
+                "(SELECT id FROM documents WHERE sha256_hash IN ";
+            sql += buildPlaceholderList(documentHashes.size());
+            sql += ")";
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            Statement stmt = std::move(stmtResult).value();
+            if (auto bindResult = stmt.bind(1, match); !bindResult) {
+                return bindResult.error();
+            }
+            int index = 2;
+            for (const auto& hash : documentHashes) {
+                if (auto bindResult = stmt.bind(index++, hash); !bindResult) {
+                    return bindResult.error();
+                }
+            }
+
+            std::unordered_map<std::string, double> result;
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    return stepResult.error();
+                }
+                if (!stepResult.value()) {
+                    break;
+                }
+                result[stmt.getString(0)] = -stmt.getDouble(1);
+            }
+            return result;
+        });
+}
+
 Result<std::unordered_map<std::string, std::pair<DocumentInfo, std::string>>>
 MetadataRepository::batchGetDocumentsWithContentPreview(const std::vector<std::string>& hashes,
                                                         int maxPreviewChars) {

@@ -1140,6 +1140,9 @@ struct StatusResponse {
     uint32_t onnxEmbedUsed{0};
     uint32_t onnxRerankerUsed{0};
 
+    // Older daemons omit this capability. Clients must not infer it from a version string.
+    bool supportsPathUnlink{false};
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -1245,6 +1248,7 @@ struct StatusResponse {
         // Host pressure (appended; older clients tolerate missing tail fields).
         ser << hostPressureSource << hostPressureElevated << hostCpuPressurePct << hostIoPressurePct
             << hostMemoryPressurePct << hostLoadPerCpu << deferredBackgroundWork;
+        ser << supportsPathUnlink;
     }
 
     template <typename Deserializer>
@@ -1681,6 +1685,8 @@ struct StatusResponse {
             res.hostLoadPerCpu = v.value();
         if (auto v = deser.template read<std::string>())
             res.deferredBackgroundWork = std::move(v.value());
+        if (auto v = deser.template read<bool>())
+            res.supportsPathUnlink = v.value();
 
         return res;
     }
@@ -3925,205 +3931,6 @@ struct GraphTraceResponse {
     }
 };
 
-struct GraphImpactResponse {
-    std::string symbol;
-    std::vector<GraphExploreSymbol> affectedSymbols;
-    std::vector<GraphExploreRelation> relationships;
-    std::vector<std::string> warnings;
-    bool truncated{false};
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << symbol << static_cast<uint32_t>(affectedSymbols.size());
-        for (const auto& affected : affectedSymbols) {
-            affected.serialize(ser);
-        }
-        ser << static_cast<uint32_t>(relationships.size());
-        for (const auto& relation : relationships) {
-            relation.serialize(ser);
-        }
-        ser << warnings << truncated;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<GraphImpactResponse> deserialize(Deserializer& deser) {
-        GraphImpactResponse response;
-        if (auto r = deser.readString(); r)
-            response.symbol = std::move(r.value());
-        else
-            return r.error();
-        if (auto cnt = deser.template read<uint32_t>(); cnt) {
-            response.affectedSymbols.reserve(cnt.value());
-            for (uint32_t i = 0; i < cnt.value(); ++i) {
-                auto affected = GraphExploreSymbol::deserialize(deser);
-                if (!affected)
-                    return affected.error();
-                response.affectedSymbols.push_back(std::move(affected.value()));
-            }
-        } else
-            return cnt.error();
-        if (auto cnt = deser.template read<uint32_t>(); cnt) {
-            response.relationships.reserve(cnt.value());
-            for (uint32_t i = 0; i < cnt.value(); ++i) {
-                auto relation = GraphExploreRelation::deserialize(deser);
-                if (!relation)
-                    return relation.error();
-                response.relationships.push_back(std::move(relation.value()));
-            }
-        } else
-            return cnt.error();
-        if (auto r = deser.readStringVector(); r)
-            response.warnings = std::move(r.value());
-        else
-            return r.error();
-        if (auto r = deser.template read<bool>(); r)
-            response.truncated = r.value();
-        else
-            return r.error();
-        return response;
-    }
-};
-
-struct GraphAffectedTestsResponse {
-    std::vector<std::string> changedFiles;
-    std::vector<std::string> affectedTests;
-    std::vector<GraphExploreRelation> relationships;
-    std::vector<std::string> warnings;
-    bool truncated{false};
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << changedFiles << affectedTests << static_cast<uint32_t>(relationships.size());
-        for (const auto& relation : relationships) {
-            relation.serialize(ser);
-        }
-        ser << warnings << truncated;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<GraphAffectedTestsResponse> deserialize(Deserializer& deser) {
-        GraphAffectedTestsResponse response;
-        if (auto r = deser.readStringVector(); r)
-            response.changedFiles = std::move(r.value());
-        else
-            return r.error();
-        if (auto r = deser.readStringVector(); r)
-            response.affectedTests = std::move(r.value());
-        else
-            return r.error();
-        if (auto cnt = deser.template read<uint32_t>(); cnt) {
-            response.relationships.reserve(cnt.value());
-            for (uint32_t i = 0; i < cnt.value(); ++i) {
-                auto relation = GraphExploreRelation::deserialize(deser);
-                if (!relation)
-                    return relation.error();
-                response.relationships.push_back(std::move(relation.value()));
-            }
-        } else
-            return cnt.error();
-        if (auto r = deser.readStringVector(); r)
-            response.warnings = std::move(r.value());
-        else
-            return r.error();
-        if (auto r = deser.template read<bool>(); r)
-            response.truncated = r.value();
-        else
-            return r.error();
-        return response;
-    }
-};
-
-struct PathHistoryEntry {
-    std::string path;
-    std::string snapshotId;
-    std::string blobHash;
-    std::string changeType;
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << path << snapshotId << blobHash << changeType;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<PathHistoryEntry> deserialize(Deserializer& deser) {
-        PathHistoryEntry entry;
-
-        if (auto r = deser.readString(); r)
-            entry.path = std::move(r.value());
-        else
-            return r.error();
-
-        if (auto r = deser.readString(); r)
-            entry.snapshotId = std::move(r.value());
-        else
-            return r.error();
-
-        if (auto r = deser.readString(); r)
-            entry.blobHash = std::move(r.value());
-        else
-            return r.error();
-
-        if (auto r = deser.readString(); r)
-            entry.changeType = std::move(r.value());
-        else
-            return r.error();
-
-        return entry;
-    }
-};
-
-struct GraphPathHistoryResponse {
-    std::string queryPath;
-    std::vector<PathHistoryEntry> history;
-    bool hasMore{false};
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << queryPath;
-        ser << static_cast<uint32_t>(history.size());
-        for (const auto& entry : history) {
-            entry.serialize(ser);
-        }
-        ser << hasMore;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<GraphPathHistoryResponse> deserialize(Deserializer& deser) {
-        GraphPathHistoryResponse res;
-
-        if (auto r = deser.readString(); r)
-            res.queryPath = std::move(r.value());
-        else
-            return r.error();
-
-        if (auto cnt = deser.template read<uint32_t>(); cnt) {
-            res.history.reserve(cnt.value());
-            for (uint32_t i = 0; i < cnt.value(); ++i) {
-                auto entry = PathHistoryEntry::deserialize(deser);
-                if (!entry)
-                    return entry.error();
-                res.history.push_back(std::move(entry.value()));
-            }
-        } else
-            return cnt.error();
-
-        if (auto r = deser.template read<bool>(); r)
-            res.hasMore = r.value();
-        else
-            return r.error();
-
-        return res;
-    }
-};
-
 // ============================================================================
 // Graph Maintenance Responses (PBI-009 Phase 4.3)
 // ============================================================================
@@ -4667,137 +4474,6 @@ struct CatResponse {
     }
 };
 
-struct ListSessionsResponse {
-    std::vector<std::string> session_names;
-    std::string current_session;
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << session_names << current_session;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<ListSessionsResponse> deserialize(Deserializer& deser) {
-        ListSessionsResponse res;
-        auto sn = deser.readStringVector();
-        if (!sn)
-            return sn.error();
-        res.session_names = std::move(sn.value());
-        auto cs = deser.readString();
-        if (!cs)
-            return cs.error();
-        res.current_session = std::move(cs.value());
-        return res;
-    }
-};
-
-struct TreeChangeEntry {
-    std::string changeType;
-    std::string path;
-    std::string oldPath;
-    std::string hash;
-    std::string oldHash;
-    uint64_t size = 0;
-    uint64_t oldSize = 0;
-    std::string contentDeltaHash;
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << changeType << path << oldPath << hash << oldHash << size << oldSize
-            << contentDeltaHash;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<TreeChangeEntry> deserialize(Deserializer& deser) {
-        TreeChangeEntry entry;
-        auto ct = deser.readString();
-        if (!ct)
-            return ct.error();
-        entry.changeType = std::move(ct.value());
-
-        auto p = deser.readString();
-        if (!p)
-            return p.error();
-        entry.path = std::move(p.value());
-
-        auto op = deser.readString();
-        if (!op)
-            return op.error();
-        entry.oldPath = std::move(op.value());
-
-        auto h = deser.readString();
-        if (!h)
-            return h.error();
-        entry.hash = std::move(h.value());
-
-        auto oh = deser.readString();
-        if (!oh)
-            return oh.error();
-        entry.oldHash = std::move(oh.value());
-
-        auto sz = deser.template read<uint64_t>();
-        if (!sz)
-            return sz.error();
-        entry.size = sz.value();
-
-        auto osz = deser.template read<uint64_t>();
-        if (!osz)
-            return osz.error();
-        entry.oldSize = osz.value();
-
-        auto cdh = deser.readString();
-        if (!cdh)
-            return cdh.error();
-        entry.contentDeltaHash = std::move(cdh.value());
-
-        return entry;
-    }
-};
-
-struct ListTreeDiffResponse {
-    std::vector<TreeChangeEntry> changes;
-    uint64_t totalCount = 0;
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << static_cast<uint32_t>(changes.size());
-        for (const auto& entry : changes) {
-            entry.serialize(ser);
-        }
-        ser << totalCount;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<ListTreeDiffResponse> deserialize(Deserializer& deser) {
-        ListTreeDiffResponse resp;
-        auto countRes = deser.template read<uint32_t>();
-        if (!countRes)
-            return countRes.error();
-        auto count = countRes.value();
-
-        resp.changes.reserve(count);
-        for (uint32_t i = 0; i < count; ++i) {
-            auto entry = TreeChangeEntry::deserialize(deser);
-            if (!entry)
-                return entry.error();
-            resp.changes.push_back(std::move(entry.value()));
-        }
-
-        auto total = deser.template read<uint64_t>();
-        if (!total)
-            return total.error();
-        resp.totalCount = total.value();
-
-        return resp;
-    }
-};
-
 /**
  * @brief Per-operation result embedded in the final RepairResponse.
  */
@@ -5062,9 +4738,6 @@ struct MemorySyncResponse {
     }
 };
 
-// Forward declaration for batch response type
-struct BatchResponse;
-
 // Variant type for all responses
 using Response = std::variant<
     SearchResponse, AddResponse, GetResponse, GetInitResponse, GetChunkResponse, StatusResponse,
@@ -5072,14 +4745,10 @@ using Response = std::variant<
     ModelLoadResponse, ModelStatusResponse, ListResponse, AddDocumentResponse, GrepResponse,
     UpdateDocumentResponse, GetStatsResponse, DownloadResponse, ListDownloadJobsResponse,
     DeleteResponse, PrepareSessionResponse, EmbedDocumentsResponse, PluginScanResponse,
-    PluginLoadResponse, PluginTrustListResponse, CatResponse, ListSessionsResponse,
-    ListTreeDiffResponse, FileHistoryResponse, PruneResponse, ListSnapshotsResponse,
-    RestoreCollectionResponse, RestoreSnapshotResponse, GraphQueryResponse, GraphExploreResponse,
-    GraphSymbolLookupResponse, GraphTraceResponse, GraphImpactResponse, GraphAffectedTestsResponse,
-    GraphPathHistoryResponse, GraphRepairResponse, GraphValidateResponse, KgIngestResponse,
-    MetadataValueCountsResponse, MemorySyncResponse,
-    // Batch response (Track B)
-    BatchResponse,
+    PluginLoadResponse, PluginTrustListResponse, CatResponse, FileHistoryResponse, PruneResponse,
+    ListSnapshotsResponse, RestoreCollectionResponse, RestoreSnapshotResponse, GraphQueryResponse,
+    GraphExploreResponse, GraphSymbolLookupResponse, GraphTraceResponse, GraphRepairResponse,
+    GraphValidateResponse, KgIngestResponse, MetadataValueCountsResponse, MemorySyncResponse,
     // Streaming events (progress/heartbeats)
     EmbeddingEvent, ModelLoadEvent,
     // Repair service responses

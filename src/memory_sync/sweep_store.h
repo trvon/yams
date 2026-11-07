@@ -74,6 +74,10 @@ private:
     std::size_t rowBytes_{0};
     std::size_t count_{0};
     std::int64_t generation_{0};
+    // Advances only on winner changes this node did not write (see noteWinnerChange), so an
+    // adapter pass can tell whether anything arrived that local state does not already hold.
+    std::int64_t foreignGeneration_{0};
+    std::string localOrigin_;
     // Unique per store for the process lifetime, so an identity never matches a later store
     // that reuses this one's address.
     const std::uint64_t instance_{nextInstance()};
@@ -349,18 +353,22 @@ private:
     class View final : public WinnerView {
         std::shared_ptr<const SweepStore> store_;
         std::int64_t generation_;
+        std::int64_t foreignGeneration_;
         std::size_t count_;
         bool named_;
 
     public:
-        View(std::shared_ptr<const SweepStore> store, std::int64_t generation, std::size_t count,
-             bool named)
-            : store_(std::move(store)), generation_(generation), count_(count), named_(named) {}
+        View(std::shared_ptr<const SweepStore> store, std::int64_t generation,
+             std::int64_t foreignGeneration, std::size_t count, bool named)
+            : store_(std::move(store)), generation_(generation),
+              foreignGeneration_(foreignGeneration), count_(count), named_(named) {}
         std::optional<Identity> identity() const noexcept override {
             if (!named_) {
                 return std::nullopt;
             }
-            return Identity{.instance = store_->instance_, .generation = generation_};
+            return Identity{.instance = store_->instance_,
+                            .generation = generation_,
+                            .foreignGeneration = foreignGeneration_};
         }
         std::size_t size() const noexcept override { return count_; }
         Result<MemoryIndexRecord> find(std::string_view key) const override {
@@ -377,14 +385,26 @@ public:
         std::lock_guard lock(mutex_);
         // Rows added while building do not advance the generation, so a view taken then
         // cannot name its contents.
-        return std::make_shared<View>(shared_from_this(), generation_, count_,
+        return std::make_shared<View>(shared_from_this(), generation_, foreignGeneration_, count_,
                                       !building_ && healthy_);
     }
     [[nodiscard]] std::size_t size() const noexcept { return count_; }
+    /// This node's writer id. Winners it wrote do not advance the foreign generation. Unset,
+    /// every change counts as foreign.
+    void setLocalOrigin(std::string origin) {
+        std::lock_guard lock(mutex_);
+        localOrigin_ = std::move(origin);
+    }
     [[nodiscard]] bool needsCompaction() const noexcept {
         return generation_ > 512 && static_cast<std::uint64_t>(generation_) / 2 > count_;
     }
     Result<MemoryIndexRecord> find(std::string_view key) const { return findAt(key, generation_); }
+    /// A winner written (or, for a discard, previously held) by another writer changed.
+    void noteWinnerChange(std::string_view origin) noexcept {
+        if (localOrigin_.empty() || origin != localOrigin_) {
+            ++foreignGeneration_;
+        }
+    }
     Result<WinnerPage> page(std::string_view prefix, std::string_view after,
                             std::size_t limit) const {
         return pageAt(prefix, after, limit, generation_);
@@ -415,6 +435,7 @@ public:
                     return Error{ErrorCode::ResourceExhausted, "winner generation exhausted"};
                 }
                 ++generation_;
+                noteWinnerChange(record.origin);
             }
             const auto encoded = serialize(record);
             Statement row{db_.get(), "INSERT OR REPLACE INTO winners VALUES(?1,?2,?3,?4)"};
@@ -450,6 +471,7 @@ public:
                 row.bind(1, key);
                 row.integer(2, ++generation_);
                 row.step();
+                noteWinnerChange(previous.value().origin);
             }
             --count_;
             return {};
@@ -472,6 +494,7 @@ public:
             row.bind(1, writer);
             row.integer(2, ++generation_);
             row.step();
+            ++foreignGeneration_; // hiding a writer's winners changes what local state should hold
             Statement count{db_.get(),
                             "SELECT COUNT(*) FROM winners AS w WHERE w.envelope IS NOT NULL "
                             "AND w.generation=(SELECT n.generation FROM winners AS n "

@@ -148,7 +148,9 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
                     }
                 }
             } else {
-                auto result = d->stop();
+                // main may already own the close: wait for it (and retry it if it failed).
+                auto result = d->stopOrAwaitClose(
+                    std::chrono::milliseconds(timeoutMs > 0 ? timeoutMs : 15000));
                 if (!result) {
                     const bool alreadyStopped =
                         result.error().code == ErrorCode::InvalidState && !d->isRunning();

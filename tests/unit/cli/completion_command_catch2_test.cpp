@@ -243,7 +243,11 @@ TEST_CASE("CompletionCommand - bash completes nested subcommands from command tr
         "COMP_WORDS=(yams plugin trust list \"\"); COMP_CWORD=4; _yams_completion; printf "
         "\"TRUSTLIST:%s\\n\" \"${COMPREPLY[*]}\"; "
         "COMP_WORDS=(yams plugins trust list \"\"); COMP_CWORD=4; _yams_completion; printf "
-        "\"PLUGINSALIAS:%s\\n\" \"${COMPREPLY[*]}\"' > '" +
+        "\"PLUGINSALIAS:%s\\n\" \"${COMPREPLY[*]}\"; "
+        "COMP_WORDS=(yams ls --for); COMP_CWORD=2; _yams_completion; printf "
+        "\"LSALIAS:%s\\n\" \"${COMPREPLY[*]}\"; "
+        "COMP_WORDS=(yams rm --dr); COMP_CWORD=2; _yams_completion; printf "
+        "\"RMALIAS:%s\\n\" \"${COMPREPLY[*]}\"' > '" +
         out.string() + "'";
 
     const int rc = std::system(cmd.c_str());
@@ -266,6 +270,13 @@ TEST_CASE("CompletionCommand - bash completes nested subcommands from command tr
     std::getline(input, pathTreeLine);
     std::getline(input, pluginTrustListLine);
     std::getline(input, pluginsAliasLine);
+    std::string lsAliasLine;
+    std::string rmAliasLine;
+    std::getline(input, lsAliasLine);
+    std::getline(input, rmAliasLine);
+    // Aliases complete with their command's options.
+    CHECK_THAT(lsAliasLine, ContainsSubstring("LSALIAS:--format"));
+    CHECK_THAT(rmAliasLine, ContainsSubstring("RMALIAS:--dry-run"));
 
     CHECK_THAT(configLine, ContainsSubstring("CONFIG:embeddings"));
     CHECK_THAT(pluginLine, ContainsSubstring("PLUGIN:remove"));

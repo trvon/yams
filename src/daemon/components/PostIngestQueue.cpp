@@ -59,6 +59,20 @@ namespace {
 constexpr size_t kMaxGlinerChars = 2000;
 constexpr float kMinTitleConfidence = 0.55f;
 constexpr float kMinNlEntityConfidence = 0.45f;
+constexpr std::size_t kDefaultPreparedEmbedBatchPayloadBytes = 16ULL * 1024ULL * 1024ULL;
+#ifdef YAMS_TEST_PROVIDER_CONTROLS
+std::atomic<std::size_t> gPreparedEmbedBatchPayloadBytes{0};
+#endif
+
+std::size_t preparedEmbedBatchPayloadBytes() {
+#ifdef YAMS_TEST_PROVIDER_CONTROLS
+    const auto overrideBytes = gPreparedEmbedBatchPayloadBytes.load(std::memory_order_relaxed);
+    if (overrideBytes > 0) {
+        return overrideBytes;
+    }
+#endif
+    return kDefaultPreparedEmbedBatchPayloadBytes;
+}
 
 struct PostIngestBatchPolicy {
     // Keep extraction scheduling and content-index DB commit sizing separate. The extraction
@@ -123,6 +137,16 @@ inline bool isGlinerTitleExtractionDisabled() {
 
 } // namespace
 
+#ifdef YAMS_TEST_PROVIDER_CONTROLS
+void PostIngestQueue::testing_setPreparedEmbedBatchPayloadBytes(std::size_t bytes) {
+    gPreparedEmbedBatchPayloadBytes.store(bytes, std::memory_order_relaxed);
+}
+
+void PostIngestQueue::testing_resetPreparedEmbedBatchPayloadBytes() {
+    gPreparedEmbedBatchPayloadBytes.store(0, std::memory_order_relaxed);
+}
+#endif
+
 // Dynamic concurrency limits from TuneAdvisor
 std::size_t PostIngestQueue::maxExtractionConcurrent() {
     // Use the budget allocator's decision — it already guarantees >=1 when
@@ -134,10 +158,6 @@ std::size_t PostIngestQueue::maxExtractionConcurrent() {
 
 std::size_t PostIngestQueue::maxKgConcurrent() {
     return static_cast<std::size_t>(TuneAdvisor::postKgConcurrent());
-}
-
-std::size_t PostIngestQueue::maxSymbolConcurrent() {
-    return static_cast<std::size_t>(TuneAdvisor::postSymbolConcurrent());
 }
 
 std::size_t PostIngestQueue::maxEntityConcurrent() {
@@ -551,10 +571,6 @@ void PostIngestQueue::setKnowledgeGraphEnabled(bool enabled) {
     }
 }
 
-bool PostIngestQueue::isKnowledgeGraphEnabled() const {
-    return knowledgeGraphEnabled_.load(std::memory_order_acquire);
-}
-
 void PostIngestQueue::pauseAll() {
     for (std::size_t i = 0; i < kStageCount; ++i) {
         stagePaused_[i].store(true, std::memory_order_release);
@@ -849,7 +865,10 @@ PressureLimitedPollerConfig<Job> PostIngestQueue::makePollerConfig(
     };
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
-    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
+    // The frame's exit guard may run after this object is destroyed: notify through the shared
+    // lifecycle state and keep it alive from the frame.
+    cfg.notifyLifecycleFn = [lifecycle = lifecycle_]() { lifecycle->notify(); };
+    cfg.lifecycleKeepAlive = lifecycle_;
     cfg.callbackInFlightCounter = &callbacksInFlight_;
     cfg.executor = std::move(executor);
     cfg.getHashFn = std::move(getHash);
@@ -2495,7 +2514,7 @@ void PostIngestQueue::initializeChannels() {
     titleChannel_ = bus.get_or_create_channel<InternalEventBus::TitleExtractionJob>(
         "title_extraction", boundedStageChannelCapacity(4096));
     embedChannel_ = bus.get_or_create_channel<InternalEventBus::EmbedJob>(
-        "embed_jobs", std::max<std::size_t>(TuneAdvisor::embedChannelCapacity(), 256));
+        "embed_jobs", TuneAdvisor::embedJobChannelCapacity());
     spdlog::info("[PostIngestQueue] Cached {} EventBus channel pointers", 7);
 }
 
@@ -2843,9 +2862,10 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     std::vector<InternalEventBus::EmbedPreparedDoc> embedPreparedBatch;
     std::vector<std::string> embedHashBatch;
     std::size_t embedPreparedBatchPayloadBytes = 0;
-    const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedJobDocCap();
+    const std::size_t maxEmbedBatch =
+        ResourceGovernor::instance().capEmbedJobDocuments(TuneAdvisor::resolvedEmbedJobDocCap());
     constexpr std::size_t kMaxPreparedEmbedPayloadBytes = 4ULL * 1024ULL * 1024ULL;
-    constexpr std::size_t kMaxPreparedEmbedBatchPayloadBytes = 16ULL * 1024ULL * 1024ULL;
+    const std::size_t maxPreparedEmbedBatchPayloadBytes = preparedEmbedBatchPayloadBytes();
     const auto dispatchPolicyStart = std::chrono::steady_clock::now();
     const auto dispatchPolicy = ConfigResolver::resolveEmbeddingDispatchPolicy();
     dispatchTimings.setupConfig.add(std::chrono::steady_clock::now() - dispatchPolicyStart);
@@ -2969,7 +2989,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
                 }
                 if (!embedPreparedBatch.empty() &&
                     embedPreparedBatchPayloadBytes + docPayloadBytes >
-                        kMaxPreparedEmbedBatchPayloadBytes) {
+                        maxPreparedEmbedBatchPayloadBytes) {
                     flushEmbedBatch();
                 }
                 embedPreparedBatchPayloadBytes += docPayloadBytes;

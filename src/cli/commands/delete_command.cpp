@@ -79,7 +79,15 @@ public:
                         "Only prune versions in this series (requires --keep-versions)");
         cmd->add_flag("--json", jsonOutput_, "Output results as JSON");
 
-        cmd->callback([this]() { cli_->setPendingCommand(this); });
+        cmd->callback([this]() {
+            if (targets_.empty() && hash_.empty() && name_.empty() && names_.empty() &&
+                pattern_.empty() && directory_.empty() && keepVersions_ == 0) {
+                std::cerr << "error: delete needs a target, --hash, --name, --names, --pattern, "
+                             "--directory or --keep-versions\n";
+                throw CLI::RuntimeError(2);
+            }
+            cli_->setPendingCommand(this);
+        });
     }
 
     Result<void> execute() override {

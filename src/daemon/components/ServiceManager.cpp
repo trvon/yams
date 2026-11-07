@@ -22,6 +22,7 @@
 #include <string>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
@@ -44,6 +45,8 @@
 #endif
 
 #include "../../../include/yams/daemon/components/ServiceManager.h"
+#include <yams/daemon/components/thread_pool_naming.h>
+
 #include "service_manager/bootstrap_status.h"
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -54,11 +57,13 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
+#include <simeon/static_embedding.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/config/config_helpers.h>
+#include <yams/config/static_embedding_table.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/CheckpointManager.h>
@@ -74,6 +79,7 @@
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/init_utils.hpp>
+#include <yams/daemon/components/LegacyVectorCleanup.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
@@ -89,6 +95,7 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/daemon/resource/plugin_host_services.h>
 #include <yams/daemon/resource/simeon_model_provider.h>
 #include <yams/daemon/shutdown_budget.h>
 #include <yams/extraction/builtin_text_content_extractor.h>
@@ -97,6 +104,7 @@
 #include <yams/metadata/migration.h>
 #include <yams/storage/corpus_stats.h>
 #include <yams/storage/storage_runtime_resolver.h>
+#include <yams/vector/simeon_embedding_backend.h>
 #include <yams/vector/vector_database.h>
 
 namespace {
@@ -391,6 +399,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     // Kept separate from the event-loop pool so heavy disk ops never stall async work.
     try {
         blockingPool_ = std::make_unique<boost::asio::thread_pool>(1);
+        nameThreadPoolWorkers(*blockingPool_, 1, "yams-blocking-");
         spdlog::debug("[ServiceManager] Blocking thread pool created (1 worker)");
     } catch (const std::exception& e) {
         spdlog::error("Failed to initialize blocking thread pool: {}", e.what());
@@ -437,6 +446,14 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 spdlog::debug("ServiceManager: AbiPluginHost initialized (trustFile='{}')",
                               trustFile.string());
             }
+            // Extraction plugins get their thread and memory grants from the governor.
+            yams_set_extraction_budget_provider([] {
+                const auto grant = ResourceGovernor::instance().recommendExtractionBudget();
+                yams_extraction_budget_v1 out{};
+                out.max_threads = grant.maxThreads;
+                out.max_decompressed_bytes = grant.maxDecompressedBytes;
+                return out;
+            });
         } catch (const std::exception& e) {
             spdlog::warn("ServiceManager: failed to initialize AbiPluginHost: {}", e.what());
         } catch (...) {
@@ -589,6 +606,25 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 return config ? config->dimension : std::nullopt;
             };
             vectorDeps.suppressVectorIndexBuild = config_.instrumentation.suppressVectorIndexBuild;
+            vectorDeps.migrationTarget =
+                [this]() -> std::optional<VectorSystemManager::MigrationTarget> {
+                // Only the training-free (Simeon) space migrates automatically; a model-backed
+                // dimension change stays a reported mismatch.
+                if (!config_.autoMigrateEmbeddings) {
+                    return std::nullopt;
+                }
+                auto provider = loadModelProvider();
+                if (!provider || !provider->isAvailable() || !provider->isTrainingFree()) {
+                    return std::nullopt;
+                }
+                const size_t dim = provider->getEmbeddingDim("");
+                if (dim == 0) {
+                    return std::nullopt;
+                }
+                return VectorSystemManager::MigrationTarget{dim,
+                                                            provider->getEmbeddingSpaceIdentity(""),
+                                                            provider->isFallbackEmbeddingSpace("")};
+            };
             vectorSystemManager_ = std::make_unique<VectorSystemManager>(vectorDeps);
             spdlog::debug("[ServiceManager] VectorSystemManager created");
 
@@ -613,14 +649,12 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 std::chrono::seconds(TuneAdvisor::checkpointIntervalSeconds());
             checkpointConfig.vector_index_insert_threshold =
                 TuneAdvisor::checkpointInsertThreshold();
-            checkpointConfig.enable_hotzone_persistence = TuneAdvisor::enableHotzoneCheckpoint();
             checkpointConfig.data_dir = config_.dataDir;
 
             CheckpointManager::Dependencies checkpointDeps;
             checkpointDeps.vectorSystemManager = vectorSystemManager_.get();
             checkpointDeps.vectorIndexCoordinator = vectorIndexCoordinator_.get();
             checkpointDeps.state = &state_;
-            checkpointDeps.hotzoneManager = nullptr;
             if (auto metadataRepository = getMetadataRepo()) {
                 checkpointDeps.checkpointWal = [metadataRepository]() {
                     return metadataRepository->checkpointWal();
@@ -780,6 +814,8 @@ ServiceManager::~ServiceManager() {
 void ServiceManager::publishResolvedDataDir(std::filesystem::path dir) {
     std::lock_guard lock(resolvedDataDirMutex_);
     resolvedDataDir_ = std::move(dir);
+    // Static-embedding tables are found under this data dir by the embedding backend too.
+    vector::setStaticEmbeddingDataDirHint(resolvedDataDir_);
 }
 
 yams::Result<void> ServiceManager::initialize() {
@@ -1490,6 +1526,7 @@ void ServiceManager::shutdownExtractedManagers() {
 void ServiceManager::releasePluginInfrastructure() {
     spdlog::info("[ServiceManager] Phase 10: Releasing plugin infrastructure");
     try {
+        yams_set_extraction_budget_provider({});
         abiHost_.reset();
         spdlog::info("[ServiceManager] Phase 10.1: ABI host reset");
     } catch (...) {
@@ -1560,11 +1597,8 @@ void ServiceManager::shutdown() {
 
     // Direct P2P sessions use memory_sync and the peer registry database. Stop and join the
     // listener/reconnect worker before either dependency starts teardown.
-    if (p2pManager_) {
-        p2pManager_->stop();
-        p2pManager_.reset();
-        spdlog::info("[ServiceManager] Phase 1.8: direct P2P stopped");
-    }
+    stopDirectP2pRecovery();
+    spdlog::info("[ServiceManager] Phase 1.8: direct P2P stopped");
 
     // memory_sync callbacks use WorkCoordinator-owned vector rebuilds and database-backed
     // destinations. Stop and join the sync worker before either dependency starts teardown.
@@ -2312,6 +2346,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             auto embeddingService = std::make_shared<EmbeddingService>(
                 getContentStore(), getMetadataRepo(), workCoordinator_.get(),
                 config_.embeddingService);
+            embeddingService->setRepairEmbeddedCounter(&state_.stats.repairEmbeddingsGenerated);
 
             auto initRes = embeddingService->initialize();
             if (initRes) {
@@ -2568,6 +2603,26 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("[ServiceManager] Vector DB init failed: {}", vdbRes.error().message);
         } else if (vdbRes.value()) {
             spdlog::info("[ServiceManager] Vector DB initialized successfully");
+            if (vectorSystemManager_->migratedEmbeddingSpace()) {
+                // Edges derived from the old space would mix with new-space neighbours; drop them
+                // so the idle backfill rebuilds them as documents re-embed.
+                // Idempotent: a crash before the acknowledgement redoes it on the next start.
+                auto kg = getKgStore();
+                auto removed = kg ? kg->deleteEdgesByRelation("semantic_neighbor")
+                                  : Result<std::int64_t>(Error{ErrorCode::NotInitialized,
+                                                               "knowledge graph unavailable"});
+                if (removed) {
+                    spdlog::info("[ServiceManager] embedding space migrated: removed {} "
+                                 "semantic_neighbor edges; documents re-embed in the background",
+                                 removed.value());
+                    requestTopologyRebuild("embedding_space_migrated");
+                    vectorSystemManager_->acknowledgeEmbeddingMigration();
+                } else {
+                    spdlog::warn("[ServiceManager] embedding space migrated, but semantic_neighbor "
+                                 "edges were not removed ({}); retrying on the next start",
+                                 removed.error().message);
+                }
+            }
             startupPhase_.begin(StartupPhase::EmbeddingReconcile);
             // Wire the VDB into the coordinator now that it's ready.
             if (vectorIndexCoordinator_) {
@@ -2650,6 +2705,35 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                                         orphanDocsFailed);
                                 }
                                 reconciledHashes = std::move(retainedHashes);
+                            }
+                        }
+
+                        // Once per data directory: vectors from builds that recorded no model
+                        // id, whose document has since lost its text, embed nothing current.
+                        const auto legacyMarker =
+                            config_.dataDir / "legacy-vectors-without-text-purged";
+                        std::error_code markerEc;
+                        if (!config_.dataDir.empty() && !reconciledHashes.empty() &&
+                            !std::filesystem::exists(legacyMarker, markerEc)) {
+                            const std::unordered_set<std::string> vectorHashes(
+                                reconciledHashes.begin(), reconciledHashes.end());
+                            auto purged = purgeLegacyVectorsWithoutText(
+                                *metadataRepo, *vectorDatabase, vectorHashes);
+                            if (!purged) {
+                                spdlog::warn("[Embeddings] Legacy vector cleanup failed: {}",
+                                             purged.error().message);
+                            } else {
+                                if (purged.value().documentsPurged > 0) {
+                                    spdlog::info("[Embeddings] Removed legacy vectors of {} "
+                                                 "documents that no longer have text",
+                                                 purged.value().documentsPurged);
+                                    std::erase_if(reconciledHashes, [&](const std::string& h) {
+                                        return vectorDatabase->getVectorsByDocument(h).empty();
+                                    });
+                                }
+                                if (purged.value().documentsFailed == 0) {
+                                    std::ofstream(legacyMarker) << "1\n";
+                                }
                             }
                         }
 
@@ -2737,16 +2821,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // All replicated destination stores are now initialized. Attach the ordered apply callback
     // only at this point so the convergence worker cannot race database/vector/KG startup.
-    // Coarse phase markers for the init-waiter warning. Atomics only: both calls below can block
-    // for minutes on a corpus-sized scan, so a status path must never query memory-sync.
+    // Coarse phase markers for the init-waiter warning. Atomics only: the apply setup below can
+    // block for minutes on a corpus-sized scan, so a status path must never query memory-sync.
     startupPhase_.begin(StartupPhase::MemorySyncApply);
     if (auto applyResult = configureMemorySyncApply(); !applyResult) {
         co_return applyResult.error();
-    }
-    startupPhase_.begin(StartupPhase::DirectP2p);
-    if (auto p2pResult = initializeDirectP2p(dataDir); !p2pResult) {
-        co_return Error{p2pResult.error().code,
-                        "direct P2P initialization failed: " + p2pResult.error().message};
     }
 
     // Full SearchEngine construction is non-critical. Metadata search is already available via
@@ -2762,6 +2841,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         ingestService_->start();
     }
     spdlog::info("[ServiceManager] Phase: Ingest Service Started.");
+    // Direct P2P recovers the local op store with a corpus-sized scan before listening. It runs
+    // in the background so search, ingest and readiness never wait on it; a failure degrades
+    // the "p2p" subsystem instead of failing startup.
+    startDirectP2pRecovery(dataDir);
     startupPhase_.begin(StartupPhase::AsyncInitComplete);
 
     co_return Result<void>();
@@ -3559,11 +3642,27 @@ boost::asio::any_io_executor ServiceManager::getCliExecutor() const {
     return getWorkerExecutor();
 }
 
+std::shared_ptr<const simeon::StaticEmbedding> ServiceManager::loadStaticEmbeddingTable() {
+    std::call_once(staticEmbeddingTableOnce_, [this]() {
+        const auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
+        std::optional<std::filesystem::path> configured;
+        if (policy.staticTable) {
+            configured = std::filesystem::path(*policy.staticTable);
+        }
+        if (auto path = yams::config::findStaticEmbeddingTable(configured, resolvedDataDir_)) {
+            staticEmbeddingTable_ = vector::loadSharedStaticEmbeddingTable(*path);
+        }
+    });
+    return staticEmbeddingTable_;
+}
+
 void ServiceManager::wireSearchEngineRuntimeAdapters(
     const std::shared_ptr<search::SearchEngine>& engine, const char* contextLabel) {
     if (!engine) {
         return;
     }
+
+    engine->setStaticEmbedding(loadStaticEmbeddingTable());
 
     cachedQueryConceptExtractor_ = createGlinerExtractionFunc(getEntityExtractors());
     engine->setConceptExtractor(cachedQueryConceptExtractor_);
@@ -3759,14 +3858,6 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
     } catch (const std::exception& e) {
         spdlog::error("[ServiceManager] co_enableEmbeddingsAndRebuild: exception: {}", e.what());
     }
-}
-
-bool ServiceManager::triggerSearchEngineRebuildIfNeeded() {
-    // Delegate to SearchComponent for corpus monitoring and rebuild triggering
-    if (searchComponent_) {
-        return searchComponent_->checkAndTriggerRebuildIfNeeded();
-    }
-    return false;
 }
 
 boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured() {

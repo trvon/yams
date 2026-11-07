@@ -4,6 +4,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/embedding_service_config.h>
+#include <yams/daemon/components/InitWaiterOwnership.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
@@ -24,6 +25,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <yams/compat/thread_stop_compat.h>
 //
@@ -63,6 +65,10 @@ struct DaemonConfig {
     bool useMockModelProvider = false;
     size_t autoRepairBatchSize = 32;
     bool autoRebuildOnDimMismatch = false;
+    // When the training-free embedding space changes dimension (e.g. the static-embedding table
+    // replaces the hash encoder), recreate the vector tables at startup and re-embed in the
+    // background. Config: daemon.auto_migrate_embeddings.
+    bool autoMigrateEmbeddings = true;
     size_t maxPendingRepairs = 1000;
     // Embedded one-shot clients (sandboxed CLIs, Codex) should avoid startup maintenance that can
     // outlive the command and make teardown expensive. Request handlers may still perform explicit
@@ -178,12 +184,65 @@ public:
     Result<void> start();
     Result<void> stop();
     bool waitForStopCompletion(std::chrono::milliseconds timeout);
+    /// stop(); if another thread already owns the close, wait for it and retry if it failed.
+    Result<void> stopOrAwaitClose(std::chrono::milliseconds timeout);
     /// Run the daemon main loop on the calling thread. Call after start().
     /// Returns when stopRequested_ becomes true or requestStop() is called.
     void runLoop();
+    /// Checked entry boundary; success does not certify Ready or completed shutdown.
+    Result<void> runLoopChecked();
+    /// Wait between main-loop ticks: 50 ms while an external shutdown flag is bound and the
+    /// daemon is busy; while idle the tuning idle tick, capped at 200 ms when a flag is bound.
+    static uint32_t runLoopWaitMs(bool daemonIdle, bool externalShutdownFlag, uint32_t tickMs,
+                                  uint32_t idleTickMs) noexcept;
     /// Test helper: trigger deferred async initialization and the init waiter
     /// without entering the long-lived runLoop wait loop.
     void testingStartAsyncInitWithoutRunLoop();
+    Result<void> testingStartAsyncInitWithoutRunLoopChecked();
+#if defined(YAMS_TESTING)
+    // Install before start(); immutable until all daemon callers/waiters have joined.
+    bool testingSetBeforeInitOutcomeObserver(std::function<void()> observer) {
+        if (running_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        beforeInitOutcomeObserverForTesting_ = std::move(observer);
+        return true;
+    }
+    bool testingSetAfterShutdownAdmissionObserver(std::function<void()> observer) {
+        if (running_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        afterShutdownAdmissionObserverForTesting_ = std::move(observer);
+        return true;
+    }
+    bool testingSetBeforeInitWaiterPublicationObserver(std::function<void()> observer) {
+        if (running_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        beforeInitWaiterPublicationObserverForTesting_ = std::move(observer);
+        return true;
+    }
+    bool testingSetAdditionalInitWaiterAdmission(std::function<bool()> permission) {
+        if (running_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        additionalInitWaiterAdmissionForTesting_ = std::move(permission);
+        return true;
+    }
+    bool testingSetBeforeInitWaiterJoinObserver(std::function<void()> observer) {
+        if (running_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        beforeInitWaiterJoinObserverForTesting_ = std::move(observer);
+        return true;
+    }
+    /// Stands in for client requests executing on the IPC handler, which increments this
+    /// counter for every non-health request. Tests use it to drive client-demand gating.
+    void testingAdjustExecutingRequests(std::int64_t delta) {
+        state_.stats.activeNonHealthRequests.fetch_add(static_cast<std::uint64_t>(delta),
+                                                       std::memory_order_relaxed);
+    }
+#endif
     void requestStop() {
         stopRequested_.store(true, std::memory_order_release);
         stop_cv_.notify_all();
@@ -211,7 +270,6 @@ public:
     enum class PathType { Socket, PidFile, LogFile };
     static std::filesystem::path resolveSystemPath(PathType type);
     static bool canWriteToDirectory(const std::filesystem::path& dir);
-    static std::filesystem::path getXDGRuntimeDir();
     DaemonConfig config_;
     StateComponent state_;
     std::unique_ptr<LifecycleComponent> lifecycleManager_;
@@ -249,6 +307,7 @@ public:
     std::atomic<bool> asyncInitBarrierSet_{false};
 
     std::thread initWaiterThread_;
+    InitWaiterOwnership initWaiterOwnership_;
     std::atomic<bool> initHandled_{false};
 
     std::mutex shutdownThreadMutex_;
@@ -269,6 +328,16 @@ public:
 
     // Signal check hook for integration with main loop (avoids separate thread)
     std::function<bool()> signalCheckHook_;
+    // Always present for identical library/test class layout. Empty in production;
+    // invoked outside daemon/FSM locks at initialization lifecycle test seams.
+    std::function<void()> beforeInitOutcomeObserverForTesting_;
+    std::function<void()> afterShutdownAdmissionObserverForTesting_;
+    std::function<void()> beforeInitWaiterPublicationObserverForTesting_;
+    // Test-only additive denial: never permits work refused by the real governor.
+    std::function<bool()> additionalInitWaiterAdmissionForTesting_;
+    std::function<void()> beforeInitWaiterJoinObserverForTesting_;
+    bool sampleInitWaiterAdmission() const;
+    void runInitWaiterJob(bool withoutRunLoop);
 
     // External shutdown flag reference for CV predicate wake-up (yams-qe6r fix)
     // When set, the CV predicate in runLoop() also checks this flag, enabling
@@ -279,7 +348,6 @@ public:
     // On-demand plugin autoload bridge
     Result<size_t> autoloadPluginsNow();
     ServiceManager* getServiceManager() const { return serviceManager_.get(); }
-    void requestReload() { reloadRequested_.store(true, std::memory_order_relaxed); }
     void reloadTuningConfig();
 
     void snapshotTuningProfileForRuntime();

@@ -55,11 +55,6 @@ struct PluginInfo {
     std::string manifestJson; // Raw manifest if available
 };
 
-/// Probe a plugin for basic ABI information (dlopen + symbol lookup)
-/// @param pluginPath Path to the plugin .so/.dylib/.dll
-/// @return PluginInfo if successful, error otherwise
-Result<PluginInfo> probePluginAbi(const std::filesystem::path& pluginPath);
-
 /// Result of interface availability check
 struct InterfaceProbe {
     std::string interfaceId;
@@ -67,13 +62,6 @@ struct InterfaceProbe {
     bool available{false};
     bool hasBatchApi{false}; // For model_provider_v1: has generate_embedding_batch
 };
-
-/// Check if a specific interface is available in an already-loaded plugin
-/// @param handle dlopen handle
-/// @param interfaceId Interface identifier (e.g., "model_provider_v1")
-/// @param version Interface version
-/// @return InterfaceProbe result
-InterfaceProbe probeInterface(void* handle, const std::string& interfaceId, uint32_t version);
 
 // ============================================================================
 // Platform Compatibility

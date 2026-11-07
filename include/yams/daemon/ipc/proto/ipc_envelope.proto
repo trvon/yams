@@ -118,6 +118,14 @@ message DeleteRequest {
   string instance_id = 100;
 }
 
+// Exact location retirement is a separate payload, not an ignorable DeleteRequest flag.
+message UnlinkPathRequest {
+  string path = 1;
+  bool dry_run = 2;
+  string session_id = 99;
+  string instance_id = 100;
+}
+
 message ListRequest {
   uint32 limit = 1;
   int32 offset = 2;
@@ -403,6 +411,14 @@ message GetResponse {
   string file_name = 20;
   bool graph_enabled = 21; // knowledge graph results (show_graph requests)
   repeated RelatedDocumentEntry related = 22;
+  uint64 size = 23;
+  string mime_type = 24;
+  string file_type = 25;
+  int64 created = 26;  // unix epoch seconds
+  int64 modified = 27; // unix epoch seconds
+  int64 indexed = 28;  // unix epoch seconds
+  uint64 total_bytes = 29;
+  bool output_written = 30;
 }
 
 message RelatedDocumentEntry {
@@ -558,9 +574,9 @@ message GrepMatch {
 message GrepResponse {
   // Preferred field
   repeated GrepMatch matches = 1;
-  // Backward compatibility for legacy clients/servers (deprecated)
-  // Use bytes to avoid libprotobuf UTF-8 validation failures when binary data is present.
-  repeated bytes lines = 2;
+  // Field 2 was the deprecated legacy `lines` payload; never reuse it.
+  reserved 2;
+  reserved "lines";
   uint64 total_matches = 3;
   uint64 files_searched = 4;
   uint64 regex_matches = 5;
@@ -668,52 +684,9 @@ message CatResponse {
 }
 
 // Session management
-message ListSessionsRequest {}
-message ListSessionsResponse {
-  repeated string session_names = 1;
-  string current_session = 2;
-}
 
 message UseSessionRequest {
   string session_name = 1;
-}
-
-message AddPathSelectorRequest {
-  string session_name = 1; // optional, defaults to current
-  string path = 2;
-  repeated string tags = 3;
-  repeated KvPair metadata = 4;
-}
-
-message RemovePathSelectorRequest {
-  string session_name = 1; // optional, defaults to current
-  string path = 2;
-}
-
-// Tree diff queries (PBI-043)
-message ListTreeDiffRequest {
-  string base_snapshot_id = 1;
-  string target_snapshot_id = 2;
-  string path_prefix = 3; // optional filter
-  string type_filter = 4; // optional: "added", "modified", "deleted", "renamed"
-  uint64 limit = 5;
-  uint64 offset = 6;
-}
-
-message TreeChangeEntry {
-  string change_type = 1; // "added", "modified", "deleted", "renamed"
-  string path = 2;
-  string old_path = 3; // for renames
-  string hash = 4; // content hash (SHA256)
-  string old_hash = 5; // for modifications
-  uint64 size = 6;
-  uint64 old_size = 7;
-  string content_delta_hash = 8; // optional delta blob hash
-}
-
-message ListTreeDiffResponse {
-  repeated TreeChangeEntry changes = 1;
-  uint64 total_count = 2;
 }
 
 message FileHistoryRequest {
@@ -1100,53 +1073,6 @@ message GraphTraceResponse {
   uint64 snippets_rendered = 9;
 }
 
-message GraphImpactRequest {
-  string symbol = 1;
-  uint64 depth = 2;
-  uint64 max_symbols = 3;
-  string scope_path_prefix = 4;
-}
-
-message GraphImpactResponse {
-  string symbol = 1;
-  repeated GraphExploreSymbol affected_symbols = 2;
-  repeated GraphExploreRelation relationships = 3;
-  repeated string warnings = 4;
-  bool truncated = 5;
-}
-
-message GraphAffectedTestsRequest {
-  repeated string changed_files = 1;
-  uint64 depth = 2;
-  string test_path_pattern = 3;
-}
-
-message GraphAffectedTestsResponse {
-  repeated string changed_files = 1;
-  repeated string affected_tests = 2;
-  repeated GraphExploreRelation relationships = 3;
-  repeated string warnings = 4;
-  bool truncated = 5;
-}
-
-message GraphPathHistoryRequest {
-  string path = 1;
-  uint32 limit = 2;
-}
-
-message PathHistoryEntry {
-  string path = 1;
-  string snapshot_id = 2;
-  string blob_hash = 3;
-  string change_type = 4;
-}
-
-message GraphPathHistoryResponse {
-  string query_path = 1;
-  repeated PathHistoryEntry history = 2;
-  bool has_more = 3;
-}
-
 // Document repair (RepairService)
 message RepairRequest {
   // Operation flags
@@ -1279,6 +1205,9 @@ message MemorySyncResponse {
 
 // ENVELOPE
 message Envelope {
+  // Removed messages; never reuse these numbers or names.
+  reserved 41, 43, 44, 45, 56, 128, 129, 141, 143, 144, 153, 154, 155, 156;
+  reserved "list_sessions_request", "add_path_selector_request", "remove_path_selector_request", "list_tree_diff_request", "graph_path_history_request", "list_sessions_response", "list_tree_diff_response", "graph_path_history_response", "batch_request", "batch_response", "graph_impact_request", "graph_impact_response", "graph_affected_tests_request", "graph_affected_tests_response";
   uint32 version = 1;
   uint64 request_id = 2;
   string session_id = 3;
@@ -1293,6 +1222,7 @@ message Envelope {
     GetChunkRequest get_chunk_request = 15;
     GetEndRequest get_end_request = 16;
     DeleteRequest delete_request = 17;
+    UnlinkPathRequest unlink_path_request = 190;
     ListRequest list_request = 18;
     ShutdownRequest shutdown_request = 19;
     StatusRequest status_request = 20;
@@ -1321,12 +1251,8 @@ message Envelope {
     CancelRequest cancel_request = 39;
     CatRequest cat_request = 40;
     // Session requests
-    ListSessionsRequest list_sessions_request = 41;
     UseSessionRequest use_session_request = 42;
-    AddPathSelectorRequest add_path_selector_request = 43;
-    RemovePathSelectorRequest remove_path_selector_request = 44;
     // Tree diff requests (PBI-043)
-    ListTreeDiffRequest list_tree_diff_request = 45;
     FileHistoryRequest file_history_request = 46;
     // Prune request
     PruneRequest prune_request = 47;
@@ -1343,7 +1269,6 @@ message Envelope {
     // Graph query requests
     GraphQueryRequest graph_query_request = 55;
     GraphExploreRequest graph_explore_request = 62;
-    GraphPathHistoryRequest graph_path_history_request = 56;
     MetadataValueCountsRequest metadata_value_counts_request = 57;
     // Document repair request (RepairService)
     RepairRequest repair_request = 58;
@@ -1381,9 +1306,7 @@ message Envelope {
     PluginLoadResponse plugin_load_response = 125;
     PluginTrustListResponse plugin_trust_list_response = 126;
     CatResponse cat_response = 127;
-    ListSessionsResponse list_sessions_response = 128;
     // Tree diff responses (PBI-043)
-    ListTreeDiffResponse list_tree_diff_response = 129;
     FileHistoryResponse file_history_response = 130;
     PathTreeResponse path_tree_response = 131;
     // Prune response
@@ -1405,15 +1328,7 @@ message Envelope {
     GraphSymbolLookupResponse graph_symbol_lookup_response = 150;
     GraphTraceRequest graph_trace_request = 151;
     GraphTraceResponse graph_trace_response = 152;
-    GraphImpactRequest graph_impact_request = 153;
-    GraphImpactResponse graph_impact_response = 154;
-    GraphAffectedTestsRequest graph_affected_tests_request = 155;
-    GraphAffectedTestsResponse graph_affected_tests_response = 156;
-    GraphPathHistoryResponse graph_path_history_response = 141;
     MetadataValueCountsResponse metadata_value_counts_response = 142;
-    // Batch request/response (Track B)
-    BatchRequest batch_request = 143;
-    BatchResponse batch_response = 144;
     // Document repair responses + streaming event (RepairService)
     RepairResponse repair_response = 145;
     RepairEvent repair_event = 146;
@@ -1422,51 +1337,3 @@ message Envelope {
   }
 }
 
-// =============================================================================
-// Batch Request/Response Types (Track B: Communication Overhead Reduction)
-// =============================================================================
-
-message BatchRequest {
-  repeated BatchItem items = 1;
-  bool continue_on_error = 2;
-  string session_id = 99;
-  string instance_id = 100;
-}
-
-message BatchItem {
-  uint32 sequence_id = 1;
-  oneof request {
-    SearchRequest search_request = 11;
-    GetRequest get_request = 13;
-    AddDocumentRequest add_document_request = 26;
-    GrepRequest grep_request = 27;
-    UpdateDocumentRequest update_document_request = 28;
-    DeleteRequest delete_request = 17;
-    ListRequest list_request = 18;
-    GraphQueryRequest graph_query_request = 55;
-  }
-}
-
-message BatchResponse {
-  repeated BatchItemResponse items = 1;
-  uint32 total_count = 2;
-  uint32 success_count = 3;
-  uint32 error_count = 4;
-  int64 elapsed_ms = 5;
-}
-
-message BatchItemResponse {
-  uint32 sequence_id = 1;
-  bool success = 2;
-  oneof response {
-    SearchResponse search_response = 103;
-    GetResponse get_response = 105;
-    AddDocumentResponse add_document_response = 114;
-    GrepResponse grep_response = 115;
-    UpdateDocumentResponse update_document_response = 116;
-    DeleteResponse delete_response = 119;
-    ListResponse list_response = 113;
-    GraphQueryResponse graph_query_response = 140;
-    ErrorResponse error = 101;
-  }
-}

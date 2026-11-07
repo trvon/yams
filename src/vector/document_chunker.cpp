@@ -219,6 +219,21 @@ DocumentChunker::splitLargeChunks(const std::vector<DocumentChunk>& chunks) {
                     --end;
                 }
 
+                // Splitting runs after merging, so a short tail cannot be repaired by
+                // mergeSmallChunks. Extend it backwards as bounded source overlap rather
+                // than losing it or failing validation for the entire document.
+                const size_t min_chunk_chars =
+                    config_.use_token_count ? (config_.min_chunk_size * 4) : config_.min_chunk_size;
+                if (end > start && end - start < min_chunk_chars && end >= min_chunk_chars) {
+                    start = end - min_chunk_chars;
+                    if (config_.preserve_words) {
+                        while (start > 0 && end - start < max_chunk_chars &&
+                               !std::isspace(static_cast<unsigned char>(content[start - 1]))) {
+                            --start;
+                        }
+                    }
+                }
+
                 // Ensure end is always after start.
                 if (end <= start) {
                     end = std::min(start + 1, content.size());
@@ -395,28 +410,6 @@ std::vector<size_t> DocumentChunker::findParagraphBoundaries(const std::string& 
     }
 
     // Add end of text
-    if (!text.empty()) {
-        boundaries.push_back(text.size());
-    }
-
-    return boundaries;
-}
-
-std::vector<size_t> DocumentChunker::findWordBoundaries(const std::string& text) const {
-    std::vector<size_t> boundaries;
-
-    bool in_word = false;
-    for (size_t i = 0; i < text.size(); ++i) {
-        bool is_space = std::isspace(text[i]);
-
-        if (in_word && is_space) {
-            boundaries.push_back(i);
-            in_word = false;
-        } else if (!in_word && !is_space) {
-            in_word = true;
-        }
-    }
-
     if (!text.empty()) {
         boundaries.push_back(text.size());
     }
@@ -758,7 +751,7 @@ size_t SlidingWindowChunker::calculateStride() const {
 
 std::unique_ptr<DocumentChunker> createChunker(ChunkingStrategy strategy,
                                                const ChunkingConfig& config,
-                                               std::shared_ptr<EmbeddingGenerator> embedder) {
+                                               std::shared_ptr<EmbeddingGenerator> /*embedder*/) {
     switch (strategy) {
         case ChunkingStrategy::FIXED_SIZE:
             return std::make_unique<FixedSizeChunker>(config);
@@ -776,10 +769,7 @@ std::unique_ptr<DocumentChunker> createChunker(ChunkingStrategy strategy,
             return std::make_unique<SlidingWindowChunker>(config);
 
         case ChunkingStrategy::SEMANTIC:
-            if (embedder) {
-                return std::make_unique<SemanticChunker>(config, embedder);
-            }
-            // Fall back to sentence-based if no embedder provided
+            // Semantic chunking was never implemented; sentence boundaries are the fallback.
             return std::make_unique<SentenceBasedChunker>(config);
 
         case ChunkingStrategy::MARKDOWN_AWARE:
@@ -892,34 +882,6 @@ double calculateSemanticCoherence(const std::string& text) {
     double coherence = 1.0 - std::abs(avg_words_per_sentence - 15.0) / 15.0;
 
     return std::max(0.0, std::min(1.0, coherence));
-}
-
-std::vector<size_t> findNaturalBreaks(const std::string& text) {
-    std::vector<size_t> breaks;
-
-    // Find paragraph breaks
-    size_t pos = 0;
-    while ((pos = text.find("\n\n", pos)) != std::string::npos) {
-        breaks.push_back(pos);
-        pos += 2;
-    }
-
-    // Find section breaks (markdown headers)
-    // Note: std::regex does not support multiline mode (where ^ matches start of line).
-    // We simulate it by matching start of string or newline.
-    std::regex header_regex(R"((?:^|\n)#{1,6}\s+[^\n]*)");
-    auto begin = std::sregex_iterator(text.begin(), text.end(), header_regex);
-    auto end = std::sregex_iterator();
-
-    for (auto& it = begin; it != end; ++it) {
-        breaks.push_back(it->position());
-    }
-
-    // Sort and remove duplicates
-    std::sort(breaks.begin(), breaks.end());
-    breaks.erase(std::unique(breaks.begin(), breaks.end()), breaks.end());
-
-    return breaks;
 }
 
 std::vector<DocumentChunk> mergeOverlappingChunks(const std::vector<DocumentChunk>& chunks,
@@ -1082,92 +1044,11 @@ std::string createChunkingSummary(const std::vector<DocumentChunk>& chunks) {
 // =============================================================================
 // Placeholder implementations for remaining chunkers
 // =============================================================================
-
-// SemanticChunker
-SemanticChunker::SemanticChunker(const ChunkingConfig& config,
-                                 std::shared_ptr<EmbeddingGenerator> embedder)
-    : DocumentChunker(config), embedder_(std::move(embedder)) {
-    config_.strategy = ChunkingStrategy::SEMANTIC;
-}
-
-std::vector<DocumentChunk> SemanticChunker::doChunking(const std::string& content,
-                                                       const std::string& document_hash) {
-    // Simplified implementation - creates basic chunks
-    // Full implementation would use embeddings to group semantically similar sentences
-    std::vector<DocumentChunk> chunks;
-
-    size_t chunk_size =
-        config_.use_token_count ? (config_.target_chunk_size * 4) : config_.target_chunk_size;
-    size_t start = 0;
-    size_t chunk_index = 0;
-
-    while (start < content.size()) {
-        size_t end = std::min(start + chunk_size, content.size());
-
-        DocumentChunk chunk;
-        chunk.chunk_id = generateChunkId(document_hash, chunk_index);
-        chunk.document_hash = document_hash;
-        chunk.content = content.substr(start, end - start);
-        chunk.chunk_index = chunk_index;
-        chunk.start_offset = start;
-        chunk.end_offset = end;
-        chunk.strategy_used = ChunkingStrategy::SEMANTIC;
-
-        chunks.push_back(std::move(chunk));
-
-        start = end;
-        chunk_index++;
-    }
-
-    linkChunks(chunks);
-    return chunks;
-}
-
-double SemanticChunker::computeSimilarity(const std::string& text1, const std::string& text2) {
-    (void)text1; // Suppress unused parameter warning
-    (void)text2; // Suppress unused parameter warning
-    // Compute embeddings and calculate cosine similarity
-    // Placeholder implementation
-    return 0.5;
-}
-
-std::vector<size_t> SemanticChunker::findSemanticBoundaries(const std::string& text) {
-    // Find boundaries where semantic similarity drops
-    // Placeholder implementation
-    return findSentenceBoundaries(text);
-}
-
-// =============================================================================
 // SentenceBasedChunker Implementation
 // =============================================================================
 
 SentenceBasedChunker::SentenceBasedChunker(const ChunkingConfig& config) : DocumentChunker(config) {
     config_.strategy = ChunkingStrategy::SENTENCE_BASED;
-}
-
-std::vector<std::string> SentenceBasedChunker::splitIntoSentences(const std::string& text) const {
-    std::vector<std::string> sentences;
-    auto boundaries = findSentenceBoundaries(text);
-
-    size_t start = 0;
-    for (size_t boundary : boundaries) {
-        if (boundary > start) {
-            std::string sentence = text.substr(start, boundary - start);
-            // Trim whitespace
-            while (!sentence.empty() && std::isspace(sentence.back())) {
-                sentence.pop_back();
-            }
-            while (!sentence.empty() && std::isspace(sentence.front())) {
-                sentence.erase(0, 1);
-            }
-            if (!sentence.empty()) {
-                sentences.push_back(sentence);
-            }
-        }
-        start = boundary;
-    }
-
-    return sentences;
 }
 
 bool SentenceBasedChunker::isSentenceEnd(const std::string& text, size_t pos) const {
@@ -1278,31 +1159,6 @@ std::vector<DocumentChunk> SentenceBasedChunker::doChunking(const std::string& c
 ParagraphBasedChunker::ParagraphBasedChunker(const ChunkingConfig& config)
     : DocumentChunker(config) {
     config_.strategy = ChunkingStrategy::PARAGRAPH_BASED;
-}
-
-std::vector<std::string> ParagraphBasedChunker::splitIntoParagraphs(const std::string& text) const {
-    std::vector<std::string> paragraphs;
-    auto boundaries = findParagraphBoundaries(text);
-
-    size_t start = 0;
-    for (size_t boundary : boundaries) {
-        if (boundary > start) {
-            std::string paragraph = text.substr(start, boundary - start);
-            // Trim whitespace
-            while (!paragraph.empty() && std::isspace(paragraph.back())) {
-                paragraph.pop_back();
-            }
-            while (!paragraph.empty() && std::isspace(paragraph.front())) {
-                paragraph.erase(0, 1);
-            }
-            if (!paragraph.empty()) {
-                paragraphs.push_back(paragraph);
-            }
-        }
-        start = boundary;
-    }
-
-    return paragraphs;
 }
 
 std::vector<DocumentChunk> ParagraphBasedChunker::doChunking(const std::string& content,
@@ -1437,24 +1293,6 @@ std::vector<DocumentChunk> MarkdownChunker::doChunking(const std::string& conten
 
     linkChunks(chunks);
     return chunks;
-}
-
-std::vector<MarkdownChunker::MarkdownSection>
-MarkdownChunker::parseMarkdownStructure(const std::string& text) const {
-    (void)text; // Suppress unused parameter warning
-    // Parse markdown headers and sections
-    // Placeholder implementation
-    return {};
-}
-
-std::vector<DocumentChunk>
-MarkdownChunker::chunksFromSections(const std::vector<MarkdownSection>& sections,
-                                    const std::string& document_hash) const {
-    (void)sections;      // Suppress unused parameter warning
-    (void)document_hash; // Suppress unused parameter warning
-    // Convert markdown sections to chunks
-    // Placeholder implementation
-    return {};
 }
 
 } // namespace yams::vector

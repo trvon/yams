@@ -480,6 +480,14 @@ public:
 std::unique_ptr<IDownloadManager> makeDownloadManager(const StorageConfig& storage,
                                                       const DownloaderConfig& cfg);
 
+namespace detail {
+/// Copy `src` over `dst` durably: write a temporary file beside `dst`, fsync it, then rename it
+/// into place, so `dst` is either the old file or the complete new one. On failure nothing is
+/// left at a previously absent `dst`. Used when a rename crosses filesystems.
+Expected<void> copyFileDurablyReplacing(const std::filesystem::path& src,
+                                        const std::filesystem::path& dst);
+} // namespace detail
+
 std::unique_ptr<IDownloadManager> makeDownloadManagerWithDependencies(
     const StorageConfig& storage, const DownloaderConfig& cfg, std::unique_ptr<IHttpAdapter> http,
     std::unique_ptr<IDiskWriter> disk, std::unique_ptr<IIntegrityVerifier> integ,

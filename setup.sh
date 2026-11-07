@@ -1135,6 +1135,15 @@ if [[ "${ENABLE_TSAN}" == "true" ]]; then
 	echo "ThreadSanitizer enabled (race detection)"
 elif [[ "${ENABLE_ASAN}" == "true" ]]; then
 	MESON_OPTIONS+=("-Db_sanitize=address,undefined")
+	cc_tool="${CC##* }"
+	cxx_tool="${CXX##* }"
+	if [[ "${cc_tool}" == clang* ]] || [[ "${cxx_tool}" == clang++* ]]; then
+		# Clang shared objects resolve __asan_*/__ubsan_* from the sanitized executable, so
+		# they must not be linked with --no-undefined (libyams_onnx_resource.so otherwise fails
+		# to link). CI's asan lane passes the same option explicitly.
+		MESON_OPTIONS+=("-Db_lundef=false")
+		echo "AddressSanitizer on Clang: forcing b_lundef=false so sanitized shared objects link"
+	fi
 	echo "AddressSanitizer enabled (memory safety checks)"
 else
 	# Ensure any previous sanitizer setting doesn't persist across reconfigure.
@@ -1224,4 +1233,11 @@ elif [[ -n "${MESON_WRAPPER_PATH}" ]]; then
 else
 	echo "To compile, run: meson compile -C ${BUILD_DIR}"
 	echo "To install, run: meson install -C ${BUILD_DIR}"
+fi
+if [[ "${BUILD_TYPE_MESON_LOWER}" == "release" || "${BUILD_TYPE_MESON_LOWER}" == "debugoptimized" ]]; then
+	# -Ddebug=true here means -g (symbols for packaging), not a debug build: the binaries are
+	# -O3 with NDEBUG. A plain install ships the symbols (hundreds of MB per binary).
+	echo "Note: this build keeps debug symbols (-g) for packaging; a plain install ships them."
+	echo "  Stripped install:        meson install -C ${BUILD_DIR} --strip"
+	echo "  Keep symbols separately: meson install -C ${BUILD_DIR} && sudo bash scripts/split-debug-symbols.sh <prefix> <prefix>/lib/debug"
 fi

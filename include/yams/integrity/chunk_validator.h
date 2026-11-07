@@ -119,24 +119,10 @@ public:
                          chunkProvider) override;
 
     /**
-     * Validate chunks during reconstruction
-     * This can be called during file reconstruction to validate chunks on-the-fly
-     */
-    Result<void> validateDuringReconstruction(const manifest::ChunkRef& chunkRef,
-                                              std::span<const std::byte> chunkData);
-
-    /**
      * Batch validate multiple chunks
      */
     std::vector<ChunkValidationResult>
     validateChunks(const std::vector<std::pair<std::span<const std::byte>, std::string>>& chunks);
-
-    /**
-     * Asynchronous validation
-     */
-    std::future<ValidationReport> validateManifestAsync(
-        const manifest::Manifest& manifest,
-        const std::function<Result<std::vector<std::byte>>(const std::string&)>& chunkProvider);
 
     const ChunkValidationConfig& getConfig() const override { return config_; }
     void setConfig(const ChunkValidationConfig& config) override { config_ = config; }
@@ -180,10 +166,5 @@ private:
                                                 const std::string& expectedHash, size_t offset,
                                                 size_t size);
 };
-
-/**
- * Factory function to create a chunk validator
- */
-std::unique_ptr<IChunkValidator> createChunkValidator(ChunkValidationConfig config = {});
 
 } // namespace yams::integrity

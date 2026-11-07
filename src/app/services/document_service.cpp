@@ -43,6 +43,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -295,7 +296,7 @@ public:
         }
 
         // Try exact path
-        auto exactRes = repo_.findDocumentByExactPath(query);
+        const auto exactRes = repo_.findDocumentByExactPath(query);
         if (exactRes && exactRes.value().has_value()) {
             std::vector<metadata::DocumentInfo> v = {exactRes.value().value()};
             addUnique(v);
@@ -345,13 +346,13 @@ private:
         std::string normalized = path;
         std::replace(normalized.begin(), normalized.end(), '\\', '/');
 
-        auto treeNodeRes = repo_.findPathTreeNodeByFullPath(normalized);
+        const auto treeNodeRes = repo_.findPathTreeNodeByFullPath(normalized);
         if (!treeNodeRes || !treeNodeRes.value().has_value()) {
             return std::nullopt;
         }
 
         const auto& node = treeNodeRes.value().value();
-        auto docRes = repo_.findDocumentByExactPath(node.fullPath);
+        const auto docRes = repo_.findDocumentByExactPath(node.fullPath);
         if (docRes && docRes.value().has_value()) {
             return docRes.value().value().sha256Hash;
         }
@@ -359,7 +360,7 @@ private:
     }
 
     std::optional<std::string> tryExactPath(const std::string& path) {
-        auto res = repo_.findDocumentByExactPath(path);
+        const auto res = repo_.findDocumentByExactPath(path);
         if (res && res.value().has_value()) {
             return res.value().value().sha256Hash;
         }
@@ -402,18 +403,14 @@ private:
 
         // For absolute paths, try progressive suffix patterns
         if (!name.empty() && (name[0] == '/' || name.find(":\\") != std::string::npos)) {
-            try {
-                std::string pathStr = name;
-                std::replace(pathStr.begin(), pathStr.end(), '\\', '/');
-                size_t pos = 0;
-                while ((pos = pathStr.find('/', pos + 1)) != std::string::npos) {
-                    std::string suffix = pathStr.substr(pos + 1);
-                    if (!suffix.empty() && suffix != basename) {
-                        patterns.push_back("%" + suffix);
-                    }
+            std::string pathStr = name;
+            std::replace(pathStr.begin(), pathStr.end(), '\\', '/');
+            size_t pos = 0;
+            while ((pos = pathStr.find('/', pos + 1)) != std::string::npos) {
+                std::string suffix = pathStr.substr(pos + 1);
+                if (!suffix.empty() && suffix != basename) {
+                    patterns.push_back("%" + suffix);
                 }
-            } catch (...) {
-                // Ignore path manipulation errors
             }
         }
 
@@ -734,8 +731,11 @@ buildDocumentInfo(const StoreDocumentRequest& req, const std::string& usePath,
                     info.mimeType =
                         yams::detection::FileTypeDetector::getMimeTypeFromExtension(extForMime);
                 }
+            } catch (const std::exception& e) {
+                spdlog::debug("MIME file detection failed for {}: {}; using fallback", p.string(),
+                              e.what());
             } catch (...) {
-                // fallback below
+                spdlog::debug("MIME file detection failed for {}; using fallback", p.string());
             }
         }
     }
@@ -750,7 +750,14 @@ buildDocumentInfo(const StoreDocumentRequest& req, const std::string& usePath,
                 if (auto sig = det.detectFromBuffer(bytes)) {
                     info.mimeType = sig.value().mimeType;
                 }
+            } catch (const std::exception& e) {
+                spdlog::debug("MIME buffer detection failed for {}: {}; retaining binary fallback",
+                              req.name, e.what());
+                info.mimeType = "application/octet-stream";
             } catch (...) {
+                spdlog::debug("MIME buffer detection failed for {}; retaining binary fallback",
+                              req.name);
+                info.mimeType = "application/octet-stream";
             }
         } else if (info.mimeType.empty())
             info.mimeType = "application/octet-stream";
@@ -838,6 +845,29 @@ private:
     }
 
     Result<std::vector<DeleteTarget>> resolveDeleteTargets(const DeleteByNameRequest& req) {
+        if (req.pathOnly) {
+            if (req.name.empty() || !req.hash.empty() || !req.names.empty() ||
+                !req.pattern.empty()) {
+                return Error{ErrorCode::InvalidArgument,
+                             "Path-only deletion requires one exact name and no other selector"};
+            }
+            if (!ctx_.metadataRepo->supportsDocumentPaths()) {
+                return Error{ErrorCode::InvalidState,
+                             "Path-only deletion requires the current metadata schema"};
+            }
+            auto document = ctx_.metadataRepo->findDocumentByExactPath(req.name);
+            if (!document)
+                return document.error();
+            auto& currentDocument = document.value();
+            if (!currentDocument)
+                return Error{ErrorCode::NotFound, "Document path not indexed: " + req.name};
+            DeleteTarget target;
+            target.doc = std::move(*currentDocument);
+            target.hash = target.doc->sha256Hash;
+            target.name = target.doc->filePath;
+            return std::vector<DeleteTarget>{std::move(target)};
+        }
+
         DocumentResolver<metadata::IMetadataRepository> resolver(*ctx_.metadataRepo);
         DocumentResolver<metadata::IMetadataRepository>::ResolveOptions resolveOpts;
         resolveOpts.tryHashPrefix = true;
@@ -848,7 +878,7 @@ private:
 
         if (!req.hash.empty()) {
             if (req.hash.size() == 64) {
-                auto docRes = ctx_.metadataRepo->getDocumentByHash(req.hash);
+                const auto docRes = ctx_.metadataRepo->getDocumentByHash(req.hash);
                 if (docRes && docRes.value().has_value()) {
                     addUniqueDeleteTargets(targets, seenHashes, {docRes.value().value()});
                 } else if (docRes && yams::common::isHexDigits(req.hash)) {
@@ -924,7 +954,7 @@ private:
             }
         }
 
-        auto lingering = ctx_.metadataRepo->getDocumentByHash(doc.sha256Hash);
+        const auto lingering = ctx_.metadataRepo->getDocumentByHash(doc.sha256Hash);
         if (!lingering) {
             r.errorCode = lingering.error().code;
             r.error = "Failed to verify metadata deletion: " + lingering.error().message;
@@ -952,6 +982,39 @@ private:
             resp.deleted.push_back(r);
             return;
         }
+        // A name identifies a location, not every reference to its CAS hash.
+        // Keep explicit hash deletion and keepRefs' corpus-wide semantics below.
+        if (target.doc && req.hash.empty() && ctx_.metadataRepo->supportsDocumentPaths()) {
+            const auto current = ctx_.metadataRepo->findDocumentByExactPath(target.doc->filePath);
+            if (!current || !current.value() || current.value()->id != target.doc->id) {
+                r.errorCode = current ? ErrorCode::NotFound : current.error().code;
+                r.error = current ? "Document path is no longer current: " + target.doc->filePath
+                                  : current.error().message;
+                resp.errors.push_back(r);
+                return;
+            }
+            auto references = ctx_.metadataRepo->getDocumentPathReferences(target.doc->id);
+            if (!references) {
+                r.errorCode = references.error().code;
+                r.error = references.error().message;
+                resp.errors.push_back(r);
+                return;
+            }
+            if (req.pathOnly || references.value().size() > 1) {
+                auto retired = ctx_.metadataRepo->retireDocumentPath(target.doc->filePath);
+                if (!retired) {
+                    r.errorCode = retired.error().code;
+                    r.error = retired.error().message;
+                    resp.errors.push_back(r);
+                    return;
+                }
+                r.deleted = true;
+                r.pathOnly = true;
+                resp.deleted.push_back(r);
+                return; // No CAS removal, hash-wide sync intent, or immutable-history cleanup.
+            }
+        }
+
         if (req.beforeDelete) {
             auto staged = req.beforeDelete(target.hash);
             if (!staged) {
@@ -1078,22 +1141,20 @@ private:
                 prefix.pop_back();
                 suffix = "/" + suffix;
             }
-            try {
-                if (!prefix.empty() && std::filesystem::exists(prefix)) {
-                    canonicalPattern = std::filesystem::canonical(prefix).string() + suffix;
+            if (!prefix.empty()) {
+                std::error_code ec;
+                const auto canonicalPrefix = std::filesystem::canonical(prefix, ec);
+                if (!ec) {
+                    canonicalPattern = canonicalPrefix.string() + suffix;
                 }
-            } catch (...) {
-                // Ignore errors; use original pattern.
             }
             return canonicalPattern;
         }
 
-        try {
-            if (std::filesystem::exists(pattern)) {
-                canonicalPattern = std::filesystem::canonical(pattern).string();
-            }
-        } catch (...) {
-            // Ignore errors; use original pattern.
+        std::error_code ec;
+        const auto canonicalPath = std::filesystem::canonical(pattern, ec);
+        if (!ec) {
+            canonicalPattern = canonicalPath.string();
         }
         return canonicalPattern;
     }
@@ -1106,6 +1167,25 @@ private:
             return;
         }
 
+        // Basenames use a LIKE pattern without globToSqlLike's path-prefix expansion.
+        if (pattern.find_first_of("/\\") == std::string::npos) {
+            std::string namePattern;
+            namePattern.reserve(pattern.size());
+            for (const char c : pattern) {
+                if (c == '*') {
+                    namePattern += '%';
+                } else if (c == '?') {
+                    namePattern += '_';
+                } else {
+                    if (c == '%' || c == '_' || c == '\\') {
+                        namePattern += '\\';
+                    }
+                    namePattern += c;
+                }
+            }
+            queryOpts.fileNamePattern = std::move(namePattern);
+            return;
+        }
         auto wildcardPos = pattern.find_first_of("*?");
         const bool hasWildcard = wildcardPos != std::string::npos;
         if (!hasWildcard) {
@@ -1215,6 +1295,16 @@ private:
         return ids;
     }
 
+    Result<MetadataMap> listMetadataForPath(const metadata::DocumentInfo& doc) {
+        auto location = ctx_.metadataRepo->getDocumentPathMetadata(doc.filePath, doc.id);
+        if (!location)
+            return location.error();
+        auto& pathMetadata = location.value();
+        if (pathMetadata)
+            return std::move(*pathMetadata);
+        return ctx_.metadataRepo->getAllMetadata(doc.id);
+    }
+
     void applyFallbackListFilters(std::vector<metadata::DocumentInfo>& docs,
                                   const ListDocumentsRequest& req) {
         if (!req.extension.empty()) {
@@ -1229,7 +1319,7 @@ private:
         if (!req.tags.empty()) {
             std::vector<metadata::DocumentInfo> filtered;
             for (const auto& doc : docs) {
-                auto md = ctx_.metadataRepo->getAllMetadata(doc.id);
+                auto md = listMetadataForPath(doc);
                 if (!md) {
                     continue;
                 }
@@ -1248,7 +1338,7 @@ private:
         if (!req.metadataFilters.empty()) {
             std::vector<metadata::DocumentInfo> filtered;
             for (const auto& doc : docs) {
-                auto md = ctx_.metadataRepo->getAllMetadata(doc.id);
+                auto md = listMetadataForPath(doc);
                 if (!md) {
                     continue;
                 }
@@ -1313,15 +1403,31 @@ private:
         return {SnippetPreviewCache{}, true};
     }
 
-    static DocumentEntry buildHydratedListEntry(const ListDocumentsRequest& req,
-                                                const metadata::DocumentInfo& doc,
-                                                const MetadataCache& metadataCache,
-                                                const SnippetPreviewCache& snippetPreviewCache,
-                                                bool snippetFetchFailed) {
+    DocumentEntry buildHydratedListEntry(const ListDocumentsRequest& req,
+                                         const metadata::DocumentInfo& doc,
+                                         const MetadataCache& metadataCache,
+                                         const SnippetPreviewCache& snippetPreviewCache,
+                                         bool snippetFetchFailed) {
         DocumentEntry entry = makeBaseListEntry(doc);
         const MetadataMap* cachedMetadata = nullptr;
         if (auto it = metadataCache.find(doc.id); it != metadataCache.end()) {
             cachedMetadata = &it->second;
+        }
+        MetadataMap locationMetadata;
+        if (req.showMetadata || req.showTags) {
+            auto location = ctx_.metadataRepo->getDocumentPathMetadata(doc.filePath, doc.id);
+            if (location) {
+                auto& pathMetadata = location.value();
+                if (pathMetadata) {
+                    locationMetadata = std::move(*pathMetadata);
+                    cachedMetadata = &locationMetadata;
+                }
+            } else {
+                // Never leak a sibling location's metadata after a failed lookup.
+                cachedMetadata = nullptr;
+                spdlog::debug("Failed to hydrate path metadata for {}: {}", doc.filePath,
+                              location.error().message);
+            }
         }
 
         if (req.showSnippets && req.snippetLength > 0) {
@@ -1387,12 +1493,9 @@ public:
             auto err = storeRes.error();
             if (err.code == ErrorCode::FileNotFound || err.code == ErrorCode::NotFound) {
                 std::string hint;
-                try {
-                    if (usePath.find(',') != std::string::npos) {
-                        hint = " (hint: pass multiple files individually or use addDirectory; "
-                               "commas are not path separators)";
-                    }
-                } catch (...) {
+                if (usePath.find(',') != std::string::npos) {
+                    hint = " (hint: pass multiple files individually or use addDirectory; "
+                           "commas are not path separators)";
                 }
                 return Error{ErrorCode::FileNotFound,
                              std::string("File not found: ") + usePath + hint};
@@ -1405,7 +1508,7 @@ public:
         out.bytesStored = storeRes.value().bytesStored;
         out.bytesDeduped = storeRes.value().bytesDeduped;
 
-        // Best-effort: insert/update metadata repository entry
+        // Commit corpus identity before acknowledging an indexed store.
         if (ctx_.metadataRepo) {
             const auto metadataPrepareStart = std::chrono::steady_clock::now();
             auto now = std::chrono::system_clock::now();
@@ -1428,13 +1531,15 @@ public:
                              "metadata insert writer unavailable in AppContext"};
             }
             metadata::BatchDocumentInsert insertRecord{.info = info,
-                                                       .tags = std::move(tagPairs),
+                                                       .tags = tagPairs,
                                                        .snapshot = std::move(snapshotRecord),
                                                        .updatePathTreeInTransaction =
                                                            req.combineMetadataPathTree,
                                                        .initializePathSeriesInTransaction = true};
             auto ins = ctx_.metadataInsertWriter->submit(std::move(insertRecord)).get();
             recordDocumentStorePhase("metadata_insert", repoInsertStart);
+            if (!ins)
+                return ins.error();
             if (ins) {
                 const int64_t docId = ins.value().documentId;
                 out.documentId = docId;
@@ -1444,6 +1549,9 @@ public:
                 }
                 applyStorePathTree(req, info, docId);
                 syncStoreKnowledgeGraph(info, snapshotId);
+                auto pathStored = ctx_.metadataRepo->recordDocumentPath(info, docId, tagPairs);
+                if (!pathStored)
+                    return pathStored.error();
                 enqueueStoreFuzzyTerms(info);
                 applyStoreInlineContentIndex(req, info, docId, usePath);
             }
@@ -1513,21 +1621,22 @@ public:
                                          : std::vector<Result<api::StoreResult>>{};
         recordDocumentStorePhase("content_store", contentStoreStart);
         for (std::size_t i = 0; i < prepared.size(); ++i) {
+            const auto& item = prepared[i];
             if (i >= contentResults.size()) {
-                outcomes[prepared[i].requestIndex] =
+                outcomes[item.requestIndex] =
                     Error{ErrorCode::InternalError,
                           "content store batch returned an invalid result count"};
-                if (prepared[i].temporaryPath) {
+                if (item.temporaryPath) {
                     std::error_code ec;
-                    std::filesystem::remove(*prepared[i].temporaryPath, ec);
+                    std::filesystem::remove(*item.temporaryPath, ec);
                 }
                 continue;
             }
             if (!contentResults[i]) {
-                outcomes[prepared[i].requestIndex] = contentResults[i].error();
-                if (prepared[i].temporaryPath) {
+                outcomes[item.requestIndex] = contentResults[i].error();
+                if (item.temporaryPath) {
                     std::error_code ec;
-                    std::filesystem::remove(*prepared[i].temporaryPath, ec);
+                    std::filesystem::remove(*item.temporaryPath, ec);
                 }
             }
         }
@@ -1538,6 +1647,7 @@ public:
             metadata::DocumentInfo info;
             std::string snapshotId;
             std::string usePath;
+            std::vector<std::pair<std::string, metadata::MetadataValue>> pathMetadata;
             std::future<Result<metadata::DocumentInsertOutcome>> future;
         };
         std::vector<PendingMetadata> pendingMetadata;
@@ -1583,7 +1693,7 @@ public:
 
             metadata::BatchDocumentInsert insertRecord{
                 .info = info,
-                .tags = std::move(tagPairs),
+                .tags = tagPairs,
                 .snapshot = std::move(snapshotRecord),
                 .updatePathTreeInTransaction = requests[item.requestIndex].combineMetadataPathTree,
                 .initializePathSeriesInTransaction = true};
@@ -1594,6 +1704,7 @@ public:
                                        .info = std::move(info),
                                        .snapshotId = item.snapshotId,
                                        .usePath = item.usePath,
+                                       .pathMetadata = std::move(tagPairs),
                                        .future = std::move(future)});
         }
 
@@ -1613,7 +1724,16 @@ public:
                 continue;
             }
 
-            auto& response = outcomes[pending.requestIndex]->value();
+            auto& outcome = outcomes[pending.requestIndex];
+            if (!outcome) {
+                outcome = Error{ErrorCode::InternalError,
+                                "metadata insert completed without a content-store response"};
+                continue;
+            }
+            if (!*outcome) {
+                continue;
+            }
+            auto& response = outcome->value();
             response.documentId = inserted.value().documentId;
             const auto& request = requests[pending.requestIndex];
             if (!inserted.value().pathSeriesInitialized) {
@@ -1621,6 +1741,12 @@ public:
             }
             applyStorePathTree(request, pending.info, response.documentId);
             syncStoreKnowledgeGraph(pending.info, pending.snapshotId);
+            auto pathStored = ctx_.metadataRepo->recordDocumentPath(
+                pending.info, response.documentId, pending.pathMetadata);
+            if (!pathStored) {
+                outcomes[pending.requestIndex] = pathStored.error();
+                continue;
+            }
             auto documentTerms = collectDocumentTermsForFuzzySearch(pending.info);
             batchFuzzyTerms.insert(batchFuzzyTerms.end(),
                                    std::make_move_iterator(documentTerms.begin()),
@@ -1648,19 +1774,25 @@ public:
     // --- store() side-effect helpers (behavior-preserving extractions) ---
 
     void applyStoreVersioning(const metadata::DocumentInfo& info, int64_t docId) {
-        // Path-series versioning (best-effort)
+        const auto canonical = ctx_.metadataRepo->getDocument(docId);
+        if (!canonical || !canonical.value() || canonical.value()->filePath != info.filePath) {
+            // An alias has its own head/revision; never rewrite the canonical
+            // content row's series on behalf of a sibling location.
+            return;
+        }
+        // Legacy content-row path-series versioning (best-effort).
         const auto versioningStart = std::chrono::steady_clock::now();
         try {
             auto* writeCoord = getWriteCoordinator();
             if (writeCoord) {
                 int64_t maxVersion = 0;
                 std::optional<int64_t> prevLatestId;
-                auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
+                const auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
                 if (priorDoc && priorDoc.value().has_value()) {
-                    auto& prior = priorDoc.value().value();
+                    const auto& prior = priorDoc.value().value();
                     if (prior.sha256Hash != info.sha256Hash) {
                         prevLatestId = prior.id;
-                        auto verRes = ctx_.metadataRepo->getMetadata(prior.id, "version");
+                        const auto verRes = ctx_.metadataRepo->getMetadata(prior.id, "version");
                         if (verRes && verRes.value().has_value()) {
                             try {
                                 maxVersion = verRes.value().value().asInteger();
@@ -1681,12 +1813,13 @@ public:
                         for (const auto& d : prevListRes.value()) {
                             if (d.id == docId)
                                 continue;
-                            auto latestRes = ctx_.metadataRepo->getMetadata(d.id, "is_latest");
+                            const auto latestRes =
+                                ctx_.metadataRepo->getMetadata(d.id, "is_latest");
                             if (latestRes && latestRes.value().has_value() &&
                                 latestRes.value().value().asBoolean()) {
                                 prevLatestId = d.id;
                             }
-                            auto verRes = ctx_.metadataRepo->getMetadata(d.id, "version");
+                            const auto verRes = ctx_.metadataRepo->getMetadata(d.id, "version");
                             if (verRes && verRes.value().has_value()) {
                                 try {
                                     int64_t v = verRes.value().value().asInteger();
@@ -1732,9 +1865,9 @@ public:
                          {docId, "series_key", metadata::MetadataValue(info.filePath)}}},
                     *writeCoord);
             } else {
-                auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
+                const auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
                 if (priorDoc && priorDoc.value().has_value()) {
-                    auto& prior = priorDoc.value().value();
+                    const auto& prior = priorDoc.value().value();
                     if (prior.sha256Hash != info.sha256Hash) {
                         metadata::applyPathSeriesVersioning(*ctx_.metadataRepo, info.filePath,
                                                             docId, prior);
@@ -2341,7 +2474,7 @@ public:
             std::string mime;
             std::string ext;
             if (ctx_.metadataRepo) {
-                auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
+                const auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
                 if (docRes && docRes.value().has_value()) {
                     mime = docRes.value()->mimeType;
                     ext = docRes.value()->fileExtension;
@@ -2417,7 +2550,7 @@ public:
         std::optional<yams::metadata::DocumentInfo> targetDoc;
         if (ctx_.metadataRepo) {
             // PERFORMANCE: Use direct hash lookup instead of scanning all documents
-            auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
+            const auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
             if (docRes && docRes.value().has_value()) {
                 targetDoc = docRes.value();
             }
@@ -2440,7 +2573,7 @@ public:
 
         if (mode == yams::cli::HotColdMode::HotOnly && !forceCold && ctx_.metadataRepo &&
             targetDoc) {
-            auto c = ctx_.metadataRepo->getContent(targetDoc->id);
+            const auto c = ctx_.metadataRepo->getContent(targetDoc->id);
             if (c && c.value().has_value()) {
                 CatDocumentResponse out;
                 out.hash = hash;
@@ -2457,7 +2590,7 @@ public:
 
         // Auto: prefer hot content when available; otherwise cold
         if (mode == yams::cli::HotColdMode::Auto && !forceCold && ctx_.metadataRepo && targetDoc) {
-            auto c = ctx_.metadataRepo->getContent(targetDoc->id);
+            const auto c = ctx_.metadataRepo->getContent(targetDoc->id);
             if (c && c.value().has_value() && !c.value()->contentText.empty()) {
                 CatDocumentResponse out;
                 out.hash = hash;
@@ -2508,7 +2641,11 @@ public:
         std::size_t totalFoundApprox = 0;
 
         metadata::DocumentQueryOptions queryOpts;
+        queryOpts.usePathLocations = true;
         queryOpts.limit = req.limit > 0 ? req.limit : 0;
+        if (req.recent && *req.recent > 0)
+            queryOpts.limit =
+                queryOpts.limit > 0 ? std::min(queryOpts.limit, *req.recent) : *req.recent;
         queryOpts.offset = std::max(0, req.offset);
         queryOpts.pathsOnly = req.pathsOnly;
 
@@ -2586,7 +2723,14 @@ public:
         if (!usedQuery) {
             std::string sqlPattern =
                 canonicalPattern.empty() ? "%" : globToSqlLike(canonicalPattern);
-            auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, sqlPattern);
+            auto fallbackQuery = queryOpts;
+            fallbackQuery.limit = 0;
+            fallbackQuery.offset = 0;
+            // Preserve the legacy fallback's any-tag semantics; the local
+            // metadata-aware filter below applies them before pagination.
+            fallbackQuery.tags.clear();
+            fallbackQuery.likePattern = sqlPattern;
+            auto docsRes = ctx_.metadataRepo->queryDocuments(fallbackQuery);
             if (!docsRes) {
                 if (listCanceled()) {
                     return canceledError();
@@ -2608,6 +2752,8 @@ public:
                        docs.end());
         }
 
+        const auto totalFound = usedQuery ? totalFoundApprox : docs.size();
+
         // Pagination: offset, limit
         std::vector<metadata::DocumentInfo> page;
         if (usedQuery) {
@@ -2628,7 +2774,7 @@ public:
         }
 
         ListDocumentsResponse out;
-        out.totalFound = usedQuery ? totalFoundApprox : docs.size();
+        out.totalFound = totalFound;
         out.count = page.size();
         out.sortBy = req.sortBy;
         out.sortOrder = req.sortOrder;
@@ -2751,7 +2897,7 @@ public:
         }
 
         // Find target document by hash - use direct lookup instead of scanning all
-        auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
+        const auto docRes = ctx_.metadataRepo->getDocumentByHash(hash);
         if (!docRes) {
             return Error{ErrorCode::InternalError,
                          "Failed to lookup document: " + docRes.error().message};
@@ -2981,6 +3127,30 @@ public:
             }
         }
 
+        // Path-aware tag and metadata filters read each location's own metadata, which is
+        // authoritative there; mirror the update onto every live location of the document.
+        {
+            std::vector<std::pair<std::string, std::optional<std::string>>> locationChanges;
+            for (const auto& [k, v] : req.keyValues)
+                locationChanges.emplace_back(k, v);
+            for (const auto& p : req.pairs) {
+                if (const auto pos = p.find('='); pos != std::string::npos)
+                    locationChanges.emplace_back(p.substr(0, pos), p.substr(pos + 1));
+            }
+            for (const auto& tag : req.addTags)
+                locationChanges.emplace_back("tag:" + tag, tag);
+            for (const auto& tag : req.removeTags)
+                locationChanges.emplace_back("tag:" + tag, std::nullopt);
+            if (!locationChanges.empty()) {
+                if (auto mirrored =
+                        ctx_.metadataRepo->applyDocumentPathMetadata(target.id, locationChanges);
+                    !mirrored) {
+                    errors.push_back("Failed to update location metadata: " +
+                                     mirrored.error().message);
+                }
+            }
+        }
+
         resp.success = (errors.empty() || !req.atomic);
         resp.updatesApplied = count;
         return resp;
@@ -3043,14 +3213,28 @@ public:
         deleteRequest.dryRun = req.dryRun;
         deleteRequest.force = true;
         for (const auto& candidate : candidates.value()) {
+            // An older canonical version can still be current content at another location.
+            // Exclude it in both preview and apply before removing any CAS bytes.
+            if (ctx_.metadataRepo->supportsDocumentPaths()) {
+                auto references =
+                    ctx_.metadataRepo->getDocumentPathReferences(candidate.document.id);
+                if (!references) {
+                    return references.error();
+                }
+                if (!references.value().empty()) {
+                    continue;
+                }
+            }
             DeleteTarget target;
             target.doc = candidate.document;
             target.hash = candidate.document.sha256Hash;
             target.name = candidate.document.fileName.empty() ? candidate.document.filePath
                                                               : candidate.document.fileName;
+            // Retention selects historical content, not the current head at its former path.
+            deleteRequest.hash = target.hash;
             executeDeleteTarget(deleteRequest, target, response);
         }
-        response.count = candidates.value().size();
+        response.count = response.deleted.size() + response.errors.size();
         return response;
     }
 

@@ -2061,3 +2061,30 @@ TEST_CASE("MemorySyncService readers do not block on a slow reconciliation",
     service.stop();
     CHECK_FALSE(service.started());
 }
+
+// Every reconcile cycle copied the loop's whole committed state (every merged record and every
+// cached blob) into a new snapshot, even when the cycle reused the last complete scan because
+// nothing had changed. Profiling the daemon at idle showed that copy and its destruction as most
+// of the memory-sync worker's CPU. An unchanged cycle now keeps the published snapshot.
+TEST_CASE("MemorySyncService keeps its committed snapshot across an unchanged cycle",
+          "[memory-sync][service][snapshot]") {
+    TempDirGuard tmp;
+    MemorySyncConfig config{"reader"};
+    config.exclusiveBackend = true;
+    MemorySyncService service{makeBackend(tmp.path), config};
+    REQUIRE(service.publish("document/a", bytes("a")).has_value());
+    REQUIRE(service.syncOnce().has_value());
+    REQUIRE(service.syncOnce().has_value());
+    const auto settled = service.testing_committedSnapshot();
+    REQUIRE(settled != nullptr);
+
+    REQUIRE(service.syncOnce().has_value());
+    CHECK(service.testing_committedSnapshot() == settled);
+
+    // A change still publishes a new snapshot that carries it.
+    REQUIRE(service.publish("document/b", bytes("b")).has_value());
+    REQUIRE(service.syncOnce().has_value());
+    const auto changed = service.testing_committedSnapshot();
+    CHECK(changed != settled);
+    REQUIRE(service.readCached("document/b").has_value());
+}

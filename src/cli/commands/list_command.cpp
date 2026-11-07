@@ -76,6 +76,8 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("list", getDescription());
+        if (cli_)
+            cli_->registerReadOptions(*cmd);
         cmd->alias("ls"); // Add ls as alias for list
 
         cmd->add_option("--name,-p,--pattern", namePattern_,
@@ -97,7 +99,9 @@ public:
         cmd->add_flag("--reverse,-r", reverse_, "Reverse sort order");
         cmd->add_option("--limit,-n", limit_, "Limit number of results")->default_val(100);
         cmd->add_option("--offset", offset_, "Offset for pagination")->default_val(0);
-        cmd->add_option("--recent", recentCount_, "Show N most recent documents");
+        cmd->add_option("--recent", recentCount_,
+                        "Show at most N most recent documents, one per line")
+            ->check(CLI::PositiveNumber);
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information");
         cmd->add_flag("--paths-only", pathsOnly_,
                       "Output only file paths, one per line (useful for scripting)");
@@ -122,7 +126,8 @@ public:
 
         // Metadata filters (key/value)
         cmd->add_option("--metadata", metadataFiltersRaw_,
-                        "Additional metadata filters key=value (repeatable)")
+                        "Filter add -m metadata: key=value (repeatable; e.g. task, source, phase, "
+                        "owner, worktree, branch)")
             ->take_all();
         cmd->add_flag("--match-any-metadata", matchAnyMetadata_,
                       "Use OR across metadata filters (default AND)");
@@ -207,8 +212,11 @@ public:
     }
 
     Result<void> execute() override {
+        OutputBudget outputBudget(std::cout, cli_ ? cli_->outputBudgetChars() : 0);
         try {
             const bool cliOneShot = yams::cli::cli_one_shot_enabled();
+            if (recentCount_ > 0)
+                limit_ = limit_ > 0 ? std::min(limit_, recentCount_) : recentCount_;
 
             if (jsonFlag_ || (cli_ && cli_->getJsonOutput()))
                 format_ = "json";
@@ -262,8 +270,9 @@ public:
             dreq.recent = (recentCount_ > 0) || (limit_ <= 100);
 
             // Format and display options
-            const bool includeCompactMetadataSummary =
-                !showMetadata_ && format_ == "table" && !cli_->getJsonOutput() && !pathsOnly_;
+            const bool includeCompactMetadataSummary = recentCount_ == 0 && !showMetadata_ &&
+                                                       format_ == "table" &&
+                                                       !cli_->getJsonOutput() && !pathsOnly_;
             dreq.format = format_;
             dreq.sortBy = sortBy_;
             dreq.reverse = reverse_;
@@ -337,22 +346,36 @@ public:
                 resolvedLocalFilePath_ = resolved.isLocalFile ? resolved.absPath : std::nullopt;
             }
 
-            bool showSpinner = !cli_->getJsonOutput() && !pathsOnly_ && format_ != "json" &&
-                               format_ != "csv" && format_ != "minimal";
+            bool showSpinner = !cli_->getQuiet() && !cli_->getJsonOutput() && !pathsOnly_ &&
+                               format_ != "json" && format_ != "csv" && format_ != "minimal";
             std::optional<ui::SpinnerRunner> spinner;
             if (showSpinner) {
                 spinner.emplace();
                 spinner->start("Listing documents...");
             }
 
-            auto render = [&](const yams::daemon::ListResponse& resp) -> Result<void> {
+            auto render = [&](const yams::daemon::ListResponse& rawResp) -> Result<void> {
                 if (spinner) {
                     spinner->stop();
+                }
+                auto resp = rawResp;
+                if (limit_ > 0 && resp.items.size() > static_cast<std::size_t>(limit_))
+                    resp.items.resize(static_cast<std::size_t>(limit_));
+                if (recentCount_ > 0 && format_ == "table" && !cli_->getJsonOutput() &&
+                    !pathsOnly_) {
+                    for (const auto& entry : resp.items) {
+                        std::cout << compactSnippet(entry.path.empty() ? entry.name : entry.path,
+                                                    240)
+                                  << ": " << compactSnippet(entry.snippet) << '\n';
+                        noteOutputResult(std::cout);
+                    }
+                    return Result<void>();
                 }
                 // Handle paths-only output
                 if (pathsOnly_) {
                     for (const auto& e : resp.items) {
                         std::cout << e.path << std::endl;
+                        noteOutputResult(std::cout);
                     }
                     return Result<void>();
                 }
@@ -876,8 +899,9 @@ private:
             }
 
             // Display options
-            const bool includeCompactMetadataSummary =
-                !showMetadata_ && format_ == "table" && !cli_->getJsonOutput() && !pathsOnly_;
+            const bool includeCompactMetadataSummary = recentCount_ == 0 && !showMetadata_ &&
+                                                       format_ == "table" &&
+                                                       !cli_->getJsonOutput() && !pathsOnly_;
             serviceReq.format = format_;
             serviceReq.showSnippets = showSnippets_ && !noSnippets_;
             serviceReq.snippetLength = snippetLength_;
@@ -1080,24 +1104,6 @@ private:
             return "binary";
         }
     };
-
-    static void
-    mergeTagsIntoMetadata(const std::vector<std::string>& tags,
-                          std::unordered_map<std::string, metadata::MetadataValue>& metadata) {
-        if (tags.empty())
-            return;
-
-        for (const auto& tag : tags) {
-            if (tag.empty())
-                continue;
-            std::string key = tag.starts_with("tag:") ? tag : ("tag:" + tag);
-            if (metadata.find(key) != metadata.end())
-                continue;
-            metadata::MetadataValue metaVal;
-            metaVal.value = tag;
-            metadata.emplace(std::move(key), std::move(metaVal));
-        }
-    }
 
     Result<void> listMetadataValues() {
         // Start spinner early (before any blocking operations)
@@ -1848,61 +1854,6 @@ private:
                                                 .indexedAfter = indexedAfter_,
                                                 .indexedBefore = indexedBefore_};
         return yams::cli::applyDocTimeFilters(doc, filters);
-    }
-
-    bool applyChangeFilters(const metadata::DocumentInfo& doc) {
-        // If no change filters are specified, include all documents
-        if (!showChanges_ && sinceTime_.empty() && !showDeleted_) {
-            return true;
-        }
-
-        auto now = std::chrono::system_clock::now();
-
-        // Handle --changes flag (show recent modifications in last 24h or specified window)
-        if (showChanges_) {
-            auto windowTime = TimeParser::parse(changeWindow_);
-            if (!windowTime) {
-                // Default to 24 hours if parsing fails
-                windowTime = now - std::chrono::hours(24);
-            }
-
-            // Check if document was modified, created, or indexed recently
-            bool recentlyChanged = (doc.modifiedTime >= windowTime.value()) ||
-                                   (doc.createdTime >= windowTime.value()) ||
-                                   (doc.indexedTime >= windowTime.value());
-
-            if (!recentlyChanged) {
-                return false;
-            }
-        }
-
-        // Handle --since filter
-        if (!sinceTime_.empty()) {
-            auto sinceTimePoint = TimeParser::parse(sinceTime_);
-            if (!sinceTimePoint) {
-                spdlog::warn("Invalid since time: {}", sinceTime_);
-                return true; // Don't filter on invalid input
-            }
-
-            // Check if any timestamp is after the since time
-            bool changedSince = (doc.modifiedTime >= sinceTimePoint.value()) ||
-                                (doc.createdTime >= sinceTimePoint.value()) ||
-                                (doc.indexedTime >= sinceTimePoint.value());
-
-            if (!changedSince) {
-                return false;
-            }
-        }
-
-        // Handle --show-deleted flag
-        if (!showDeleted_) {
-            // Check if file still exists on filesystem
-            if (!std::filesystem::exists(doc.filePath)) {
-                return false; // Filter out deleted files unless explicitly requested
-            }
-        }
-
-        return true;
     }
 
     bool applyFileTypeFilters(const metadata::DocumentInfo& doc) {

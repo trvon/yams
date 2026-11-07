@@ -53,6 +53,23 @@ TEST_CASE_METHOD(RepairBinaryFilterFixture, "RepairBinaryFilter: recognizes text
         CHECK(detector.isTextMimeType("application/yaml"));
         CHECK(detector.isTextMimeType("application/x-yaml"));
     }
+
+    SECTION("JSON Lines, mailboxes and PEM files are text") {
+        // Unrecognised, 183 JSONL documents on the dev corpus were never FTS-indexed: repair
+        // judged them unextractable and post-ingest never ran.
+        CHECK(detector.isTextMimeType("application/x-ndjson"));
+        CHECK(detector.isTextMimeType("application/ndjson"));
+        CHECK(detector.isTextMimeType("application/jsonl"));
+        CHECK(detector.isTextMimeType("application/x-jsonlines"));
+        CHECK(detector.isTextMimeType("application/mbox"));
+        CHECK(detector.isTextMimeType("application/x-pem-file"));
+        // Every detection path must agree: the category drives isBinary in detectFromFile.
+        for (const auto* mime :
+             {"application/x-ndjson", "application/mbox", "application/x-pem-file"}) {
+            INFO(mime);
+            CHECK(detector.getFileTypeCategory(mime) == "text");
+        }
+    }
 }
 
 TEST_CASE_METHOD(RepairBinaryFilterFixture, "RepairBinaryFilter: recognizes binary MIME types",

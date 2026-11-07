@@ -33,6 +33,18 @@ std::tm localtimeCopy(const std::time_t& time) {
     return {};
 }
 
+std::chrono::system_clock::time_point
+localStartOfDay(const std::chrono::system_clock::time_point& tp, int dayOffset = 0) {
+    const auto time = std::chrono::system_clock::to_time_t(tp);
+    std::tm tm = localtimeCopy(time);
+    tm.tm_mday += dayOffset;
+    tm.tm_hour = 0;
+    tm.tm_min = 0;
+    tm.tm_sec = 0;
+    tm.tm_isdst = -1;
+    return std::chrono::system_clock::from_time_t(std::mktime(&tm));
+}
+
 } // namespace
 
 Result<std::chrono::system_clock::time_point> TimeParser::parse(const std::string& timeStr) {
@@ -201,16 +213,15 @@ TimeParser::parseNatural(const std::string& naturalStr) {
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 
     auto now = std::chrono::system_clock::now();
-    auto today = startOfDay(now);
 
     if (lower == "now") {
         return now;
     } else if (lower == "today") {
-        return today;
+        return localStartOfDay(now);
     } else if (lower == "yesterday") {
-        return today - std::chrono::hours(24);
+        return localStartOfDay(now, -1);
     } else if (lower == "tomorrow") {
-        return today + std::chrono::hours(24);
+        return localStartOfDay(now, 1);
     } else if (lower == "last-week" || lower == "last_week" || lower == "lastweek") {
         return now - std::chrono::hours(24 * 7);
     } else if (lower == "last-month" || lower == "last_month" || lower == "lastmonth") {
@@ -288,12 +299,7 @@ std::string TimeParser::formatRelative(const std::chrono::system_clock::time_poi
 
 std::chrono::system_clock::time_point
 TimeParser::startOfDay(const std::chrono::system_clock::time_point& tp) {
-    auto time_t = std::chrono::system_clock::to_time_t(tp);
-    std::tm tm = localtimeCopy(time_t);
-    tm.tm_hour = 0;
-    tm.tm_min = 0;
-    tm.tm_sec = 0;
-    return std::chrono::system_clock::from_time_t(std::mktime(&tm));
+    return localStartOfDay(tp);
 }
 
 std::chrono::system_clock::time_point
@@ -303,6 +309,7 @@ TimeParser::endOfDay(const std::chrono::system_clock::time_point& tp) {
     tm.tm_hour = 23;
     tm.tm_min = 59;
     tm.tm_sec = 59;
+    tm.tm_isdst = -1;
     return std::chrono::system_clock::from_time_t(std::mktime(&tm));
 }
 

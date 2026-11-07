@@ -101,6 +101,8 @@ inline bool applyCpuThrottlingForPoller(boost::asio::steady_timer& timer) {
     return false;
 }
 
+/// Re-poll delay while queued work is blocked (paused, admission closed, limiter or
+/// concurrency saturated). Job completion does not signal the wake timer, so this stays short.
 inline std::chrono::milliseconds pollerMaxIdleDelay() {
     if (auto snap = TuningSnapshotRegistry::instance().get()) {
         if (snap->daemonIdle) {
@@ -111,6 +113,22 @@ inline std::chrono::milliseconds pollerMaxIdleDelay() {
             std::max<uint32_t>(2u, std::min<uint32_t>(snap->workerPollMs, 10u)));
     }
     return std::chrono::milliseconds(2);
+}
+
+/// Safety-net wait while the channel is empty. Enqueue paths cancel the wake timer; the cancel
+/// is posted to the timer's executor, which is the poller's strand, so it can only run while the
+/// poller is suspended on a registered wait. No wake is lost, and this wait only bounds the
+/// latency of a missing signal. It follows the tuning cadence: the idle tick while the daemon is
+/// idle, otherwise the worker poll period. A fixed 10 ms here cost ~100 wakeups/s per poller on
+/// an idle daemon.
+inline std::chrono::milliseconds pollerIdleWait() {
+    if (auto snap = TuningSnapshotRegistry::instance().get()) {
+        if (snap->daemonIdle) {
+            return std::chrono::milliseconds(std::max<uint32_t>(1u, TuneAdvisor::idleTickMs()));
+        }
+        return std::chrono::milliseconds(std::max<uint32_t>(1u, snap->workerPollMs));
+    }
+    return std::chrono::milliseconds(std::max<uint32_t>(1u, TuneAdvisor::workerPollMs()));
 }
 
 } // namespace detail
@@ -135,6 +153,11 @@ template <typename Task> struct PressureLimitedPollerConfig {
     // Invoked on poller lifecycle transitions (start entry, stop exit, inflight decrement)
     // so owners can wake condition variables observing these state changes.
     std::function<void()> notifyLifecycleFn;
+    // Optional. Keeps the state behind startedFlag and notifyLifecycleFn alive for as long as the
+    // poller frame exists. The frame's exit guard clears startedFlag and calls notifyLifecycleFn
+    // even when the frame is destroyed with a stopped io_context, which can happen after the
+    // owner's destructor returned; neither may then point into the owner (lt-safety A2.2).
+    std::shared_ptr<void> lifecycleKeepAlive;
     // Tracks posted executor callbacks that may still access owner state after
     // inFlightCounter reaches zero.
     std::atomic<std::size_t>* callbackInFlightCounter = nullptr;
@@ -162,8 +185,10 @@ template <typename Task> struct PressureLimitedPollerConfig {
     bool enableCpuThrottling = true;
 
     // Event-driven wake: the enqueuer cancels this timer to wake the poller.
-    // The timer is always armed with a safety-net expiry so that even if a
-    // cancel races past, the poller resumes promptly.
+    // The timer is armed with a safety-net expiry (detail::pollerIdleWait on an empty
+    // channel, detail::pollerMaxIdleDelay when queued work is blocked). Create it on the
+    // poller's executor: the posted cancel is then serialized with the poller and cannot
+    // run between the empty-channel check and the registered wait.
     std::shared_ptr<boost::asio::steady_timer> wakeTimer;
     std::mutex* wakeTimerMutex = nullptr;
 };
@@ -254,11 +279,36 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
     if (cfg.notifyLifecycleFn) {
         cfg.notifyLifecycleFn();
     }
+    // Publish the exit on every path: normal, exception, and frame destruction when the
+    // io_context stopped while the poller was suspended (the owner then waits on startedFlag).
+    struct PollerExitGuard {
+        const PressureLimitedPollerConfig<Task>& cfg;
+        ~PollerExitGuard() {
+            cfg.startedFlag->store(false, std::memory_order_release);
+            if (cfg.notifyLifecycleFn) {
+                try {
+                    cfg.notifyLifecycleFn();
+                } catch (...) {
+                    // Best effort: the owner may already be waking up on the flag alone.
+                }
+            }
+        }
+    } exitGuard{cfg};
     spdlog::info("[PostIngestQueue] {} poller started", cfg.stageName);
 
     constexpr auto kAdmissionRetryDelay = std::chrono::milliseconds(1);
 
     while (!cfg.stopFlag->load()) {
+        // Cancellation reaches this loop as operation_aborted from the wake (swallowed by
+        // awaitPressureLimitedPollerWake, which cannot tell it from an enqueuer's wake) or as an
+        // exception from the next co_await (throw_if_cancelled), caught below. Either way the
+        // loop must exit here instead of re-entering a co_await that throws at once and spinning
+        // on its worker (lt-safety A2.2).
+        const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
+        if (cancellation.cancelled() != boost::asio::cancellation_type::none) {
+            spdlog::info("[PostIngestQueue] {} poller cancelled", cfg.stageName);
+            break;
+        }
         try {
             // Capability check (e.g., titlePoller requires titleExtractor_)
             if (cfg.isCapableFn && !cfg.isCapableFn()) {
@@ -498,19 +548,20 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                 continue;
             }
 
-            co_await detail::awaitPressureLimitedPollerWake(cfg, std::chrono::milliseconds(10),
-                                                            "idle");
+            // Nothing was taken. An empty channel sleeps until the next enqueue signal or the
+            // tuning cadence. Queued work the poller could not admit (limiter, maxConcurrent,
+            // requeue) is re-polled promptly: completion does not signal the wake timer.
+            const bool channelsEmpty =
+                channel->empty() && (!cfg.highPriorityChannel || cfg.highPriorityChannel->empty());
+            co_await detail::awaitPressureLimitedPollerWake(
+                cfg, channelsEmpty ? detail::pollerIdleWait() : detail::pollerMaxIdleDelay(),
+                channelsEmpty ? "idle" : "blocked");
         } catch (const std::exception& e) {
             spdlog::error("[PostIngestQueue] {} poller exception: {}", cfg.stageName, e.what());
         }
     }
 
-    if (cfg.startedFlag) {
-        cfg.startedFlag->store(false, std::memory_order_release);
-    }
-    if (cfg.notifyLifecycleFn) {
-        cfg.notifyLifecycleFn();
-    }
+    // exitGuard clears startedFlag and notifies the owner on return.
     spdlog::info("[PostIngestQueue] {} poller exited", cfg.stageName);
     co_return;
 }

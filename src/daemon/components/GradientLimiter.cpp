@@ -36,10 +36,6 @@ bool GradientLimiter::tryAcquire() {
     return false;
 }
 
-void GradientLimiter::onJobStart() {
-    // Already counted in tryAcquire
-}
-
 void GradientLimiter::onJobEnd() {
     // Decrement in-flight when job ends
     inFlight_.fetch_sub(1, std::memory_order_relaxed);

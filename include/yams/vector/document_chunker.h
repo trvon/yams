@@ -83,11 +83,6 @@ struct DocumentChunk {
         : chunk_id(std::move(id)), document_hash(std::move(doc_hash)), content(std::move(text)),
           strategy_used(ChunkingStrategy::FIXED_SIZE) {}
 
-    // Utility methods
-    bool hasOverlapWith(const DocumentChunk& other) const {
-        return (start_offset < other.end_offset) && (end_offset > other.start_offset);
-    }
-
     size_t getSize() const { return content.size(); }
 };
 
@@ -168,7 +163,6 @@ public:
     size_t estimateTokenCount(const std::string& text) const;
     std::vector<size_t> findSentenceBoundaries(const std::string& text) const;
     std::vector<size_t> findParagraphBoundaries(const std::string& text) const;
-    std::vector<size_t> findWordBoundaries(const std::string& text) const;
 
     // Error handling
     std::string getLastError() const;
@@ -214,7 +208,6 @@ protected:
                                           const std::string& document_hash) override;
 
 private:
-    std::vector<std::string> splitIntoSentences(const std::string& text) const;
     bool isSentenceEnd(const std::string& text, size_t pos) const;
 };
 
@@ -228,27 +221,6 @@ public:
 protected:
     std::vector<DocumentChunk> doChunking(const std::string& content,
                                           const std::string& document_hash) override;
-
-private:
-    std::vector<std::string> splitIntoParagraphs(const std::string& text) const;
-};
-
-/**
- * Semantic chunking using embeddings
- */
-class SemanticChunker : public DocumentChunker {
-public:
-    SemanticChunker(const ChunkingConfig& config, std::shared_ptr<EmbeddingGenerator> embedder);
-
-protected:
-    std::vector<DocumentChunk> doChunking(const std::string& content,
-                                          const std::string& document_hash) override;
-
-private:
-    double computeSimilarity(const std::string& text1, const std::string& text2);
-    std::vector<size_t> findSemanticBoundaries(const std::string& text);
-
-    std::shared_ptr<EmbeddingGenerator> embedder_;
 };
 
 /**
@@ -283,16 +255,6 @@ protected:
                                           const std::string& document_hash) override;
 
 private:
-    struct MarkdownSection {
-        std::string content;
-        int header_level = 0; // 0 for non-header content
-        size_t start_pos = 0;
-        size_t end_pos = 0;
-    };
-
-    std::vector<MarkdownSection> parseMarkdownStructure(const std::string& text) const;
-    std::vector<DocumentChunk> chunksFromSections(const std::vector<MarkdownSection>& sections,
-                                                  const std::string& document_hash) const;
 };
 
 /**
@@ -345,11 +307,6 @@ std::string detectLanguage(const std::string& text);
  * Calculate semantic coherence of a chunk
  */
 double calculateSemanticCoherence(const std::string& text);
-
-/**
- * Find natural breaking points in text
- */
-std::vector<size_t> findNaturalBreaks(const std::string& text);
 
 /**
  * Merge overlapping chunks

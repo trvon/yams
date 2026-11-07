@@ -40,6 +40,7 @@ yams serve
 
 - [Install and setup](install.md): every channel, file locations, the daemon service, key settings
 - [Build from source](BUILD.md)
+- [Bounded CLI retrieval and repository freshness](cli-retrieval.md)
 - [P2P corpus sync](p2p.md)
 - [Benchmarks](benchmarks/)
 - [Runtime path authority](architecture/runtime-paths.md)

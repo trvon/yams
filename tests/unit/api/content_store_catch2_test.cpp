@@ -4,7 +4,6 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include <yams/api/async_content_store.h>
 #include <yams/api/content_metadata.h>
 #include <yams/api/content_store.h>
 #include <yams/api/content_store_builder.h>

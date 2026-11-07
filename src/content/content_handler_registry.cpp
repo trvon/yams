@@ -51,51 +51,6 @@ Result<void> ContentHandlerRegistry::registerHandler(std::shared_ptr<IContentHan
     return Result<void>();
 }
 
-Result<void> ContentHandlerRegistry::unregisterHandler(const std::string& name) {
-    std::unique_lock lock(mutex_);
-
-    auto it = handlers_.find(name);
-    if (it == handlers_.end()) {
-        return Error{ErrorCode::NotFound, "Handler not found: " + name};
-    }
-
-    // Remove MIME type mappings
-    for (auto mit = mimeToHandler_.begin(); mit != mimeToHandler_.end();) {
-        if (mit->second == name) {
-            mit = mimeToHandler_.erase(mit);
-        } else {
-            ++mit;
-        }
-    }
-
-    // Remove handler
-    handlers_.erase(it);
-
-    spdlog::debug("Unregistered content handler: {}", name);
-    return Result<void>();
-}
-
-std::shared_ptr<IContentHandler>
-ContentHandlerRegistry::getHandler(const detection::FileSignature& signature) const {
-    std::shared_lock lock(mutex_);
-
-    // Get all compatible handlers
-    std::vector<std::pair<int, std::shared_ptr<IContentHandler>>> candidates;
-
-    for (const auto& [name, handler] : handlers_) {
-        if (handler->canHandle(signature)) {
-            candidates.emplace_back(handler->priority(), handler);
-        }
-    }
-
-    // Sort by priority (highest first)
-    std::sort(candidates.begin(), candidates.end(),
-              [](const auto& a, const auto& b) { return a.first > b.first; });
-
-    // Return highest priority handler
-    return candidates.empty() ? nullptr : candidates.front().second;
-}
-
 std::shared_ptr<IContentHandler>
 ContentHandlerRegistry::getHandlerByName(const std::string& name) const {
     std::shared_lock lock(mutex_);
@@ -104,49 +59,10 @@ ContentHandlerRegistry::getHandlerByName(const std::string& name) const {
     return (it != handlers_.end()) ? it->second : nullptr;
 }
 
-std::vector<std::shared_ptr<IContentHandler>>
-ContentHandlerRegistry::getCompatibleHandlers(const detection::FileSignature& signature) const {
-    std::shared_lock lock(mutex_);
-
-    // C++20: Filter and transform handlers
-    std::vector<std::pair<int, std::shared_ptr<IContentHandler>>> compatibleHandlers;
-    for (const auto& [name, handler] : handlers_) {
-        if (handler->canHandle(signature)) {
-            compatibleHandlers.emplace_back(handler->priority(), handler);
-        }
-    }
-
-    // Sort by priority (highest first)
-    std::ranges::sort(compatibleHandlers,
-                      [](const auto& a, const auto& b) { return a.first > b.first; });
-
-    // Extract handlers from pairs
-    std::vector<std::shared_ptr<IContentHandler>> result;
-    result.reserve(compatibleHandlers.size());
-    for (const auto& [priority, handler] : compatibleHandlers) {
-        result.push_back(handler);
-    }
-    return result;
-}
-
 std::unordered_map<std::string, std::shared_ptr<IContentHandler>>
 ContentHandlerRegistry::getAllHandlers() const {
     std::shared_lock lock(mutex_);
     return handlers_;
-}
-
-std::vector<std::string> ContentHandlerRegistry::getHandlerNames() const {
-    std::shared_lock lock(mutex_);
-
-    // C++20: Extract and sort handler names
-    std::vector<std::string> names;
-    names.reserve(handlers_.size());
-    for (const auto& [name, handler] : handlers_) {
-        names.push_back(name);
-    }
-
-    std::ranges::sort(names);
-    return names;
 }
 
 bool ContentHandlerRegistry::hasHandler(const std::string& name) const {
@@ -298,23 +214,6 @@ ContentHandlerRegistry::RegistryStats ContentHandlerRegistry::getStats() const {
     }
 
     return stats;
-}
-
-bool ContentHandlerRegistry::matchesMimePattern(const std::string& pattern,
-                                                const std::string& mimeType) const {
-    // Handle wildcard patterns
-    if (pattern == "*/*") {
-        return true;
-    }
-
-    // Handle partial wildcards like "text/*"
-    if (pattern.back() == '*') {
-        std::string prefix = pattern.substr(0, pattern.length() - 1);
-        return mimeType.find(prefix) == 0;
-    }
-
-    // Exact match
-    return pattern == mimeType;
 }
 
 } // namespace yams::content

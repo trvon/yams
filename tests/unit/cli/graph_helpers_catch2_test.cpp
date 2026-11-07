@@ -96,7 +96,8 @@ TEST_CASE("Graph helpers: explore hints preserve external target identity",
         (cwd.parent_path() / "graph_hint_other" / "src" / "shared.cpp").generic_string();
     const auto presentation = yams::cli::describeFileForCli(external, {}, cwd);
 
-    CHECK(presentation.displayPath == "src/shared.cpp");
+    // Shown in full: "src/shared.cpp" would name a different file under cwd.
+    CHECK(presentation.displayPath == external);
     CHECK(presentation.graphExploreHint == "yams graph --explore \"" + external + "\" --global");
     CHECK(yams::cli::buildGraphExploreHint("../graph_hint_other/src/shared.cpp", {}, 2, cwd) ==
           "yams graph --explore \"" + external + "\" --global");

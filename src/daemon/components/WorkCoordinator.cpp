@@ -18,6 +18,7 @@
 
 #include <spdlog/spdlog.h>
 #include <yams/core/assert.hpp>
+#include <yams/core/thread_name.h>
 
 #include <algorithm>
 #include <chrono>
@@ -97,6 +98,41 @@ struct WorkCoordinator::DetachedCancellationState {
     std::vector<DetachedCancellationRequest> requests;
 };
 
+/// Counts the cancellation handlers stop() posted that have not run yet. Shared with the posted
+/// handlers, which may outlive stop() (and the coordinator) when their strand never frees up.
+struct WorkCoordinator::DetachedCancellationDrain {
+    explicit DetachedCancellationDrain(std::size_t count) : pending_(count) {}
+
+    /// Records one handler run. Returns true for the last one.
+    bool acknowledge() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (pending_ > 0) {
+            --pending_;
+        }
+        const bool last = pending_ == 0;
+        if (last) {
+            cv_.notify_all();
+        }
+        return last;
+    }
+
+    /// Waits until every handler has run or `budget` elapses. Returns true when all ran.
+    bool waitAll(std::chrono::milliseconds budget) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, budget, [this] { return pending_ == 0; });
+    }
+
+    std::size_t pending() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pending_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    std::size_t pending_;
+};
+
 struct WorkCoordinator::ProgressProbeState {
     std::atomic<uint64_t> posted{0};
     std::atomic<uint64_t> completed{0};
@@ -105,7 +141,7 @@ struct WorkCoordinator::ProgressProbeState {
 };
 
 WorkCoordinator::WorkCoordinator()
-    : ioContext_(std::make_shared<boost::asio::io_context>()), started_(false),
+    : ioContext_(std::make_shared<boost::asio::io_context>()),
       progressProbeState_(std::make_shared<ProgressProbeState>()),
       highPriorityStrand_(ioContext_->get_executor()),
       normalPriorityStrand_(ioContext_->get_executor()),
@@ -135,8 +171,8 @@ WorkCoordinator::~WorkCoordinator() {
                 }
             }
         }
+        markStoppedBeforeClearingWorkers();
         workers_.clear();
-        started_ = false;
     }
     try {
         spdlog::debug("[WorkCoordinator] Destroyed");
@@ -173,6 +209,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
     try {
         for (std::size_t i = 0; i < workerCount; ++i) {
             workers_.emplace_back([this, i, jobSlots]() {
+                yams::setCurrentThreadName("yams-work-" + std::to_string(i));
                 tlsWorkerJobSlot = &jobSlots->slots[i];
                 {
                     std::lock_guard<std::mutex> stateLock(workerStateMutex_);
@@ -239,7 +276,8 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                 joinCV_.notify_all();
             });
         }
-        started_ = true;
+        workerCount_.store(workers_.size(), std::memory_order_release);
+        started_.store(true, std::memory_order_release);
         requestProgressProbe();
         spdlog::info("[WorkCoordinator] Started with {} worker threads", workerCount);
     } catch (const std::exception& e) {
@@ -263,7 +301,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
     }
 }
 
-void WorkCoordinator::stop() {
+void WorkCoordinator::stop(std::chrono::milliseconds cancelDrainBudget) {
     if (!started_) {
         try {
             spdlog::debug("[WorkCoordinator] stop() called but not started (no-op)");
@@ -287,22 +325,49 @@ void WorkCoordinator::stop() {
     if (detachedCancellationRequests.empty()) {
         ioContext_->stop();
     } else {
-        auto remaining =
-            std::make_shared<std::atomic<std::size_t>>(detachedCancellationRequests.size());
-        auto ioContext = ioContext_;
+        auto drain =
+            std::make_shared<DetachedCancellationDrain>(detachedCancellationRequests.size());
+        // Weak: a handler stranded on a busy strand is destroyed with the io_context's queue; a
+        // strong reference from inside that queue would keep the io_context alive forever.
+        std::weak_ptr<boost::asio::io_context> ioContext = ioContext_;
         for (auto& request : detachedCancellationRequests) {
             boost::asio::post(request.executor,
-                              [signal = std::move(request.signal), remaining, ioContext]() {
+                              [signal = std::move(request.signal), drain, ioContext]() {
                                   signal->emit(boost::asio::cancellation_type::all);
-                                  if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                                      ioContext->stop();
+                                  if (drain->acknowledge()) {
+                                      if (auto context = ioContext.lock()) {
+                                          context->stop();
+                                      }
                                   }
                               });
+        }
+        // Every strand with a suspended coroutine runs its handler almost at once; one that is
+        // busy in synchronous work cannot. Do not let it hold the idle workers inside run().
+        if (!drain->waitAll(cancelDrainBudget)) {
+            logBusyDetachedStrands(drain->pending(), detachedCancellationRequests.size(),
+                                   cancelDrainBudget);
+            ioContext_->stop();
         }
     }
     workGuard_.reset();
     try {
         spdlog::info("[WorkCoordinator] Cancellation requested and work guard reset");
+    } catch (...) {
+        // Intentional best-effort path; keep the primary operation unaffected.
+    }
+}
+
+void WorkCoordinator::logBusyDetachedStrands(std::size_t pending, std::size_t posted,
+                                             std::chrono::milliseconds budget) const noexcept {
+    try {
+        spdlog::warn("[WorkCoordinator] stop(): {} of {} detached coroutine(s) did not run their "
+                     "cancellation within {}ms (strand busy in synchronous work); stopping the "
+                     "io_context anyway. Busy workers keep running until their handler returns.",
+                     pending, posted, budget.count());
+        for (const auto& job : activeJobs()) {
+            spdlog::warn("[WorkCoordinator] stop(): busy worker={} job={} job_age={}ms",
+                         job.workerIndex, job.name, job.age.count());
+        }
     } catch (...) {
         // Intentional best-effort path; keep the primary operation unaffected.
     }
@@ -350,8 +415,8 @@ void WorkCoordinator::join() {
             }
         }
     }
+    markStoppedBeforeClearingWorkers();
     workers_.clear();
-    started_ = false;
     try {
         spdlog::info("[WorkCoordinator] All workers joined");
     } catch (...) {
@@ -518,8 +583,8 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout,
         }
     }
 
+    markStoppedBeforeClearingWorkers();
     workers_.clear();
-    started_ = false;
     try {
         spdlog::info("[WorkCoordinator] joinWithTimeout complete (success={})", completed);
     } catch (...) {
@@ -584,8 +649,8 @@ void WorkCoordinator::abandonWorkersForShutdown() {
             }
         }
     }
+    markStoppedBeforeClearingWorkers();
     workers_.clear();
-    started_ = false;
 }
 
 void WorkCoordinator::requestProgressProbe() noexcept {
@@ -648,11 +713,17 @@ boost::asio::strand<boost::asio::io_context::executor_type> WorkCoordinator::mak
 }
 
 bool WorkCoordinator::isRunning() const noexcept {
-    return started_ && !workers_.empty();
+    return started_.load(std::memory_order_acquire) &&
+           workerCount_.load(std::memory_order_acquire) > 0;
+}
+
+void WorkCoordinator::markStoppedBeforeClearingWorkers() noexcept {
+    started_.store(false, std::memory_order_release);
+    workerCount_.store(0, std::memory_order_release);
 }
 
 std::size_t WorkCoordinator::getWorkerCount() const noexcept {
-    return workers_.size();
+    return workerCount_.load(std::memory_order_acquire);
 }
 
 } // namespace yams::daemon

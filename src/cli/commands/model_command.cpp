@@ -24,16 +24,19 @@
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/static_tables.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/config/static_embedding_table.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/integrity/repair_utils.h>
 #include <yams/profiling.h>
+#include <yams/vector/simeon_embedding_backend.h>
 
 namespace yams::cli {
 
@@ -48,34 +51,44 @@ struct ModelInfo {
     std::string type; // "embedding", "reranker", or "generation"
 };
 
-static const std::vector<ModelInfo> AVAILABLE_MODELS = {
-    // Embedding models
-    {"mxbai-edge-colbert-v0-17m",
-     "https://huggingface.co/ryandono/mxbai-edge-colbert-v0-17m-onnx-int8/resolve/main/onnx/"
-     "model_quantized.onnx",
-     "Lightweight ColBERT (token-level, MaxSim) optimized for edge use", 17, "embedding"},
-    {"all-MiniLM-L6-v2",
-     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
-     "Lightweight 384-dim embeddings for semantic search", 90, "embedding"},
-    {"all-mpnet-base-v2",
-     "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/onnx/model.onnx",
-     "High-quality 768-dim embeddings", 420, "embedding"},
-    {"jina-embeddings-v2-base-code",
-     "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/main/onnx/model.onnx",
-     "Code-aware 768-dim embeddings for 30+ programming languages", 550, "embedding"},
-    {"embeddinggemma-300m",
-     "https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/onnx/model.onnx",
-     "Google EmbeddingGemma 768-dim, SentencePiece tokenizer (2048 max tokens)", 1200, "embedding"},
-    // Reranker models (cross-encoder for two-stage retrieval)
-    {"bge-reranker-base",
-     "https://huggingface.co/BAAI/bge-reranker-base/resolve/main/onnx/model.onnx",
-     "Cross-encoder reranker for hybrid search refinement (512 max tokens)", 278, "reranker"},
-    {"bge-reranker-large",
-     "https://huggingface.co/BAAI/bge-reranker-large/resolve/main/onnx/model.onnx",
-     "High-quality cross-encoder reranker (512 max tokens)", 560, "reranker"}
-    // Note: Nomic ONNX embedding model is currently not recommended due to provider limitations
-    // (no batch embeddings/preload). You can still download via --hf or --url manually.
-};
+static const std::vector<ModelInfo>& availableModels() {
+    static const std::vector<ModelInfo> models = {
+        // Embedding models
+        {"mxbai-edge-colbert-v0-17m",
+         "https://huggingface.co/ryandono/mxbai-edge-colbert-v0-17m-onnx-int8/resolve/main/onnx/"
+         "model_quantized.onnx",
+         "Lightweight ColBERT (token-level, MaxSim) optimized for edge use", 17, "embedding"},
+        {"all-MiniLM-L6-v2",
+         "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/"
+         "model.onnx",
+         "Lightweight 384-dim embeddings for semantic search", 90, "embedding"},
+        {"all-mpnet-base-v2",
+         "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/onnx/"
+         "model.onnx",
+         "High-quality 768-dim embeddings", 420, "embedding"},
+        {"jina-embeddings-v2-base-code",
+         "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/main/onnx/model.onnx",
+         "Code-aware 768-dim embeddings for 30+ programming languages", 550, "embedding"},
+        {"embeddinggemma-300m",
+         "https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/onnx/"
+         "model.onnx",
+         "Google EmbeddingGemma 768-dim, SentencePiece tokenizer (2048 max tokens)", 1200,
+         "embedding"},
+        // Reranker models (cross-encoder for two-stage retrieval)
+        {"bge-reranker-base",
+         "https://huggingface.co/BAAI/bge-reranker-base/resolve/main/onnx/model.onnx",
+         "Cross-encoder reranker for hybrid search refinement (512 max tokens)", 278, "reranker"},
+        {"bge-reranker-large",
+         "https://huggingface.co/BAAI/bge-reranker-large/resolve/main/onnx/model.onnx",
+         "High-quality cross-encoder reranker (512 max tokens)", 560, "reranker"}
+        // Note: Nomic ONNX embedding model is currently not recommended due to provider limitations
+        // (no batch embeddings/preload). You can still download via --hf or --url manually.
+    };
+    return models;
+}
+
+using yams::cli::findStaticTable;
+using yams::cli::staticTableCatalog;
 
 class ModelCommand : public ICommand {
 private:
@@ -90,45 +103,11 @@ private:
     std::string hfRepo_;
     std::string revision_ = "main";
     std::string token_;
+    std::string sha256_; // expected sha256 for --url downloads of static tables
     bool offline_ = false;
     bool check_ = false;
     bool applyConfig_ = false; // when true, write detected dims into config
     bool executed_ = false;
-
-    // Helper function to check if a command exists in PATH
-    bool commandExists(const std::string& cmd) const {
-        const char* path_env = std::getenv("PATH");
-        if (!path_env)
-            return false;
-
-#ifdef _WIN32
-        std::stringstream ss(path_env);
-        std::string dir;
-        while (std::getline(ss, dir, ';')) {
-            fs::path full_path = fs::path(dir) / cmd;
-            // On Windows, check for .exe extension if not present
-            if (full_path.extension() != ".exe")
-                full_path += ".exe";
-
-            if (fs::exists(full_path) && fs::is_regular_file(full_path)) {
-                return true;
-            }
-        }
-#else
-        std::stringstream ss(path_env);
-        std::string dir;
-        while (std::getline(ss, dir, ':')) {
-            fs::path full_path = fs::path(dir) / cmd;
-            if (fs::exists(full_path) && fs::is_regular_file(full_path)) {
-                struct stat st;
-                if (stat(full_path.c_str(), &st) == 0 && (st.st_mode & S_IXUSR)) {
-                    return true;
-                }
-            }
-        }
-#endif
-        return false;
-    }
 
     // Simple JSON loader
     static nlohmann::json load_json_file(const fs::path& p) {
@@ -164,6 +143,7 @@ private:
             if (cfg.contains("max_position_embeddings"))
                 out.max_seq = static_cast<size_t>(cfg["max_position_embeddings"].get<int>());
         } catch (...) {
+            spdlog::debug("Optional model shape metadata unavailable; using existing heuristics");
         }
         try {
             if (sbert.contains("output_embedding_size") && out.dim == 0)
@@ -175,6 +155,7 @@ private:
                 sbert["pooling_mode_cls_token"].get<bool>())
                 out.pooling = out.pooling.empty() ? "cls" : (out.pooling + "+cls");
         } catch (...) {
+            spdlog::debug("Optional pooling metadata unavailable; using existing defaults");
         }
         // Heuristics by well-known model names (using extracted utility)
         if (out.dim == 0) {
@@ -273,51 +254,6 @@ private:
         }
     }
 
-    // Helper function for safe command execution
-    int executeCommand(const std::vector<std::string>& args) const {
-        if (args.empty())
-            return -1;
-
-#ifdef _WIN32
-        std::vector<const char*> argv;
-        for (const auto& arg : args) {
-            argv.push_back(arg.c_str());
-        }
-        argv.push_back(nullptr);
-
-        intptr_t status = _spawnvp(_P_WAIT, argv[0], argv.data());
-        return (int)status;
-#else
-        // Convert to char* array for execvp
-        std::vector<char*> argv;
-        for (const auto& arg : args) {
-            argv.push_back(const_cast<char*>(arg.c_str()));
-        }
-        argv.push_back(nullptr);
-
-        pid_t pid = fork();
-        if (pid == 0) {
-            // Child process
-            execvp(argv[0], argv.data());
-            // If we get here, exec failed
-            std::cerr << "Failed to execute: " << args[0] << std::endl;
-            exit(127);
-        } else if (pid > 0) {
-            // Parent process - wait for child
-            int status;
-            waitpid(pid, &status, 0);
-            if (WIFEXITED(status)) {
-                return WEXITSTATUS(status);
-            }
-            return -1;
-        } else {
-            // Fork failed
-            std::cerr << "Fork failed" << std::endl;
-            return -1;
-        }
-#endif
-    }
-
     // Helper function to validate paths for safety
     bool isPathSafe(const fs::path& path) const {
         // Check for directory traversal
@@ -368,7 +304,7 @@ public:
             auto r = execute();
             if (!r) {
                 spdlog::error("Model list failed: {}", r.error().message);
-                std::exit(1);
+                throw CLI::RuntimeError(1);
             }
         });
 
@@ -379,6 +315,8 @@ public:
         sub_download->add_option("--hf", hfRepo_, "Hugging Face repo id (org/name)");
         sub_download->add_option("--revision", revision_, "Hugging Face revision (default: main)");
         sub_download->add_option("--token", token_, "Hugging Face access token");
+        sub_download->add_option("--sha256", sha256_,
+                                 "Expected sha256 of a static table downloaded with --url");
         sub_download->add_flag("--offline", offline_, "Offline mode: use cache only");
         sub_download->add_flag("--force", force_, "Force redownload if model exists");
         sub_download->add_flag(
@@ -407,7 +345,7 @@ public:
                 } else {
                     std::cout << "Model name is required. Usage: yams model download <name> [--url "
                                  "<url>] [--output <dir>] or provide --hf <org/name>\n";
-                    std::exit(2);
+                    throw CLI::RuntimeError(2);
                 }
             } else {
                 downloadModel_ = positional_download_name_;
@@ -416,7 +354,7 @@ public:
             auto r = execute();
             if (!r) {
                 spdlog::error("Model download failed: {}", r.error().message);
-                std::exit(1);
+                throw CLI::RuntimeError(1);
             }
         });
 
@@ -425,7 +363,7 @@ public:
         sub_info->callback([this]() {
             if (positional_info_name_.empty()) {
                 std::cout << "Model name is required. Usage: yams model info <name>" << std::endl;
-                std::exit(2);
+                throw CLI::RuntimeError(2);
             }
             infoModel_ = positional_info_name_;
             executed_ = true;
@@ -547,7 +485,7 @@ private:
                 std::error_code ec2;
                 auto sz = fs::file_size(onnx, ec2);
                 if (!ec2)
-                    size_mb = static_cast<size_t>(sz / (1024 * 1024));
+                    size_mb = static_cast<size_t>(sz / (1024ULL * 1024ULL));
                 locals.push_back(ModelInfo{dir.filename().string(), "", "Installed local model",
                                            size_mb, "embedding"});
             }
@@ -566,17 +504,18 @@ private:
                 preferred = it->second;
             }
             if (preferred.empty()) {
-                if (const char* p = std::getenv("YAMS_PREFERRED_MODEL"))
-                    preferred = p;
+                if (const auto p = yams::config::getenv_optional("YAMS_PREFERRED_MODEL"))
+                    preferred = *p;
             }
         } catch (...) {
+            spdlog::debug("Optional preferred-model config unavailable; listing local models");
         }
 
         // Query daemon for active models (dims/seq) — opt-in to avoid starting/stopping daemon
         // unexpectedly
         std::vector<std::string> activeLines;
-        if (const char* withd = std::getenv("YAMS_MODEL_LIST_WITH_DAEMON")) {
-            if (std::string(withd) == "1" || std::string(withd) == "true") {
+        if (const auto withd = yams::config::getenv_optional("YAMS_MODEL_LIST_WITH_DAEMON")) {
+            if (*withd == "1" || *withd == "true") {
                 try {
                     yams::daemon::ClientConfig cfg;
                     cfg.executor = getExecutor();
@@ -620,7 +559,7 @@ private:
         std::cout << "\nAvailable ONNX Models:\n";
         std::cout << "=====================\n\n";
 
-        for (const auto& model : AVAILABLE_MODELS) {
+        for (const auto& model : availableModels()) {
             std::cout << "  " << model.name << " (" << model.type << ", " << model.size_mb
                       << " MB)\n";
             std::cout << "    " << model.description << "\n\n";
@@ -696,6 +635,8 @@ private:
             std::cout << "\n";
         }
 
+        printStaticTables();
+
         std::cout << "To download a model:\n";
         std::cout << "  yams model --download <model-name>\n";
         std::cout << "Then set it as preferred:\n";
@@ -704,8 +645,7 @@ private:
         return Result<void>{};
     }
 
-    Result<void> downloadModel(const std::string& model_name,
-                               [[maybe_unused]] const std::string& output_dir,
+    Result<void> downloadModel(const std::string& model_name, const std::string& output_dir,
                                const std::string& override_url) {
         YAMS_ZONE_SCOPED_N("ModelCommand::downloadModel");
 
@@ -724,12 +664,20 @@ private:
             return {};
         };
 
+        if (const auto* table = findStaticTable(model_name)) {
+            return downloadStaticTable(model_name, table->url, table->sha256, output_dir);
+        }
+        if (override_url.ends_with(".smstat")) {
+            return downloadStaticTable(model_name, override_url, sha256_, output_dir);
+        }
+
         // Find model info
-        auto it = std::find_if(AVAILABLE_MODELS.begin(), AVAILABLE_MODELS.end(),
+        const auto& models = availableModels();
+        auto it = std::find_if(models.begin(), models.end(),
                                [&](const ModelInfo& m) { return m.name == model_name; });
 
         ModelInfo model;
-        if (it == AVAILABLE_MODELS.end()) {
+        if (it == models.end()) {
             // If no URL override, treat model_name (or --hf) as HF repo id
             if (override_url.empty()) {
                 std::string repo = !hfRepo_.empty() ? hfRepo_ : model_name;
@@ -801,16 +749,16 @@ private:
             const std::string rev = revision_.empty() ? std::string("main") : revision_;
 
             auto findInCacheFile = [&](const std::string& filename) -> fs::path {
-                const char* home = std::getenv("HOME");
-                const std::string homeDir = home ? home : "";
-                const char* hfhome = std::getenv("HF_HOME");
-                const char* ycache = std::getenv("YAMS_ONNX_HF_CACHE");
+                const auto home = yams::config::getenv_optional("HOME");
+                const std::string homeDir = home.value_or("");
+                const auto hfhome = yams::config::getenv_optional("HF_HOME");
+                const auto ycache = yams::config::getenv_optional("YAMS_ONNX_HF_CACHE");
                 std::vector<fs::path> roots;
                 if (ycache)
-                    roots.emplace_back(ycache);
+                    roots.emplace_back(*ycache);
                 if (hfhome) {
-                    roots.emplace_back(hfhome);
-                    roots.emplace_back(fs::path(hfhome) / "hub");
+                    roots.emplace_back(*hfhome);
+                    roots.emplace_back(fs::path(*hfhome) / "hub");
                 }
                 if (!homeDir.empty()) {
                     roots.emplace_back(fs::path(homeDir) / ".cache" / "huggingface");
@@ -834,6 +782,8 @@ private:
                             if (!hash.empty())
                                 snapdir = base / "snapshots" / hash;
                         } catch (...) {
+                            spdlog::debug(
+                                "Optional HF cache ref unavailable; using requested revision");
                         }
                     }
                     if (fs::exists(snapdir, ec)) {
@@ -901,7 +851,7 @@ private:
                     storage.objectsDir = tmp / "yams" / "objects";
                     storage.stagingDir = tmp / "yams" / "downloader";
                 } catch (...) {
-                    // keep defaults if temp_directory_path throws
+                    spdlog::debug("Temporary model-download staging unavailable; keeping defaults");
                 }
             }
 
@@ -1162,11 +1112,87 @@ private:
         return Result<void>{};
     }
 
+    fs::path staticTablesDir() const { return yams::cli::staticTablesDir(cli_->getDataPath()); }
+
+    Result<void> downloadStaticTable(const std::string& name, const std::string& url,
+                                     const std::string& sha256, const std::string& output_dir) {
+        if (!isPathSafe(fs::path(name))) {
+            return Error{ErrorCode::InvalidArgument, "invalid static table name: " + name};
+        }
+        const fs::path existing =
+            (output_dir.empty() ? staticTablesDir() : fs::path(output_dir)) / (name + ".smstat");
+        fs::path selected = existing;
+        if (fs::exists(existing) && !force_ &&
+            yams::vector::loadSharedStaticEmbeddingTable(existing)) {
+            std::cout << "Static table already exists at: " << existing << "\n";
+            std::cout << "Use --force to redownload\n";
+        } else {
+            auto out = yams::cli::downloadStaticTable(
+                name, url, sha256, cli_->getDataPath(),
+                output_dir.empty() ? fs::path{} : fs::path(output_dir), force_);
+            if (!out) {
+                return out.error();
+            }
+            selected = out.value();
+        }
+        const auto saved = yams::cli::selectStaticTable(selected, resolveConfigPath());
+        if (!saved) {
+            return saved.error();
+        }
+        std::cout << "\n✓ Static table selected: " << selected << "\n";
+        std::cout << "  identity: " << yams::vector::staticEmbeddingSpaceIdentity(selected) << "\n";
+        if (output_dir.empty()) {
+            std::cout << "\nThe daemon uses it on its next start and re-embeds existing documents "
+                         "in the background\n(set daemon.auto_migrate_embeddings = false to keep "
+                         "the current vectors).\n";
+        }
+        return Result<void>{};
+    }
+
+    void printStaticTables() const {
+        if (!cli_) {
+            return;
+        }
+        std::vector<fs::path> installed;
+        std::error_code ec;
+        if (fs::is_directory(staticTablesDir(), ec)) {
+            for (const auto& e : fs::directory_iterator(staticTablesDir(), ec)) {
+                if (e.is_regular_file(ec) && e.path().extension() == ".smstat") {
+                    installed.push_back(e.path());
+                }
+            }
+        }
+        std::sort(installed.begin(), installed.end());
+        const auto choice = yams::config::parse_config_value(resolveConfigPath(),
+                                                             "embeddings.simeon", "static_table");
+        const auto active = yams::config::findStaticEmbeddingTable(
+            choice.empty() ? std::nullopt : std::optional<fs::path>{fs::path(choice)},
+            cli_->getDataPath());
+        std::cout << "Static embedding tables (Simeon):\n";
+        for (const auto& t : staticTableCatalog()) {
+            std::cout << "  " << t.name << " (static, " << t.size_mb << " MB)\n    "
+                      << t.description << "\n";
+        }
+        for (const auto& p : installed) {
+            std::error_code sec;
+            const auto sz = fs::file_size(p, sec);
+            std::cout << "  installed: " << p.filename().string();
+            if (!sec) {
+                std::cout << " (~" << sz / (1024ULL * 1024ULL) << " MB)";
+            }
+            std::cout << "\n";
+        }
+        // This is the recorded choice, not the running daemon's loaded model.
+        std::cout << "  selected: " << (active ? active->string() : std::string("(none)"))
+                  << "\n\n";
+    }
+
     Result<void> showModelInfo(const std::string& model_name) {
-        auto it = std::find_if(AVAILABLE_MODELS.begin(), AVAILABLE_MODELS.end(),
+        const auto& models = availableModels();
+        auto it = std::find_if(models.begin(), models.end(),
                                [&](const ModelInfo& m) { return m.name == model_name; });
 
-        if (it == AVAILABLE_MODELS.end()) {
+        if (it == models.end()) {
             return Error{ErrorCode::InvalidArgument, "Unknown model: " + model_name};
         }
 
@@ -1237,10 +1263,10 @@ private:
         std::cout << "ONNX runtime support: Disabled (compiled without ONNX)\n";
 #endif
         // Best-effort plugin presence check
-        const char* plugin_env = std::getenv("YAMS_PLUGIN_DIR");
+        const auto plugin_env = yams::config::getenv_optional("YAMS_PLUGIN_DIR");
         fs::path plugin_dir;
         if (plugin_env) {
-            plugin_dir = fs::path(plugin_env);
+            plugin_dir = fs::path(*plugin_env);
         } else {
 #ifdef __APPLE__
             plugin_dir = fs::path("/opt/homebrew/lib/yams/plugins");
@@ -1277,7 +1303,9 @@ private:
                 std::cout << "\n";
             }
         }
-        std::cout << "\nDefault semantic search uses built-in Simeon embeddings.\n";
+        std::cout << "\n";
+        printStaticTables();
+        std::cout << "Default semantic search uses built-in Simeon embeddings.\n";
         std::cout << "Use 'yams model download <name>' or 'yams model download <name> --url "
                      "<url>' only for optional ONNX/plugin-backed models.\n";
         return Result<void>{};
@@ -1325,69 +1353,6 @@ Default download location: <data-dir>/models/<model-name>/
 Note: Default retrieval embeddings use built-in Simeon and do not require a model download.
       Models are stored in the unified YAMS data directory for consistency.
 )";
-    }
-
-    // Build a Hugging Face resolve URL for a given repo and revision
-    static std::string buildHfUrl(const std::string& repo, const std::string& revision) {
-        const std::string rev = revision.empty() ? std::string("main") : revision;
-        return std::string("https://huggingface.co/") + repo + "/resolve/" + rev +
-               "/onnx/model.onnx";
-    }
-
-    // Find model.onnx for a repo/revision in the local HF cache (no network)
-    static fs::path findInHfCache(const std::string& repo, const std::string& revision) {
-        const char* home = std::getenv("HOME");
-        const std::string homeDir = home ? home : "";
-        const char* hfhome = std::getenv("HF_HOME");
-        const char* ycache = std::getenv("YAMS_ONNX_HF_CACHE");
-
-        std::vector<fs::path> roots;
-        if (ycache)
-            roots.emplace_back(ycache);
-        if (hfhome) {
-            roots.emplace_back(hfhome);
-            roots.emplace_back(fs::path(hfhome) / "hub");
-        }
-        if (!homeDir.empty()) {
-            roots.emplace_back(fs::path(homeDir) / ".cache" / "huggingface");
-            roots.emplace_back(fs::path(homeDir) / ".cache" / "huggingface" / "hub");
-        }
-
-        // HF cache repo dir format: models--org--name
-        std::string repo_dir = "models--";
-        for (char c : repo)
-            repo_dir += (c == '/') ? std::string("--") : std::string(1, c);
-        const std::string rev = revision.empty() ? std::string("main") : revision;
-
-        for (const auto& root : roots) {
-            std::error_code ec;
-            fs::path base = root / repo_dir;
-            if (!fs::exists(base, ec))
-                continue;
-
-            // Prefer refs/<rev> to map to snapshot hash under snapshots/
-            fs::path snapdir = base / "snapshots" / rev;
-            fs::path ref = base / "refs" / rev;
-            if (fs::exists(ref, ec)) {
-                try {
-                    std::ifstream in(ref);
-                    std::string hash;
-                    std::getline(in, hash);
-                    if (!hash.empty())
-                        snapdir = base / "snapshots" / hash;
-                } catch (...) {
-                }
-            }
-            if (fs::exists(snapdir, ec)) {
-                for (auto& p : fs::recursive_directory_iterator(snapdir, ec)) {
-                    if (!p.is_regular_file())
-                        continue;
-                    if (p.path().filename() == "model.onnx")
-                        return p.path();
-                }
-            }
-        }
-        return {};
     }
 };
 

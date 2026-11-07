@@ -59,11 +59,6 @@ public:
     [[nodiscard]] Result<void> remove(std::string_view hash) override;
     [[nodiscard]] Result<uint64_t> getBlockSize(std::string_view hash) const override;
 
-    // Additional compressed storage functionality
-    [[nodiscard]] Result<uint64_t> getCompressedSize(std::string_view key) const;
-
-    [[nodiscard]] Result<uint64_t> getUncompressedSize(std::string_view key) const;
-
     // Async operations
     std::future<Result<void>> storeAsync(std::string_view hash,
                                          std::span<const std::byte> data) override;

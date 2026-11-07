@@ -288,46 +288,6 @@ private:
     bool clearS3FallbackLocalDataDir_ = false;
     int s3R2TtlSeconds_ = 0;
 
-    // Template helper for setting single config value with validation
-    template <typename Validator = std::nullptr_t>
-    Result<void> setConfigValue(const std::string& key, const std::string& value,
-                                Validator validator = nullptr) {
-        try {
-            if constexpr (!std::is_same_v<Validator, std::nullptr_t>) {
-                auto validationResult = validator(key, value);
-                if (!validationResult) {
-                    return validationResult;
-                }
-            }
-
-            auto result = writeConfigValue(key, value);
-            if (!result)
-                return result;
-
-            std::cout << ui::status_ok("Updated " + key + " = " + value + " in " +
-                                       getConfigPath().string())
-                      << "\n";
-            return Result<void>();
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
-        }
-    }
-
-    // Template helper for setting multiple config values
-    template <typename... Pairs> Result<void> setConfigValues(Pairs&&... pairs) {
-        try {
-            auto results = {setConfigValue(std::forward<Pairs>(pairs).first,
-                                           std::forward<Pairs>(pairs).second)...};
-            for (const auto& result : results) {
-                if (!result)
-                    return result;
-            }
-            return Result<void>();
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
-        }
-    }
-
     // Template helper for setting multiple config key-value pairs from a map/vector
     Result<void>
     setMultipleConfigs(const std::vector<std::pair<std::string, std::string>>& configs) {
@@ -341,17 +301,6 @@ private:
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
         }
-    }
-
-    // Template helper for showing status with config values
-    template <typename ConfigMap>
-    void printStatusSection(const std::string& title, const ConfigMap& items) {
-        std::cout << title << "\n";
-        std::cout << std::string(title.length(), '=') << "\n\n";
-        for (const auto& [label, value] : items) {
-            std::cout << label << ": " << value << "\n";
-        }
-        std::cout << "\n";
     }
 
     // Template helper for enable/disable operations
@@ -442,8 +391,7 @@ private:
             if (config.find(key_) != config.end()) {
                 std::cout << config[key_] << "\n";
             } else {
-                return Error{ErrorCode::InvalidArgument,
-                             "Key '" + key_ + "' not found in configuration"};
+                return Error{ErrorCode::NotFound, "Key '" + key_ + "' not found in configuration"};
             }
 
             return Result<void>();

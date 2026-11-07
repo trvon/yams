@@ -331,6 +331,10 @@ public:
         struct Identity {
             std::uint64_t instance{0};
             std::int64_t generation{0};
+            /// Advances only when a winner this node did not write changes (or a writer is
+            /// banned). Equal readings in one instance mean every change in between was a local
+            /// write, which local state already holds.
+            std::int64_t foreignGeneration{0};
             bool operator==(const Identity&) const = default;
         };
         virtual ~WinnerView() = default;
@@ -374,6 +378,11 @@ public:
     [[nodiscard]] std::map<std::string, MemoryIndexRecord> adapterState() const;
 
     [[nodiscard]] CommittedState committedState() const;
+    /// True when the last sync() returned the previous complete scan unchanged (an exclusive
+    /// backend with no writes or quarantine changes since): committed state did not change.
+    [[nodiscard]] bool lastSyncReusedCompleteScan() const noexcept {
+        return lastSyncReusedCompleteScan_;
+    }
 
     /// Bounded snapshot of current quarantine reasons (cleared each scan page).
     [[nodiscard]] std::map<std::string, std::string> quarantinedReasons() const;
@@ -781,6 +790,15 @@ private:
             bool complete{false};
         };
 
+        // One budget-sized, sorted run of keys after `start`, read in a single traversal
+        // when the whole prefix does not fit the retained-key budget. Pages are served from
+        // it, so a sweep costs one walk per window instead of one walk per page.
+        struct ListingWindow {
+            std::optional<std::string> start; // exclusive lower bound; nullopt = first key
+            std::vector<std::string> keys;
+            bool more{false}; // keys exist after keys.back()
+        };
+
         [[nodiscard]] bool filesystemSnapshotEligible() const;
         void incrementWrites();
         void beforeMutation(std::string_view key);
@@ -801,6 +819,14 @@ private:
         [[nodiscard]] storage::ObjectListPage
         pageFromSnapshot(const PrefixListing& listing, std::optional<std::string_view> cursor,
                          std::size_t limit) const;
+        [[nodiscard]] std::optional<storage::ObjectListPage>
+        pageFromWindow(std::string_view prefix, std::optional<std::string_view> cursor,
+                       std::size_t limit) const;
+        [[nodiscard]] Result<storage::ObjectListPage>
+        listPageThroughWindow(std::string_view prefix, std::optional<std::string_view> cursor,
+                              std::size_t limit) const;
+        void dropWindow(std::string_view prefix) const;
+        void invalidateWindows(std::string_view key) const;
 
         storage::IStorageBackend& inner_;
         bool exclusive_{false};
@@ -812,6 +838,8 @@ private:
         mutable std::size_t retainedKeyBytes_{0};
         mutable std::map<std::string, storage::ObjectListPage> pages_;
         mutable std::map<std::string, PrefixListing, std::less<>> prefixListings_;
+        mutable std::map<std::string, ListingWindow, std::less<>> windows_;
+        mutable std::set<std::string, std::less<>> declinedSnapshots_;
     };
 
     /// Mutation count and quarantine generation observed when the last complete scan ended.
@@ -823,6 +851,7 @@ private:
     std::unique_ptr<WriteCountingBackend> countedBackend_;
     storage::IStorageBackend* backend_;
     std::optional<CompleteScanStamp> completeScan_;
+    bool lastSyncReusedCompleteScan_{false};
     NodeId nodeId_;
     std::string corpusId_;
     std::uint64_t corpusEpoch_{0};

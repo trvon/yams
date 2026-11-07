@@ -37,6 +37,8 @@ namespace yams::cli {
 namespace fs = std::filesystem;
 
 class StatusCommand : public ICommand {
+    std::string repoPath_;
+
 public:
     std::string getName() const override { return "status"; }
 
@@ -48,6 +50,7 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("status", getDescription());
+        cmd->alias("stats");
 
         cmd->add_flag("--json", jsonOutput_, "Output in JSON format");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed information");
@@ -57,19 +60,36 @@ public:
             "--corpus", corpusStats_,
             "Show corpus statistics for search tuning (doc counts, content type ratios, coverage)");
 
-        cmd->callback([this]() { exitOnError(execute(), "Status command"); });
-
-        // Provide a 'stats' alias that maps to the same implementation
-        // Mirrors flags and behavior to ease migration from the old stats command
-        auto* stats = app.add_subcommand("stats", getDescription());
-        stats->add_flag("--json", jsonOutput_, "Output in JSON format");
-        stats->add_flag("-v,--verbose", verbose_, "Show detailed information");
-        stats->add_flag("--no-physical", noPhysical_,
-                        "Skip physical size fallback scan; use daemon stats only");
-        stats->add_flag(
-            "--corpus", corpusStats_,
-            "Show corpus statistics for search tuning (doc counts, content type ratios, coverage)");
-        stats->callback([this]() { exitOnError(execute(), "Stats (alias)"); });
+        cmd->add_option("--repo", repoPath_,
+                        "Check tracked repo files against the index (exit 0: fresh, 3: stale)");
+        cmd->callback([this]() {
+            if (!repoPath_.empty()) {
+                const auto files = readRepoFiles(repoPath_);
+                auto result = cli_->repoFreshness(files);
+                if (!result) {
+                    exitOnError(Result<void>{result.error()}, "Repo status");
+                    return;
+                }
+                const auto& diff = result.value();
+                if (jsonOutput_ || cli_->getJsonOutput()) {
+                    std::cout << nlohmann::json{{"repo", files.root.string()},
+                                                {"tracked", diff.tracked},
+                                                {"stale", diff.changed.size()},
+                                                {"missing", diff.missing.size()},
+                                                {"fresh", !diff.stale()}}
+                                     .dump()
+                              << '\n';
+                } else {
+                    std::cout << "Repo: " << files.root.string() << "\nTracked: " << diff.tracked
+                              << "\nStale: " << diff.changed.size()
+                              << "\nMissing: " << diff.missing.size() << '\n';
+                }
+                if (diff.stale())
+                    throw CLI::RuntimeError(3);
+                return;
+            }
+            exitOnError(execute(), "Status command");
+        });
     }
 
     Result<void> execute() override {
@@ -80,6 +100,22 @@ public:
     boost::asio::awaitable<Result<void>> executeAsync() override {
         try {
             const bool cliOneShot = yams::cli::cli_one_shot_enabled();
+
+            if (cli_ && cli_->hasExplicitDataDir()) {
+                std::error_code storeEc;
+                const auto dataDir = cli_->getDataPath();
+                if (!std::filesystem::exists(dataDir / "yams.db", storeEc)) {
+                    if (jsonOutput_) {
+                        std::cout << nlohmann::json{{"status", "not_initialized"},
+                                                    {"dataDir", dataDir.string()}}
+                                         .dump()
+                                  << std::endl;
+                    }
+                    co_return Error{ErrorCode::NotInitialized,
+                                    "no YAMS store at " + dataDir.string() +
+                                        "; run `yams --data-dir " + dataDir.string() + " init`"};
+                }
+            }
 
             // Try daemon-first for quick status snapshot
             {
@@ -105,6 +141,21 @@ public:
                     }
                     if (st) {
                         auto s = st.value();
+                        if (!explicitDataDir.empty() && !s.dataDir.empty()) {
+                            std::error_code ec;
+                            const auto served = std::filesystem::weakly_canonical(s.dataDir, ec);
+                            const auto wanted =
+                                std::filesystem::weakly_canonical(explicitDataDir, ec);
+                            if (served != wanted) {
+                                co_return Error{ErrorCode::InvalidState,
+                                                "the daemon on this socket serves " + s.dataDir +
+                                                    ", not " + explicitDataDir.string()};
+                            }
+                        }
+                        const std::string reportedDataDir =
+                            !s.dataDir.empty()
+                                ? s.dataDir
+                                : (cli_ ? cli_->getDataPath().string() : std::string{});
                         auto getCount = [&](const char* key) -> uint64_t {
                             auto it = s.requestCounts.find(key);
                             return it != s.requestCounts.end() ? it->second : 0ULL;
@@ -127,8 +178,8 @@ public:
                             j["version"] = s.version;
                             j["uptimeSeconds"] = s.uptimeSeconds;
                             j["requestsProcessed"] = s.requestsProcessed;
-                            if (!s.dataDir.empty())
-                                j["dataDir"] = s.dataDir;
+                            if (!reportedDataDir.empty())
+                                j["dataDir"] = reportedDataDir;
                             if (!s.metadataDbPath.empty())
                                 j["metadataDbPath"] = s.metadataDbPath;
                             if (!s.vectorDbPath.empty())
@@ -507,6 +558,9 @@ public:
                             }
                             std::cout << section_header("Overview") << "\n\n";
                             render_rows(std::cout, overview);
+                            // Paths are useful only in full, so this line is never truncated.
+                            if (!reportedDataDir.empty())
+                                std::cout << "  Data dir     " << reportedDataDir << "\n";
 
                             // Resources with progress bars
                             std::cout << "\n" << section_header("Resources") << "\n\n";
@@ -1200,16 +1254,14 @@ public:
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
                 if (jsonOutput_) {
-                    std::cout
-                        << R"({"status": "not_initialized", "message": "YAMS not initialized"})"
-                        << std::endl;
-                } else {
-                    std::cout << "YAMS System Status\n";
-                    std::cout << "==================\n";
-                    std::cout << "✗ Not initialized\n";
-                    std::cout << "  → Run 'yams init' to get started\n";
+                    std::cout << nlohmann::json{{"status", "not_initialized"},
+                                                {"message", "YAMS not initialized"},
+                                                {"dataDir", cli_->getDataPath().string()}}
+                                     .dump()
+                              << std::endl;
                 }
-                co_return Result<void>();
+                co_return Error{ErrorCode::NotInitialized,
+                                "YAMS is not initialized; run `yams init`"};
             }
             auto store = cli_->getContentStore();
             auto metadataRepo = cli_->getMetadataRepository();
@@ -1587,6 +1639,9 @@ private:
 
     void outputJson(const StatusInfo& info) {
         std::cout << "{\n";
+        std::cout << "  \"dataDir\": "
+                  << nlohmann::json(cli_ ? cli_->getDataPath().string() : info.storagePath).dump()
+                  << ",\n";
         std::cout << "  \"storage\": {\n";
         std::cout << "    \"healthy\": " << (info.storageHealthy ? "true" : "false") << ",\n";
         std::cout << "    \"totalDocuments\": " << info.totalDocuments << ",\n";
@@ -1733,6 +1788,9 @@ private:
 
         std::cout << section_header("Overview") << "\n\n";
         render_rows(std::cout, overview);
+        // Same untruncated line as the daemon view.
+        if (cli_)
+            std::cout << "  Data dir     " << cli_->getDataPath().string() << "\n";
 
         std::vector<Row> worker;
         if (info.workerThreads > 0) {

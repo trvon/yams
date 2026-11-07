@@ -21,6 +21,7 @@
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/extraction/extraction_util.h>
+#include <yams/integrity/repair_utils.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
@@ -31,6 +32,8 @@
 #include <yams/search/search_engine.h>
 #include <yams/search/search_tuner.h>
 #include <yams/storage/storage_runtime_resolver.h>
+#include <yams/vector/embedding_generator.h>
+#include <yams/vector/simeon_embedding_backend.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_utils.h>
@@ -147,6 +150,13 @@ public:
 
     Result<void> execute() override { return Result<void>(); }
     boost::asio::awaitable<Result<void>> executeAsync() override {
+        if (recreateVectors_) {
+            auto recreated = runRecreateVectors();
+            if (!recreated) {
+                std::cout << "Doctor --recreate-vectors: " << recreated.error().message << "\n";
+            }
+            co_return recreated;
+        }
         // Handle --vectors flag first (detect and fix dimension mismatch)
         if (vectorsFix_) {
             try {
@@ -334,14 +344,6 @@ private:
     static void printSummary(const std::string& title, const std::vector<StepResult>& steps) {
         doctor::DoctorRender::printSummary(std::cout, title, steps);
     }
-    // Step helpers to make doctor logic composable (delegating to extracted utilities)
-    Result<void> touchDbFile(const std::filesystem::path& dbPath) {
-        return vecutil::ensureDbFile(dbPath);
-    }
-
-    // Legacy lock helpers kept for reference; no-ops now
-    Result<void> acquireMaintenanceLock(const std::filesystem::path&) { return Result<void>(); }
-    void releaseMaintenanceLock(const std::filesystem::path&) {}
 
     // Stop the daemon gracefully if it is running (best-effort)
     void ensureDaemonStopped() {
@@ -367,40 +369,12 @@ private:
         }
     }
 
-    Result<void> openDbMinimal(yams::vector::SqliteVecBackend& be,
-                               const std::filesystem::path& dbPath, int timeout_ms) {
-        // Ensure minimal, fast open with deferred vec init
-        setEnvIfUnset("YAMS_SQLITE_VEC_SKIP_INIT", 1);
-        setEnvIfUnset("YAMS_SQLITE_MINIMAL_PRAGMAS", 1);
-        auto openOpt = runWithSpinner(
-            "Opening vectors.db", [&]() { return be.initialize(dbPath.string()); }, timeout_ms);
-        if (!openOpt)
-            return Error{ErrorCode::Timeout, "open timeout"};
-        return *openOpt;
-    }
-
     Result<void> initVecModule(yams::vector::SqliteVecBackend& be, int timeout_ms) {
         auto vecOpt = runWithSpinner(
             "Initializing sqlite-vec", [&]() { return be.ensureVecLoaded(); }, timeout_ms);
         if (!vecOpt)
             return Error{ErrorCode::Timeout, "vec init timeout"};
         return *vecOpt;
-    }
-
-    Result<void> createVecSchema(yams::vector::SqliteVecBackend& be, size_t dim, int timeout_ms) {
-        auto cr = runWithSpinner(
-            "Creating vector tables", [&]() { return be.createTables(dim); }, timeout_ms);
-        if (!cr)
-            return Error{ErrorCode::Timeout, "create tables timeout"};
-        return *cr;
-    }
-
-    Result<void> dropVecSchema(yams::vector::SqliteVecBackend& be, int timeout_ms) {
-        auto dr = runWithSpinner(
-            "Dropping existing vector tables", [&]() { return be.dropTables(); }, timeout_ms);
-        if (!dr)
-            return Error{ErrorCode::Timeout, "drop tables timeout"};
-        return *dr;
     }
 
     static void writeVectorSentinel(const std::filesystem::path& dataDir, size_t dim) {
@@ -422,9 +396,6 @@ private:
 
     using R2KeychainStatus = doctor::R2ConfigStatus;
 
-    static R2KeychainStatus evaluateR2KeychainStatus() {
-        return doctor::DoctorContext::evaluateR2Config();
-    }
     // Run a blocking function with a console spinner and timeout.
     // Returns optional result; nullopt indicates timeout.
     std::optional<Result<void>> runWithSpinner(const std::string& label,
@@ -455,14 +426,6 @@ private:
         }
     }
 
-    static void setEnvIfUnset(const char* key, int value) {
-        if (!yams::config::getenv_optional(key)) {
-            const auto rendered = std::to_string(value);
-            if (!yams::config::set_environment(key, rendered.c_str())) {
-                spdlog::debug("Unable to set doctor environment default for {}", key);
-            }
-        }
-    }
     void runRepair() {
         if (fixAll_) {
             fixEmbeddings_ = true;
@@ -761,6 +724,9 @@ private:
     Result<void> validateGraph();
     void runDedupe();
     void runVectorsFix(); // Implementation of yams doctor --vectors
+    // yams doctor --recreate-vectors [--dim N]: drop vector tables and recreate them at the target
+    // dimension (from --dim, or from the static-embedding table when encoder_profile = "static").
+    Result<void> runRecreateVectors();
     // Prune state
     bool pruneApply_{false};
     std::vector<std::string> pruneCategories_;
@@ -796,6 +762,45 @@ private:
     std::filesystem::path getConfigPath() const;
     Result<void> writeConfigValue(const std::string& key, const std::string& value);
 };
+
+Result<void> DoctorCommand::runRecreateVectors() {
+    const auto dataDir = cli_ ? cli_->getDataPath() : std::filesystem::path{};
+    if (dataDir.empty()) {
+        return Error{ErrorCode::InvalidArgument, "no data directory resolved"};
+    }
+    const auto socket = daemon::DaemonClient::resolveSocketPathConfigFirst().string();
+    if (daemon::DaemonClient::isDaemonRunning(socket)) {
+        return Error{ErrorCode::InvalidState,
+                     "the daemon is running; stop it first (yams daemon stop) and retry"};
+    }
+
+    std::size_t dim = recreateDim_.value_or(0);
+    if (dim == 0) {
+        const auto policy = daemon::ConfigResolver::resolveSimeonEncoderPolicy();
+        if (policy.encoderProfile && *policy.encoderProfile == "static") {
+            auto backend = vector::makeSimeonBackend(vector::EmbeddingConfig{});
+            if (backend && backend->initialize()) {
+                dim = backend->getEmbeddingDimension();
+            }
+        }
+    }
+    if (dim == 0) {
+        return Error{ErrorCode::InvalidArgument,
+                     "pass --dim N (the target is only derived for encoder_profile = \"static\")"};
+    }
+
+    auto aligned =
+        yams::integrity::ensureVectorSchemaAligned(dataDir, dim, /*recreateIfMismatch=*/true);
+    if (!aligned) {
+        return aligned.error();
+    }
+    writeVectorSentinel(dataDir, dim);
+    std::cout << ui::status_ok("Vector tables at dim " + std::to_string(dim) + " in " +
+                               (dataDir / "vectors.db").string())
+              << "\n";
+    std::cout << "Re-embed every document: yams daemon start && yams repair --embeddings --force\n";
+    return Result<void>();
+}
 
 std::unique_ptr<ICommand> createDoctorCommand() {
     return std::make_unique<DoctorCommand>();

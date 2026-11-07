@@ -183,4 +183,10 @@ Tier1TextSignal classifyTier1TextSignal(std::span<const ComponentResult> compone
     return signal;
 }
 
+bool isStrongSemanticBudgetLexical(std::span<const ComponentResult> components) {
+    return classifyTier1TextSignal(components, kSemanticBudgetMinTextHits,
+                                   kSemanticBudgetMinTopTextScore)
+        .strong;
+}
+
 } // namespace yams::search::detail

@@ -732,3 +732,62 @@ TEST_CASE("RepairService maintenance sweeps stale clean-shutdown stamp leftovers
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+// Startup and `yams repair --orphans` salvage every corrupt metadata DB left beside the live one.
+// Empty and unreadable ones must not count as salvaged: the cleanup that later deletes corrupt
+// DBs trusts salvagedPaths.
+TEST_CASE("salvageFromAllCorruptDbs merges every readable corrupt DB and skips the rest",
+          "[unit][daemon][db_salvage][aggregate]") {
+    auto dir = makeScratchDir("yams_salvage_all");
+    auto livePath = dir / "yams.db";
+    const auto older = dir / "yams.db.corrupt-older";
+    const auto newer = dir / "yams.db.corrupt-newer";
+    const auto empty = dir / "yams.db.corrupt-empty";
+    const auto garbage = dir / "yams.db.corrupt-garbage";
+    auto hashes = makeTestHashes(5);
+
+    createAndPopulateDb(livePath, 0, {});
+    createAndPopulateDb(older, 2, {hashes[0], hashes[1]});
+    createAndPopulateDb(newer, 3, {hashes[2], hashes[3], hashes[4]});
+    createAndPopulateDb(empty, 0, {});
+    std::ofstream(garbage, std::ios::binary) << "not sqlite";
+
+    const auto result = yams::daemon::salvageFromAllCorruptDbs(dir, livePath, {});
+    CHECK(result.combined.documentsSalvaged == 5);
+    CHECK(countDocuments(livePath) == 5);
+    std::vector<std::string> salvaged;
+    for (const auto& p : result.salvagedPaths)
+        salvaged.push_back(p.filename().string());
+    std::sort(salvaged.begin(), salvaged.end());
+    std::vector<std::string> expected{older.filename().string(), newer.filename().string()};
+    std::sort(expected.begin(), expected.end());
+    CHECK(salvaged == expected);
+
+    // Running again finds every document already present.
+    const auto again = yams::daemon::salvageFromAllCorruptDbs(dir, livePath, {});
+    CHECK(again.combined.documentsSalvaged == 0);
+    CHECK(countDocuments(livePath) == 5);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+// After a recovery the daemon keeps ingesting into the fresh DB. Those rows take the low ids the
+// corrupt DB's documents also use; salvage must still bring every corrupt document over.
+TEST_CASE("salvageFromCorruptDb keeps documents whose ids collide with newly ingested ones",
+          "[unit][daemon][db_salvage][aggregate]") {
+    auto dir = makeScratchDir("yams_salvage_id_collision");
+    auto livePath = dir / "yams.db";
+    auto corruptPath = dir / "corrupt.db";
+    auto hashes = makeTestHashes(3);
+    createAndPopulateDb(livePath, 1, {hashes[0]});               // ingested after recovery: id 1
+    createAndPopulateDb(corruptPath, 2, {hashes[1], hashes[2]}); // ids 1 and 2
+
+    auto result = yams::daemon::salvageFromCorruptDb(corruptPath, livePath, {});
+    REQUIRE(result.has_value());
+    CHECK(result.value().documentsSalvaged == 2);
+    CHECK(countDocuments(livePath) == 3);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}

@@ -156,8 +156,6 @@ public:
         std::optional<bool> graphWeightedSeedRanking;
         /// GraphNeighbors seed ANN k; 0 disables (Tier-1 seeds only).
         std::optional<std::size_t> graphVectorSeedProbe;
-        /// identity_order | simeon_fragment_geometry
-        std::optional<std::string> rescueSelector;
         std::optional<float> rrfK;
     };
 
@@ -237,6 +235,8 @@ public:
         std::optional<std::string> projection;
         std::optional<bool> l2Normalize;
         std::optional<std::uint32_t> pqBytes;
+        // encoder_profile = "static": SMSTAT01 table path (embeddings.simeon.static_table).
+        std::optional<std::string> staticTable;
     };
 
     struct SimeonBm25Policy {
@@ -351,6 +351,11 @@ public:
      * @return Dimension if found and > 0, nullopt otherwise
      */
     static std::optional<size_t> readDbEmbeddingDim(const std::filesystem::path& dbPath);
+
+    /// A stored embedding-space identity (vectors.model_id) other than `identity`, if any row has
+    /// one. Two seeks on idx_vectors_model, so it stays cheap on large stores.
+    static std::optional<std::string>
+    readDbForeignEmbeddingSpace(const std::filesystem::path& dbPath, const std::string& identity);
 
     /**
      * @brief Read embedding dimension from sentinel file.
@@ -553,7 +558,6 @@ public:
      * - search.topology.graph_neighbor_reciprocal_only = true|false
      * - search.topology.graph_weighted_seed_ranking = true|false
      * - search.topology.graph_vector_seed_probe = int
-     * - search.topology.rescue_selector = identity_order|simeon_fragment_geometry
      * - search.topology.rrf_k = float
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
@@ -681,18 +685,6 @@ public:
      * @return Timeout in milliseconds
      */
     static int readTimeoutMs(const char* envName, int defaultMs, int minMs);
-
-    /**
-     * @brief Read vector index max_elements from config/env.
-     *
-     * Checks in order:
-     * 1. YAMS_VECTOR_MAX_ELEMENTS environment variable
-     * 2. vector_database.max_elements from config file
-     * 3. Default value (100000)
-     *
-     * @return Maximum number of vectors for the index
-     */
-    static size_t readVectorMaxElements();
 };
 
 } // namespace yams::daemon

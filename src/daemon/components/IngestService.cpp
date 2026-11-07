@@ -5,9 +5,12 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <boost/asio/post.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/DocumentRequestMapper.h>
 #include <yams/daemon/components/IngestService.h>
@@ -54,8 +57,8 @@ static void mergePendingPostIngest(PendingPostIngestByMime& target,
 
 static bool getEnvIngestCorrectnessMode() {
     static const bool val = []() {
-        if (const char* s = std::getenv("YAMS_INGEST_CORRECTNESS_MODE")) {
-            std::string value(s);
+        if (auto valueOverride = yams::config::getenv_optional("YAMS_INGEST_CORRECTNESS_MODE")) {
+            std::string value = *valueOverride;
             std::transform(value.begin(), value.end(), value.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             return !(value == "0" || value == "false" || value == "no" || value == "off");
@@ -79,11 +82,56 @@ static void flushPendingPostIngestBatches(ServiceManager* sm, PendingPostIngestB
     pending.clear();
 }
 
+// The poller's idle timer, published while the poller runs so enqueue paths can cancel it.
+// Shared by the poller coroutine and posted wake handlers, so a handler that runs after the
+// service is destroyed only touches this block. Timer access is serialized by the poller's
+// strand; the mutex covers the pointer against the coroutine's exit path.
+struct IngestService::WakeState {
+    explicit WakeState(boost::asio::strand<boost::asio::io_context::executor_type> s)
+        : strand(std::move(s)) {}
+    boost::asio::strand<boost::asio::io_context::executor_type> strand;
+    std::mutex mutex;
+    boost::asio::steady_timer* timer{nullptr};
+    std::atomic<bool> running{false};
+    std::atomic<bool> wakePosted{false};
+};
+
+namespace {
+std::mutex gIngestWakeMutex;
+std::shared_ptr<IngestService::WakeState> gActiveIngestWake;
+
+void postIngestWake(const std::shared_ptr<IngestService::WakeState>& wake) {
+    if (!wake || !wake->running.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (wake->wakePosted.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    boost::asio::post(wake->strand, [wake]() {
+        wake->wakePosted.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(wake->mutex);
+        if (wake->timer) {
+            wake->timer->cancel();
+        }
+    });
+}
+} // namespace
+
 IngestService::IngestService(ServiceManager* sm, WorkCoordinator* coordinator)
-    : sm_(sm), coordinator_(coordinator), strand_(coordinator_->makeStrand()) {}
+    : sm_(sm), coordinator_(coordinator), strand_(coordinator_->makeStrand()),
+      wake_(std::make_shared<WakeState>(strand_)) {}
 
 IngestService::~IngestService() {
     stop();
+}
+
+void IngestService::notifyWakeup() {
+    std::shared_ptr<WakeState> wake;
+    {
+        std::lock_guard<std::mutex> lock(gIngestWakeMutex);
+        wake = gActiveIngestWake;
+    }
+    postIngestWake(wake);
 }
 
 void IngestService::start() {
@@ -95,6 +143,11 @@ void IngestService::start() {
     }
 
     stop_.store(false, std::memory_order_release);
+    wake_->wakePosted.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(gIngestWakeMutex);
+        gActiveIngestWake = wake_;
+    }
     coordinator_->spawnDetached(strand_, channelPoller());
 }
 
@@ -107,6 +160,15 @@ void IngestService::notifyLifecycle() {
 void IngestService::stop() {
     YAMS_ZONE_SCOPED_N("IngestService::stop");
     stop_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(gIngestWakeMutex);
+        if (gActiveIngestWake == wake_) {
+            gActiveIngestWake.reset();
+        }
+    }
+    // The poller checks stop_ once per iteration; wake it so stop does not wait out the
+    // idle tick.
+    postIngestWake(wake_);
     notifyLifecycle();
     spdlog::info("[IngestService] Stop requested");
 
@@ -115,16 +177,16 @@ void IngestService::stop() {
     bool exited = false;
     {
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
+        // startGuard_ is set synchronously before spawning: running_ alone
+        // cannot distinguish a drained poller from one not scheduled yet.
         exited = lifecycleCv_.wait_until(
-            lock, deadline, [this]() { return !running_.load(std::memory_order_acquire); });
+            lock, deadline, [this]() { return !startGuard_.load(std::memory_order_acquire); });
     }
 
     if (!exited) {
         spdlog::warn("[IngestService] Stop timed out after {}ms waiting for channel poller to "
                      "exit",
                      kWaitBudget.count());
-    } else {
-        startGuard_.store(false, std::memory_order_release);
     }
 }
 
@@ -156,11 +218,13 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
         std::atomic<bool>& startGuard;
         IngestService* self;
         ~RunningGuard() {
+            // Publish completion and notify while owning the same mutex as
+            // stop(). Releasing it is our final access to the service: a
+            // waiter may destroy the service as soon as it observes completion.
+            std::lock_guard<std::mutex> lock(self->lifecycleMutex_);
             running.store(false, std::memory_order_release);
             startGuard.store(false, std::memory_order_release);
-            if (self) {
-                self->notifyLifecycle();
-            }
+            self->lifecycleCv_.notify_all();
         }
     } runningGuard{running_, startGuard_, this};
 
@@ -171,18 +235,34 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
             "store_document_tasks", channelCapacity);
 
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+    {
+        std::lock_guard<std::mutex> lock(wake_->mutex);
+        wake_->timer = &timer;
+    }
+    wake_->running.store(true, std::memory_order_release);
+    struct WakeGuard {
+        std::shared_ptr<WakeState> wake;
+        ~WakeGuard() {
+            wake->running.store(false, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(wake->mutex);
+            wake->timer = nullptr;
+        }
+    } wakeGuard{wake_};
 
     auto idleDelay = std::chrono::milliseconds(5);
     const bool correctnessMode = getEnvIngestCorrectnessMode();
 
+    // Idle back-off ceiling. Enqueue paths call notifyWakeup(), which cancels the idle
+    // timer on this strand, so the ceiling is a safety net and follows the tuning cadence:
+    // the idle tick while the daemon is idle, the worker poll period otherwise. The former
+    // 50 ms cap woke this loop 20 times a second on an idle daemon.
     auto maxIdleDelay = []() {
         auto snap = TuningSnapshotRegistry::instance().get();
         if (snap && snap->daemonIdle) {
-            return std::chrono::milliseconds(
-                std::max<uint32_t>(10u, std::min<uint32_t>(TuneAdvisor::idleTickMs(), 50u)));
+            return std::chrono::milliseconds(std::max<uint32_t>(1u, TuneAdvisor::idleTickMs()));
         }
         uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
-        return std::chrono::milliseconds(std::max<uint32_t>(2u, std::min<uint32_t>(pollMs, 10u)));
+        return std::chrono::milliseconds(std::max<uint32_t>(1u, pollMs));
     };
 
     while (!stop_.load()) {
@@ -190,6 +270,9 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
         try {
             cpuUsagePercent = ResourceGovernor::instance().getSnapshot().cpuUsagePercent;
         } catch (...) {
+            cpuUsagePercent = 100.0;
+            spdlog::debug(
+                "IngestService: pressure snapshot unavailable; using conservative batching");
         }
         const bool canAdmitWork = ResourceGovernor::instance().canAdmitWork();
         const bool underPressure = !canAdmitWork;
@@ -229,7 +312,13 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
         }
         if (processed == 0) {
             timer.expires_after(idleDelay);
-            co_await timer.async_wait(boost::asio::use_awaitable);
+            boost::system::error_code ec;
+            co_await timer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+            if (ec == boost::asio::error::operation_aborted) {
+                // notifyWakeup() or stop(): work arrived, restart the back-off.
+                idleDelay = std::chrono::milliseconds(5);
+                continue;
+            }
             const auto maxIdle = maxIdleDelay();
             if (idleDelay < maxIdle) {
                 idleDelay *= 2;

@@ -182,6 +182,7 @@ simeon_retrieval_srcs = [
   join_paths(simeon_dir, 'src', 'query_router.cpp'),
   join_paths(simeon_dir, 'src', 'retrieval_strategy.cpp'),
   join_paths(simeon_dir, 'src', 'corpus_adapter.cpp'),
+  join_paths(simeon_dir, 'src', 'static_embedding.cpp'),
 ]
 
 #SIMD tier defines — must be visible to every TU that includes

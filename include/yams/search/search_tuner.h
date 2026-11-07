@@ -132,9 +132,6 @@ struct TunedParams {
     bool enableSubPhraseExpansion = false;
     size_t subPhraseExpansionMinHits = 5;
     float subPhraseExpansionPenalty = 0.70f;
-    bool enableLexicalExpansion = false;
-    size_t lexicalExpansionMinHits = 3;
-    float lexicalExpansionScorePenalty = 0.65f;
     float conceptBoostWeight = 0.10f;
     float conceptMinConfidence = 0.40f;
     size_t conceptMaxCount = 6;
@@ -187,9 +184,6 @@ struct TunedParams {
     bool graphVectorRequireCorroboration = true;
     bool graphVectorRequireTextAnchoring = true;
     bool graphVectorRequireBaselineTextAnchoring = true;
-    bool enableGraphFusionWindowGuard = false;
-    size_t graphFusionGuardDepthMultiplier = 2;
-    size_t graphMaxAddedInFusionWindow = 0;
     float graphTextMinAdmissionScore = 0.0010f;
     float graphExpansionFtsPenalty = 0.78f;
     float graphExpansionVectorPenalty = 0.82f;
@@ -243,9 +237,6 @@ struct TunedParams {
         config.graphVectorRequireCorroboration = graphVectorRequireCorroboration;
         config.graphVectorRequireTextAnchoring = graphVectorRequireTextAnchoring;
         config.graphVectorRequireBaselineTextAnchoring = graphVectorRequireBaselineTextAnchoring;
-        config.enableGraphFusionWindowGuard = enableGraphFusionWindowGuard;
-        config.graphFusionGuardDepthMultiplier = graphFusionGuardDepthMultiplier;
-        config.graphMaxAddedInFusionWindow = graphMaxAddedInFusionWindow;
         config.graphTextMinAdmissionScore = graphTextMinAdmissionScore;
         config.graphExpansionFtsPenalty = graphExpansionFtsPenalty;
         config.graphExpansionVectorPenalty = graphExpansionVectorPenalty;
@@ -300,9 +291,6 @@ struct TunedParams {
         config.enableSubPhraseExpansion = enableSubPhraseExpansion;
         config.subPhraseExpansionMinHits = subPhraseExpansionMinHits;
         config.subPhraseExpansionPenalty = subPhraseExpansionPenalty;
-        config.enableLexicalExpansion = enableLexicalExpansion;
-        config.lexicalExpansionMinHits = lexicalExpansionMinHits;
-        config.lexicalExpansionScorePenalty = lexicalExpansionScorePenalty;
         config.conceptBoostWeight = conceptBoostWeight;
         config.conceptMinConfidence = conceptMinConfidence;
         config.conceptMaxCount = conceptMaxCount;
@@ -358,9 +346,6 @@ struct TunedParams {
         graphVectorRequireCorroboration = config.graphVectorRequireCorroboration;
         graphVectorRequireTextAnchoring = config.graphVectorRequireTextAnchoring;
         graphVectorRequireBaselineTextAnchoring = config.graphVectorRequireBaselineTextAnchoring;
-        enableGraphFusionWindowGuard = config.enableGraphFusionWindowGuard;
-        graphFusionGuardDepthMultiplier = config.graphFusionGuardDepthMultiplier;
-        graphMaxAddedInFusionWindow = config.graphMaxAddedInFusionWindow;
         graphTextMinAdmissionScore = config.graphTextMinAdmissionScore;
         graphExpansionFtsPenalty = config.graphExpansionFtsPenalty;
         graphExpansionVectorPenalty = config.graphExpansionVectorPenalty;
@@ -415,9 +400,6 @@ struct TunedParams {
         enableSubPhraseExpansion = config.enableSubPhraseExpansion;
         subPhraseExpansionMinHits = config.subPhraseExpansionMinHits;
         subPhraseExpansionPenalty = config.subPhraseExpansionPenalty;
-        enableLexicalExpansion = config.enableLexicalExpansion;
-        lexicalExpansionMinHits = config.lexicalExpansionMinHits;
-        lexicalExpansionScorePenalty = config.lexicalExpansionScorePenalty;
         conceptBoostWeight = config.conceptBoostWeight;
         conceptMinConfidence = config.conceptMinConfidence;
         conceptMaxCount = config.conceptMaxCount;

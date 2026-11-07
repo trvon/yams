@@ -10,6 +10,7 @@
 #include <string_view>
 #include <thread>
 #include <yams/config/config_helpers.h>
+#include <yams/core/thread_name.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/profiling.h>
 
@@ -946,16 +947,6 @@ void ConnectionPool::returnConnection(PooledConnection* conn) {
     cv_.notify_one();
 }
 
-void ConnectionPool::refreshNext() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!available_.empty()) {
-        auto conn = std::move(available_.front());
-        available_.pop();
-        conn->returned_ = true; // Prevent destructor deadlock
-        totalConnections_--;
-    }
-}
-
 void ConnectionPool::refreshAll() {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -1007,6 +998,7 @@ bool ConnectionPool::isConnectionValid(const Database& db) const {
 void ConnectionPool::startMaintenanceThread() {
     using namespace std::chrono_literals;
     maintenanceThread_ = std::jthread([this](std::stop_token st) {
+        yams::setCurrentThreadName("yams-db-maint");
         while (!st.stop_requested()) {
             (void)this->healthCheck();
             this->pruneIdleConnections();

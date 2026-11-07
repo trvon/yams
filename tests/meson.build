@@ -30,6 +30,11 @@ _test_thread_sanitizer = yams_sanitize_thread
 # reach only a few suites. The default setup applies it to every test in a TSan build.
 if _test_thread_sanitizer
   add_test_setup('tsan', env: {'TSAN_OPTIONS': _test_tsan_options}, is_default: true)
+  # Audit setup: narrowed suppressions plus deadlock/history diagnostics (lt-safety A1).
+  add_test_setup('tsan_narrow', env: {
+    'TSAN_OPTIONS': 'suppressions=' + (meson.project_source_root() / 'tsan.narrow.suppressions')
+      + ':second_deadlock_stack=1:history_size=7',
+  })
 endif
 _test_address_sanitizer = yams_sanitize_address
 # ASan builds: keep meson's default ASAN_OPTIONS, add stack-use-after-return detection (it finds
@@ -208,9 +213,36 @@ test('retrieval_contract_unit',
   suite: ['unit', 'policy', 'benchmark'],
   timeout: 30,
 )
+# Measurement-harness tests use synthetic samples and mocks, not live workloads.
+test('soak_measurement_unit',
+  python_exe,
+  args: files('benchmarks/soak/test_soak.py'),
+  suite: ['unit', 'test-harness', 'measurement'],
+  timeout: 30,
+)
+test('mesh_measurement_unit',
+  python_exe,
+  args: files('integration/p2p_mesh/test_mesh_measurement.py'),
+  suite: ['unit', 'test-harness', 'measurement'],
+  timeout: 30,
+)
+
 test('meson_failure_reporter_unit',
   python_exe,
   args: files('scripts/test_report_meson_failures.py'),
+  suite: ['unit', 'ci'],
+  timeout: 30,
+)
+# Command-policy tests with fake lanes/meson; they never stand in for sanitizer results.
+test('pre_push_host_dispatch_unit',
+  python_exe,
+  args: files('scripts/test_pre_push_host_dispatch.py'),
+  suite: ['unit', 'ci'],
+  timeout: 30,
+)
+test('native_linux_lane_unit',
+  python_exe,
+  args: files('scripts/test_native_linux_lane.py'),
   suite: ['unit', 'ci'],
   timeout: 30,
 )
@@ -263,6 +295,14 @@ promotion_reconciliation_tests = files('scripts/test_reconcile_promotion_pr.py')
 test('promotion_reconciliation',
   python_exe,
   args: [promotion_reconciliation_tests],
+  suite: ['unit', 'policy', 'release'],
+  timeout: 30,
+)
+
+prerelease_prune_tests = files('scripts/test_prune_prereleases.py')
+test('prerelease_prune',
+  python_exe,
+  args: [prerelease_prune_tests],
   suite: ['unit', 'policy', 'release'],
   timeout: 30,
 )
@@ -603,6 +643,26 @@ if catch2_dep.found()
     'is_parallel': false,
   }]
 
+  catch2_test_table += [{
+    'name': 'daemon_startup_ownership',
+    'target': 'catch2_daemon_startup_ownership',
+    'sources': files('unit/daemon/daemon_startup_ownership_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'concurrency'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
+
+  catch2_test_table += [{
+    'name': 'daemon_stop_state',
+    'target': 'catch2_daemon_stop_state',
+    'sources': files('unit/daemon/daemon_stop_state_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'concurrency'],
+    'timeout': 60,
+    'is_parallel': false,
+  }]
+
   catch2_daemon_metrics_status_exe = executable('catch2_daemon_metrics_status',
     files('unit/daemon/daemon_metrics_status_test.cpp'),
     include_directories: incs,
@@ -756,7 +816,8 @@ if catch2_dep.found()
       'unit/daemon/request_handler_status_unary_catch2_test.cpp',
       'unit/daemon/proto_serializer_catch2_test.cpp',
     ),
-    'deps': test_deps,
+    # proto_serializer_catch2_test builds a descriptor pool directly.
+    'deps': test_deps + [protobuf_dep],
     'suite': ['catch2', 'unit', 'daemon', 'protocol', 'concurrency'],
     'timeout': 60,
     'is_parallel': false,
@@ -857,6 +918,24 @@ if catch2_dep.found()
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'post-ingest'],
     'timeout': 60,
+  }]
+
+#Legacy vectors whose document lost its text
+  catch2_test_table += [{
+    'name': 'legacy_vector_cleanup',
+    'sources': files('unit/daemon/legacy_vector_cleanup_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'embeddings'],
+    'timeout': 60,
+  }]
+
+  #ResourceGovernor memory accounting (anon vs file-backed RSS)
+  catch2_test_table += [{
+    'name': 'resource_governor_memory',
+    'sources': files('unit/daemon/resource_governor_memory_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'governor'],
+    'timeout': 30,
   }]
 
 #PressureLimitedPoller shutdown unit tests(capability - sleep / stop paths)
@@ -1048,7 +1127,8 @@ if catch2_dep.found()
   }]
 
   catch2_repair_service_exe = executable('catch2_repair_service',
-    files('unit/daemon/repair_service_post_ingest_channel_catch2_test.cpp'),
+    files('unit/daemon/repair_service_post_ingest_channel_catch2_test.cpp',
+          'unit/daemon/repair_scan_cursor_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -1061,6 +1141,22 @@ if catch2_dep.found()
     'sources': files('unit/daemon/repair_maintenance_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'repair'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
+    'name': 'repair_stalled_processing',
+    'sources': files('unit/daemon/repair_stalled_processing_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'repair'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
+    'name': 'embedding_memory_accounting',
+    'sources': files('unit/daemon/embedding_memory_accounting_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'embedding'],
     'timeout': 60,
   }]
 
@@ -1208,6 +1304,71 @@ if catch2_dep.found()
     'timeout': 120,
     'is_parallel': false,
   }]
+
+#lt-safety expected failures: each functional case runs in its own subprocess outside the
+#default unit suite. The wrapper accepts only the named CHECK expression in Catch2 XML; generic
+#Meson should_fail and Catch2 !shouldfail would incorrectly accept setup crashes or exceptions.
+  catch2_lt_safety_red_exe = executable('catch2_lt_safety_red',
+    files('unit/daemon/lt_safety_red_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  lt_expected_failure_runner = files('common/lt_expected_failure_runner.py')
+  test('lt_expected_failure_runner_unit', python_exe,
+    args: [files('common/test_lt_expected_failure_runner.py')],
+    suite: ['unit', 'test-harness'],
+    timeout: 30,
+  )
+  # CI's generic lane runs --suite unit. Expose the wrapped cases there on Linux only: the red
+  # assertions are pinned on Linux (gcc, clang TSan, clang ASan); macOS and Windows runners have
+  # not been measured, and a non-reproducing red case fails the strict wrapper.
+  _lt_red_suite = ['catch2', 'daemon', 'lt-red']
+  if host_machine.system() == 'linux'
+    _lt_red_suite += ['unit']
+  endif
+  # A red case whose shutdown path trips a known, separately tracked TSan report is registered
+  # outside the lt-red and unit suites in a TSan build (still runnable by name). The strict
+  # wrapper rejects any sanitizer output, and a setup's exclude_suites does not apply when the
+  # run names a suite. Not a suppression: the report stays visible when the case runs.
+  _lt_red_tsan_sensitive_suite = ['catch2', 'daemon', 'lt-red-tsan-sensitive']
+  # Each entry: [Catch2 case, exact CHECK expression that must be the single failure,
+  #              TSan-sensitive]. A fix PR removes its entry here and re-registers the case as an
+  # ordinary green test.
+  _lt_red_cases = [
+    # lt_red_detached_never_suspends went green with lt-safety A2.1; see work_coordinator_test.cpp
+    # "stop releases idle workers past a detached strand that never suspends".
+    # lt_red_poller_started_flag and lt_red_metrics_stop_after_cancel went green with lt-safety
+    # A2.2; see pressure_limited_poller_catch2_test.cpp ("exits when its cancellation slot fires",
+    # "clears startedFlag when an abandoned frame is destroyed", "stops cleanly with
+    # WorkCoordinator::stop") and daemon_metrics_status_test.cpp ("stopPolling returns after the
+    # WorkCoordinator cancelled the loop").
+    # red until ServiceManager resets writeCoordinator_ after the worker join (lt-safety A2.3).
+    # TSan-sensitive: its full shutdown intermittently trips the PostIngestQueue lifecycle-mutex
+    # race (B5 class, lt-safety A2.2/A2.4), an unrelated diagnostic for this case.
+    ['lt_red_write_coordinator_lifetime', 'providerNonnullBeforeWorkerRelease', true],
+  ]
+  foreach _case : _lt_red_cases
+    _case_suite = (_case[2] and _test_thread_sanitizer) ? _lt_red_tsan_sensitive_suite : _lt_red_suite
+    test(_case[0], python_exe,
+      args: [
+        lt_expected_failure_runner,
+        '--binary', catch2_lt_safety_red_exe,
+        '--case', _case[0],
+        '--expression', _case[1],
+        '--timeout', '170',
+      ],
+      depends: [catch2_lt_safety_red_exe],
+      suite: _case_suite,
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 180,
+      is_parallel: false,
+    )
+  endforeach
+  # lt_red_abandoned_worker_uaf remains as a hidden manual/unvalidated historical reproducer.
+  # It has no Meson registration and must not run in this ordinary harness lane.
 
   catch2_test_table += [{
     'name': 'repair_binary_filter',
@@ -1583,6 +1744,7 @@ if catch2_dep.found()
       catch2_dep,
       catch2_main_dep,
       dependency('nlohmann_json'),
+      dependency('yams_api'),
       dependency('yams_storage_engine'),
       dependency('yams_crypto'),
       dependency('yams_memory_sync'),
@@ -1701,7 +1863,6 @@ if catch2_dep.found()
     'sources': files(
       'unit/search/chunk_coverage_catch2_test.cpp',
       'unit/search/graph_expansion_catch2_test.cpp',
-      'unit/search/hotzone_manager_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/lexical_scoring_catch2_test.cpp',
       'unit/search/simeon_lexical_backend_catch2_test.cpp',
@@ -1719,6 +1880,7 @@ if catch2_dep.found()
       'unit/search/component_fanout_catch2_test.cpp',
       'unit/search/concept_boost_catch2_test.cpp',
       'unit/search/cross_rerank_catch2_test.cpp',
+      'unit/search/lexical_rerank_catch2_test.cpp',
       'unit/search/final_result_order_catch2_test.cpp',
       'unit/search/search_vector_pipeline_catch2_test.cpp',
       'unit/search/search_facets_catch2_test.cpp',
@@ -1948,6 +2110,10 @@ if catch2_dep.found()
 #Migrated from GTest as part of yams - 3s4 / yams - cli
   cli_test_deps = [version_generated_dep, catch2_dep, catch2_main_dep] + test_deps
   cli_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
+  if get_option('build-mcp-server')
+    # command_catalog.h sizes its table on this; keep tests and the CLI on one definition.
+    cli_test_cpp_args += ['-DYAMS_BUILD_MCP_SERVER=1']
+  endif
 
   catch2_cli_common_exe = executable('catch2_cli_common',
     version_header,
@@ -1969,6 +2135,8 @@ if catch2_dep.found()
       'unit/cli/homebrew_service_formula_catch2_test.cpp',
       'unit/cli/pipeline_stage_render_catch2_test.cpp',
       'unit/cli/prompt_util_catch2_test.cpp',
+    'unit/cli/output_controls_catch2_test.cpp',
+    'unit/cli/repo_files_catch2_test.cpp',
       'unit/cli/recommendation_util_catch2_test.cpp',
       'unit/cli/status_metrics_catch2_test.cpp',
       'unit/cli/time_filters_catch2_test.cpp',
@@ -1988,6 +2156,7 @@ if catch2_dep.found()
     files(
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/cli_option_isolation_catch2_test.cpp',
+    'unit/cli/retrieval_flags_catch2_test.cpp',
       'unit/cli/cli_utility_coverage_catch2_test.cpp',
       'unit/cli/config_command_catch2_test.cpp',
       'unit/cli/data_dir_resolution_catch2_test.cpp',
@@ -2009,8 +2178,14 @@ if catch2_dep.found()
       'unit/cli/completion_command_catch2_test.cpp',
       'unit/cli/delete_command_catch2_test.cpp',
       'unit/cli/download_command_catch2_test.cpp',
-      'unit/cli/init_command_catch2_test.cpp',
+      'unit/cli/error_format_contract_catch2_test.cpp',
+      'unit/cli/exit_code_contract_catch2_test.cpp',
+      'unit/cli/grep_output_contract_catch2_test.cpp',
+      # init_command_catch2_test.cpp runs in its own cli_init_command target (serial).
       'unit/cli/list_command_catch2_test.cpp',
+      'unit/cli/name_resolution_contract_catch2_test.cpp',
+      'unit/cli/search_no_match_contract_catch2_test.cpp',
+      'unit/cli/status_data_dir_catch2_test.cpp',
       'unit/cli/update_command_catch2_test.cpp',
     ),
     include_directories: incs,
@@ -2101,6 +2276,7 @@ if catch2_dep.found()
         'unit/vector/embedding_service_synthetic_catch2_test.cpp',
         'unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp',
         'unit/vector/sqlite_vec_backend_persistence_catch2_test.cpp',
+        'unit/vector/sqlite_vec_backend_spq_incremental_catch2_test.cpp',
         'unit/vector/static_cosine_ann_index_catch2_test.cpp',
         'unit/vector/sqlite_vec_c_api_smoke_catch2_test.cpp',
         'unit/vector/vector_schema_migration_vec0_catch2_test.cpp',
@@ -2147,15 +2323,13 @@ if catch2_dep.found()
 #API Test Suites(Catch2) - content store API tests
 #Migrated from GTest as part of yams - 3s4 / api
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-#API submodule tests(content store, metadata API)
+#API submodule tests(content store, content store builder)
 #Migrated from GTest as part of yams - 3s4 / api
   catch2_test_table += [{
     'name': 'api_submodule',
     'sources': files(
       'unit/api/content_store_catch2_test.cpp',
       'unit/api/content_store_builder_compression_catch2_test.cpp',
-      'unit/api/metadata_api_catch2_test.cpp',
-      'unit/api/semantic_search_api_catch2_test.cpp',
     ),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'api', 'concurrency'],
@@ -2688,6 +2862,15 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'core_task',
+    'target': 'core_task',
+    'sources': files('unit/core/task_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'core', 'task'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'core_uuid',
     'target': 'core_uuid',
     'sources': files('unit/core/uuid_test.cpp'),
@@ -2761,6 +2944,12 @@ if catch2_dep.found()
       'unit/detection/file_type_graceful_fallback_test.cpp',
     ),
     'deps': test_deps,
+    # Absolute source path: __FILE__ is build-dir relative under meson, so the
+    # fixture could not find its JSON files from another working directory.
+    'cpp_args': [
+      '-DYAMS_DETECTION_TEST_DATA_DIR="@0@"'.format(
+        meson.current_source_dir() / 'unit' / 'detection' / 'test_data'),
+    ],
     'suite': ['catch2', 'unit', 'detection'],
     'timeout': 120,
   }]
@@ -2790,6 +2979,7 @@ if catch2_dep.found()
     dependency('yams_metadata'),
     dependency('yams_search'),
     dependency('yams_daemon'),
+    dependency('yams_api'),
   ]
 
   integrity_catch2_exe = executable('integrity_catch2',
@@ -3025,7 +3215,6 @@ if catch2_dep.found()
     'sources': files(
       'unit/app/services/service_utilities_test.cpp',
       'unit/app/services/download_metadata_entries_test.cpp',
-      'unit/app/services/enhanced_search_config_catch2_test.cpp',
       'unit/app/services/retrieval_service_mapping_catch2_test.cpp',
     ),
     'deps': test_deps,
@@ -3604,7 +3793,7 @@ foreach t : catch2_test_table
   t_exe = executable(t.get('target', 'catch2_' + t['name']), t['sources'],
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + t['deps'],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'] + t.get('cpp_args', []),
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )

@@ -93,11 +93,7 @@ DEFINE_REQUEST_HANDLER(GetInitRequest, handleGetInitRequest);
 DEFINE_REQUEST_HANDLER(GetChunkRequest, handleGetChunkRequest);
 DEFINE_REQUEST_HANDLER(GetEndRequest, handleGetEndRequest);
 DEFINE_REQUEST_HANDLER(CatRequest, handleCatRequest);
-DEFINE_REQUEST_HANDLER(ListSessionsRequest, handleListSessionsRequest);
 DEFINE_REQUEST_HANDLER(UseSessionRequest, handleUseSessionRequest);
-DEFINE_REQUEST_HANDLER(AddPathSelectorRequest, handleAddPathSelectorRequest);
-DEFINE_REQUEST_HANDLER(RemovePathSelectorRequest, handleRemovePathSelectorRequest);
-DEFINE_REQUEST_HANDLER(ListTreeDiffRequest, handleListTreeDiffRequest);
 DEFINE_REQUEST_HANDLER(FileHistoryRequest, handleFileHistoryRequest);
 DEFINE_REQUEST_HANDLER(PruneRequest, handlePruneRequest);
 // ListCollectionsRequest removed - use getMetadataValueCounts(["collection"], {})
@@ -107,6 +103,7 @@ DEFINE_REQUEST_HANDLER(RestoreSnapshotRequest, handleRestoreSnapshotRequest);
 DEFINE_REQUEST_HANDLER(AddDocumentRequest, handleAddDocumentRequest);
 DEFINE_REQUEST_HANDLER(ListRequest, handleListRequest);
 DEFINE_REQUEST_HANDLER(DeleteRequest, handleDeleteRequest);
+DEFINE_REQUEST_HANDLER(UnlinkPathRequest, handleUnlinkPathRequest);
 DEFINE_REQUEST_HANDLER(GetStatsRequest, handleGetStatsRequest);
 DEFINE_REQUEST_HANDLER(GenerateEmbeddingRequest, handleGenerateEmbeddingRequest);
 DEFINE_REQUEST_HANDLER(BatchEmbeddingRequest, handleBatchEmbeddingRequest);
@@ -132,15 +129,11 @@ DEFINE_REQUEST_HANDLER(GraphQueryRequest, handleGraphQueryRequest);
 DEFINE_REQUEST_HANDLER(GraphExploreRequest, handleGraphExploreRequest);
 DEFINE_REQUEST_HANDLER(GraphSymbolLookupRequest, handleGraphSymbolLookupRequest);
 DEFINE_REQUEST_HANDLER(GraphTraceRequest, handleGraphTraceRequest);
-DEFINE_REQUEST_HANDLER(GraphImpactRequest, handleGraphImpactRequest);
-DEFINE_REQUEST_HANDLER(GraphAffectedTestsRequest, handleGraphAffectedTestsRequest);
-DEFINE_REQUEST_HANDLER(GraphPathHistoryRequest, handleGraphPathHistoryRequest);
 DEFINE_REQUEST_HANDLER(GraphRepairRequest, handleGraphRepairRequest);
 DEFINE_REQUEST_HANDLER(GraphValidateRequest, handleGraphValidateRequest);
 DEFINE_REQUEST_HANDLER(KgIngestRequest, handleKgIngestRequest);
 DEFINE_REQUEST_HANDLER(MetadataValueCountsRequest, handleMetadataValueCountsRequest);
 DEFINE_REQUEST_HANDLER(MemorySyncRequest, handleMemorySyncRequest);
-DEFINE_REQUEST_HANDLER(BatchRequest, handleBatchRequest);
 template <> struct RequestHandlerTraits<RepairRequest> {
     static boost::asio::awaitable<Response> handle(RequestDispatcher*, const RepairRequest&) {
         co_return dispatch::makeErrorResponse(

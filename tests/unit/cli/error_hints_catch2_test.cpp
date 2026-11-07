@@ -154,13 +154,13 @@ TEST_CASE("ErrorHints - Timeout code fallback", "[cli][error_hints][catch2]") {
 
 TEST_CASE("ErrorHints - InvalidArgument code with command", "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::InvalidArgument, "invalid option", "add");
-    CHECK(hint.hint == "Check command syntax");
+    CHECK(hint.hint.empty());
     CHECK(hint.command == "yams add --help");
 }
 
 TEST_CASE("ErrorHints - InvalidArgument code without command", "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::InvalidArgument, "invalid option", "");
-    CHECK(hint.hint == "Check command syntax");
+    CHECK(hint.hint.empty());
     CHECK(hint.command == "yams --help");
 }
 
@@ -180,25 +180,26 @@ TEST_CASE("ErrorHints - Unknown code returns empty hint", "[cli][error_hints][ca
 // formatErrorWithHint() tests
 // ============================================================================
 
-TEST_CASE("ErrorHints - Format error includes message", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Format error leads with error:", "[cli][error_hints][catch2]") {
     auto formatted = formatErrorWithHint(ErrorCode::NotInitialized, "storage missing");
-    CHECK(formatted.find("storage missing") != std::string::npos);
+    CHECK(formatted.rfind("error: storage missing", 0) == 0);
 }
 
-TEST_CASE("ErrorHints - Format error includes hint emoji", "[cli][error_hints][catch2]") {
+TEST_CASE("ErrorHints - Format error puts the hint on a hint: line", "[cli][error_hints][catch2]") {
     auto formatted = formatErrorWithHint(ErrorCode::NotInitialized, "storage missing");
-    CHECK(formatted.find("💡 Hint:") != std::string::npos);
+    CHECK(formatted.find("\nhint: ") != std::string::npos);
+    CHECK(formatted.find("💡") == std::string::npos);
 }
 
 TEST_CASE("ErrorHints - Format error includes command", "[cli][error_hints][catch2]") {
     auto formatted = formatErrorWithHint(ErrorCode::NotInitialized, "storage missing");
-    CHECK(formatted.find("📋 Try:") != std::string::npos);
-    CHECK(formatted.find("yams init") != std::string::npos);
+    CHECK(formatted.find("📋") == std::string::npos);
+    CHECK(formatted.find("`yams init`") != std::string::npos);
 }
 
 TEST_CASE("ErrorHints - Format error no hint for unknown", "[cli][error_hints][catch2]") {
     auto formatted = formatErrorWithHint(ErrorCode::Unknown, "mystery error");
-    CHECK(formatted == "mystery error");
+    CHECK(formatted == "error: mystery error");
 }
 
 TEST_CASE("ErrorHints - Format error passes command", "[cli][error_hints][catch2]") {

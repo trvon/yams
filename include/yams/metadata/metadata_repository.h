@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <memory>
@@ -92,6 +93,7 @@ private:
 
 // Forward declarations
 class KnowledgeGraphStore;
+struct MetadataRepositoryTestAccess;
 
 // -----------------------------------------------------------------------------
 // Tree diff records (PBI-043)
@@ -193,6 +195,8 @@ struct DocumentQueryOptions {
     std::optional<std::string> pathPrefix{};
     std::optional<std::string> containsFragment{};
     std::optional<std::string> fileName{}; // Exact match on file_name column
+    // SQL LIKE on basename, not parent directories.
+    std::optional<std::string> fileNamePattern;
     std::optional<std::string> extension{};
     std::vector<std::string> extensions{};
     std::optional<std::string> mimeType{};
@@ -215,6 +219,9 @@ struct DocumentQueryOptions {
     bool orderByNameAsc{false};
     bool orderByIndexedDesc{false};
     bool pathsOnly{false};
+    // Local path identity is separate from deduplicated content identity.
+    bool usePathLocations{false};
+    bool currentPathsOnly{false};
     bool prefixIsDirectory{false};
     bool includeSubdirectories{true};
     bool containsUsesFts{false};
@@ -381,7 +388,6 @@ public:
                                                      const std::string& content,
                                                      const std::string& contentType) = 0;
     virtual Result<void> removeFromIndex(int64_t documentId) = 0;
-    virtual Result<void> removeFromIndexByHash(const std::string& hash) = 0;
     virtual Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>& hashes) = 0;
     virtual Result<bool> hasFtsEntry(int64_t documentId) = 0;
     virtual Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() = 0;
@@ -737,10 +743,11 @@ public:
                                              const std::string& content,
                                              const std::string& contentType) override;
     Result<void> removeFromIndex(int64_t documentId) override;
-    Result<void> removeFromIndexByHash(const std::string& hash) override;
     Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>& hashes) override;
     Result<bool> hasFtsEntry(int64_t documentId) override;
     Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() override;
+    /// Hashes of documents that have no document_content row (no extracted text).
+    Result<std::unordered_set<std::string>> getDocumentHashesWithoutContent();
     Result<std::vector<int64_t>> getAllFts5IndexedDocumentIds() override;
     Result<SearchResults>
     search(const std::string& query, int limit = 50, int offset = 0,
@@ -775,14 +782,6 @@ public:
     // ==========================================================================
 
     /**
-     * @brief Get IDF (Inverse Document Frequency) score for a term
-     * IDF = log(N / df) where N = total docs, df = docs containing term
-     * Returns 0.0 if term not found or corpus empty.
-     * @param term The term to look up (case-sensitive, should be lowercased)
-     */
-    [[nodiscard]] Result<float> getTermIDF(const std::string& term);
-
-    /**
      * @brief Get IDF scores for multiple terms in batch
      * More efficient than individual lookups for query processing.
      * @param terms Vector of terms to look up
@@ -790,25 +789,6 @@ public:
      */
     [[nodiscard]] Result<std::unordered_map<std::string, float>>
     getTermIDFBatch(const std::vector<std::string>& terms);
-
-    /**
-     * @brief Update term statistics during FTS5 indexing
-     * Called after indexing a document to update term frequencies.
-     * @param terms Map of term -> count in the document
-     */
-    Result<void> updateTermStats(const std::unordered_map<std::string, int64_t>& terms);
-
-    /**
-     * @brief Update corpus-level statistics
-     * Called after document additions/deletions to update totals.
-     */
-    Result<void> updateCorpusTermStats();
-
-    /**
-     * @brief Get total number of documents for IDF computation
-     * Uses cached corpus_term_stats table.
-     */
-    [[nodiscard]] Result<int64_t> getCorpusDocumentCount();
 
     // Bulk operations
     Result<std::vector<DocumentInfo>> findDocumentsByHashPrefix(const std::string& hashPrefix,
@@ -909,6 +889,13 @@ public:
     virtual Result<std::unordered_map<int64_t, std::string>>
     batchGetContentPreview(const std::vector<int64_t>& documentIds, int maxChars, int maxDocs = 0);
 
+    // Full-document FTS5 relevance for a fixed set of documents: -bm25(documents_fts, 1, 10) keyed
+    // by sha256 hash, for each document matching any of `terms` (OR). Documents without a match
+    // are absent. Terms are bare tokens.
+    virtual Result<std::unordered_map<std::string, double>>
+    bm25ForDocuments(const std::vector<std::string>& terms,
+                     const std::vector<std::string>& documentHashes);
+
     /// Batch fetch documents with content previews in a single JOIN query.
     /// Combines batchGetDocumentsByHash + batchGetContentPreview into one DB round-trip.
     Result<std::unordered_map<std::string, std::pair<DocumentInfo, std::string>>>
@@ -957,6 +944,9 @@ public:
     reconcileDocumentEmbeddingStatusByHashes(const std::vector<std::string>& embeddedHashes,
                                              const std::string& modelId = "") override;
     Result<bool> hasDocumentEmbeddingByHash(const std::string& hash) override;
+    /// Hashes of documents whose embedding derivation is open: content changed under an embed,
+    /// so any vector rows they still have describe superseded text and need re-embedding.
+    Result<std::unordered_set<std::string>> getOpenEmbeddingDerivationHashes();
 
     // Extraction status operations (avoid read-modify-write)
     Result<void> updateDocumentExtractionStatus(int64_t documentId, bool contentExtracted,
@@ -969,18 +959,14 @@ public:
     Result<void> updateDocumentRepairStatus(const std::string& hash, RepairStatus status) override;
     Result<void> batchUpdateDocumentRepairStatuses(const std::vector<std::string>& hashes,
                                                    RepairStatus status) override;
+    /// Resolve stale Processing embedding rows in one transaction, without consuming retry
+    /// budget. Rows whose current derivation completed are reconciled to Completed; unfinished
+    /// rows have their derivation generation rotated (invalidating old tokens) and return to
+    /// Pending. Returns the number of rows returned to Pending.
+    Result<std::size_t> resetStalledEmbeddingRepairs(std::int64_t staleBeforeEpoch);
 
     Result<void> checkpointWal() override;
     Result<void> checkpointWalTruncate() override;
-
-    /**
-     * @brief Refresh all idle connections in the pool (PBI-079)
-     *
-     * Discards all idle connections, forcing new connections to be created.
-     * This invalidates cached SQLite query plans and prepared statements,
-     * ensuring queries see the latest database state after WAL checkpoint.
-     */
-    void refreshAllConnections();
 
     // Path tree operations (PBI-051 scaffold)
     Result<std::optional<PathTreeNode>> findPathTreeNode(int64_t parentId,
@@ -1033,22 +1019,39 @@ public:
     using TreeDiffAppliedCallback =
         std::function<Result<void>(int64_t, const std::vector<TreeChangeRecord>&)>;
 
-    void setTreeDiffAppliedCallback(TreeDiffAppliedCallback callback) {
-        treeDiffAppliedCallback_ = std::move(callback);
-    }
-
     void setGraphComponent(std::shared_ptr<yams::daemon::GraphComponent> graphComponent);
+
+    bool supportsDocumentPaths() const { return hasDocumentPaths_; }
+    Result<void>
+    recordDocumentPath(const DocumentInfo& info, int64_t documentId,
+                       const std::vector<std::pair<std::string, MetadataValue>>& metadata);
+    Result<void> retireDocumentPath(const std::string& path);
+    Result<std::vector<DocumentInfo>> getDocumentPathReferences(int64_t documentId);
+    Result<std::optional<std::unordered_map<std::string, MetadataValue>>>
+    getDocumentPathMetadata(const std::string& path, int64_t documentId);
+    /// Apply metadata changes to every live location of a document. A location's metadata is
+    /// authoritative for path-aware tag and metadata filters, so updates written only to the
+    /// metadata table stay invisible there. A value sets the key; nullopt removes it.
+    Result<void> applyDocumentPathMetadata(
+        int64_t documentId,
+        const std::vector<std::pair<std::string, std::optional<std::string>>>& changes);
+    /// Set the file name and extension of a document's live location at `path`. Path-aware
+    /// listings read these from the location, not from the documents row.
+    Result<void> setDocumentPathName(int64_t documentId, const std::string& path,
+                                     const std::string& fileName, const std::string& fileExtension);
 
     std::shared_ptr<KnowledgeGraphStore> getKnowledgeGraphStore() const {
         return std::atomic_load_explicit(&kgStore_, std::memory_order_acquire);
     }
 
 private:
+    friend struct MetadataRepositoryTestAccess;
     class ContentBatchOps;
 
     ConnectionPool& pool_;
     ConnectionPool* readPool_{nullptr};
     bool hasPathIndexing_{false};
+    bool hasDocumentPaths_{false};
     bool pathFtsAvailable_{false};
     std::shared_ptr<KnowledgeGraphStore> kgStore_;    // PBI-043: tree diff KG integration
     TreeDiffAppliedCallback treeDiffAppliedCallback_; // PBI-009: centralized graph ops hook
@@ -1212,8 +1215,6 @@ private:
     void updateQueryCache(const std::string& key, const SearchResults& results) const;
     void invalidateQueryCache() const;
     std::optional<std::vector<int64_t>> getCachedFtsIndexedIds() const;
-    std::optional<std::vector<uint8_t>>
-    getCachedFtsIndexedStates(std::span<const int64_t> docIds) const;
     void setCachedFtsIndexedIds(const std::vector<int64_t>& docIds) const;
     void noteFtsIndexedId(int64_t docId) const;
     void eraseFtsIndexedId(int64_t docId) const;
@@ -1331,37 +1332,43 @@ private:
                 std::chrono::duration_cast<std::chrono::microseconds>(releaseEnd - attemptStart)
                     .count();
 
-            if (metadata_trace_enabled()) {
-                auto op = current_metadata_op();
-                if (result.has_value()) {
-                    spdlog::info(
-                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                        "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
-                        "total_ms={} total_us={} ok=true",
-                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
-                        queryMs, queryUs, releaseUs, totalMs, totalUs);
-                } else {
-                    spdlog::info(
-                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                        "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
-                        "total_ms={} total_us={} ok=false error='{}'",
-                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
-                        queryMs, queryUs, releaseUs, totalMs, totalUs, result.error().message);
+            // Observability must never discard a committed result or cause the operation to retry.
+            try {
+                if (metadata_trace_enabled()) {
+                    auto op = current_metadata_op();
+                    if (result.has_value()) {
+                        spdlog::info(
+                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                            "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
+                            "total_ms={} total_us={} ok=true",
+                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
+                            queryMs, queryUs, releaseUs, totalMs, totalUs);
+                    } else {
+                        spdlog::info(
+                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                            "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
+                            "total_ms={} total_us={} ok=false error='{}'",
+                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
+                            queryMs, queryUs, releaseUs, totalMs, totalUs, result.error().message);
+                    }
                 }
+            } catch (...) {
+                std::fputs("MetadataRepository: query trace unavailable\n", stderr);
             }
 
             if (result.has_value()) {
-                if (attempt > 0) {
-                    // Log successful retry at debug level
-                    spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
-                                  "after {} retries",
-                                  route, attempt);
+                try {
+                    if (attempt > 0) {
+                        // Log successful retry at debug level
+                        spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
+                                      "after {} retries",
+                                      route, attempt);
+                    }
+                } catch (...) {
+                    std::fputs("MetadataRepository: retry success trace unavailable\n", stderr);
                 }
-                if constexpr (std::is_void_v<T>) {
-                    return Result<void>();
-                } else {
-                    return result.value();
-                }
+                // NRVO / implicit move transfers the payload without an allocating copy.
+                return result;
             }
 
             // The scoped connection above has been returned to the pool before retry backoff.
@@ -1531,27 +1538,12 @@ public:
 
     // Document filtering
     MetadataQueryBuilder& withExtension(const std::string& extension);
-    MetadataQueryBuilder& withMimeType(const std::string& mimeType);
-    MetadataQueryBuilder& withPathContaining(const std::string& pathFragment);
     MetadataQueryBuilder& modifiedAfter(std::chrono::system_clock::time_point time);
     MetadataQueryBuilder& modifiedBefore(std::chrono::system_clock::time_point time);
     MetadataQueryBuilder& indexedAfter(std::chrono::system_clock::time_point time);
-    MetadataQueryBuilder& withContentExtracted(bool extracted);
-    MetadataQueryBuilder& withExtractionStatus(ExtractionStatus status);
-
-    // Metadata filtering
-    MetadataQueryBuilder& withMetadata(const std::string& key, const std::string& value);
-    MetadataQueryBuilder& withMetadataKey(const std::string& key);
-
-    // Content filtering
-    MetadataQueryBuilder& withContentLanguage(const std::string& language);
-    MetadataQueryBuilder& withMinContentLength(int64_t minLength);
-    MetadataQueryBuilder& withMaxContentLength(int64_t maxLength);
 
     // Sorting and pagination
     MetadataQueryBuilder& orderByModified(bool ascending = false);
-    MetadataQueryBuilder& orderByIndexed(bool ascending = false);
-    MetadataQueryBuilder& orderBySize(bool ascending = false);
     MetadataQueryBuilder& limit(int count);
     MetadataQueryBuilder& offset(int count);
 

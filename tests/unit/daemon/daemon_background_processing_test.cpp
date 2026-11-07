@@ -25,6 +25,7 @@
 #include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store.h>
+#include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -846,6 +847,58 @@ TEST_CASE("IngestService suspends instead of blocking its WorkCoordinator worker
     CHECK(stored);
 }
 
+TEST_CASE("IngestService picks up a task enqueued while idle without waiting out the idle tick",
+          "[daemon][background][ingest][idle-wake]") {
+    // The idle back-off ceiling is the tuning idle tick (1 s) while the daemon is idle.
+    // notifyWakeup() must cancel that wait so an enqueue is stored within the back-off floor.
+    SpdlogCaptureGuard logGuard(spdlog::level::err);
+    StoreDocumentChannelGuard channelGuard;
+    WorkCoordinatorThreadsGuard threadsGuard(1);
+    yams::test::TempDirGuard testDir("yams_ingest_service_idle_wake_");
+
+    const auto savedSnapshot = TuningSnapshotRegistry::instance().get();
+    auto idleSnapshot = std::make_shared<TuningSnapshot>();
+    idleSnapshot->daemonIdle = true;
+    TuningSnapshotRegistry::instance().set(idleSnapshot);
+    struct SnapshotRestore {
+        std::shared_ptr<const TuningSnapshot> saved;
+        ~SnapshotRestore() { TuningSnapshotRegistry::instance().set(saved); }
+    } snapshotRestore{savedSnapshot};
+
+    auto contentStore = std::make_shared<StubContentStore>();
+    DaemonConfig config;
+    config.dataDir = testDir.path();
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager serviceManager(config, state, lifecycleFsm);
+    serviceManager.__test_setContentStore(contentStore);
+
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+            "store_document_tasks", 64);
+
+    IngestService ingestService(&serviceManager, serviceManager.getWorkCoordinator());
+    ingestService.start();
+    // Let the back-off climb to its ceiling (5 ms doubling reaches 1 s after ~1.3 s).
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+    InternalEventBus::StoreDocumentTask task;
+    task.request.name = "idle-wake.txt";
+    task.request.content = "enqueued while idle";
+    const auto pushedAt = std::chrono::steady_clock::now();
+    REQUIRE(channel->try_push(std::move(task)));
+    IngestService::notifyWakeup();
+
+    const bool stored =
+        contentStore->waitForStoredItems(1, pushedAt + std::chrono::milliseconds(300));
+    const auto stopRequestedAt = std::chrono::steady_clock::now();
+    ingestService.stop();
+    const auto stopTook = std::chrono::steady_clock::now() - stopRequestedAt;
+    CHECK(stored);
+    // stop() wakes the poller too; it must not wait out the idle tick either.
+    CHECK(stopTook < std::chrono::milliseconds(500));
+}
+
 // =============================================================================
 // PostIngestQueue Tests
 // =============================================================================
@@ -1319,11 +1372,13 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
     REQUIRE(
         (std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) == insertedDocIds.end()));
 
+    // The cap is what this test pins. A slow runner can split a batch across the coalesce
+    // window, so the batch count is a lower bound, not an exact value.
     const auto metrics = queue->metricsSnapshot();
-    const auto expectedBatches = highPriority ? 16u : 8u;
+    const auto minBatches = highPriority ? 16u : 8u;
     const auto expectedMaxBatchSize = highPriority ? 4u : 8u;
-    CHECK(metrics.batches.extractionBatches == expectedBatches);
-    CHECK(metrics.batches.contentIndexCalls == expectedBatches);
+    CHECK(metrics.batches.extractionBatches >= minBatches);
+    CHECK(metrics.batches.contentIndexCalls == metrics.batches.extractionBatches);
     CHECK(metrics.batches.contentIndexMaxEntries == expectedMaxBatchSize);
 
     stopAndResetQueue(queue);
@@ -1699,4 +1754,24 @@ TEST_CASE("InternalEventBus records capacity disagreements on channel reuse",
     // assertion cannot depend on which cases ran first.
     bus.remove_channel(kProbe);
     CHECK(bus.capacity_mismatches().size() == before);
+}
+
+// Scheduled auto-repair runs only while the daemon is idle. Agents (MCP clients, local models)
+// keep connections open between requests, so an open connection must not count as busy; an
+// executing request, queued repair work or a repair already in progress must.
+TEST_CASE("Auto-repair treats executing requests, not open connections, as busy",
+          "[daemon][background][auto-repair]") {
+    yams::daemon::DaemonStats stats;
+    stats.activeConnections.store(4);
+    CHECK(yams::daemon::BackgroundTaskManager::autoRepairMayRun(stats, false));
+
+    stats.activeNonHealthRequests.store(1);
+    CHECK_FALSE(yams::daemon::BackgroundTaskManager::autoRepairMayRun(stats, false));
+    stats.activeNonHealthRequests.store(0);
+
+    stats.repairQueueDepth.store(3);
+    CHECK_FALSE(yams::daemon::BackgroundTaskManager::autoRepairMayRun(stats, false));
+    stats.repairQueueDepth.store(0);
+
+    CHECK_FALSE(yams::daemon::BackgroundTaskManager::autoRepairMayRun(stats, true));
 }

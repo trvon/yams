@@ -5,7 +5,6 @@
 #include <filesystem>
 #include <optional>
 #include <string_view>
-#include <unordered_set>
 
 #include <yams/daemon/ipc/ipc_protocol_responses.h>
 #include <yams/metadata/path_utils.h>
@@ -147,21 +146,6 @@ bool graphNodeHiddenByDefault(std::string_view displayType) {
 
 } // namespace
 
-namespace {
-
-std::vector<std::string> splitPathSegments(const std::filesystem::path& path) {
-    std::vector<std::string> segments;
-    for (const auto& part : path) {
-        auto s = part.generic_string();
-        if (!s.empty() && s != "/") {
-            segments.push_back(std::move(s));
-        }
-    }
-    return segments;
-}
-
-} // namespace
-
 std::filesystem::path invocationCwdForCli() {
     auto cwd = std::filesystem::current_path();
     std::error_code ec;
@@ -195,59 +179,8 @@ std::string projectPathForCli(const std::string& rawPath, const std::filesystem:
             }
         }
 
-        const auto cwdSegs = splitPathSegments(cwd.lexically_normal());
-        const auto pathSegs = splitPathSegments(normalizedPath.lexically_normal());
-        if (!cwdSegs.empty() && !pathSegs.empty()) {
-            std::size_t bestLen = 0;
-            std::size_t bestPathStart = 0;
-            for (std::size_t len = std::min(cwdSegs.size(), pathSegs.size()); len >= 2; --len) {
-                const std::size_t cwdStart = cwdSegs.size() - len;
-                for (std::size_t pathStart = 0; pathStart + len <= pathSegs.size(); ++pathStart) {
-                    bool match = true;
-                    for (std::size_t i = 0; i < len; ++i) {
-                        if (cwdSegs[cwdStart + i] != pathSegs[pathStart + i]) {
-                            match = false;
-                            break;
-                        }
-                    }
-                    if (match) {
-                        bestLen = len;
-                        bestPathStart = pathStart;
-                        break;
-                    }
-                }
-                if (bestLen > 0 || len == 2) {
-                    break;
-                }
-            }
-
-            if (bestLen > 0) {
-                std::filesystem::path projected;
-                for (std::size_t i = bestPathStart + bestLen; i < pathSegs.size(); ++i) {
-                    projected /= pathSegs[i];
-                }
-                if (!projected.empty()) {
-                    return projected.generic_string();
-                }
-            }
-
-            static const std::unordered_set<std::string> kProjectAnchors = {
-                "src", "include", "tests", "docs", "examples", "benchmarks",
-            };
-            for (std::size_t i = 0; i < pathSegs.size(); ++i) {
-                if (!kProjectAnchors.contains(pathSegs[i])) {
-                    continue;
-                }
-                std::filesystem::path anchored;
-                for (std::size_t j = i; j < pathSegs.size(); ++j) {
-                    anchored /= pathSegs[j];
-                }
-                if (!anchored.empty()) {
-                    return anchored.generic_string();
-                }
-            }
-        }
-
+        // Outside cwd: show the full path. A shortened tail such as
+        // "src/foo.cpp" would name a different file under cwd.
         return normalizedPath.generic_string();
     } catch (const std::exception& e) {
         spdlog::trace("CLI path display normalization failed for '{}': {}", rawPath, e.what());

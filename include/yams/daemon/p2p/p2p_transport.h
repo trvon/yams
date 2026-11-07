@@ -94,9 +94,6 @@ public:
     /// Our own node id.
     std::string localNodeId() const;
 
-    /// Local socket address (useful for logs/tests).
-    std::uint16_t localPort() const;
-
     /// Close the channel and interrupt any blocked read/write.
     void close() noexcept;
 

@@ -352,7 +352,41 @@ else
         '--allow-running-no-tests'],
     )
 
-    # Removed flaky shutdown tests (idempotency, after_ops, under_load, graceful)
+    # Restored: idempotency, after-operations, under-load and graceful shutdown. The two that
+    # raced (an immediate list after async adds, a fixed 200 ms before shutdown) now wait for the
+    # condition they check.
+    test('daemon_shutdown_graceful',
+      daemon_shutdown_exe,
+      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: daemon_integration_timeout,
+      args: ['Daemon graceful shutdown behavior', '--allow-running-no-tests'],
+    )
+    test('daemon_shutdown_after_operations',
+      daemon_shutdown_exe,
+      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: daemon_integration_timeout,
+      args: ['Daemon shutdown after operations', '--allow-running-no-tests'],
+    )
+    test('daemon_shutdown_idempotency',
+      daemon_shutdown_exe,
+      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: daemon_integration_timeout,
+      args: ['Daemon shutdown idempotency', '--allow-running-no-tests'],
+    )
+    test('daemon_shutdown_under_load',
+      daemon_shutdown_exe,
+      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: daemon_integration_timeout,
+      args: ['Daemon shutdown under load', '--allow-running-no-tests'],
+    )
     # Core shutdown behavior is covered by timing and inflight_ops tests above
     
     post_ingest_queue_validation_exe = executable('yams_post_ingest_queue_validation',
@@ -563,6 +597,15 @@ else
       args: ['Daemon shutdown timing with external flag', '--allow-running-no-tests'],
     )
 
+    test('daemon_sigterm_signal',
+      daemon_sigterm_exe,
+      suite: ['integration', 'daemon', 'catch2', 'sigterm'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: daemon_integration_timeout,
+      args: ['Daemon handles actual SIGTERM signal', '--allow-running-no-tests'],
+    )
+
     # Data-dir single-instance enforcement tests
     lifecycle_single_instance_exe = executable('yams_lifecycle_single_instance_tests_catch2',
       lifecycle_single_instance_srcs,
@@ -710,6 +753,30 @@ else
       timeout: 60,
       args: ['Daemon memory sync backfill skips a poisoned blob and continues', '--allow-running-no-tests'],
     )
+    test('daemon_memory_sync_oversized_blob',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon memory sync backfill skips an oversized blob and continues', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_p2p_recovery_readiness',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync', 'p2p'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon readiness and search do not wait for direct P2P recovery', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_p2p_recovery_throws',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync', 'p2p'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Direct P2P recovery that throws degrades P2P instead of terminating', '--allow-running-no-tests'],
+    )
     test('daemon_memory_sync_direct_delta_hydration',
       memory_sync_service_integration_exe,
       suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
@@ -733,7 +800,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 120,
-      args: ['~[slow]', '--allow-running-no-tests'],
+      args: ['[repair-hysteresis]~[slow]', '--allow-running-no-tests'],
     )
 
     test('lifecycle_repair_hysteresis_slow',
@@ -908,6 +975,15 @@ else
       is_parallel: false,
       timeout: daemon_integration_timeout,
       args: ['Concurrent status queries return consistent governor data', '--allow-running-no-tests'],
+    )
+
+    test('resource_governor_policy_surfaces',
+      resource_governor_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'governor'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: daemon_integration_timeout,
+      args: ['ResourceGovernor phase-4 policy surfaces respond during daemon operation', '--allow-running-no-tests'],
     )
 
     # Diagnostic tool (not a test, but helpful for debugging)

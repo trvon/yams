@@ -1,6 +1,10 @@
 // Catch2 tests for Recovery Manager
 // Migrated from GTest: recovery_manager_test.cpp
 
+#include <atomic>
+#include <latch>
+#include <thread>
+#include <vector>
 #include <catch2/catch_test_macros.hpp>
 
 #include <future>
@@ -321,4 +325,38 @@ TEST_CASE_METHOD(RecoveryManagerFixture, "RecoveryManager - RecoveryUtilities",
     error.attemptNumber = 5;
     operation = recovery_utils::analyzeFailurePattern(error);
     CHECK(operation == RecoveryOperation::CompressFallback);
+}
+
+namespace {
+// Runs start() from several threads released together and returns how many succeeded.
+template <typename Start> int concurrentStartSuccesses(Start start, int threads = 4) {
+    std::latch go(threads);
+    std::atomic<int> ok{0};
+    std::vector<std::thread> workers;
+    for (int i = 0; i < threads; ++i) {
+        workers.emplace_back([&] {
+            go.arrive_and_wait();
+            if (start())
+                ok.fetch_add(1);
+        });
+    }
+    for (auto& t : workers)
+        t.join();
+    return ok.load();
+}
+} // namespace
+
+// start() checked running_ and set it separately, so concurrent starts could all pass and push
+// worker threads into the same vector.
+TEST_CASE("RecoveryManager - concurrent start admits exactly one",
+          "[compression][recovery][lifecycle]") {
+    RecoveryConfig config;
+    config.threadPoolSize = 2;
+    auto handler = std::make_shared<CompressionErrorHandler>(ErrorHandlingConfig{});
+    auto validator = std::make_shared<IntegrityValidator>(ValidationConfig{});
+    for (int round = 0; round < 20; ++round) {
+        RecoveryManager manager(config, handler, validator);
+        CHECK(concurrentStartSuccesses([&] { return manager.start().has_value(); }) == 1);
+        manager.stop();
+    }
 }

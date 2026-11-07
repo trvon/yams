@@ -129,12 +129,15 @@ struct SearchGraphUxFixture {
     fs::path root{rootGuard.path()};
     fs::path dataDir{root / "data"};
     fs::path stateDir{root / "state"};
+    fs::path configPath{root / "config.toml"};
     fs::path worktree{root / "repo"};
     fs::path sourceFile{worktree / "src" / "example.cpp"};
     fs::path externalFile{root / "corpus" / "external.txt"};
     std::string agentToken{"agentux-" + root.filename().string()};
     std::string globalToken{"globalcorpus-" + root.filename().string()};
     yams::test::ScopedEnvVar stateEnv{"XDG_STATE_HOME", stateDir.string()};
+    yams::test::ScopedEnvVar configEnv{"YAMS_CONFIG", configPath.string()};
+    yams::test::ScopedEnvVar configPathEnv{"YAMS_CONFIG_PATH", configPath.string()};
     yams::test::ScopedEnvVar currentSessionEnv{"YAMS_SESSION_CURRENT", std::nullopt};
     yams::test::ScopedEnvVar ipcTimeout{"YAMS_IPC_TIMEOUT_MS", std::to_string(kSmokeIpcTimeoutMs)};
     yams::test::ScopedEnvVar streamChunkTimeout{"YAMS_STREAM_CHUNK_TIMEOUT_MS",
@@ -147,6 +150,10 @@ struct SearchGraphUxFixture {
         fs::create_directories(stateDir);
         fs::create_directories(worktree / "src");
         fs::create_directories(externalFile.parent_path());
+        // These session/graph tests deliberately query a temporary corpus. Keep the
+        // scratch-policy opt-out explicit and independent of the developer's config.
+        yams::test::write_file(configPath,
+                               "[version]\nconfig_version = 3\n[search]\nexclude_paths = []\n");
         yams::test::write_file(sourceFile, "#include <iostream>\n"
                                            "int main() {\n"
                                            "    std::cout << \"" +

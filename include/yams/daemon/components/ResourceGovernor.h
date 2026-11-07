@@ -67,11 +67,26 @@ constexpr std::string_view pressureLevelName(ResourcePressureLevel level) noexce
 
 /// Snapshot of ALL managed scaling dimensions at a point in time.
 /// Uses designated initializers for clarity at construction sites.
+/// Process memory as reported by /proc/self/status (bytes). File-backed RSS (SQLite mmap,
+/// page cache) is reclaimable and warms up after load; anonymous RSS is what a leak or
+/// allocator retention moves, so memory pressure is judged on anon when the kernel reports it.
+struct ProcessMemory {
+    std::uint64_t rssBytes{0};
+    std::uint64_t anonBytes{0}; // RssAnon; 0 when the kernel does not report it
+    std::uint64_t fileBytes{0}; // RssFile + RssShmem
+};
+/// Parse VmRSS / RssAnon / RssFile / RssShmem (kB lines) from /proc/self/status text.
+ProcessMemory parseProcStatusMemory(std::string_view text) noexcept;
+/// Pressure ratio: anon over budget when anon is known, else rss over budget; 0 when no budget.
+double memoryPressureRatio(std::uint64_t rssBytes, std::uint64_t anonBytes,
+                           std::uint64_t budgetBytes) noexcept;
+
 struct ResourceSnapshot {
     // Memory metrics
-    std::uint64_t rssBytes{0};          // Current resident set size
+    std::uint64_t rssBytes{0};          // Current resident set size (anon + file-backed)
+    std::uint64_t anonBytes{0};         // Anonymous RSS (heap, anonymous mmap); 0 if unknown
     std::uint64_t memoryBudgetBytes{0}; // Configured memory budget
-    double memoryPressure{0.0};         // rssBytes / memoryBudgetBytes (0.0-1.0+)
+    double memoryPressure{0.0};         // anonBytes (rssBytes if unknown) / memoryBudgetBytes
 
     // CPU metrics
     double cpuUsagePercent{0.0}; // Process CPU % across all cores
@@ -194,6 +209,11 @@ public:
     [[nodiscard]] std::uint32_t
     capEmbedConcurrencyForDbContention(std::uint32_t requested) const noexcept;
 
+    /// Clamp document count for already-admitted embedding work (not a byte budget).
+    /// Zero requests stay zero; positive requests retain progress even at Emergency.
+    /// Does not grant admission: callers must retain their existing admission/defer gates.
+    [[nodiscard]] std::size_t capEmbedJobDocuments(std::size_t requested) const noexcept;
+
     /// Recommend next connection slot target with hysteresis and governor gating.
     [[nodiscard]] std::uint32_t
     recommendConnectionSlotTarget(std::uint32_t currentSlots, std::uint32_t activeConnections,
@@ -220,6 +240,30 @@ public:
     /// bound the governor is willing to grant. Returns 0 when the governor has
     /// no memory budget (caller should fall back to a conservative literal).
     [[nodiscard]] std::uint64_t recommendLexicalCorpusBytes() const noexcept;
+
+    /// Recommend the maximum live heap for the in-memory simeon lexical index
+    /// (BM25 postings, summed over every index one build holds), as counted by
+    /// simeon::Bm25Index::memory_bytes(). This bounds the index itself; the
+    /// corpus-text cap above does not: a SubwordAwareBackoff index runs ~8x its
+    /// input text. The build polls this during the build, so a pressure rise
+    /// stops it. Peak RSS while building runs up to ~2x the grant (arrays
+    /// double as they grow).
+    [[nodiscard]] std::uint64_t recommendLexicalIndexBytes() const noexcept;
+
+    /// Per-document grant for content extraction plugins, served to them
+    /// through the plugin host's resource_service.
+    struct ExtractionBudget {
+        std::uint32_t maxThreads{1};
+        std::uint64_t maxDecompressedBytes{0};
+    };
+
+    /// Threads and decompressed bytes one document's extraction may use. Splits
+    /// the cores and a 12.5% share of the memory budget across the current
+    /// extraction worker cap, so all concurrent extractions together stay
+    /// within that share. Each document gets at least 8 MiB, which lifts the
+    /// total past the share only when workers * 8 MiB exceeds it. Shrinks
+    /// under pressure; Critical and above get one thread.
+    [[nodiscard]] ExtractionBudget recommendExtractionBudget() const noexcept;
 
     /// Recommend the maximum working-set byte budget for the SPQ vector index
     /// rebuild (training set + per-row encoded codes scratch). Scales with the
@@ -318,6 +362,19 @@ public:
         deferralGates_ = {};
         deferredWorkMask_.store(0, std::memory_order_release);
     }
+    /// Test-only: end the startup grace period, so Critical and Emergency are reported.
+    /// Returns the previous startup time for testing_restoreStartupTime().
+    /// Call only while no tick thread is running.
+    std::chrono::steady_clock::time_point testing_endStartupGrace() noexcept {
+        const auto previous = startupTime_;
+        startupTime_ =
+            std::chrono::steady_clock::now() - kStartupGracePeriod - std::chrono::seconds(1);
+        return previous;
+    }
+    /// Test-only: restore a startup time saved by testing_endStartupGrace().
+    void testing_restoreStartupTime(std::chrono::steady_clock::time_point t) noexcept {
+        startupTime_ = t;
+    }
     /// Test-only: set pressure state for hysteresis tests.
     void testing_setPressureState(ResourcePressureLevel level,
                                   std::chrono::steady_clock::time_point when) {
@@ -375,6 +432,11 @@ private:
     /// Update CPU-based admission control with hysteresis
     void updateCpuAdmissionControl(const ResourceSnapshot& snap);
 
+    /// Scale a byte budget down for the current pressure level, never below `floor`.
+    /// Shared by the recommend*Bytes() budgets.
+    [[nodiscard]] std::uint64_t scaleBudgetForPressure(std::uint64_t cap,
+                                                       std::uint64_t floor) const noexcept;
+
     /// Update scaling caps based on pressure level.
     void updateScalingCaps(ResourcePressureLevel level);
 
@@ -416,6 +478,7 @@ private:
     // Cached /proc read state to throttle filesystem I/O
     std::chrono::steady_clock::time_point lastProcReadTime_{};
     std::uint64_t cachedRssBytes_{0};
+    std::uint64_t cachedAnonBytes_{0};
     double cachedCpuPercent_{0.0};
 
     // Host pressure sampling state. PSI avg10 only moves every 2s, so sample at most once a

@@ -128,33 +128,7 @@ template <typename T> T extractColumn(const Statement& stmt, int column) {
     }
 }
 
-/**
- * @brief Extract columns into entity using fold expression with index_sequence
- */
-template <HasEntityTraits Entity, std::size_t... Is>
-void extractColumnsImpl(const Statement& stmt, Entity& e, std::index_sequence<Is...>) {
-    const auto& cols = EntityTraits<Entity>::columns;
-    // Fold expression: extract each column into corresponding member
-    ((e.*(std::get<Is>(cols).member) =
-          extractColumn<std::remove_reference_t<decltype(e.*(std::get<Is>(cols).member))>>(stmt,
-                                                                                           Is)),
-     ...);
-}
-
 } // namespace detail
-
-/**
- * @brief Extract all columns from Statement into an entity
- *
- * Uses compile-time column metadata to map statement columns to struct members.
- *
- * @param stmt The executed statement positioned at a result row
- * @param e The entity to populate
- */
-template <HasEntityTraits Entity> void extractColumns(const Statement& stmt, Entity& e) {
-    constexpr auto N = std::tuple_size_v<typename EntityTraits<Entity>::columns_tuple>;
-    detail::extractColumnsImpl(stmt, e, std::make_index_sequence<N>{});
-}
 
 // ============================================================================
 // Column Binding Helpers

@@ -277,25 +277,6 @@ bool ServiceManagerFsm::completeShutdown() noexcept {
     return false;
 }
 
-bool ServiceManagerFsm::canInitializeVectors() const noexcept {
-    try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return snap_.state == ServiceManagerState::SchemaReady;
-    } catch (...) {
-        return false;
-    }
-}
-
-bool ServiceManagerFsm::canBuildSearchEngine() const noexcept {
-    try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto s = snap_.state;
-        return s == ServiceManagerState::VectorsReady || s == ServiceManagerState::SchemaReady;
-    } catch (...) {
-        return false;
-    }
-}
-
 bool ServiceManagerFsm::isReady() const noexcept {
     try {
         std::lock_guard<std::mutex> lock(mutex_);

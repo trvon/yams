@@ -70,10 +70,17 @@ void UpdateCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
 
 Result<void> UpdateCommand::execute() {
     try {
+        // Resolve --name here with the strict resolver and send only the hash:
+        // the daemon's by-name lookup picks the newest of several matches.
+        if (hash_.empty() && !name_.empty()) {
+            auto hr = resolveNameToHashSmart(name_);
+            if (!hr)
+                return hr.error();
+            hash_ = hr.value();
+        }
         if (cli_) {
             yams::daemon::UpdateDocumentRequest dreq;
             dreq.hash = hash_;
-            dreq.name = name_;
 
             // Parse metadata key=value pairs
             for (const auto& kv : metadata_) {
@@ -222,10 +229,16 @@ Result<void> UpdateCommand::execute() {
 // New: non-blocking async implementation leveraging DaemonClient coroutines
 boost::asio::awaitable<Result<void>> UpdateCommand::executeAsync() {
     try {
+        // See execute(): never let the daemon resolve --name.
+        if (hash_.empty() && !name_.empty()) {
+            auto hr = resolveNameToHashSmart(name_);
+            if (!hr)
+                co_return hr.error();
+            hash_ = hr.value();
+        }
         if (cli_) {
             yams::daemon::UpdateDocumentRequest dreq;
             dreq.hash = hash_;
-            dreq.name = name_;
 
             for (const auto& kv : metadata_) {
                 auto pos = kv.find('=');
@@ -466,11 +479,6 @@ Result<void> UpdateCommand::executeLocal() {
     return Result<void>();
 }
 
-Result<metadata::MetadataValue> UpdateCommand::parseMetadataValue(const std::string& value) {
-    // Simple implementation - in reality this might parse JSON or other formats
-    return metadata::MetadataValue(value);
-}
-
 void UpdateCommand::parseArguments(const std::vector<std::string>& args) {
     // Simple argument parsing for testing
     for (size_t i = 0; i < args.size(); i++) {
@@ -491,77 +499,6 @@ void UpdateCommand::parseArguments(const std::vector<std::string>& args) {
             }
         }
     }
-}
-
-Result<metadata::DocumentInfo> UpdateCommand::resolveNameToDocument(const std::string& name) {
-    // Use injected repository if available (for testing)
-    auto metadataRepo = metadataRepo_;
-    if (!metadataRepo && cli_) {
-        metadataRepo = cli_->getMetadataRepository();
-    }
-    if (!metadataRepo) {
-        return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
-    }
-
-    // First try as a path suffix (for real files)
-    auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%/" + name);
-    if (documentsResult && !documentsResult.value().empty()) {
-        const auto& results = documentsResult.value();
-        if (results.size() > 1) {
-            // Multiple documents with the same name
-            std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
-            for (const auto& doc : results) {
-                std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " << doc.filePath
-                          << std::endl;
-            }
-            return Error{
-                ErrorCode::InvalidOperation,
-                "Multiple documents with the same name. Please use hash to specify which one."};
-        }
-        return results[0];
-    }
-
-    // Try exact path match
-    documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, name);
-    if (documentsResult && !documentsResult.value().empty()) {
-        return documentsResult.value()[0];
-    }
-
-    // For stdin documents or when path search fails, search all documents and match by fileName
-    auto allDocsResult = metadataRepo->getDocumentCount();
-    if (!allDocsResult) {
-        return Error{allDocsResult.error().code, allDocsResult.error().message};
-    }
-
-    // Use search to find by name (works for both file and stdin documents)
-    auto searchResult = metadataRepo->search(name, 100, 0);
-    if (searchResult) {
-        std::vector<metadata::DocumentInfo> matchingDocs;
-        for (const auto& result : searchResult.value().results) {
-            // SearchResult contains document directly
-            const auto& doc = result.document;
-            // Check if fileName matches exactly
-            if (doc.fileName == name) {
-                matchingDocs.push_back(doc);
-            }
-        }
-
-        if (!matchingDocs.empty()) {
-            if (matchingDocs.size() > 1) {
-                std::cerr << "Multiple documents found with name '" << name << "':" << std::endl;
-                for (const auto& doc : matchingDocs) {
-                    std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " << doc.filePath
-                              << std::endl;
-                }
-                return Error{
-                    ErrorCode::InvalidOperation,
-                    "Multiple documents with the same name. Please use hash to specify which one."};
-            }
-            return matchingDocs[0];
-        }
-    }
-
-    return Error{ErrorCode::NotFound, "No document found with name: " + name};
 }
 
 // Smart resolution mirroring get_by_name behavior used in MCP server
@@ -601,7 +538,11 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
                 const auto& docs = res.value();
                 if (docs.size() == 1)
                     return docs[0].sha256Hash;
-                // Multiple matches: pick by latest/oldest or first
+                if (!latest_ && !oldest_) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "glob '" + nm + "' matches " + std::to_string(docs.size()) +
+                                     " documents; pass --latest, --oldest or --hash"};
+                }
                 const metadata::DocumentInfo* chosen = &docs[0];
                 if (latest_ || oldest_) {
                     for (const auto& d : docs) {
@@ -660,85 +601,10 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
 
     auto grr = rsvc.getByNameSmart(nm, pickOldest, includeContent, useSession, sessionName, ropts,
                                    resolver);
-    if (grr) {
-        return grr.value().hash;
+    if (!grr) {
+        return grr.error();
     }
-
-    // Fallback: try common list patterns via RetrievalService (daemon)
-    auto tryList = [&](const std::string& pat) -> std::optional<yams::daemon::ListResponse> {
-        yams::app::services::ListOptions lreq;
-        lreq.namePattern = pat;
-        lreq.limit = 500;
-        lreq.pathsOnly = false;
-        auto lr = rsvc.list(lreq, ropts);
-        if (lr && !lr.value().items.empty())
-            return lr.value();
-        return std::nullopt;
-    };
-
-    std::optional<yams::daemon::ListResponse> lr;
-    lr = tryList(std::string("%/") + nm);
-    if (!lr) {
-        std::string stem = nm;
-        try {
-            stem = std::filesystem::path(nm).stem().string();
-        } catch (const std::exception& ex) {
-            // Intentional best-effort path; keep the primary operation unaffected.
-            spdlog::debug("Update: failed to derive stem for '{}': {}", nm, ex.what());
-        } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
-            spdlog::debug("Update: failed to derive stem for '{}'", nm);
-        }
-        lr = tryList(std::string("%/") + stem + "%");
-    }
-    if (!lr)
-        lr = tryList(std::string("%") + nm + "%");
-    if (!lr || lr->items.empty())
-        return Error{ErrorCode::NotFound, "No matching documents"};
-
-    // Disambiguate
-    const yams::daemon::ListEntry* chosen = nullptr;
-    if (latest_ || oldest_) {
-        for (const auto& it : lr->items) {
-            if (!chosen)
-                chosen = &it;
-            else if (oldest_) {
-                if (it.indexed < chosen->indexed)
-                    chosen = &it;
-            } else {
-                if (it.indexed > chosen->indexed)
-                    chosen = &it;
-            }
-        }
-    } else {
-        auto scoreName = [&](const std::string& base) -> int {
-            if (base == nm)
-                return 1000;
-            if (base.size() >= nm.size() && base.rfind(nm, 0) == 0)
-                return 800;
-            if (base.find(nm) != std::string::npos)
-                return 600;
-            int dl = static_cast<int>(std::abs((long)(base.size() - nm.size())));
-            return 400 - std::min(200, dl * 10);
-        };
-        int best = -1;
-        for (const auto& it : lr->items) {
-            std::string b;
-            try {
-                b = std::filesystem::path(it.path).filename().string();
-            } catch (...) {
-                b = it.name;
-            }
-            int sc = scoreName(b);
-            if (sc > best) {
-                best = sc;
-                chosen = &it;
-            }
-        }
-    }
-    if (!chosen)
-        return Error{ErrorCode::NotFound, "No matching documents"};
-    return chosen->hash;
+    return grr.value().hash;
 }
 
 // Factory function

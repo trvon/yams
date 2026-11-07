@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -16,6 +17,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <simeon/static_embedding.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -698,87 +700,6 @@ TEST_CASE("SearchEngine shadow policy measures candidate rescue without changing
     CHECK(debug.at("topology_candidate_rescue_exact_matched_document_doc_ids") == "x1\tx2");
 }
 
-TEST_CASE("SearchEngine topology final-window rescue promotes a topology-scored candidate",
-          "[search][topology][candidate-rescue][final-rescue][catch2]") {
-    yams::test::ScopedEnvVar stageTrace("YAMS_SEARCH_STAGE_TRACE", std::optional<std::string>("1"));
-
-    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
-    fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
-    // x2 is topology-reachable from x1 (see seedTwoClusterTopology) but its real vector embedding
-    // is deliberately dissimilar to the query, mirroring the q0/q37 boundary: relation-reachable
-    // and document-scored, but losing on raw fused score alone.
-    fix.addDocument("x2", "alpha two", {0.1F, 0.9F});
-    // x3 is a strong organic match (like x1) but has no topology relation at all, so it competes
-    // for the same final-window slot as x2 without ever receiving topology evidence.
-    fix.addDocument("x3", "alpha one", {0.95F, 0.05F});
-    fix.addDocument("y1", "omega one", {0.0F, 1.0F});
-    fix.addDocument("y2", "omega two", {0.1F, 0.9F});
-    seedTwoClusterTopology(fix);
-    REQUIRE(fix.vectorDb->buildIndex());
-    auto generator = makeFixedGenerator({1.0F, 0.0F});
-
-    auto config = topologyRoutingTestConfig(true);
-    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
-    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Augment;
-    config.topologySparseDenseAlpha = 1.0F;
-    config.topologyNarrowMinBoundaryMargin = 0.0F;
-    config.textMaxResults = 2;
-    config.vectorMaxResults = 2;
-    config.enableWeakQueryFanoutBoost = false;
-    config.topologyMaxDocs = 2;
-    config.topologyExpansionOutputLimit = 2;
-    config.similarityThreshold = -1.0F;
-
-    // Default: no final-window rescue. The window's 2 slots go to the strong organic matches
-    // (x1, x3); the weak, topology-only x2 is excluded even though it was admitted and scored as
-    // a candidate.
-    auto baseline = runTopologySearch(fix, generator, config, 2, "alpha one");
-    REQUIRE(baseline.has_value());
-    REQUIRE(baseline.value().results.size() == 2);
-    std::vector<std::string> baselineHashes;
-    for (const auto& r : baseline.value().results) {
-        baselineHashes.push_back(r.document.sha256Hash);
-    }
-    CHECK(std::ranges::find(baselineHashes, "x1") != baselineHashes.end());
-    CHECK(std::ranges::find(baselineHashes, "x3") != baselineHashes.end());
-    CHECK(std::ranges::find(baselineHashes, "x2") == baselineHashes.end());
-    CHECK(baseline.value().debugStats.at("topology_final_rescue_enabled") == "0");
-
-    // Enabling the topology final-window rescue seam and requiring both window slots to carry
-    // topology evidence promotes x2 (which has it) over x3 (which does not), independent of the
-    // generic evidence-rescue family (fusionEvidenceRescueSlots), which stays disabled here.
-    config.topologyFinalRescueSlots = 2;
-    auto rescued = runTopologySearch(fix, generator, config, 2, "alpha one");
-    REQUIRE(rescued.has_value());
-    REQUIRE(rescued.value().results.size() == 2);
-    std::vector<std::string> rescuedHashes;
-    for (const auto& r : rescued.value().results) {
-        rescuedHashes.push_back(r.document.sha256Hash);
-    }
-    CHECK(std::ranges::find(rescuedHashes, "x1") != rescuedHashes.end());
-    CHECK(std::ranges::find(rescuedHashes, "x2") != rescuedHashes.end());
-    CHECK(std::ranges::find(rescuedHashes, "x3") == rescuedHashes.end());
-
-    const auto& debug = rescued.value().debugStats;
-    CHECK(debug.at("topology_final_rescue_enabled") == "1");
-    CHECK(debug.at("topology_final_rescue_slots") == "2");
-    CHECK(debug.at("topology_final_rescue_promoted_doc_ids") == "x2");
-    CHECK(debug.at("topology_final_rescue_displaced_doc_ids") == "x3");
-    CHECK(debug.at("topology_final_rescue_eligible_window_doc_ids").empty());
-    CHECK(debug.at("topology_final_rescue_eligible_tail_doc_ids") == "x2");
-
-    // x1 is organically found (not a novel rescue) but still shares the topology route with x2,
-    // so it also receives nonzero topologyScore -- a magnitude-only gate would have considered it
-    // just as eligible as x2. It must never appear as promoted/displaced: the eligibility set is
-    // scoped to novel candidates only, not every topology-touched one.
-    const auto x1Result = std::ranges::find_if(
-        rescued.value().results, [](const auto& r) { return r.document.sha256Hash == "x1"; });
-    REQUIRE(x1Result != rescued.value().results.end());
-    CHECK(x1Result->topologyScore.has_value());
-    CHECK(debug.at("topology_final_rescue_promoted_doc_ids").find("x1") == std::string::npos);
-    CHECK(debug.at("topology_final_rescue_displaced_doc_ids").find("x1") == std::string::npos);
-}
-
 namespace {
 
 // x2 shares a topology route with the lexical seed x1, but lexical Tier-1 keeps only x1
@@ -1390,6 +1311,104 @@ TEST_CASE("SearchEngine cross reranker promotes lower fused candidate",
     CHECK((debug.at("cross_rerank_available") == "1"));
     CHECK(debug.at("cross_rerank_skip_reason").empty());
     CHECK((debug.at("cross_rerank_replace_scores") == "1"));
+}
+
+TEST_CASE("SearchEngine deep lexical rerank scores the fused pool from FTS5",
+          "[search][rerank][lexical_rerank][catch2]") {
+    TopologySearchFixture fix;
+    fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
+    fix.addDocument("x2", "alpha alpha alpha gamma", {0.9F, 0.1F});
+
+    SearchEngineConfig config;
+    config.includeDebugInfo = true;
+    config.enableParallelExecution = false;
+    config.textWeight = 1.0F;
+    config.vectorWeight = 0.0F;
+    config.entityVectorWeight = 0.0F;
+    config.enableGraphRerank = false;
+    config.enableReranking = false;
+    config.lexicalRerankDepth = 20;
+    config.lexicalRerankWeight = 0.5F;
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, nullptr, fix.kgStore, config);
+    SearchParams params;
+    params.limit = 5;
+    auto response = engine.searchWithResponse("alpha", params);
+    REQUIRE(response.has_value());
+    REQUIRE_FALSE(response.value().results.empty());
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("lexical_rerank_applied") == "1");
+    CHECK(debug.at("lexical_rerank_matched") == "2");
+}
+
+TEST_CASE("SearchEngine deep rerank adds the static-embedding term when a table is set",
+          "[search][rerank][lexical_rerank][catch2]") {
+    // Minimal SMSTAT01 table: 4 dims, int8 rows with scale 1.
+    const std::vector<std::string> tokens = {"[UNK]", "alpha", "one", "gamma", "two"};
+    const std::vector<std::array<std::int8_t, 4>> rows = {
+        {{0, 0, 0, 0}}, {{100, 0, 0, 0}}, {{0, 100, 0, 0}}, {{0, 0, 100, 0}}, {{0, 0, 0, 100}}};
+    std::string bytes = "SMSTAT01";
+    auto u32 = [&](std::uint32_t v) {
+        for (int k = 0; k < 4; ++k)
+            bytes.push_back(static_cast<char>((v >> (8 * k)) & 0xFF));
+    };
+    u32(1);             // version
+    u32(4);             // dim
+    u32(tokens.size()); // vocab
+    u32(3);             // lowercase | strip_accents
+    u32(0);             // unk id
+    u32(100);           // max word chars
+    for (const auto& t : tokens) {
+        bytes.push_back(static_cast<char>(t.size() & 0xFF));
+        bytes.push_back(static_cast<char>(t.size() >> 8));
+        bytes += t;
+    }
+    for (std::size_t i = 0; i < tokens.size(); ++i)
+        u32(0x3F800000u); // 1.0f
+    for (const auto& r : rows)
+        for (auto v : r)
+            bytes.push_back(static_cast<char>(v));
+    const std::vector<std::uint8_t> raw(bytes.begin(), bytes.end());
+    auto table =
+        std::make_shared<const simeon::StaticEmbedding>(simeon::StaticEmbedding::from_bytes(raw));
+
+    TopologySearchFixture fix;
+    fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
+    fix.addDocument("x2", "alpha alpha alpha gamma", {0.9F, 0.1F});
+
+    SearchEngineConfig config;
+    config.includeDebugInfo = true;
+    config.enableParallelExecution = false;
+    config.textWeight = 1.0F;
+    config.vectorWeight = 0.0F;
+    config.entityVectorWeight = 0.0F;
+    config.enableGraphRerank = false;
+    config.enableReranking = false;
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, nullptr, fix.kgStore, config);
+    engine.setStaticEmbedding(table);
+    SearchParams params;
+    params.limit = 5;
+    auto response = engine.searchWithResponse("alpha", params);
+    REQUIRE(response.has_value());
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("lexical_rerank_applied") == "1");
+    CHECK(debug.at("static_rerank_applied") == "1");
+    CHECK_FALSE(debug.contains("static_rerank_error"));
+
+    // Without a table the stage stays lexical-only.
+    engine.setStaticEmbedding(nullptr);
+    auto plain = engine.searchWithResponse("alpha", params);
+    REQUIRE(plain.has_value());
+    CHECK(plain.value().debugStats.at("static_rerank_applied") == "0");
 }
 
 TEST_CASE("SearchEngine reports the scoring mode of the wired cross reranker",

@@ -70,11 +70,6 @@ void ProgressReporter::setCallback(ProgressCallback callback) {
     pImpl->callback = std::move(callback);
 }
 
-void ProgressReporter::setTotalBytes(uint64_t total) {
-    pImpl->totalBytes = total;
-    pImpl->notifyProgress();
-}
-
 void ProgressReporter::reportProgress(uint64_t processed) {
     pImpl->bytesProcessed = processed;
     pImpl->notifyProgress();
@@ -128,13 +123,6 @@ uint64_t ProgressReporter::getTotalBytes() const {
     return pImpl->totalBytes.load();
 }
 
-double ProgressReporter::getPercentage() const {
-    uint64_t total = pImpl->totalBytes.load();
-    if (total == 0)
-        return 0.0;
-    return static_cast<double>(pImpl->bytesProcessed.load()) / total * 100.0;
-}
-
 bool ProgressReporter::isComplete() const {
     uint64_t total = pImpl->totalBytes.load();
     return total > 0 && pImpl->bytesProcessed.load() >= total;
@@ -177,33 +165,6 @@ void ProgressReporter::reset(uint64_t totalBytes) {
         pImpl->currentOperation.clear();
     }
     pImpl->notifyProgress();
-}
-
-std::chrono::seconds ProgressReporter::estimateRemaining() const {
-    auto elapsed = getElapsedTime();
-    double percentage = getPercentage();
-
-    if (percentage <= 0 || percentage >= 100) {
-        return std::chrono::seconds(0);
-    }
-
-    auto totalEstimate = elapsed / (percentage / 100.0);
-    auto remaining = totalEstimate - elapsed;
-
-    return std::chrono::duration_cast<std::chrono::seconds>(remaining);
-}
-
-std::chrono::milliseconds ProgressReporter::getElapsedTime() const {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
-                                                                 pImpl->startTime);
-}
-
-double ProgressReporter::getBytesPerSecond() const {
-    auto elapsed = getElapsedTime();
-    if (elapsed.count() == 0)
-        return 0.0;
-
-    return static_cast<double>(pImpl->bytesProcessed.load()) / (elapsed.count() / 1000.0);
 }
 
 std::unique_ptr<ProgressReporter> ProgressReporter::createSubReporter(uint64_t subTotalBytes) {
@@ -299,31 +260,9 @@ std::shared_ptr<ProgressReporter> MultiProgressTracker::addOperation(const std::
     return reporter;
 }
 
-Progress MultiProgressTracker::getOverallProgress() const {
-    return pImpl->calculateOverallProgress();
-}
-
-void MultiProgressTracker::setOverallCallback(ProgressCallback callback) {
-    std::lock_guard lock(pImpl->mutex);
-    pImpl->overallCallback = std::move(callback);
-}
-
 size_t MultiProgressTracker::getOperationCount() const {
     std::lock_guard lock(pImpl->mutex);
     return pImpl->operations.size();
-}
-
-size_t MultiProgressTracker::getCompletedOperations() const {
-    std::lock_guard lock(pImpl->mutex);
-    return std::count_if(pImpl->operations.begin(), pImpl->operations.end(),
-                         [](const auto& op) { return op.reporter->isComplete(); });
-}
-
-void MultiProgressTracker::cancelAll() {
-    std::lock_guard lock(pImpl->mutex);
-    for (auto& op : pImpl->operations) {
-        op.reporter->cancel();
-    }
 }
 
 } // namespace yams::api

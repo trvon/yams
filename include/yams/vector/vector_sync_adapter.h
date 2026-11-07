@@ -56,7 +56,11 @@ public:
         if (auto identity = checkPublishable(record); !identity) {
             return identity.error();
         }
-        if (nlohmann::json(toRecord(record)).dump().size() > maxValueBytes) {
+        auto encoded = memory_sync::encodeRecordJson(toRecord(record));
+        if (!encoded) {
+            return encoded.error();
+        }
+        if (encoded.value().size() > maxValueBytes) {
             return Error{ErrorCode::InvalidArgument,
                          "embedding sync value exceeds configured resident limit"};
         }
@@ -68,8 +72,11 @@ public:
         if (auto publishable = checkPublishable(record); !publishable) {
             return publishable.error();
         }
-        const auto payload = toRecord(record);
-        const std::string dump = nlohmann::json(payload).dump();
+        auto encoded = memory_sync::encodeRecordJson(toRecord(record));
+        if (!encoded) {
+            return encoded.error();
+        }
+        const std::string& dump = encoded.value();
         std::vector<std::byte> bytes(dump.size());
         std::memcpy(bytes.data(), dump.data(), dump.size());
         auto published =

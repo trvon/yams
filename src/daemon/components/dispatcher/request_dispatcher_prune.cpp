@@ -1,11 +1,15 @@
 // PBI-062: Prune request handler
 #include <spdlog/spdlog.h>
 #include <algorithm>
-#include <boost/asio/cancellation_state.hpp>
 #include <cctype>
 #include <filesystem>
 #include <limits>
 #include <system_error>
+#include <boost/asio/cancellation_state.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_awaitable.hpp>
+#include <boost/system/system_error.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -143,7 +147,25 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                     uint64_t failed = 0;
                     uint64_t bytesFreed = 0;
 
+                    // Every delete below is synchronous. Reading cancellation_state never
+                    // suspends, so without a real suspension this strand would pin its worker and
+                    // WorkCoordinator::stop() could not deliver the cancellation (lt-safety A2.1).
+                    // Yield to the strand every few candidates; after a cancellation the yield
+                    // itself throws operation_aborted.
+                    constexpr std::size_t kYieldEveryCandidates = 8;
+                    const auto executor = co_await boost::asio::this_coro::executor;
+                    std::size_t processed = 0;
+
                     for (const auto& candidate : candidates) {
+                        if (processed++ % kYieldEveryCandidates == 0) {
+                            try {
+                                co_await boost::asio::post(executor, boost::asio::use_awaitable);
+                            } catch (const boost::system::system_error&) {
+                                spdlog::info("Prune cancelled after deleted={} failed={}", deleted,
+                                             failed);
+                                co_return;
+                            }
+                        }
                         const auto cancellationState =
                             co_await boost::asio::this_coro::cancellation_state;
                         if (cancellationState.cancelled() != boost::asio::cancellation_type::none) {
@@ -177,8 +199,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
 
                             const auto& deleteResp = deleteResult.value();
                             if (!deleteResp.errors.empty()) {
-                                spdlog::warn("Failed to prune {}: {}", candidate.path,
-                                             deleteResp.errors.front().error.value_or("delete failed"));
+                                spdlog::warn(
+                                    "Failed to prune {}: {}", candidate.path,
+                                    deleteResp.errors.front().error.value_or("delete failed"));
                                 ++failed;
                                 continue;
                             }
@@ -203,7 +226,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                                 ++failed;
                             }
                         } catch (const std::exception& e) {
-                            spdlog::error("Exception while pruning {}: {}", candidate.path, e.what());
+                            spdlog::error("Exception while pruning {}: {}", candidate.path,
+                                          e.what());
                             ++failed;
                         }
                     }
@@ -212,9 +236,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                                  failed, bytesFreed);
                     co_return;
                 });
-            response.statusMessage = fmt::format(
-                "Prune accepted: {} candidates are being removed in the background.",
-                candidateCount);
+            response.statusMessage =
+                fmt::format("Prune accepted: {} candidates are being removed in the background.",
+                            candidateCount);
         }
 
     } catch (const std::exception& e) {

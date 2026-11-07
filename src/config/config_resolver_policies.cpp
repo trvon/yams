@@ -130,6 +130,9 @@ ConfigResolver::SimeonEncoderPolicy ConfigResolver::resolveSimeonEncoderPolicy()
                 policy.l2Normalize = parseTomlBool(it->second);
             if (auto it = kv.find("embeddings.simeon.pq_bytes"); it != kv.end())
                 policy.pqBytes = parseTomlU32(it->second);
+            if (auto it = kv.find("embeddings.simeon.static_table");
+                it != kv.end() && !it->second.empty())
+                policy.staticTable = it->second;
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for simeon encoder policy: {}", e.what());

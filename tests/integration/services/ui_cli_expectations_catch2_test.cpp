@@ -212,6 +212,11 @@ public:
         dbEnvGuards_.push_back(std::make_unique<ScopedEnvVar>("YAMS_DB_POOL_MAX", "4"));
         yams::test::DaemonHarnessOptions options;
         options.isolateState = true;
+        options.isolateConfig = true;
+        // This fixture deliberately indexes a temporary corpus to test UI/relation behavior,
+        // not the default scratch-path policy. Keep that opt-out in the isolated config.
+        options.isolatedConfigContents =
+            "[version]\nconfig_version = 3\n[search]\nexclude_paths = []\n";
         harness_ = std::make_unique<yams::test::DaemonHarness>(options);
         REQUIRE(harness_->start(15s));
 
@@ -762,7 +767,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: update metadata then delete b
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: rm confirmation happens before daemon delete",
-                 "[integration][services][ui-cli][delete]") {
+                 "[integration][services][ui-cli][delete][batch3d]") {
     start();
 
     const auto sourcePath = root() / "ingest" / "rm-confirm.txt";
@@ -1566,8 +1571,12 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search json includes rela
     definesTwo.relation = "defines";
     REQUIRE(retryKgWriteForTest([&]() { return ctx.kgStore->addEdge(definesTwo); }));
 
+    ctx.workerExecutor = sm->getWorkerExecutor();
+    REQUIRE(ctx.workerExecutor);
     auto searchSvc = yams::app::services::makeSearchService(ctx);
-    (void)searchSvc->lightIndexForHash(doc.sha256Hash);
+    REQUIRE(searchSvc->lightIndexForHash(doc.sha256Hash));
+    yams::cli::YamsCLI configProbe;
+    REQUIRE(configProbe.retrievalOutputConfig().excludePaths.empty());
     yams::app::services::SearchRequest pollReq;
     pollReq.query = "json sentinel";
     pollReq.type = "keyword";
@@ -1589,6 +1598,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search json includes rela
                        "--no-group-versions", "--json", "--limit", "5", "json sentinel"},
                       socketPath());
     CHECK(rc == 0);
+    INFO("CLI search output: " << capture.str());
 
     auto parsed = nlohmann::json::parse(capture.str(), nullptr, false);
     REQUIRE_FALSE(parsed.is_discarded());
@@ -1671,8 +1681,12 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search human includes rel
     definesEdge.relation = "defines";
     REQUIRE(retryKgWriteForTest([&]() { return ctx.kgStore->addEdge(definesEdge); }));
 
+    ctx.workerExecutor = sm->getWorkerExecutor();
+    REQUIRE(ctx.workerExecutor);
     auto searchSvc = yams::app::services::makeSearchService(ctx);
-    (void)searchSvc->lightIndexForHash(doc.sha256Hash);
+    REQUIRE(searchSvc->lightIndexForHash(doc.sha256Hash));
+    yams::cli::YamsCLI configProbe;
+    REQUIRE(configProbe.retrievalOutputConfig().excludePaths.empty());
     yams::app::services::SearchRequest pollReq;
     pollReq.query = "human sentinel";
     pollReq.type = "keyword";
@@ -1695,6 +1709,7 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: CLI search human includes rel
     CHECK(rc == 0);
 
     const std::string output = capture.str();
+    INFO("CLI search output: " << output);
     CHECK(output.find("cli_relation_human.txt") != std::string::npos);
     CHECK(output.find("rel:") != std::string::npos);
     CHECK(output.find("defines") != std::string::npos);

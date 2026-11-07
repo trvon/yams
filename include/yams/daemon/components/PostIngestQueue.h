@@ -281,23 +281,16 @@ public:
     std::uint64_t directoriesAdded() const { return directoriesAdded_.load(); }
     std::uint64_t filesProcessed() const { return filesProcessed_.load(); }
     std::uint64_t directoriesProcessed() const { return directoriesProcessed_.load(); }
-    void incFilesAdded(std::uint64_t count = 1) {
-        filesAdded_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incDirectoriesAdded(std::uint64_t count = 1) {
-        directoriesAdded_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incFilesProcessed(std::uint64_t count = 1) {
-        filesProcessed_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incDirectoriesProcessed(std::uint64_t count = 1) {
-        directoriesProcessed_.fetch_add(count, std::memory_order_relaxed);
-    }
     double latencyMsEma() const { return latencyMsEma_.load(); }
     double ratePerSecEma() const { return ratePerSecEma_.load(); }
     std::size_t capacity() const { return capacity_.load(std::memory_order_relaxed); }
     MetricsSnapshot metricsSnapshot() const;
     void resetMetrics();
+
+#ifdef YAMS_TEST_PROVIDER_CONTROLS
+    static void testing_setPreparedEmbedBatchPayloadBytes(std::size_t bytes);
+    static void testing_resetPreparedEmbedBatchPayloadBytes();
+#endif
 
     // Backpressure observability
     std::uint64_t backpressureRejects() const {
@@ -332,7 +325,6 @@ public:
     // Stage concurrency limits (dynamic via TuneAdvisor)
     static std::size_t maxExtractionConcurrent();
     static std::size_t maxKgConcurrent();
-    static std::size_t maxSymbolConcurrent();
     static std::size_t maxEntityConcurrent();
     static std::size_t maxTitleConcurrent();
 
@@ -384,7 +376,6 @@ public:
     /// Explicitly enable or disable KG dispatch. Unlike pauseStage(), disabling dispatch marks
     /// KG as outside the active pipeline contract; temporary pauses continue buffering work.
     void setKnowledgeGraphEnabled(bool enabled);
-    [[nodiscard]] bool isKnowledgeGraphEnabled() const;
 
     /// Pause all processing stages (emergency shutdown)
     void pauseAll();
@@ -545,8 +536,23 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> startGuard_{false};
 
+    // Poller lifecycle state shared with the poller frames. A frame abandoned by a stopped
+    // io_context is destroyed only with that io_context, possibly after this object; its exit
+    // guard clears its started flag and notifies through this heap object, never through
+    // `this` (lt-safety A2.2). The reference members keep the existing names.
+    struct StageLifecycle {
+        std::array<std::atomic<bool>, kStageCount> started{};
+        std::mutex mutex;
+        std::condition_variable cv;
+        void notify() {
+            std::lock_guard<std::mutex> lock(mutex);
+            cv.notify_all();
+        }
+    };
+    std::shared_ptr<StageLifecycle> lifecycle_ = std::make_shared<StageLifecycle>();
+
     // Per-stage arrays indexed by Stage enum (0..4)
-    std::array<std::atomic<bool>, kStageCount> stageStarted_{};
+    std::array<std::atomic<bool>, kStageCount>& stageStarted_ = lifecycle_->started;
     std::array<std::atomic<bool>, kStageCount> stagePaused_{};
     std::mutex stageActivityMutex_;
     std::array<bool, kStageCount> stageActivityPublished_{};
@@ -562,15 +568,6 @@ private:
             }
         }
         return false;
-    }
-
-    [[nodiscard]] bool allStagesStarted() const {
-        for (std::size_t i = 0; i < kStageCount; ++i) {
-            if (!stageStarted_[i].load(std::memory_order_acquire)) {
-                return false;
-            }
-        }
-        return true;
     }
 
     [[nodiscard]] bool allStagesStopped() const {
@@ -591,12 +588,9 @@ private:
         return pendingKgJobs_.empty() && !pendingKgDrainScheduled_.load(std::memory_order_acquire);
     }
 
-    mutable std::mutex lifecycleMutex_;
-    std::condition_variable lifecycleCv_;
-    void notifyLifecycle() {
-        std::lock_guard<std::mutex> lock(lifecycleMutex_);
-        lifecycleCv_.notify_all();
-    }
+    std::mutex& lifecycleMutex_ = lifecycle_->mutex;
+    std::condition_variable& lifecycleCv_ = lifecycle_->cv;
+    void notifyLifecycle() { lifecycle_->notify(); }
 
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};

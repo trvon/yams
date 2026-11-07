@@ -26,6 +26,21 @@ std::string qcol(const CommonFilterSqlFlavor& flavor, std::string_view name) {
     return out;
 }
 
+std::string metadataPredicate(bool locations, std::string_view documentId) {
+    if (!locations)
+        return "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = " + std::string(documentId) +
+               " AND m.key = ? AND m.value = ?)";
+    const auto dot = documentId.find_last_of('.');
+    const auto location = std::string(documentId.substr(0, dot + 1)) + "location_metadata";
+    // A location's metadata is authoritative, including absent keys. Do not
+    // fall back to a sibling location's canonical metadata on a missing key.
+    return "EXISTS (SELECT 1 FROM (SELECT m.key, m.value FROM metadata m WHERE "
+           "m.document_id = " +
+           std::string(documentId) + " AND " + location +
+           " IS NULL UNION ALL SELECT key, value FROM json_each(" + location +
+           ")) effective_metadata WHERE key = ? AND value = ?)";
+}
+
 void appendCommonDocumentFilters(const DocumentQueryOptions& options, bool joinFtsForContains,
                                  bool hasPathIndexing, std::vector<std::string>& conditions,
                                  std::vector<BindParam>& params,
@@ -154,6 +169,11 @@ void appendCommonDocumentFilters(const DocumentQueryOptions& options, bool joinF
         addTextParam(params, *options.likePattern);
     }
 
+    if (options.fileNamePattern && !options.fileNamePattern->empty()) {
+        conditions.emplace_back(qcol(flavor, "file_name") + " LIKE ? ESCAPE '\\'");
+        addTextParam(params, *options.fileNamePattern);
+    }
+
     if (options.fileName && !options.fileName->empty()) {
         conditions.emplace_back(qcol(flavor, "file_name") + " = ?");
         addTextParam(params, *options.fileName);
@@ -248,6 +268,12 @@ void appendCommonDocumentFilters(const DocumentQueryOptions& options, bool joinF
     }
 
     for (const auto& tag : options.tags) {
+        if (options.usePathLocations) {
+            conditions.push_back(metadataPredicate(true, flavor.outerDocumentIdExpr));
+            addTextParam(params, std::string("tag:") + tag);
+            addTextParam(params, tag);
+            continue;
+        }
         conditions.emplace_back("EXISTS (SELECT 1 FROM metadata " +
                                 std::string(flavor.tagMetadataAlias) + " WHERE " +
                                 std::string(flavor.tagMetadataAlias) +
@@ -280,9 +306,7 @@ void appendDocumentQueryFilters(const DocumentQueryOptions& options, bool joinFt
                                  .logExactPath = logExactPath});
 
     for (const auto& [key, value] : options.metadataFilters) {
-        conditions.emplace_back(
-            "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
-            "AND m.key = ? AND m.value = ?)");
+        conditions.push_back(metadataPredicate(options.usePathLocations, "documents.id"));
         addTextParam(params, key);
         addTextParam(params, value);
     }
@@ -293,8 +317,7 @@ void appendDocumentQueryFilters(const DocumentQueryOptions& options, bool joinFt
             if (i > 0) {
                 condition += " OR ";
             }
-            condition += "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
-                         "AND m.key = ? AND m.value = ?)";
+            condition += metadataPredicate(options.usePathLocations, "documents.id");
             addTextParam(params, options.metadataAnyFilters[i].first);
             addTextParam(params, options.metadataAnyFilters[i].second);
         }

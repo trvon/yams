@@ -114,6 +114,11 @@ private:
     bool fuzzySearch_ = false;
     float minSimilarity_ = 0.7f;
     bool pathsOnly_ = false;
+    bool compact_{false};
+    bool scores_{false};
+    bool includeEphemeral_{false};
+    std::string worktree_;
+    std::string worktreeRoot_;
     bool literalText_ = false;
     bool showHash_ = false;
     bool verbose_ = false;
@@ -171,6 +176,8 @@ private:
         std::string path;
         std::string title;
         std::string snippet;
+        std::string compactPreview;
+        std::size_t snippetLine{0}; // 0 means the backend did not supply a source line.
         std::string hash;
         std::string mimeType;
         std::string fileType;
@@ -190,6 +197,12 @@ private:
             item.path = r.path;
             item.title = r.title;
             item.snippet = r.snippet;
+            if (auto it = r.metadata.find("compact_snippet"); it != r.metadata.end())
+                item.compactPreview = it->second;
+            if (auto it = r.metadata.find("snippet_line_number"); it != r.metadata.end()) {
+                (void)std::from_chars(it->second.data(), it->second.data() + it->second.size(),
+                                      item.snippetLine);
+            }
             item.score = r.score;
             if (auto it = r.metadata.find("hash"); it != r.metadata.end())
                 item.hash = it->second;
@@ -228,6 +241,8 @@ private:
         int64_t elapsedMs{0};
         std::string method{"search"};
         std::string traceId;
+        // Documents matched by a text component; absent when the backend did not report it.
+        std::optional<int64_t> lexicalHits;
     };
 
     struct GroupedSearchResults {
@@ -258,6 +273,12 @@ private:
         ctx.elapsedMs = resp.elapsed.count();
         ctx.method = "daemon";
         ctx.traceId = resp.traceId;
+        if (auto it = resp.searchStats.find("lexical_hits"); it != resp.searchStats.end()) {
+            try {
+                ctx.lexicalHits = std::stoll(it->second);
+            } catch (const std::exception&) {
+            }
+        }
         return ctx;
     }
 
@@ -375,6 +396,7 @@ private:
                           << "\n";
             }
             std::cout << "\n";
+            noteOutputResult(std::cout);
         }
     }
 
@@ -448,6 +470,7 @@ private:
                     std::cout << ui::colorize(indent + "yams cat --hash " + v.hash, ui::Ansi::DIM)
                               << "\n";
                 }
+                noteOutputResult(std::cout);
             }
             if (versionsMode_ == "all" && vec.size() > cap) {
                 std::cout << ui::colorize("    (+" + std::to_string(vec.size() - cap) + " more)",
@@ -460,15 +483,16 @@ private:
 
     bool shouldShowSpinner() const {
         bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
-        return !jsonMode && !pathsOnly_;
+        return !jsonMode && !pathsOnly_ && !compact_ && !(cli_ && cli_->getQuiet());
     }
 
     // Unified rendering function for search results
     Result<void> renderResults(std::vector<UnifiedItem>& items, const RenderContext& ctx) {
-        enrichRelations(items);
+        if (!compact_ && !(cli_ && cli_->getQuiet()))
+            enrichRelations(items);
 
         auto emitTagHint = [&]() {
-            if (!filterTags_.empty()) {
+            if (!compact_ && !(cli_ && cli_->getQuiet()) && !filterTags_.empty()) {
                 std::cerr
                     << "Hint: tag filter returned no results; tags are stored as metadata keys "
                        "'tag:<name>'. Try searching without --tags."
@@ -477,7 +501,7 @@ private:
         };
 
         auto emitNoResultsGuidance = [&]() {
-            if (jsonOutput_ || pathsOnly_) {
+            if (jsonOutput_ || pathsOnly_ || compact_ || (cli_ && cli_->getQuiet())) {
                 return;
             }
             std::cout << "\nDiagnostics:\n";
@@ -502,11 +526,37 @@ private:
             if (deduplicated.size() >= limit_)
                 break;
             const std::string& key = item.path.empty() ? item.id : item.path;
+            const bool explicitNote =
+                !filterTags_.empty() ||
+                std::filesystem::path(item.path).filename().string() == query_;
+            if (!includeEphemeral_ && cli_ &&
+                excludeRetrievalPath(item.path, cli_->retrievalOutputConfig(), query_,
+                                     explicitNote))
+                continue;
             if (!key.empty() && seenPaths.count(key))
                 continue;
             if (!key.empty())
                 seenPaths.insert(key);
             deduplicated.push_back(std::move(item));
+        }
+
+        if (deduplicated.empty() && !jsonOutput_ && cli_ && cli_->getQuiet()) {
+            std::cout << "(no results)\n";
+            return Result<void>();
+        }
+        if (compact_ && !pathsOnly_ && !jsonOutput_) {
+            if (deduplicated.empty())
+                std::cout << "(no results)\n";
+            for (const auto& item : deduplicated) {
+                const auto path =
+                    describeFileForCli(item.getDisplayPath(), {}, invocationCwd_).displayPath;
+                std::cout << compactHit(path, item.snippetLine,
+                                        item.compactPreview.empty() ? item.snippet
+                                                                    : item.compactPreview,
+                                        scores_ ? std::optional<double>{item.score} : std::nullopt);
+                noteOutputResult(std::cout);
+            }
+            return Result<void>();
         }
 
         // Paths-only output
@@ -519,6 +569,7 @@ private:
                     std::cout
                         << describeFileForCli(item.getDisplayPath(), {}, invocationCwd_).displayPath
                         << std::endl;
+                    noteOutputResult(std::cout);
                 }
             }
             return Result<void>();
@@ -533,6 +584,8 @@ private:
             output["execution_time_ms"] = ctx.elapsedMs;
             if (!ctx.traceId.empty())
                 output["trace_id"] = ctx.traceId;
+            if (ctx.lexicalHits)
+                output["lexical_hits"] = *ctx.lexicalHits;
 
             nlohmann::json results = nlohmann::json::array();
             for (const auto& item : deduplicated) {
@@ -540,11 +593,13 @@ private:
             }
             output["results"] = std::move(results);
             std::cout << output.dump(2) << std::endl;
+            for (std::size_t i = 0; i < deduplicated.size(); ++i)
+                noteOutputResult(std::cout);
             return Result<void>();
         }
 
-        // Human-readable output
-        if (deduplicated.empty()) {
+        // Human-readable output. Grouped JSON reaches here too and must stay a JSON document.
+        if (deduplicated.empty() && !jsonOutput_) {
             std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
             emitTagHint();
             emitNoResultsGuidance();
@@ -597,12 +652,18 @@ private:
                 output["query"] = ctx.query;
                 output["method"] = ctx.method;
                 output["total_groups"] = groups.size();
+                if (ctx.lexicalHits)
+                    output["lexical_hits"] = *ctx.lexicalHits;
                 nlohmann::json groupsArr = nlohmann::json::array();
                 for (auto& group : groups) {
                     groupsArr.push_back(makeGroupedSearchJson(group.path, group.versions));
                 }
                 output["groups"] = groupsArr;
                 std::cout << output.dump(2) << std::endl;
+                // stdout holds only the JSON document, as in the flat JSON branch.
+                for (std::size_t i = 0; i < deduplicated.size(); ++i)
+                    noteOutputResult(std::cout);
+                return Result<void>();
             } else {
                 renderGroupedHumanResults(groups);
             }
@@ -614,7 +675,7 @@ private:
                                       std::to_string(ctx.elapsedMs) + "ms)",
                                   ui::Ansi::DIM)
                   << std::endl;
-        if (!pathsOnly_ && !jsonOutput_ && !deduplicated.empty()) {
+        if (!pathsOnly_ && !jsonOutput_ && !deduplicated.empty() && !(cli_ && cli_->getQuiet())) {
             std::cout << "\n";
             if (!concreteGraphNextHint.empty()) {
                 std::cout << ui::colorize(concreteGraphNextHint, ui::Ansi::DIM) << std::endl;
@@ -691,42 +752,6 @@ private:
         double whitespaceRatio{0.0};
         std::string sanitized;
     };
-
-    SnippetAssessment assessSnippet(std::string_view snippet) const {
-        SnippetAssessment assessment;
-        if (snippet.empty()) {
-            return assessment;
-        }
-        std::string cleaned;
-        cleaned.reserve(snippet.size());
-        size_t printable = 0;
-        size_t whitespace = 0;
-        for (unsigned char c : snippet) {
-            if (c == '\n' || c == '\r' || c == '\t') {
-                whitespace++;
-                cleaned.push_back(' ');
-                continue;
-            }
-            if (c >= 0x20 && c < 0x7F) {
-                printable++;
-                if (std::isspace(c)) {
-                    whitespace++;
-                    if (!cleaned.empty() && cleaned.back() == ' ') {
-                        continue;
-                    }
-                    cleaned.push_back(' ');
-                } else {
-                    cleaned.push_back(static_cast<char>(c));
-                }
-            }
-        }
-        const double total = static_cast<double>(snippet.size());
-        const double denominator = std::max(total, 1.0);
-        assessment.printableRatio = printable / denominator;
-        assessment.whitespaceRatio = whitespace / denominator;
-        assessment.sanitized = std::move(cleaned);
-        return assessment;
-    }
 
     std::string formatSnippet(const UnifiedItem& item, size_t maxLength) {
         auto formatted = ui::format_text_snippet(item.snippet, maxLength, 0.65, true);
@@ -833,6 +858,7 @@ private:
     yams::daemon::SearchRequest
     makeDaemonSearchRequest(const std::vector<std::string>& includeGlobsExpanded) const {
         yams::daemon::SearchRequest dreq;
+        dreq.scopePathPrefix = worktreeRoot_;
         dreq.query = yams::common::sanitizeUtf8(query_);
         if (dreq.query != query_) {
             spdlog::debug("Search query contained invalid UTF-8; sanitized for IPC transmission");
@@ -848,7 +874,7 @@ private:
         dreq.jsonOutput = jsonOutput_;
         dreq.showHash = showHash_;
         dreq.verbose = verbose_;
-        dreq.showLineNumbers = showLineNumbers_;
+        dreq.showLineNumbers = showLineNumbers_ || compact_;
 
         if (!includeGlobsExpanded.empty()) {
             dreq.pathPatterns = includeGlobsExpanded;
@@ -908,6 +934,13 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("search", getDescription());
+        cmd->add_flag("--compact", compact_, "One bounded path:line: snippet per hit; no banners");
+        cmd->add_flag("--scores", scores_, "Include scores in compact output");
+        cmd->add_flag("--include-ephemeral", includeEphemeral_,
+                      "Include scratch paths excluded by search.exclude_paths");
+        cmd->add_option("--worktree", worktree_, "Scope to a registered Git worktree name or path");
+        if (cli_)
+            cli_->registerReadOptions(*cmd);
         // Provide flagged alias to safely pass queries beginning with '-'
         cmd->add_option("-q,--query", query_, "Search query (use when the query starts with '-')");
         // Define a positional option for the query - this allows options anywhere in command line
@@ -1037,6 +1070,10 @@ public:
         // limitOpt is unused but kept for potential future diagnostics
         (void)limitOpt;
         cmd->callback([this, cmd]() {
+            if (!worktree_.empty()) {
+                worktreeRoot_ = resolveWorktree(invocationCwdForCli(), worktree_).generic_string();
+                noSession_ = true;
+            }
             cli_->setPendingCommand(this);
             // Apply local inversion flags captured above
             // Note: CLI11 stores flag states; re-fetch via app to avoid capture issues
@@ -1072,6 +1109,7 @@ public:
     }
 
     Result<void> execute() override {
+        OutputBudget outputBudget(std::cout, cli_ ? cli_->outputBudgetChars() : 0);
         YAMS_ZONE_SCOPED_N("SearchCommand::execute");
 
         try {
@@ -1180,7 +1218,7 @@ public:
             }
 
             std::string cwdScope;
-            if (scopeToCwd_) {
+            if (scopeToCwd_ && worktreeRoot_.empty()) {
                 std::error_code ec;
                 cwdScope = std::filesystem::current_path(ec).string();
                 if (!ec) {
@@ -1219,7 +1257,8 @@ public:
             }
 
             auto dreq = makeDaemonSearchRequest(includeGlobsExpanded);
-            dreq.scopePathPrefix = std::move(cwdScope);
+            if (worktreeRoot_.empty())
+                dreq.scopePathPrefix = std::move(cwdScope);
 
             std::shared_ptr<ui::SpinnerRunner> spinner =
                 shouldShowSpinner() ? std::make_shared<ui::SpinnerRunner>() : nullptr;
@@ -1367,6 +1406,7 @@ public:
     }
 
     boost::asio::awaitable<Result<void>> executeAsync() override {
+        OutputBudget outputBudget(std::cout, cli_ ? cli_->outputBudgetChars() : 0);
         jsonOutput_ = jsonOutput_ || (cli_ && cli_->getJsonOutput());
         const bool cliOneShot = yams::cli::cli_one_shot_enabled();
 
@@ -1430,7 +1470,7 @@ public:
             includeGlobsExpanded.push_back(pathFilter_);
 
         // CWD scoping: add current directory as a path prefix filter
-        if (scopeToCwd_) {
+        if (scopeToCwd_ && worktreeRoot_.empty()) {
             std::error_code ec;
             auto cwd = std::filesystem::current_path(ec);
             if (!ec) {

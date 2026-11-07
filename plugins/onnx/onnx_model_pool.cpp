@@ -3395,35 +3395,6 @@ std::string OnnxModelPool::resolveModelPath(const std::string& modelName) const 
     return "models/" + modelName + ".onnx";
 }
 
-Result<OnnxModelPool::ModelSessionPtr>
-OnnxModelPool::createModelSession(const std::string& modelName) {
-    std::string modelPath = resolveModelPath(modelName);
-
-    OnnxTextConfig config;
-    config.model_path = modelPath;
-    config.model_name = modelName;
-    config.enable_gpu = config_.enableGPU;
-    config.num_threads = config_.numThreads;
-    config.max_sequence_length = 0;
-
-    {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        auto it = threadingOverrides_.find(modelName);
-        if (it != threadingOverrides_.end()) {
-            config.num_threads = it->second.first;
-            config.inter_op_threads = it->second.second;
-        }
-    }
-
-    try {
-        auto session = std::make_shared<OnnxModelSession>(modelPath, modelName, config);
-        return session;
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError,
-                     std::string("Failed to create model session: ") + e.what()};
-    }
-}
-
 void OnnxModelPool::updateAccessStats(const std::string& modelName) {
     auto it = models_.find(modelName);
     if (it != models_.end()) {

@@ -84,18 +84,8 @@ public:
         std::chrono::seconds read_timeout{30};  // Timeout for read operations
         std::chrono::milliseconds stream_chunk_timeout{
             30000}; // Timeout for next_chunk() (30s default)
-        std::chrono::milliseconds new_session_probe_grace{
-            0}; // Disabled by default: persistent idle sessions are valid and should not
-                // be reaped before the normal read timeout elapses
         std::chrono::milliseconds post_response_reuse_grace{
-            250};                          // Short grace window to detect session reuse
-        bool auto_detect_streaming = true; // Auto-detect requests that benefit from streaming
-        bool force_streaming = false;      // Force streaming for all responses
-        // Close strategy: with multiplexing enabled, prefer persistent connections to
-        // avoid mid-flight truncation that can manifest as EPIPE/ECONNRESET when the
-        // peer queues multiple requests. Default to keep-alive; callers may override.
-        bool close_after_response = false; // Keep connection open by default
-                                           // (safer with multiplexing)
+            250}; // Short grace window to detect session reuse
         // Maximum allowed frame size (bytes) for inbound messages; must align with server limits
         size_t max_frame_size = 10 * 1024 * 1024; // 10MB default
         // Multiplexing limits (when enable_multiplexing=true)
@@ -106,17 +96,6 @@ public:
         size_t writer_budget_bytes_per_turn =
             256 * 1024; // Fair-writer byte budget per request turn (fallback)
         std::shared_ptr<std::atomic<std::size_t>> writer_budget_ref{};
-
-        // When closing after a response, attempt a graceful half-close (shutdown send) and briefly
-        // drain the peer's read side to reduce the chance of truncation at the client. Has no
-        // effect when close_after_response=false (persistent connections).
-        bool graceful_half_close = false;
-        std::chrono::milliseconds graceful_drain_timeout{200};
-
-        // When services are not ready (early startup), emit a minimal
-        // streaming stub (header + empty final chunk) for streaming-capable
-        // requests instead of invoking heavy services.
-        bool stream_stub_on_init = true;
 
         // Executor for offloading CPU-bound work (worker pool)
         boost::asio::any_io_executor worker_executor{};
@@ -143,18 +122,6 @@ public:
     explicit RequestHandler(RequestDispatcher* dispatcher, Config config = Config{});
 
     ~RequestHandler();
-
-    // Set the request processor
-    void set_processor(std::shared_ptr<RequestProcessor> processor) {
-        processor_ = std::move(processor);
-    }
-
-    // Update configuration at runtime (used by AsyncIpcServer to align limits/timeouts)
-    void set_config(const Config& cfg) {
-        config_ = cfg;
-        // Keep framer's max message size aligned with config
-        framer_ = MessageFramer(cfg.max_frame_size);
-    }
 
     [[nodiscard]] boost::asio::awaitable<void>
     handle_connection(std::shared_ptr<boost::asio::local::stream_protocol::socket> socket,
@@ -208,12 +175,6 @@ public:
 #endif
 
 private:
-    // Minimal streaming path used before services are ready: emits header then
-    // a single final empty chunk for Search/List/Grep without touching dispatcher.
-    boost::asio::awaitable<Result<void>>
-    stream_chunks_stub(boost::asio::local::stream_protocol::socket& socket, const Request& request,
-                       uint64_t request_id, ConnectionFsm* fsm);
-
     // Write a header frame and optionally flush
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     write_header(boost::asio::local::stream_protocol::socket& socket, Response response,
@@ -272,16 +233,6 @@ private:
             std::chrono::nanoseconds{stats_.max_latency_ns.load(std::memory_order_relaxed)};
         return copy;
     }
-    void reset_stats() {
-        stats_.requests_processed.store(0, std::memory_order_relaxed);
-        stats_.requests_failed.store(0, std::memory_order_relaxed);
-        stats_.bytes_received.store(0, std::memory_order_relaxed);
-        stats_.bytes_sent.store(0, std::memory_order_relaxed);
-        stats_.total_processing_time_ns.store(0, std::memory_order_relaxed);
-        stats_.min_latency_ns.store(std::chrono::nanoseconds::max().count(),
-                                    std::memory_order_relaxed);
-        stats_.max_latency_ns.store(0, std::memory_order_relaxed);
-    }
 
 private:
     // Internal stats — fully lock-free using atomics.
@@ -307,10 +258,6 @@ private:
                       bool last_chunk = false, bool flush = true, ConnectionFsm* fsm = nullptr);
 
     [[nodiscard]] boost::asio::awaitable<Response> process_request(const Request& request);
-
-    // Process request with streaming support
-    [[nodiscard]] boost::asio::awaitable<std::optional<Response>>
-    process_streaming_request(const Request& request);
 
     // Check if the processor can handle streaming for this request
     [[nodiscard]] bool can_stream_request(const Request& request) const;

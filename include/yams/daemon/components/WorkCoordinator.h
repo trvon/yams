@@ -39,6 +39,8 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/strand.hpp>
 
+#include <yams/daemon/shutdown_budget.h>
+
 namespace yams::daemon {
 
 /**
@@ -79,13 +81,30 @@ namespace yams::daemon {
  *
  * ## Shutdown Behavior
  *
- * - `stop()`: Resets work guard, allowing io_context to drain naturally
+ * - `stop()`: posts one cancellation per spawnDetached() coroutine, waits a bounded time
+ *   (shutdown_budget::kDetachedCancelDrainBudget) for every strand to run it, then stops the
+ *   io_context and resets the work guard.
  * - `join()`: Blocks until all workers complete (safe for destruction)
  *
+ * ## Contract for spawnDetached() coroutines
+ *
+ * The io_context stops as soon as the cancellations have been posted and run (or the drain
+ * budget expires). A coroutine suspended at that moment is abandoned: its pending operation
+ * never completes, no code after that `co_await` runs, and the frame's locals are destroyed
+ * only when the io_context is destroyed. Therefore:
+ *
+ * 1. Keep every piece of cleanup that another thread waits on (flags, completions, counters)
+ *    in an RAII guard inside the frame, never after the last `co_await`.
+ * 2. Do not run long synchronous sections. A strand that never suspends cannot run its posted
+ *    cancellation and pins its worker past stop(); yield between items with
+ *    `co_await boost::asio::post(executor, boost::asio::use_awaitable)`. Reading
+ *    `this_coro::cancellation_state` does not suspend and is advisory only.
+ * 3. Do not rely on code after the loop running during shutdown.
  */
 class WorkCoordinator {
 private:
     struct DetachedCancellationState;
+    struct DetachedCancellationDrain;
     struct ProgressProbeState;
     struct JobSlots;
     struct DetachedCancellationRequest {
@@ -136,12 +155,17 @@ public:
     /**
      * @brief Stop accepting new work and interrupt the io_context.
      *
-     * Serializes detached-coroutine cancellation on their executors, then stops the
-     * io_context. Does NOT block - call join() to wait for threads.
+     * Posts one cancellation per spawnDetached() coroutine onto its strand, waits at most
+     * `cancelDrainBudget` for all of them to run, then stops the io_context whether or not they
+     * did. A strand that is busy in synchronous work cannot run its cancellation; after the
+     * budget it is logged (with the worker's current job, when it opened a JobScope) and the
+     * idle workers are released anyway. Returns at once when no detached coroutine is alive.
+     * Call join() or joinWithTimeout() to wait for the threads.
      *
      * Safe to call multiple times (idempotent).
      */
-    void stop();
+    void
+    stop(std::chrono::milliseconds cancelDrainBudget = shutdown_budget::kDetachedCancelDrainBudget);
 
     /**
      * @brief Wait for all worker threads to finish.
@@ -327,6 +351,8 @@ public:
     }
 
 private:
+    /// Publishes "not running" to status readers before the worker vector is cleared.
+    void markStoppedBeforeClearingWorkers() noexcept;
     void registerDetachedCancellationSignal(
         const std::shared_ptr<boost::asio::cancellation_signal>& signal,
         boost::asio::any_io_executor executor);
@@ -335,6 +361,10 @@ private:
     static void
     cleanupDetachedCancellationState(const std::weak_ptr<DetachedCancellationState>& state,
                                      const boost::asio::cancellation_signal* completedSignal);
+    /// Names the workers (and their JobScope jobs) still busy when stop() forces the io_context
+    /// to stop with `pending` of `posted` cancellation handlers unrun after `budget`.
+    void logBusyDetachedStrands(std::size_t pending, std::size_t posted,
+                                std::chrono::milliseconds budget) const noexcept;
     /// Shared io_context for all async operations
     std::shared_ptr<boost::asio::io_context> ioContext_;
 
@@ -345,8 +375,10 @@ private:
     /// Worker thread pool running io_context.run()
     std::vector<std::thread> workers_;
 
-    /// Flag to track if start() has been called
-    bool started_ = false;
+    /// Set once start() has spawned its workers; cleared before the worker vector is. Status
+    /// readers (isRunning(), getWorkerCount()) run on other threads and read only these atomics.
+    std::atomic<bool> started_{false};
+    std::atomic<std::size_t> workerCount_{0};
 
     /// Count of workers currently inside io_context::run().
     std::atomic<std::size_t> activeWorkers_{0};

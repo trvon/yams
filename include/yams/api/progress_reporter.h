@@ -39,9 +39,6 @@ public:
     // Set callback
     void setCallback(ProgressCallback callback);
 
-    // Set total bytes (if not known at construction)
-    void setTotalBytes(uint64_t total);
-
     // Report progress
     void reportProgress(uint64_t processed);
     void reportProgress(uint64_t processed, const std::string& operation);
@@ -51,7 +48,6 @@ public:
     [[nodiscard]] Progress getProgress() const;
     [[nodiscard]] uint64_t getBytesProcessed() const;
     [[nodiscard]] uint64_t getTotalBytes() const;
-    [[nodiscard]] double getPercentage() const;
     [[nodiscard]] bool isComplete() const;
 
     // Cancellation support
@@ -62,15 +58,6 @@ public:
     // Reset progress
     void reset();
     void reset(uint64_t totalBytes);
-
-    // Estimate remaining time
-    [[nodiscard]] std::chrono::seconds estimateRemaining() const;
-
-    // Get elapsed time
-    [[nodiscard]] std::chrono::milliseconds getElapsedTime() const;
-
-    // Rate calculation
-    [[nodiscard]] double getBytesPerSecond() const;
 
     // Create sub-reporter for a portion of work
     std::unique_ptr<ProgressReporter> createSubReporter(uint64_t subTotalBytes);
@@ -122,18 +109,8 @@ public:
     // Add operation to track
     std::shared_ptr<ProgressReporter> addOperation(const std::string& name, uint64_t totalBytes);
 
-    // Get overall progress
-    [[nodiscard]] Progress getOverallProgress() const;
-
-    // Set callback for overall progress
-    void setOverallCallback(ProgressCallback callback);
-
     // Get operation count
     [[nodiscard]] size_t getOperationCount() const;
-    [[nodiscard]] size_t getCompletedOperations() const;
-
-    // Cancel all operations
-    void cancelAll();
 
 private:
     struct Impl;

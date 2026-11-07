@@ -1534,3 +1534,55 @@ TEST_CASE("KG Store hot lookups reuse prepared statements after warm-up",
     std::error_code ec;
     std::filesystem::remove(dbPath, ec);
 }
+
+// The graph prune task (BackgroundTaskManager::launchGraphPruneTask) deletes old snapshot version
+// nodes on a timer. It keeps the newest N per canonical key and must not touch anything else.
+TEST_CASE_METHOD(KGStoreFixture, "KG Store prunes only superseded snapshot version nodes",
+                 "[unit][metadata][kg][prune]") {
+    const auto addNode = [&](const std::string& key, std::optional<std::string> properties,
+                             std::int64_t updated) {
+        KGNode node;
+        node.nodeKey = key;
+        node.type = "version";
+        node.properties = std::move(properties);
+        node.updatedTime = updated;
+        auto id = store_->upsertNode(node);
+        REQUIRE(id.has_value());
+    };
+    const auto version = [](const std::string& canonical, const std::string& snapshot) {
+        return std::optional<std::string>{R"({"canonical_key":")" + canonical +
+                                          R"(","snapshot_id":")" + snapshot + R"("})"};
+    };
+    addNode("v:a:1", version("a", "s1"), 100);
+    addNode("v:a:2", version("a", "s2"), 200);
+    addNode("v:a:3", version("a", "s3"), 300);
+    addNode("v:b:1", version("b", "s1"), 100);
+    addNode("plain", std::nullopt, 50); // not a version node
+    addNode("canonical-only", std::optional<std::string>{R"({"canonical_key":"a"})"}, 10);
+
+    GraphVersionPruneConfig none;
+    none.keepLatestPerCanonical = 0;
+    REQUIRE(store_->pruneVersionNodes(none).value() == 0); // 0 disables pruning
+
+    GraphVersionPruneConfig keepTwo;
+    keepTwo.keepLatestPerCanonical = 2;
+    auto pruned = store_->pruneVersionNodes(keepTwo);
+    REQUIRE(pruned.has_value());
+    CHECK(pruned.value() == 1);
+    const auto exists = [&](const std::string& key) {
+        auto node = store_->getNodeByKey(key);
+        REQUIRE(node.has_value());
+        return node.value().has_value();
+    };
+    CHECK_FALSE(exists("v:a:1")); // the oldest version of "a"
+    CHECK(exists("v:a:2"));
+    CHECK(exists("v:a:3"));
+    CHECK(exists("v:b:1"));
+    CHECK(exists("plain"));
+    CHECK(exists("canonical-only"));
+
+    // Already pruned: a second pass deletes nothing.
+    auto again = store_->pruneVersionNodes(keepTwo);
+    REQUIRE(again.has_value());
+    CHECK(again.value() == 0);
+}

@@ -226,11 +226,6 @@ public:
         return *b;
     }
 
-    template <typename T>
-    std::shared_ptr<SpscQueue<T>> make_channel(const std::string& name, std::size_t capacity) {
-        return get_or_create_channel<T>(name, capacity);
-    }
-
     /// A channel name was requested at a capacity other than the one it already has.
     ///
     /// get_or_create_channel() returns the existing channel and ignores the requested capacity, so
@@ -373,6 +368,8 @@ public:
         std::vector<EmbedPreparedDoc> preparedDocs;
         std::shared_ptr<EmbedJobMonitor> monitor;
         bool updateSemanticGraph{true};
+        /// Submitted by RepairService; committed embeddings count toward repair progress.
+        bool fromRepair{false};
     };
 
     enum class Fts5Operation {
@@ -574,20 +571,7 @@ public:
     void setLastOrphanScanTime(uint64_t epochMs) {
         lastOrphanScanEpochMs_.store(epochMs, std::memory_order_relaxed);
     }
-    void incFts5FailNoDoc(uint64_t count = 1) {
-        fts5FailNoDoc_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incFts5FailExtraction(uint64_t count = 1) {
-        fts5FailExtraction_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incFts5FailIndex(uint64_t count = 1) {
-        fts5FailIndex_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incFts5FailException(uint64_t count = 1) {
-        fts5FailException_.fetch_add(count, std::memory_order_relaxed);
-    }
     void incPostQueued() { postQueued_.fetch_add(1, std::memory_order_relaxed); }
-    void incPostDropped() { postDropped_.fetch_add(1, std::memory_order_relaxed); }
     void incPostConsumed() { postConsumed_.fetch_add(1, std::memory_order_relaxed); }
     void incKgQueued() { kgQueued_.fetch_add(1, std::memory_order_relaxed); }
     void incKgDropped() { kgDropped_.fetch_add(1, std::memory_order_relaxed); }

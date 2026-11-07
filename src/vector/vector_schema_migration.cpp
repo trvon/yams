@@ -138,7 +138,9 @@ Result<void> rejectUnsupportedVectorSchemaObjects(sqlite3* db) {
         "vectors_index_generation_insert",
         "vectors_index_generation_update",
         "vectors_index_generation_update_v2",
+        "vectors_index_generation_update_v3",
         "vectors_index_generation_delete",
+        "vectors_index_generation_delete_v2",
     };
 
     constexpr const char* sql = R"sql(
@@ -253,20 +255,51 @@ Result<void> installCanonicalVectorSchema(sqlite3* db) {
         CREATE INDEX idx_vectors_level ON vectors(level, document_hash);
         CREATE TABLE IF NOT EXISTS vector_index_generation (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            generation INTEGER NOT NULL DEFAULT 0
+            generation INTEGER NOT NULL DEFAULT 0,
+            structural_generation INTEGER NOT NULL DEFAULT 0
         );
         INSERT OR IGNORE INTO vector_index_generation(id, generation) VALUES (1, 0);
+    )sql");
+    if (!result) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to install canonical vector schema: " + result.error().message};
+    }
+    // Legacy files already hold vector_index_generation without the structural counter, and
+    // CREATE TABLE IF NOT EXISTS keeps that shape. Add the column before installing the
+    // triggers that maintain it.
+    auto structuralColumn = queryInt64(db, "SELECT COUNT(*) FROM "
+                                           "pragma_table_info('vector_index_generation') "
+                                           "WHERE name = 'structural_generation'");
+    if (!structuralColumn) {
+        return structuralColumn.error();
+    }
+    if (structuralColumn.value() == 0) {
+        result = executeSQL(db, "ALTER TABLE vector_index_generation ADD COLUMN "
+                                "structural_generation INTEGER NOT NULL DEFAULT 0");
+        if (!result) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to add vector index structural generation column: " +
+                             result.error().message};
+        }
+    }
+    result = executeSQL(db, R"sql(
         CREATE TRIGGER vectors_index_generation_insert
         AFTER INSERT ON vectors BEGIN
             UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
         END;
-        CREATE TRIGGER vectors_index_generation_update_v2
+        CREATE TRIGGER vectors_index_generation_update_v3
         AFTER UPDATE OF chunk_id, document_hash, embedding, embedding_dim ON vectors BEGIN
-            UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
+            UPDATE vector_index_generation
+               SET generation = generation + 1,
+                   structural_generation = structural_generation + 1
+             WHERE id = 1;
         END;
-        CREATE TRIGGER vectors_index_generation_delete
+        CREATE TRIGGER vectors_index_generation_delete_v2
         AFTER DELETE ON vectors BEGIN
-            UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
+            UPDATE vector_index_generation
+               SET generation = generation + 1,
+                   structural_generation = structural_generation + 1
+             WHERE id = 1;
         END;
         DROP TABLE IF EXISTS turboquant_quantizer_meta;
     )sql");
@@ -792,65 +825,6 @@ Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db,
     spdlog::info("Backup tables created: doc_embeddings_v1_backup, doc_metadata_v1_backup");
     spdlog::info("Run removeBackupTables() after confirming V2 works correctly");
 
-    return Result<void>{};
-}
-
-Result<void> VectorSchemaMigration::rollbackV2ToV1(sqlite3* db) {
-    if (!db) {
-        return Error{ErrorCode::InvalidArgument, "Database handle is null"};
-    }
-
-    if (!hasBackupTables(db)) {
-        return Error{ErrorCode::InvalidState, "Cannot rollback: backup tables not found"};
-    }
-
-    spdlog::info("Rolling back V2 to V1 schema...");
-
-    auto result = beginTransaction(db);
-    if (!result) {
-        return result;
-    }
-
-    // Drop V2 tables
-    result = executeSQL(db, "DROP TABLE IF EXISTS vectors");
-    if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return result;
-    }
-
-    result = executeSQL(db, "DROP TABLE IF EXISTS vectors_hnsw_meta");
-    if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return result;
-    }
-
-    result = executeSQL(db, "DROP TABLE IF EXISTS vectors_hnsw_nodes");
-    if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return result;
-    }
-
-    // Restore V1 tables
-    result = executeSQL(db, "ALTER TABLE doc_embeddings_v1_backup RENAME TO doc_embeddings");
-    if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return result;
-    }
-
-    result = executeSQL(db, "ALTER TABLE doc_metadata_v1_backup RENAME TO doc_metadata");
-    if (!result) {
-        // Try to restore doc_embeddings backup name
-        executeSQL(db, "ALTER TABLE doc_embeddings RENAME TO doc_embeddings_v1_backup");
-        executeSQL(db, "ROLLBACK");
-        return result;
-    }
-
-    result = executeSQL(db, "COMMIT");
-    if (!result) {
-        return result;
-    }
-
-    spdlog::info("Rollback to V1 schema completed");
     return Result<void>{};
 }
 

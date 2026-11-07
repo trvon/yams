@@ -405,32 +405,10 @@ RetrievalService::getChunkedBuffer(const GetInitOptions& req_opts, std::size_t c
     return ChunkedGetResult{fake, std::move(content)};
 }
 
-Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashPrefix,
-                                                        bool preferOldest, bool preferLatest,
-                                                        const RetrievalOptions& opts,
-                                                        std::size_t limit) const {
-    if (hashPrefix.size() < 6 || hashPrefix.size() > 64) {
-        return Error{ErrorCode::InvalidArgument,
-                     "Hash prefix must be between 6 and 64 hexadecimal characters."};
-    }
-
-    yams::daemon::SearchRequest sreq;
-    sreq.query = hashPrefix;
-    sreq.hashQuery = hashPrefix;
-    sreq.searchType = "hash";
-    sreq.limit = static_cast<uint32_t>(std::max<std::size_t>(limit, 1));
-    sreq.showHash = true;
-    sreq.pathsOnly = false;
-
-    auto client = getOrCreateClient(opts);
-    auto searchResult = runClientCallWithTimeout<yams::daemon::SearchResponse>(
-        opts, "search",
-        [client, sreq = std::move(sreq)]() { return client->streamingSearch(sreq); });
-    if (!searchResult)
-        return searchResult.error();
-
-    const auto& resp = searchResult.value();
-    if (resp.results.empty()) {
+Result<std::string> selectHashPrefixMatch(const std::vector<yams::daemon::SearchResult>& results,
+                                          const std::string& hashPrefix, bool preferOldest,
+                                          bool preferLatest) {
+    if (results.empty()) {
         return Error{ErrorCode::NotFound, "No documents match the provided hash prefix."};
     }
 
@@ -442,9 +420,9 @@ Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashP
     };
 
     std::vector<Candidate> matches;
-    matches.reserve(resp.results.size());
+    matches.reserve(results.size());
 
-    for (const auto& item : resp.results) {
+    for (const auto& item : results) {
         auto hashIt = item.metadata.find("hash");
         if (hashIt == item.metadata.end())
             continue;
@@ -468,6 +446,10 @@ Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashP
             }
         }
 
+        // One document listed at several locations is still one match.
+        if (std::any_of(matches.begin(), matches.end(),
+                        [&](const Candidate& c) { return c.hash == hash; }))
+            continue;
         matches.push_back(Candidate{&item, std::move(hash), item.path, indexed});
     }
 
@@ -521,6 +503,34 @@ Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashP
     return chosen->hash;
 }
 
+Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashPrefix,
+                                                        bool preferOldest, bool preferLatest,
+                                                        const RetrievalOptions& opts,
+                                                        std::size_t limit) const {
+    if (hashPrefix.size() < 6 || hashPrefix.size() > 64) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Hash prefix must be between 6 and 64 hexadecimal characters."};
+    }
+
+    yams::daemon::SearchRequest sreq;
+    sreq.query = hashPrefix;
+    sreq.hashQuery = hashPrefix;
+    sreq.searchType = "hash";
+    sreq.limit = static_cast<uint32_t>(std::max<std::size_t>(limit, 1));
+    sreq.showHash = true;
+    sreq.pathsOnly = false;
+
+    auto client = getOrCreateClient(opts);
+    auto searchResult = runClientCallWithTimeout<yams::daemon::SearchResponse>(
+        opts, "search",
+        [client, sreq = std::move(sreq)]() { return client->streamingSearch(sreq); });
+    if (!searchResult)
+        return searchResult.error();
+
+    return selectHashPrefixMatch(searchResult.value().results, hashPrefix, preferOldest,
+                                 preferLatest);
+}
+
 } // namespace yams::app::services
 
 namespace yams::app::services {
@@ -532,14 +542,32 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
     if (name.empty())
         return Error{ErrorCode::InvalidArgument, "empty name"};
 
-    // 1) Try resolver (e.g., DocumentService::resolveNameToHash)
-    if (resolver) {
+    // 1) Resolver (DocumentService::resolveNameToHash). It falls back to
+    //    contains-path patterns and picks the newest of several matches, so its
+    //    answer counts only when that document's path or basename is exactly
+    //    `name`. Globs and loose names go through the stages below.
+    if (resolver && name.find_first_of("*?") == std::string::npos) {
         auto rh = resolver(name);
         if (rh) {
-            GetOptions greq_opts;
-            greq_opts.hash = rh.value();
-            greq_opts.metadataOnly = !includeContent;
-            return get(greq_opts, opts);
+            GetOptions meta_opts;
+            meta_opts.hash = rh.value();
+            meta_opts.metadataOnly = true;
+            auto meta = get(meta_opts, opts);
+            if (meta) {
+                const auto& path = meta.value().path;
+                const std::string suffix = "/" + name;
+                const bool exact =
+                    path == name || meta.value().name == name ||
+                    (path.size() > suffix.size() &&
+                     path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0);
+                if (exact) {
+                    if (!includeContent)
+                        return meta;
+                    GetOptions greq_opts;
+                    greq_opts.hash = rh.value();
+                    return get(greq_opts, opts);
+                }
+            }
         }
     }
 
@@ -685,98 +713,98 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
         }
     }
 
-    // 4) Base-name list fallback (portable and fast): "% /name", then stem, then contains
-    {
-        std::optional<yams::daemon::ListEntry> cand;
-        if (!cand)
-            cand = try_list_pattern(std::string("%/") + name, 32);
-        if (!cand) {
-            std::string stem = name;
-            try {
-                stem = std::filesystem::path(name).stem().string();
-            } catch (...) {
-                // Intentional best-effort path; keep the primary operation unaffected.
-            }
-            cand = try_list_pattern(std::string("%/") + stem + "%", 64);
+    // List patterns are globs: `*` and `?` are wildcards, everything else is literal.
+    auto list_matches = [&](const std::string& pat,
+                            uint32_t limit) -> std::vector<yams::daemon::ListEntry> {
+        ListOptions lreq_opts;
+        lreq_opts.namePattern = pat;
+        lreq_opts.limit = limit;
+        lreq_opts.pathsOnly = false;
+        // Newest first by default; oldest first when asked, so the limit never
+        // drops the version the caller wants.
+        lreq_opts.reverse = oldest;
+        auto lr = list(lreq_opts, opts);
+        if (!lr)
+            return {};
+        std::vector<yams::daemon::ListEntry> unique;
+        for (auto& item : lr.value().items) {
+            if (item.hash.empty())
+                continue;
+            const bool seen = std::any_of(unique.begin(), unique.end(),
+                                          [&](const auto& u) { return u.hash == item.hash; });
+            if (!seen)
+                unique.push_back(std::move(item));
         }
-        if (!cand)
-            cand = try_list_pattern(std::string("%") + name + "%", 64);
-        if (cand) {
-            GetOptions greq_opts;
-            greq_opts.hash = cand->hash;
-            greq_opts.metadataOnly = !includeContent;
-            return get(greq_opts, opts);
-        }
-    }
+        return unique;
+    };
+    auto get_hash = [&](const std::string& hash) {
+        GetOptions greq_opts;
+        greq_opts.hash = hash;
+        greq_opts.metadataOnly = !includeContent;
+        return get(greq_opts, opts);
+    };
 
-    // 5) Hybrid search fallback for best match
-    // PBI-040, task 040-1: Fast-path check if FTS5 is ready before attempting search
-    if (!isFTS5Ready(opts)) {
-        return Error{ErrorCode::NotFound,
-                     "document not found (search index updating, try again in a few seconds)"};
-    }
-
+    const bool hasWildcard = name.find_first_of("*?") != std::string::npos;
+    bool isAbsolute = false;
     try {
-        auto client = getOrCreateClient(opts);
-        yams::daemon::SearchRequest sreq;
-        sreq.query = name;
-        sreq.fuzzy = true;
-        sreq.similarity = 0.7;
-        sreq.searchType = "hybrid";
-        sreq.limit = 1;
-        sreq.pathsOnly = false;
-        auto sres = runClientCallWithTimeout<yams::daemon::SearchResponse>(
-            opts, "search",
-            [client, sreq = std::move(sreq)]() { return client->streamingSearch(sreq); });
-        if (sres && !sres.value().results.empty()) {
-            const auto& best = sres.value().results.front();
-            std::string hash;
-            auto it = best.metadata.find("hash");
-            if (it != best.metadata.end())
-                hash = it->second;
-            GetOptions greq_opts;
-            if (!hash.empty()) {
-                greq_opts.hash = hash;
-            } else {
-                // Prefer filename-based name resolution for portability over absolute path
-                try {
-                    std::filesystem::path bp(best.path);
-                    greq_opts.name = bp.filename().string();
-                } catch (...) {
-                    greq_opts.name = best.path; // fallback to provided path
+        isAbsolute = std::filesystem::path(name).is_absolute();
+    } catch (...) {
+    }
+
+    // 4) Whole-name matches: the exact basename, or a relative path that is a
+    //    suffix of the stored path. Several versions may share a name; pick by
+    //    time as documented for --latest/--oldest.
+    if (!hasWildcard && !isAbsolute) {
+        std::vector<yams::daemon::ListEntry> whole;
+        if (looksPathLike) {
+            const std::string suffix = "/" + name;
+            for (auto& item : list_matches("*" + suffix, 256)) {
+                if (item.path.size() >= suffix.size() &&
+                    item.path.compare(item.path.size() - suffix.size(), suffix.size(), suffix) == 0)
+                    whole.push_back(std::move(item));
+            }
+        } else {
+            whole = list_matches(name, 256);
+        }
+        if (auto chosen = pick_by_time(whole))
+            return get_hash(chosen->hash);
+    }
+
+    // 5) Loose matches (stem prefix, then substring of the basename) resolve
+    //    only when exactly one document matches. No search fallback: a name
+    //    that matches nothing is NotFound, never the nearest search hit.
+    if (!looksPathLike) {
+        std::string stem = name;
+        try {
+            stem = std::filesystem::path(name).stem().string();
+        } catch (...) {
+        }
+        std::vector<std::string> loose;
+        if (hasWildcard) {
+            loose.push_back(name);
+        } else {
+            if (!stem.empty())
+                loose.push_back(stem + "*");
+            loose.push_back("*" + name + "*");
+        }
+        for (const auto& pat : loose) {
+            auto items = list_matches(pat, 6);
+            if (items.size() == 1)
+                return get_hash(items.front().hash);
+            if (items.size() > 1) {
+                std::string candidates;
+                for (std::size_t i = 0; i < items.size() && i < 5; ++i) {
+                    candidates +=
+                        (i ? ", " : "") + (items[i].path.empty() ? items[i].name : items[i].path);
                 }
-                greq_opts.byName = true;
+                return Error{ErrorCode::InvalidArgument,
+                             "ambiguous name '" + name + "' matches several documents (" +
+                                 candidates + "); pass a full path or --hash"};
             }
-            greq_opts.metadataOnly = !includeContent;
-            return get(greq_opts, opts);
         }
-    } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
     }
 
-    return Error{ErrorCode::NotFound, "document not found by name"};
-}
-
-// PBI-040, task 040-1: Check if FTS5 index is ready for queries
-bool RetrievalService::isFTS5Ready(const RetrievalOptions& opts) const {
-    try {
-        auto client = getOrCreateClient(opts);
-        auto fastOpts = opts;
-        fastOpts.requestTimeoutMs = 500;
-        auto status = runClientCallWithTimeout<yams::daemon::StatusResponse>(
-            fastOpts, "status", [client]() { return client->status(); });
-        if (!status) {
-            return false; // Status query failed -> not ready
-        }
-
-        // Consider FTS5 ready if queue depth is low (< 100 tasks)
-        // Threshold balances responsiveness vs. false negatives
-        constexpr uint32_t kReadyThreshold = 100;
-        return status.value().postIngestQueueDepth < kReadyThreshold;
-
-    } catch (...) {
-        return false; // Any error -> assume not ready
-    }
+    return Error{ErrorCode::NotFound, "no document named '" + name + "'"};
 }
 
 Result<yams::daemon::SearchResponse> RetrievalService::search(const SearchOptions& req_opts,

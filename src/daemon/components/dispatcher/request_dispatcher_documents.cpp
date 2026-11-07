@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -30,6 +31,7 @@
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/grep_result_window.h>
+#include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -639,17 +641,16 @@ int envIntOrDefault(const char* name, int fallback, int minValue, int maxValue) 
 
 int computeEnqueueDelayMs(const AddDocumentRequest& req, int attempt, int baseDelayMs,
                           int maxDelayMs) {
-    int expDelay = baseDelayMs;
-    if (attempt > 0) {
-        const int shift = std::min(attempt, 10);
-        expDelay = std::min(maxDelayMs, baseDelayMs << shift);
-    }
+    const auto base = static_cast<std::uint64_t>(std::max(0, baseDelayMs));
+    const auto maximum = static_cast<std::uint64_t>(std::max(0, maxDelayMs));
+    const auto shift = static_cast<unsigned int>(std::clamp(attempt, 0, 10));
+    const auto expDelay = std::min(maximum, base * (std::uint64_t{1} << shift));
 
     const std::string& key = req.name.empty() ? req.path : req.name;
     const std::size_t seed = std::hash<std::string>{}(key);
-    const int jitterCap = std::max(1, expDelay / 2);
-    const int jitter = static_cast<int>(seed % static_cast<std::size_t>(jitterCap));
-    return std::min(maxDelayMs, expDelay + jitter);
+    const auto jitterCap = std::max(std::uint64_t{1}, expDelay / 2U);
+    const auto jitter = static_cast<std::uint64_t>(seed) % jitterCap;
+    return static_cast<int>(std::min(maximum, expDelay + jitter));
 }
 
 struct ImmediateAddFingerprint {
@@ -691,6 +692,7 @@ tryEnqueueStoreDocumentTaskWithBackoff(const AddDocumentRequest& req,
         }
         if (pushed) {
             TuningManager::notifyWakeup();
+            IngestService::notifyWakeup();
             if (attempt > 0) {
                 spdlog::debug("[RequestDispatcher] AddDocument enqueue succeeded after {} retries",
                               attempt);
@@ -1437,11 +1439,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                 daemonResult.error = deleteResult.error.value_or("");
                 if (daemonResult.success) {
                     response.successCount++;
-                    if (lifecycle_ && !deleteResult.hash.empty()) {
-                        lifecycle_->onDocumentRemoved(deleteResult.hash);
-                    }
-                    if (!response.dryRun && !deleteResult.hash.empty()) {
-                        replicatedDeletes.push_back(deleteResult.hash);
+                    // A successful location retirement leaves the content in the corpus.
+                    // Neither lifecycle removal nor replication may turn it into a hash delete.
+                    if (!deleteResult.pathOnly) {
+                        if (lifecycle_ && !deleteResult.hash.empty()) {
+                            lifecycle_->onDocumentRemoved(deleteResult.hash);
+                        }
+                        if (!response.dryRun && !deleteResult.hash.empty()) {
+                            replicatedDeletes.push_back(deleteResult.hash);
+                        }
                     }
                 } else {
                     response.failureCount++;
@@ -1488,6 +1494,57 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
 }
 
 boost::asio::awaitable<Response>
+RequestDispatcher::handleUnlinkPathRequest(const UnlinkPathRequest& req) {
+    co_return co_await yams::daemon::dispatch::guard_await(
+        "unlink_path", [this, req]() -> boost::asio::awaitable<Response> {
+            auto documentService =
+                app::services::makeDocumentService(serviceManager_->getAppContext());
+            app::services::DeleteByNameRequest operation;
+            operation.name = req.path;
+            operation.dryRun = req.dryRun;
+            operation.pathOnly = true;
+            // No hash-wide durable intent, lifecycle removal, or replication publication.
+            auto result = co_await yams::daemon::dispatch::offload_to_worker(
+                serviceManager_, "documents.unlink_path",
+                [documentService, operation = std::move(operation)]() mutable {
+                    return documentService->deleteByName(operation);
+                });
+            if (!result) {
+                co_return yams::daemon::dispatch::makeErrorResponse(result.error().code,
+                                                                    result.error().message);
+            }
+            const auto& response = result.value();
+            if (!response.errors.empty()) {
+                const auto& error = response.errors.front();
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    error.errorCode, error.error.value_or("Failed to retire document path"));
+            }
+            if (response.deleted.size() != 1) {
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::InvalidState,
+                    "Path unlink must resolve exactly one current location");
+            }
+            const auto& effect = response.deleted.front();
+            if (!req.dryRun && !effect.pathOnly) {
+                co_return yams::daemon::dispatch::makeErrorResponse(
+                    ErrorCode::InvalidState, "Path unlink returned a corpus-wide deletion effect");
+            }
+            DeleteResponse reply;
+            reply.dryRun = req.dryRun;
+            DeleteResponse::DeleteResult status;
+            status.name = effect.name;
+            status.hash = effect.hash;
+            status.success = effect.deleted || req.dryRun;
+            status.errorCode = effect.errorCode;
+            status.error = effect.error.value_or("");
+            reply.successCount = status.success ? 1 : 0;
+            reply.failureCount = status.success ? 0 : 1;
+            reply.results.push_back(std::move(status));
+            co_return reply;
+        });
+}
+
+boost::asio::awaitable<Response>
 RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
     co_return co_await yams::daemon::dispatch::guard_await(
         "add_document", [this, req]() -> boost::asio::awaitable<Response> {
@@ -1495,20 +1552,41 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             const auto channelCapacity =
                 static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
 
-            // Check admission control before accepting new work
+            // Keep directory/recursive routing, but never convert a requested
+            // synchronous acknowledgement into a queued-success response.
+            if (!req.path.empty()) {
+                std::error_code existsEc;
+                const bool exists = std::filesystem::exists(req.path, existsEc);
+                if (existsEc) {
+                    co_return yams::daemon::dispatch::makeErrorResponse(
+                        ErrorCode::IOError,
+                        "Cannot access " + req.path + ": " + existsEc.message());
+                }
+                if (!exists) {
+                    co_return yams::daemon::dispatch::makeErrorResponse(
+                        ErrorCode::NotFound, "Path not found: " + req.path);
+                }
+            }
+            const bool isDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
+            const bool synchronousRequested =
+                req.waitForProcessing ||
+                (!isDir && !req.recursive && envRequestsSyncSingleFileAdd());
             if (!ResourceGovernor::instance().canAdmitWork()) {
-                const bool reqIsDir =
-                    (!req.path.empty() && std::filesystem::is_directory(req.path));
+                if (synchronousRequested) {
+                    if (state_) {
+                        state_->stats.addRequestsRejected.fetch_add(1, std::memory_order_acq_rel);
+                    }
+                    co_return admission::makeBusyError(
+                        "Synchronous ingestion was not accepted (system under pressure)",
+                        admission::captureSnapshot(serviceManager_, state_));
+                }
                 co_return co_await enqueueAddDocumentOrReject(
                     serviceManager_, state_, req, channelCapacity,
                     "Queued for deferred processing (system under pressure).",
-                    /*countDeferred=*/true, reqIsDir);
+                    /*countDeferred=*/true, isDir);
             }
 
-            // Be forgiving: if the path is a directory but recursive was not set, treat it as
-            // a directory ingestion with recursive=true to avoid file_size errors sent by clients
-            // that didn't set the flag (common with LLM-driven clients).
-            bool isDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
+            // Directory requests still use the recursive async ingestion path.
             if (req.path.empty() && (req.content.empty() || req.name.empty())) {
                 co_return yams::daemon::dispatch::makeErrorResponse(
                     ErrorCode::InvalidArgument, "Provide either 'path' or 'content' + 'name'");
@@ -1526,8 +1604,17 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 }
             }
 
-            // Centralized routing: directories/recursive/not-ready and default single-file adds go
-            // to the async queue; only sync-env / waitForProcessing take the synchronous path.
+            if (!daemonReady && synchronousRequested) {
+                if (state_) {
+                    state_->stats.addRequestsRejected.fetch_add(1, std::memory_order_acq_rel);
+                }
+                co_return admission::makeBusyError(
+                    "Daemon is initializing; synchronous ingestion was not accepted",
+                    admission::captureSnapshot(serviceManager_, state_));
+            }
+
+            // Explicit async requests can be queued during initialization; a
+            // requested synchronous store must reach the actual store path.
             const auto routing = selectAddRoutingPlan(req, isDir, daemonReady);
             if (routing.async) {
                 co_return co_await enqueueAddDocumentOrReject(
@@ -1682,7 +1769,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
             // intentionally omits per-file match details and instead populates the shared
             // pathsOnly projection. Map those paths into lightweight GrepMatch entries so daemon
             // clients (and tests) can observe results via the standard matches field.
-            if (serviceReq.pathsOnly) {
+            if (req.pathsOnly) {
                 GrepResponse response;
                 response.filesSearched = serviceResp.filesSearched;
                 response.regexMatches = static_cast<uint64_t>(serviceResp.regexMatches);

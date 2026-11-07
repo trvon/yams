@@ -6,11 +6,14 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 
+#include <boost/asio/associated_executor.hpp>
+#include <boost/asio/async_result.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
@@ -22,6 +25,72 @@ namespace yams::daemon {
 // Keep each writer-loop turn bounded, but allow enough batches to coalesce noisy
 // status-only producers before they churn the single SQLite writer.
 static constexpr std::size_t kMaxBatchesPerIteration = 64;
+
+struct WriteCoordinator::EmbeddingAcknowledgementState {
+    explicit EmbeddingAcknowledgementState(EmbeddingCompletionAcknowledgementCallback callbackIn)
+        : callback(std::move(callbackIn)) {}
+
+    void settle(Result<EmbeddingCompletionAcknowledgement> result) noexcept {
+        if (settled.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        auto completion = std::move(callback);
+        callback = {};
+        try {
+            completion(std::move(result));
+        } catch (const std::exception& e) {
+            spdlog::error("[WriteCoordinator] embedding acknowledgement threw: {}", e.what());
+        } catch (...) {
+            spdlog::error(
+                "[WriteCoordinator] embedding acknowledgement threw an unknown exception");
+        }
+    }
+
+    std::atomic<bool> settled{false};
+    EmbeddingCompletionAcknowledgementCallback callback;
+};
+
+namespace {
+
+void acknowledgeEmbeddingCompletion(CompleteDocumentEmbeddingsByHashesOp& op,
+                                    Result<EmbeddingCompletionAcknowledgement> result) noexcept {
+    if (!op.acknowledgement) {
+        return;
+    }
+    auto acknowledgement = std::move(op.acknowledgement);
+    op.acknowledgement = {};
+    try {
+        acknowledgement(std::move(result));
+    } catch (const std::exception& e) {
+        spdlog::error("[WriteCoordinator] embedding acknowledgement threw: {}", e.what());
+    } catch (...) {
+        spdlog::error("[WriteCoordinator] embedding acknowledgement threw an unknown exception");
+    }
+}
+
+void failEmbeddingAcknowledgements(std::vector<std::unique_ptr<WriteBatch>>& batches,
+                                   const Error& error) noexcept {
+    for (auto& batch : batches) {
+        if (!batch) {
+            continue;
+        }
+        for (auto& op : batch->ops) {
+            if (auto* completion = std::get_if<CompleteDocumentEmbeddingsByHashesOp>(&op)) {
+                acknowledgeEmbeddingCompletion(*completion, error);
+            }
+        }
+    }
+}
+
+void failEmbeddingAcknowledgements(WriteBatch& batch, const Error& error) noexcept {
+    for (auto& op : batch.ops) {
+        if (auto* completion = std::get_if<CompleteDocumentEmbeddingsByHashesOp>(&op)) {
+            acknowledgeEmbeddingCompletion(*completion, error);
+        }
+    }
+}
+
+} // namespace
 
 WriteCoordinator::WriteCoordinator(boost::asio::io_context& ioc,
                                    std::shared_ptr<metadata::KnowledgeGraphStore> kgStore,
@@ -35,6 +104,8 @@ WriteCoordinator::WriteCoordinator(boost::asio::io_context& ioc,
                       "WriteCoordinator channelCapacity must be positive");
     YAMS_PRECONDITION(config_.maxBatchDelayMs.count() >= 0,
                       "WriteCoordinator maxBatchDelayMs must be non-negative");
+    YAMS_PRECONDITION(config_.shutdownTimeout.count() >= 0,
+                      "WriteCoordinator shutdownTimeout must be non-negative");
     spdlog::info("[WriteCoordinator] Initialized maxBatchSize={} maxDelayMs={} capacity={}",
                  config_.maxBatchSize, config_.maxBatchDelayMs.count(), config_.channelCapacity);
 }
@@ -48,30 +119,75 @@ WriteCoordinator::~WriteCoordinator() {
     shutdown();
 }
 
+void WriteCoordinator::registerEmbeddingAcknowledgementsLocked(WriteBatch& batch) {
+    embeddingAcknowledgements_.erase(
+        std::remove_if(embeddingAcknowledgements_.begin(), embeddingAcknowledgements_.end(),
+                       [](const auto& state) { return state.expired(); }),
+        embeddingAcknowledgements_.end());
+    for (auto& op : batch.ops) {
+        auto* completion = std::get_if<CompleteDocumentEmbeddingsByHashesOp>(&op);
+        if (!completion || !completion->acknowledgement) {
+            continue;
+        }
+        auto state =
+            std::make_shared<EmbeddingAcknowledgementState>(std::move(completion->acknowledgement));
+        completion->acknowledgement =
+            [state](Result<EmbeddingCompletionAcknowledgement> result) mutable {
+                state->settle(std::move(result));
+            };
+        embeddingAcknowledgements_.emplace_back(state);
+    }
+}
+
+void WriteCoordinator::settleOutstandingEmbeddingAcknowledgements(const Error& error) noexcept {
+    std::vector<std::shared_ptr<EmbeddingAcknowledgementState>> states;
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        states.reserve(embeddingAcknowledgements_.size());
+        for (auto& weakState : embeddingAcknowledgements_) {
+            if (auto state = weakState.lock()) {
+                states.push_back(std::move(state));
+            }
+        }
+        embeddingAcknowledgements_.clear();
+    }
+    for (auto& state : states) {
+        state->settle(error);
+    }
+}
+
 void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
     YAMS_ZONE_SCOPED_N("WriteCoordinator::enqueue");
     if (!batch)
         return;
     batch->enqueueTime = std::chrono::steady_clock::now();
     bool forcedOverCapacity = false;
+    bool rejectedForShutdown = false;
     std::size_t queueDepth = 0;
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         if (stop_.load(std::memory_order_acquire)) {
-            spdlog::warn("[WriteCoordinator] Dropping batch from '{}' after shutdown requested",
-                         batch->source);
-            return;
+            rejectedForShutdown = true;
+        } else {
+            if (pendingBatches_.size() >= config_.channelCapacity) {
+                forcedOverCapacity = true;
+                spdlog::warn(
+                    "[WriteCoordinator] Queue full ({} batches); forcing guaranteed enqueue past "
+                    "capacity={}",
+                    pendingBatches_.size(), config_.channelCapacity);
+            }
+            registerEmbeddingAcknowledgementsLocked(*batch);
+            pendingBatches_.push_back(std::move(batch));
+            queueDepth = pendingBatches_.size();
+            YAMS_PLOT("wc.queue.depth", static_cast<int64_t>(queueDepth));
         }
-        if (pendingBatches_.size() >= config_.channelCapacity) {
-            forcedOverCapacity = true;
-            spdlog::warn(
-                "[WriteCoordinator] Queue full ({} batches); forcing guaranteed enqueue past "
-                "capacity={}",
-                pendingBatches_.size(), config_.channelCapacity);
-        }
-        pendingBatches_.push_back(std::move(batch));
-        queueDepth = pendingBatches_.size();
-        YAMS_PLOT("wc.queue.depth", static_cast<int64_t>(queueDepth));
+    }
+    if (rejectedForShutdown) {
+        spdlog::warn("[WriteCoordinator] Dropping batch from '{}' after shutdown requested",
+                     batch->source);
+        failEmbeddingAcknowledgements(
+            *batch, Error{ErrorCode::SystemShutdown, "WriteCoordinator is shutting down"});
+        return;
     }
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
@@ -89,32 +205,107 @@ bool WriteCoordinator::tryEnqueue(std::unique_ptr<WriteBatch>& batch) {
     if (!batch)
         return false;
     bool rejectedAtCapacity = false;
+    bool rejectedForShutdown = false;
     std::size_t queueDepth = 0;
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         if (stop_.load(std::memory_order_acquire)) {
-            return false;
-        }
-        if (pendingBatches_.size() >= config_.channelCapacity) {
+            rejectedForShutdown = true;
+        } else if (pendingBatches_.size() >= config_.channelCapacity) {
             rejectedAtCapacity = true;
         } else {
             batch->enqueueTime = std::chrono::steady_clock::now();
+            registerEmbeddingAcknowledgementsLocked(*batch);
             pendingBatches_.push_back(std::move(batch));
             queueDepth = pendingBatches_.size();
             YAMS_PLOT("wc.queue.depth", static_cast<int64_t>(queueDepth));
         }
     }
+    if (rejectedForShutdown) {
+        return false;
+    }
+    if (rejectedAtCapacity) {
+        {
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.capacityRejections++;
+        }
+        return false;
+    }
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
-        if (rejectedAtCapacity) {
-            stats_.capacityRejections++;
-            return false;
-        }
         stats_.batchesEnqueued++;
         stats_.maxQueueDepth = std::max<std::uint64_t>(stats_.maxQueueDepth, queueDepth);
     }
     wakeWriter();
     return true;
+}
+
+boost::asio::awaitable<Result<EmbeddingCompletionAcknowledgement>, boost::asio::any_io_executor>
+WriteCoordinator::asyncCompleteEmbeddingDerivations(
+    std::vector<metadata::EmbeddingDerivationToken> derivations, std::string modelName,
+    std::string source) {
+    if (derivations.empty() || modelName.empty()) {
+        co_return Error{ErrorCode::InvalidArgument,
+                        "Embedding completion requires derivation tokens and a model"};
+    }
+
+    auto cancellationState = co_await boost::asio::this_coro::cancellation_state;
+    if (cancellationState.cancelled() != boost::asio::cancellation_type::none) {
+        co_return Error{ErrorCode::OperationCancelled, "Embedding completion was cancelled"};
+    }
+    auto cancellationSlot = cancellationState.slot();
+    auto callerExecutor = co_await boost::asio::this_coro::executor;
+
+    co_return co_await boost::asio::async_initiate<
+        const boost::asio::use_awaitable_t<>&, void(Result<EmbeddingCompletionAcknowledgement>)>(
+        [this, derivations = std::move(derivations), modelName = std::move(modelName),
+         source = std::move(source), cancellationSlot, callerExecutor](auto&& handler) mutable {
+            using Handler = std::decay_t<decltype(handler)>;
+            auto handlerPtr = std::make_shared<Handler>(std::forward<decltype(handler)>(handler));
+            auto completionExecutor =
+                boost::asio::get_associated_executor(*handlerPtr, callerExecutor);
+            auto completed = std::make_shared<std::atomic<bool>>(false);
+            auto finish = [completed, handlerPtr, completionExecutor](
+                              Result<EmbeddingCompletionAcknowledgement> result) mutable {
+                if (completed->exchange(true, std::memory_order_acq_rel)) {
+                    return;
+                }
+                boost::asio::post(completionExecutor,
+                                  [handlerPtr, result = std::move(result)]() mutable {
+                                      auto completionHandler = std::move(*handlerPtr);
+                                      std::move(completionHandler)(std::move(result));
+                                  });
+            };
+
+            if (cancellationSlot.is_connected()) {
+                cancellationSlot.assign([finish](boost::asio::cancellation_type type) mutable {
+                    if (type != boost::asio::cancellation_type::none) {
+                        finish(Error{ErrorCode::OperationCancelled,
+                                     "Embedding completion was cancelled"});
+                    }
+                });
+            }
+
+            auto batch = std::make_unique<WriteBatch>();
+            batch->source =
+                source.empty() ? "WriteCoordinator::embeddingCompletion" : std::move(source);
+            CompleteDocumentEmbeddingsByHashesOp op;
+            op.modelName = std::move(modelName);
+            op.derivations = std::move(derivations);
+            auto admissionFailure = finish;
+            op.acknowledgement = std::move(finish);
+            batch->ops.emplace_back(std::move(op));
+            if (!tryEnqueue(batch)) {
+                if (isShuttingDown()) {
+                    admissionFailure(
+                        Error{ErrorCode::SystemShutdown, "WriteCoordinator is shutting down"});
+                } else {
+                    admissionFailure(
+                        Error{ErrorCode::ResourceExhausted, "WriteCoordinator queue is full"});
+                }
+            }
+        },
+        boost::asio::use_awaitable);
 }
 
 void WriteCoordinator::wakeWriter() {
@@ -165,13 +356,19 @@ void WriteCoordinator::shutdown() {
         std::lock_guard<std::mutex> lock(queueMutex_);
         drainCv_.notify_all();
     }
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    auto deadline = std::chrono::steady_clock::now() + config_.shutdownTimeout;
+    bool drained = false;
     {
         std::unique_lock<std::mutex> lock(queueMutex_);
-        drainCv_.wait_until(lock, deadline, [this]() {
+        drained = drainCv_.wait_until(lock, deadline, [this]() {
             return pendingBatches_.empty() && inFlight_.load(std::memory_order_acquire) == 0 &&
                    writerExited_.load(std::memory_order_acquire);
         });
+    }
+    if (!drained) {
+        settleOutstandingEmbeddingAcknowledgements(
+            Error{ErrorCode::SystemShutdown,
+                  "WriteCoordinator shutdown timed out before acknowledgement"});
     }
     if (queuedBatches() > 0) {
         spdlog::warn("[WriteCoordinator] Shutdown with {} batches still pending", queuedBatches());
@@ -244,7 +441,8 @@ void WriteCoordinator::recordSourceApply(const std::string& source, std::uint64_
 }
 
 boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
-    YAMS_SET_THREAD_NAME("yams-write-coordinator");
+    // No thread name here: this coroutine runs on the shared WorkCoordinator executor and can
+    // resume on any of its workers, so naming "this thread" would mislabel a pool worker.
     spdlog::info("[WriteCoordinator] Writer loop started");
     auto pollTimer = wakeTimer_;
 
@@ -290,7 +488,23 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
 
         spdlog::debug("[WriteCoordinator] Processing {} batches", batchesToProcess.size());
         YAMS_PLOT("wc.in_flight.batches", static_cast<int64_t>(batchesToProcess.size()));
-        auto result = applyBatches(batchesToProcess);
+        Result<void> result;
+        try {
+            result = applyBatches(batchesToProcess);
+        } catch (const std::exception& e) {
+            result = Error{ErrorCode::InternalError,
+                           std::string{"WriteCoordinator apply threw: "} + e.what()};
+        } catch (...) {
+            result = Error{ErrorCode::InternalError,
+                           "WriteCoordinator apply threw an unknown exception"};
+        }
+        if (!result) {
+            failEmbeddingAcknowledgements(batchesToProcess, result.error());
+        } else {
+            failEmbeddingAcknowledgements(
+                batchesToProcess, Error{ErrorCode::InternalError,
+                                        "Embedding completion acknowledgement was not applied"});
+        }
         if (!result) {
             {
                 std::lock_guard<std::mutex> lock(queueMutex_);
@@ -540,6 +754,11 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             return *firstCompletionError;
     }
 
+    if (hasMetaOps && !meta_) {
+        failEmbeddingAcknowledgements(
+            batches, Error{ErrorCode::InvalidState, "MetadataRepository unavailable"});
+    }
+
     if (hasMetaOps && meta_) {
         YAMS_ZONE_SCOPED_N("WriteCoordinator::applyMetadata");
         struct RepairStatusGroup {
@@ -686,10 +905,14 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                             return;
                         } else if constexpr (std::is_same_v<T,
                                                             CompleteDocumentEmbeddingsByHashesOp>) {
-                            if (!concrete.derivations.empty()) {
-                                r = applyMetadataOp(concrete);
-                                if (!r && !firstOpError) {
-                                    firstOpError = r.error();
+                            if (!concrete.derivations.empty() || concrete.acknowledgement) {
+                                auto completion = applyMetadataOp(concrete);
+                                if (!completion) {
+                                    r = completion.error();
+                                    acknowledgeEmbeddingCompletion(concrete, completion.error());
+                                } else {
+                                    r = Result<void>{};
+                                    acknowledgeEmbeddingCompletion(concrete, std::move(completion));
                                 }
                             } else {
                                 if (concrete.hashes.empty())
@@ -853,11 +1076,11 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                 YAMS_ZONE_SCOPED_N("WriteCoordinator::coalesceEmbeddingCompletion");
                 const auto end = std::min(group.hashes.size(), off + chunkMax);
                 const auto sourceStart = std::chrono::steady_clock::now();
-                CompleteDocumentEmbeddingsByHashesOp op{
-                    std::vector<std::string>(
-                        std::make_move_iterator(group.hashes.begin() + static_cast<long>(off)),
-                        std::make_move_iterator(group.hashes.begin() + static_cast<long>(end))),
-                    group.modelName};
+                CompleteDocumentEmbeddingsByHashesOp op;
+                op.hashes = std::vector<std::string>(
+                    std::make_move_iterator(group.hashes.begin() + static_cast<long>(off)),
+                    std::make_move_iterator(group.hashes.begin() + static_cast<long>(end)));
+                op.modelName = group.modelName;
                 const auto hashCount = static_cast<std::uint64_t>(op.hashes.size());
                 const auto logicalOpCount = hashCount * 2;
                 YAMS_PLOT("wc.coalesce.embedding_completion", static_cast<int64_t>(hashCount));
@@ -1355,7 +1578,8 @@ Result<void> WriteCoordinator::applyMetadataOp(UpdateEmbeddingStatusByHashesOp& 
     return r;
 }
 
-Result<void> WriteCoordinator::applyMetadataOp(CompleteDocumentEmbeddingsByHashesOp& op) {
+Result<EmbeddingCompletionAcknowledgement>
+WriteCoordinator::applyMetadataOp(CompleteDocumentEmbeddingsByHashesOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
     if (!op.derivations.empty()) {
@@ -1374,18 +1598,25 @@ Result<void> WriteCoordinator::applyMetadataOp(CompleteDocumentEmbeddingsByHashe
             stats_.embeddingStatusesUpdated += completed.value();
             stats_.repairStatusesUpdated += completed.value();
         }
-        return {};
+        return EmbeddingCompletionAcknowledgement{op.derivations.size(), completed.value()};
+    }
+    if (op.acknowledgement) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Acknowledged embedding completion requires derivation tokens"};
     }
     if (op.hashes.empty())
-        return Result<void>();
+        return EmbeddingCompletionAcknowledgement{};
     metadata::MetadataOpScope opScope("wc_embedding_completion_batch");
     auto r = meta_->batchCompleteDocumentEmbeddingsByHashes(op.hashes, op.modelName);
-    if (r) {
+    if (!r) {
+        return r.error();
+    }
+    {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.embeddingStatusesUpdated += op.hashes.size();
         stats_.repairStatusesUpdated += op.hashes.size();
     }
-    return r;
+    return EmbeddingCompletionAcknowledgement{op.hashes.size(), op.hashes.size()};
 }
 
 Result<void> WriteCoordinator::applyMetadataOp(InsertRelationshipOp& op) {

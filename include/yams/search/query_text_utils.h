@@ -28,7 +28,6 @@ std::string trimAndCollapseWhitespace(std::string_view input);
 std::string normalizeEntityTextForKey(std::string_view input);
 std::string normalizeGraphSurface(std::string_view input);
 const std::array<std::string_view, 19>& defaultQueryEntityTypes();
-bool looksLikeCompactBiomedicalSymbol(std::string_view input);
 std::string canonicalizeEntityType(std::string_view rawType, std::string_view rawText = {});
 bool isLowValueEntityText(std::string_view normalizedText, std::string_view normalizedType);
 SurfaceVariantKind surfaceVariantKindForEntityType(std::string_view entityType);

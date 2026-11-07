@@ -49,6 +49,29 @@ def production_environment_keys(root: Path) -> set[str]:
     return keys
 
 
+def is_reader_definition(text: str, match: re.Match[str]) -> bool:
+    # The candidate regex deliberately accepts nested signatures. Its greedy
+    # parentheses also include the outer condition in if(parse_toml(...) != x),
+    # so check the suffix after the actual balanced argument list. Keep quoted
+    # literals/comments opaque; this remains a source-policy heuristic, not a
+    # complete C++ parser.
+    argument_start = text.index("(", match.start("name"), match.end())
+    tokens = re.finditer(
+        r'''//[^\n]*|/\*[\s\S]*?\*/|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|[()]''',
+        text[argument_start : match.end()],
+    )
+    depth = 0
+    for token in tokens:
+        if token.group() == "(":
+            depth += 1
+        elif token.group() == ")":
+            depth -= 1
+            if depth == 0:
+                suffix = text[argument_start + token.end() : match.end()]
+                return re.fullmatch(r"\s*(?:const\s*)?\{", suffix) is not None
+    return False
+
+
 def toml_reader_definitions(root: Path) -> set[str]:
     definitions: set[str] = set()
     for path in iter_sources(root):
@@ -56,6 +79,8 @@ def toml_reader_definitions(root: Path) -> set[str]:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         for match in TOML_DEFINITION_RE.finditer(text):
+            if not is_reader_definition(text, match):
+                continue
             line = text.count("\n", 0, match.start()) + 1
             relative = path.relative_to(root).as_posix()
             definitions.add(f"{relative}:{match.group('name')}:{line}")

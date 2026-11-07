@@ -73,16 +73,6 @@ public:
 
         return static_cast<double>(totalCount) * 1000.0 / actualWindow.count(); // per second
     }
-
-    uint64_t getTotalCount() const {
-        std::lock_guard lock(mutex);
-
-        uint64_t total = 0;
-        for (const auto& event : events) {
-            total += event.count;
-        }
-        return total;
-    }
 };
 
 /**

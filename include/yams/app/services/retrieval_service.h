@@ -249,10 +249,15 @@ private:
     std::shared_ptr<yams::daemon::DaemonClient> client_; // optional shared client
     std::shared_ptr<yams::daemon::DaemonClient>
     getOrCreateClient(const RetrievalOptions& opts) const;
-
-    // Check if FTS5 index is ready for queries (PBI-040, task 040-1)
-    bool isFTS5Ready(const RetrievalOptions& opts) const;
 };
+
+/// Pick the document a hash prefix names from hash-search results. Results whose hash does not
+/// start with the prefix (case-insensitive) are ignored; several results with the same hash (one
+/// document at several paths) count once. More than one distinct document is ambiguous unless
+/// preferLatest / preferOldest picks by indexed time (oldest wins when both are set).
+Result<std::string> selectHashPrefixMatch(const std::vector<yams::daemon::SearchResult>& results,
+                                          const std::string& hashPrefix, bool preferOldest,
+                                          bool preferLatest);
 
 #ifdef YAMS_TESTING
 namespace testing {

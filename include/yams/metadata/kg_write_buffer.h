@@ -140,9 +140,6 @@ public:
     /// Current document count for auto-flush tracking.
     [[nodiscard]] std::size_t docCount() const noexcept;
 
-    /// Reset the document counter without flushing.
-    void resetDocCount();
-
     /// Reset all counters (edges/entities/docs flushed count).
     void resetCounters();
 
@@ -164,10 +161,6 @@ private:
     /// Merge 'incoming' into 'existing' per addEdgesUnique() semantics:
     /// keep max weight, COALESCE properties.
     static void mergeEdge(KGEdge& existing, const KGEdge& incoming);
-
-    /// Merge 'incoming' into 'existing' per addDocEntities semantics:
-    /// highest confidence wins, extractor coalesced.
-    static void mergeDocEntity(DocEntity& existing, const DocEntity& incoming);
 };
 
 } // namespace yams::metadata

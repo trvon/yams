@@ -235,7 +235,6 @@ public:
                     "dispatcher state");
 
         ioThreads_.clear();
-        ioContext_.reset();
 
         if (dispatcher_) {
             dispatcher_.reset();
@@ -245,6 +244,12 @@ public:
             serviceManager_.reset();
         }
         lifecycle_.reset();
+        // Service workers can still be returning from post() to this stopped
+        // executor. Drain/join them before destroying its scheduler, even though
+        // the host's own io_context threads have already joined.
+        emitTestingShutdownSnapshot(
+            EmbeddedServiceHost::TestingShutdownPhase::BeforeIoContextRelease);
+        ioContext_.reset();
         lifecycleFsm_.dispatch(StoppedEvent{});
 
         started_ = false;
@@ -273,6 +278,8 @@ public:
                 return beforeThreadJoinSnapshot_;
             case EmbeddedServiceHost::TestingShutdownPhase::AfterThreadJoin:
                 return afterThreadJoinSnapshot_;
+            case EmbeddedServiceHost::TestingShutdownPhase::BeforeIoContextRelease:
+                return beforeIoContextReleaseSnapshot_;
         }
         return std::nullopt;
     }
@@ -293,6 +300,9 @@ private:
                 break;
             case EmbeddedServiceHost::TestingShutdownPhase::AfterThreadJoin:
                 afterThreadJoinSnapshot_ = snapshot;
+                break;
+            case EmbeddedServiceHost::TestingShutdownPhase::BeforeIoContextRelease:
+                beforeIoContextReleaseSnapshot_ = snapshot;
                 break;
         }
         if (testingShutdownHook_) {
@@ -320,6 +330,7 @@ private:
     EmbeddedServiceHost::TestingShutdownHook testingShutdownHook_;
     std::optional<EmbeddedServiceHost::TestingShutdownSnapshot> beforeThreadJoinSnapshot_;
     std::optional<EmbeddedServiceHost::TestingShutdownSnapshot> afterThreadJoinSnapshot_;
+    std::optional<EmbeddedServiceHost::TestingShutdownSnapshot> beforeIoContextReleaseSnapshot_;
 };
 
 EmbeddedServiceHost::EmbeddedServiceHost(const Options& options)

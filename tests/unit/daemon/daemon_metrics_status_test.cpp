@@ -33,10 +33,13 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/daemon_lifecycle.h>
@@ -879,7 +882,6 @@ import sys
 EXPECTED_MODE = )PY"
                    << (requireTrustedConfig ? R"PY("trusted")PY" : "None") << R"PY(
 
-
 def handle_request(req):
     method = req.get("method", "")
     if method == "handshake.manifest":
@@ -897,7 +899,6 @@ def handle_request(req):
     if method == "plugin.shutdown":
         return {"status": "ok"}
     raise ValueError(f"Method not found: {method}")
-
 
 for line in sys.stdin:
     line = line.strip()
@@ -1011,6 +1012,139 @@ template <typename Predicate> bool waitForCondition(Predicate&& predicate, int a
 // Embedding Status Tests
 // =============================================================================
 
+TEST_CASE("Worker completion retains the caller context until the posting scope exits",
+          "[daemon][dispatcher][offload-lifetime]") {
+    struct TailGate {
+        std::promise<void> entered;
+        std::promise<void> releasePromise;
+        std::shared_future<void> released{releasePromise.get_future().share()};
+        std::once_flag releaseOnce;
+        std::thread::id worker;
+
+        void release() {
+            std::call_once(releaseOnce, [this] { releasePromise.set_value(); });
+        }
+    };
+    struct TailResult {
+        std::shared_ptr<TailGate> gate;
+        int value{0};
+        bool workerTemporary{false};
+
+        TailResult() = default;
+        explicit TailResult(std::shared_ptr<TailGate> g) : gate(std::move(g)), value(42) {}
+        TailResult(const TailResult&) = delete;
+        TailResult& operator=(const TailResult&) = delete;
+        TailResult(TailResult&& other) noexcept : gate(other.gate), value(other.value) {}
+        TailResult& operator=(TailResult&& other) noexcept {
+            gate = other.gate;
+            value = other.value;
+            workerTemporary = true;
+            return *this;
+        }
+        ~TailResult() {
+            // offload_to_worker assigns its worker-local result, then moves a
+            // separate result into the completion. Hold that original scope
+            // after posting without blocking the caller's completion handler.
+            if (workerTemporary && gate && std::this_thread::get_id() == gate->worker) {
+                gate->entered.set_value();
+                gate->released.wait();
+            }
+        }
+    };
+
+    // The context outlives the actual workers even if a REQUIRE aborts the case.
+    boost::asio::io_context caller;
+    GraphDispatcherFixture fixture;
+    auto gate = std::make_shared<TailGate>();
+    ScopeExit releaseWorker([&] { gate->release(); });
+    auto work = [gate] {
+        gate->worker = std::this_thread::get_id();
+        return TailResult(gate);
+    };
+    auto result =
+        boost::asio::co_spawn(caller,
+                              yams::daemon::dispatch::offload_to_worker(
+                                  fixture.svc.get(), "test_completion_lifetime", std::move(work)),
+                              boost::asio::use_future);
+    caller.poll();
+    REQUIRE(gate->entered.get_future().wait_for(std::chrono::seconds(2)) ==
+            std::future_status::ready);
+    // This is an I/O work-budget check, not a sleep/racy timing inference: the
+    // completion is queued and the worker remains held by an explicit future.
+    caller.run_for(std::chrono::milliseconds(10));
+    CHECK(result.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    CHECK_FALSE(caller.stopped());
+    gate->release();
+    caller.restart();
+    caller.run_for(std::chrono::seconds(2));
+    REQUIRE(result.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    CHECK(result.get().value == 42);
+}
+
+TEST_CASE("Synchronous add never silently becomes a queued initialization or pressure request",
+          "[daemon][documents][startup-write-guard]") {
+    const bool originalGovernor = TuneAdvisor::enableResourceGovernor();
+    const bool originalAdmission = TuneAdvisor::enableAdmissionControl();
+    auto restore = ScopeExit([&] {
+        TuneAdvisor::setEnableResourceGovernor(originalGovernor);
+        TuneAdvisor::setEnableAdmissionControl(originalAdmission);
+        ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Normal);
+        drainStoreDocumentTasks();
+    });
+    TuneAdvisor::setEnableResourceGovernor(false);
+    TuneAdvisor::setEnableAdmissionControl(false);
+    drainStoreDocumentTasks();
+    ScopedEnvVar syncDefault("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+    std::optional<ScopedEnvVar> syncOverride;
+    LifecycleState lifecycleState = LifecycleState::Initializing;
+    bool expectRejection = true;
+    AddDocumentRequest request;
+    request.name = "must-not-be-queued.txt";
+    request.content = "synchronous acknowledgement requires completed storage";
+    request.waitForProcessing = true;
+    SECTION("explicit wait while initialization is incomplete") {}
+    SECTION("existing synchronous compatibility setting during initialization") {
+        request.waitForProcessing = false;
+        syncOverride.emplace("YAMS_SYNC_SINGLE_FILE_ADD", "1");
+    }
+    SECTION("explicit wait under resource pressure") {
+        lifecycleState = LifecycleState::Ready;
+        TuneAdvisor::setEnableResourceGovernor(true);
+        TuneAdvisor::setEnableAdmissionControl(true);
+        ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+    }
+    SECTION("explicit asynchronous initialization remains an honest queued acknowledgement") {
+        request.waitForProcessing = false;
+        expectRejection = false;
+    }
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true);
+    state.readiness.metadataRepoReady.store(true);
+    StubLifecycle lifecycle(lifecycleState);
+    // No service manager, database, worker, filesystem or live daemon is needed:
+    // the existing queue is observable, and a rejection must precede any enqueue.
+    RequestDispatcher dispatcher(&lifecycle, nullptr, &state);
+    const auto response = dispatchRequest(dispatcher, Request{request});
+    auto channel = getStoreDocumentTaskChannel();
+    InternalEventBus::StoreDocumentTask task;
+    const bool enqueued = channel->try_pop(task);
+    if (expectRejection) {
+        CHECK(std::holds_alternative<ErrorResponse>(response));
+        CHECK_FALSE(enqueued);
+        CHECK(state.stats.addRequestsDeferred.load() == 0);
+        if (const auto* error = std::get_if<ErrorResponse>(&response)) {
+            CHECK(error->code == ErrorCode::ResourceExhausted);
+            CHECK(error->retry.has_value());
+            CHECK(error->message.find("retry") != std::string::npos);
+        }
+    } else {
+        REQUIRE(std::holds_alternative<AddDocumentResponse>(response));
+        CHECK(std::get<AddDocumentResponse>(response).documentsAdded == 0);
+        CHECK(enqueued);
+        CHECK(task.request.content == request.content);
+    }
+}
+
 TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embedding]") {
     StateComponent state;
     DaemonLifecycleFsm lifecycleFsm;
@@ -1044,6 +1178,59 @@ TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embeddi
         REQUIRE(snap != nullptr);
         REQUIRE(!snap->embeddingBackend.empty());
     }
+}
+
+TEST_CASE("DaemonMetrics polling follows the idle tick while the daemon is idle",
+          "[daemon][metrics][idle]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_metrics_idle_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+
+    const auto savedSnapshot = TuningSnapshotRegistry::instance().get();
+    struct SnapshotRestore {
+        std::shared_ptr<const TuningSnapshot> saved;
+        ~SnapshotRestore() { TuningSnapshotRegistry::instance().set(saved); }
+    } snapshotRestore{savedSnapshot};
+    auto idle = std::make_shared<TuningSnapshot>();
+    idle->daemonIdle = true;
+    TuningSnapshotRegistry::instance().set(idle);
+    REQUIRE(TuneAdvisor::idleTickMs() >= 1000u);
+    REQUIRE(TuneAdvisor::metricsCacheMs() <= 500u);
+
+    // Owned by shared_ptr as in production: the off-strand collectors use shared_from_this.
+    auto metricsPtr =
+        std::make_shared<DaemonMetrics>(nullptr, &state, &svc, svc.getWorkCoordinator());
+    auto& metrics = *metricsPtr;
+    metrics.startPolling();
+    auto waitIterationsAbove = [&](std::uint64_t floor, std::chrono::milliseconds budget) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        while (metrics.pollingIterations() <= floor &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return metrics.pollingIterations() > floor;
+    };
+    REQUIRE(waitIterationsAbove(0, std::chrono::seconds(3)));
+
+    // Idle: at most one more iteration in 900 ms (the 250 ms default would make 3-4).
+    const auto base = metrics.pollingIterations();
+    std::this_thread::sleep_for(std::chrono::milliseconds(900));
+    CHECK(metrics.pollingIterations() - base <= 1);
+
+    // A status read on a stale cache still refreshes promptly, well within one idle tick:
+    // observe a tick, let the cache age past cacheMs_, then read.
+    const auto tickBase = metrics.pollingIterations();
+    REQUIRE(waitIterationsAbove(tickBase, std::chrono::milliseconds(1500)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(TuneAdvisor::metricsCacheMs() + 100));
+    const auto beforeRead = metrics.pollingIterations();
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+    CHECK(snap->statusSnapshotStale);
+    CHECK(waitIterationsAbove(beforeRead, std::chrono::milliseconds(500)));
+
+    metrics.stopPolling();
 }
 
 TEST_CASE("DaemonMetrics reports effective embedding policy before provider adoption",
@@ -1376,45 +1563,6 @@ TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",
     auto resp = fut.get();
 
     REQUIRE(std::holds_alternative<StatusResponse>(resp));
-}
-
-TEST_CASE("RequestDispatcher: tree diff handler validates inputs and missing metadata repo",
-          "[daemon][tree-diff][dispatcher]") {
-    DaemonConfig cfg;
-    cfg.dataDir = makeTempDir("yams_tree_diff_dispatcher_");
-
-    StubLifecycle lifecycle;
-    StateComponent state;
-    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
-    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
-    DaemonLifecycleFsm lifecycleFsm;
-    ServiceManager svc(cfg, state, lifecycleFsm);
-    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
-
-    SECTION("returns invalid argument when snapshot ids are missing") {
-        ListTreeDiffRequest req;
-        req.targetSnapshotId = "target-only";
-
-        auto resp = dispatchRequest(dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::InvalidArgument);
-        CHECK(err.message.find("baseSnapshotId") != std::string::npos);
-    }
-
-    SECTION("returns internal error when metadata repository is unavailable") {
-        ListTreeDiffRequest req;
-        req.baseSnapshotId = "base";
-        req.targetSnapshotId = "target";
-
-        auto resp = dispatchRequest(dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::InternalError);
-        CHECK(err.message.find("Metadata repository not available") != std::string::npos);
-    }
 }
 
 TEST_CASE("RequestDispatcher: prune handler reports missing metadata repo",
@@ -3276,6 +3424,46 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(err.message == "Provide either 'path' or 'content' + 'name'");
     }
 
+    SECTION("add document rejects a path that does not exist") {
+        ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
+        drainStoreDocumentTasks();
+
+        AddDocumentRequest req;
+        req.path = (makeTempDir("yams_documents_missing_path_") / "no-such-file.txt").string();
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        CHECK(std::get<ErrorResponse>(resp).code == ErrorCode::NotFound);
+        auto channel = getStoreDocumentTaskChannel();
+        InternalEventBus::StoreDocumentTask task;
+        CHECK_FALSE(channel->try_pop(task));
+    }
+
+    SECTION("add document rejects a missing path while daemon is initializing") {
+        DaemonConfig notReadyCfg;
+        notReadyCfg.dataDir = makeTempDir("yams_documents_missing_path_not_ready_");
+        StubLifecycle notReadyLifecycle(LifecycleState::Starting);
+        StateComponent notReadyState;
+        notReadyState.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        notReadyState.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        DaemonLifecycleFsm notReadyLifecycleFsm;
+        ServiceManager notReadySvc(notReadyCfg, notReadyState, notReadyLifecycleFsm);
+        RequestDispatcher notReadyDispatcher(&notReadyLifecycle, &notReadySvc, &notReadyState);
+        drainStoreDocumentTasks();
+
+        AddDocumentRequest req;
+        req.path = (notReadyCfg.dataDir / "no-such-file.txt").string();
+
+        auto resp = dispatchRequest(notReadyDispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        CHECK(std::get<ErrorResponse>(resp).code == ErrorCode::NotFound);
+        auto channel = getStoreDocumentTaskChannel();
+        InternalEventBus::StoreDocumentTask task;
+        CHECK_FALSE(channel->try_pop(task));
+    }
+
     SECTION("add document uses async single-file path by default when ready") {
         ScopedEnvVar syncGuard("YAMS_SYNC_SINGLE_FILE_ADD", "0");
         drainStoreDocumentTasks();
@@ -5018,41 +5206,6 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK(graphResp.warning == "Knowledge graph not available");
     }
 
-    SECTION("graph path history reports unavailable metadata repository") {
-        GraphPathHistoryRequest req;
-        req.path = "/repo/file.cpp";
-
-        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::InternalError);
-        CHECK(err.message == "Metadata repository unavailable");
-    }
-
-    SECTION("legacy impact and affected-tests requests explain the removed symbol graph") {
-        // No metadata repository: the answer does not depend on daemon state.
-        GraphImpactRequest impactReq;
-        impactReq.symbol = "callee";
-        auto impactResp = dispatchRequest(*fixture.dispatcher, Request{impactReq});
-        REQUIRE(std::holds_alternative<GraphImpactResponse>(impactResp));
-        const auto& impact = std::get<GraphImpactResponse>(impactResp);
-        CHECK(impact.symbol == "callee");
-        CHECK(impact.affectedSymbols.empty());
-        REQUIRE(impact.warnings.size() == 1);
-        CHECK(impact.warnings.front() == app::services::kImpactNeedsSymbolGraphWarning);
-
-        GraphAffectedTestsRequest testsReq;
-        testsReq.changedFiles = {"src/callee.cpp"};
-        auto testsResp = dispatchRequest(*fixture.dispatcher, Request{testsReq});
-        REQUIRE(std::holds_alternative<GraphAffectedTestsResponse>(testsResp));
-        const auto& tests = std::get<GraphAffectedTestsResponse>(testsResp);
-        CHECK(tests.changedFiles == testsReq.changedFiles);
-        CHECK(tests.affectedTests.empty());
-        REQUIRE(tests.warnings.size() == 1);
-        CHECK(tests.warnings.front() == app::services::kAffectedTestsNeedSymbolGraphWarning);
-    }
-
     SECTION("graph explore reports unavailable metadata repository") {
         auto resp =
             dispatchRequest(*fixture.dispatcher, Request{GraphExploreRequest{.query = "entry"}});
@@ -5584,71 +5737,6 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK(relations.count("renamed_to") == 1);
         CHECK(relations.count("renamed_from") == 1);
         CHECK(relations.count("custom_rel") == 1);
-    }
-
-    SECTION("graph path history requires path") {
-        fixture.initMetadata();
-
-        auto resp = dispatchRequest(*fixture.dispatcher, Request{GraphPathHistoryRequest{}});
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::InvalidArgument);
-        CHECK(err.message == "Path is required for path history query");
-    }
-
-    SECTION("graph path history returns empty response when kg store is unavailable") {
-        fixture.initMetadata(false);
-
-        GraphPathHistoryRequest req;
-        req.path = "/repo/file.cpp";
-
-        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<GraphPathHistoryResponse>(resp));
-        const auto& historyResp = std::get<GraphPathHistoryResponse>(resp);
-        CHECK(historyResp.queryPath == "/repo/file.cpp");
-        CHECK(historyResp.history.empty());
-        CHECK_FALSE(historyResp.hasMore);
-    }
-
-    SECTION("graph path history returns snapshot entries") {
-        fixture.initMetadata();
-        fixture.upsertNode("path:snap1:/repo/file.cpp", "/repo/file.cpp", "path",
-                           R"({"snapshot_id":"snap1","path":"/repo/file.cpp"})");
-        fixture.upsertNode("path:snap2:/repo/file.cpp", "/repo/file.cpp", "path",
-                           R"({"snapshot_id":"snap2","path":"/repo/file.cpp"})");
-
-        GraphPathHistoryRequest req;
-        req.path = "/repo/file.cpp";
-        req.limit = 10;
-
-        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<GraphPathHistoryResponse>(resp));
-        const auto& historyResp = std::get<GraphPathHistoryResponse>(resp);
-        CHECK(historyResp.queryPath == "/repo/file.cpp");
-        REQUIRE(historyResp.history.size() == 2);
-        CHECK(historyResp.history[0].snapshotId == "snap2");
-        CHECK(historyResp.history[0].blobHash.empty());
-        CHECK(historyResp.history[0].changeType == "unknown");
-        CHECK(historyResp.history[1].snapshotId == "snap1");
-        CHECK_FALSE(historyResp.hasMore);
-    }
-
-    SECTION("graph path history reports store errors") {
-        fixture.initMetadata();
-        fixture.execSql("ALTER TABLE kg_nodes RENAME TO kg_nodes_broken");
-
-        GraphPathHistoryRequest req;
-        req.path = "/repo/file.cpp";
-
-        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code != ErrorCode::Success);
-        CHECK_FALSE(err.message.empty());
     }
 
     SECTION("kg ingest reports unavailable metadata repository") {
@@ -6543,28 +6631,6 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::DatabaseError);
         CHECK(err.message == "counts failed");
-    }
-
-    SECTION("batch request returns not implemented items for each sequence") {
-        BatchRequest req;
-        req.items.push_back(BatchItem{.sequenceId = 7, .request = SearchRequest{.query = "one"}});
-        req.items.push_back(BatchItem{.sequenceId = 8, .request = ListRequest{}});
-
-        auto resp = dispatchRequest(dispatcher, Request{req});
-
-        REQUIRE(std::holds_alternative<BatchResponse>(resp));
-        const auto& batchResp = std::get<BatchResponse>(resp);
-        CHECK(batchResp.totalCount == 2);
-        CHECK(batchResp.successCount == 0);
-        CHECK(batchResp.errorCount == 2);
-        REQUIRE(batchResp.items.size() == 2);
-        CHECK(batchResp.items[0].sequenceId == 7);
-        CHECK_FALSE(batchResp.items[0].success);
-        REQUIRE(std::holds_alternative<ErrorResponse>(batchResp.items[0].response));
-        CHECK(std::get<ErrorResponse>(batchResp.items[0].response).code ==
-              ErrorCode::NotImplemented);
-        CHECK(batchResp.items[1].sequenceId == 8);
-        CHECK_FALSE(batchResp.items[1].success);
     }
 
     SECTION("restore collection exercises regex, layout, and io branches") {
@@ -7650,4 +7716,49 @@ TEST_CASE("FsmMetricsRegistry: Metrics collection", "[daemon][metrics][fsm]") {
         auto snap = FsmMetricsRegistry::instance().snapshot();
         REQUIRE(snap.transitions == 0);
     }
+}
+
+// =============================================================================
+// lt-safety A2.2: stopPolling after the WorkCoordinator cancelled the loop
+// =============================================================================
+
+TEST_CASE("DaemonMetrics: stopPolling returns after the WorkCoordinator cancelled the loop",
+          "[daemon][metrics][shutdown]") {
+    // Was lt_red_metrics_stop_after_cancel. A stopped WorkCoordinator abandons the polling loop at
+    // its co_await; stopPolling() must return within its budget instead of waiting forever for a
+    // completion that only the frame's exit guard can deliver (when the io_context is destroyed).
+    using namespace std::chrono_literals;
+    const auto dataDir = makeTempDir("yams_metrics_stop_after_cancel_");
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = dataDir;
+    cfg.enableModelProvider = false;
+    cfg.autoLoadPlugins = false;
+    cfg.enableAutoRepair = false;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    REQUIRE(svc.initialize().has_value());
+    auto* wc = svc.getWorkCoordinator();
+    REQUIRE((wc != nullptr));
+    REQUIRE(wc->isRunning());
+
+    // Off-strand collectors use shared_from_this(), so the object needs shared ownership.
+    auto metrics = std::make_shared<DaemonMetrics>(nullptr, &state, &svc, wc);
+    metrics->startPolling();
+    REQUIRE(
+        yams::test::wait_for_condition(5s, 1ms, [&] { return metrics->pollingIterations() > 0; }));
+
+    wc->stop();
+    REQUIRE(wc->joinWithTimeout(10s));
+
+    const auto stopStart = std::chrono::steady_clock::now();
+    metrics->stopPolling();
+    const auto stopElapsed = std::chrono::steady_clock::now() - stopStart;
+    CHECK((stopElapsed < 6s)); // bounded wait (2 s budget) plus slack for sanitizer builds
+
+    // Destroying the metrics object before the ServiceManager (and so before the io_context that
+    // still holds the abandoned frame) must be safe: the frame's exit guard only touches state it
+    // shares with the object, never the object itself.
+    metrics.reset();
+    svc.shutdown();
 }

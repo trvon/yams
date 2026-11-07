@@ -8,6 +8,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/integrity/repair_utils.h>
 #include <yams/vector/dim_resolver.h>
 #include <yams/vector/vector_database.h>
 
@@ -17,6 +18,8 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string_view>
 #include <thread>
@@ -147,11 +150,13 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     std::optional<size_t> dim;
 
     // 1. Existing DB DDL
+    std::optional<size_t> storedDim;
     if (exists) {
         try {
             auto ddlDim = ConfigResolver::readDbEmbeddingDim(cfg.database_path);
             if (ddlDim && *ddlDim > 0) {
                 dim = ddlDim;
+                storedDim = ddlDim;
                 spdlog::info("[VectorInit] probe: ddl dim={}", *ddlDim);
             }
         } catch (...) {
@@ -444,8 +449,68 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         spdlog::warn("[VectorInit] lock setup error (continuing without lock)");
     }
 
+    // Embedding-space migration (under the vectors.lock, before any VectorDatabase opens):
+    // recreate the tables at the provider's dimension; RepairService re-embeds the documents.
+    // A marker file records the migration until the caller acknowledges the follow-up work
+    // (acknowledgeEmbeddingMigration), so a crash in between redoes it on the next start.
+    const auto marker = dataDir / kEmbeddingMigrationMarker;
+    migrationMarker_ = marker;
+    std::optional<std::string> migrationError;
+    if (storedDim && deps_.migrationTarget) {
+        std::optional<MigrationTarget> target;
+        try {
+            target = deps_.migrationTarget();
+        } catch (...) {
+            spdlog::debug("[VectorInit] migration target probe failed");
+        }
+        std::optional<std::string> foreignIdentity;
+        if (target && !target->identity.empty()) {
+            foreignIdentity =
+                ConfigResolver::readDbForeignEmbeddingSpace(cfg.database_path, target->identity);
+        }
+        bool dimChanged = target && target->dim > 0 && target->dim != *storedDim;
+        if (target && target->fallback && (dimChanged || foreignIdentity)) {
+            // The provider could not load the configured space (e.g. the static table is
+            // missing). Keep the stored vectors; new embeddings will not match until it is back.
+            spdlog::error("[VectorInit] embedding provider is running a fallback space ('{}'); "
+                          "keeping the stored vectors (dim {}, space '{}'). Restore the static "
+                          "table (yams model download) or set embeddings.simeon.encoder_profile.",
+                          target->identity, *storedDim, foreignIdentity.value_or("?"));
+            dimChanged = false;
+            foreignIdentity.reset();
+        }
+        if (dimChanged || foreignIdentity) {
+            spdlog::warn("[VectorInit] embedding space changed (dim {} -> {}, space '{}' -> '{}'); "
+                         "recreating vector tables (documents re-embed in the background; "
+                         "keyword search is unaffected)",
+                         *storedDim, target->dim, foreignIdentity.value_or("?"), target->identity);
+            {
+                std::ofstream out(marker, std::ios::trunc);
+                out << nlohmann::json{{"from", foreignIdentity.value_or("")},
+                                      {"to", target->identity},
+                                      {"from_dim", *storedDim},
+                                      {"to_dim", target->dim}}
+                           .dump();
+            }
+            auto aligned = yams::integrity::recreateVectorTables(dataDir, target->dim);
+            if (aligned) {
+                cfg.embedding_dim = target->dim;
+            } else {
+                std::error_code ec;
+                std::filesystem::remove(marker, ec);
+                migrationError = aligned.error().message;
+                spdlog::error("[VectorInit] vector table migration failed: {}", *migrationError);
+            }
+        }
+    }
+    {
+        std::error_code ec;
+        migratedEmbeddingSpace_.store(!migrationError && std::filesystem::exists(marker, ec),
+                                      std::memory_order_release);
+    }
+
     // Initialize with retries
-    const int maxAttempts = 3;
+    const int maxAttempts = migrationError ? 0 : 3;
     bool success = false;
 
     for (int attempt = 0; attempt < maxAttempts; ++attempt) {
@@ -547,6 +612,12 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     }
 #endif
 
+    if (migrationError) {
+        // Opening the old tables would accept no new embeddings; stay without a vector DB.
+        clearRetryableInitAttempt();
+        return Error{ErrorCode::DatabaseError,
+                     "embedding space migration failed: " + *migrationError};
+    }
     if (!success) {
         spdlog::error("[VectorInit] all {} attempt(s) failed; continuing without vector DB",
                       maxAttempts);
@@ -557,6 +628,17 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     YAMS_POSTCONDITION(getVectorDatabase() != nullptr,
                        "VectorSystemManager success path must publish a vector database");
     return Result<bool>(true);
+}
+
+void VectorSystemManager::acknowledgeEmbeddingMigration() {
+    if (!migratedEmbeddingSpace_.exchange(false, std::memory_order_acq_rel))
+        return;
+    std::error_code ec;
+    std::filesystem::remove(migrationMarker_, ec);
+    if (ec) {
+        spdlog::warn("[VectorInit] could not remove {}: {}", migrationMarker_.string(),
+                     ec.message());
+    }
 }
 
 size_t VectorSystemManager::getEmbeddingDimension() const {

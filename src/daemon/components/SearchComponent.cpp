@@ -32,6 +32,9 @@ SearchComponent::SearchComponent(ServiceManager& serviceManager, StateComponent&
 SearchComponent::~SearchComponent() = default;
 
 uint64_t SearchComponent::getCurrentDocCount() const {
+    if (docCountProbe_) {
+        return docCountProbe_();
+    }
     try {
         auto metadataRepo = serviceManager_.getMetadataRepo();
         if (metadataRepo) {
@@ -44,6 +47,42 @@ uint64_t SearchComponent::getCurrentDocCount() const {
         spdlog::debug("[SearchComponent] Failed to get doc count: {}", e.what());
     }
     return 0;
+}
+
+uint64_t SearchComponent::currentInsertCounter() const {
+    if (insertCounterProbe_) {
+        return insertCounterProbe_();
+    }
+    try {
+        if (auto metadataRepo = serviceManager_.getMetadataRepo()) {
+            // Monotonic count of documents inserted in this process lifetime (no DB query).
+            return metadataRepo->getCachedDocumentCount();
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("[SearchComponent] Failed to read insert counter: {}", e.what());
+    }
+    return 0;
+}
+
+search::IndexFreshnessSnapshot SearchComponent::currentIndexFreshness() const {
+    if (freshnessProbe_) {
+        return freshnessProbe_();
+    }
+    return serviceManager_.getIndexFreshnessSnapshot();
+}
+
+bool SearchComponent::coveredSinceLastEvaluation() const {
+    if (!coveredEvaluationValid_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    // No insert since the covered evaluation: the overlay still covers the same growth.
+    return currentInsertCounter() == lastCoveredInsertCounter_.load(std::memory_order_acquire);
+}
+
+void SearchComponent::recordCoveredEvaluation(uint64_t docCount) const {
+    lastCoveredDocCount_.store(docCount, std::memory_order_release);
+    lastCoveredInsertCounter_.store(currentInsertCounter(), std::memory_order_release);
+    coveredEvaluationValid_.store(true, std::memory_order_release);
 }
 
 bool SearchComponent::hasSignificantGrowth() const {
@@ -81,7 +120,7 @@ bool SearchComponent::shouldTriggerHeavyRebuild() const {
     }
 
     if (state_.readiness.searchEngineReady.load(std::memory_order_relaxed) && growth > 0) {
-        const auto freshness = serviceManager_.getIndexFreshnessSnapshot();
+        const auto freshness = currentIndexFreshness();
         const bool lexicalOverlayCoversGrowth = freshness.lexicalDeltaPublishedDocs >= growth ||
                                                 freshness.lexicalDeltaRecentDocs >= growth;
         bool vectorUsable = state_.readiness.vectorDbReady.load(std::memory_order_relaxed);
@@ -100,6 +139,7 @@ bool SearchComponent::shouldTriggerHeavyRebuild() const {
             spdlog::info("[SearchComponent] Skipping heavy rebuild: lexical overlay published {} "
                          "docs and vector DB is already usable",
                          growth);
+            recordCoveredEvaluation(currentCount);
             return false;
         }
     }
@@ -145,6 +185,7 @@ bool SearchComponent::shouldTriggerHeavyRebuild() const {
 
 void SearchComponent::recordSuccessfulBuild(uint64_t docCount) {
     lastBuildDocCount_.store(docCount);
+    coveredEvaluationValid_.store(false, std::memory_order_release);
     state_.readiness.searchEngineDocCount.store(docCount);
     rebuildInProgress_.store(false);
     spdlog::info("[SearchComponent] Recorded successful build with {} docs", docCount);
@@ -217,6 +258,15 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
     bool expected = false;
     if (!rebuildInProgress_.compare_exchange_strong(expected, true)) {
         spdlog::debug("[SearchComponent] Rebuild already in progress, skipping");
+        return false;
+    }
+
+    // A previous evaluation found the lexical overlay covering all growth. Until another
+    // document is inserted that answer cannot change, so skip the count, the freshness
+    // snapshot and the log line instead of repeating them every check interval for the rest
+    // of the process lifetime (observed: every 5 s after any ingest).
+    if (coveredSinceLastEvaluation()) {
+        rebuildInProgress_.store(false);
         return false;
     }
 

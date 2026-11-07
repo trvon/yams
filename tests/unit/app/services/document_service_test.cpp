@@ -72,7 +72,9 @@ struct DocumentFixture {
         auto pid = std::to_string(::getpid());
         auto timestamp =
             std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-        testDir_ = std::filesystem::temp_directory_path() /
+        // Canonical: macOS temp is a /var -> /private/var symlink and Windows temp can be an 8.3
+        // short name; the code under test reports canonical paths.
+        testDir_ = std::filesystem::weakly_canonical(std::filesystem::temp_directory_path()) /
                    ("document_service_test_" + pid + "_" + timestamp);
 
         std::error_code ec;
@@ -485,6 +487,243 @@ TEST_CASE("DocumentService initializes fresh path series without follow-up write
     fixture.documentService_.reset();
 }
 
+TEST_CASE("DocumentService keeps identical content paths independently addressable",
+          "[document][service][path-identity]") {
+    DocumentFixture fixture;
+    const auto original = fixture.testDir_ / "test1.txt";
+    const auto alias = fixture.testDir_ / "other-worktree" / "test1.txt";
+    std::filesystem::create_directories(alias.parent_path());
+    std::filesystem::copy_file(original, alias);
+    StoreDocumentRequest request;
+    request.path = alias.string();
+    request.metadata = {
+        {"owner", "lane-owner"}, {"worktree", "other-worktree"}, {"branch", "lane"}};
+    auto stored = fixture.documentService_->store(request);
+    REQUIRE(stored);
+    REQUIRE(stored.value().hash == fixture.testHash1_);
+
+    SECTION("A path-scoped query resolves the second location without stealing the original") {
+        ListDocumentsRequest query;
+        query.pattern = alias.string();
+        query.showMetadata = true;
+        auto aliases = fixture.documentService_->list(query);
+        REQUIRE(aliases);
+        REQUIRE(aliases.value().documents.size() == 1);
+        CHECK(aliases.value().documents.front().path == alias.generic_string());
+        CHECK(aliases.value().documents.front().hash == fixture.testHash1_);
+        CHECK(aliases.value().documents.front().metadata.at("worktree") == "other-worktree");
+        query.pattern = original.string();
+        auto originals = fixture.documentService_->list(query);
+        REQUIRE(originals);
+        REQUIRE(originals.value().documents.size() == 1);
+        CHECK(originals.value().documents.front().metadata.at("owner") == "trace");
+    }
+    SECTION("Removing one path does not remove the shared blob or the other location") {
+        int hashDeleteIntents = 0;
+        DeleteByNameRequest remove;
+        remove.name = original.string();
+        remove.beforeDelete = [&](std::string_view) -> Result<void> {
+            ++hashDeleteIntents;
+            return {};
+        };
+        auto deleted = fixture.documentService_->deleteByName(remove);
+        REQUIRE(deleted);
+        CHECK(deleted.value().errors.empty());
+        REQUIRE(deleted.value().deleted.size() == 1);
+        CHECK(deleted.value().deleted.front().deleted);
+        CHECK_FALSE(deleted.value().deleted.front().contentRemoved);
+        CHECK(deleted.value().deleted.front().pathOnly);
+        CHECK(hashDeleteIntents == 0);
+        auto retained = fixture.contentStore_->exists(fixture.testHash1_);
+        REQUIRE(retained);
+        CHECK(retained.value());
+        ListDocumentsRequest query;
+        query.pattern = alias.string();
+        auto aliases = fixture.documentService_->list(query);
+        REQUIRE(aliases);
+        REQUIRE(aliases.value().documents.size() == 1);
+        CHECK(aliases.value().documents.front().path == alias.generic_string());
+
+        // A retired canonical path must not fall back to its shared content row
+        // and delete the remaining alias on a second attempt.
+        auto repeated = fixture.documentService_->deleteByName(remove);
+        if (repeated) {
+            CHECK(repeated.value().deleted.empty());
+        } else {
+            CHECK(repeated.error().code == ErrorCode::NotFound);
+        }
+        CHECK(hashDeleteIntents == 0);
+        auto remaining = fixture.documentService_->list(query);
+        REQUIRE(remaining);
+        CHECK(remaining.value().documents.size() == 1);
+    }
+
+    SECTION("An exact alias selector removes the alias rather than its canonical sibling") {
+        DeleteByNameRequest remove;
+        remove.name = alias.string();
+        auto deleted = fixture.documentService_->deleteByName(remove);
+        REQUIRE(deleted);
+        CHECK(deleted.value().errors.empty());
+        REQUIRE(deleted.value().deleted.size() == 1);
+        CHECK_FALSE(deleted.value().deleted.front().contentRemoved);
+        CHECK(deleted.value().deleted.front().pathOnly);
+        auto retired = fixture.metadataRepo_->findDocumentByExactPath(alias.string());
+        REQUIRE(retired);
+        CHECK_FALSE(retired.value().has_value());
+        ListDocumentsRequest query;
+        query.pattern = original.string();
+        auto remaining = fixture.documentService_->list(query);
+        REQUIRE(remaining);
+        REQUIRE(remaining.value().documents.size() == 1);
+        CHECK(remaining.value().documents.front().path == original.generic_string());
+    }
+
+    SECTION("An explicit hash still stages and deletes corpus-wide metadata with keepRefs") {
+        int hashDeleteIntents = 0;
+        DeleteByNameRequest remove;
+        remove.hash = fixture.testHash1_;
+        remove.keepRefs = true;
+        remove.beforeDelete = [&](std::string_view) -> Result<void> {
+            ++hashDeleteIntents;
+            return {};
+        };
+        auto deleted = fixture.documentService_->deleteByName(remove);
+        REQUIRE(deleted);
+        CHECK(deleted.value().errors.empty());
+        CHECK(hashDeleteIntents == 1);
+        REQUIRE(deleted.value().deleted.size() == 1);
+        CHECK_FALSE(deleted.value().deleted.front().pathOnly);
+        auto metadata = fixture.metadataRepo_->getDocumentByHash(fixture.testHash1_);
+        REQUIRE(metadata);
+        CHECK_FALSE(metadata.value().has_value());
+        auto retained = fixture.contentStore_->exists(fixture.testHash1_);
+        REQUIRE(retained);
+        CHECK(retained.value());
+    }
+
+    SECTION("Path-only requests reject empty or mixed selectors even during dry-run") {
+        for (int selector = 0; selector < 4; ++selector) {
+            DeleteByNameRequest unlink;
+            unlink.pathOnly = true;
+            unlink.dryRun = true;
+            if (selector != 0)
+                unlink.name = original.string();
+            if (selector == 1)
+                unlink.hash = fixture.testHash1_;
+            if (selector == 2)
+                unlink.names = {alias.string()};
+            if (selector == 3)
+                unlink.pattern = "*.txt";
+            auto rejected = fixture.documentService_->deleteByName(unlink);
+            CHECK_FALSE(rejected);
+            if (!rejected)
+                CHECK(rejected.error().code == ErrorCode::InvalidArgument);
+        }
+    }
+
+    SECTION("Path-only selectors never fall back to a different path with the same basename") {
+        DeleteByNameRequest unlink;
+        unlink.pathOnly = true;
+        unlink.dryRun = true;
+        unlink.name = (fixture.testDir_ / "absent" / "test1.txt").string();
+        auto missing = fixture.documentService_->deleteByName(unlink);
+        CHECK_FALSE(missing);
+        if (!missing)
+            CHECK(missing.error().code == ErrorCode::NotFound);
+    }
+}
+
+TEST_CASE("DocumentService graph versions remain navigable after content reversion",
+          "[document][service][versioning][graph-history]") {
+    DocumentFixture fixture;
+    auto kg = makeSqliteKnowledgeGraphStore(*fixture.pool_);
+    REQUIRE(kg);
+    fixture.documentService_.reset();
+    fixture.appContext_.kgStore = std::shared_ptr<KnowledgeGraphStore>(std::move(kg).value());
+    fixture.metadataRepo_->setKnowledgeGraphStore(fixture.appContext_.kgStore);
+    fixture.documentService_ = makeDocumentService(fixture.appContext_);
+    const auto path = fixture.testDir_ / "history.txt";
+    std::vector<std::string> hashes;
+    for (int revision = 1; revision <= 3; ++revision) {
+        std::ofstream(path) << (revision == 2 ? "version two\n" : "version one\n");
+        StoreDocumentRequest request;
+        request.path = path.string();
+        request.snapshotId = "correctness-snapshot-" + std::to_string(revision);
+        auto stored = fixture.documentService_->store(request);
+        REQUIRE(stored);
+        hashes.push_back(stored.value().hash);
+    }
+    REQUIRE(hashes.front() == hashes.back());
+    REQUIRE(hashes[0] != hashes[1]);
+    auto graph = makeGraphQueryService(fixture.appContext_.kgStore, fixture.metadataRepo_);
+    REQUIRE(graph);
+    GraphQueryRequest query;
+    query.documentName = path.string();
+    query.relationFilters = {GraphRelationType::PathVersion};
+    query.maxDepth = 2;
+    auto response = graph->query(query);
+    REQUIRE(response);
+    CHECK(response.value().originNode.node.nodeKey == "path:logical:" + path.generic_string());
+    CHECK_FALSE(response.value().originNode.snapshotId.has_value());
+    CHECK(response.value().originNode.normalizedPath == path.generic_string());
+    std::set<std::string> visibleHashes;
+    for (const auto& node : response.value().allConnectedNodes) {
+        if (node.nodeMetadata.node.nodeKey.starts_with("blob:"))
+            visibleHashes.insert(node.nodeMetadata.node.nodeKey.substr(5));
+    }
+    CHECK(visibleHashes == std::set<std::string>{hashes[0], hashes[1]});
+    auto history = graph->getPathHistory({.path = path.string()});
+    REQUIRE(history);
+    CHECK(history.value().history.size() == 3);
+    // History is keyed by the normalized path, so another spelling of it (backslashes on
+    // Windows, a ./ segment anywhere) finds the same history.
+    auto respelled =
+        graph->getPathHistory({.path = (fixture.testDir_ / "." / "history.txt").string()});
+    REQUIRE(respelled);
+    CHECK(respelled.value().history.size() == 3);
+    auto head = fixture.metadataRepo_->findDocumentByExactPath(path.string());
+    REQUIRE(head);
+    REQUIRE(head.value());
+    CHECK(head.value()->sha256Hash == hashes.back());
+
+    // Incremental repository cleanup retires a location, including a sole
+    // location, without treating its immutable content/history as garbage.
+    int hashDeleteIntents = 0;
+    DeleteByNameRequest unlink;
+    unlink.name = path.string();
+    unlink.pathOnly = true;
+    unlink.beforeDelete = [&](std::string_view) -> Result<void> {
+        ++hashDeleteIntents;
+        return {};
+    };
+    auto removed = fixture.documentService_->deleteByName(unlink);
+    REQUIRE(removed);
+    REQUIRE(removed.value().errors.empty());
+    REQUIRE(removed.value().deleted.size() == 1);
+    CHECK_FALSE(removed.value().deleted.front().contentRemoved);
+    CHECK(removed.value().deleted.front().pathOnly);
+    CHECK(hashDeleteIntents == 0);
+    auto retired = fixture.metadataRepo_->findDocumentByExactPath(path.string());
+    REQUIRE(retired);
+    CHECK_FALSE(retired.value().has_value());
+    auto contentRecord = fixture.metadataRepo_->getDocumentByHash(hashes.back());
+    REQUIRE(contentRecord);
+    CHECK(contentRecord.value().has_value());
+    ListDocumentsRequest listing;
+    listing.pattern = path.string();
+    auto listed = fixture.documentService_->list(listing);
+    REQUIRE(listed);
+    CHECK(listed.value().documents.empty());
+    auto retainedHistory = graph->getPathHistory({.path = path.string()});
+    REQUIRE(retainedHistory);
+    CHECK(retainedHistory.value().history.size() == 3);
+    for (const auto& hash : {hashes[0], hashes[1]}) {
+        auto present = fixture.contentStore_->exists(hash);
+        REQUIRE(present);
+        CHECK(present.value());
+    }
+}
+
 TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
     DocumentFixture fixture;
 
@@ -714,6 +953,60 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
             }
         }
         CHECK(foundSharedObject);
+    }
+
+    SECTION("Recent count caps the fast SQL list path independently of limit") {
+        ListDocumentsRequest request;
+        request.limit = 100;
+        request.recent = 1;
+        auto result = fixture.documentService_->list(request);
+        REQUIRE(result);
+        CHECK(result.value().documents.size() == 1);
+    }
+
+    SECTION("Basename glob is not interpreted as a directory prefix") {
+        ListDocumentsRequest request;
+        request.pattern = "*test2*";
+        request.limit = 1;
+        auto result = fixture.documentService_->list(request);
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 1);
+        CHECK(result.value().documents.front().hash == fixture.testHash2_);
+    }
+
+    SECTION("Exact basename matches without an absolute path") {
+        ListDocumentsRequest request;
+        request.pattern = "test1.txt";
+        auto result = fixture.documentService_->list(request);
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 1);
+        CHECK(result.value().documents.front().hash == fixture.testHash1_);
+    }
+
+    SECTION("Prefix basename glob matches before pagination") {
+        ListDocumentsRequest request;
+        request.pattern = "test*.txt";
+        request.limit = 1;
+        auto result = fixture.documentService_->list(request);
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 1);
+        CHECK(result.value().documents.front().hash == fixture.testHash1_);
+    }
+
+    SECTION("Basename glob treats SQL wildcard characters literally") {
+        for (const auto& name : {"literal_one.txt", "literalXone.txt"}) {
+            const auto path = fixture.testDir_ / name;
+            std::ofstream{path} << "content for " << name;
+            StoreDocumentRequest store;
+            store.path = path.string();
+            REQUIRE(fixture.documentService_->store(store));
+        }
+        ListDocumentsRequest request;
+        request.pattern = "literal_*.txt";
+        auto result = fixture.documentService_->list(request);
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 1);
+        CHECK(result.value().documents.front().fileName == "literal_one.txt");
     }
 
     SECTION("List recent documents") {
@@ -1452,6 +1745,74 @@ TEST_CASE("DocumentService - Version Retention", "[document][service][retention]
     auto latest = fixture.metadataRepo_->getDocumentByHash(hashes.back());
     REQUIRE(latest);
     CHECK(latest.value().has_value());
+}
+
+TEST_CASE("DocumentService retention protects current shared-content locations",
+          "[document][service][retention][path-identity]") {
+    DocumentFixture fixture;
+    std::vector<std::string> hashes;
+    for (int version = 1; version <= 3; ++version) {
+        StoreDocumentRequest request;
+        request.name = "shared-history.txt";
+        request.content = "shared revision " + std::to_string(version);
+        auto stored = fixture.documentService_->store(request);
+        REQUIRE(stored);
+        hashes.push_back(stored.value().hash);
+        auto document = fixture.metadataRepo_->getDocumentByHash(hashes.back());
+        REQUIRE(document);
+        REQUIRE(document.value().has_value());
+        REQUIRE(fixture.metadataRepo_->setMetadata(
+            document.value()->id, "series_key", MetadataValue(std::string("shared-history.txt"))));
+        REQUIRE(fixture.metadataRepo_->setMetadata(document.value()->id, "version",
+                                                   MetadataValue(static_cast<int64_t>(version))));
+        REQUIRE(fixture.metadataRepo_->setMetadata(document.value()->id, "is_latest",
+                                                   MetadataValue(version == 3)));
+    }
+    StoreDocumentRequest alias;
+    alias.name = (fixture.testDir_ / "retained-alias.txt").string();
+    alias.content = "shared revision 1";
+    auto storedAlias = fixture.documentService_->store(alias);
+    REQUIRE(storedAlias);
+    REQUIRE(storedAlias.value().hash == hashes.front());
+    auto currentAlias = fixture.metadataRepo_->findDocumentByExactPath(alias.name);
+    REQUIRE(currentAlias);
+    REQUIRE(currentAlias.value().has_value());
+
+    auto preview = fixture.documentService_->pruneVersions(
+        {.keepLatest = 1, .seriesKey = "shared-history.txt", .dryRun = true});
+    REQUIRE(preview);
+    REQUIRE(preview.value().errors.empty());
+    REQUIRE(preview.value().count == 1);
+    REQUIRE(preview.value().deleted.size() == 1);
+    CHECK(preview.value().deleted.front().hash == hashes[1]);
+
+    auto applied = fixture.documentService_->pruneVersions(
+        {.keepLatest = 1, .seriesKey = "shared-history.txt", .dryRun = false});
+    REQUIRE(applied);
+    REQUIRE(applied.value().errors.empty());
+    REQUIRE(applied.value().count == 1);
+    REQUIRE(applied.value().deleted.size() == 1);
+    CHECK(applied.value().deleted.front().hash == hashes[1]);
+    auto retained = fixture.metadataRepo_->getDocumentByHash(hashes.front());
+    REQUIRE(retained);
+    REQUIRE(retained.value().has_value());
+    auto content = fixture.contentStore_->exists(hashes.front());
+    REQUIRE(content);
+    CHECK(content.value());
+    auto aliasAfter = fixture.metadataRepo_->findDocumentByExactPath(alias.name);
+    REQUIRE(aliasAfter);
+    REQUIRE(aliasAfter.value().has_value());
+    CHECK(aliasAfter.value()->id == currentAlias.value()->id);
+    auto removed = fixture.metadataRepo_->getDocumentByHash(hashes[1]);
+    REQUIRE(removed);
+    CHECK_FALSE(removed.value().has_value());
+    auto latest = fixture.metadataRepo_->getDocumentByHash(hashes.back());
+    REQUIRE(latest);
+    REQUIRE(latest.value().has_value());
+    auto currentHead = fixture.metadataRepo_->findDocumentByExactPath(latest.value()->filePath);
+    REQUIRE(currentHead);
+    REQUIRE(currentHead.value().has_value());
+    CHECK(currentHead.value()->sha256Hash == hashes.back());
 }
 
 TEST_CASE("DocumentService - Error Handling", "[document][service][errors]") {
