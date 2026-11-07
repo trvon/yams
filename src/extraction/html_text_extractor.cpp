@@ -116,7 +116,7 @@ std::string HtmlTextExtractor::extractTextFromHtml(const std::string& html) {
 
     // Safety limit: Skip regex processing on very large HTML to avoid stack overflow
     // Regex backtracking can cause exponential time complexity on large strings
-    constexpr size_t MAX_REGEX_SIZE = 5 * 1024 * 1024; // 5MB limit for regex operations
+    constexpr size_t MAX_REGEX_SIZE = 5ULL * 1024 * 1024; // 5MB limit for regex operations
     if (html.size() > MAX_REGEX_SIZE) {
         spdlog::warn(
             "HTML file too large for regex processing ({} bytes), using simple tag stripping",

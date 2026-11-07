@@ -55,7 +55,7 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
         ModelLoadResponse resp;
         resp.success = true;
         resp.modelName = req.modelName;
-        resp.memoryUsageMb = provider->getMemoryUsage() / (1024 * 1024);
+        resp.memoryUsageMb = provider->getMemoryUsage() / (1024ULL * 1024);
         resp.loadTimeMs = 0;
 
         // Model is now loaded via provider and the success response is complete. Only schedule
@@ -164,7 +164,7 @@ RequestDispatcher::handleModelStatusRequest(const ModelStatusRequest& req) {
                 d.isHot = true;
                 d.memoryMb = 0;
                 if (auto mi = provider->getModelInfo(name); mi) {
-                    d.memoryMb = mi.value().memoryUsageBytes / (1024 * 1024);
+                    d.memoryMb = mi.value().memoryUsageBytes / (1024ULL * 1024);
                     d.maxSequenceLength = mi.value().maxSequenceLength;
                 }
                 d.embeddingDim = provider->getEmbeddingDim(name);
@@ -174,7 +174,7 @@ RequestDispatcher::handleModelStatusRequest(const ModelStatusRequest& req) {
                 d.lastAccess = {};
                 resp.models.push_back(std::move(d));
             }
-            resp.totalMemoryMb = provider->getMemoryUsage() / (1024 * 1024);
+            resp.totalMemoryMb = provider->getMemoryUsage() / (1024ULL * 1024);
             resp.maxMemoryMb = 0;
             co_return resp;
         });

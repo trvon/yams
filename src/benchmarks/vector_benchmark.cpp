@@ -500,10 +500,10 @@ std::string formatMemory(size_t bytes) {
 #if YAMS_HAVE_STD_FORMAT
     if (bytes < 1024) {
         return fmt::format("{} B", bytes);
-    } else if (bytes < 1024 * 1024) {
-        return fmt::format("{:.2f} KB", bytes / 1024.0);
-    } else if (bytes < 1024 * 1024 * 1024) {
-        return fmt::format("{:.2f} MB", bytes / (1024.0 * 1024));
+    } else if (bytes < 1024ULL * 1024) {
+        return fmt::format("{:.2f} KB", static_cast<double>(bytes) / 1024.0);
+    } else if (bytes < 1024ULL * 1024 * 1024) {
+        return fmt::format("{:.2f} MB", static_cast<double>(bytes) / (1024.0 * 1024));
     } else {
         return fmt::format("{:.2f} GB", bytes / (1024.0 * 1024 * 1024));
     }
@@ -564,7 +564,7 @@ private:
     size_t getCurrentMemoryUsage() const {
         // Platform-specific implementation would go here
         // For now, return a mock value
-        return 100 * 1024 * 1024; // 100MB
+        return 100ULL * 1024 * 1024; // 100MB
     }
 
     std::atomic<bool> profiling_{false};

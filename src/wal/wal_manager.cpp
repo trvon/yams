@@ -49,7 +49,7 @@ bool isEmptyWalSegment(const std::filesystem::path& path) {
         return true;
     }
     std::ifstream in(path, std::ios::binary);
-    std::array<char, 64 * 1024> buffer{};
+    std::array<char, 64ULL * 1024> buffer{};
     std::uintmax_t remaining = size;
     while (remaining > 0) {
         const auto count =

@@ -337,7 +337,7 @@ QuerySnippetResult createQuerySnippet(const std::string& content, const std::str
         return {.text = createSnippet(content, maxLength, preserveWordBoundary)};
     }
 
-    constexpr std::size_t kMaxScanBytes = 128 * 1024;
+    constexpr std::size_t kMaxScanBytes = 128ULL * 1024;
     constexpr std::size_t kMaxOccurrencesPerTerm = 32;
     const auto scanBytes = std::min(content.size(), kMaxScanBytes);
     const auto lowerContent = lowerAsciiPrefix(content, scanBytes);

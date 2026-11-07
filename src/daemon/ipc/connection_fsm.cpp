@@ -234,7 +234,7 @@ struct ConnectionFsm::Impl {
     int retries{0};
     // Phase 2: write backpressure queue (bytes only; payload owned by higher layers)
     std::size_t write_bytes{0};
-    std::size_t write_cap_bytes{2 * 1024 * 1024};
+    std::size_t write_cap_bytes{2ULL * 1024 * 1024};
     uint32_t low_wm_percent{50};
     uint32_t high_wm_percent{85};
     bool backpressured{false};
@@ -582,7 +582,8 @@ void ConnectionFsm::on_write_queued(std::size_t bytes) noexcept {
     if (bytes == 0)
         return;
     if (auto* impl = impl_.get()) {
-        const std::size_t cap = impl->write_cap_bytes ? impl->write_cap_bytes : (2 * 1024 * 1024);
+        const std::size_t cap =
+            impl->write_cap_bytes ? impl->write_cap_bytes : (2ULL * 1024 * 1024);
         const std::size_t before = impl->write_bytes;
         impl->write_bytes = std::min(before + bytes, cap);
         const std::size_t percent = cap ? (impl->write_bytes * 100) / cap : 0;
@@ -601,7 +602,8 @@ void ConnectionFsm::on_write_queued(std::size_t bytes) noexcept {
 
 void ConnectionFsm::on_write_flushed(std::size_t bytes) noexcept {
     if (auto* impl = impl_.get()) {
-        const std::size_t cap = impl->write_cap_bytes ? impl->write_cap_bytes : (2 * 1024 * 1024);
+        const std::size_t cap =
+            impl->write_cap_bytes ? impl->write_cap_bytes : (2ULL * 1024 * 1024);
         if (bytes >= impl->write_bytes)
             impl->write_bytes = 0;
         else
