@@ -163,7 +163,7 @@ void VectorBenchmark::calculateStatistics(BenchmarkResult& result,
 
     // Mean
     double sum = std::accumulate(sorted_timings.begin(), sorted_timings.end(), 0.0);
-    result.mean_time_us = sum / sorted_timings.size();
+    result.mean_time_us = sum / static_cast<double>(sorted_timings.size());
 
     // Median
     size_t mid = sorted_timings.size() / 2;
@@ -178,11 +178,11 @@ void VectorBenchmark::calculateStatistics(BenchmarkResult& result,
     for (double t : sorted_timings) {
         sq_sum += (t - result.mean_time_us) * (t - result.mean_time_us);
     }
-    result.stddev_time_us = std::sqrt(sq_sum / sorted_timings.size());
+    result.stddev_time_us = std::sqrt(sq_sum / static_cast<double>(sorted_timings.size()));
 
     // Percentiles
-    size_t p95_idx = static_cast<size_t>(sorted_timings.size() * 0.95);
-    size_t p99_idx = static_cast<size_t>(sorted_timings.size() * 0.99);
+    size_t p95_idx = static_cast<size_t>(static_cast<double>(sorted_timings.size()) * 0.95);
+    size_t p99_idx = static_cast<size_t>(static_cast<double>(sorted_timings.size()) * 0.99);
 
     result.p95_time_us = sorted_timings[std::min(p95_idx, sorted_timings.size() - 1)];
     result.p99_time_us = sorted_timings[std::min(p99_idx, sorted_timings.size() - 1)];
@@ -266,8 +266,8 @@ void BenchmarkSuite::compareResults(const std::vector<BenchmarkResult>& baseline
         const double speedup =
             curr.mean_time_us > 0.0 ? base.mean_time_us / curr.mean_time_us : 0.0;
         if (base.memory_used_bytes > 0 && curr.memory_used_bytes > 0) {
-            const double memory_change =
-                static_cast<double>(curr.memory_used_bytes) / base.memory_used_bytes;
+            const double memory_change = static_cast<double>(curr.memory_used_bytes) /
+                                         static_cast<double>(base.memory_used_bytes);
             spdlog::info("  {}: Speedup: {:.2f}x, RSS: {:.2f}x", base.name, speedup, memory_change);
         } else {
             spdlog::info("  {}: Speedup: {:.2f}x, RSS: unavailable", base.name, speedup);
@@ -300,11 +300,12 @@ double AccuracyBenchmark::calculateRecallAtK(const std::vector<std::vector<std::
         }
 
         if (!relevant[i].empty()) {
-            total_recall += static_cast<double>(relevant_found) / relevant[i].size();
+            total_recall +=
+                static_cast<double>(relevant_found) / static_cast<double>(relevant[i].size());
         }
     }
 
-    return total_recall / retrieved.size();
+    return total_recall / static_cast<double>(retrieved.size());
 }
 
 double
@@ -329,11 +330,12 @@ AccuracyBenchmark::calculatePrecisionAtK(const std::vector<std::vector<std::stri
         }
 
         if (retrieved_k > 0) {
-            total_precision += static_cast<double>(relevant_found) / retrieved_k;
+            total_precision +=
+                static_cast<double>(relevant_found) / static_cast<double>(retrieved_k);
         }
     }
 
-    return total_precision / retrieved.size();
+    return total_precision / static_cast<double>(retrieved.size());
 }
 
 double AccuracyBenchmark::calculateNDCG(
@@ -376,7 +378,7 @@ double AccuracyBenchmark::calculateNDCG(
         }
     }
 
-    return total_ndcg / retrieved.size();
+    return total_ndcg / static_cast<double>(retrieved.size());
 }
 
 // Utility functions
@@ -500,12 +502,12 @@ std::string formatMemory(size_t bytes) {
 #if YAMS_HAVE_STD_FORMAT
     if (bytes < 1024) {
         return fmt::format("{} B", bytes);
-    } else if (bytes < 1024 * 1024) {
-        return fmt::format("{:.2f} KB", bytes / 1024.0);
-    } else if (bytes < 1024 * 1024 * 1024) {
-        return fmt::format("{:.2f} MB", bytes / (1024.0 * 1024));
+    } else if (bytes < 1024ULL * 1024) {
+        return fmt::format("{:.2f} KB", static_cast<double>(bytes) / 1024.0);
+    } else if (bytes < 1024ULL * 1024 * 1024) {
+        return fmt::format("{:.2f} MB", static_cast<double>(bytes) / (1024.0 * 1024));
     } else {
-        return fmt::format("{:.2f} GB", bytes / (1024.0 * 1024 * 1024));
+        return fmt::format("{:.2f} GB", static_cast<double>(bytes) / (1024.0 * 1024 * 1024));
     }
 #else
     auto to_fixed = [](double v, const char* unit) {
@@ -564,7 +566,7 @@ private:
     size_t getCurrentMemoryUsage() const {
         // Platform-specific implementation would go here
         // For now, return a mock value
-        return 100 * 1024 * 1024; // 100MB
+        return 100ULL * 1024 * 1024; // 100MB
     }
 
     std::atomic<bool> profiling_{false};

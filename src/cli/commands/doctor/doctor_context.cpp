@@ -139,7 +139,7 @@ const CachedDaemonState& DoctorContext::cachedState() const {
                     state.stats = std::move(gres.value());
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
     }
 
@@ -160,7 +160,7 @@ void DoctorContext::ensureDaemonStopped() {
         auto leaseHandle = std::move(leaseRes.value());
         auto& shut = **leaseHandle;
         (void)run_result(shut.shutdown(true), std::chrono::seconds(6));
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 }
 

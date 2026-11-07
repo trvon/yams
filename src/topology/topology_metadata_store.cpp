@@ -63,6 +63,7 @@ Result<void> deleteRoadSidecar(metadata::KnowledgeGraphStore& kgStore,
     if (!node.value().has_value()) {
         return {};
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     if (auto removed = kgStore.deleteNodeById(node.value()->id); !removed) {
         return removed.error();
     }
@@ -482,9 +483,11 @@ MetadataKgTopologyArtifactStore::loadSnapshotById(std::string_view snapshotId) c
         return snapshotNodeResult.error();
     }
     if (!snapshotNodeResult.value().has_value() ||
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         !snapshotNodeResult.value()->properties.has_value()) {
         return std::optional<TopologyArtifactBatch>{};
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     auto batchResult = deserializeTopologyBatchCompressed(*snapshotNodeResult.value()->properties);
     if (!batchResult) {
         return batchResult.error();
@@ -515,10 +518,12 @@ MetadataKgTopologyArtifactStore::attachRoadSidecar(TopologyArtifactBatch& batch)
     if (!node) {
         return node.error();
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     if (!node.value().has_value() || !node.value()->properties.has_value()) {
         return {}; // neither roads nor orders were written for this snapshot
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     auto sidecar = deserializeTopologyRoadSidecarCompressed(*node.value()->properties);
     if (!sidecar) {
         batch.roadUnavailableReason = "road_sidecar_undecodable:" + sidecar.error().message;
@@ -568,7 +573,9 @@ MetadataKgTopologyArtifactStore::loadResidentLatest() const {
         return latestNodeResult.error();
     }
     std::string latestSnapshotId;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     if (latestNodeResult.value().has_value() && latestNodeResult.value()->properties.has_value()) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         auto parsed = json::parse(*latestNodeResult.value()->properties, nullptr, false);
         if (!parsed.is_discarded() && parsed.is_object()) {
             if (auto it = parsed.find("snapshot_id"); it != parsed.end() && it->is_string()) {
@@ -590,6 +597,7 @@ MetadataKgTopologyArtifactStore::loadResidentLatest() const {
     if (!loaded.value().has_value()) {
         return current;
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     auto loadedResident = makeResident(std::move(*loaded.value()));
     std::lock_guard lock(residentMutex_);
     if (residentGeneration_ == generation) {
@@ -621,6 +629,7 @@ MetadataKgTopologyArtifactStore::loadLatestShared(std::string_view snapshotId) c
     if (!loaded.value().has_value()) {
         return std::shared_ptr<const TopologyArtifactBatch>{};
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     return std::make_shared<const TopologyArtifactBatch>(std::move(*loaded.value()));
 }
 
@@ -674,6 +683,7 @@ Result<std::vector<DocumentClusterMembership>> MetadataKgTopologyArtifactStore::
             continue;
         }
 
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         auto allMetadataResult = metadataRepo_->getAllMetadata(documentResult.value()->id);
         if (!allMetadataResult) {
             return allMetadataResult.error();

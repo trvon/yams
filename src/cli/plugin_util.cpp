@@ -104,8 +104,8 @@ std::vector<fs::path> getPluginSearchDirs() {
     std::vector<fs::path> dirs;
 
     // User-local plugins
-    if (const char* home = std::getenv("HOME")) {
-        dirs.emplace_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
+    if (const auto home = yams::config::getenv_optional("HOME")) {
+        dirs.emplace_back(fs::path(*home) / ".local" / "lib" / "yams" / "plugins");
     }
 
 #ifdef __APPLE__
@@ -212,7 +212,6 @@ std::optional<fs::path> resolvePlugin(const std::string& nameOrPath) {
                 continue;
             }
 
-            std::string filename = path.filename().string();
             std::string ext = path.extension().string();
             if (ext != ".so" && ext != ".dylib" && ext != ".dll") {
                 continue; // Skip WASM for ABI probing

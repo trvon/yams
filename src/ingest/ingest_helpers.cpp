@@ -7,7 +7,7 @@
 namespace yams::ingest {
 
 namespace {
-constexpr size_t kMaxTextToPersistInMetadataBytes = 16 * 1024 * 1024; // 16 MiB (best-effort)
+constexpr size_t kMaxTextToPersistInMetadataBytes = 16ULL * 1024 * 1024; // 16 MiB (best-effort)
 }
 
 Result<void> persist_content_and_index(metadata::IMetadataRepository& meta, int64_t docId,

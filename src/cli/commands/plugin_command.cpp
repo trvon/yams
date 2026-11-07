@@ -1231,6 +1231,7 @@ void PluginCommand::updatePlugins() {
         for (const auto& [name, version] : updates.value()) {
             auto currentVer = installer->installedVersion(name);
             std::string current =
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 (currentVer && currentVer.value()) ? *currentVer.value() : "unknown";
             std::cout << "  " << name << ": " << current << " -> " << version << "\n";
         }

@@ -234,7 +234,7 @@ ExternalEntityProviderAdapter::extractEntitiesWithBase64(const std::string& base
 }
 
 size_t ExternalEntityProviderAdapter::calculateBatchSize(size_t binarySize) {
-    constexpr size_t MB = 1024 * 1024;
+    constexpr size_t MB = 1024ULL * 1024;
     if (binarySize < 1 * MB) {
         return BATCH_SIZE_TINY;
     } else if (binarySize < 5 * MB) {

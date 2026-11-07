@@ -194,6 +194,8 @@ PostIngestQueue::PostIngestQueue(
     }
 }
 
+// Teardown only locks, logs and waits; a throw here means a broken mutex or allocator.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 PostIngestQueue::~PostIngestQueue() {
     stop_.store(true, std::memory_order_release);
     cancelPendingKgJobs(true, "destructor shutdown");
@@ -1578,7 +1580,7 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
         }
     } else {
         spdlog::debug("[PostIngestQueue] KG batch submitted {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
-                      jobs.size(), ms, ms / jobs.size());
+                      jobs.size(), ms, ms / static_cast<double>(jobs.size()));
     }
 }
 
@@ -2671,6 +2673,7 @@ PostIngestQueue::getCachedDocumentInfo(const std::string& hash) {
 
     auto result = meta_->getDocumentByHash(hash);
     if (result && result.value().has_value()) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         auto info = *result.value();
         metadataCache_.infoCache.put(hash, info);
         return info;
@@ -2906,6 +2909,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         uint32_t waits = 0;
         const auto enqueueStart = std::chrono::steady_clock::now();
         while (!stop_.load(std::memory_order_acquire)) {
+            // push_wait moves `job` only when it returns true.
+            // NOLINTNEXTLINE(bugprone-use-after-move)
             if (embedQ->push_wait(std::move(job), kEnqueueTimeout)) {
                 InternalEventBus::instance().incEmbedQueued(batchSize);
                 embedJobsEmitted_.fetch_add(1, std::memory_order_relaxed);

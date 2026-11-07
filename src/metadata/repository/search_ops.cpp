@@ -270,7 +270,7 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                 const size_t requestedLimit = static_cast<size_t>(effectiveLimit);
 
                 if (resultSize < requestedLimit) {
-                    out.totalCount = resultSize;
+                    out.totalCount = static_cast<int64_t>(resultSize);
                 } else {
                     constexpr int64_t kMaxCountLimit = 10000;
                     std::string countSql = R"(
@@ -323,7 +323,7 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                             }
                         }
                     } else {
-                        out.totalCount = resultSize;
+                        out.totalCount = static_cast<int64_t>(resultSize);
                         spdlog::debug("Count query failed, using result size as count");
                     }
                 }
@@ -569,7 +569,7 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
             results.results.push_back(result);
         }
 
-        results.totalCount = results.results.size();
+        results.totalCount = static_cast<int64_t>(results.results.size());
 
         auto end = std::chrono::high_resolution_clock::now();
         results.executionTimeMs =

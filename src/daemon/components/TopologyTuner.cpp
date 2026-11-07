@@ -134,7 +134,6 @@ void TopologyTuner::observeRebuildStatsWithPersistence(std::string_view armId,
         double reward = geometric;
         switch (cfg_.rewardMode) {
             case TunerRewardMode::Geometric:
-                reward = geometric;
                 break;
             case TunerRewardMode::Persistence:
                 reward = persistenceNorm;

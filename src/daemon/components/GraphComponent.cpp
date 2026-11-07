@@ -390,6 +390,7 @@ bool GraphComponent::shouldSkipEntityExtraction(
         return false;
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     auto entRes = kg->getDocEntitiesForDocument(docIdRes.value().value(), 1, 0);
     return entRes.has_value() && !entRes.value().empty();
 }

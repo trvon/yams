@@ -1096,7 +1096,6 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
     }
 
     std::vector<float> full(doc_count_, 0.0f);
-    const char* recipe_label = "Bm25SabSmooth";
 
     // Build query profile from the primary index for routing decisions.
     simeon::QueryProfile profile;
@@ -1148,7 +1147,7 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
     strategy_router_->route(query, profile, evidence,
                             std::span<simeon::RetrievalStrategy* const>(pool),
                             std::span<float>{full});
-    recipe_label = "StrategyRouted";
+    const char* recipe_label = "StrategyRouted";
 
     // Blend concept scores when available.
     if (concept_index_ && cfg_.concept_weight > 0.0f) {
@@ -1232,7 +1231,6 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
     } else {
         // Unrecognized or unavailable arm: fall back to plain SAB.
         index_->score(query, std::span<float>{full});
-        recipe_label = "Bm25SabSmooth";
     }
 
     // Blend concept scores when available.
@@ -1304,13 +1302,16 @@ SimeonLexicalBackend::QuerySession::score(std::span<const std::int64_t> document
         return scored.error();
     }
     RescoreDecision result;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     result.recipe_name = scores_->value().recipe_name;
     result.scores.reserve(documentIds.size());
     for (const auto id : documentIds) {
         const auto found = backend_.doc_id_to_index_.find(id);
-        result.scores.push_back(found == backend_.doc_id_to_index_.end()
-                                    ? 0.0F
-                                    : scores_->value().scores[found->second]);
+        result.scores.push_back(
+            found == backend_.doc_id_to_index_.end()
+                ? 0.0F
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                : scores_->value().scores[found->second]);
     }
     return result;
 }
@@ -1332,7 +1333,9 @@ SimeonLexicalBackend::QuerySession::searchTop(std::size_t limit) {
         return scored.error();
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     out.recipe_name = scores_->value().recipe_name;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     const auto& scores = scores_->value().scores;
     if (scores.size() != index_to_doc_id_.size()) {
         return Error{ErrorCode::InternalError, "SimeonLexicalBackend: direct score size mismatch"};

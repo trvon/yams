@@ -212,7 +212,7 @@ public:
                     snapshot.createdTime = std::chrono::duration_cast<std::chrono::seconds>(
                                                std::chrono::system_clock::now().time_since_epoch())
                                                .count();
-                    snapshot.fileCount = response.filesIndexed;
+                    snapshot.fileCount = static_cast<std::int64_t>(response.filesIndexed);
                     // Accumulate total bytes from successful file results
                     uint64_t totalBytes = 0;
                     for (const auto& r : response.results) {
@@ -220,7 +220,7 @@ public:
                             totalBytes += r.sizeBytes;
                         }
                     }
-                    snapshot.totalBytes = totalBytes;
+                    snapshot.totalBytes = static_cast<std::int64_t>(totalBytes);
 
                     // Store metadata fields
                     snapshot.metadata["directory_path"] = req.directoryPath;

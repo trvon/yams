@@ -7,6 +7,7 @@ namespace yamsfmt = std;
 #include <spdlog/fmt/fmt.h>
 namespace yamsfmt = fmt;
 #endif
+#include <yams/config/config_helpers.h>
 #include <yams/core/types.h>
 #include <yams/metadata/db_lock_telemetry.h>
 #include <yams/storage/reference_db.h>
@@ -40,8 +41,8 @@ bool db_lifetime_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const char* env = std::getenv("YAMS_TRACE_DB_LIFETIME");
-    bool enabled = env && *env && std::string_view(env) != "0";
+    const auto env = yams::config::getenv_nonempty("YAMS_TRACE_DB_LIFETIME");
+    bool enabled = env && *env != "0";
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -222,8 +223,8 @@ Database::Database(const std::filesystem::path& path) : path_(path.string()) {
         sqlite3_busy_timeout(db_, 15000);
 
         // WAL mode for better concurrency (unless testing)
-        if (const char* test_env = std::getenv("YAMS_TESTING")) {
-            std::string v(test_env);
+        if (auto test_env = yams::config::getenv_optional("YAMS_TESTING")) {
+            std::string v = std::move(*test_env);
             std::transform(v.begin(), v.end(), v.begin(),
                            [](unsigned char c) { return (char)std::tolower(c); });
             if (v == "1" || v == "true" || v == "yes" || v == "on") {

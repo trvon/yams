@@ -990,6 +990,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     try {
         auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::BestEffort);
         if (sres && sres.value()) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             const auto& s = *sres.value();
             if (!s.contentStoreRoot.empty()) {
                 namespace fs = std::filesystem;
@@ -1116,6 +1117,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             try {
                 auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::BestEffort);
                 if (sres && sres.value()) {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     const auto& s = *sres.value();
                     if (!s.contentStoreRoot.empty()) {
                         baseDir = std::filesystem::path(s.contentStoreRoot).parent_path();
@@ -1742,8 +1744,10 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
             if (resolved.isLocalFile && !item.path.empty()) {
                 // If item.path ends with local abs path's filename, annotate
                 try {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     std::string base = std::filesystem::path(*resolved.absPath).filename().string();
                     if (std::filesystem::path(item.path).filename().string() == base) {
+                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                         docJson["local_input_file"] = *resolved.absPath;
                     }
                 } catch (...) {
@@ -1881,6 +1885,7 @@ MCPServer::handleGetStatus(const MCPStatusRequest& req) {
     auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::Required);
     if (!sres)
         co_return sres.error();
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     const auto& s = *sres.value();
     MCPStatusResponse out;
     out.running = s.running;
@@ -2015,9 +2020,11 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
         boost::asio::local::stream_protocol::socket probe(exec);
         if (!sock.empty()) {
             boost::system::error_code bec;
+            // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
             (void)probe.connect(boost::asio::local::stream_protocol::endpoint(sock.string()), bec);
             connectable = !bec;
             boost::system::error_code closeError;
+            // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
             (void)probe.close(closeError);
         }
     } catch (...) {
@@ -2029,6 +2036,7 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     bool haveStatus = false;
     if (auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::BestEffort);
         sres && sres.value()) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         s = std::move(*sres.value());
         haveStatus = true;
     }

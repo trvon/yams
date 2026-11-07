@@ -258,6 +258,7 @@ resolveGraphCandidateNodeId(const std::shared_ptr<yams::metadata::KnowledgeGraph
     if (!node || !node.value().has_value()) {
         auto fallbackNode = kgStore->getNodeByKey("doc:" + std::string(candidateId));
         if (fallbackNode && fallbackNode.value().has_value()) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             return fallbackNode.value()
                 ->id; // NOLINT(bugprone-unchecked-optional-access) — guarded above
         }

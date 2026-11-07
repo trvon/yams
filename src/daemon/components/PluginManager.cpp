@@ -193,7 +193,7 @@ PluginManager::PluginManager(Dependencies deps) {
 }
 
 PluginManager::~PluginManager() {
-    shutdown();
+    PluginManager::shutdown();
 }
 
 Result<void> PluginManager::initialize() {

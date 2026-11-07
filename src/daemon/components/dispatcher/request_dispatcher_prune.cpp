@@ -57,13 +57,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                         setMinimumAge(24);
                         break;
                     case 'w':
-                        setMinimumAge(24 * 7);
+                        setMinimumAge(24LL * 7);
                         break;
                     case 'm':
-                        setMinimumAge(24 * 30);
+                        setMinimumAge(24LL * 30);
                         break;
                     case 'y':
-                        setMinimumAge(24 * 365);
+                        setMinimumAge(24LL * 365);
                         break;
                     default:
                         spdlog::warn("Unknown age unit '{}', ignoring", unit);
@@ -93,7 +93,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                     return value * 1024 * 1024 * 1024;
                 return value;
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
         return 0;

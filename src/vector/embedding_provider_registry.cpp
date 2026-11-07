@@ -20,7 +20,7 @@ public:
 
     ~DaemonClientEmbeddingProvider() override {
         if (initialized_) {
-            shutdown();
+            DaemonClientEmbeddingProvider::shutdown();
         }
     }
 

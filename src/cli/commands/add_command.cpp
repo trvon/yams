@@ -1206,6 +1206,7 @@ private:
         if (!initial.value().has_value()) {
             return Error{ErrorCode::NotFound, "document not found by hash"};
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         if (!isLightIndexCandidate(*initial.value())) {
             return Result<void>();
         }
@@ -1220,6 +1221,7 @@ private:
                 return doc.error();
             }
             if (doc.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 const auto& info = *doc.value();
                 if (info.contentExtracted &&
                     info.extractionStatus == metadata::ExtractionStatus::Success) {

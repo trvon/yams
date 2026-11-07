@@ -745,6 +745,7 @@ Result<DeltaExchangeStats> receiveAll(FrameSource& frames, const std::string& lo
         }
         if (verdict.value()) {
             // quarantineWriter logs the quarantine with the local counters; add the session's.
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             const auto reason = verdict.value()->reason +
                                 " (p2p session frontier=" + std::to_string(expectedCounter) +
                                 " staged=" + std::to_string(staged.size()) + ")";
@@ -752,6 +753,7 @@ Result<DeltaExchangeStats> receiveAll(FrameSource& frames, const std::string& lo
             if (!quarantined) {
                 return quarantined.error();
             }
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             return Error{verdict.value()->code, verdict.value()->reason};
         }
         if (staged.empty()) {

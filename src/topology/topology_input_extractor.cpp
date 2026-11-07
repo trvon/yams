@@ -161,7 +161,8 @@ std::optional<std::int64_t> parseTopologyEventTime(std::string_view value) noexc
     if (hour > 23 || minute > 59 || second > 60) {
         return std::nullopt;
     }
-    seconds += static_cast<std::int64_t>(hour) * 3600 + minute * 60 + second;
+    seconds +=
+        static_cast<std::int64_t>(hour) * 3600 + static_cast<std::int64_t>(minute) * 60 + second;
     if (pos == value.size()) {
         return seconds;
     }
@@ -189,7 +190,8 @@ std::optional<std::int64_t> parseTopologyEventTime(std::string_view value) noexc
     if (pos != value.size() || offsetHours > 23 || offsetMinutes > 59) {
         return std::nullopt;
     }
-    const std::int64_t offset = static_cast<std::int64_t>(offsetHours) * 3600 + offsetMinutes * 60;
+    const std::int64_t offset = static_cast<std::int64_t>(offsetHours) * 3600 +
+                                static_cast<std::int64_t>(offsetMinutes) * 60;
     // `+02:00` means the local clock runs ahead of UTC, so UTC is earlier.
     return negativeOffset ? seconds + offset : seconds - offset;
 }

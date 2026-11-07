@@ -415,3 +415,43 @@ TEST_CASE_METHOD(VectorDimensionFixture, "VectorDimensionValidation update opera
         CHECK_FALSE(db.updateVector(rec.chunk_id, rec)); // Use chunk_id, not document_hash
     }
 }
+
+// A batch whose first record matches the stored schema (not the config) takes
+// the reconciliation path; every later record must still be validated.
+TEST_CASE_METHOD(VectorDimensionFixture,
+                 "VectorDimensionValidation batch reconciliation still rejects a bad tail record",
+                 "[vector][dimension][catch2]") {
+    skipIfNeeded();
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("yams_vdim_reconcile_" + std::to_string(std::rand()));
+    std::filesystem::create_directories(dir);
+    const auto dbPath = (dir / "vectors.db").string();
+
+    {
+        auto config = createConfig(8);
+        config.database_path = dbPath;
+        config.use_in_memory = false;
+        VectorDatabase db(config);
+        REQUIRE(db.initialize());
+        REQUIRE(db.insertVector(createVectorRecord("seed", createEmbedding(8))));
+        db.close();
+    }
+
+    auto config = createConfig(4);
+    config.database_path = dbPath;
+    config.use_in_memory = false;
+    VectorDatabase db(config);
+    REQUIRE(db.initialize());
+    // Precondition: the config still disagrees with the stored schema, so the
+    // batch below reaches reconciliation.
+    REQUIRE(db.getConfig().embedding_dim == 4);
+
+    const std::vector<VectorRecord> batch = {
+        createVectorRecord("ok", createEmbedding(8)),
+        createVectorRecord("bad", createEmbedding(3)),
+    };
+    CHECK_FALSE(db.insertVectorsBatch(batch));
+    CHECK_THAT(db.getLastError(), ContainsSubstring("got_dim=3"));
+    db.close();
+    std::filesystem::remove_all(dir);
+}

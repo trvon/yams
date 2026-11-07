@@ -1702,7 +1702,8 @@ public:
                     if (!rr)
                         return rr;
                 }
-                applyEntityCountDelta(entities.size(), countNativeEntitiesFromDocEntities(entities),
+                applyEntityCountDelta(static_cast<std::int64_t>(entities.size()),
+                                      countNativeEntitiesFromDocEntities(entities),
                                       countNerEntitiesFromDocEntities(entities));
                 return Result<void>();
             });

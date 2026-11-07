@@ -391,7 +391,7 @@ public:
                     doc.info.filePath = e.path;
                     doc.info.sha256Hash = e.hash;
                     doc.info.fileExtension = e.extension;
-                    doc.info.fileSize = e.size;
+                    doc.info.fileSize = static_cast<int64_t>(e.size);
                     doc.info.mimeType = e.mimeType;
 
                     // Convert timestamps (seconds precision)
@@ -965,7 +965,7 @@ private:
                 doc.info.filePath = docEntry.path;
                 doc.info.sha256Hash = docEntry.hash;
                 doc.info.fileExtension = docEntry.extension;
-                doc.info.fileSize = docEntry.size;
+                doc.info.fileSize = static_cast<int64_t>(docEntry.size);
                 doc.info.mimeType = docEntry.mimeType;
 
                 // Convert timestamps (seconds precision)
@@ -989,6 +989,7 @@ private:
                 // Handle content snippet and extraction status
                 doc.extractionStatus = docEntry.extractionStatus;
                 if (docEntry.snippet) {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     doc.contentSnippet = docEntry.snippet.value();
                     doc.hasContent = true;
                 }
@@ -1107,8 +1108,8 @@ private:
 
     Result<void> listMetadataValues() {
         // Start spinner early (before any blocking operations)
-        bool showSpinner =
-            !cli_->getJsonOutput() && format_ != "json" && format_ != "csv" && format_ != "minimal";
+        bool showSpinner = cli_ && !cli_->getJsonOutput() && format_ != "json" &&
+                           format_ != "csv" && format_ != "minimal";
         std::shared_ptr<ui::SpinnerRunner> spinner =
             showSpinner ? std::make_shared<ui::SpinnerRunner>() : nullptr;
         if (spinner) {

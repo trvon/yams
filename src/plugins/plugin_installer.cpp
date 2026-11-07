@@ -373,6 +373,7 @@ public:
         auto installedVer = installedVersion(info.name);
         if (installedVer && installedVer.value()) {
             result.wasUpgrade = true;
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             result.previousVersion = *installedVer.value();
             if (!options.force && result.previousVersion == info.version) {
                 return Error{ErrorCode::InvalidOperation,
@@ -608,6 +609,7 @@ public:
                 continue; // Plugin not in repository
             }
 
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             if (remoteInfo.value().version != *currentVer.value()) {
                 updates[pluginName] = remoteInfo.value().version;
             }

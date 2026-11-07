@@ -121,7 +121,7 @@ void DoctorDisplay::renderLiveRepairProgress(std::ostream& os, YamsCLI*) {
 
         if (printedHeader)
             os << "\n";
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 }
 

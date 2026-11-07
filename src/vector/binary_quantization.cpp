@@ -220,7 +220,8 @@ std::vector<BinaryQuantizedHit> BinaryQuantizedIndex::search(const BinaryVector&
     }
 
     const auto take = std::min(topK, candidates.size());
-    std::partial_sort(candidates.begin(), candidates.begin() + take, candidates.end(),
+    std::partial_sort(candidates.begin(), candidates.begin() + static_cast<std::ptrdiff_t>(take),
+                      candidates.end(),
                       [](const BinaryQuantizedHit& lhs, const BinaryQuantizedHit& rhs) {
                           if (lhs.hammingDistance != rhs.hammingDistance) {
                               return lhs.hammingDistance < rhs.hammingDistance;

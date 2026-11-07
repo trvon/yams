@@ -116,7 +116,7 @@ nlohmann::json DoctorRender::buildDoctorJson(YamsCLI* cli, const CachedDaemonSta
         }
         trustJson["roots"] = std::move(rootsJson);
         jsonResult["plugin_trust"] = std::move(trustJson);
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 
     namespace fs = std::filesystem;
@@ -154,7 +154,7 @@ nlohmann::json DoctorRender::buildDoctorJson(YamsCLI* cli, const CachedDaemonSta
         if (!r2Status.detail.empty()) {
             jsonResult["storage"]["r2"]["detail"] = r2Status.detail;
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 
     try {
@@ -179,7 +179,7 @@ nlohmann::json DoctorRender::buildDoctorJson(YamsCLI* cli, const CachedDaemonSta
             jsonResult["knowledge_graph"]["doc_entities"] =
                 countTable("SELECT COUNT(1) FROM doc_entities");
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 
     if (recs && !recs->empty()) {

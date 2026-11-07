@@ -280,7 +280,8 @@ std::vector<DocumentChunk> DocumentChunker::addOverlap(const std::vector<Documen
         size_t overlap_size = config_.overlap_size;
         if (config_.overlap_percentage > 0) {
             size_t chunk_size = config_.use_token_count ? chunk.token_count : chunk.content.size();
-            overlap_size = static_cast<size_t>(chunk_size * config_.overlap_percentage);
+            overlap_size =
+                static_cast<size_t>(static_cast<double>(chunk_size) * config_.overlap_percentage);
         }
 
         // Overlap extraction uses character offsets.
@@ -587,7 +588,7 @@ std::vector<std::string> RecursiveTextSplitter::recursiveSplit(
         // Check if we got reasonable chunks
         bool needs_further_split = false;
         for (const auto& chunk : results) {
-            if (chunk.size() > target_size * 1.5) {
+            if (static_cast<double>(chunk.size()) > static_cast<double>(target_size) * 1.5) {
                 needs_further_split = true;
                 break;
             }
@@ -733,7 +734,8 @@ size_t SlidingWindowChunker::calculateStride() const {
     size_t overlap = config_.overlap_size;
 
     if (config_.overlap_percentage > 0) {
-        overlap = static_cast<size_t>(window_size * config_.overlap_percentage);
+        overlap =
+            static_cast<size_t>(static_cast<double>(window_size) * config_.overlap_percentage);
     } else if (config_.use_token_count) {
         // overlap_size is configured in the same unit as target_chunk_size.
         overlap = overlap * 4;
@@ -876,7 +878,8 @@ double calculateSemanticCoherence(const std::string& text) {
         }
     }
 
-    double avg_words_per_sentence = static_cast<double>(word_count) / sentence_count;
+    double avg_words_per_sentence =
+        static_cast<double>(word_count) / static_cast<double>(sentence_count);
 
     // Normalize to 0-1 range (assuming 10-20 words per sentence is optimal)
     double coherence = 1.0 - std::abs(avg_words_per_sentence - 15.0) / 15.0;
@@ -903,7 +906,8 @@ std::vector<DocumentChunk> mergeOverlappingChunks(const std::vector<DocumentChun
         if (overlap_start < overlap_end) {
             size_t overlap_size = overlap_end - overlap_start;
             size_t min_size = std::min(current.content.size(), chunk.content.size());
-            double overlap_ratio = static_cast<double>(overlap_size) / min_size;
+            double overlap_ratio =
+                static_cast<double>(overlap_size) / static_cast<double>(min_size);
 
             if (overlap_ratio > overlap_threshold) {
                 // Merge chunks
@@ -955,7 +959,7 @@ std::vector<DocumentChunk> deduplicateChunks(const std::vector<DocumentChunk>& c
                 }
             }
 
-            double similarity = static_cast<double>(common_chars) / min_len;
+            double similarity = static_cast<double>(common_chars) / static_cast<double>(min_len);
 
             if (similarity > similarity_threshold) {
                 is_duplicate = true;
@@ -994,7 +998,7 @@ std::string createChunkingSummary(const std::vector<DocumentChunk>& chunks) {
         total_tokens += chunk.token_count;
     }
 
-    double avg_size = static_cast<double>(total_size) / chunks.size();
+    double avg_size = static_cast<double>(total_size) / static_cast<double>(chunks.size());
 
     summary << "  Average chunk size: " << static_cast<size_t>(avg_size) << " characters\n";
     summary << "  Min chunk size: " << min_size << " characters\n";
@@ -1097,10 +1101,8 @@ std::vector<DocumentChunk> SentenceBasedChunker::doChunking(const std::string& c
             if (config_.use_token_count) {
                 limit = config_.target_chunk_size * 4;
             }
-            if (new_size > limit) {
-                should_split = true;
-            } else if (config_.preserve_sentences &&
-                       current_sentence_count >= 3) { // Default to 3 sentences per chunk
+            // Default to 3 sentences per chunk
+            if (new_size > limit || (config_.preserve_sentences && current_sentence_count >= 3)) {
                 should_split = true;
             }
         }
@@ -1200,10 +1202,8 @@ std::vector<DocumentChunk> ParagraphBasedChunker::doChunking(const std::string& 
             if (config_.use_token_count) {
                 limit = config_.target_chunk_size * 4;
             }
-            if (new_size > limit) {
-                should_split = true;
-            } else if (config_.preserve_paragraphs &&
-                       current_paragraph_count >= 2) { // Default to 2 paragraphs per chunk
+            // Default to 2 paragraphs per chunk
+            if (new_size > limit || (config_.preserve_paragraphs && current_paragraph_count >= 2)) {
                 should_split = true;
             }
         }

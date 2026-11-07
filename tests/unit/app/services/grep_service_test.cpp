@@ -718,7 +718,6 @@ TEST_CASE("GrepService - Path-scoped grep prefers latest indexed version",
 
     GrepFixture fixture;
     yams::test::ScopedEnvVar hotCap("YAMS_GREP_MAX_DOCS_HOT", std::string("1"));
-    yams::test::ScopedEnvVar coldCap("YAMS_GREP_MAX_DOCS_COLD", std::string("1"));
 
     fixture.addDocument("versioned.txt", "old-token only\n");
     fixture.addDocument("versioned.txt", "new-token only\n");
@@ -745,7 +744,6 @@ TEST_CASE("GrepService - Broad regex grep does not stop at candidate cap",
 
     GrepFixture fixture;
     yams::test::ScopedEnvVar hotCap("YAMS_GREP_MAX_DOCS_HOT", std::string("2"));
-    yams::test::ScopedEnvVar coldCap("YAMS_GREP_MAX_DOCS_COLD", std::string("0"));
     yams::test::ScopedEnvVar budget("YAMS_GREP_TIME_BUDGET_MS", std::string("10000"));
 
     fixture.addDocument("old_match.txt", "rare_token_42\n");

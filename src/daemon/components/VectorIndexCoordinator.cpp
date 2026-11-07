@@ -155,6 +155,8 @@ warnIfRebuildExceedsBudget(const std::shared_ptr<vector::VectorDatabase>& vdb) n
     }
 }
 
+// Only allocation or mutex failures can escape; terminating on those is intended.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 void VectorIndexCoordinator::postTelemetryRefresh() noexcept {
     boost::asio::post(strand_, [this]() {
         VectorIndexTelemetry t = snapshot();
@@ -199,6 +201,8 @@ VectorIndexCoordinator::BulkScope VectorIndexCoordinator::beginBulkIngest(Rebuil
     return BulkScope(this);
 }
 
+// Only allocation or mutex failures can escape; terminating on those is intended.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 void VectorIndexCoordinator::releaseBulkScope() noexcept {
     const uint32_t prev = activeBulkScopes_.fetch_sub(1, std::memory_order_acq_rel);
     if (prev == 1) {

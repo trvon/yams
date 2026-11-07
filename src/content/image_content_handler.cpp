@@ -404,7 +404,7 @@ ImageContentHandler::generateThumbnail(std::span<const std::byte> data, ImageFor
     }
 
     std::vector<std::byte> thumbnail;
-    thumbnail.reserve(targetSize * targetSize * 3); // RGB estimate
+    thumbnail.reserve(static_cast<std::size_t>(targetSize) * targetSize * 3); // RGB estimate
 
     // For now, just store a minimal header indicating it's a placeholder
     const std::string placeholder =

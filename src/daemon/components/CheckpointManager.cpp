@@ -235,8 +235,8 @@ bool CheckpointManager::checkpointWal() {
                     auto postSize = walSizeBytes();
                     spdlog::info("[CheckpointManager] WAL checkpoint (TRUNCATE) completed  "
                                  "{} MB -> {} MB",
-                                 preSize ? std::to_string(*preSize / (1024 * 1024)) : "?",
-                                 postSize ? std::to_string(*postSize / (1024 * 1024)) : "?");
+                                 preSize ? std::to_string(*preSize / (1024ULL * 1024)) : "?",
+                                 postSize ? std::to_string(*postSize / (1024ULL * 1024)) : "?");
                     return true;
                 }
                 spdlog::warn("[CheckpointManager] TRUNCATE attempt {} failed: {}", attempt + 1,
@@ -248,7 +248,7 @@ bool CheckpointManager::checkpointWal() {
         }
         stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);
         spdlog::warn("[CheckpointManager] TRUNCATE failed after {} retries — WAL at {} MB",
-                     kMaxRetries, preSize ? std::to_string(*preSize / (1024 * 1024)) : "?");
+                     kMaxRetries, preSize ? std::to_string(*preSize / (1024ULL * 1024)) : "?");
         return false;
     }
 

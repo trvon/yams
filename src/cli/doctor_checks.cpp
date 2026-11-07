@@ -108,13 +108,13 @@ DaemonCheckResult checkDaemon(YamsCLI* cli, std::optional<daemon::StatusResponse
 ModelsCheckResult checkInstalledModels(YamsCLI* cli) {
     ModelsCheckResult result;
 
-    const char* home = std::getenv("HOME");
+    const auto home = yams::config::getenv_optional("HOME");
     if (!home) {
         return result;
     }
 
     // Deprecated location
-    result.deprecatedPath = fs::path(home) / ".yams" / "models";
+    result.deprecatedPath = fs::path(*home) / ".yams" / "models";
 
     // Current location
     result.currentPath = cli ? cli->getDataPath() / "models" : fs::path();
@@ -209,11 +209,9 @@ VectorDbCheckResult checkVectorDb(YamsCLI* cli) {
     }
 
     // Determine schema type
-    if (!result.exists) {
-        result.schemaType = "none";
-    } else if (result.usesVec0) {
+    if (result.exists && result.usesVec0) {
         result.schemaType = "vec0";
-    } else if (result.schemaValid) {
+    } else if (result.exists && result.schemaValid) {
         result.schemaType = "legacy";
         result.issues.push_back("doc_embeddings table not using vec0 virtual table");
     } else {

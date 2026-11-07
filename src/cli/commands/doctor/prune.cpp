@@ -84,8 +84,8 @@ Result<void> PruneCommand::execute(std::ostream& os) {
     auto leaseRes = acquire_cli_daemon_client(clientCfg, 1, 4);
     if (!leaseRes) {
         os << "  "
-           << status_error(formatErrorWithHint(leaseRes.error().code, leaseRes.error().message,
-                                               "prune"))
+           << status_error(
+                  formatErrorWithHint(leaseRes.error().code, leaseRes.error().message, "prune"))
            << "\n";
         return leaseRes.error();
     }
@@ -94,8 +94,8 @@ Result<void> PruneCommand::execute(std::ostream& os) {
     auto respRes = run_result(lease->call<daemon::PruneRequest>(req), std::chrono::minutes(10));
     if (!respRes) {
         os << "  "
-           << status_error(formatErrorWithHint(respRes.error().code, respRes.error().message,
-                                               "prune"))
+           << status_error(
+                  formatErrorWithHint(respRes.error().code, respRes.error().message, "prune"))
            << "\n";
         return respRes.error();
     }
@@ -123,14 +123,14 @@ Result<void> PruneCommand::execute(std::ostream& os) {
     os << "  " << colorize(useCandidateTotal ? "Total candidates:" : "Total files:", Ansi::BOLD)
        << " " << (useCandidateTotal ? totalCandidates : totalFiles) << "\n";
     os << "  " << colorize("Total size:", Ansi::BOLD) << " " << std::fixed << std::setprecision(2)
-       << (resp.totalBytesFreed / 1024.0 / 1024.0) << " MB\n\n";
+       << (static_cast<double>(resp.totalBytesFreed) / 1024.0 / 1024.0) << " MB\n\n";
 
     if (!resp.categoryCounts.empty()) {
         os << subsection_header("By Category") << "\n\n";
         for (const auto& [cat, count] : resp.categoryCounts) {
             auto it = resp.categorySizes.find(cat);
             uint64_t size = (it != resp.categorySizes.end()) ? it->second : 0;
-            double sizeMB = size / 1024.0 / 1024.0;
+            double sizeMB = static_cast<double>(size) / 1024.0 / 1024.0;
             os << "  " << colorize(cat, Ansi::CYAN) << ": " << count << " files, " << std::fixed
                << std::setprecision(2) << sizeMB << " MB\n";
         }

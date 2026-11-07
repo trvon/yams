@@ -375,11 +375,9 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
         if (!metadataLoaded) {
             if (auto metadata = extractUsingFFProbe(path)) {
                 audioMeta = *metadata;
-                metadataLoaded = true;
             } else if (path.extension() == ".wav") {
                 if (auto wavMeta = analyzeWAVHeader(path)) {
                     audioMeta = *wavMeta;
-                    metadataLoaded = true;
                 }
             }
 
@@ -387,7 +385,6 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
             if (path.extension() == ".mp3") {
                 if (auto id3v1 = extractID3v1(path)) {
                     audioMeta.tags = *id3v1;
-                    metadataLoaded = true;
                 }
             }
         }

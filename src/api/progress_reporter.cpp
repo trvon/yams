@@ -31,10 +31,10 @@ struct ProgressReporter::Impl {
         Progress progress;
         progress.bytesProcessed = bytesProcessed.load();
         progress.totalBytes = totalBytes.load();
-        progress.percentage =
-            (progress.totalBytes > 0)
-                ? (static_cast<double>(progress.bytesProcessed) / progress.totalBytes * 100.0)
-                : 0.0;
+        progress.percentage = (progress.totalBytes > 0)
+                                  ? (static_cast<double>(progress.bytesProcessed) /
+                                     static_cast<double>(progress.totalBytes) * 100.0)
+                                  : 0.0;
         progress.startTime = startTime;
         progress.isCancelled = cancelled.load();
 
@@ -93,10 +93,10 @@ Progress ProgressReporter::getProgress() const {
     Progress progress;
     progress.bytesProcessed = pImpl->bytesProcessed.load();
     progress.totalBytes = pImpl->totalBytes.load();
-    progress.percentage =
-        (progress.totalBytes > 0)
-            ? (static_cast<double>(progress.bytesProcessed) / progress.totalBytes * 100.0)
-            : 0.0;
+    progress.percentage = (progress.totalBytes > 0)
+                              ? (static_cast<double>(progress.bytesProcessed) /
+                                 static_cast<double>(progress.totalBytes) * 100.0)
+                              : 0.0;
     progress.startTime = pImpl->startTime;
     progress.isCancelled = pImpl->cancelled.load();
 
@@ -176,8 +176,9 @@ std::unique_ptr<ProgressReporter> ProgressReporter::createSubReporter(uint64_t s
         // Calculate how much of the parent's progress this sub-task represents
         uint64_t parentTotal = parentPtr->getTotalBytes();
         if (parentTotal > 0) {
-            double subRatio = static_cast<double>(subTotalBytes) / parentTotal;
-            uint64_t parentBytes = static_cast<uint64_t>(subProgress.bytesProcessed * subRatio);
+            double subRatio = static_cast<double>(subTotalBytes) / static_cast<double>(parentTotal);
+            uint64_t parentBytes =
+                static_cast<uint64_t>(static_cast<double>(subProgress.bytesProcessed) * subRatio);
             parentPtr->addProgress(parentBytes);
         }
     });
@@ -219,8 +220,8 @@ struct MultiProgressTracker::Impl {
         }
 
         if (overall.totalBytes > 0) {
-            overall.percentage =
-                static_cast<double>(overall.bytesProcessed) / overall.totalBytes * 100.0;
+            overall.percentage = static_cast<double>(overall.bytesProcessed) /
+                                 static_cast<double>(overall.totalBytes) * 100.0;
 
             auto elapsed = std::chrono::steady_clock::now() - overall.startTime;
             if (overall.percentage > 0) {

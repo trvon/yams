@@ -336,7 +336,7 @@ void applyCorpusStateAdjustments(const storage::CorpusStats& stats, TuningState 
     // ── Extraction / FTS readiness ────────────────────────────────────────
     if (stats.contentExtractedCoverage > 0.9) {
         const size_t prev = params.textMaxResults;
-        params.textMaxResults = static_cast<size_t>(std::lround(prev * 1.33));
+        params.textMaxResults = static_cast<size_t>(std::lround(static_cast<double>(prev) * 1.33));
         cs << "text_max=" << prev << "->" << params.textMaxResults;
         any = true;
     }
