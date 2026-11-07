@@ -276,7 +276,8 @@ private:
         if (auto it = resp.searchStats.find("lexical_hits"); it != resp.searchStats.end()) {
             try {
                 ctx.lexicalHits = std::stoll(it->second);
-            } catch (const std::exception&) {
+            } catch (const std::exception&) { // NOLINT(bugprone-empty-catch)
+                // A malformed count leaves lexicalHits unset.
             }
         }
         return ctx;
@@ -736,7 +737,8 @@ private:
 
         // Find last space before maxLength
         size_t lastSpace = result.rfind(' ', maxLength);
-        if (lastSpace != std::string::npos && lastSpace > maxLength * 0.7) {
+        if (lastSpace != std::string::npos &&
+            static_cast<double>(lastSpace) > static_cast<double>(maxLength) * 0.7) {
             return result.substr(0, lastSpace) + "...";
         }
 
@@ -907,6 +909,7 @@ private:
         dreq.globalSearch = !shouldUseSessionScope();
         dreq.useSession = shouldUseSessionScope();
         if (shouldUseSessionScope()) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             dreq.sessionName = *sessionOverride_;
         }
         if (!collection_.empty()) {

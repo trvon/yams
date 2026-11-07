@@ -145,6 +145,7 @@ Result<void> MetadataRepository::retireDocumentPath(const std::string& path) {
     // One atomic upsert: never temporarily reactivate a path or overwrite a
     // concurrently advanced head while establishing a legacy-path tombstone.
     const auto derived = computePathDerivedValues(path);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     const auto& info = *document.value();
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         auto statement = db.prepare(R"(
@@ -180,6 +181,7 @@ MetadataRepository::getDocumentPathReferences(int64_t documentId) {
             return document.error();
         std::vector<DocumentInfo> result;
         if (document.value())
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             result.push_back(*document.value());
         return result;
     }

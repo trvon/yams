@@ -115,6 +115,9 @@ WriteCoordinator::WriteCoordinator(boost::asio::io_context& ioc,
                                    std::shared_ptr<metadata::MetadataRepository> metadataRepo)
     : WriteCoordinator(ioc, std::move(kgStore), std::move(metadataRepo), Config{}) {}
 
+// A failed shutdown must not return while coroutines still use this object;
+// std::terminate is the safe outcome.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 WriteCoordinator::~WriteCoordinator() {
     shutdown();
 }
@@ -183,8 +186,9 @@ void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
         }
     }
     if (rejectedForShutdown) {
+        // `batch` is moved only on the enqueue branch, which leaves rejectedForShutdown false.
         spdlog::warn("[WriteCoordinator] Dropping batch from '{}' after shutdown requested",
-                     batch->source);
+                     batch->source); // NOLINT(bugprone-use-after-move)
         failEmbeddingAcknowledgements(
             *batch, Error{ErrorCode::SystemShutdown, "WriteCoordinator is shutting down"});
         return;
@@ -1332,6 +1336,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
                 } else if (kg_) {
                     auto nodeRes = kg_->getNodeByKey(nodeKey);
                     if (nodeRes && nodeRes.value().has_value()) {
+                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                         nodeId = nodeRes.value()->id;
                         nodeKeyToId[nodeKey] = nodeId;
                     }
@@ -1381,6 +1386,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
         } else if (kg_) {
             auto nodeRes = kg_->getNodeByKey(deferred.nodeKey);
             if (nodeRes && nodeRes.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 nodeId = nodeRes.value()->id;
                 nodeKeyToId[deferred.nodeKey] = nodeId;
             }

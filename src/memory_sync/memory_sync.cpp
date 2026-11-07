@@ -421,6 +421,7 @@ Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPage(
                     declinedSnapshots_.erase(std::string(prefix));
                     try {
                         PrefixListing listing;
+                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                         listing.keys = std::move(*snapshot.value());
                         listing.complete = true;
                         if (testing_beforeCacheAllocation) {
@@ -681,11 +682,14 @@ Result<void> MemorySyncLoop::stageErase(std::string_view logicalKey, std::string
     }
     EraseIntentState intent;
     if (existing.value()) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         if (existing.value()->tombstonePayload != tombstonePayload ||
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             existing.value()->readinessProbe != readinessProbe) {
             return Error{ErrorCode::InvalidState,
                          "staged erase payload conflicts with retained intent"};
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         intent = std::move(*existing.value());
         if (!ready || intent.ready) {
             return {};
@@ -848,6 +852,7 @@ Result<void> MemorySyncLoop::publishStagedErase(std::string_view logicalKey,
     if (!loaded.value()) {
         return Error{ErrorCode::NotFound, "staged erase intent is missing"};
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     auto intent = std::move(*loaded.value());
     bool readinessValidated = false;
     if (!intent.ready && validator) {
@@ -906,6 +911,7 @@ Result<void> MemorySyncLoop::publishStagedErase(std::string_view logicalKey,
     if (!retained.value()) {
         return {};
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     intent = std::move(*retained.value());
     const auto durable = historyCommitments_.find(nodeId_);
     const bool pointOfNoReturn =
@@ -934,16 +940,21 @@ Result<void> MemorySyncLoop::cancelStagedErase(std::string_view logicalKey) {
     if (!intent.value()) {
         return {};
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     if (intent.value()->ready && !intent.value()->record) {
         return Error{ErrorCode::InvalidState, "ready erase intent lacks prepared envelope"};
     }
     const auto durable = historyCommitments_.find(nodeId_);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     if (intent.value()->record && durable != historyCommitments_.end() &&
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         durable->second == intent.value()->preparedCommitment) {
         // The full-history frontier already includes this exact operation. Cancellation is no
         // longer safe; finish its idempotent index publication instead.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         return commitPreparedErase(*intent.value());
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     if (intent.value()->record) {
         return Error{ErrorCode::ResourceBusy,
                      "prepared erase must commit before it can be removed"};
@@ -1754,10 +1765,12 @@ Result<MemoryDeltaBatch> MemorySyncLoop::exportLocalDeltasAfter(const VersionVec
         if (!delta) {
             return delta.error();
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         if (!delta.value() || delta.value()->record.vv.get(nodeId_) != counter) {
             return Error{ErrorCode::InvalidState,
                          "writer counter index does not resolve a contiguous delta"};
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         deltas.push_back(std::move(*delta.value()));
     }
     return MemoryDeltaBatch{.deltas = std::move(deltas),
@@ -2100,20 +2113,26 @@ Result<WriterHistoryCommitment> MemorySyncLoop::localHistoryWindowAfter(std::uin
             return Error{ErrorCode::InvalidState,
                          "writer counter window does not resolve a durable delta"};
         }
-        const auto control = nlohmann::json{{"type", "delta_record"},
-                                            {"logical_key", delta.value()->logicalKey},
-                                            {"record", delta.value()->record},
-                                            {"payload_size", delta.value()->payload.size()}}
-                                 .dump()
-                                 .size();
+        const auto control =
+            nlohmann::json{{"type", "delta_record"},
+                           // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                           {"logical_key", delta.value()->logicalKey},
+                           // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                           {"record", delta.value()->record},
+                           // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                           {"payload_size", delta.value()->payload.size()}}
+                .dump()
+                .size();
         constexpr std::size_t kFramePrefixBytes = 4;
         constexpr std::size_t kPerRecordBatchHeaderAllowance = 128;
         const auto framing = 2 * kFramePrefixBytes + kPerRecordBatchHeaderAllowance;
         if (control > std::numeric_limits<std::size_t>::max() - framing ||
             control + framing >
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 std::numeric_limits<std::size_t>::max() - delta.value()->payload.size()) {
             return Error{ErrorCode::ResourceExhausted, "writer history wire estimate overflow"};
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         const auto estimated = control + framing + delta.value()->payload.size();
         if (admittedBytes > maxWireBytes || estimated > maxWireBytes - admittedBytes) {
             break;

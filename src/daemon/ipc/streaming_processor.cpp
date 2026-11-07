@@ -297,7 +297,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             spdlog::debug("[SRP] next_chunk enter has_pending={} heartbeat_sent={}",
                           has_req ? 1 : 0, heartbeat_sent_ ? 1 : 0);
 #endif
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
         // 1) If we have a pending request and have not yet sent the initial heartbeat,
@@ -427,13 +427,13 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             if (std::holds_alternative<AddDocumentRequest>(req)) {
                 try {
                     spdlog::debug("[SRP] AddDocument delegate processing start");
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Intentional best-effort path; keep the primary operation unaffected.
                 }
                 auto final = co_await delegate_->process(req);
                 try {
                     spdlog::debug("[SRP] AddDocument delegate processing done");
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Intentional best-effort path; keep the primary operation unaffected.
                 }
                 reset_state();

@@ -1,4 +1,3 @@
-#define _CRT_SECURE_NO_WARNINGS
 // pi-lens-ignore: fatal error
 #include <yams/api/content_store_builder.h>
 #include <yams/api/content_store_error.h>

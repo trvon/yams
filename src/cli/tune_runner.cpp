@@ -300,7 +300,8 @@ void runTuneStatus(YamsCLI* cli, bool json) {
                     total += s.meanReward();
                 }
                 if (!recent.value().empty()) {
-                    report["label_mean_reward_recent"] = total / recent.value().size();
+                    report["label_mean_reward_recent"] =
+                        total / static_cast<double>(recent.value().size());
                 }
             }
         } catch (const std::exception& e) {

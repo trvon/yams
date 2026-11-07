@@ -75,6 +75,9 @@ ProcessMemory readProcessMemory() {
     size_t n = 0;
     while ((n = std::fread(buf, 1, sizeof(buf), file)) > 0) {
         text.append(buf, n);
+        if (n < sizeof(buf)) {
+            break; // EOF or error; another read would be undefined for the stream
+        }
     }
     std::fclose(file);
     mem = parseProcStatusMemory(text);
@@ -1098,7 +1101,7 @@ std::uint64_t ResourceGovernor::recommendLexicalIndexBytes() const noexcept {
 ResourceGovernor::ExtractionBudget ResourceGovernor::recommendExtractionBudget() const noexcept {
     constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
     constexpr std::uint64_t kPoolFloor = 256 * kMiB;
-    constexpr std::uint64_t kPoolCeiling = 8 * 1024 * kMiB;
+    constexpr std::uint64_t kPoolCeiling = 8ULL * 1024 * kMiB;
     // Small enough that the floor rarely lifts the total past the pool:
     // that happens only when workers * 8 MiB > pool (33+ workers on the
     // 256 MiB minimum pool).

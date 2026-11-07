@@ -247,6 +247,7 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
             co_return dispatch::makeErrorResponse(ErrorCode::NotFound,
                                                   "Node not found: " + req.nodeKey);
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         originNodeId = nodeResult.value()->id;
     }
 

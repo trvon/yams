@@ -584,7 +584,7 @@ std::uint64_t DaemonMetrics::cachedPssKb() const {
         if (auto snap = TuningSnapshotRegistry::instance().get()) {
             idle = snap->daemonIdle;
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     std::lock_guard<std::mutex> lock(pssMutex_);
     return sampleProcessPssKb(pssState_, std::chrono::steady_clock::now(), pssSampleTtl(idle),
@@ -784,6 +784,9 @@ void DaemonMetrics::setSocketServer(const SocketServer* socketServer) {
     }
 }
 
+// A failed shutdown must not return while coroutines still use this object;
+// std::terminate is the safe outcome.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 DaemonMetrics::~DaemonMetrics() {
     stopPolling();
 }

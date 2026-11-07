@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <yams/common/utf8_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -30,17 +31,17 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
         bool was_loaded = false;
         try {
             was_loaded = provider->isModelLoaded(req.modelName);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
 
         int timeout_ms = 30000;
-        if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
+        if (const auto env = yams::config::getenv_optional("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
             try {
-                timeout_ms = std::stoi(env);
+                timeout_ms = std::stoi(*env);
                 if (timeout_ms < 1000)
                     timeout_ms = 1000;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
@@ -55,7 +56,7 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
         ModelLoadResponse resp;
         resp.success = true;
         resp.modelName = req.modelName;
-        resp.memoryUsageMb = provider->getMemoryUsage() / (1024 * 1024);
+        resp.memoryUsageMb = provider->getMemoryUsage() / (1024ULL * 1024);
         resp.loadTimeMs = 0;
 
         // Model is now loaded via provider and the success response is complete. Only schedule
@@ -85,7 +86,7 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
                                     }
                                 }
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                             // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     }
@@ -108,11 +109,13 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
                                       req.modelName);
                     }
                 } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
+                    spdlog::warn("[RequestDispatcher] post-load rebuild check failed (model={})",
+                                 req.modelName);
                 }
             }
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::warn("[RequestDispatcher] post-load readiness update failed (model={})",
+                         req.modelName);
         }
         co_return resp;
     } catch (const std::exception& e) {
@@ -164,7 +167,7 @@ RequestDispatcher::handleModelStatusRequest(const ModelStatusRequest& req) {
                 d.isHot = true;
                 d.memoryMb = 0;
                 if (auto mi = provider->getModelInfo(name); mi) {
-                    d.memoryMb = mi.value().memoryUsageBytes / (1024 * 1024);
+                    d.memoryMb = mi.value().memoryUsageBytes / (1024ULL * 1024);
                     d.maxSequenceLength = mi.value().maxSequenceLength;
                 }
                 d.embeddingDim = provider->getEmbeddingDim(name);
@@ -174,7 +177,7 @@ RequestDispatcher::handleModelStatusRequest(const ModelStatusRequest& req) {
                 d.lastAccess = {};
                 resp.models.push_back(std::move(d));
             }
-            resp.totalMemoryMb = provider->getMemoryUsage() / (1024 * 1024);
+            resp.totalMemoryMb = provider->getMemoryUsage() / (1024ULL * 1024);
             resp.maxMemoryMb = 0;
             co_return resp;
         });

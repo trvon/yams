@@ -666,7 +666,8 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
             if (sizes.empty())
                 return 0;
             const auto idx = std::min<std::size_t>(
-                sizes.size() - 1, static_cast<std::size_t>(p * (sizes.size() - 1)));
+                sizes.size() - 1,
+                static_cast<std::size_t>(p * static_cast<double>((sizes.size() - 1))));
             return sizes[idx];
         };
         stats.clusterSizeMax = static_cast<std::uint64_t>(maxSize);

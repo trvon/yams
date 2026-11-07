@@ -487,7 +487,8 @@ private:
         auto total_texts = stats_.total_texts_processed.load();
         if (total_texts > 0) {
             auto total_time = stats_.total_inference_time.load();
-            stats_.avg_inference_time.store(total_time / total_texts);
+            stats_.avg_inference_time.store(
+                total_time / static_cast<std::chrono::milliseconds::rep>(total_texts));
         }
         stats_.updateThroughput();
     }

@@ -153,7 +153,8 @@ selectTopologyRoutesForNarrowing(const std::vector<yams::topology::ClusterRoute>
         }
     }
 
-    selection.routes.assign(routes.begin(), routes.begin() + selectedCount);
+    selection.routes.assign(routes.begin(),
+                            routes.begin() + static_cast<std::ptrdiff_t>(selectedCount));
     if (selectedCount < routes.size()) {
         selection.boundaryScoreMargin = static_cast<float>(routes[selectedCount - 1].routeScore -
                                                            routes[selectedCount].routeScore);
@@ -212,6 +213,7 @@ collectSemanticNeighbors(yams::metadata::KnowledgeGraphStore& kgStore,
     if (!nodeResult || !nodeResult.value().has_value()) {
         return std::nullopt;
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     const auto nodeId = nodeResult.value()->id;
     auto edgeResult = kgStore.getEdgesBidirectional(nodeId, kSemanticNeighborRelation, edgeLimit);
     if (!edgeResult) {
@@ -449,11 +451,8 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
     result.certificate.routingPolicyFingerprint =
         topologyRoutingPolicyFingerprint(snapshot->representationFingerprint, request.options);
     result.certificate.coordinateSpaceIdentity = snapshot->artifacts->embeddingSpaceIdentity;
-    if (!request.queryEmbedding.has_value()) {
-        result.certificate.admission.coordinateSpaceAlignment =
-            TopologyProofObligationStatus::Unavailable;
-    } else if (request.queryEmbeddingSpaceIdentity.empty() ||
-               snapshot->artifacts->embeddingSpaceIdentity.empty()) {
+    if (!request.queryEmbedding.has_value() || request.queryEmbeddingSpaceIdentity.empty() ||
+        snapshot->artifacts->embeddingSpaceIdentity.empty()) {
         result.certificate.admission.coordinateSpaceAlignment =
             TopologyProofObligationStatus::Unavailable;
     } else if (request.queryEmbeddingSpaceIdentity == snapshot->artifacts->embeddingSpaceIdentity) {

@@ -472,13 +472,11 @@ Result<std::string> selectHashPrefixMatch(const std::vector<yams::daemon::Search
     };
 
     const Candidate* chosen = nullptr;
-    if (preferLatest && preferOldest) {
-        // If both flags set, favor oldest first to match legacy behavior
+    if (preferOldest) {
+        // Oldest also wins when both flags are set, to match legacy behavior.
         chosen = &chooseByIndexed(true);
     } else if (preferLatest) {
         chosen = &chooseByIndexed(false);
-    } else if (preferOldest) {
-        chosen = &chooseByIndexed(true);
     } else if (matches.size() == 1) {
         chosen = &matches.front();
     }
@@ -708,7 +706,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
                     // Otherwise continue to general fallback below
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // ignore session errors and continue
         }
     }
@@ -748,7 +746,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
     bool isAbsolute = false;
     try {
         isAbsolute = std::filesystem::path(name).is_absolute();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 
     // 4) Whole-name matches: the exact basename, or a relative path that is a
@@ -777,7 +775,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
         std::string stem = name;
         try {
             stem = std::filesystem::path(name).stem().string();
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         std::vector<std::string> loose;
         if (hasWildcard) {

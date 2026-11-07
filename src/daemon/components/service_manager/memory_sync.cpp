@@ -503,6 +503,7 @@ Result<memory_sync::ApplyStagePass> ServiceManager::applyMemorySyncContentBlobs(
     memory_sync::ApplyStagePass out;
     out.deferredKeys = std::move(pass.value().deferredKeys);
     if (pass.value().failure) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         out.failure = pass.value().failure->message;
     }
     return out;
@@ -645,6 +646,8 @@ bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
     }
 }
 
+// Only allocation or mutex failures can escape; terminating on those is intended.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 void ServiceManager::applyMemorySyncWinners() noexcept {
     YAMS_ZONE_SCOPED_N("memory_sync.cycle");
     memorySyncApplyAttempts_.fetch_add(1, std::memory_order_acq_rel);
@@ -1413,13 +1416,13 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed: {}", error.what());
     try {
         memorySyncApplyHealth_.recordPublishFailed();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 } catch (...) {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed (unknown)");
     try {
         memorySyncApplyHealth_.recordPublishFailed();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 }
 
@@ -1502,6 +1505,7 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
                 return Error{ErrorCode::InvalidState,
                              "memory_sync S3 resolution returned no backend config"};
             }
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             resolvedS3Config = *storageDecision.value().backendConfig;
         }
 

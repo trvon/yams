@@ -338,6 +338,7 @@ Result<void> UpdateCommand::executeLocal() {
         if (!docResult.value().has_value()) {
             return Error{ErrorCode::NotFound, "Document not found with hash: " + docHash};
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         docId = docResult.value()->id;
     } else if (!name_.empty()) {
         // Resolve name using smart resolver
@@ -351,6 +352,7 @@ Result<void> UpdateCommand::executeLocal() {
         if (!docResult.value().has_value()) {
             return Error{ErrorCode::NotFound, "Document not found with resolved hash: " + docHash};
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         docId = docResult.value()->id;
     } else {
         return Error{ErrorCode::InvalidArgument, "No document identifier specified"};

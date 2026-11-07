@@ -98,7 +98,7 @@ std::optional<ExtendedVideoMetadata> analyzeMP4Header(const std::filesystem::pat
 
         // Skip to next box
         if (header.size > sizeof(header)) {
-            file.seekg(header.size - sizeof(header), std::ios::cur);
+            file.seekg(static_cast<std::streamoff>(header.size - sizeof(header)), std::ios::cur);
         } else {
             break;
         }

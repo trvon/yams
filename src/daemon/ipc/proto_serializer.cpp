@@ -72,7 +72,7 @@ std::int64_t size_to_proto_int64(std::size_t value, const char* fieldName) {
     try {
         spdlog::warn("clamping {} from {} to INT64_MAX for protobuf serialization", fieldName,
                      value);
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     return std::numeric_limits<std::int64_t>::max();
 }
@@ -1875,21 +1875,21 @@ template <> struct ProtoBinding<StatusResponse> {
             if (kv.key() == "embedding_dim") {
                 try {
                     r.embeddingDim = static_cast<uint32_t>(std::stoul(kv.value()));
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
                 continue;
             }
             if (kv.key() == "embedding_threads_intra") {
                 try {
                     r.embeddingThreadsIntra = static_cast<int32_t>(std::stol(kv.value()));
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
                 continue;
             }
             if (kv.key() == "embedding_threads_inter") {
                 try {
                     r.embeddingThreadsInter = static_cast<int32_t>(std::stol(kv.value()));
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
                 continue;
             }
@@ -1910,7 +1910,7 @@ template <> struct ProtoBinding<StatusResponse> {
             if (kv.key() == "vector_db_dim") {
                 try {
                     r.vectorDbDim = static_cast<uint32_t>(std::stoul(kv.value()));
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
                 continue;
             }
@@ -1939,14 +1939,14 @@ template <> struct ProtoBinding<StatusResponse> {
                 try {
                     r.searchTuningParams[kv.key().substr(std::strlen("search_tuning_param:"))] =
                         std::stod(kv.value());
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
                 continue;
             }
             try {
                 uint64_t n = static_cast<uint64_t>(std::stoull(kv.value()));
                 r.requestCounts[kv.key()] = n;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // ignore parse errors for numeric map
             }
         }
@@ -1965,7 +1965,7 @@ template <> struct ProtoBinding<StatusResponse> {
                 if (n > 100)
                     n = 100;
                 r.initProgress[kv.key()] = static_cast<uint8_t>(n);
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // ignore parse errors
             }
         }

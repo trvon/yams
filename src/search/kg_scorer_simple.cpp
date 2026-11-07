@@ -75,7 +75,7 @@ public:
                 return std::nullopt;
             }
             nodeCache.emplace(nodeId, *nodeRes.value());
-            return *nodeRes.value();
+            return nodeRes.value();
         };
 
         // Resolve aliases/phrases to nodes (budget-aware)
@@ -751,12 +751,9 @@ private:
         for (unsigned char uc : text) {
             if (std::isalnum(uc)) {
                 cur.push_back(static_cast<char>(uc));
-            } else if (uc == '-' || uc == '/' || uc == '_') {
-                // Preserve biomedical compounds as token boundaries that still contribute a
-                // combined phrase via variant expansion.
-                flushTokenVariants(cur, tokens);
-                cur.clear();
             } else {
+                // Any separator ends the token. For '-', '/' and '_' (biomedical compounds)
+                // variant expansion still contributes the combined phrase.
                 flushTokenVariants(cur, tokens);
                 cur.clear();
             }

@@ -1,5 +1,6 @@
-#include <yams/common/fs_utils.h>
 #include <yams/cli/session_store.h>
+#include <yams/common/fs_utils.h>
+#include <yams/config/config_helpers.h>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -11,12 +12,10 @@ namespace yams::cli::session_store {
 using json = nlohmann::json;
 
 static std::filesystem::path state_root() {
-    const char* xdg = std::getenv("XDG_STATE_HOME");
-    const char* home = std::getenv("HOME");
-    if (xdg && *xdg)
-        return std::filesystem::path(xdg) / "yams";
-    if (home && *home)
-        return std::filesystem::path(home) / ".local" / "state" / "yams";
+    if (const auto xdg = yams::config::getenv_nonempty("XDG_STATE_HOME"))
+        return std::filesystem::path(*xdg) / "yams";
+    if (const auto home = yams::config::getenv_nonempty("HOME"))
+        return std::filesystem::path(*home) / ".local" / "state" / "yams";
     return std::filesystem::current_path() / ".yams_state";
 }
 
@@ -33,9 +32,8 @@ std::filesystem::path index_path() {
 }
 
 std::optional<std::string> current_session() {
-    if (const char* env = std::getenv("YAMS_SESSION_CURRENT")) {
-        if (*env)
-            return std::string(env);
+    if (auto env = yams::config::getenv_nonempty("YAMS_SESSION_CURRENT")) {
+        return env;
     }
     auto path = index_path();
     if (!std::filesystem::exists(path))

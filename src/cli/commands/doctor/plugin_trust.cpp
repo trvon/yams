@@ -24,10 +24,10 @@ bool PluginTrust::resolveStrictPluginDirMode() {
         if (auto it = cfg.find("daemon.plugin_dir_strict"); it != cfg.end()) {
             strictMode = yams::config::parse_bool(it->second, strictMode);
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
-    if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-        strictMode = yams::config::parse_bool(envStrict, strictMode);
+    if (const auto envStrict = yams::config::getenv_optional("YAMS_PLUGIN_DIR_STRICT")) {
+        strictMode = yams::config::parse_bool(*envStrict, strictMode);
     }
     return strictMode;
 }

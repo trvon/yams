@@ -38,6 +38,7 @@ public:
                 auto r = execute();
                 if (!r) {
                     spdlog::error("tune: {}", r.error().message);
+                    // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                     std::exit(1);
                 }
             }
@@ -51,6 +52,7 @@ public:
             auto r = execute();
             if (!r) {
                 spdlog::error("tune status: {}", r.error().message);
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
         });
@@ -66,6 +68,7 @@ public:
             auto r = execute();
             if (!r) {
                 spdlog::error("tune reset: {}", r.error().message);
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
         });
@@ -77,6 +80,7 @@ public:
             auto r = execute();
             if (!r) {
                 spdlog::error("tune replay: {}", r.error().message);
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
         });

@@ -1,4 +1,3 @@
-#define _CRT_SECURE_NO_WARNINGS
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <future>
@@ -260,7 +259,7 @@ private:
                 spdlog::debug("EmbeddingGenerator: failed to read TuneAdvisor concurrency cap");
             }
             if (cap <= 0) {
-                cap = std::max(1u, std::thread::hardware_concurrency());
+                cap = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
             }
             return std::max(1, cap);
         }

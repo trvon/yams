@@ -11,6 +11,7 @@
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -992,6 +993,73 @@ TEST_CASE("WorkCoordinator stop releases idle workers past a detached strand tha
     const auto logs = capture.str();
     INFO(logs);
     CHECK((logs.find("did not run their cancellation") != std::string::npos));
+}
+
+namespace {
+// Forwards to an io_context executor until `fail` is set, then throws from execute(). stop()
+// posts each detached strand's cancellation through its executor, so this makes stop() throw
+// before it releases the work guard.
+struct FailingExecutor {
+    boost::asio::io_context::executor_type inner;
+    std::shared_ptr<std::atomic<bool>> fail;
+
+    boost::asio::execution_context& query(boost::asio::execution::context_t) const noexcept {
+        return inner.context();
+    }
+    static constexpr auto query(boost::asio::execution::blocking_t) noexcept {
+        return boost::asio::execution::blocking.never;
+    }
+    FailingExecutor require(boost::asio::execution::blocking_t::never_t) const { return *this; }
+
+    template <typename F> void execute(F&& f) const {
+        if (fail->load(std::memory_order_acquire)) {
+            throw std::runtime_error("injected executor failure");
+        }
+        boost::asio::require(inner, boost::asio::execution::blocking.never)
+            .execute(std::forward<F>(f));
+    }
+
+    bool operator==(const FailingExecutor& other) const noexcept {
+        return inner == other.inner && fail == other.fail;
+    }
+    bool operator!=(const FailingExecutor& other) const noexcept { return !(*this == other); }
+};
+} // namespace
+
+TEST_CASE("WorkCoordinator destructor returns when stop() throws",
+          "[daemon][work_coordinator][shutdown][cancel]") {
+    auto coordinator = std::make_unique<WorkCoordinator>();
+    coordinator->start(2);
+
+    auto fail = std::make_shared<std::atomic<bool>>(false);
+    auto started = std::make_shared<std::atomic<bool>>(false);
+    auto ioCtx = coordinator->getIOContext();
+    auto task = [started, ioCtx]() -> boost::asio::awaitable<void> {
+        started->store(true, std::memory_order_release);
+        boost::asio::steady_timer timer(*ioCtx);
+        timer.expires_after(1h);
+        co_await timer.async_wait(boost::asio::use_awaitable);
+    };
+    coordinator->spawnDetached(FailingExecutor{coordinator->getExecutor(), fail}, task());
+    REQUIRE(
+        wait_for_condition(2000ms, 1ms, [&] { return started->load(std::memory_order_acquire); }));
+
+    fail->store(true, std::memory_order_release);
+
+    // Destroy on another thread so a regression fails the test instead of hanging the suite.
+    auto destroyed = std::make_shared<std::promise<void>>();
+    auto done = destroyed->get_future();
+    std::thread destroyer([c = std::move(coordinator), destroyed]() mutable {
+        c.reset();
+        destroyed->set_value();
+    });
+    const bool returned = done.wait_for(10s) == std::future_status::ready;
+    if (returned) {
+        destroyer.join();
+    } else {
+        destroyer.detach();
+    }
+    REQUIRE(returned);
 }
 
 TEST_CASE("WorkCoordinator stop does not wait the drain budget when every strand yields",

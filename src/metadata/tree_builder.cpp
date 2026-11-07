@@ -53,7 +53,7 @@ std::string TreeNode::computeHash() const {
 
     // Convert to hex string
     std::string hexHash;
-    hexHash.reserve(SHA256_DIGEST_LENGTH * 2);
+    hexHash.reserve(std::size_t{SHA256_DIGEST_LENGTH} * 2);
     for (unsigned char byte : hash) {
         char buf[3]{};
         snprintf(buf, sizeof(buf), "%02x", byte);
@@ -262,7 +262,7 @@ Result<std::string> TreeBuilder::buildTreeRecursive(const std::string& dirPath,
 
                 // Convert to hex
                 std::string hexHash;
-                hexHash.reserve(SHA256_DIGEST_LENGTH * 2);
+                hexHash.reserve(std::size_t{SHA256_DIGEST_LENGTH} * 2);
                 for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
                     char buf[3]{};
                     snprintf(buf, sizeof(buf), "%02x", hash[i]);

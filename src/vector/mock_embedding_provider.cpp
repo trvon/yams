@@ -14,7 +14,7 @@ public:
 
     ~MockEmbeddingProvider() override {
         if (initialized_) {
-            shutdown();
+            MockEmbeddingProvider::shutdown();
         }
     }
 

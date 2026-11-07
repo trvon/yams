@@ -3,6 +3,7 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -13,11 +14,11 @@ ModelCheck::Result ModelCheck::execute(const DoctorContext& ctx) {
     namespace fs = std::filesystem;
     Result r;
 
-    const char* home = std::getenv("HOME");
+    const auto home = yams::config::getenv_optional("HOME");
     if (!home)
         return r;
 
-    fs::path oldBase = fs::path(home) / ".yams" / "models";
+    fs::path oldBase = fs::path(*home) / ".yams" / "models";
     fs::path newBase = ctx.dataDir() / "models";
 
     std::error_code ec;

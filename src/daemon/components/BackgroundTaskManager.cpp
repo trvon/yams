@@ -65,6 +65,9 @@ BackgroundTaskManager::BackgroundTaskManager(Dependencies deps)
     }
 }
 
+// A failed shutdown must not return while coroutines still use this object;
+// std::terminate is the safe outcome.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 BackgroundTaskManager::~BackgroundTaskManager() {
     if (running_.load(std::memory_order_acquire)) {
         stop();
@@ -483,8 +486,10 @@ void BackgroundTaskManager::launchOrphanScanTask() {
                                     for (size_t i = 0; i < orphanIds.size(); i += BATCH_SIZE) {
                                         size_t batchEnd =
                                             std::min(i + BATCH_SIZE, orphanIds.size());
-                                        std::vector<int64_t> batch(orphanIds.begin() + i,
-                                                                   orphanIds.begin() + batchEnd);
+                                        std::vector<int64_t> batch(
+                                            orphanIds.begin() + static_cast<std::ptrdiff_t>(i),
+                                            orphanIds.begin() +
+                                                static_cast<std::ptrdiff_t>(batchEnd));
 
                                         Bus::Fts5Job orphanJob;
                                         orphanJob.ids = batch;

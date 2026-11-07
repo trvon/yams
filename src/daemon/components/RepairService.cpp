@@ -266,6 +266,8 @@ queueWithBackoff(std::shared_ptr<SpscQueue<JobT>> queue, JobT&& job,
     const auto queueStart = std::chrono::steady_clock::now();
     uint64_t totalWaitMs = 0;
     int retries = 0;
+    // try_push moves `job` only when it returns true.
+    // NOLINTNEXTLINE(bugprone-use-after-move)
     while (!queue->try_push(std::forward<JobT>(job))) {
         if (!running.load(std::memory_order_relaxed) || (shouldStop && shouldStop()))
             co_return false;
@@ -811,6 +813,7 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
     try {
         auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
         if (!meta) {
+            // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores): read by ~Report via reference
             end = End::Finished;
             co_return;
         }
@@ -1261,6 +1264,7 @@ RepairService::MissingWorkFlags RepairService::analyzeMissingWorkForHash(
         return flags;
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     const auto& d = docRes.value().value();
     if (d.repairStatus == yams::metadata::RepairStatus::Processing) {
         return flags;
@@ -1933,6 +1937,7 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
             TuningManager::notifyWakeup();
             auto docRes = meta->getDocument(s.docId);
             if (docRes && docRes.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 auto doc = docRes.value().value();
                 doc.repairAttempts = s.repairAttempts + 1;
                 doc.repairAttemptedAt = std::chrono::time_point_cast<std::chrono::seconds>(
@@ -2044,6 +2049,7 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
             // Increment repair attempts
             auto docRes = meta->getDocument(s.docId);
             if (docRes && docRes.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 auto doc = docRes.value().value();
                 doc.repairAttempts = s.repairAttempts + 1;
                 doc.repairAttemptedAt = std::chrono::time_point_cast<std::chrono::seconds>(
@@ -2304,6 +2310,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
                     continue;
                 }
 
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 auto doc = *docResult.value();
                 const bool oldWasText = detector.isTextMimeType(doc.mimeType);
                 const bool newIsText = detector.isTextMimeType(mimeType);
@@ -3717,7 +3724,8 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         }
 
         const std::size_t end = std::min(i + batchSize, hashes.size());
-        std::vector<std::string> batch(hashes.begin() + i, hashes.begin() + end);
+        std::vector<std::string> batch(hashes.begin() + static_cast<std::ptrdiff_t>(i),
+                                       hashes.begin() + static_cast<std::ptrdiff_t>(end));
         const std::size_t batchIndex = i / batchSize;
 
         submitRepairStatusUpdate(ctx_, meta, batch, metadata::RepairStatus::Processing,

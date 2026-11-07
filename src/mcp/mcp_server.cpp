@@ -551,7 +551,8 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
                 }
 
                 const auto& data = contentResult.value();
-                outFile.write(reinterpret_cast<const char*>(data.data()), data.size());
+                outFile.write(reinterpret_cast<const char*>(data.data()),
+                              static_cast<std::streamsize>(data.size()));
                 outFile.close();
 
                 response.restoredPaths.push_back(fullOutputPath.string());
@@ -1039,7 +1040,9 @@ MCPServer::handleSemanticDedupe(const MCPSemanticDedupeRequest& req) {
         }
         if (groupResult.value().has_value()) {
             std::vector<int64_t> docIds;
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             if (groupResult.value()->canonicalDocumentId.has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 docIds.push_back(*groupResult.value()->canonicalDocumentId);
             }
             auto grouped = repo.getSemanticDuplicateGroupsForDocuments(docIds);
@@ -1053,6 +1056,7 @@ MCPServer::handleSemanticDedupe(const MCPSemanticDedupeRequest& req) {
                 details.push_back(it->second);
             } else {
                 details.push_back(
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     metadata::SemanticDuplicateGroupDetail{std::move(*groupResult.value()), {}});
             }
         }

@@ -131,7 +131,7 @@ Result<StoragePreflightResult> probeStorage(const fs::path& dataDir,
         } catch (...) {
             try {
                 promise->set_exception(std::current_exception());
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // promise destroyed before we could set anything; nothing to do
             }
         }

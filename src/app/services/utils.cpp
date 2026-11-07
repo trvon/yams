@@ -313,7 +313,7 @@ std::string createSnippet(const std::string& content, size_t maxLength, bool pre
     size_t cut = maxLength;
     if (preserveWordBoundary) {
         // Try to find the last space within the last 30% of the window
-        size_t windowStart = static_cast<size_t>(maxLength * 0.7);
+        size_t windowStart = static_cast<size_t>(static_cast<double>(maxLength) * 0.7);
         size_t pos = cleaned.rfind(' ', maxLength);
         if (pos != std::string::npos && pos >= windowStart) {
             cut = pos;
@@ -337,7 +337,7 @@ QuerySnippetResult createQuerySnippet(const std::string& content, const std::str
         return {.text = createSnippet(content, maxLength, preserveWordBoundary)};
     }
 
-    constexpr std::size_t kMaxScanBytes = 128 * 1024;
+    constexpr std::size_t kMaxScanBytes = 128ULL * 1024;
     constexpr std::size_t kMaxOccurrencesPerTerm = 32;
     const auto scanBytes = std::min(content.size(), kMaxScanBytes);
     const auto lowerContent = lowerAsciiPrefix(content, scanBytes);
@@ -500,7 +500,7 @@ std::string classifyFileType(const std::string& mimeType, const std::string& ext
             else if (detector.isBinaryMimeType(mime))
                 category = "binary";
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // MIME detection is best-effort; fall back to extension heuristics below.
     }
 

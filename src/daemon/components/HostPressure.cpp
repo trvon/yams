@@ -49,7 +49,7 @@ bool readSmallFile(const char* path, std::string& out, std::size_t maxBytes = 40
     std::size_t n = 0;
     while ((n = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
         out.append(buffer, n);
-        if (out.size() > maxBytes) {
+        if (out.size() > maxBytes || n < sizeof(buffer)) {
             break;
         }
     }
@@ -74,7 +74,7 @@ double sampleDiskBusyPct() noexcept {
     static std::chrono::steady_clock::time_point previousAt{};
     try {
         std::string buffer;
-        if (!readSmallFile("/proc/diskstats", buffer, 256 * 1024)) {
+        if (!readSmallFile("/proc/diskstats", buffer, 256ULL * 1024)) {
             return -1.0;
         }
         auto current = parseDiskstatsIoTicks(buffer);

@@ -9,6 +9,7 @@
 #include <yams/metadata/path_utils.h>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -499,4 +500,158 @@ TEST_CASE("Semantic neighbor seeding keeps mutual pairs and, when directed, one-
     CHECK(directed[3].targetHash == "a");
     CHECK_FALSE(directed[3].mutual);
     CHECK(directed[3].weight == Catch::Approx(0.10F));
+}
+
+// Metric definitions follow trec_eval / pytrec_eval as used by BEIR:
+// relevant means grade > 0, P@k divides by k, AP divides by all relevant
+// documents (R), nDCG uses linear gain.
+TEST_CASE("Retrieval scoring uses trec_eval metric definitions", "[bench][retrieval][metrics]") {
+    yams::bench::TestQuery query;
+    query.useDocIds = true;
+    query.relevantDocIds = {"d1", "d2", "d3"};
+    query.relevanceGrades = {{"d1", 2}, {"d2", 1}, {"d3", 0}}; // d3 is judged non-relevant
+
+    SECTION("full ranking") {
+        const auto s = yams::bench::scoreRankedDocIds(query, {"x", "d1", "d3", "d2"}, 10);
+        CHECK(s.firstRelevantRank == 2);
+        CHECK(s.reciprocalRank == Catch::Approx(0.5));
+        CHECK(s.numRelevantInTopK == 2);
+        CHECK(s.precisionAtK == Catch::Approx(2.0 / 10.0));
+        CHECK(s.recallAtK == Catch::Approx(1.0));
+        CHECK(s.averagePrecision == Catch::Approx((1.0 / 2.0 + 2.0 / 4.0) / 2.0));
+        const double dcg = 2.0 / std::log2(3.0) + 1.0 / std::log2(5.0);
+        const double idcg = 2.0 / std::log2(2.0) + 1.0 / std::log2(3.0);
+        CHECK(s.ndcgAtK == Catch::Approx(dcg / idcg));
+    }
+
+    SECTION("truncated ranking keeps R and k as denominators") {
+        const auto s = yams::bench::scoreRankedDocIds(query, {"d1"}, 5);
+        CHECK(s.precisionAtK == Catch::Approx(1.0 / 5.0));
+        CHECK(s.recallAtK == Catch::Approx(0.5));
+        CHECK(s.averagePrecision == Catch::Approx(0.5));
+    }
+
+    SECTION("grade-0 hit alone scores zero") {
+        const auto s = yams::bench::scoreRankedDocIds(query, {"d3"}, 10);
+        CHECK(s.firstRelevantRank == -1);
+        CHECK(s.reciprocalRank == Catch::Approx(0.0));
+        CHECK(s.ndcgAtK == Catch::Approx(0.0));
+    }
+}
+
+TEST_CASE("Ungraded relevant documents count as grade 1", "[bench][retrieval][metrics]") {
+    yams::bench::TestQuery query;
+    query.relevantFiles = {"a.txt", "b.txt"};
+    const auto s = yams::bench::scoreRankedDocIds(query, {"a.txt", "c.txt", "b.txt"}, 3);
+    const double dcg = 1.0 + 1.0 / std::log2(4.0);
+    const double idcg = 1.0 + 1.0 / std::log2(3.0);
+    CHECK(s.ndcgAtK == Catch::Approx(dcg / idcg));
+    CHECK(s.averagePrecision == Catch::Approx((1.0 + 2.0 / 3.0) / 2.0));
+}
+
+TEST_CASE("BEIR loader drops grade-0 qrels from relevant sets", "[bench][retrieval][beir]") {
+    yams::bench::BEIRDataset ds;
+    ds.queries.emplace("q1", yams::bench::BEIRQuery{.id = "q1", .text = "alpha"});
+    ds.queries.emplace("q2", yams::bench::BEIRQuery{.id = "q2", .text = "beta"});
+    ds.qrels.emplace("q1", yams::bench::BEIRQrel{.docId = "d1", .score = 1});
+    ds.qrels.emplace("q1", yams::bench::BEIRQrel{.docId = "d2", .score = 0});
+    ds.qrels.emplace("q2", yams::bench::BEIRQrel{.docId = "d3", .score = 0});
+    yams::test::TempDirGuard tempDir{"retrieval_beir_grade0_"};
+    yams::bench::BEIRCorpusLoader loader(ds, tempDir.path());
+
+    const auto queries = loader.generateTestQueries();
+    REQUIRE(queries.size() == 1); // q2 has no relevant documents
+    CHECK(queries[0].relevantDocIds == std::set<std::string>{"d1"});
+}
+
+namespace {
+
+yams::bench::BEIRDataset subsetFixture() {
+    yams::bench::BEIRDataset ds;
+    for (int i = 0; i < 40; ++i) {
+        const auto id = "d" + std::to_string(i);
+        ds.documents.emplace(id, yams::bench::BEIRDocument{.id = id, .title = "", .text = id});
+    }
+    // q<i> is relevant to d<2i> and d<2i+1>; d39 is judged non-relevant everywhere.
+    for (int q = 0; q < 10; ++q) {
+        const auto qid = "q" + std::to_string(q);
+        ds.queries.emplace(qid, yams::bench::BEIRQuery{.id = qid, .text = qid});
+        ds.qrels.emplace(qid,
+                         yams::bench::BEIRQrel{.docId = "d" + std::to_string(2 * q), .score = 1});
+        ds.qrels.emplace(
+            qid, yams::bench::BEIRQrel{.docId = "d" + std::to_string(2 * q + 1), .score = 2});
+        ds.qrels.emplace(qid, yams::bench::BEIRQrel{.docId = "d39", .score = 0});
+    }
+    return ds;
+}
+
+} // namespace
+
+TEST_CASE("Benchmark subset keeps every relevant document of sampled queries",
+          "[bench][retrieval][subset]") {
+    const auto full = subsetFixture();
+    yams::bench::BenchmarkSubsetSpec spec{.maxDocs = 12, .maxQueries = 4, .seed = 7};
+    yams::bench::BenchmarkSubsetStats stats;
+    auto subset = yams::bench::selectBenchmarkSubset(full, spec, &stats);
+    REQUIRE(subset.has_value());
+    const auto& ds = subset.value();
+
+    CHECK(ds.queries.size() == 4);
+    CHECK(ds.documents.size() == 12);
+    CHECK(stats.relevantDocs == 8);
+    CHECK(stats.fillerDocs == 4);
+    for (const auto& [qid, _] : ds.queries) {
+        auto range = full.qrels.equal_range(qid);
+        for (auto it = range.first; it != range.second; ++it) {
+            if (it->second.score > 0) {
+                CHECK(ds.documents.count(it->second.docId) == 1); // R is never truncated
+            }
+        }
+    }
+    CHECK(yams::bench::benchmarkSubsetLabel(spec) == "seeded:7");
+}
+
+TEST_CASE("Benchmark subset is reproducible per seed and not ID-ordered",
+          "[bench][retrieval][subset]") {
+    const auto full = subsetFixture();
+    auto pick = [&](std::uint64_t seed) {
+        yams::bench::BenchmarkSubsetSpec spec{.maxDocs = 10, .maxQueries = 3, .seed = seed};
+        auto r = yams::bench::selectBenchmarkSubset(full, spec);
+        REQUIRE(r.has_value());
+        // Queries and documents both depend on the seed (filler is sampled too).
+        std::pair<std::set<std::string>, std::set<std::string>> picked;
+        for (const auto& [id, _] : r.value().queries) {
+            picked.first.insert(id);
+        }
+        for (const auto& [id, _] : r.value().documents) {
+            picked.second.insert(id);
+        }
+        return picked;
+    };
+    CHECK(pick(1) == pick(1));
+    bool queriesDiffer = false;
+    bool docsDiffer = false;
+    for (std::uint64_t seed = 2; seed < 10; ++seed) {
+        const auto other = pick(seed);
+        queriesDiffer = queriesDiffer || other.first != pick(1).first;
+        docsDiffer = docsDiffer || other.second != pick(1).second;
+    }
+    CHECK(queriesDiffer);
+    CHECK(docsDiffer);
+}
+
+TEST_CASE("Benchmark subset without caps returns the full dataset", "[bench][retrieval][subset]") {
+    const auto full = subsetFixture();
+    yams::bench::BenchmarkSubsetSpec spec;
+    auto r = yams::bench::selectBenchmarkSubset(full, spec);
+    REQUIRE(r.has_value());
+    CHECK(r.value().documents.size() == full.documents.size());
+    CHECK(r.value().qrels.size() == full.qrels.size());
+    CHECK(yams::bench::benchmarkSubsetLabel(spec) == "full");
+}
+
+TEST_CASE("Benchmark subset fails when no relevant set fits", "[bench][retrieval][subset]") {
+    const auto full = subsetFixture();
+    yams::bench::BenchmarkSubsetSpec spec{.maxDocs = 1, .maxQueries = 2};
+    CHECK_FALSE(yams::bench::selectBenchmarkSubset(full, spec).has_value());
 }

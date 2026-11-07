@@ -193,7 +193,7 @@ public:
 
             try {
                 yams::daemon::ClientConfig cfg;
-                if (cli_->hasExplicitDataDir()) {
+                if (cli_ && cli_->hasExplicitDataDir()) {
                     cfg.dataDir = cli_->getDataPath();
                 }
                 cfg.enableChunkedResponses = false;
@@ -491,6 +491,7 @@ private:
                     }
                     auto docResult = appContext->metadataRepo->getDocumentByHash(result.hash);
                     if (docResult && docResult.value()) {
+                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                         totalSize += docResult.value()->fileSize;
                     }
                 }
