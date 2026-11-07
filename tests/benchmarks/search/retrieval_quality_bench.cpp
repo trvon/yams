@@ -775,7 +775,8 @@ static Result<BEIRDataset> selectBenchmarkBEIRDataset(const std::string& dataset
         auto range = fullDataset.qrels.equal_range(qid);
         bool hasRelevantDoc = false;
         for (auto it = range.first; it != range.second; ++it) {
-            if (includedDocIds.count(it->second.docId) > 0) {
+            // Grade-0 qrels are judged non-relevant and do not make a query scorable.
+            if (it->second.score > 0 && includedDocIds.count(it->second.docId) > 0) {
                 hasRelevantDoc = true;
                 break;
             }
