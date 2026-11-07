@@ -24,7 +24,9 @@ jobs:
   quality:
     name: Static Analysis
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Changed-line analysis of a promotion PR covers all of experimental vs main, which took
+    # over 20 minutes for 0.22.0 (#467, #478). Feature PRs finish in about a minute.
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
