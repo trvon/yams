@@ -618,18 +618,26 @@ TEST_CASE("Benchmark subset is reproducible per seed and not ID-ordered",
         yams::bench::BenchmarkSubsetSpec spec{.maxDocs = 10, .maxQueries = 3, .seed = seed};
         auto r = yams::bench::selectBenchmarkSubset(full, spec);
         REQUIRE(r.has_value());
-        std::set<std::string> ids;
+        // Queries and documents both depend on the seed (filler is sampled too).
+        std::pair<std::set<std::string>, std::set<std::string>> picked;
         for (const auto& [id, _] : r.value().queries) {
-            ids.insert(id);
+            picked.first.insert(id);
         }
-        return ids;
+        for (const auto& [id, _] : r.value().documents) {
+            picked.second.insert(id);
+        }
+        return picked;
     };
     CHECK(pick(1) == pick(1));
-    bool differs = false;
-    for (std::uint64_t seed = 2; seed < 10 && !differs; ++seed) {
-        differs = pick(seed) != pick(1);
+    bool queriesDiffer = false;
+    bool docsDiffer = false;
+    for (std::uint64_t seed = 2; seed < 10; ++seed) {
+        const auto other = pick(seed);
+        queriesDiffer = queriesDiffer || other.first != pick(1).first;
+        docsDiffer = docsDiffer || other.second != pick(1).second;
     }
-    CHECK(differs);
+    CHECK(queriesDiffer);
+    CHECK(docsDiffer);
 }
 
 TEST_CASE("Benchmark subset without caps returns the full dataset", "[bench][retrieval][subset]") {
