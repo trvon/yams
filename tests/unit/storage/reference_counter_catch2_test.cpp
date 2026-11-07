@@ -76,11 +76,17 @@ TEST_CASE("ReferenceCounter initialize retries while another connection holds th
 
     sqlite3* holder = nullptr;
     REQUIRE(sqlite3_open(dbPath.string().c_str(), &holder) == SQLITE_OK);
+    // COMMIT needs an exclusive lock, so it fails with SQLITE_BUSY while the connection under test
+    // holds a shared lock between its retries. Without a busy timeout that COMMIT failed silently
+    // and the lock was never released (seen on a slow macOS runner: six retries over 13 s, all
+    // locked). Waiting here keeps the release at ~400 ms however the retries interleave.
+    REQUIRE(sqlite3_busy_timeout(holder, 10'000) == SQLITE_OK);
     REQUIRE(sqlite3_exec(holder, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) == SQLITE_OK);
 
+    int commitRc = SQLITE_OK;
     std::thread releaser([&] {
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
-        sqlite3_exec(holder, "COMMIT", nullptr, nullptr, nullptr);
+        commitRc = sqlite3_exec(holder, "COMMIT", nullptr, nullptr, nullptr);
     });
 
     ReferenceCounter::Config config{.databasePath = dbPath,
@@ -100,6 +106,7 @@ TEST_CASE("ReferenceCounter initialize retries while another connection holds th
     }
 
     releaser.join();
+    CHECK(commitRc == SQLITE_OK); // the lock was really released
     sqlite3_close(holder);
     std::filesystem::remove(dbPath);
     std::filesystem::remove(dbPath.string() + "-wal");
