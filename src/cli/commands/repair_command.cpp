@@ -17,6 +17,7 @@
 #include <yams/cli/status_metrics.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -89,6 +90,7 @@ public:
                     addHint("hint: start the daemon first with 'yams daemon start'");
                 }
                 spdlog::error("Repair failed: {}", msg);
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
         });
@@ -281,9 +283,9 @@ public:
             boost::asio::detached);
 
         std::chrono::milliseconds localWaitTimeout = cfg.requestTimeout;
-        if (const char* envMs = std::getenv("YAMS_REPAIR_RPC_TIMEOUT_MS")) {
+        if (const auto envMs = yams::config::getenv_optional("YAMS_REPAIR_RPC_TIMEOUT_MS")) {
             try {
-                auto parsed = std::stoll(std::string(envMs));
+                auto parsed = std::stoll(*envMs);
                 if (parsed > 0) {
                     localWaitTimeout = std::chrono::milliseconds(parsed);
                 }

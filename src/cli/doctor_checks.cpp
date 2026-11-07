@@ -108,13 +108,13 @@ DaemonCheckResult checkDaemon(YamsCLI* cli, std::optional<daemon::StatusResponse
 ModelsCheckResult checkInstalledModels(YamsCLI* cli) {
     ModelsCheckResult result;
 
-    const char* home = std::getenv("HOME");
+    const auto home = yams::config::getenv_optional("HOME");
     if (!home) {
         return result;
     }
 
     // Deprecated location
-    result.deprecatedPath = fs::path(home) / ".yams" / "models";
+    result.deprecatedPath = fs::path(*home) / ".yams" / "models";
 
     // Current location
     result.currentPath = cli ? cli->getDataPath() / "models" : fs::path();

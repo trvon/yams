@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <yams/config/config_helpers.h>
 
 #include "search_query_helpers.hpp"
 
@@ -561,9 +562,8 @@ std::string sanitizeFts5UserQuery(std::string query, bool allowPrefixWildcard) {
 }
 
 Fts5QueryMode parseFts5ModeEnv() {
-    if (const char* env = std::getenv("YAMS_FTS_MODE");
-        env && *env) { // NOLINT(concurrency-mt-unsafe)
-        std::string mode(env);
+    if (auto env = yams::config::getenv_nonempty("YAMS_FTS_MODE")) {
+        std::string mode = std::move(*env);
         std::transform(mode.begin(), mode.end(), mode.begin(),
                        [](unsigned char c) { return toLowerAscii(c); });
         if (mode == "simple") {
@@ -748,9 +748,8 @@ bool includeSearchSnippets() {
         return cachedValue == 1;
 
     bool enabled = false;
-    if (const char* env = std::getenv("YAMS_SEARCH_INCLUDE_SNIPPET");
-        env && *env) { // NOLINT(concurrency-mt-unsafe)
-        std::string_view value(env);
+    if (const auto env = yams::config::getenv_nonempty("YAMS_SEARCH_INCLUDE_SNIPPET")) {
+        std::string_view value(*env);
         enabled = (value != "0" && value != "false" && value != "off" && value != "no");
     }
     gIncludeSearchSnippetsCached.store(enabled ? 1 : 0, std::memory_order_relaxed);

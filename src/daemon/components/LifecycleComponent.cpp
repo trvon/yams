@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <random>
 #include <sstream>
+#include <system_error>
 #include <thread>
 
 #include <nlohmann/json.hpp>
@@ -16,6 +17,7 @@ using nlohmann::json;
 #include <boost/asio/awaitable.hpp>
 
 #include <yams/cli/cli_sync.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/process_discovery.h>
 #include <yams/daemon/components/LifecycleComponent.h>
@@ -359,7 +361,7 @@ Result<void> LifecycleComponent::createPidFile() {
         _open(pidFile_.string().c_str(), _O_CREAT | _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE);
     if (pidFileFd_ == -1) {
         return Error{ErrorCode::WriteError,
-                     "Failed to open PID file: " + std::string(strerror(errno))};
+                     "Failed to open PID file: " + std::generic_category().message(errno)};
     }
 
     HANDLE hFile = (HANDLE)_get_osfhandle(pidFileFd_);
@@ -379,7 +381,7 @@ Result<void> LifecycleComponent::createPidFile() {
         _close(pidFileFd_);
         pidFileFd_ = -1;
         return Error{ErrorCode::WriteError,
-                     "Failed to write to PID file: " + std::string(strerror(errno))};
+                     "Failed to write to PID file: " + std::generic_category().message(errno)};
     }
     // Flush the write buffer to disk on Windows
     _commit(pidFileFd_);
@@ -387,7 +389,7 @@ Result<void> LifecycleComponent::createPidFile() {
     pidFileFd_ = open(pidFile_.c_str(), O_CREAT | O_RDWR, 0644);
     if (pidFileFd_ == -1) {
         return Error{ErrorCode::WriteError,
-                     "Failed to open PID file: " + std::string(strerror(errno))};
+                     "Failed to open PID file: " + std::generic_category().message(errno)};
     }
 
     if (flock(pidFileFd_, LOCK_EX | LOCK_NB) == -1) {
@@ -404,7 +406,7 @@ Result<void> LifecycleComponent::createPidFile() {
         close(pidFileFd_);
         pidFileFd_ = -1;
         return Error{ErrorCode::WriteError,
-                     "Failed to write to PID file: " + std::string(strerror(errno))};
+                     "Failed to write to PID file: " + std::generic_category().message(errno)};
     }
 #endif
     pidFileOwned_ = true;
@@ -696,7 +698,8 @@ Result<void> LifecycleComponent::terminateProcess(pid_t pid) const {
         if (errno == ESRCH) {
             return Result<void>();
         }
-        spdlog::warn("Failed to send SIGTERM to PID {}: {}", pid, strerror(errno));
+        spdlog::warn("Failed to send SIGTERM to PID {}: {}", pid,
+                     std::generic_category().message(errno));
     } else {
         if (waitForProcessExit(pid, std::chrono::seconds(3))) {
             return Result<void>();
@@ -708,8 +711,8 @@ Result<void> LifecycleComponent::terminateProcess(pid_t pid) const {
         if (errno == ESRCH) {
             return Result<void>();
         }
-        return Error{ErrorCode::InvalidState,
-                     std::string("Failed to SIGKILL PID: ") + strerror(errno)};
+        return Error{ErrorCode::InvalidState, std::string("Failed to SIGKILL PID: ") +
+                                                  std::generic_category().message(errno)};
     }
 
     if (waitForProcessExit(pid, std::chrono::seconds(8))) {
@@ -806,8 +809,8 @@ bool LifecycleComponent::aggressiveModeEnabled() {
 #if defined(YAMS_TESTING) || defined(YAMS_TEST_LIFECYCLE_CONTROLS)
     // Test guard: allow unit/integration tests to disable kill-others behavior
     // without changing the production default.
-    if (const char* test_guard = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
-        test_guard && *test_guard) {
+    if (const auto guard = yams::config::getenv_nonempty("YAMS_TEST_SAFE_SINGLE_INSTANCE")) {
+        const char* test_guard = guard->c_str();
         if (equalsIgnoreCase(test_guard, "1") || equalsIgnoreCase(test_guard, "true") ||
             equalsIgnoreCase(test_guard, "on") || equalsIgnoreCase(test_guard, "yes")) {
             return false; // SAFE mode during tests
@@ -816,10 +819,11 @@ bool LifecycleComponent::aggressiveModeEnabled() {
 #endif
 
     // Production default: aggressive ON unless explicitly opted out.
-    const char* env = std::getenv("YAMS_DAEMON_KILL_OTHERS");
-    if (!env || env[0] == '\0') {
+    const auto envValue = yams::config::getenv_nonempty("YAMS_DAEMON_KILL_OTHERS");
+    if (!envValue) {
         return true; // default ON
     }
+    const char* env = envValue->c_str();
     // Explicit opt-out when set to "0" or "false" (case-insensitive)
     if ((env[0] == '0' && env[1] == '\0') || equalsIgnoreCase(env, "false") ||
         equalsIgnoreCase(env, "off") || equalsIgnoreCase(env, "no")) {
@@ -834,8 +838,8 @@ Result<void> LifecycleComponent::acquireDataDirLock() {
     dataDirLockFd_ = _open(dataDirLockFile_.string().c_str(), _O_CREAT | _O_RDWR | _O_BINARY,
                            _S_IREAD | _S_IWRITE);
     if (dataDirLockFd_ == -1) {
-        return Error{ErrorCode::WriteError,
-                     "Failed to open data-dir lock file: " + std::string(strerror(errno))};
+        return Error{ErrorCode::WriteError, "Failed to open data-dir lock file: " +
+                                                std::generic_category().message(errno)};
     }
 
     HANDLE hFile = (HANDLE)_get_osfhandle(dataDirLockFd_);
@@ -848,8 +852,8 @@ Result<void> LifecycleComponent::acquireDataDirLock() {
 #else
     dataDirLockFd_ = open(dataDirLockFile_.c_str(), O_CREAT | O_RDWR, 0644);
     if (dataDirLockFd_ == -1) {
-        return Error{ErrorCode::WriteError,
-                     "Failed to open data-dir lock file: " + std::string(strerror(errno))};
+        return Error{ErrorCode::WriteError, "Failed to open data-dir lock file: " +
+                                                std::generic_category().message(errno)};
     }
 
     bool lockAcquired = (flock(dataDirLockFd_, LOCK_EX | LOCK_NB) == 0);
@@ -895,7 +899,8 @@ Result<void> LifecycleComponent::acquireDataDirLock() {
     }
     if (write(dataDirLockFd_, lockStr.c_str(), lockStr.size()) !=
         static_cast<ssize_t>(lockStr.size())) {
-        spdlog::warn("Failed to write data-dir lock info: {}", strerror(errno));
+        spdlog::warn("Failed to write data-dir lock info: {}",
+                     std::generic_category().message(errno));
     }
 #endif
 

@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <cstdlib>
 #include <yams/common/utf8_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -35,9 +36,9 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
         }
 
         int timeout_ms = 30000;
-        if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
+        if (const auto env = yams::config::getenv_optional("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
             try {
-                timeout_ms = std::stoi(env);
+                timeout_ms = std::stoi(*env);
                 if (timeout_ms < 1000)
                     timeout_ms = 1000;
             } catch (...) {

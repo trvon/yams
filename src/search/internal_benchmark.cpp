@@ -5,12 +5,29 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <ctime>
 #include <iomanip>
 #include <numeric>
 #include <sstream>
+#include <string>
 #include <unordered_set>
 
 namespace yams::search {
+
+namespace {
+// Thread-safe replacement for std::gmtime + std::put_time.
+std::string formatUtcTime(std::time_t t, const char* format) {
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &t);
+#else
+    gmtime_r(&t, &tm);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&tm, format);
+    return out.str();
+}
+} // namespace
 
 // ============================================================================
 // LatencyStats
@@ -576,7 +593,7 @@ BenchmarkResults InternalBenchmark::aggregateResults(const std::vector<QueryExec
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
     std::ostringstream oss;
-    oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%SZ");
+    oss << formatUtcTime(time_t, "%Y-%m-%dT%H:%M:%SZ");
     results.timestamp = oss.str();
 
     if (executions.empty()) {

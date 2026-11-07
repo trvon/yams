@@ -365,7 +365,6 @@ public:
         // PERFORMANCE: Lower default limits to prevent timeouts on large repos
         // Users can override with environment variables if needed
         int max_docs_hot = getenv_int("YAMS_GREP_MAX_DOCS_HOT", 500);
-        int max_docs_cold = getenv_int("YAMS_GREP_MAX_DOCS_COLD", 50);
         int budget_ms = getenv_int("YAMS_GREP_TIME_BUDGET_MS", 10000);
         const int max_total_results = getenv_int("YAMS_GREP_MAX_RESULTS", 1000);
 

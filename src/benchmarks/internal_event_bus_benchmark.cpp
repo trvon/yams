@@ -10,6 +10,8 @@
 using Clock = std::chrono::high_resolution_clock;
 
 static uint64_t env_u64(const char* key, uint64_t def) {
+    // The benchmark does not link the config library; it reads env before starting threads.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
     const char* v = std::getenv(key);
     if (!v)
         return def;

@@ -5,6 +5,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/common/fs_utils.h>
 #include <yams/common/string_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/uuid.h>
 #include <yams/daemon/client/daemon_client.h>
 
@@ -88,9 +89,8 @@ public:
         std::string targetSession;
         if (!sessionName_.empty()) {
             targetSession = sessionName_;
-        } else if (const char* envSession = std::getenv("YAMS_SESSION_CURRENT");
-                   envSession && *envSession) {
-            targetSession = envSession;
+        } else if (auto envSession = yams::config::getenv_nonempty("YAMS_SESSION_CURRENT")) {
+            targetSession = std::move(*envSession);
         } else {
             std::string base = root.filename().string();
             if (base.empty())

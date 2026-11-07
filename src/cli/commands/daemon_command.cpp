@@ -43,6 +43,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <system_error>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -173,6 +174,7 @@ public:
 
         stop->callback([this]() {
             if (!stopDaemon()) {
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
         });
@@ -320,7 +322,8 @@ private:
             if (errno == ESRCH) {
                 return true; // Already gone
             }
-            spdlog::error("Failed to query daemon PID {}: {}", pid, strerror(errno));
+            spdlog::error("Failed to query daemon PID {}: {}", pid,
+                          std::generic_category().message(errno));
             return false; // Process doesn't exist or not permitted
         }
 
@@ -336,7 +339,8 @@ private:
             if (errno == ESRCH) {
                 return true; // Process exited before signal
             }
-            spdlog::error("Failed to send signal to daemon (PID {}): {}", pid, strerror(errno));
+            spdlog::error("Failed to send signal to daemon (PID {}): {}", pid,
+                          std::generic_category().message(errno));
             auto desc = describeProcess(pid);
             if (!desc.empty()) {
                 spdlog::error("Daemon PID {} state: {}", pid, desc);
@@ -847,12 +851,14 @@ private:
             }
             if (!stopDaemon()) {
                 std::cerr << "Failed to stop running daemon; not starting a new one.\n";
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
 
             if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5),
                                    pidBeforeStop)) {
                 std::cerr << "Failed to stop running daemon; not starting a new one.\n";
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
         }
@@ -975,9 +981,11 @@ private:
 
             // Exec and never return on success
             ::execvp(exePath.c_str(), argv.data());
-            spdlog::error("Failed to exec yams-daemon ({}): {}", exePath, strerror(errno));
-            std::cerr << "[FAIL] Failed to exec yams-daemon: " << exePath << ": " << strerror(errno)
-                      << "\n";
+            spdlog::error("Failed to exec yams-daemon ({}): {}", exePath,
+                          std::generic_category().message(errno));
+            std::cerr << "[FAIL] Failed to exec yams-daemon: " << exePath << ": "
+                      << std::generic_category().message(errno) << "\n";
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(1);
         } else {
             // Start daemon in background
@@ -1014,6 +1022,7 @@ private:
                           << "\n";
                 std::cerr << "  💡 Hint: Check if another daemon is already running\n";
                 std::cerr << "  📋 Try: yams daemon stop && yams daemon start\n";
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
 
@@ -1884,6 +1893,7 @@ private:
         }
         if (lastErr.code == ErrorCode::ResourceBusy) {
             std::cout << lastErr.message << "\n";
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(2);
         }
         // All retries exhausted — fall back to bootstrap status file before giving up
@@ -1924,6 +1934,7 @@ private:
         } catch (...) {
         }
         spdlog::error("Failed to get daemon status: {}", lastErr.message);
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
         std::exit(1);
     }
 
@@ -1970,11 +1981,13 @@ private:
         }
         if (!stopDaemon()) {
             spdlog::error("Failed to stop daemon for restart");
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(1);
         }
 
         if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5), pidBeforeStop)) {
             spdlog::error("Failed to stop daemon for restart");
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(1);
         }
 
@@ -2285,6 +2298,7 @@ private:
         // With the Linux packages the user unit already exists in /usr/lib/systemd/user: enable
         // it rather than writing a copy (a file in ~/.config/systemd/user would shadow it).
         if (userScope && !customDaemonOptions() && packagedUserUnitInstalled()) {
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
             (void)std::system("systemctl --user daemon-reload >/dev/null 2>&1");
             if (yams::daemon::client::runUserUnit("enable --now")) {
                 std::cout << "[OK] Enabled and started the packaged yams-daemon.service user "
@@ -2354,6 +2368,7 @@ private:
         if (ec) {
             std::cerr << "[FAIL] Cannot create unit directory " << unitDir.string() << ": "
                       << ec.message() << "\n";
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(1);
         }
         // The unit's WorkingDirectory= is the data directory: systemd fails the start with
@@ -2362,12 +2377,14 @@ private:
         if (ec) {
             std::cerr << "[FAIL] Cannot create data directory " << dataDir << ": " << ec.message()
                       << "\n";
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(1);
         }
         {
             std::ofstream out(unitPath, std::ios::trunc);
             if (!out) {
                 std::cerr << "[FAIL] Cannot write " << unitPath.string() << "\n";
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
             out << unit.str();
@@ -2386,8 +2403,11 @@ private:
         std::cout << "[INFO] Running: " << reloadCmd << "\n";
         std::cout << "[INFO] Running: " << enableCmd << "\n";
         std::cout << "[INFO] Running: " << startCmd << "\n";
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         (void)std::system((reloadCmd + " 2>&1").c_str());
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         (void)std::system((enableCmd + " 2>&1").c_str());
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         const int startRc = std::system((startCmd + " 2>&1").c_str());
         if (startRc == 0) {
             std::cout << "[OK] yams-daemon.service " << (userScope ? "(user)" : "(system)")
@@ -2415,14 +2435,18 @@ private:
 
         const std::string ctl = systemctlPath();
         const std::string scope = userScope ? " --user" : "";
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         (void)std::system((ctl + scope + " stop yams-daemon.service 2>&1").c_str());
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         (void)std::system((ctl + scope + " disable yams-daemon.service 2>&1").c_str());
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         (void)std::system((ctl + scope + " daemon-reload 2>&1").c_str());
         std::error_code ec;
         if (fs::exists(unitPath, ec)) {
             fs::remove(unitPath, ec);
             std::cout << (fs::exists(unitPath, ec) ? "[WARN] Could not remove " : "[OK] Removed ")
                       << unitPath.string() << "\n";
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
             (void)std::system((ctl + scope + " daemon-reload 2>&1").c_str());
         } else {
             std::cout << "[OK] Disabled yams-daemon.service" << (userScope ? " (user)" : "")

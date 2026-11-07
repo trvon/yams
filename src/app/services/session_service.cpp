@@ -8,6 +8,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/common/fs_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/uuid.h>
 
 namespace yams::app::services {
@@ -16,10 +17,10 @@ using json = nlohmann::json;
 
 namespace {
 static std::filesystem::path state_root() {
-    if (const char* xdg = std::getenv("XDG_STATE_HOME"); xdg && *xdg)
-        return std::filesystem::path(xdg) / "yams";
-    if (const char* home = std::getenv("HOME"); home && *home)
-        return std::filesystem::path(home) / ".local" / "state" / "yams";
+    if (const auto xdg = yams::config::getenv_nonempty("XDG_STATE_HOME"))
+        return std::filesystem::path(*xdg) / "yams";
+    if (const auto home = yams::config::getenv_nonempty("HOME"))
+        return std::filesystem::path(*home) / ".local" / "state" / "yams";
     return std::filesystem::current_path() / ".yams_state";
 }
 static std::filesystem::path sessions_dir() {
@@ -69,8 +70,8 @@ public:
         auto j = load_json(index_path());
         if (j.contains("current") && j["current"].is_string())
             return j["current"].get<std::string>();
-        if (const char* env = std::getenv("YAMS_SESSION_CURRENT"); env && *env)
-            return std::string(env);
+        if (auto env = yams::config::getenv_nonempty("YAMS_SESSION_CURRENT"))
+            return env;
         return std::nullopt;
     }
 
@@ -478,8 +479,8 @@ public:
                                   std::chrono::system_clock::now().time_since_epoch())
                                   .count();
         // Record instance that opened this session (set by caller or env)
-        if (const char* instEnv = std::getenv("YAMS_INSTANCE_ID"); instEnv && *instEnv) {
-            j["lastInstanceId"] = std::string(instEnv);
+        if (const auto instEnv = yams::config::getenv_nonempty("YAMS_INSTANCE_ID")) {
+            j["lastInstanceId"] = *instEnv;
         }
         save_json(p, j);
         use(name);

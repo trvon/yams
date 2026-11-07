@@ -26,8 +26,8 @@ bool PluginTrust::resolveStrictPluginDirMode() {
         }
     } catch (...) {
     }
-    if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-        strictMode = yams::config::parse_bool(envStrict, strictMode);
+    if (const auto envStrict = yams::config::getenv_optional("YAMS_PLUGIN_DIR_STRICT")) {
+        strictMode = yams::config::parse_bool(*envStrict, strictMode);
     }
     return strictMode;
 }

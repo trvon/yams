@@ -3,6 +3,7 @@
  * @brief Implementation of the plugin repository client
  */
 
+#include <yams/config/config_helpers.h>
 #include <yams/plugins/plugin_repo_client.hpp>
 
 #include <cstdlib>
@@ -59,8 +60,8 @@ class PluginRepoClientImpl : public IPluginRepoClient {
 public:
     explicit PluginRepoClientImpl(PluginRepoConfig config) : config_(std::move(config)) {
         // Allow environment variable override
-        if (const char* envUrl = std::getenv("YAMS_PLUGIN_REPO_URL")) {
-            config_.repoUrl = envUrl;
+        if (auto envUrl = yams::config::getenv_optional("YAMS_PLUGIN_REPO_URL")) {
+            config_.repoUrl = std::move(*envUrl);
         }
         // Remove trailing slash
         while (!config_.repoUrl.empty() && config_.repoUrl.back() == '/') {

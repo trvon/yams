@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <system_error>
 #include <vector>
 #include <yams/wal/wal_file.h>
 
@@ -60,7 +61,7 @@ struct WALFile::Impl {
         // Get current file size
         struct stat st;
         if (fstat(fd, &st) < 0) {
-            spdlog::error("fstat failed: {}", strerror(errno));
+            spdlog::error("fstat failed: {}", std::generic_category().message(errno));
             return Result<void>(ErrorCode::Unknown);
         }
         fileSize = st.st_size;
@@ -70,12 +71,12 @@ struct WALFile::Impl {
             size_t desiredSize = std::max(fileSize, WALFile::INITIAL_MAP_SIZE);
 #ifdef _WIN32
             if (_chsize_s(fd, static_cast<__int64>(desiredSize)) != 0) {
-                spdlog::error("_chsize_s failed: {}", strerror(errno));
+                spdlog::error("_chsize_s failed: {}", std::generic_category().message(errno));
                 return Result<void>(ErrorCode::Unknown);
             }
 #else
-            if (ftruncate(fd, desiredSize) < 0) {
-                spdlog::error("ftruncate failed: {}", strerror(errno));
+            if (ftruncate(fd, static_cast<off_t>(desiredSize)) < 0) {
+                spdlog::error("ftruncate failed: {}", std::generic_category().message(errno));
                 return Result<void>(ErrorCode::Unknown);
             }
 #endif
@@ -117,7 +118,7 @@ struct WALFile::Impl {
 
         if (mappedMemory == MAP_FAILED) {
             mappedMemory = nullptr;
-            spdlog::error("mmap failed: {}", strerror(errno));
+            spdlog::error("mmap failed: {}", std::generic_category().message(errno));
             return Result<void>(ErrorCode::Unknown);
         }
 #endif
@@ -188,7 +189,7 @@ struct WALFile::Impl {
 
         if (mappedMemory == MAP_FAILED) {
             mappedMemory = nullptr;
-            spdlog::error("mmap failed: {}", strerror(errno));
+            spdlog::error("mmap failed: {}", std::generic_category().message(errno));
             return Result<void>(ErrorCode::Unknown);
         }
 #endif
@@ -243,7 +244,8 @@ Result<void> WALFile::open() {
 #endif
 
     if (pImpl->fd < 0) {
-        spdlog::error("Failed to open WAL file {}: {}", pImpl->path.string(), strerror(errno));
+        spdlog::error("Failed to open WAL file {}: {}", pImpl->path.string(),
+                      std::generic_category().message(errno));
         return Result<void>(ErrorCode::FileNotFound);
     }
 
@@ -348,7 +350,7 @@ Result<void> WALFile::sync() {
         }
 #else
         if (msync(pImpl->mappedMemory, pImpl->writePos, MS_SYNC) < 0) {
-            spdlog::error("msync failed: {}", strerror(errno));
+            spdlog::error("msync failed: {}", std::generic_category().message(errno));
             return Result<void>(ErrorCode::Unknown);
         }
 #endif
@@ -360,7 +362,7 @@ Result<void> WALFile::sync() {
 #else
     if (fsync(pImpl->fd) < 0) {
 #endif
-        spdlog::error("fsync failed: {}", strerror(errno));
+        spdlog::error("fsync failed: {}", std::generic_category().message(errno));
         return Result<void>(ErrorCode::Unknown);
     }
 

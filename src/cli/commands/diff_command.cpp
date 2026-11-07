@@ -75,6 +75,7 @@ public:
             auto result = execute();
             if (!result) {
                 spdlog::error("Diff command failed: {}", result.error().message);
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
         });

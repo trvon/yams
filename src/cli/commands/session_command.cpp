@@ -9,6 +9,7 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/common/fs_utils.h>
+#include <yams/config/config_helpers.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -522,8 +523,8 @@ private:
     static std::filesystem::path sessionsDir() { return yams::cli::session_store::sessions_dir(); }
     static std::filesystem::path indexPath() { return yams::cli::session_store::index_path(); }
     static std::optional<std::string> currentSession() {
-        if (const char* env = std::getenv("YAMS_SESSION_CURRENT"); env && *env) {
-            return std::string(env);
+        if (auto env = yams::config::getenv_nonempty("YAMS_SESSION_CURRENT")) {
+            return env;
         }
         return yams::cli::session_store::current_session();
     }

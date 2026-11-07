@@ -1,3 +1,4 @@
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/client/sandbox_probe.h>
 
 #include <atomic>
@@ -51,16 +52,16 @@ UnixSocketProbeFn& test_probe_slot() {
 }
 
 std::filesystem::path probe_temp_dir() {
-    if (const char* xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && *xdg) {
+    if (const auto xdg = yams::config::getenv_nonempty("XDG_RUNTIME_DIR")) {
         std::error_code ec;
-        if (std::filesystem::is_directory(xdg, ec)) {
-            return std::filesystem::path(xdg);
+        if (std::filesystem::is_directory(*xdg, ec)) {
+            return std::filesystem::path(*xdg);
         }
     }
-    if (const char* tmp = std::getenv("TMPDIR"); tmp && *tmp) {
+    if (const auto tmp = yams::config::getenv_nonempty("TMPDIR")) {
         std::error_code ec;
-        if (std::filesystem::is_directory(tmp, ec)) {
-            return std::filesystem::path(tmp);
+        if (std::filesystem::is_directory(*tmp, ec)) {
+            return std::filesystem::path(*tmp);
         }
     }
     return std::filesystem::temp_directory_path();

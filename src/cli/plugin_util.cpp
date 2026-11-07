@@ -104,8 +104,8 @@ std::vector<fs::path> getPluginSearchDirs() {
     std::vector<fs::path> dirs;
 
     // User-local plugins
-    if (const char* home = std::getenv("HOME")) {
-        dirs.emplace_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
+    if (const auto home = yams::config::getenv_optional("HOME")) {
+        dirs.emplace_back(fs::path(*home) / ".local" / "lib" / "yams" / "plugins");
     }
 
 #ifdef __APPLE__

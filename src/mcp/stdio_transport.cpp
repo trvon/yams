@@ -1,3 +1,4 @@
+#include <yams/config/config_helpers.h>
 #include <yams/mcp/mcp_server.h>
 
 #include <spdlog/spdlog.h>
@@ -43,9 +44,9 @@ StdioTransport::StdioTransport() {
     // the caller's stream buffers and synchronization policy.
 
     // Configure receive timeout from environment, enforce a sane minimum
-    if (const char* env = std::getenv("YAMS_MCP_RECV_TIMEOUT_MS"); env && *env) {
+    if (const auto env = yams::config::getenv_nonempty("YAMS_MCP_RECV_TIMEOUT_MS")) {
         try {
-            recvTimeoutMs_ = std::stoi(env);
+            recvTimeoutMs_ = std::stoi(*env);
             if (recvTimeoutMs_ < 50)
                 recvTimeoutMs_ = 50;
         } catch (...) {
