@@ -1415,13 +1415,13 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed: {}", error.what());
     try {
         memorySyncApplyHealth_.recordPublishFailed();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 } catch (...) {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed (unknown)");
     try {
         memorySyncApplyHealth_.recordPublishFailed();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 }
 

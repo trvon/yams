@@ -706,7 +706,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
                     // Otherwise continue to general fallback below
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // ignore session errors and continue
         }
     }
@@ -746,7 +746,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
     bool isAbsolute = false;
     try {
         isAbsolute = std::filesystem::path(name).is_absolute();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 
     // 4) Whole-name matches: the exact basename, or a relative path that is a
@@ -775,7 +775,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
         std::string stem = name;
         try {
             stem = std::filesystem::path(name).stem().string();
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         std::vector<std::string> loose;
         if (hasWildcard) {

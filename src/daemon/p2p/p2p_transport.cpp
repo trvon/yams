@@ -652,7 +652,7 @@ public:
                 std::lock_guard<std::mutex> stateLock(self->socketStateMutex);
                 self->closeSocketLocked();
             });
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // A failed cancellation enqueue must not escape a noexcept shutdown path. The active
             // operation remains bounded by its operation and aggregate session deadlines.
         }
@@ -1062,7 +1062,7 @@ public:
                     // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                     acceptor->close(ignored);
                 });
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // The accept loop normally drains this cancellation on its own io_context. If the
                 // enqueue itself fails, its next completion/error path remains exception-contained.
             }
@@ -1087,7 +1087,7 @@ public:
         }
         try {
             invokeAfterAcceptJoinHook();
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Test instrumentation must never escape a noexcept lifecycle boundary.
         }
         // Close sessions accepted between the initial cancellation sweep and accept-loop exit.

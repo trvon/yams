@@ -27,7 +27,7 @@ json normalizeToolResultOrError(const std::string& name, const json& arguments, 
                 const auto& item = result["content"][0];
                 msg = item.value("text", msg);
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // keep default
         }
 

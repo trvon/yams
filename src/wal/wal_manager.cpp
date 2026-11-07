@@ -585,7 +585,7 @@ Result<void> WALManager::initialize() {
         try {
             uint64_t seq = std::stoull(stem.substr(lastUnderscore + 1));
             maxSeq = std::max(maxSeq, seq);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Ignore parsing errors for unexpected filenames
         }
     }

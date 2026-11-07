@@ -49,7 +49,7 @@ StdioTransport::StdioTransport() {
             recvTimeoutMs_ = std::stoi(*env);
             if (recvTimeoutMs_ < 50)
                 recvTimeoutMs_ = 50;
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // ignore and keep default
         }
     }
@@ -64,7 +64,7 @@ StdioTransport::~StdioTransport() {
     if (writerThread_.joinable()) {
         try {
             writerThread_.join();
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // swallow any join exceptions
         }
     }

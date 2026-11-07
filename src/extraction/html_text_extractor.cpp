@@ -352,7 +352,7 @@ std::string HtmlTextExtractor::decodeHtmlEntities(const std::string& text) {
                         pos = end + 1;
                         continue;
                     }
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Invalid number, keep as-is
                 }
             }
@@ -371,7 +371,7 @@ std::string HtmlTextExtractor::decodeHtmlEntities(const std::string& text) {
                         pos = end + 1;
                         continue;
                     }
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Invalid hex, keep as-is
                 }
             }

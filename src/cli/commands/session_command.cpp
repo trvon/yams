@@ -536,7 +536,7 @@ private:
                 std::ifstream in(p);
                 if (in.good())
                     in >> j;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
@@ -551,7 +551,7 @@ private:
                 std::ifstream in(ip);
                 if (in.good())
                     in >> idx;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
         }

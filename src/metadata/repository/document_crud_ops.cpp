@@ -477,7 +477,7 @@ Result<void> recordDocumentSnapshotRow(Database& db, int64_t docId,
         if (key == "snapshot_time") {
             try {
                 timeMicros = std::stoll(value.asString());
-            } catch (const std::exception&) {
+            } catch (const std::exception&) { // NOLINT(bugprone-empty-catch)
             }
         }
     }

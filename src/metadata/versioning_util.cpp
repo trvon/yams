@@ -60,7 +60,7 @@ selectVersionRetentionCandidates(IMetadataRepository& repo, const VersionRetenti
             versionIt != metadataIt->second.end()) {
             try {
                 version = versionIt->second.asInteger();
-            } catch (const std::exception&) {
+            } catch (const std::exception&) { // NOLINT(bugprone-empty-catch)
                 // Sort malformed versions behind well-formed history. The latest
                 // marker below still ensures the current document is protected.
             }

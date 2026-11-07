@@ -229,7 +229,7 @@ private:
                 if (json.contains("error")) {
                     msg << ": " << json["error"].get<std::string>();
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Error bodies are best-effort diagnostics; keep the HTTP status error.
             }
             return Error{ErrorCode::NetworkError, msg.str()};

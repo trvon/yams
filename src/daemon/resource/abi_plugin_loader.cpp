@@ -82,7 +82,7 @@ static std::vector<std::string> parseInterfacesFromManifest(const std::string& m
                 }
             }
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     return out;
 }
@@ -93,7 +93,7 @@ AbiPluginLoader::HandleInfo::~HandleInfo() {
         if (shutdown) {
             try {
                 shutdown();
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
         dlclose(handle);
@@ -126,7 +126,7 @@ std::vector<std::filesystem::path> AbiPluginLoader::trustList() const {
                 }
             }
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     return std::vector<std::filesystem::path>(trusted.begin(), trusted.end());
 }
@@ -187,7 +187,7 @@ AbiPluginLoader::scanTarget(const std::filesystem::path& file) const {
         sr.name = stem;
         sr.version = "";
         sr.abiVersion = 0;
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     return Result<ScanResult>(std::move(sr));
 }
@@ -227,7 +227,7 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
         bool looks_like_yams = false;
         try {
             looks_like_yams = (fname.rfind("libyams_", 0) == 0) || (fname.rfind("yams_", 0) == 0);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         if (!looks_like_yams) {
             if (namePolicy == NamePolicy::Spec && !isBundledRuntimeDependency(fname)) {
@@ -246,7 +246,7 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
                     return;
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
 #endif
 
@@ -403,11 +403,11 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
                     if (std::regex_search(hi->info.manifestJson, m, verRe)) {
                         hi->info.version = m[1].str();
                     }
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
             }
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     if (declaresRemovedSymbolExtractor(hi->info.interfaces)) {
         // A stale install artifact, not an error: say once per process which file to delete.
@@ -465,7 +465,7 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
             dlclose(handle);
             return Result<ScanResult>(existingHandle->info);
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 #endif
 

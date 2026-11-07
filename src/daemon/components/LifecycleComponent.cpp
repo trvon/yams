@@ -255,7 +255,7 @@ Result<void> LifecycleComponent::initialize() {
                 }
             }
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // best effort
     }
 

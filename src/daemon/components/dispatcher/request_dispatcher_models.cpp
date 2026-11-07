@@ -31,7 +31,7 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
         bool was_loaded = false;
         try {
             was_loaded = provider->isModelLoaded(req.modelName);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
 
@@ -41,7 +41,7 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
                 timeout_ms = std::stoi(*env);
                 if (timeout_ms < 1000)
                     timeout_ms = 1000;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
@@ -86,7 +86,7 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
                                     }
                                 }
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                             // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     }
@@ -109,11 +109,13 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
                                       req.modelName);
                     }
                 } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
+                    spdlog::warn("[RequestDispatcher] post-load rebuild check failed (model={})",
+                                 req.modelName);
                 }
             }
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::warn("[RequestDispatcher] post-load readiness update failed (model={})",
+                         req.modelName);
         }
         co_return resp;
     } catch (const std::exception& e) {

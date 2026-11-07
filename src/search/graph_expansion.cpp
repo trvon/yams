@@ -46,7 +46,7 @@ EdgeAnchorHints edgeAnchorHints(const std::optional<std::string>& properties) {
         parsed.region = props.value("region", "");
         parsed.scope = props.value("scope", "");
         hints = std::move(parsed);
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     return cache.emplace(text, std::move(hints)).first->second;
 }

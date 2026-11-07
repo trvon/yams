@@ -141,7 +141,7 @@ public:
         try {
             auto dd = cli_->getDataPath();
             std::cout << "  " << ui::key_value("Data directory", dd.string()) << "\n\n";
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
 
@@ -289,7 +289,7 @@ public:
                 if (parsed > 0) {
                     localWaitTimeout = std::chrono::milliseconds(parsed);
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
         }

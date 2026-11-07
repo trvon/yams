@@ -24,7 +24,7 @@ RequestExecutor::~RequestExecutor() {
     if (started_) {
         try {
             spdlog::debug("[RequestExecutor] Destructor: stopping...");
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
         stop();
@@ -32,7 +32,7 @@ RequestExecutor::~RequestExecutor() {
             if (w.joinable()) {
                 try {
                     w.join();
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
@@ -66,10 +66,10 @@ void RequestExecutor::start(std::optional<std::size_t> numThreads) {
                 } catch (const std::exception& e) {
                     try {
                         spdlog::error("[RequestExecutor] Worker {} exception: {}", i, e.what());
-                    } catch (...) {
+                    } catch (...) { // NOLINT(bugprone-empty-catch)
                         // Intentional best-effort path; keep the primary operation unaffected.
                     }
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Intentional best-effort path; keep the primary operation unaffected.
                 }
                 if (ioContext_->stopped())

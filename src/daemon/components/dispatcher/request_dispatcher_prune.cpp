@@ -93,7 +93,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                     return value * 1024 * 1024 * 1024;
                 return value;
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
         return 0;

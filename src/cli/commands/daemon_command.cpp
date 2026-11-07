@@ -244,7 +244,7 @@ private:
                 auto cliDataDir = cli_->getDataPath();
                 if (!cliDataDir.empty())
                     return cliDataDir;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
         return yams::config::resolve_data_dir_from_config();
@@ -1407,7 +1407,7 @@ private:
                             if (itDeg != s.readinessStates.end() && itDeg->second) {
                                 std::cout << "  Search:      degraded (repairing)\n";
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                         }
                         // Show vector scoring availability
                         try {
@@ -1426,7 +1426,7 @@ private:
                             } else {
                                 std::cout << "  Vector:      enabled\n";
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                         }
                         // Worker pool (from requestCounts)
                         try {
@@ -1448,7 +1448,7 @@ private:
                                           << ", active=" << active << ", queued=" << queued
                                           << ", util=" << util << "%\n";
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                         }
 
                         // Version mismatch check
@@ -1457,7 +1457,7 @@ private:
                             if (!s.version.empty() && s.version != current) {
                                 hints.push_back("Version mismatch - run: yams daemon restart");
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                         }
                         // Show any components not ready yet
                         bool has_waiting = false;
@@ -1507,7 +1507,7 @@ private:
                                     }
                                 }
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                         }
 
                         // Check resource usage
@@ -1522,7 +1522,7 @@ private:
                                             " MB) - reduce cache/model size");
                         }
                     }
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
             } else {
                 std::cout << "  Socket: "
@@ -1606,7 +1606,7 @@ private:
                 if (found) {
                     std::cout << "  Process found: INITIALIZING\n";
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // ignore errors from /proc scanning
             }
         }
@@ -1747,7 +1747,7 @@ private:
                                         j["progress"].contains(it.key())) {
                                         try {
                                             w << " (" << j["progress"][it.key()].get<int>() << "%)";
-                                        } catch (...) {
+                                        } catch (...) { // NOLINT(bugprone-empty-catch)
                                         }
                                     }
                                     waiting.push_back(w.str());
@@ -1838,7 +1838,7 @@ private:
                                      "or tail the daemon log.\n";
                         return;
                     }
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
                 // No bootstrap file either — the daemon is not running or has not
                 // yet written any status. Match the "not running" message emitted
@@ -1918,7 +1918,7 @@ private:
                             try {
                                 pct = " (" + std::to_string(j["progress"][it.key()].get<int>()) +
                                       "%)";
-                            } catch (...) {
+                            } catch (...) { // NOLINT(bugprone-empty-catch)
                             }
                         }
                         std::cout << "  " << it.key() << ": " << state << pct << "\n";
@@ -1927,12 +1927,12 @@ private:
                 if (j.contains("uptime_seconds")) {
                     try {
                         std::cout << "  Uptime: ~" << j["uptime_seconds"].get<long>() << "s\n";
-                    } catch (...) {
+                    } catch (...) { // NOLINT(bugprone-empty-catch)
                     }
                 }
                 return;
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         spdlog::error("Failed to get daemon status: {}", lastErr.message);
         // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
@@ -2041,7 +2041,7 @@ private:
                     logPath = reported;
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Best effort: fall back to the default candidate paths below.
         }
 

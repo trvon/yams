@@ -500,7 +500,7 @@ std::string classifyFileType(const std::string& mimeType, const std::string& ext
             else if (detector.isBinaryMimeType(mime))
                 category = "binary";
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // MIME detection is best-effort; fall back to extension heuristics below.
     }
 

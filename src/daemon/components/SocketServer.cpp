@@ -114,7 +114,7 @@ SocketServer::backoffAfterReject(std::chrono::milliseconds delay) const {
     timer.expires_after(delay);
     try {
         co_await timer.async_wait(use_awaitable);
-    } catch (const boost::system::system_error&) {
+    } catch (const boost::system::system_error&) { // NOLINT(bugprone-empty-catch)
         // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
@@ -242,7 +242,7 @@ RequestHandler::Config SocketServer::makeHandlerConfig(bool isProxy,
             handlerConfig.worker_executor = dispatcher->getWorkerExecutor();
             handlerConfig.cli_executor = dispatcher->getCliExecutor();
             handlerConfig.worker_job_signal = dispatcher->getWorkerJobSignal();
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
     }
@@ -337,9 +337,8 @@ Result<void> SocketServer::start() {
         if (!sockPath.is_absolute()) {
             try {
                 sockPath = std::filesystem::absolute(sockPath);
-            } catch (...) {
-                // NOLINTNEXTLINE(bugprone-empty-catch): best-effort fallback keeps original path.
-                // fallback: keep original
+            } catch (...) { // NOLINT(bugprone-empty-catch)
+                // Best-effort fallback: keep the original path.
             }
         }
 
@@ -512,7 +511,7 @@ Result<void> SocketServer::start() {
                               std::chrono::steady_clock::now() - state_->stats.startTime)
                               .count();
                 state_->initDurationsMs.emplace("ipc_server", static_cast<uint64_t>(ms));
-            } catch (
+            } catch (  // NOLINT(bugprone-empty-catch)
                 ...) { // NOLINT(bugprone-empty-catch): metrics recording must not fail startup.
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
@@ -548,7 +547,7 @@ Result<void> SocketServer::stop() {
         // Request stop on all active connections via stop_source
         try {
             stop_source_.request_stop();
-        } catch (
+        } catch (  // NOLINT(bugprone-empty-catch)
             ...) { // NOLINT(bugprone-empty-catch): stop request is best-effort during shutdown.
             // Intentional best-effort path; keep the primary operation unaffected.
         }
@@ -812,7 +811,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                     timer.expires_after(backoff_ms);
                     try {
                         co_await timer.async_wait(use_awaitable);
-                    } catch (
+                    } catch (                                 // NOLINT(bugprone-empty-catch)
                         const boost::system::system_error&) { // NOLINT(bugprone-empty-catch): timer
                                                               // cancellation is expected.
                         // Intentional best-effort path; keep the primary operation unaffected.
