@@ -225,10 +225,7 @@ std::vector<std::string> tokenizeKgQuery(std::string_view query) {
     for (unsigned char uc : query) {
         if (std::isalnum(uc)) {
             current.push_back(static_cast<char>(uc));
-        } else if (uc == '-' || uc == '/' || uc == '_') {
-            flushTokenVariants(current, rawTokens);
-            current.clear();
-        } else {
+        } else { // '-', '/', '_' and any other separator end the token
             flushTokenVariants(current, rawTokens);
             current.clear();
         }
@@ -283,7 +280,7 @@ std::vector<std::string> tokenizeKgQuery(std::string_view query) {
 }
 
 float graphNodeExpansionWeight(const std::optional<std::string>& typeOpt,
-                               std::string_view labelView) {
+                               std::string_view /*labelView*/) {
     std::string type;
     if (typeOpt.has_value()) {
         type.reserve(typeOpt->size());
@@ -291,7 +288,6 @@ float graphNodeExpansionWeight(const std::optional<std::string>& typeOpt,
             type.push_back(static_cast<char>(std::tolower(uc)));
         }
     }
-    const std::string label = normalizeGraphSurface(labelView);
     if (type == "document" || type == "file" || type == "path" || type == "directory" ||
         type == "blob" || type == "text_segment" || type == "date" || type == "time" ||
         type == "duration" || type == "number" || type == "ordinal") {
@@ -406,7 +402,7 @@ generateGraphExpansionTerms(const std::shared_ptr<metadata::KnowledgeGraphStore>
             return std::nullopt;
         }
         nodeCache.emplace(nodeId, *nodeRes.value());
-        return *nodeRes.value();
+        return nodeRes.value();
     };
 
     const size_t aliasesPerTerm = std::max<size_t>(4, config.maxTerms);
@@ -568,7 +564,7 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
             return std::nullopt;
         }
         nodeCache.emplace(nodeId, *nodeRes.value());
-        return *nodeRes.value();
+        return nodeRes.value();
     };
 
     std::unordered_map<std::string, float> termScores;

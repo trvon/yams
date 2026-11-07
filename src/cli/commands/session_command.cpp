@@ -614,7 +614,7 @@ private:
             size_t selCount = svc ? svc->listPathSelectors(*cur).size()
                                   : (j.contains("selectors") ? j["selectors"].size() : 0);
             auto mat =
-                svc ? svc->listMaterialized(*cur) : std::vector<app::services::MaterializedItem>{};
+                svc ? svc->listMaterialized(cur) : std::vector<app::services::MaterializedItem>{};
             std::cout << "Selectors: " << selCount << std::endl;
             std::cout << "Materialized: " << mat.size() << std::endl;
         }
@@ -898,7 +898,7 @@ private:
         std::vector<std::string> out;
 
         if (emitMaterialized_) {
-            auto items = svc->listMaterialized(*cur);
+            auto items = svc->listMaterialized(cur);
             for (const auto& m : items) {
                 if (emitKind_ == "paths")
                     out.push_back(m.path);

@@ -532,19 +532,8 @@ void ConnectionFsm::on_close_request() {
 void ConnectionFsm::on_response_complete(bool close_after) {
     // If we are streaming or just wrote a header/payload and persistent connection is desired,
     // transition back to Connected to allow the next request. Otherwise go to Closing.
-    switch (state_) {
-        case State::WritingHeader:
-        case State::StreamingChunks:
-            transition(close_after ? State::Closing : State::Connected,
-                       close_after ? "on_response_complete:close"
-                                   : "on_response_complete:keepalive");
-            break;
-        default:
-            transition(close_after ? State::Closing : State::Connected,
-                       close_after ? "on_response_complete:close"
-                                   : "on_response_complete:keepalive");
-            break;
-    }
+    transition(close_after ? State::Closing : State::Connected,
+               close_after ? "on_response_complete:close" : "on_response_complete:keepalive");
 }
 
 const char* ConnectionFsm::to_string(State s) noexcept {

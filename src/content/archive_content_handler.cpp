@@ -220,8 +220,6 @@ std::optional<ArchiveMetadata> extractUsingLibArchive(const std::filesystem::pat
         time_t mtime = archive_entry_mtime(entry);
         archiveEntry.modificationTime = std::chrono::system_clock::from_time_t(mtime);
 
-        metadata.entries.push_back(std::move(archiveEntry));
-
         if (archiveEntry.isDirectory) {
             metadata.totalDirectories++;
         } else {
@@ -230,6 +228,7 @@ std::optional<ArchiveMetadata> extractUsingLibArchive(const std::filesystem::pat
 
         metadata.compressedSize += archiveEntry.compressedSize;
         metadata.uncompressedSize += archiveEntry.uncompressedSize;
+        metadata.entries.push_back(std::move(archiveEntry));
 
         archive_read_data_skip(a);
     }
@@ -295,13 +294,12 @@ std::optional<ArchiveMetadata> extractUsingUnzip(const std::filesystem::path& pa
                     entry.path = entry.name;
                     entry.isDirectory = entry.name.back() == '/';
 
-                    metadata.entries.push_back(std::move(entry));
-
                     if (entry.isDirectory) {
                         metadata.totalDirectories++;
                     } else {
                         metadata.totalFiles++;
                     }
+                    metadata.entries.push_back(std::move(entry));
                 }
             }
 

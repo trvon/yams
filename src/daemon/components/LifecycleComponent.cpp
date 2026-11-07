@@ -467,6 +467,7 @@ void LifecycleComponent::handleSignal(int signal) {
             }
             break;
 #ifndef _WIN32
+        // NOLINTNEXTLINE(bugprone-branch-clone): placeholder until reload exists
         case SIGHUP:
             // TODO: set an atomic flag for reload, handle outside signal context
             break;

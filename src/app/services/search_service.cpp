@@ -615,6 +615,8 @@ public:
 
         auto searchExecutionContext =
             buildSearchExecutionContext(ctx_, normalizedReq, normalizedReq.query);
+        // Only trivially copyable fields (counters, flags, freshness) are read after this move.
+        // NOLINTNEXTLINE(bugprone-use-after-move)
         search::SearchExecutionContextGuard searchExecutionContextGuard(
             std::move(searchExecutionContext));
         (void)searchExecutionContextGuard;

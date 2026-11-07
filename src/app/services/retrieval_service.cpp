@@ -472,13 +472,11 @@ Result<std::string> selectHashPrefixMatch(const std::vector<yams::daemon::Search
     };
 
     const Candidate* chosen = nullptr;
-    if (preferLatest && preferOldest) {
-        // If both flags set, favor oldest first to match legacy behavior
+    if (preferOldest) {
+        // Oldest also wins when both flags are set, to match legacy behavior.
         chosen = &chooseByIndexed(true);
     } else if (preferLatest) {
         chosen = &chooseByIndexed(false);
-    } else if (preferOldest) {
-        chosen = &chooseByIndexed(true);
     } else if (matches.size() == 1) {
         chosen = &matches.front();
     }

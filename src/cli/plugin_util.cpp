@@ -212,7 +212,6 @@ std::optional<fs::path> resolvePlugin(const std::string& nameOrPath) {
                 continue;
             }
 
-            std::string filename = path.filename().string();
             std::string ext = path.extension().string();
             if (ext != ".so" && ext != ".dylib" && ext != ".dll") {
                 continue; // Skip WASM for ABI probing

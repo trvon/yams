@@ -534,7 +534,7 @@ discoverLiveDaemonSocket(const std::filesystem::path& preferredSocket,
         if (auto parsed = extractSocketPathFromProcessDescription(desc);
             parsed && !parsed->empty()) {
             if (*parsed == preferredSocket) {
-                return *parsed;
+                return parsed;
             }
             if (!fallbackSocket) {
                 fallbackSocket = *parsed;

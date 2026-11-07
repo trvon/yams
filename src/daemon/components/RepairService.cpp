@@ -266,6 +266,8 @@ queueWithBackoff(std::shared_ptr<SpscQueue<JobT>> queue, JobT&& job,
     const auto queueStart = std::chrono::steady_clock::now();
     uint64_t totalWaitMs = 0;
     int retries = 0;
+    // try_push moves `job` only when it returns true.
+    // NOLINTNEXTLINE(bugprone-use-after-move)
     while (!queue->try_push(std::forward<JobT>(job))) {
         if (!running.load(std::memory_order_relaxed) || (shouldStop && shouldStop()))
             co_return false;

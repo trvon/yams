@@ -232,9 +232,7 @@ Result<void> WALFile::open() {
         case Mode::Read:
             flags = O_RDONLY;
             break;
-        case Mode::Write:
-            flags = O_RDWR | O_CREAT; // Need read-write for mmap, no O_APPEND with mmap
-            break;
+        case Mode::Write: // Needs read-write for mmap, and no O_APPEND with mmap
         case Mode::ReadWrite:
             flags = O_RDWR | O_CREAT;
             break;

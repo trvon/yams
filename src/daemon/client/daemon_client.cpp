@@ -1,4 +1,3 @@
-#define _CRT_SECURE_NO_WARNINGS
 #if __has_include(<yams/common/fs_utils.h>)
 #include <yams/common/fs_utils.h>
 #elif __has_include("yams/common/fs_utils.h")

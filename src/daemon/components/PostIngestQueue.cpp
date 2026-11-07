@@ -2906,6 +2906,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         uint32_t waits = 0;
         const auto enqueueStart = std::chrono::steady_clock::now();
         while (!stop_.load(std::memory_order_acquire)) {
+            // push_wait moves `job` only when it returns true.
+            // NOLINTNEXTLINE(bugprone-use-after-move)
             if (embedQ->push_wait(std::move(job), kEnqueueTimeout)) {
                 InternalEventBus::instance().incEmbedQueued(batchSize);
                 embedJobsEmitted_.fetch_add(1, std::memory_order_relaxed);

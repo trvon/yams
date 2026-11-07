@@ -449,11 +449,8 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
     result.certificate.routingPolicyFingerprint =
         topologyRoutingPolicyFingerprint(snapshot->representationFingerprint, request.options);
     result.certificate.coordinateSpaceIdentity = snapshot->artifacts->embeddingSpaceIdentity;
-    if (!request.queryEmbedding.has_value()) {
-        result.certificate.admission.coordinateSpaceAlignment =
-            TopologyProofObligationStatus::Unavailable;
-    } else if (request.queryEmbeddingSpaceIdentity.empty() ||
-               snapshot->artifacts->embeddingSpaceIdentity.empty()) {
+    if (!request.queryEmbedding.has_value() || request.queryEmbeddingSpaceIdentity.empty() ||
+        snapshot->artifacts->embeddingSpaceIdentity.empty()) {
         result.certificate.admission.coordinateSpaceAlignment =
             TopologyProofObligationStatus::Unavailable;
     } else if (request.queryEmbeddingSpaceIdentity == snapshot->artifacts->embeddingSpaceIdentity) {

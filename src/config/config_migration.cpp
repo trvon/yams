@@ -807,15 +807,12 @@ Result<void> ConfigMigrator::writeTomlConfig(
                 // Handle special formatting for certain values
                 if (value.empty()) {
                     file << "# " << key << " = \"\"\n";
-                } else if (value[0] == '[') {
-                    // Array value
-                    file << key << " = " << value << "\n";
-                } else if (value == "true" || value == "false" ||
+                } else if (value[0] == '[' || value == "true" || value == "false" ||
                            std::ranges::all_of(value, ::isdigit) ||
                            (value.find('.') != std::string::npos &&
                             std::ranges::all_of(value,
                                                 [](char c) { return ::isdigit(c) || c == '.'; }))) {
-                    // Boolean or numeric value
+                    // Array, boolean or numeric value
                     file << key << " = " << value << "\n";
                 } else {
                     // String value
@@ -835,9 +832,7 @@ Result<void> ConfigMigrator::writeTomlConfig(
         for (const auto& [key, value] : kv) {
             if (value.empty()) {
                 file << "# " << key << " = \"\"\n";
-            } else if (!value.empty() && value[0] == '[') {
-                file << key << " = " << value << "\n";
-            } else if (value == "true" || value == "false" ||
+            } else if (value[0] == '[' || value == "true" || value == "false" ||
                        std::ranges::all_of(value, ::isdigit) ||
                        (value.find('.') != std::string::npos &&
                         std::all_of(value.begin(), value.end(),

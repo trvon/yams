@@ -1097,10 +1097,8 @@ std::vector<DocumentChunk> SentenceBasedChunker::doChunking(const std::string& c
             if (config_.use_token_count) {
                 limit = config_.target_chunk_size * 4;
             }
-            if (new_size > limit) {
-                should_split = true;
-            } else if (config_.preserve_sentences &&
-                       current_sentence_count >= 3) { // Default to 3 sentences per chunk
+            // Default to 3 sentences per chunk
+            if (new_size > limit || (config_.preserve_sentences && current_sentence_count >= 3)) {
                 should_split = true;
             }
         }
@@ -1200,10 +1198,8 @@ std::vector<DocumentChunk> ParagraphBasedChunker::doChunking(const std::string& 
             if (config_.use_token_count) {
                 limit = config_.target_chunk_size * 4;
             }
-            if (new_size > limit) {
-                should_split = true;
-            } else if (config_.preserve_paragraphs &&
-                       current_paragraph_count >= 2) { // Default to 2 paragraphs per chunk
+            // Default to 2 paragraphs per chunk
+            if (new_size > limit || (config_.preserve_paragraphs && current_paragraph_count >= 2)) {
                 should_split = true;
             }
         }

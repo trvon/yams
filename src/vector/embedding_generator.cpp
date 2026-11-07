@@ -1,4 +1,3 @@
-#define _CRT_SECURE_NO_WARNINGS
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <future>

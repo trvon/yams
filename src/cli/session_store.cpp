@@ -1,4 +1,3 @@
-#include <yams/common/fs_utils.h>
 #include <yams/cli/session_store.h>
 
 #include <nlohmann/json.hpp>

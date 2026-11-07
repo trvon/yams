@@ -69,6 +69,8 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
     // Resolve registry: try public toolRegistry_ first (composite tools: query/execute/session),
     // then fall back to internalRegistry_ (individual tools used for internal dispatch).
     ToolRegistry* reg = nullptr;
+    // The branch order is the lookup order; the last branch is the fallback.
+    // NOLINTNEXTLINE(bugprone-branch-clone)
     if (toolRegistry_ && toolRegistry_->hasTool(name)) {
         reg = toolRegistry_.get();
     } else if (internalRegistry_ && internalRegistry_->hasTool(name)) {
@@ -118,6 +120,8 @@ boost::asio::awaitable<json> MCPServer::callToolAsync(const std::string& name,
     // Resolve registry: try public toolRegistry_ first (composite tools: query/execute/session),
     // then fall back to internalRegistry_ (individual tools).
     ToolRegistry* reg = nullptr;
+    // The branch order is the lookup order; the last branch is the fallback.
+    // NOLINTNEXTLINE(bugprone-branch-clone)
     if (toolRegistry_ && toolRegistry_->hasTool(name)) {
         reg = toolRegistry_.get();
     } else if (internalRegistry_ && internalRegistry_->hasTool(name)) {

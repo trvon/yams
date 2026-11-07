@@ -84,8 +84,8 @@ Result<void> PruneCommand::execute(std::ostream& os) {
     auto leaseRes = acquire_cli_daemon_client(clientCfg, 1, 4);
     if (!leaseRes) {
         os << "  "
-           << status_error(formatErrorWithHint(leaseRes.error().code, leaseRes.error().message,
-                                               "prune"))
+           << status_error(
+                  formatErrorWithHint(leaseRes.error().code, leaseRes.error().message, "prune"))
            << "\n";
         return leaseRes.error();
     }
@@ -94,8 +94,8 @@ Result<void> PruneCommand::execute(std::ostream& os) {
     auto respRes = run_result(lease->call<daemon::PruneRequest>(req), std::chrono::minutes(10));
     if (!respRes) {
         os << "  "
-           << status_error(formatErrorWithHint(respRes.error().code, respRes.error().message,
-                                               "prune"))
+           << status_error(
+                  formatErrorWithHint(respRes.error().code, respRes.error().message, "prune"))
            << "\n";
         return respRes.error();
     }
