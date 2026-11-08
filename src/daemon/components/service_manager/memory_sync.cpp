@@ -291,6 +291,13 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
         return unixMs > 0 && nowMs > unixMs ? nowMs - unixMs : 0;
     };
     const auto lastFailureAgeMs = ageMs(inbound.lastFailureUnixMs);
+    auto syncFailure = memorySync_->lastSyncFailure();
+    const std::uint64_t syncFailureAgeMs =
+        syncFailure.lastError.empty()
+            ? 0
+            : static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - syncFailure.lastAt)
+                                             .count());
     return MemorySyncStatus{
         memorySync_->started(),
         memorySync_->mergedRecordCount(),
@@ -319,7 +326,9 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
         outbound.sessions,
         outbound.failures,
         std::move(outbound.lastFailure),
-        ageMs(outbound.lastFailureUnixMs)};
+        ageMs(outbound.lastFailureUnixMs),
+        std::move(syncFailure.lastError),
+        syncFailureAgeMs};
 }
 
 Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view contentHash,

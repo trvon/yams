@@ -1223,6 +1223,49 @@ TEST_CASE("Sweep byte admission handles zero and maximum size without overflow",
     CHECK(reader.testingScanBytes() == 0);
 }
 
+TEST_CASE("A disk-backed sweep grows its scan budget until the store fits",
+          "[memory-sync][scan-safety][bounds]") {
+    BackendFixture fixture{"scan-budget-growth"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    constexpr int kRecords = 24;
+    for (int i = 0; i < kRecords; ++i) {
+        REQUIRE(writer.publish("key-" + std::to_string(i), bytes("value " + std::to_string(i)))
+                    .has_value());
+    }
+    auto keys = fixture.backend.list("index/");
+    REQUIRE(keys.has_value());
+    REQUIRE(keys.value().size() == kRecords);
+    auto envelope = fixture.backend.retrieve(keys.value().front());
+    REQUIRE(envelope.has_value());
+    const auto oneRecord = keys.value().front().size() + envelope.value().size();
+
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 4;
+    limits.maxScanBytes = oneRecord * 2; // far below the store's total
+    MemorySyncControl control;
+    control.exclusiveBackend = true; // disk-backed sweep workspace
+
+    SECTION("the budget grows and the sweep completes") {
+        MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false,
+                              limits,          control};
+        const auto synced = reader.syncFully();
+        REQUIRE(synced.has_value());
+        CHECK(reader.mergedRecordCount() == kRecords);
+        CHECK(reader.scanBudget() > limits.maxScanBytes);
+        CHECK(reader.scanBudget() >= oneRecord * kRecords);
+    }
+    SECTION("a ceiling at the starting budget keeps the old failure") {
+        limits.maxScanBytesCeiling = limits.maxScanBytes;
+        MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false,
+                              limits,          control};
+        const auto failed = reader.syncFully();
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error().code == yams::ErrorCode::ResourceExhausted);
+        CHECK(reader.mergedRecordCount() == 0);
+        CHECK(reader.scanBudget() == limits.maxScanBytes);
+    }
+}
+
 TEST_CASE("Direct writer quarantine cannot exceed the invalidation window",
           "[memory-sync][recovery][review-regression]") {
     BackendFixture fixture{"quarantine-invalidation-window"};

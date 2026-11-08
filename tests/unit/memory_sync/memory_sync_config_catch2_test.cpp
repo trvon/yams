@@ -59,6 +59,7 @@ TEST_CASE("MemorySyncDaemonConfig parses the [memory_sync] TOML section", "[memo
         {"memory_sync.max_cache_bytes", "8192"},
         {"memory_sync.max_tracked_identities", "31"},
         {"memory_sync.max_scan_bytes", "16384"},
+        {"memory_sync.max_scan_bytes_ceiling", "65536"},
         {"memory_sync.backend", "filesystem"},
         {"memory_sync.path", "/tmp/mem"},
         {"memory_sync.sync_interval_ms", "250"},
@@ -79,6 +80,7 @@ TEST_CASE("MemorySyncDaemonConfig parses the [memory_sync] TOML section", "[memo
     CHECK(cfg.limits.maxCacheBytes == 8192);
     CHECK(cfg.limits.maxTrackedIdentities == 31);
     CHECK(cfg.limits.maxScanBytes == 16384);
+    CHECK(cfg.limits.maxScanBytesCeiling == 65536);
     CHECK(cfg.backend == "filesystem");
     CHECK(cfg.path == "/tmp/mem");
     CHECK(cfg.syncIntervalMs == 250);

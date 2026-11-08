@@ -26,6 +26,7 @@
 #include <yams/core/types.h>
 #include <yams/memory_sync/lifecycle_drain.h>
 #include <yams/memory_sync/memory_sync.h>
+#include <yams/memory_sync/sync_failure_reporter.h>
 #include <yams/storage/storage_backend.h>
 
 namespace yams::memory_sync {
@@ -881,6 +882,9 @@ public:
         return failedSyncCycles_.load(std::memory_order_relaxed);
     }
 
+    /// The error of the current run of failed cycles; empty once a cycle succeeds.
+    SyncFailureReporter::Snapshot lastSyncFailure() const { return syncFailures_.snapshot(); }
+
     std::uint64_t lastSuccessfulSyncAgeMs() const noexcept {
         const auto completed = lastSuccessfulSyncSteadyMs_.load(std::memory_order_acquire);
         if (completed == 0) {
@@ -1273,8 +1277,12 @@ private:
                     // An unrenewed temporary lease makes this cycle unhealthy. Do not expose
                     // winners or advance freshness while another peer may collect the namespace.
                     failedSyncCycles_.fetch_add(1, std::memory_order_relaxed);
+                    reportSyncFailure("session lease renewal failed: " + lease.error().message);
                 } else if (completedSweep) {
                     successfulSyncCycles_.fetch_add(1, std::memory_order_relaxed);
+                    if (auto line = syncFailures_.succeeded()) {
+                        logSyncCycleReport(*line, false);
+                    }
                     lastSuccessfulSyncSteadyMs_.store(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
@@ -1285,6 +1293,7 @@ private:
                 }
             } else {
                 failedSyncCycles_.fetch_add(1, std::memory_order_relaxed);
+                reportSyncFailure(snapshot.error().message);
             }
             if (quarantineChanged && !callbackInvoked) {
                 invokeAfterSyncCallback();
@@ -1295,6 +1304,16 @@ private:
         }
         workerRunning_.store(false, std::memory_order_release);
         workerIdHash_.store(0, std::memory_order_release);
+    }
+
+    void reportSyncFailure(std::string error) noexcept {
+        try {
+            if (auto line =
+                    syncFailures_.failed(std::move(error), std::chrono::steady_clock::now())) {
+                logSyncCycleReport(*line, true);
+            }
+        } catch (...) { // NOLINT(bugprone-empty-catch): reporting must not stop the worker
+        }
     }
 
     Result<void> refreshSessionLease() noexcept {
@@ -1356,6 +1375,7 @@ private:
     std::atomic<std::uint64_t> shutdownFailures_{0};
     std::atomic<std::uint64_t> successfulSyncCycles_{0};
     std::atomic<std::uint64_t> failedSyncCycles_{0};
+    SyncFailureReporter syncFailures_;
     std::atomic<std::int64_t> lastSuccessfulSyncSteadyMs_{0};
     std::atomic<bool> namespaceCleaned_{false};
     std::atomic<bool> fullRecoveryCompleted_{false};

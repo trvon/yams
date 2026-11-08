@@ -1201,6 +1201,9 @@ message MemorySyncResponse {
   uint64 outbound_failures = 40;
   string last_outbound_failure = 41;
   uint64 last_outbound_failure_age_ms = 42;
+  // Error of the current run of failed reconciliation cycles; empty after a success.
+  string last_sync_error = 43;
+  uint64 last_sync_error_age_ms = 44;
 }
 
 // ENVELOPE

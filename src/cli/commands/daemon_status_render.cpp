@@ -307,6 +307,10 @@ void renderMemorySyncSection(const yams::daemon::MemorySyncResponse* sync, std::
                        neverSynced ? std::string{"never"}
                                    : format_duration(m.lastSuccessAgeMs / 1000) + " ago"),
          ""});
+    if (!m.lastSyncError.empty()) {
+        rows.push_back({"Last sync error", severity_text(Severity::Warn, m.lastSyncError),
+                        format_duration(m.lastSyncErrorAgeMs / 1000) + " ago"});
+    }
     // A reconciled cycle can still fail to apply; report it apart from transport health.
     const auto applyOk = m.applyCycles - std::min(m.applyCycles, m.applyFailedCycles);
     rows.push_back({"Apply cycles",

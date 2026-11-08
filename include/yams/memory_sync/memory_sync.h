@@ -75,6 +75,10 @@ struct MemorySyncLimits {
     /// Together with maxTrackedIdentities (also the candidate-count ceiling), bounds
     /// decoded scan state in proportion to input. Not an allocator/RSS ceiling.
     std::size_t maxScanBytes{std::size_t{64} * 1024 * 1024};
+    /// A disk-backed sweep that exhausts maxScanBytes retries with a 4x larger budget, up to
+    /// this ceiling and the free space in its scratch directory, so a store that grows past the
+    /// starting budget still completes. The in-memory sweep keeps maxScanBytes fixed.
+    std::size_t maxScanBytesCeiling{std::size_t{8} * 1024 * 1024 * 1024};
 };
 
 struct MemoryDelta {
@@ -170,6 +174,7 @@ public:
           tombstoneGc_(std::move(tombstoneGc)), writerAuth_(std::move(writerAuth)),
           controlScope_(controlScope.empty() ? corpusId_ + ":" + std::to_string(corpusEpoch_)
                                              : std::move(controlScope)) {
+        scanBudget_ = limits_.maxScanBytes;
         if (control_.exclusiveBackend && !backend.isRemote()) {
             if (auto* filesystem = dynamic_cast<storage::FilesystemBackend*>(&backend)) {
                 sweepDirectory_ = filesystem->scratchDirectory();
@@ -232,6 +237,8 @@ public:
     Result<std::map<std::string, MemoryIndexRecord>> sync();
     /// A successful page is progress, not a complete security/visibility decision.
     [[nodiscard]] bool sweepInProgress() const noexcept { return !scanCursor_.empty(); }
+    /// The complete-sweep scan budget currently in effect.
+    [[nodiscard]] std::size_t scanBudget() const noexcept { return scanBudget_; }
 
     /// Complete the current bounded sweep and return a full committed view.
     /// Direct mode calls this against its local durable op store at startup.
@@ -434,6 +441,10 @@ private:
     Result<std::vector<std::byte>> fetchPinnedPayload(const MemoryIndexRecord& record) const;
     class SweepStore;
     Result<std::shared_ptr<SweepStore>> makeSweepStore();
+    /// Raises scanBudget_ 4x (bounded by limits_.maxScanBytesCeiling and the scratch
+    /// directory's free space) after a disk-backed sweep exhausted it. Returns false when the
+    /// budget cannot grow, leaving the failure to the degraded-sweep backoff.
+    bool growScanBudget();
     Result<void> ensureCommittedStore();
     Result<MemoryIndexRecord> committedWinner(std::string_view logicalKey) const;
     void cacheWinner(std::string_view logicalKey, const MemoryIndexRecord& record,
@@ -883,6 +894,13 @@ private:
     /// ResourceExhausted too, but it is transient backpressure that must never be
     /// latched as an unsatisfiable sweep.
     bool sweepBoundExhausted_{false};
+    /// The complete-sweep scan budget in effect: starts at limits_.maxScanBytes and grows when
+    /// a disk-backed sweep exhausts it (see growScanBudget).
+    std::size_t scanBudget_{0};
+    /// The last sync failed because the scan budget (or the workspace sized from it) ran out.
+    bool scanBudgetExhausted_{false};
+    /// The last sync failed on the scan budget and the budget was raised for a retry.
+    bool scanBudgetGrew_{false};
     ErrorCode sweepDegradedCode_{ErrorCode::ResourceExhausted};
     std::string sweepDegradedReason_;
     std::size_t sweepDegradedAttempts_{0};
