@@ -2018,12 +2018,14 @@ TEST_CASE("Daemon client parallel status from independent clients",
     // Generous per-call bound for arm64/TSAN runners; a failed status() is still a bug.
     static constexpr auto kStatusTimeout = 15s;
 
-    // One connection per client so the daemon serves kClients sockets at once.
+    // Pooled clients share one AsioConnectionPool per socket path, so disable pooling: each
+    // status() opens its own daemon connection and the daemon serves kClients sessions at once.
     std::vector<std::unique_ptr<DaemonClient>> clients;
     clients.reserve(kClients);
     for (int i = 0; i < kClients; ++i) {
         ClientConfig config;
         config.socketPath = harness.socketPath();
+        config.singleUseConnections = true;
         config.connectTimeout = 5s;
         config.requestTimeout = kStatusTimeout;
         config.autoStart = false;
@@ -2040,15 +2042,23 @@ TEST_CASE("Daemon client parallel status from independent clients",
         REQUIRE(connectResult.has_value());
     }
 
+    // Declared before the promise so it is destroyed after it: if std::async throws before
+    // set_value(), the promise breaks first, waiting workers bail out, and only then do the
+    // futures' destructors join them.
+    std::vector<std::future<std::string>> workers;
+    workers.reserve(kClients);
+
     // Release every worker at once so the status() calls overlap.
     std::promise<void> startSignal;
     std::shared_future<void> start = startSignal.get_future().share();
 
-    std::vector<std::future<std::string>> workers;
-    workers.reserve(kClients);
     for (int i = 0; i < kClients; ++i) {
         workers.push_back(std::async(std::launch::async, [&clients, start, i]() -> std::string {
-            start.wait();
+            try {
+                start.get();
+            } catch (const std::future_error&) {
+                return "client " + std::to_string(i) + ": start signal abandoned";
+            }
             for (int req = 0; req < kRequestsPerClient; ++req) {
                 auto sres = yams::cli::run_sync(clients[i]->status(), kStatusTimeout);
                 if (!sres.has_value()) {

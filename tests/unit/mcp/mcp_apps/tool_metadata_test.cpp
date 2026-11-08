@@ -139,11 +139,14 @@ TEST_CASE("MCP Apps Tool - Visibility Model and App",
     REQUIRE(result["result"].contains("tools"));
 
     // MCPServer links exactly these tools to the dashboard UI (listTools shaping in
-    // mcp_server.cpp); "query" is the code-mode composite.
+    // mcp_server.cpp). Every one that is listed must carry the UI metadata.
     const std::set<std::string> linkedTools = {"search", "grep", "graph", "query"};
+    // The default surface is code mode (initializeToolRegistry in mcp_server_tool_registry.cpp):
+    // mcp.echo, doctor, query, execute, session. Of the linked tools only "query" is listed.
+    const std::set<std::string> expectedLinkedInDefaultMode = {"query"};
     const json expectedVisibility = json::array({"model", "app"});
 
-    int linkedSeen = 0;
+    std::set<std::string> linkedSeen;
     for (const auto& tool : result["result"]["tools"]) {
         REQUIRE(tool.contains("name"));
         const auto name = tool["name"].get<std::string>();
@@ -158,7 +161,7 @@ TEST_CASE("MCP Apps Tool - Visibility Model and App",
             continue;
         }
 
-        ++linkedSeen;
+        linkedSeen.insert(name);
         REQUIRE(tool.contains("_meta"));
         const auto& meta = tool["_meta"];
         REQUIRE(meta.contains("ui"));
@@ -168,6 +171,8 @@ TEST_CASE("MCP Apps Tool - Visibility Model and App",
         CHECK(meta.at("ui/visibility") == expectedVisibility);
     }
 
-    // At least one linked tool is listed in every tool mode.
-    CHECK(linkedSeen > 0);
+    for (const auto& name : expectedLinkedInDefaultMode) {
+        INFO("expected linked tool " << name);
+        CHECK(linkedSeen.contains(name));
+    }
 }
