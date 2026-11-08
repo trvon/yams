@@ -65,6 +65,27 @@ struct VectorSchemaRepairFixture {
         backend.close();
     }
 
+    // One `vectors` row at `vectorsDim` and one `entity_vectors` row at `entityDim`.
+    void seedMixed(std::size_t vectorsDim, std::size_t entityDim) const {
+        std::filesystem::create_directories(dataDir);
+        SqliteVecBackend backend;
+        REQUIRE(backend.initialize(dbPath()).has_value());
+        REQUIRE(backend.createTables(vectorsDim).has_value());
+        VectorRecord rec;
+        rec.document_hash = "doc-mixed";
+        rec.chunk_id = "doc-mixed_chunk_0";
+        rec.embedding.assign(vectorsDim, 0.5f);
+        rec.content = "mixed";
+        rec.end_offset = rec.content.size();
+        REQUIRE(backend.insertVector(rec).has_value());
+        EntityVectorRecord entity;
+        entity.node_key = "node-mixed";
+        entity.embedding.assign(entityDim, 0.25f);
+        entity.content = "mixed";
+        REQUIRE(backend.insertEntityVector(entity).has_value());
+        backend.close();
+    }
+
     struct Snapshot {
         bool vectorsTable = false;
         bool entityVectorsTable = false;
@@ -205,6 +226,29 @@ TEST_CASE_METHOD(VectorSchemaRepairFixture,
     SECTION("matching dimension: no-op, entity rows kept") {
         REQUIRE(ensureVectorSchemaAligned(dataDir, 8, /*recreateIfMismatch=*/true).has_value());
         CHECK(snapshot().entityRows == 1);
+    }
+}
+
+TEST_CASE_METHOD(VectorSchemaRepairFixture,
+                 "ensureVectorSchemaAligned recreates only the stale table group",
+                 "[unit][vector][schema-repair][catch2]") {
+    SECTION("vectors at target, entity_vectors stale: document vectors are kept") {
+        seedMixed(/*vectorsDim=*/16, /*entityDim=*/8);
+        REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/true).has_value());
+        const auto s = snapshot();
+        CHECK(s.rows == 1);
+        CHECK(s.storedDim == std::optional<std::size_t>{16});
+        CHECK(s.entityVectorsTable);
+        CHECK(s.entityRows == 0);
+    }
+    SECTION("vectors stale, entity_vectors at target: entity vectors are kept") {
+        seedMixed(/*vectorsDim=*/8, /*entityDim=*/16);
+        REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/true).has_value());
+        const auto s = snapshot();
+        CHECK(s.vectorsTable);
+        CHECK(s.rows == 0);
+        CHECK_FALSE(s.storedDim.has_value());
+        CHECK(s.entityRows == 1);
     }
 }
 
