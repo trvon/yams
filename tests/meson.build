@@ -2539,6 +2539,14 @@ if catch2_dep.found()
     'timeout': 120,
   }]
 
+  catch2_test_table += [{
+    'name': 'path_tree_repair',
+    'sources': files('unit/metadata/path_tree_repair_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'path-tree'],
+    'timeout': 60,
+  }]
+
 #Session Isolation Tests(Catch2) - session - isolated memory operations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --

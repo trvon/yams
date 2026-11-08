@@ -352,6 +352,60 @@ Result<std::vector<DocumentInfo>> MetadataRepository::findDocsMissingPathTree(in
         });
 }
 
+Result<MetadataRepository::PathTreeScanPage>
+MetadataRepository::scanDocsMissingPathTree(std::int64_t afterId, std::size_t windowSize) {
+    if (windowSize == 0)
+        return Error{ErrorCode::InvalidArgument, "path tree scan window must be positive"};
+
+    return executeReadQuery<PathTreeScanPage>([&](Database& db) -> Result<PathTreeScanPage> {
+        PathTreeScanPage page;
+        page.lastScannedId = afterId;
+
+        // The window bound: the id of the last of the next `windowSize` documents (rowid
+        // keyset, so this reads only the window).
+        auto boundRes = db.prepare("SELECT COUNT(*), MAX(id) FROM "
+                                   "(SELECT id FROM documents WHERE id > ? ORDER BY id LIMIT ?)");
+        if (!boundRes)
+            return boundRes.error();
+        auto bound = std::move(boundRes).value();
+        if (auto r = bound.bind(1, afterId); !r)
+            return r.error();
+        if (auto r = bound.bind(2, static_cast<int64_t>(windowSize)); !r)
+            return r.error();
+        auto boundStep = bound.step();
+        if (!boundStep)
+            return boundStep.error();
+        if (!boundStep.value() || bound.getInt64(0) == 0)
+            return page;
+        page.scanned = static_cast<std::uint64_t>(bound.getInt64(0));
+        page.lastScannedId = bound.getInt64(1);
+
+        std::string sql = "SELECT ";
+        sql += documentColumnList(false);
+        sql += " FROM documents d "
+               "LEFT JOIN path_tree_nodes p ON p.full_path = d.file_path "
+               "WHERE d.id > ? AND d.id <= ? AND d.file_path != '' AND p.node_id IS NULL "
+               "ORDER BY d.id";
+        auto stmtResult = db.prepare(sql);
+        if (!stmtResult)
+            return stmtResult.error();
+        auto stmt = std::move(stmtResult).value();
+        if (auto r = stmt.bind(1, afterId); !r)
+            return r.error();
+        if (auto r = stmt.bind(2, page.lastScannedId); !r)
+            return r.error();
+        while (true) {
+            auto stepRes = stmt.step();
+            if (!stepRes)
+                return stepRes.error();
+            if (!stepRes.value())
+                break;
+            page.missing.push_back(mapDocumentRow(stmt));
+        }
+        return page;
+    });
+}
+
 Result<std::vector<PathTreeNode>>
 MetadataRepository::listPathTreeChildren(std::string_view fullPath, std::size_t limit) {
     return executeReadQuery<std::vector<PathTreeNode>>(

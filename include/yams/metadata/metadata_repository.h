@@ -1012,6 +1012,23 @@ public:
     /// Uses a single efficient LEFT JOIN anti-join query. Limited to `limit` rows (0 = no limit).
     Result<std::vector<DocumentInfo>> findDocsMissingPathTree(int limit = 0);
 
+    /// One keyset page of the path-tree repair scan.
+    struct PathTreeScanPage {
+        /// Documents in the window with a non-empty file_path but no path_tree_nodes entry,
+        /// ordered by id.
+        std::vector<DocumentInfo> missing;
+        /// Number of documents examined (at most the requested window).
+        std::uint64_t scanned{0};
+        /// Largest document id examined; the next page starts after it. Equals `afterId` when
+        /// the window was empty.
+        std::int64_t lastScannedId{0};
+    };
+
+    /// Examine the next `windowSize` documents with id > `afterId` (in id order) and return the
+    /// ones missing from the path tree. Bounded by the window, not by the number of misses, so
+    /// a page costs the same whether the tree is complete or empty.
+    Result<PathTreeScanPage> scanDocsMissingPathTree(std::int64_t afterId, std::size_t windowSize);
+
     void setKnowledgeGraphStore(std::shared_ptr<KnowledgeGraphStore> kgStore) {
         std::atomic_store_explicit(&kgStore_, std::move(kgStore), std::memory_order_release);
     }

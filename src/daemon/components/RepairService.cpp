@@ -29,6 +29,7 @@
 #include <yams/integrity/repair_manager.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_tree_repair.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/sqlite_vec_backend.h>
@@ -2542,7 +2543,6 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
         return result;
     }
 
-    // Use RepairManager for path tree repair
     auto concreteRepo = std::dynamic_pointer_cast<metadata::MetadataRepository>(meta);
     if (!concreteRepo) {
         result.message = "Could not get concrete MetadataRepository";
@@ -2562,8 +2562,8 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
         return result;
     }
 
-    integrity::RepairManager repairMgr(*concreteRepo);
-    auto repairResult = repairMgr.repairPathTree([](uint64_t, uint64_t) {});
+    // The on-demand repair runs a full pass; only the background pass works in slices.
+    auto repairResult = metadata::repairMissingPathTree(*concreteRepo);
     if (!repairResult) {
         result.message = "Path tree repair failed: " + repairResult.error().message;
         result.failed = 1;
@@ -2571,7 +2571,9 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
     }
 
     const auto& stats = repairResult.value();
-    result.processed = stats.documentsScanned;
+    spdlog::info("Path tree repair complete: scanned={} missing={} created={} errors={}",
+                 stats.documentsScanned, stats.documentsMissing, stats.nodesCreated, stats.errors);
+    result.processed = stats.documentsMissing;
     result.succeeded = stats.nodesCreated;
     result.failed = stats.errors;
     result.message = "Created " + std::to_string(stats.nodesCreated) + " path tree entries";

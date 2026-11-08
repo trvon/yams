@@ -55,14 +55,6 @@ struct PruneResult {
     std::vector<std::string> failedPaths;
 };
 
-/// Result of path tree repair operation
-struct PathTreeRepairResult {
-    uint64_t documentsScanned{0};
-    uint64_t nodesCreated{0};
-    uint64_t nodesUpdated{0};
-    uint64_t errors{0};
-};
-
 /// Result of block references repair operation
 struct BlockRefsRepairResult {
     uint64_t blocksScanned{0};
@@ -93,9 +85,6 @@ public:
     RepairManager(storage::IStorageEngine& storage, metadata::MetadataRepository& repo,
                   RepairManagerConfig config = {});
 
-    /// Constructor for metadata-only operations (path tree repair, prune queries)
-    explicit RepairManager(metadata::MetadataRepository& repo);
-
     RepairManager(const RepairManager&) = delete;
     RepairManager& operator=(const RepairManager&) = delete;
 
@@ -109,11 +98,6 @@ public:
     [[nodiscard]] static std::vector<PruneCandidate>
     queryCandidatesForPrune(metadata::MetadataRepository& repo, const PruneConfig& config,
                             const std::shared_ptr<api::IContentStore>& contentStore = nullptr);
-
-    // Path tree repair operations
-    /// Rebuild path tree entries for all documents missing from the path tree
-    [[nodiscard]] Result<PathTreeRepairResult>
-    repairPathTree(std::function<void(uint64_t current, uint64_t total)> progress = nullptr);
 
     // Block references repair operations
     /// Scan CAS files and update block_references with correct sizes from disk and headers

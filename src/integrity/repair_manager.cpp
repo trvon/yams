@@ -110,9 +110,6 @@ RepairManager::RepairManager(storage::IStorageEngine& storage, metadata::Metadat
                              RepairManagerConfig config)
     : storage_(&storage), config_(std::move(config)), repo_(&repo) {}
 
-RepairManager::RepairManager(metadata::MetadataRepository& repo)
-    : storage_(nullptr), config_(), repo_(&repo) {}
-
 bool RepairManager::attemptRepair(const std::string& blockHash,
                                   const std::vector<RepairStrategy>& order) {
     const auto& strategies = order.empty() ? config_.defaultOrder : order;
@@ -235,80 +232,6 @@ RepairManager::queryCandidatesForPrune(metadata::MetadataRepository& repo,
 
     spdlog::info("Prune query: found {} candidates", candidates.size());
     return candidates;
-}
-
-// ============================================================================
-// Path Tree Repair Operations
-// ============================================================================
-
-Result<PathTreeRepairResult>
-RepairManager::repairPathTree(std::function<void(uint64_t, uint64_t)> progress) {
-    if (!repo_) {
-        return Error{ErrorCode::InvalidArgument, "MetadataRepository not initialized"};
-    }
-
-    PathTreeRepairResult result;
-
-    // Use SQL anti-join to find only docs missing from path_tree instead of
-    // loading all documents and checking each one individually (O(N) → O(missing)).
-    auto missingDocs = repo_->findDocsMissingPathTree();
-    if (!missingDocs) {
-        spdlog::error("Failed to query documents missing from path tree: {}",
-                      missingDocs.error().message);
-        return missingDocs.error();
-    }
-
-    auto& docs = missingDocs.value();
-    const uint64_t total = docs.size();
-    spdlog::info("Path tree repair: {} documents missing from path tree", total);
-
-    if (total == 0) {
-        // Quick path: nothing to do. Still log the scan count from a lightweight count.
-        auto countRes = repo_->countDocsMissingPathTree();
-        // countRes should be 0, but even if it fails we're done.
-        result.documentsScanned = 0;
-        spdlog::info("Path tree repair complete: all documents have path tree entries");
-        return result;
-    }
-
-    result.documentsScanned = total;
-
-    uint64_t processed = 0;
-    for (const auto& doc : docs) {
-        // Report progress
-        if (progress && processed % 100 == 0) {
-            progress(processed, total);
-        }
-
-        // Create path tree entry for this document
-        try {
-            auto treeRes = repo_->upsertPathTreeForDocument(doc, doc.id, true /* isNewDocument */,
-                                                            std::span<const float>());
-            if (treeRes) {
-                result.nodesCreated++;
-                spdlog::debug("Path tree repair: created entry for '{}'", doc.filePath);
-            } else {
-                result.errors++;
-                spdlog::warn("Path tree repair: failed for '{}': {}", doc.filePath,
-                             treeRes.error().message);
-            }
-        } catch (const std::exception& e) {
-            result.errors++;
-            spdlog::warn("Path tree repair: exception for '{}': {}", doc.filePath, e.what());
-        }
-
-        processed++;
-    }
-
-    // Final progress report
-    if (progress) {
-        progress(total, total);
-    }
-
-    spdlog::info("Path tree repair complete: scanned={} created={} errors={}",
-                 result.documentsScanned, result.nodesCreated, result.errors);
-
-    return result;
 }
 
 // ============================================================================
