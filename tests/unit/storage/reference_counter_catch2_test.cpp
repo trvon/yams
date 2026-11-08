@@ -1958,6 +1958,41 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector respects minimum age
     CHECK(count.value() == 0u);
 }
 
+TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector respects maxBlocksPerRun",
+                 "[storage][gc][edge][catch2]") {
+    std::vector<std::byte> data(256, std::byte{42});
+    std::vector<std::string> hashes;
+    for (int i = 0; i < 15; ++i) {
+        auto hash = generateHash(160 + i);
+        REQUIRE(storageEngine->store(hash, data).has_value());
+        REQUIRE(refCounter->increment(hash, data.size()).has_value());
+        REQUIRE(refCounter->decrement(hash).has_value());
+        hashes.push_back(hash);
+    }
+
+    GCOptions options{
+        .maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = false, .progressCallback = nullptr};
+
+    auto result = gc->collect(options);
+    REQUIRE(result.has_value());
+
+    const auto& stats = result.value();
+    CHECK(stats.blocksScanned == 10u);
+    CHECK(stats.blocksDeleted == 10u);
+    CHECK(stats.bytesReclaimed == 10u * data.size());
+    CHECK(stats.errors.empty());
+
+    size_t remaining = 0;
+    for (const auto& hash : hashes) {
+        auto exists = storageEngine->exists(hash);
+        REQUIRE(exists.has_value());
+        if (exists.value()) {
+            ++remaining;
+        }
+    }
+    CHECK(remaining == 5u);
+}
+
 TEST_CASE_METHOD(GarbageCollectorFixture,
                  "GarbageCollector preserves failure evidence and continues after missing block",
                  "[storage][gc][edge][catch2]") {

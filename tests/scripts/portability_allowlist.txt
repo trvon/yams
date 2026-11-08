@@ -271,9 +271,6 @@ tests/unit/daemon/onnx_plugin_harness_test.cpp:399:portability/env-read # review
 tests/unit/extraction/jsonrpc_client_test.cpp:12:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_launcher_test.cpp:46:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_launcher_test.cpp:59:portability/env-read # reviewed raw environment read
-tests/unit/extraction/plugin_process_minimal_test.cpp:10:portability/env-read # reviewed raw environment read
-tests/unit/extraction/plugin_process_minimal_test.cpp:34:portability/env-read # reviewed raw environment read
-tests/unit/extraction/plugin_process_minimal_test.cpp:58:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_test.cpp:82:portability/env-read # reviewed raw environment read
 tests/unit/metadata/connection_pool_catch2_test.cpp:33:portability/env-read # reviewed raw environment read
 tests/unit/metadata/corpus_stats_catch2_test.cpp:43:portability/env-read # reviewed raw environment read

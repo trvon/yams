@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <stdexcept>
+#include <string>
 #include <tuple>
 
 #include <yams/compat/unistd.h>
@@ -37,7 +39,9 @@ std::filesystem::path make_temp_dir(std::string_view prefix = "yams_version_test
             return candidate;
         }
     }
-    return base;
+    // Never fall back to the shared temp root: callers remove_all() the returned path.
+    throw std::runtime_error("make_temp_dir: failed to create a unique directory under " +
+                             base.string());
 }
 
 DocumentInfo makeDocInfo(const std::string& filePath, const std::string& hash,

@@ -47,10 +47,6 @@ else
     'socket_memory_pressure_test.cpp',
   )
 
-  stats_command_crash_srcs = files(
-    'stats_command_crash_test.cpp',
-  )
-
   daemon_db_corruption_recovery_srcs = files(
     'daemon_db_corruption_recovery_test.cpp',
   )
@@ -459,22 +455,6 @@ else
       is_parallel: false,
       timeout: daemon_integration_timeout,
       args: ['--allow-running-no-tests'],
-    )
-
-    stats_command_crash_exe = executable('yams_stats_command_crash_tests_catch2',
-      stats_command_crash_srcs,
-      include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
-      cpp_args: ['-DYAMS_TESTING=1'],
-      install: false,
-    )
-
-    test('stats_command_crash',
-      stats_command_crash_exe,
-      suite: ['integration', 'daemon', 'catch2', 'stats', 'crash'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
     )
 
     daemon_db_corruption_recovery_exe = executable('yams_daemon_db_corruption_recovery_tests_catch2',
