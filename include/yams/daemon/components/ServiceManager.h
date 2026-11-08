@@ -85,9 +85,6 @@ class Database;
 class ConnectionPool;
 class MetadataRepository;
 } // namespace yams::metadata
-namespace yams::integrity {
-class RepairManager;
-} // namespace yams::integrity
 namespace yams::memory_sync {
 class MemorySyncService;
 } // namespace yams::memory_sync
@@ -586,9 +583,6 @@ public:
         return databaseManager_ ? databaseManager_->getWalMetricsProvider()
                                 : std::shared_ptr<WalMetricsProvider>{};
     }
-    std::shared_ptr<yams::integrity::RepairManager> getRepairManager() const {
-        return repairManager_;
-    }
 
     std::shared_ptr<RepairService> getRepairServiceShared() const {
         return repairServiceHost_.get();
@@ -1033,7 +1027,6 @@ private:
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
     mutable std::mutex resolvedDataDirMutex_;
     std::filesystem::path resolvedDataDir_;
-    std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;
     std::unique_ptr<WriteCoordinator> writeCoordinator_;

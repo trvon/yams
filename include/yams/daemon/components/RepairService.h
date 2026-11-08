@@ -47,10 +47,6 @@ namespace yams::vector {
 class VectorDatabase;
 } // namespace yams::vector
 
-namespace yams::integrity {
-class RepairManager;
-} // namespace yams::integrity
-
 namespace yams::daemon {
 
 class WriteCoordinator;
@@ -77,7 +73,6 @@ struct RepairServiceContext {
     std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore;
     std::function<std::shared_ptr<GraphComponent>()> getGraphComponent;
     std::function<std::shared_ptr<PostIngestQueue>()> getPostIngestQueue;
-    std::function<std::shared_ptr<integrity::RepairManager>()> getRepairManager;
     std::function<std::shared_ptr<IModelProvider>()> getModelProvider;
     std::function<std::size_t()> getEmbeddingQueuedJobs;
     std::function<std::size_t()> getEmbeddingInFlightJobs;
@@ -462,7 +457,6 @@ private:
     std::atomic<bool> orphansRecovered_{false};
     /// Last idle sweep that returned stalled Processing attempts to Pending.
     std::chrono::steady_clock::time_point lastStalledRecovery_{};
-    boost::asio::awaitable<void> processPathTreeRepair();
     void performVectorCleanup();
     /// Move one batch of legacy per-snapshot metadata keys into document_snapshots.
     /// Returns true once none remain (or the repository cannot do it).

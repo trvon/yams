@@ -99,7 +99,6 @@
 #include <yams/daemon/resource/simeon_model_provider.h>
 #include <yams/daemon/shutdown_budget.h>
 #include <yams/extraction/builtin_text_content_extractor.h>
-#include <yams/integrity/repair_manager.h>
 #include <yams/metadata/metadata_insert_writer.h>
 #include <yams/metadata/migration.h>
 #include <yams/storage/corpus_stats.h>
@@ -1309,7 +1308,6 @@ void ServiceManager::stopWorkCoordinatorForShutdown(
 void ServiceManager::clearCachedServiceState() {
     storeGraphComponent(std::shared_ptr<GraphComponent>{});
     graphQueryServiceOverride_.reset();
-    repairManager_.reset();
     {
         std::lock_guard lock(contentExtractorsMutex_);
         contentExtractors_.clear();
