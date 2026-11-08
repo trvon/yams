@@ -96,20 +96,38 @@ public:
     RemotePluginInfo info;
 };
 
+enum class TarType { File, Directory, Symlink, Hardlink };
+
 struct TarEntry {
     std::string name;
-    std::string body; // ignored for directories
-    bool isDirectory{false};
+    std::string body; // regular files only
+    TarType type{TarType::File};
+    std::string linkTarget; // symlinks and hard links only
 };
 
-// Writes `entries` as a gzip-compressed ustar archive to `archivePath`. Built in-process so the
-// tests need no external tar tool or binary fixture.
-fs::path writePluginArchive(const fs::path& archivePath, const std::vector<TarEntry>& entries) {
+char tarTypeflag(TarType type) {
+    switch (type) {
+        case TarType::Directory:
+            return '5';
+        case TarType::Symlink:
+            return '2';
+        case TarType::Hardlink:
+            return '1';
+        case TarType::File:
+            break;
+    }
+    return '0';
+}
+
+// Serializes `entries` as an uncompressed ustar stream. Built in-process so the tests need no
+// external tar tool or binary fixture.
+std::string makeTar(const std::vector<TarEntry>& entries) {
     constexpr size_t kBlock = 512;
     std::string tar;
     for (const auto& entry : entries) {
         REQUIRE((entry.name.size() < 100u));
-        const std::string body = entry.isDirectory ? std::string{} : entry.body;
+        REQUIRE((entry.linkTarget.size() < 100u));
+        const std::string body = entry.type == TarType::File ? entry.body : std::string{};
 
         std::array<char, kBlock> header{};
         std::memcpy(header.data(), entry.name.data(), entry.name.size());
@@ -117,12 +135,13 @@ fs::path writePluginArchive(const fs::path& archivePath, const std::vector<TarEn
             std::snprintf(header.data() + offset, width, "%0*llo", static_cast<int>(width - 1),
                           static_cast<unsigned long long>(value));
         };
-        putOctal(100, 8, entry.isDirectory ? 0755 : 0644); // mode
-        putOctal(108, 8, 0);                               // uid
-        putOctal(116, 8, 0);                               // gid
-        putOctal(124, 12, body.size());                    // size
-        putOctal(136, 12, 0);                              // mtime
-        header[156] = entry.isDirectory ? '5' : '0';       // typeflag
+        putOctal(100, 8, entry.type == TarType::Directory ? 0755 : 0644); // mode
+        putOctal(108, 8, 0);                                              // uid
+        putOctal(116, 8, 0);                                              // gid
+        putOctal(124, 12, body.size());                                   // size
+        putOctal(136, 12, 0);                                             // mtime
+        header[156] = tarTypeflag(entry.type);                            // typeflag
+        std::memcpy(header.data() + 157, entry.linkTarget.data(), entry.linkTarget.size());
         std::memcpy(header.data() + 257, "ustar", 6);
         std::memcpy(header.data() + 263, "00", 2);
         std::memset(header.data() + 148, ' ', 8);
@@ -138,26 +157,38 @@ fs::path writePluginArchive(const fs::path& archivePath, const std::vector<TarEn
         tar.append((kBlock - body.size() % kBlock) % kBlock, '\0');
     }
     tar.append(2 * kBlock, '\0'); // end-of-archive marker
+    return tar;
+}
 
+std::vector<unsigned char> gzipBytes(std::string data) {
     z_stream zs{};
     REQUIRE((deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) ==
              Z_OK));
-    std::vector<unsigned char> gz(deflateBound(&zs, static_cast<uLong>(tar.size())) + 64);
-    zs.next_in = reinterpret_cast<Bytef*>(tar.data());
-    zs.avail_in = static_cast<uInt>(tar.size());
+    std::vector<unsigned char> gz(deflateBound(&zs, static_cast<uLong>(data.size())) + 64);
+    zs.next_in = reinterpret_cast<Bytef*>(data.data());
+    zs.avail_in = static_cast<uInt>(data.size());
     zs.next_out = gz.data();
     zs.avail_out = static_cast<uInt>(gz.size());
     const int rc = deflate(&zs, Z_FINISH);
     gz.resize(zs.total_out);
     deflateEnd(&zs);
     REQUIRE((rc == Z_STREAM_END));
+    return gz;
+}
 
-    fs::create_directories(archivePath.parent_path());
-    std::ofstream out(archivePath, std::ios::binary | std::ios::trunc);
-    out.write(reinterpret_cast<const char*>(gz.data()), static_cast<std::streamsize>(gz.size()));
+fs::path writeBytes(const fs::path& path, const std::vector<unsigned char>& bytes) {
+    fs::create_directories(path.parent_path());
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
     out.close();
-    REQUIRE((fs::file_size(archivePath) == gz.size()));
-    return archivePath;
+    REQUIRE((fs::file_size(path) == bytes.size()));
+    return path;
+}
+
+// Writes `entries` as a gzip-compressed ustar archive to `archivePath`.
+fs::path writePluginArchive(const fs::path& archivePath, const std::vector<TarEntry>& entries) {
+    return writeBytes(archivePath, gzipBytes(makeTar(entries)));
 }
 
 // A single-file plugin archive: "fake-plugin/yams-plugin.json" at version 1.0.0.
@@ -480,6 +511,48 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install verifies the archive checksum 
         CHECK((result.value().checksum == actualChecksum));
         CHECK((isTrusted(trustFile, pluginDir)));
     }
+
+    SECTION("a malformed caller checksum is rejected") {
+        repo->info.checksum = actualChecksum;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        options.checksum = "sha256:" + std::string(63, 'a'); // one hex digit short
+        auto shortResult = installer->install("fake-plugin", options);
+        REQUIRE_FALSE(shortResult.has_value());
+        CHECK((shortResult.error().code == ErrorCode::InvalidArgument));
+
+        options.checksum = "sha256:" + std::string(64, 'g'); // not hex
+        auto nonHexResult = installer->install("fake-plugin", options);
+        REQUIRE_FALSE(nonHexResult.has_value());
+        CHECK((nonHexResult.error().code == ErrorCode::InvalidArgument));
+
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+    }
+
+    SECTION("a direct URL install without --checksum is refused") {
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install(fileUrl(archive), options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidData));
+        CHECK_FALSE(fs::exists(installDir / "fake-plugin.tar"));
+        CHECK_FALSE(fs::exists(pluginDir));
+    }
+
+    SECTION("a dry run without a checksum reports that one will be required") {
+        repo->info.checksum.clear();
+        options.dryRun = true;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().checksumRequired));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+    }
 }
 
 TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive entries safely",
@@ -500,7 +573,7 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
 
     SECTION("a directory entry with a trailing slash installs") {
         // What `tar czf out.tar.gz plugin` produces.
-        auto result = installFrom({{"plugin/", "", true}, {"plugin/lib.so", "ELF"}});
+        auto result = installFrom({{"plugin/", "", TarType::Directory}, {"plugin/lib.so", "ELF"}});
 
         REQUIRE((result.has_value()));
         CHECK((fs::is_regular_file(pluginDir / "lib.so")));
@@ -509,7 +582,7 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
 
     SECTION("'./' entries install") {
         // What `tar -C dir -czf out.tar.gz .` produces.
-        auto result = installFrom({{"./", "", true}, {"./plugin.so", "ELF"}});
+        auto result = installFrom({{"./", "", TarType::Directory}, {"./plugin.so", "ELF"}});
 
         REQUIRE((result.has_value()));
         CHECK((fs::is_regular_file(pluginDir / "plugin.so")));
@@ -531,6 +604,99 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
         CHECK_FALSE(fs::exists(pluginDir));
         CHECK_FALSE(isTrusted(trustFile, pluginDir));
     }
+
+    SECTION("a `tar -C dir .` layout keeps its top-level files") {
+        auto result = installFrom({{"./", "", TarType::Directory},
+                                   {"./plugin.so", "ELF"},
+                                   {"./yams-plugin.json", R"({"version": "1.0.0"})"},
+                                   {"./lib/", "", TarType::Directory},
+                                   {"./lib/dep.so", "DEP"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "plugin.so")));
+        CHECK((fs::is_regular_file(pluginDir / "yams-plugin.json")));
+        CHECK((fs::is_regular_file(pluginDir / "lib" / "dep.so")));
+    }
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install rejects archive links and root replacement",
+                 "[plugins][installer][security]") {
+    const fs::path pluginDir = installDir / "fake-plugin";
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+
+    auto installFrom = [&](const std::vector<TarEntry>& entries) {
+        const fs::path archive =
+            writePluginArchive(testDir / "source" / "fake-plugin.tar.gz", entries);
+        repo->info.downloadUrl = fileUrl(archive);
+        repo->info.checksum = sha256Of(archive);
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+        return installer->install("fake-plugin", InstallOptions{});
+    };
+
+    // If a link were honored, the follow-up entry would be written to <system temp>/<name>.
+    const std::string escapeName = "esc-" + testDir.filename().string();
+    const fs::path escapeTarget = fs::temp_directory_path() / escapeName;
+    REQUIRE_FALSE(fs::exists(escapeTarget));
+
+    auto expectRejected = [&](const Result<InstallResult>& result) {
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidPath));
+        CHECK_FALSE(fs::exists(escapeTarget));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+    };
+
+    SECTION("a symlink with an absolute target") {
+        expectRejected(installFrom(
+            {{"plugin/out", "", TarType::Symlink, "/tmp"}, {"plugin/out/" + escapeName, "evil"}}));
+    }
+
+    SECTION("a symlink with a '..' target") {
+        // extracted/plugin/up -> ../../.. resolves to the system temp directory.
+        expectRejected(installFrom({{"plugin/up", "", TarType::Symlink, "../../.."},
+                                    {"plugin/up/" + escapeName, "evil"}}));
+    }
+
+    SECTION("a hard link entry") {
+        expectRejected(installFrom({{"plugin/lib.so", "ELF"},
+                                    {"plugin/alias.so", "", TarType::Hardlink, "plugin/lib.so"}}));
+    }
+
+    SECTION("a symlink entry named '.'") {
+        expectRejected(installFrom({{".", "", TarType::Symlink, "plugin"}}));
+    }
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install rejects a truncated archive",
+                 "[plugins][installer][security]") {
+    const fs::path pluginDir = installDir / "fake-plugin";
+
+    // Incompressible body so that cutting the gzip stream in half cuts the file data too.
+    std::string body(64 * 1024, '\0');
+    std::uint32_t state = 0x12345678u;
+    for (auto& ch : body) {
+        state = state * 1664525u + 1013904223u;
+        ch = static_cast<char>(state >> 24);
+    }
+    auto gz = gzipBytes(makeTar({{"plugin/lib.so", body}}));
+    gz.resize(gz.size() / 2);
+    const fs::path archive = writeBytes(testDir / "source" / "fake-plugin.tar.gz", gz);
+
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+    repo->info.downloadUrl = fileUrl(archive);
+    repo->info.checksum = sha256Of(archive); // matches the truncated bytes
+    auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+    auto result = installer->install("fake-plugin", InstallOptions{});
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error().code == ErrorCode::CorruptedData));
+    CHECK_FALSE(fs::exists(pluginDir));
+    CHECK_FALSE(isTrusted(trustFile, pluginDir));
 }
 
 // =============================================================================

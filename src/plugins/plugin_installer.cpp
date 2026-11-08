@@ -4,18 +4,20 @@
  */
 
 #include <yams/common/fs_utils.h>
+#include <yams/common/hash_predicates.h>
 #include <yams/config/config_helpers.h>
+#include <yams/crypto/hasher.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/plugin_installer.hpp>
 
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <exception>
 #include <fstream>
-#include <iomanip>
+#include <optional>
 #include <regex>
 #include <set>
-#include <sstream>
 #include <string_view>
 
 #ifdef _WIN32
@@ -32,7 +34,6 @@
 #include <archive.h>
 #include <archive_entry.h>
 #include <curl/curl.h>
-#include <openssl/evp.h>
 
 namespace yams::plugins {
 
@@ -102,7 +103,9 @@ Result<void> validatePluginVersion(std::string_view version) {
 
 // Archive entry names must stay relative and never step upward. "." components ("./lib.so")
 // and the empty trailing component of a directory entry ("plugin/") are harmless and are what
-// `tar czf` / `tar -C dir .` produce. Containment is re-checked with isPathWithin().
+// `tar czf` / `tar -C dir .` produce. This only validates the entry *name*; isPathWithin() is a
+// lexical check on the joined path, and link targets are validated separately in
+// extractArchive().
 bool isRelativePathSafe(const fs::path& path) {
     if (path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory()) {
         return false;
@@ -164,46 +167,14 @@ Result<fs::path> makePluginTempDir(const std::string& name, const std::string& v
     return tempDir;
 }
 
-// Compute SHA-256 hash of a file using modern EVP API
+// SHA-256 of a file in the "sha256:<lowercase hex>" form; empty on failure.
 std::string computeSha256(const fs::path& filepath) {
-    std::ifstream file(filepath, std::ios::binary);
-    if (!file) {
+    try {
+        return "sha256:" + yams::crypto::SHA256Hasher{}.hashFile(filepath);
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to hash '{}': {}", filepath.string(), e.what());
         return "";
     }
-
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    if (!ctx) {
-        return "";
-    }
-
-    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
-        EVP_MD_CTX_free(ctx);
-        return "";
-    }
-
-    char buffer[8192];
-    while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
-        if (EVP_DigestUpdate(ctx, buffer, static_cast<size_t>(file.gcount())) != 1) {
-            EVP_MD_CTX_free(ctx);
-            return "";
-        }
-    }
-
-    unsigned char hash[EVP_MAX_MD_SIZE];
-    unsigned int hashLen = 0;
-    if (EVP_DigestFinal_ex(ctx, hash, &hashLen) != 1) {
-        EVP_MD_CTX_free(ctx);
-        return "";
-    }
-
-    EVP_MD_CTX_free(ctx);
-
-    std::ostringstream oss;
-    oss << std::hex << std::setfill('0');
-    for (unsigned int i = 0; i < hashLen; ++i) {
-        oss << std::setw(2) << static_cast<int>(hash[i]);
-    }
-    return "sha256:" + oss.str();
 }
 
 // Canonicalize a SHA-256 digest to the "sha256:<lowercase hex>" form computeSha256() produces.
@@ -224,7 +195,7 @@ Result<std::string> normalizeSha256(std::string_view value) {
     }
 
     constexpr size_t kSha256HexLength = 64;
-    if (value.size() != kSha256HexLength) {
+    if (value.size() != kSha256HexLength || !yams::common::isHexDigits(value)) {
         return Error{ErrorCode::InvalidArgument,
                      "Malformed plugin checksum: expected sha256:<64 hex characters>"};
     }
@@ -232,89 +203,213 @@ Result<std::string> normalizeSha256(std::string_view value) {
     std::string normalized(kPrefix);
     normalized.reserve(kPrefix.size() + kSha256HexLength);
     for (unsigned char ch : value) {
-        if (!std::isxdigit(ch)) {
-            return Error{ErrorCode::InvalidArgument,
-                         "Malformed plugin checksum: expected sha256:<64 hex characters>"};
-        }
         normalized.push_back(static_cast<char>(std::tolower(ch)));
     }
     return normalized;
 }
 
-// Extract tar.gz archive
+// Owns a libarchive reader/disk-writer pair so every exit path frees both.
+struct ArchivePair {
+    struct archive* reader{archive_read_new()};
+    struct archive* writer{archive_write_disk_new()};
+
+    ArchivePair() = default;
+    ArchivePair(const ArchivePair&) = delete;
+    ArchivePair& operator=(const ArchivePair&) = delete;
+    ~ArchivePair() {
+        if (reader != nullptr) {
+            archive_read_free(reader);
+        }
+        if (writer != nullptr) {
+            archive_write_free(writer);
+        }
+    }
+};
+
+// Builds an error carrying libarchive's message. Must be called while `handle` is still alive.
+Error archiveError(ErrorCode code, struct archive* handle, const std::string& what) {
+    const char* detail = handle != nullptr ? archive_error_string(handle) : nullptr;
+    return Error{code, what + ": " + (detail != nullptr ? detail : "unknown libarchive error")};
+}
+
+// A symlink entry may only point at a relative target with no ".." that stays inside `root`.
+bool isSymlinkTargetSafe(const fs::path& root, const fs::path& linkPath, const char* rawTarget) {
+    if (rawTarget == nullptr || *rawTarget == '\0') {
+        return false;
+    }
+    const fs::path target{rawTarget};
+    if (target.is_absolute() || target.has_root_name() || target.has_root_directory()) {
+        return false;
+    }
+    for (const auto& part : target) {
+        if (part == "..") {
+            return false;
+        }
+    }
+    const fs::path resolved = (linkPath.parent_path() / target).lexically_normal();
+    return isPathWithin(root, resolved);
+}
+
+// Extract a tar.gz archive into `destDir`, refusing any entry that could write outside it.
 Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir) {
-    struct archive* a = archive_read_new();
-    struct archive* ext = archive_write_disk_new();
-    struct archive_entry* entry;
-    int r;
+    ArchivePair handles;
+    if (handles.reader == nullptr || handles.writer == nullptr) {
+        return Error{ErrorCode::InternalError, "Failed to initialize libarchive"};
+    }
+    struct archive* a = handles.reader;
+    struct archive* ext = handles.writer;
 
     archive_read_support_format_tar(a);
     archive_read_support_filter_gzip(a);
 
+    // Entry paths are rewritten below to absolute paths under the (canonical) extraction root,
+    // so ARCHIVE_EXTRACT_SECURE_NOABSOLUTEPATHS cannot be used; absolute names, root names and
+    // ".." components are rejected by isRelativePathSafe() before the rewrite instead.
+    // SECURE_SYMLINKS stops a later entry from being written through an extracted symlink.
     archive_write_disk_set_options(ext, ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM |
                                             ARCHIVE_EXTRACT_ACL | ARCHIVE_EXTRACT_FFLAGS |
+                                            ARCHIVE_EXTRACT_SECURE_SYMLINKS |
                                             ARCHIVE_EXTRACT_SECURE_NODOTDOT);
 
-    r = archive_read_open_filename(a, archivePath.string().c_str(), 10240);
-    if (r != ARCHIVE_OK) {
-        archive_read_free(a);
-        archive_write_free(ext);
-        return Error{ErrorCode::IOError,
-                     std::string("Failed to open archive: ") + archive_error_string(a)};
+    if (archive_read_open_filename(a, archivePath.string().c_str(), 10240) != ARCHIVE_OK) {
+        return archiveError(ErrorCode::CorruptedData, a, "Failed to open plugin archive");
     }
 
-    // Create destination directory
     if (!yams::common::ensureDirectories(destDir)) {
-        archive_read_free(a);
-        archive_write_free(ext);
         return Error{ErrorCode::IOError, "Failed to create destination directory"};
     }
+    // Canonical root: no symlinked prefix (e.g. /var -> /private/var on macOS) for
+    // SECURE_SYMLINKS to trip over, and a stable base for the containment checks.
+    std::error_code ec;
+    const fs::path root = fs::canonical(destDir, ec);
+    if (ec) {
+        return Error{ErrorCode::IOError, "Failed to resolve extraction directory: " + ec.message()};
+    }
 
-    while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
-        // Construct full path in destination
+    struct archive_entry* entry = nullptr;
+    for (;;) {
+        int r = archive_read_next_header(a, &entry);
+        if (r == ARCHIVE_EOF) {
+            break;
+        }
+        if (r == ARCHIVE_WARN) {
+            spdlog::warn("Plugin archive header warning: {}", archive_error_string(a));
+        } else if (r != ARCHIVE_OK) {
+            return archiveError(ErrorCode::CorruptedData, a, "Failed to read plugin archive");
+        }
+
         const char* rawName = archive_entry_pathname(entry);
         if (rawName == nullptr) {
-            archive_read_free(a);
-            archive_write_free(ext);
             return Error{ErrorCode::CorruptedData, "Archive entry is missing a path"};
         }
+        const std::string name{rawName};
 
-        fs::path relativeEntryPath{rawName};
+        if (archive_entry_hardlink(entry) != nullptr) {
+            return Error{ErrorCode::InvalidPath,
+                         "Hard link entries are not allowed in plugin archives: " + name};
+        }
+
+        const fs::path relativeEntryPath{name};
         if (!isRelativePathSafe(relativeEntryPath)) {
-            archive_read_free(a);
-            archive_write_free(ext);
-            return Error{ErrorCode::InvalidPath,
-                         "Archive entry escapes extraction root: " + std::string(rawName)};
+            return Error{ErrorCode::InvalidPath, "Archive entry escapes extraction root: " + name};
         }
 
-        fs::path entryPath = (destDir / relativeEntryPath).lexically_normal();
-        if (!isPathWithin(destDir, entryPath)) {
-            archive_read_free(a);
-            archive_write_free(ext);
-            return Error{ErrorCode::InvalidPath,
-                         "Archive entry escapes extraction root: " + std::string(rawName)};
+        fs::path entryPath = (root / relativeEntryPath).lexically_normal();
+        if (!entryPath.has_filename()) {
+            entryPath = entryPath.parent_path(); // drop a directory entry's trailing separator
         }
+        if (!isPathWithin(root, entryPath)) {
+            return Error{ErrorCode::InvalidPath, "Archive entry escapes extraction root: " + name};
+        }
+
+        const auto fileType = archive_entry_filetype(entry);
+
+        // "." / "./" name the extraction root itself. A directory entry for it carries nothing
+        // but metadata, which must not be applied to the root; anything else would replace it.
+        if (entryPath == root) {
+            if (fileType != AE_IFDIR) {
+                return Error{ErrorCode::InvalidPath,
+                             "Archive entry would replace the extraction root: " + name};
+            }
+            if (archive_read_data_skip(a) != ARCHIVE_OK) {
+                return archiveError(ErrorCode::CorruptedData, a, "Failed to read plugin archive");
+            }
+            continue;
+        }
+
+        if (fileType == AE_IFLNK) {
+            if (!isSymlinkTargetSafe(root, entryPath, archive_entry_symlink(entry))) {
+                return Error{ErrorCode::InvalidPath,
+                             "Symlink entry points outside the extraction root: " + name};
+            }
+        } else if (fileType != AE_IFREG && fileType != AE_IFDIR) {
+            return Error{ErrorCode::InvalidPath,
+                         "Unsupported entry type in plugin archive: " + name};
+        }
+
         archive_entry_set_pathname(entry, entryPath.string().c_str());
 
         r = archive_write_header(ext, entry);
-        if (r != ARCHIVE_OK) {
-            spdlog::warn("Failed to extract header: {}", archive_error_string(ext));
-        } else if (archive_entry_size(entry) > 0) {
-            const void* buff;
-            size_t size;
-            la_int64_t offset;
+        if (r == ARCHIVE_WARN) {
+            spdlog::warn("Plugin archive entry '{}' extracted with warning: {}", name,
+                         archive_error_string(ext));
+        } else if (r != ARCHIVE_OK) {
+            return archiveError(ErrorCode::CorruptedData, ext, "Failed to extract " + name);
+        }
 
-            while (archive_read_data_block(a, &buff, &size, &offset) == ARCHIVE_OK) {
-                archive_write_data_block(ext, buff, size, offset);
+        if (fileType == AE_IFREG && archive_entry_size(entry) > 0) {
+            const void* buff = nullptr;
+            size_t size = 0;
+            la_int64_t offset = 0;
+            for (;;) {
+                r = archive_read_data_block(a, &buff, &size, &offset);
+                if (r == ARCHIVE_EOF) {
+                    break;
+                }
+                if (r != ARCHIVE_OK) {
+                    return archiveError(ErrorCode::CorruptedData, a, "Failed to read " + name);
+                }
+                if (archive_write_data_block(ext, buff, size, offset) != ARCHIVE_OK) {
+                    return archiveError(ErrorCode::CorruptedData, ext, "Failed to write " + name);
+                }
             }
         }
-        archive_write_finish_entry(ext);
+
+        r = archive_write_finish_entry(ext);
+        if (r == ARCHIVE_WARN) {
+            spdlog::warn("Plugin archive entry '{}' finished with warning: {}", name,
+                         archive_error_string(ext));
+        } else if (r != ARCHIVE_OK) {
+            return archiveError(ErrorCode::CorruptedData, ext, "Failed to finish " + name);
+        }
     }
 
-    archive_read_free(a);
-    archive_write_free(ext);
+    // Applies deferred directory metadata; a failure here leaves the tree incomplete.
+    const int closeResult = archive_write_close(ext);
+    if (closeResult != ARCHIVE_OK && closeResult != ARCHIVE_WARN) {
+        return archiveError(ErrorCode::CorruptedData, ext, "Failed to finalize plugin extraction");
+    }
 
     return {};
+}
+
+// The directory whose contents become the installed plugin: the extraction root, unless it
+// holds exactly one entry and that entry is a real directory (the "<name>/..." layout).
+fs::path selectPluginSourceDir(const fs::path& extractDir) {
+    std::error_code ec;
+    std::optional<fs::path> onlyChild;
+    size_t count = 0;
+    for (const auto& child : fs::directory_iterator(extractDir, ec)) {
+        if (++count > 1) {
+            return extractDir;
+        }
+        onlyChild = child.path();
+    }
+    if (count == 1 && onlyChild &&
+        fs::symlink_status(*onlyChild, ec).type() == fs::file_type::directory) {
+        return *onlyChild;
+    }
+    return extractDir;
 }
 
 } // namespace
@@ -402,22 +497,31 @@ public:
 
         // Every installed archive is verified before it is extracted or trusted. A caller-supplied
         // checksum overrides the repository's; with neither there is nothing to verify against,
-        // so refuse rather than install (and auto-trust) an unverified download.
+        // so refuse rather than install (and auto-trust) an unverified download. A dry run
+        // downloads and trusts nothing, so it only reports that a checksum will be required.
         const std::string declaredChecksum = options.checksum.value_or(info.checksum);
+        std::string expectedChecksum;
         if (declaredChecksum.empty()) {
-            const std::string reason =
-                isUrl ? std::string("direct URL installs do not carry one")
-                      : std::string("the plugin repository did not publish one for this release");
-            return Error{ErrorCode::InvalidData,
-                         "Refusing to install " + info.name + "@" + info.version +
-                             " without a SHA-256 checksum (" + reason +
-                             "). Pass the expected digest with --checksum sha256:<hex>."};
+            if (!options.dryRun) {
+                const std::string reason =
+                    isUrl
+                        ? std::string("direct URL installs do not carry one")
+                        : std::string("the plugin repository did not publish one for this release");
+                return Error{ErrorCode::InvalidData,
+                             "Refusing to install " + info.name + "@" + info.version +
+                                 " without a SHA-256 checksum (" + reason +
+                                 "). Supply the expected digest with --checksum sha256:<hex> "
+                                 "(accepted by `yams plugin install` and "
+                                 "`yams plugin update <name>`)."};
+            }
+            result.checksumRequired = true;
+        } else {
+            auto expectedChecksumRes = normalizeSha256(declaredChecksum);
+            if (!expectedChecksumRes) {
+                return expectedChecksumRes.error();
+            }
+            expectedChecksum = expectedChecksumRes.value();
         }
-        auto expectedChecksumRes = normalizeSha256(declaredChecksum);
-        if (!expectedChecksumRes) {
-            return expectedChecksumRes.error();
-        }
-        const std::string expectedChecksum = expectedChecksumRes.value();
 
         result.pluginName = info.name;
         result.version = info.version;
@@ -507,21 +611,16 @@ public:
             return Error{ErrorCode::IOError, "Failed to create plugin directory"};
         }
 
-        // Find the actual plugin content (may be in a subdirectory)
-        fs::path sourceDir = extractDir;
-        for (const auto& entry : fs::directory_iterator(extractDir)) {
-            if (entry.is_directory()) {
-                // If there's exactly one subdirectory, use that
-                sourceDir = entry.path();
-                break;
-            }
-        }
+        // Plugin content is either the archive root or its single top-level directory.
+        const fs::path sourceDir = selectPluginSourceDir(extractDir);
 
         // Move extracted content to plugin directory
         fs::rename(sourceDir, pluginDir, ec);
         if (ec) {
-            // If rename fails (cross-device), fall back to copy
-            fs::copy(sourceDir, pluginDir, fs::copy_options::recursive, ec);
+            // If rename fails (cross-device), fall back to copy. Symlinks were validated to stay
+            // inside the archive, so copy them as links rather than following them.
+            fs::copy(sourceDir, pluginDir,
+                     fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
             if (ec) {
                 (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
                 return Error{ErrorCode::IOError, "Failed to install plugin: " + ec.message()};
@@ -697,16 +796,25 @@ private:
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteToFile);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &file);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        // An HTTP error status is a failed download, not an archive to checksum.
+        curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curlProgressCallback);
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progressData);
 
         CURLcode res = curl_easy_perform(curl);
+        long httpStatus = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
         file.close();
         curl_easy_cleanup(curl);
 
         if (res != CURLE_OK) {
-            fs::remove(destPath);
+            std::error_code removeEc;
+            fs::remove(destPath, removeEc);
+            if (res == CURLE_HTTP_RETURNED_ERROR) {
+                return Error{httpStatus == 404 ? ErrorCode::NotFound : ErrorCode::NetworkError,
+                             "Download failed: HTTP " + std::to_string(httpStatus) + " for " + url};
+            }
             return Error{ErrorCode::NetworkError,
                          std::string("Download failed: ") + curl_easy_strerror(res)};
         }

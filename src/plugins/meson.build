@@ -9,6 +9,7 @@ openssl_dep = dependency('openssl', modules: ['ssl', 'crypto'], required: true)
 libarchive_dep = dependency('libarchive', required: true)
 yams_core = dependency('yams_core', required: true)
 yams_config = dependency('yams_config', required: true)
+yams_plugins_crypto_dep = dependency('yams_crypto', required: true)
 
 yams_plugins_mgmt = static_library('yams_plugins_mgmt',
   [
@@ -16,7 +17,7 @@ yams_plugins_mgmt = static_library('yams_plugins_mgmt',
     'plugin_installer.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, json_dep, threads_dep, curl_dep, openssl_dep, libarchive_dep, yams_core, yams_config] + yams_tracy_deps,
+  dependencies: [spdlog_dep, json_dep, threads_dep, curl_dep, openssl_dep, libarchive_dep, yams_core, yams_config, yams_plugins_crypto_dep] + yams_tracy_deps,
   cpp_args: yams_tracy_args,
   install: false,
 )
@@ -24,6 +25,6 @@ yams_plugins_mgmt = static_library('yams_plugins_mgmt',
 yams_plugins_mgmt_dep = declare_dependency(
   link_with: yams_plugins_mgmt,
   include_directories: include_directories('../../include'),
-  dependencies: [yams_config],
+  dependencies: [yams_config, yams_plugins_crypto_dep],
 )
 meson.override_dependency('yams_plugins_mgmt', yams_plugins_mgmt_dep)

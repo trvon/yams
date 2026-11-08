@@ -78,6 +78,9 @@ struct InstallResult {
     std::string version;
     std::filesystem::path installedPath;
     std::string checksum;
+    // Dry run only: no checksum is known, so the real install would be refused until one is
+    // supplied (InstallOptions::checksum / --checksum).
+    bool checksumRequired{false};
     uint64_t sizeBytes{0};
     bool wasUpgrade{false}; // true if replaced existing version
     std::string previousVersion;
