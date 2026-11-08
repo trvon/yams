@@ -8,9 +8,9 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/resource/model_provider.h>
-#include <yams/integrity/repair_utils.h>
 #include <yams/vector/dim_resolver.h>
 #include <yams/vector/vector_database.h>
+#include <yams/vector/vector_schema_repair.h>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -492,7 +492,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                                       {"to_dim", target->dim}}
                            .dump();
             }
-            auto aligned = yams::integrity::recreateVectorTables(dataDir, target->dim);
+            auto aligned = yams::vector::recreateVectorTables(dataDir, target->dim);
             if (aligned) {
                 cfg.embedding_dim = target->dim;
             } else {

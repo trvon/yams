@@ -2309,6 +2309,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'vector_schema_repair',
+    'sources': files('unit/vector/vector_schema_repair_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'vector'],
+    'timeout': 120,
+  }]
+
+  catch2_test_table += [{
     'name': 'vector_sync_adapter',
     'sources': files('unit/vector/vector_sync_adapter_catch2_test.cpp'),
     'deps': test_deps,

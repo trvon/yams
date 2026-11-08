@@ -21,7 +21,6 @@
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/extraction/extraction_util.h>
-#include <yams/integrity/repair_utils.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
@@ -36,6 +35,7 @@
 #include <yams/vector/simeon_embedding_backend.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
+#include <yams/vector/vector_schema_repair.h>
 #include <yams/vector/vector_utils.h>
 
 #include <yams/cli/doctor/benchmark.h>
@@ -790,7 +790,7 @@ Result<void> DoctorCommand::runRecreateVectors() {
     }
 
     auto aligned =
-        yams::integrity::ensureVectorSchemaAligned(dataDir, dim, /*recreateIfMismatch=*/true);
+        yams::vector::ensureVectorSchemaAligned(dataDir, dim, /*recreateIfMismatch=*/true);
     if (!aligned) {
         return aligned.error();
     }
