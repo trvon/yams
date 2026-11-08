@@ -3,18 +3,18 @@
  * @brief Implementation of the plugin installer
  */
 
+#include <yams/common/file_lock.h>
 #include <yams/common/fs_utils.h>
 #include <yams/common/hash_predicates.h>
 #include <yams/config/config_helpers.h>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/resource/plugin_trust.h>
+#include <yams/plugins/plugin_dir_names.h>
 #include <yams/plugins/plugin_installer.hpp>
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cctype>
-#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -93,9 +93,9 @@ bool isSafePathSegment(std::string_view value, bool allowPlus = false) {
 }
 
 Result<void> validatePluginName(std::string_view name) {
-    // A leading '.' is reserved for the installer's own entries (.yams-staging), so a plugin
-    // directory can never be mistaken for one.
-    if (!isSafePathSegment(name) || name.front() == '.') {
+    // Reserved names (a leading '.') hold the installer's own bookkeeping, so a plugin
+    // directory can never be mistaken for it.
+    if (!isSafePathSegment(name) || isReservedPluginDirName(name)) {
         return Error{ErrorCode::InvalidArgument,
                      "Invalid plugin name. Use only letters, numbers, '.', '_' and '-', and do "
                      "not start it with '.'."};
@@ -262,7 +262,7 @@ std::optional<std::vector<fs::path>> componentsBelow(const fs::path& root, const
 // SECURE_SYMLINKS refuses to create an entry under a symlinked parent. A ".." after a name could
 // step back out of a symlinked directory, so it is rejected. A link that names itself, its own
 // directory or one of that directory's ancestors ("sub -> .", "d/up -> ..", "d/x -> ../d") is
-// a cycle and is rejected; loops through several links are caught by scanExtractedPlugin().
+// a cycle and is rejected; loops through several links are caught by prepareExtractedPlugin().
 bool isSymlinkTargetSafe(const fs::path& root, const fs::path& linkPath, const fs::path& target) {
     if (target.empty() || target.is_absolute() || target.has_root_name() ||
         target.has_root_directory()) {
@@ -297,50 +297,8 @@ bool isSymlinkTargetSafe(const fs::path& root, const fs::path& linkPath, const f
     return !isDirOrAncestor;
 }
 
-// Walks the chosen plugin directory without following links and without throwing. Every
-// symlink must still resolve inside it (a link that only stayed inside the wider extraction
-// root would point at a sibling of the installed plugin after the move) and must not loop.
-// Returns the total size of regular files; links are not counted.
-Result<std::uint64_t> scanExtractedPlugin(const fs::path& pluginRoot) {
-    std::error_code ec;
-    std::uint64_t totalBytes = 0;
-    auto it = fs::recursive_directory_iterator(pluginRoot, ec);
-    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        const fs::path& path = it->path();
-        const auto status = it->symlink_status(ec);
-        if (ec) {
-            break;
-        }
-        if (fs::is_symlink(status)) {
-            const fs::path target = fs::read_symlink(path, ec);
-            if (ec || !isSymlinkTargetSafe(pluginRoot, path, target)) {
-                return Error{ErrorCode::InvalidPath,
-                             "Symlink points outside the plugin directory: " +
-                                 path.filename().string()};
-            }
-            std::error_code followEc;
-            (void)fs::status(path, followEc);
-            if (followEc && followEc != std::errc::no_such_file_or_directory) {
-                return Error{ErrorCode::InvalidPath, "Symlink cannot be resolved (" +
-                                                         followEc.message() +
-                                                         "): " + path.filename().string()};
-            }
-        } else if (fs::is_regular_file(status)) {
-            const auto size = fs::file_size(path, ec);
-            if (ec) {
-                break;
-            }
-            totalBytes += size;
-        }
-    }
-    if (ec) {
-        return Error{ErrorCode::IOError, "Failed to scan extracted plugin: " + ec.message()};
-    }
-    return totalBytes;
-}
-
-// Top-level archive metadata that is never plugin content: macOS resource forks and Finder
-// files that archivers on macOS add next to the real entries.
+// Archive metadata that is never plugin content, at any depth: macOS resource forks and
+// Finder files that archivers on macOS add next to the real entries.
 bool isArchiveJunk(const fs::path& name) {
     const std::string s = name.filename().string();
     return s == "__MACOSX" || s == ".DS_Store" || s.rfind("._", 0) == 0;
@@ -502,41 +460,28 @@ bool isPluginRootMarker(const fs::path& path) {
     return ext == ".so" || ext == ".dylib" || ext == ".dll";
 }
 
-// The directory whose contents become the installed plugin. Top-level archive junk
-// (isArchiveJunk) is removed first so it neither changes the decision nor gets installed. Then:
-// the extraction root if it holds a manifest or plugin library itself; otherwise its only
-// top-level directory if there is exactly one (the "<name>/..." layout, possibly with README or
-// LICENSE files beside it); otherwise the root.
+// The directory whose contents become the installed plugin, ignoring archive junk
+// (isArchiveJunk): the extraction root if it holds a manifest or plugin library itself;
+// otherwise its only top-level directory if there is exactly one (the "<name>/..." layout,
+// possibly with README or LICENSE files beside it); otherwise the root.
 Result<fs::path> selectPluginSourceDir(const fs::path& extractDir) {
     std::error_code ec;
-    std::vector<fs::path> children;
+    std::vector<fs::path> directories;
     for (auto it = fs::directory_iterator(extractDir, ec); !ec && it != fs::directory_iterator();
          it.increment(ec)) {
-        children.push_back(it->path());
-    }
-    if (ec) {
-        return Error{ErrorCode::IOError, "Failed to list extracted plugin: " + ec.message()};
-    }
-
-    std::vector<fs::path> content;
-    for (const auto& child : children) {
-        if (!isArchiveJunk(child)) {
-            content.push_back(child);
+        const fs::path& child = it->path();
+        if (isArchiveJunk(child)) {
             continue;
         }
-        if (auto removed = removeAllScoped(child, extractDir, "archive metadata"); !removed) {
-            return removed.error();
-        }
-    }
-
-    std::vector<fs::path> directories;
-    for (const auto& child : content) {
         std::error_code typeEc;
         if (fs::symlink_status(child, typeEc).type() == fs::file_type::directory) {
             directories.push_back(child);
         } else if (isPluginRootMarker(child)) {
             return extractDir;
         }
+    }
+    if (ec) {
+        return Error{ErrorCode::IOError, "Failed to list extracted plugin: " + ec.message()};
     }
     if (directories.size() == 1) {
         return directories.front();
@@ -546,103 +491,158 @@ Result<fs::path> selectPluginSourceDir(const fs::path& extractDir) {
 
 // Archive modes are kept (plugins may ship executables), but the installer must always be able
 // to traverse, update and delete what it extracted: a 0555 directory cannot be emptied. Grants
-// owner rwx on directories and owner rw on files under `root`, without following links.
+// owner rwx to a directory and owner rw to a regular file; other types are left alone (chmod
+// would follow a symlink).
+Result<void> grantOwnerAccess(const fs::path& path, const fs::file_status& status) {
+    fs::perms wanted = fs::perms::none;
+    if (fs::is_directory(status)) {
+        wanted = fs::perms::owner_all;
+    } else if (fs::is_regular_file(status)) {
+        wanted = fs::perms::owner_read | fs::perms::owner_write;
+    } else {
+        return {};
+    }
+    if ((status.permissions() & wanted) == wanted) {
+        return {};
+    }
+    std::error_code ec;
+    fs::permissions(path, wanted, fs::perm_options::add, ec);
+    if (ec) {
+        return Error{ErrorCode::IOError, "Failed to make plugin file " + path.filename().string() +
+                                             " writable: " + ec.message()};
+    }
+    return {};
+}
+
+// grantOwnerAccess() for `root` and every entry under it, without following links.
 Result<void> ensureOwnerAccess(const fs::path& root) {
     std::error_code ec;
+    const auto rootStatus = fs::symlink_status(root, ec);
+    if (ec) {
+        return Error{ErrorCode::IOError,
+                     "Failed to inspect plugin directory " + root.string() + ": " + ec.message()};
+    }
+    if (auto granted = grantOwnerAccess(root, rootStatus); !granted) {
+        return granted;
+    }
     auto it = fs::recursive_directory_iterator(root, ec);
     for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         std::error_code entryEc;
         const auto status = it->symlink_status(entryEc);
         if (entryEc) {
-            return Error{ErrorCode::IOError, "Failed to inspect extracted plugin file " +
+            return Error{ErrorCode::IOError, "Failed to inspect plugin file " +
                                                  it->path().filename().string() + ": " +
                                                  entryEc.message()};
         }
-        fs::perms wanted = fs::perms::none;
-        if (fs::is_directory(status)) {
-            wanted = fs::perms::owner_all;
-        } else if (fs::is_regular_file(status)) {
-            wanted = fs::perms::owner_read | fs::perms::owner_write;
-        } else {
-            continue; // symlinks: their mode is irrelevant and chmod would follow them
+        if (auto granted = grantOwnerAccess(it->path(), status); !granted) {
+            return granted;
         }
-        if ((status.permissions() & wanted) == wanted) {
+    }
+    if (ec) {
+        return Error{ErrorCode::IOError, "Failed to scan plugin files: " + ec.message()};
+    }
+    return {};
+}
+
+// Prepares the chosen plugin directory for installation in one pass that never follows links
+// or throws: grants owner access (directories before they are entered), removes archive junk
+// at any depth, checks that every symlink still resolves inside the plugin directory (a link
+// that only stayed inside the wider extraction root would point at a sibling of the installed
+// plugin after the move) and does not loop, and returns the size of the regular files.
+Result<std::uint64_t> prepareExtractedPlugin(const fs::path& pluginRoot) {
+    std::error_code ec;
+    std::error_code rootEc;
+    if (auto granted = grantOwnerAccess(pluginRoot, fs::symlink_status(pluginRoot, rootEc));
+        !granted) {
+        return granted.error();
+    }
+    std::uint64_t totalBytes = 0;
+    auto it = fs::recursive_directory_iterator(pluginRoot, ec);
+    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const fs::path path = it->path();
+        std::error_code entryEc;
+        const auto status = it->symlink_status(entryEc);
+        if (entryEc) {
+            return Error{ErrorCode::IOError, "Failed to inspect plugin file " +
+                                                 path.filename().string() + ": " +
+                                                 entryEc.message()};
+        }
+
+        if (isArchiveJunk(path)) {
+            if (fs::is_directory(status)) {
+                it.disable_recursion_pending();
+                (void)ensureOwnerAccess(path);
+            }
+            if (auto removed = removeAllScoped(path, pluginRoot, "archive metadata"); !removed) {
+                return removed.error();
+            }
             continue;
         }
-        fs::permissions(it->path(), wanted, fs::perm_options::add, entryEc);
-        if (entryEc) {
-            return Error{ErrorCode::IOError, "Failed to make extracted plugin file " +
-                                                 it->path().filename().string() +
-                                                 " writable: " + entryEc.message()};
+
+        if (fs::is_symlink(status)) {
+            const fs::path target = fs::read_symlink(path, entryEc);
+            if (entryEc || !isSymlinkTargetSafe(pluginRoot, path, target)) {
+                return Error{ErrorCode::InvalidPath,
+                             "Symlink points outside the plugin directory: " +
+                                 path.filename().string()};
+            }
+            std::error_code followEc;
+            (void)fs::status(path, followEc);
+            if (followEc && followEc != std::errc::no_such_file_or_directory) {
+                return Error{ErrorCode::InvalidPath, "Symlink cannot be resolved (" +
+                                                         followEc.message() +
+                                                         "): " + path.filename().string()};
+            }
+            continue;
+        }
+
+        if (auto granted = grantOwnerAccess(path, status); !granted) {
+            return granted.error();
+        }
+        if (fs::is_regular_file(status)) {
+            const auto size = fs::file_size(path, entryEc);
+            if (entryEc) {
+                return Error{ErrorCode::IOError, "Failed to size plugin file " +
+                                                     path.filename().string() + ": " +
+                                                     entryEc.message()};
+            }
+            totalBytes += size;
         }
     }
     if (ec) {
         return Error{ErrorCode::IOError, "Failed to scan extracted plugin: " + ec.message()};
     }
-    return {};
+    return totalBytes;
 }
 
 // Installs stage under <targetDir>/.yams-staging, on the same filesystem as the installed
 // plugins, so putting a new tree in place is always a rename. Each install owns one directory
-// there named "<plugin>@<start-ms>@<n>"; '@' cannot occur in a plugin name, so the owner and
-// start time of any staging directory can be read back from its name.
+// there named "<plugin>@<unique>"; '@' cannot occur in a plugin name, so the owning plugin of
+// any staging directory can be read back from its name. Installs and uninstalls into one
+// target directory are serialized by kInstallLockName, so everything under .yams-staging that
+// is not the current install's is a leftover.
 constexpr std::string_view kStagingDirName = ".yams-staging";
+constexpr std::string_view kInstallLockName = ".yams-install.lock";
+constexpr std::chrono::seconds kInstallLockTimeout{30};
 
-std::int64_t nowMillis() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
-        .count();
+Result<void> lockTargetDir(yams::common::ExclusiveFileLock& lock, const fs::path& targetDir) {
+    auto locked = lock.acquire(targetDir / std::string(kInstallLockName), kInstallLockTimeout);
+    if (!locked && locked.error().code == ErrorCode::ResourceExhausted) {
+        return Error{ErrorCode::OperationInProgress,
+                     "Another plugin install or uninstall is running in " + targetDir.string()};
+    }
+    return locked;
 }
 
-// The start time encoded in `dirName` if it is a staging directory of `plugin`.
-std::optional<std::int64_t> stagingStartMs(std::string_view dirName, const std::string& plugin) {
-    if (dirName.size() <= plugin.size() + 1 || dirName.substr(0, plugin.size()) != plugin ||
-        dirName[plugin.size()] != '@') {
-        return std::nullopt;
-    }
-    const std::string_view rest = dirName.substr(plugin.size() + 1);
-    const auto at = rest.find('@');
-    if (at == std::string_view::npos || at == 0) {
-        return std::nullopt;
-    }
-    std::int64_t startMs = 0;
-    const auto* end = rest.data() + at;
-    const auto [parsedEnd, err] = std::from_chars(rest.data(), end, startMs);
-    if (err != std::errc{} || parsedEnd != end) {
-        return std::nullopt;
-    }
-    return startMs;
-}
-
-// Creates this install's staging directory. It must not exist yet: fs::create_directory
-// reports an existing directory as "not created" without an error, which is treated as a
-// collision and retried with another suffix.
-Result<fs::path> createStagingDir(const fs::path& stagingRoot, const std::string& plugin,
-                                  std::int64_t startMs) {
-    static std::atomic<std::uint64_t> counter{0};
-    constexpr int kAttempts = 16;
-    for (int attempt = 0; attempt < kAttempts; ++attempt) {
-        const auto suffix =
-            counter.fetch_add(1, std::memory_order_relaxed) ^
-            static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-        const fs::path candidate =
-            stagingRoot / (plugin + "@" + std::to_string(startMs) + "@" + std::to_string(suffix));
-        std::error_code ec;
-        if (fs::create_directory(candidate, ec)) {
-            return candidate;
-        }
-        if (ec && ec != std::errc::file_exists) {
-            return Error{ErrorCode::IOError,
-                         "Failed to create plugin staging directory: " + ec.message()};
-        }
-    }
-    return Error{ErrorCode::IOError, "Failed to create a unique plugin staging directory under " +
-                                         stagingRoot.string()};
+bool isStagingDirOf(std::string_view dirName, const std::string& plugin) {
+    return dirName.size() > plugin.size() + 1 && dirName.substr(0, plugin.size()) == plugin &&
+           dirName[plugin.size()] == '@';
 }
 
 // Owns one install's staging directory and removes it on every exit path (restoring owner
 // access first so a read-only directory from the archive cannot block the removal), unless
-// `keep` is set because it holds a previous version that could not be restored.
+// `keep` is set because it holds a previous version that could not be restored. The staging
+// root is removed too once empty; this runs while the install still holds the target lock.
 struct ScopedStagingDir {
     fs::path path;
     fs::path stagingRoot;
@@ -662,24 +662,20 @@ struct ScopedStagingDir {
                          removed.error().message);
         }
         std::error_code ec;
-        fs::remove(stagingRoot, ec); // only succeeds once no install is staging there
+        fs::remove(stagingRoot, ec); // only succeeds when empty
     }
 };
 
-// After a successful install of `plugin`, staging directories earlier installs of it left
-// behind (a failed upgrade's preserved previous version) are no longer needed. Directories
-// started at or after `startMs` may belong to a concurrent install and are kept.
+// Removes staging directories of `plugin` other than `keepDir`: with the target lock held they
+// are leftovers of earlier installs (for example a failed upgrade's preserved previous
+// version), which a successful install or an uninstall makes obsolete. Best effort, logged.
 void removeLeftoverStaging(const fs::path& stagingRoot, const std::string& plugin,
-                           std::int64_t startMs, const fs::path& ownStagingDir) {
+                           const fs::path& keepDir) {
     std::vector<fs::path> leftovers;
     std::error_code ec;
     for (auto it = fs::directory_iterator(stagingRoot, ec); !ec && it != fs::directory_iterator();
          it.increment(ec)) {
-        if (it->path() == ownStagingDir) {
-            continue;
-        }
-        const auto started = stagingStartMs(it->path().filename().string(), plugin);
-        if (started && *started < startMs) {
+        if (it->path() != keepDir && isStagingDirOf(it->path().filename().string(), plugin)) {
             leftovers.push_back(it->path());
         }
     }
@@ -894,9 +890,15 @@ public:
             return result;
         }
 
-        // Stage this install on the install filesystem (see kStagingDirName).
+        // Stage this install on the install filesystem (see kStagingDirName), holding the
+        // target directory's install lock until return. The lock is declared before the staging
+        // guard so it is released after the guard's cleanup.
         if (!yams::common::ensureDirectories(targetDir)) {
             return Error{ErrorCode::IOError, "Failed to create plugin directory"};
+        }
+        yams::common::ExclusiveFileLock targetLock;
+        if (auto locked = lockTargetDir(targetLock, targetDir); !locked) {
+            return locked.error();
         }
         const fs::path stagingRoot = targetDir / std::string(kStagingDirName);
         std::error_code ec;
@@ -905,12 +907,12 @@ public:
             return Error{ErrorCode::IOError,
                          "Failed to create plugin staging directory: " + ec.message()};
         }
-        const std::int64_t startMs = nowMillis();
-        auto stagingDirRes = createStagingDir(stagingRoot, info.name, startMs);
-        if (!stagingDirRes) {
-            return stagingDirRes.error();
+        const fs::path stagingDir = yams::common::createTempDirectory(info.name + "@", stagingRoot);
+        if (stagingDir.empty()) {
+            return Error{ErrorCode::IOError, "Failed to create a plugin staging directory under " +
+                                                 stagingRoot.string()};
         }
-        ScopedStagingDir staging{stagingDirRes.value(), stagingRoot};
+        ScopedStagingDir staging{stagingDir, stagingRoot};
         const fs::path archivePath = staging.path / "archive.tar.gz";
 
         // Download
@@ -940,9 +942,6 @@ public:
         if (!extractRes) {
             return extractRes.error();
         }
-        if (auto permsRes = ensureOwnerAccess(extractDir); !permsRes) {
-            return permsRes.error();
-        }
 
         // Plugin content is either the archive root or its single top-level directory. Validate
         // it before touching any existing installation.
@@ -951,7 +950,7 @@ public:
             return sourceDirRes.error();
         }
         const fs::path sourceDir = sourceDirRes.value();
-        auto scanRes = scanExtractedPlugin(sourceDir);
+        auto scanRes = prepareExtractedPlugin(sourceDir);
         if (!scanRes) {
             return scanRes.error();
         }
@@ -990,7 +989,7 @@ public:
             }
             return Error{ErrorCode::IOError, message};
         }
-        removeLeftoverStaging(stagingRoot, info.name, startMs, staging.path);
+        removeLeftoverStaging(stagingRoot, info.name, staging.path);
 
         result.installedPath = pluginDir;
         result.sizeBytes = scanRes.value();
@@ -1034,14 +1033,27 @@ public:
             return Error{ErrorCode::NotFound, "Plugin not installed: " + name};
         }
 
+        yams::common::ExclusiveFileLock targetLock;
+        if (auto locked = lockTargetDir(targetLock, installDir_); !locked) {
+            return locked.error();
+        }
+
         if (removeFromTrust) {
             removeFromTrustList(pluginDir);
         }
 
+        // Installs from older builds may contain read-only directories from the archive.
+        (void)ensureOwnerAccess(pluginDir);
         auto removeRes = removeAllScoped(pluginDir, installDir_, "plugin install");
         if (!removeRes) {
             return removeRes.error();
         }
+
+        // A failed upgrade may have preserved a previous version under .yams-staging.
+        const fs::path stagingRoot = installDir_ / std::string(kStagingDirName);
+        removeLeftoverStaging(stagingRoot, name, {});
+        std::error_code ec;
+        fs::remove(stagingRoot, ec); // only succeeds when empty
 
         return {};
     }
@@ -1061,8 +1073,7 @@ public:
         }
         for (const fs::directory_iterator end; it != end; it.increment(ec)) {
             auto name = it->path().filename().string();
-            // Dot-prefixed entries (.yams-staging) are installer bookkeeping, not plugins.
-            if (name.empty() || name.front() == '.') {
+            if (name.empty() || isReservedPluginDirName(name)) {
                 continue;
             }
             std::error_code typeEc;

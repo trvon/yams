@@ -12,6 +12,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/common/file_lock.h>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/plugin_installer.hpp>
@@ -361,6 +362,50 @@ TEST_CASE_METHOD(PluginInstallerFixture, "installedVersion behavior",
 // =============================================================================
 // Uninstall Tests
 // =============================================================================
+
+TEST_CASE_METHOD(PluginInstallerFixture, "uninstall clears read-only trees and leftover staging",
+                 "[plugins][installer][uninstall]") {
+    const fs::path pluginDir = installDir / "old-plugin";
+    fs::create_directories(pluginDir / "lib");
+    std::ofstream(pluginDir / "lib" / "dep.so") << "DEP";
+    const fs::path leftover = installDir / ".yams-staging" / "old-plugin@7";
+    const fs::path otherPlugin = installDir / ".yams-staging" / "other-plugin@8";
+    fs::create_directories(leftover / "previous");
+    fs::create_directories(otherPlugin);
+#if !defined(_WIN32)
+    // As an install from an older build could leave it: directories without owner write.
+    fs::permissions(pluginDir / "lib", fs::perms::owner_read | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+    fs::permissions(pluginDir, fs::perms::owner_read | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+#endif
+
+    auto installer = makePluginInstaller(stubClient, installDir, trustFile);
+    auto result = installer->uninstall("old-plugin");
+
+    REQUIRE((result.has_value()));
+    CHECK_FALSE(fs::exists(pluginDir));
+    CHECK_FALSE(fs::exists(leftover));
+    CHECK((fs::exists(otherPlugin)));
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "ExclusiveFileLock excludes a second holder",
+                 "[plugins][installer][lock]") {
+    const fs::path lockFile = testDir / "install.lock";
+    {
+        yams::common::ExclusiveFileLock first;
+        REQUIRE((first.acquire(lockFile, std::chrono::milliseconds(0)).has_value()));
+        CHECK((first.held()));
+
+        yams::common::ExclusiveFileLock second;
+        auto busy = second.acquire(lockFile, std::chrono::milliseconds(100));
+        REQUIRE_FALSE(busy.has_value());
+        CHECK((busy.error().code == ErrorCode::ResourceExhausted));
+        CHECK_FALSE(second.held());
+    }
+    yams::common::ExclusiveFileLock third;
+    CHECK((third.acquire(lockFile, std::chrono::milliseconds(0)).has_value()));
+}
 
 TEST_CASE_METHOD(PluginInstallerFixture, "uninstall behavior", "[plugins][installer][uninstall]") {
     SECTION("removes plugin directory") {
@@ -753,29 +798,44 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
         CHECK((listed.value() == std::vector<std::string>{"fake-plugin"}));
     }
 
-    SECTION("a successful install removes only older leftover staging for the same plugin") {
-        // Staging directories are "<plugin>@<start-ms>@<n>". An old one is what a failed
-        // upgrade leaves behind; a newer one may belong to a concurrent install.
+    SECTION("a successful install removes leftover staging for the same plugin only") {
+        // Staging directories are "<plugin>@<n>". Installs into one directory are serialized,
+        // so any other staging directory of this plugin is a leftover, e.g. the previous
+        // version a failed upgrade preserved.
         const fs::path staging = installDir / ".yams-staging";
-        const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::system_clock::now().time_since_epoch())
-                               .count();
-        const fs::path olderLeftover = staging / "fake-plugin@1@0";
-        const fs::path newerInstall =
-            staging / ("fake-plugin@" + std::to_string(nowMs + 3600 * 1000) + "@0");
-        const fs::path otherPlugin = staging / "other-plugin@1@0";
-        fs::create_directories(olderLeftover / "previous");
-        std::ofstream(olderLeftover / "previous" / "yams-plugin.json") << R"({"version": "0.1"})";
-        fs::create_directories(newerInstall);
+        const fs::path leftover = staging / "fake-plugin@123";
+        const fs::path otherLeftover = staging / "fake-plugin@456";
+        const fs::path otherPlugin = staging / "other-plugin@1";
+        fs::create_directories(leftover / "previous");
+        std::ofstream(leftover / "previous" / "yams-plugin.json") << R"({"version": "0.1"})";
+        fs::create_directories(otherLeftover);
         fs::create_directories(otherPlugin);
 
         auto result = installFrom({{"plugin/", "", TarType::Directory},
                                    {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
 
         REQUIRE((result.has_value()));
-        CHECK_FALSE(fs::exists(olderLeftover));
-        CHECK((fs::exists(newerInstall)));
+        CHECK_FALSE(fs::exists(leftover));
+        CHECK_FALSE(fs::exists(otherLeftover));
         CHECK((fs::exists(otherPlugin)));
+    }
+
+    SECTION("macOS metadata is stripped at every depth") {
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/libfoo.so", "ELF"},
+                                   {"plugin/._libfoo.so", "resource fork"},
+                                   {"plugin/sub/", "", TarType::Directory},
+                                   {"plugin/sub/.DS_Store", "finder"},
+                                   {"plugin/sub/__MACOSX/", "", TarType::Directory},
+                                   {"plugin/sub/__MACOSX/._x", "fork"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "libfoo.so")));
+        CHECK_FALSE(fs::exists(pluginDir / "._libfoo.so"));
+        CHECK((fs::is_directory(pluginDir / "sub")));
+        CHECK_FALSE(fs::exists(pluginDir / "sub" / ".DS_Store"));
+        CHECK_FALSE(fs::exists(pluginDir / "sub" / "__MACOSX"));
+        CHECK((result.value().sizeBytes == 3u)); // only libfoo.so ("ELF")
     }
 
     SECTION("a single top-level directory is used even with files beside it") {
