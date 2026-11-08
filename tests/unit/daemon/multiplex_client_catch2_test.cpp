@@ -139,21 +139,3 @@ TEST_CASE("MultiplexClient backpressure max inflight saturation",
     // And at least one success overall
     REQUIRE(succeeded >= 1);
 }
-
-TEST_CASE("MultiplexClient interleaved streaming routing",
-          "[daemon][multiplex][.requires_daemon][.skip]") {
-    if (!daemon_available()) {
-        SKIP("Daemon not available for multiplex tests");
-    }
-    // NOTE: This requires server-side multiplexing (Phase 2)
-    SKIP("Requires server multiplexing (Phase 2)");
-}
-
-TEST_CASE("MultiplexClient connection drop fails all in flight",
-          "[daemon][multiplex][.requires_daemon][.skip]") {
-    if (!daemon_available()) {
-        SKIP("Daemon not available for multiplex tests");
-    }
-    SKIP("Connection drop simulation is environment-specific; implement with controlled kill in "
-         "integration tests");
-}

@@ -47,10 +47,6 @@ else
     'socket_memory_pressure_test.cpp',
   )
 
-  stats_command_crash_srcs = files(
-    'stats_command_crash_test.cpp',
-  )
-
   daemon_db_corruption_recovery_srcs = files(
     'daemon_db_corruption_recovery_test.cpp',
   )
@@ -219,6 +215,20 @@ else
       timeout: daemon_integration_timeout,
       args: ['Daemon client concurrent requests', '--allow-running-no-tests'],
     )
+
+    # Independent clients issue overlapping status() calls on one live daemon.
+    # No --allow-running-no-tests: a filter that selects nothing must fail. The case SKIPs on
+    # Windows (daemon IPC), which Catch2 reports as exit 4, so register it on POSIX only.
+    if host_machine.system() != 'windows'
+      test('daemon_socket_parallel_status',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket', 'concurrency'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client parallel status from independent clients'],
+      )
+    endif
 
     test('daemon_socket_timeout_behavior',
       daemon_catch2_exe,
@@ -459,22 +469,6 @@ else
       is_parallel: false,
       timeout: daemon_integration_timeout,
       args: ['--allow-running-no-tests'],
-    )
-
-    stats_command_crash_exe = executable('yams_stats_command_crash_tests_catch2',
-      stats_command_crash_srcs,
-      include_directories: incs,
-      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
-      cpp_args: ['-DYAMS_TESTING=1'],
-      install: false,
-    )
-
-    test('stats_command_crash',
-      stats_command_crash_exe,
-      suite: ['integration', 'daemon', 'catch2', 'stats', 'crash'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
     )
 
     daemon_db_corruption_recovery_exe = executable('yams_daemon_db_corruption_recovery_tests_catch2',

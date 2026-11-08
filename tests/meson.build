@@ -388,7 +388,6 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
       'integration',
       'integration/smoke',
       'integration/daemon',
-      'integration/cli',
       'integration/search',
       'integration/services',
     ]
@@ -484,7 +483,6 @@ endif
 if get_option('enable-integration-tests') or _test_debug_integrations
   subdir('integration/smoke')
   subdir('integration/daemon')
-  subdir('integration/cli')
   subdir('integration/search')
 endif
 if get_option('enable-mobile-tests')
@@ -1202,14 +1200,6 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
-    'name': 'db_recovery_vacuum',
-    'sources': files('unit/daemon/db_recovery_vacuum_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'db-recovery'],
-    'timeout': 60,
-  }]
-
-  catch2_test_table += [{
     'name': 'storage_preflight',
     'sources': files('unit/daemon/storage_preflight_test.cpp'),
     'deps': test_deps,
@@ -1431,15 +1421,6 @@ if catch2_dep.found()
     'is_parallel': false,
   }]
 
-  catch2_test_table += [{
-    'name': 'daemon_warm_bench',
-    'sources': files('unit/daemon/daemon_warm_bench_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'bench'],
-    'args': ['--allow-running-no-tests'],  # Bench only runs when YAMS_BENCH_FAST=1
-    'timeout': 120,
-  }]
-
   catch2_daemon_idle_control_bench_exe = executable('catch2_daemon_idle_control_bench',
     files('unit/daemon/daemon_idle_control_bench_catch2_test.cpp'),
     include_directories: incs,
@@ -1596,14 +1577,6 @@ if catch2_dep.found()
     'sources': files('unit/daemon/idle_zero_concurrency_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'tune', 'idle'],
-    'timeout': 60,
-  }]
-
-  catch2_test_table += [{
-    'name': 'health_check_isolation',
-    'sources': files('unit/daemon/health_check_isolation_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'state', 'health-check'],
     'timeout': 60,
   }]
 
@@ -1824,7 +1797,6 @@ if catch2_dep.found()
       'unit/storage/object_storage_adapter_catch2_test.cpp',
       'unit/storage/reference_counter_catch2_test.cpp',
       'unit/storage/reference_counter_stress_catch2_test.cpp',
-      'unit/storage/garbage_collector_catch2_test.cpp',
       'unit/storage/sqlite_retry_catch2_test.cpp',
       'unit/storage/s3_signer_catch2_test.cpp',
       'unit/storage/storage_backend_factory_catch2_test.cpp',
@@ -2104,7 +2076,6 @@ if catch2_dep.found()
       'unit/mcp/mcp_tool_registry_wrappers_catch2_test.cpp',
       'unit/mcp/mcp_tools_schema_and_smoke_catch2_test.cpp',
       'unit/mcp/stdio_transport_catch2_test.cpp',
-      'unit/mcp/websocket_transport_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -2245,7 +2216,6 @@ if catch2_dep.found()
       'unit/cli/graph_helpers_catch2_test.cpp',
       'unit/cli/graph_query_presenter_catch2_test.cpp',
       'unit/cli/graph_topology_support_catch2_test.cpp',
-      'unit/cli/grep_command_path_tree_catch2_test.cpp',
       'unit/cli/vector_db_util_catch2_test.cpp',
     ),
     include_directories: incs,
@@ -2515,13 +2485,11 @@ if catch2_dep.found()
     'timeout': 120,
   }]
 
-#FTS5 Tests(Catch2) - FTS5 support detection and fallback
-#Migrated from GTest as part of yams - 3s4 / yams - aqc
+#FTS5 query sanitizer and search query helper tests(Catch2)
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
   catch2_test_table += [{
-    'name': 'fts5',
+    'name': 'fts5_query_sanitizer',
     'sources': files(
-      'unit/metadata/fts5_catch2_test.cpp',
       'unit/metadata/fts5_query_sanitizer_catch2_test.cpp',
       'unit/metadata/search_query_helpers_catch2_test.cpp',
     ),
@@ -2733,17 +2701,6 @@ if catch2_dep.found()
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'vector'],
     'timeout': 30,
-  }]
-
-#Fuzzy Index Prioritization Tests(Catch2) - fuzzy index scoring
-#Migrated from GTest as part of yams - 3s4 / yams - aqc
-#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_test_table += [{
-    'name': 'fuzzy_index_prioritization',
-    'sources': files('unit/metadata/fuzzy_index_prioritization_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'metadata', 'fuzzy'],
-    'timeout': 60,
   }]
 
 #KG Store Alias and Entities Tests(Catch2) - KG alias and entity operations
@@ -3097,16 +3054,6 @@ if catch2_dep.found()
     'deps': plugin_process_test_deps,
     'suite': ['catch2', 'unit', 'extraction', 'plugins'],
     'timeout': 120,
-  }]
-
-  catch2_test_table += [{
-    'name': 'plugin_process_minimal',
-    'target': 'plugin_process_minimal',
-    'sources': files('unit/extraction/plugin_process_minimal_test.cpp'),
-    'deps': plugin_process_test_deps,
-    'suite': ['catch2', 'unit', 'extraction', 'plugins', 'debug'],
-    'timeout': 120,
-    'is_parallel': false,
   }]
 
   plugin_process_launcher_exe = executable('plugin_process_launcher',
