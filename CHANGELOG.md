@@ -11,6 +11,18 @@
 
 * **retrieval:** apply basename and location-metadata filters before pagination; retain distinct current locations for shared-content grep candidates and enforce worktree scope after FTS/semantic projection.
 
+## [0.22.1](https://github.com/trvon/yams/compare/v0.22.0...v0.22.1) (2026-11-08)
+
+
+### Fixed
+
+* **release:** fetch the static-embedding table without the built CLI ([3e359a3](https://github.com/trvon/yams/commit/3e359a3806982ae2aa406737468005253c7e3b5e))
+
+
+### Maintenance
+
+* release 0.22.1 ([c0d3ecb](https://github.com/trvon/yams/commit/c0d3ecb860ef63356b73db328f41827a317941f7))
+
 ## [0.22.0](https://github.com/trvon/yams/compare/v0.21.1...v0.22.0) (2026-11-07)
 
 
