@@ -9,6 +9,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/mcp/mcp_server.h>
 
+#include <set>
+#include <string>
+
 using namespace yams::mcp;
 using json = nlohmann::json;
 
@@ -132,27 +135,44 @@ TEST_CASE("MCP Apps Tool - Visibility Model and App",
     REQUIRE(toolsResponse.has_value());
 
     json result = toolsResponse.value();
+    REQUIRE(result.contains("result"));
+    REQUIRE(result["result"].contains("tools"));
 
-    // Look for tool with visibility ["model", "app"]
+    // MCPServer links exactly these tools to the dashboard UI (listTools shaping in
+    // mcp_server.cpp). Every one that is listed must carry the UI metadata.
+    const std::set<std::string> linkedTools = {"search", "grep", "graph", "query"};
+    // The default surface is code mode (initializeToolRegistry in mcp_server_tool_registry.cpp):
+    // mcp.echo, doctor, query, execute, session. Of the linked tools only "query" is listed.
+    const std::set<std::string> expectedLinkedInDefaultMode = {"query"};
+    const json expectedVisibility = json::array({"model", "app"});
+
+    std::set<std::string> linkedSeen;
     for (const auto& tool : result["result"]["tools"]) {
-        if (tool.contains("_meta") && tool["_meta"].contains("ui")) {
-            if (tool["_meta"]["ui"].contains("visibility")) {
-                auto visibility = tool["_meta"]["ui"]["visibility"];
-                bool hasModel = false;
-                bool hasApp = false;
-                for (const auto& v : visibility) {
-                    if (v == "model")
-                        hasModel = true;
-                    if (v == "app")
-                        hasApp = true;
-                }
+        REQUIRE(tool.contains("name"));
+        const auto name = tool["name"].get<std::string>();
+        INFO("tool " << name);
 
-                if (hasModel && hasApp) {
-                    // Tool should be visible and callable
-                    CHECK(true);
-                    break;
-                }
+        if (!linkedTools.contains(name)) {
+            if (tool.contains("_meta")) {
+                CHECK_FALSE(tool["_meta"].contains("ui"));
+                CHECK_FALSE(tool["_meta"].contains("ui/resourceUri"));
+                CHECK_FALSE(tool["_meta"].contains("ui/visibility"));
             }
+            continue;
         }
+
+        linkedSeen.insert(name);
+        REQUIRE(tool.contains("_meta"));
+        const auto& meta = tool["_meta"];
+        REQUIRE(meta.contains("ui"));
+        CHECK(meta.at("ui").at("resourceUri") == "ui://yams/dashboard");
+        CHECK(meta.at("ui").at("visibility") == expectedVisibility);
+        CHECK(meta.at("ui/resourceUri") == "ui://yams/dashboard");
+        CHECK(meta.at("ui/visibility") == expectedVisibility);
+    }
+
+    for (const auto& name : expectedLinkedInDefaultMode) {
+        INFO("expected linked tool " << name);
+        CHECK(linkedSeen.contains(name));
     }
 }

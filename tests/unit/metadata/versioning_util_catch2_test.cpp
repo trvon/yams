@@ -4,7 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <random>
+#include <string>
 #include <tuple>
 
 #include <yams/compat/unistd.h>
@@ -22,23 +22,6 @@ using namespace yams;
 using namespace yams::metadata;
 
 namespace {
-
-std::filesystem::path make_temp_dir(std::string_view prefix = "yams_version_test_") {
-    namespace fs = std::filesystem;
-    const auto base = fs::temp_directory_path();
-    std::uniform_int_distribution<int> dist(0, 9999);
-    thread_local std::mt19937_64 rng{std::random_device{}()};
-    for (int attempt = 0; attempt < 512; ++attempt) {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        auto candidate =
-            base / (std::string(prefix) + std::to_string(stamp) + "_" + std::to_string(dist(rng)));
-        std::error_code ec;
-        if (fs::create_directories(candidate, ec)) {
-            return candidate;
-        }
-    }
-    return base;
-}
 
 DocumentInfo makeDocInfo(const std::string& filePath, const std::string& hash,
                          const std::string& fileName) {
@@ -86,7 +69,7 @@ public:
 };
 
 struct VersioningFixture {
-    VersioningFixture() { testDir = make_temp_dir(); }
+    VersioningFixture() { testDir = yams::test::make_temp_dir("yams_version_test_"); }
 
     ~VersioningFixture() {
         repo_.reset();

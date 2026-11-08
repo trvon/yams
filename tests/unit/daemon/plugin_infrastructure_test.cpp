@@ -128,6 +128,28 @@ TEST_CASE("Plugin discovery ignores bundled zpdf runtime library",
     CHECK(loader.getLastSkips().empty());
 }
 
+TEST_CASE("Plugin discovery skips dot-prefixed directories",
+          "[plugin][discovery][installer-backup]") {
+    PluginHostFixture fixture;
+    AbiPluginLoader loader;
+    loader.setNamePolicy(AbiPluginLoader::NamePolicy::Spec);
+    // An upgrade backup the plugin installer left next to the live plugin.
+    const auto hidden = fixture.makeFile(".demo.yams-backup-1/libyams_old.so", "old");
+    const auto visible = fixture.makeFile("demo/libyams_demo.so", "new");
+
+    auto result = loader.scanDirectory(fixture.tempDir_);
+
+    REQUIRE(result);
+    bool sawVisible = false;
+    bool sawHidden = false;
+    for (const auto& found : result.value()) {
+        sawVisible = sawVisible || found.path == visible;
+        sawHidden = sawHidden || found.path == hidden;
+    }
+    CHECK(sawVisible);
+    CHECK_FALSE(sawHidden);
+}
+
 TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     PluginHostFixture fixture;
 
