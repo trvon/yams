@@ -206,14 +206,16 @@ requires std::constructible_from<std::string_view, T>
 }
 
 /**
- * Create a temporary directory with a unique name.
+ * Create a new directory with a unique name. The directory did not exist before the call.
  *
  * @param prefix Prefix for the directory name (default: "yams_")
+ * @param parent Existing directory to create it in (default: the system temp directory)
  * @return Path to created directory, or empty path on failure
  */
-[[nodiscard]] inline std::filesystem::path createTempDirectory(std::string_view prefix = "yams_") {
+[[nodiscard]] inline std::filesystem::path
+createTempDirectory(std::string_view prefix = "yams_", const std::filesystem::path& parent = {}) {
     std::error_code ec;
-    auto tempPath = std::filesystem::temp_directory_path(ec);
+    auto tempPath = parent.empty() ? std::filesystem::temp_directory_path(ec) : parent;
     if (ec) {
         return {};
     }
