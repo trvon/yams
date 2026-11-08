@@ -473,10 +473,10 @@ void EmbeddingService::runRepair(const yams::compat::stop_token& stopToken) {
         }
         vdbConfig.embedding_dim = repairDim;
         // Align schema only when missing; avoid dropping existing tables during repair
-        try {
-            (void)yams::vector::ensureVectorSchemaAligned(dataPath_, repairDim, false);
-        } catch (...) {
-            spdlog::debug("Repair thread: vector schema alignment failed");
+        if (auto aligned = yams::vector::ensureVectorSchemaAligned(dataPath_, repairDim, false);
+            !aligned) {
+            spdlog::warn("Repair thread: vector schema alignment failed: {}",
+                         aligned.error().message);
         }
         vdbConfig.create_if_missing = true;
 
@@ -744,8 +744,12 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                 spdlog::warn("EmbeddingService: vector DB dim={} != target dim={}, attempting "
                              "non-destructive align",
                              cfgDim, vdbConfig.embedding_dim);
-                (void)yams::vector::ensureVectorSchemaAligned(dataPath_, vdbConfig.embedding_dim,
-                                                              false);
+                if (auto aligned = yams::vector::ensureVectorSchemaAligned(
+                        dataPath_, vdbConfig.embedding_dim, false);
+                    !aligned) {
+                    spdlog::warn("EmbeddingService: vector schema alignment failed: {}",
+                                 aligned.error().message);
+                }
                 // Recreate DB handle after alignment
                 vector::VectorDatabaseConfig alignedCfg = vdbConfig;
                 vectorDb = std::make_unique<vector::VectorDatabase>(alignedCfg);
