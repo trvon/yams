@@ -463,7 +463,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 
         // Idle backoff: every tick waits one poll interval (longer while the daemon is idle).
         bool sleptIdleTick = false;
-        {
+        { // scoped so snap/pollMs stay local to the backoff
             auto snap = TuningSnapshotRegistry::instance().get();
             uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
             if (snap && snap->daemonIdle) {
