@@ -4565,6 +4565,8 @@ void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
     rcfg.maxPendingRepairs = config_.maxPendingRepairs;
     rcfg.vectorVacuumInterval = config_.maintenance.vectorVacuumInterval;
     rcfg.sessionExpiry = config_.maintenance.sessionExpiry;
+    rcfg.pathTreeRepairInterval = config_.maintenance.pathTreeRepairInterval;
+    rcfg.pathTreeRepairBatch = config_.maintenance.pathTreeRepairBatch;
     repairServiceHost_.start(std::move(rcfg), &state_, std::move(activeConnFn),
                              makeRepairServiceContext(this));
 }

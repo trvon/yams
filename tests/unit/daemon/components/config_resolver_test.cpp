@@ -634,6 +634,43 @@ TEST_CASE("ConfigResolver applies typed daemon maintenance policy",
     CHECK(config.maintenance.sessionExpiry == std::chrono::days{7});
 }
 
+TEST_CASE("ConfigResolver applies the path-tree repair maintenance keys",
+          "[daemon][components][config][maintenance][catch2]") {
+    DaemonConfig defaults;
+    CHECK(defaults.maintenance.pathTreeRepairInterval == std::chrono::hours{24});
+    CHECK(defaults.maintenance.pathTreeRepairBatch == 256);
+
+    ConfigResolver::ConfigSections sections;
+    sections["daemon.maintenance"] = {{"path_tree_repair_interval_hours", "6"},
+                                      {"path_tree_repair_batch", "1000"}};
+    DaemonConfig config;
+    ConfigResolver::applyDaemonMaintenance(sections, config);
+    CHECK(config.maintenance.pathTreeRepairInterval == std::chrono::hours{6});
+    CHECK(config.maintenance.pathTreeRepairBatch == 1000);
+
+    SECTION("an interval of 0 disables the pass") {
+        sections["daemon.maintenance"] = {{"path_tree_repair_interval_hours", "0"}};
+        ConfigResolver::applyDaemonMaintenance(sections, config);
+        CHECK(config.maintenance.pathTreeRepairInterval.count() == 0);
+    }
+    SECTION("an invalid interval keeps the previous value") {
+        sections["daemon.maintenance"] = {{"path_tree_repair_interval_hours", "-1"}};
+        ConfigResolver::applyDaemonMaintenance(sections, config);
+        CHECK(config.maintenance.pathTreeRepairInterval == std::chrono::hours{6});
+    }
+    SECTION("out-of-range or malformed batch sizes keep the previous value") {
+        for (const char* bad : {"0", "10001", "-5", "lots"}) {
+            INFO(bad);
+            sections["daemon.maintenance"] = {{"path_tree_repair_batch", bad}};
+            ConfigResolver::applyDaemonMaintenance(sections, config);
+            CHECK(config.maintenance.pathTreeRepairBatch == 1000);
+        }
+        sections["daemon.maintenance"] = {{"path_tree_repair_batch", "10000"}};
+        ConfigResolver::applyDaemonMaintenance(sections, config);
+        CHECK(config.maintenance.pathTreeRepairBatch == 10000);
+    }
+}
+
 TEST_CASE("ConfigResolver disk pressure policy rejects unsafe values",
           "[daemon][components][config][disk-pressure][catch2]") {
     const std::vector<std::pair<std::string, std::string>> invalidValues = {

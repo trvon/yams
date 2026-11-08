@@ -1974,6 +1974,30 @@ void ConfigResolver::applyDaemonMaintenance(const ConfigSections& sections, Daem
                          config.maintenance.sessionExpiry.count());
         }
     }
+    if (const auto it = section->second.find("path_tree_repair_interval_hours");
+        it != section->second.end()) {
+        if (const auto parsed = parseUnsignedIntegral<std::uint32_t>(it->second)) {
+            config.maintenance.pathTreeRepairInterval = std::chrono::hours{*parsed};
+        } else {
+            spdlog::warn("Config: daemon.maintenance.path_tree_repair_interval_hours must be an "
+                         "unsigned integer; keeping {}h",
+                         config.maintenance.pathTreeRepairInterval.count());
+        }
+    }
+    if (const auto it = section->second.find("path_tree_repair_batch");
+        it != section->second.end()) {
+        // One batch runs per repair-loop tick, so a large batch holds the loop (and the
+        // metadata write path) for longer; cap it well below "the whole table".
+        constexpr std::size_t kMaxPathTreeRepairBatch = 10000;
+        const auto parsed = parseUnsignedIntegral<std::uint32_t>(it->second);
+        if (parsed && *parsed > 0 && *parsed <= kMaxPathTreeRepairBatch) {
+            config.maintenance.pathTreeRepairBatch = *parsed;
+        } else {
+            spdlog::warn("Config: daemon.maintenance.path_tree_repair_batch must be in [1, {}]; "
+                         "keeping {}",
+                         kMaxPathTreeRepairBatch, config.maintenance.pathTreeRepairBatch);
+        }
+    }
 }
 
 bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfig& config) {
