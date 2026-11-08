@@ -266,10 +266,10 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
         if (!entry.is_directory()) {
             continue;
         }
-        // Dot-prefixed directories are never plugins: the plugin installer reserves them for
-        // upgrade backups (.<name>.yams-backup-*), which a crash can leave behind next to the
-        // live plugin, and plugin names may not start with '.'. Loading one would run a stale
-        // or partially replaced copy.
+        // Dot-prefixed directories are never plugins: plugin names may not start with '.', and
+        // the plugin installer stages installs and upgrades (including a previous version it is
+        // replacing) under .yams-staging. Loading from there would run a stale or partial copy.
+        // Same rule as ExternalPluginHost::scanDirectory.
         if (const auto dirName = entry.path().filename().string();
             !dirName.empty() && dirName.front() == '.') {
             continue;

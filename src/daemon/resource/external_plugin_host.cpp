@@ -247,6 +247,14 @@ struct ExternalPluginHost::Impl {
 
         for (const auto& entry : fs::directory_iterator(dir)) {
             if (entry.is_directory()) {
+                // Dot-prefixed directories are never plugins: plugin names may not start with
+                // '.', and the plugin installer stages installs and upgrades (including a
+                // previous version it is replacing) under .yams-staging. Same rule as
+                // AbiPluginLoader::scanDirectory.
+                if (const auto dirName = entry.path().filename().string();
+                    !dirName.empty() && dirName.front() == '.') {
+                    continue;
+                }
                 if (isPluginDirectory(entry.path())) {
                     if (auto r = scanTarget(entry.path())) {
                         results.push_back(std::move(r.value()));
