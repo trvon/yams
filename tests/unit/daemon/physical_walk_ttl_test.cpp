@@ -128,3 +128,23 @@ TEST_CASE("storageTreeFingerprint changes when an object is added or removed",
 TEST_CASE("storageTreeFingerprint is 0 for a missing root", "[unit][daemon][metrics][catch2]") {
     CHECK(storageTreeFingerprint(fs::temp_directory_path() / "yams_fp_does_not_exist") == 0);
 }
+
+TEST_CASE("storageTreeFingerprint is 0 when part of the tree cannot be read",
+          "[unit][daemon][metrics][catch2]") {
+#ifdef _WIN32
+    SKIP("POSIX permissions");
+#else
+    StorageTree tree;
+    const auto objects = tree.root / "objects";
+    fs::permissions(objects, fs::perms::none);
+    std::error_code probe;
+    const bool readable = fs::directory_iterator(objects, probe) != fs::directory_iterator{};
+    if (!probe && readable) {
+        fs::permissions(objects, fs::perms::owner_all);
+        SKIP("running with permission to read any directory");
+    }
+    // A partial fingerprint could repeat and keep stale totals; 0 forces the full walk.
+    CHECK(storageTreeFingerprint(tree.root) == 0);
+    fs::permissions(objects, fs::perms::owner_all);
+#endif
+}

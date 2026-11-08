@@ -117,25 +117,52 @@ std::uint64_t storageTreeFingerprint(const std::filesystem::path& root) noexcept
         // Order-independent: directory iteration order is unspecified.
         fingerprint += h * 0xff51afd7ed558ccdULL;
     };
+    // Any probe error returns 0, which forces the full walk: a partial fingerprint could
+    // repeat and make stale totals look current.
     try {
         const auto rootTime = fs::last_write_time(root, ec);
         if (ec) {
             return 0;
         }
         mix(root, rootTime);
-        for (const auto& child : fs::directory_iterator(root, ec)) {
-            if (!child.is_directory(ec)) {
+        fs::directory_iterator children(root, ec);
+        if (ec) {
+            return 0;
+        }
+        for (const auto& child : children) {
+            const bool childIsDir = child.is_directory(ec);
+            if (ec) {
+                return 0;
+            }
+            if (!childIsDir) {
                 continue;
             }
-            mix(child.path(), child.last_write_time(ec));
-            for (const auto& shard : fs::directory_iterator(child.path(), ec)) {
-                if (shard.is_directory(ec)) {
-                    mix(shard.path(), shard.last_write_time(ec));
+            const auto childTime = child.last_write_time(ec);
+            if (ec) {
+                return 0;
+            }
+            mix(child.path(), childTime);
+            fs::directory_iterator shards(child.path(), ec);
+            if (ec) {
+                return 0;
+            }
+            for (const auto& shard : shards) {
+                const bool shardIsDir = shard.is_directory(ec);
+                if (ec) {
+                    return 0;
                 }
+                if (!shardIsDir) {
+                    continue;
+                }
+                const auto shardTime = shard.last_write_time(ec);
+                if (ec) {
+                    return 0;
+                }
+                mix(shard.path(), shardTime);
             }
         }
     } catch (...) {
-        return 0; // a failed probe forces the full walk
+        return 0; // iteration errors throw from operator++
     }
     // 0 means "no fingerprint"; never return it for an existing tree.
     return fingerprint == 0 ? 1 : fingerprint;
@@ -702,8 +729,9 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
             refsDbBytes = refsNow;
             total = previous.total - std::min(previous.total, previous.refsDb) + refsNow;
         } else if (!root.empty() && fs::exists(root, ec)) {
-            const std::string objectsPrefix = (root / "objects").string();
-            const std::string tempPrefix = (root / "temp").string();
+            // Native strings (std::wstring on Windows), so the per-file check allocates nothing.
+            const fs::path::string_type objectsPrefix = (root / "objects").native();
+            const fs::path::string_type tempPrefix = (root / "temp").native();
             for (fs::recursive_directory_iterator
                      it(root, fs::directory_options::skip_permission_denied, ec),
                  end;
@@ -730,7 +758,7 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
                     }
                     total += add;
                     const auto& p = it->path();
-                    const std::string& native = p.native();
+                    const auto& native = p.native();
                     if (native.starts_with(objectsPrefix)) {
                         casObjectsBytes += add;
                     } else if (p.filename() == "refs.db") {
