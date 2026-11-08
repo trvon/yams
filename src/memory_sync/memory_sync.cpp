@@ -1193,7 +1193,6 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
         auto workspace = makeSweepStore();
         if (!workspace) {
             sweepBoundExhausted_ = workspace.error().code == ErrorCode::ResourceExhausted;
-            scanBudgetExhausted_ = sweepBoundExhausted_;
             return workspace.error();
         }
         sweepStore_ = std::move(workspace.value());
@@ -1325,7 +1324,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
                                                      logicalKey, validIdentity);
                 !observed) {
                 sweepBoundExhausted_ = observed.error().code == ErrorCode::ResourceExhausted;
-                scanBudgetExhausted_ = sweepBoundExhausted_; // workspace full (sized by budget)
+                scanBudgetExhausted_ = SweepStore::isWorkspaceFull(observed.error());
                 return observed.error();
             }
             if (!validIdentity) {
@@ -1336,7 +1335,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
                     ScanCandidate{key, logicalKey, candidateRecordHash, std::move(record.value())});
                 !appended) {
                 sweepBoundExhausted_ = appended.error().code == ErrorCode::ResourceExhausted;
-                scanBudgetExhausted_ = sweepBoundExhausted_; // workspace full (sized by budget)
+                scanBudgetExhausted_ = SweepStore::isWorkspaceFull(appended.error());
                 return appended.error();
             }
             continue;
@@ -1452,6 +1451,8 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
     if (sweepStore_) {
         if (auto finalized = finalizeExclusiveSweep(); !finalized) {
             sweepBoundExhausted_ = finalized.error().code == ErrorCode::ResourceExhausted;
+            // Winner selection and sealing write to the same budget-sized workspace.
+            scanBudgetExhausted_ = SweepStore::isWorkspaceFull(finalized.error());
             return finalized.error();
         }
         guard.keep = true;
@@ -1745,13 +1746,15 @@ bool MemorySyncLoop::growScanBudget() {
     }
     const auto next =
         scanBudget_ > ceiling / 4 ? ceiling : std::max<std::size_t>(scanBudget_ * 4, 1);
-    // The workspace holds roughly the bytes it scans; do not grow into a full disk.
+    // The workspace may grow to its page cap (several times the budget), so require free
+    // space for the whole cap rather than for the budget alone.
+    const auto workspaceCap = SweepStore::workspaceCapBytes(next);
     std::error_code ec;
     const auto space = std::filesystem::space(sweepDirectory_, ec);
-    if (ec || space.available < next) {
+    if (ec || space.available < workspaceCap) {
         spdlog::warn("[MemorySync] complete sweep needs more than its {} MiB scan budget, but "
-                     "{} has too little free space to raise it to {} MiB",
-                     scanBudget_ >> 20, sweepDirectory_.string(), next >> 20);
+                     "{} has too little free space for a {} MiB workspace",
+                     scanBudget_ >> 20, sweepDirectory_.string(), workspaceCap >> 20);
         return false;
     }
     spdlog::info("[MemorySync] complete sweep exceeded its {} MiB scan budget; retrying with "
