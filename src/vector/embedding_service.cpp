@@ -34,6 +34,7 @@
 #ifndef _WIN32
 #include <sys/resource.h>
 #endif
+#include <yams/common/log_rate_limiter.h>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -475,8 +476,12 @@ void EmbeddingService::runRepair(const yams::compat::stop_token& stopToken) {
         // Align schema only when missing; avoid dropping existing tables during repair
         if (auto aligned = yams::vector::ensureVectorSchemaAligned(dataPath_, repairDim, false);
             !aligned) {
-            spdlog::warn("Repair thread: vector schema alignment failed: {}",
-                         aligned.error().message);
+            static yams::common::LogRateLimiter alignFailureLog{std::chrono::minutes(10)};
+            if (auto held = alignFailureLog.admit()) {
+                spdlog::warn("Repair thread: vector schema alignment failed: {}{}",
+                             aligned.error().message,
+                             yams::common::LogRateLimiter::suppressedSuffix(*held));
+            }
         }
         vdbConfig.create_if_missing = true;
 
@@ -741,16 +746,14 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                 cfgDim = actualDim;
             }
             if (cfgDim != vdbConfig.embedding_dim) {
-                spdlog::warn("EmbeddingService: vector DB dim={} != target dim={}, attempting "
-                             "non-destructive align",
-                             cfgDim, vdbConfig.embedding_dim);
-                if (auto aligned = yams::vector::ensureVectorSchemaAligned(
-                        dataPath_, vdbConfig.embedding_dim, false);
-                    !aligned) {
-                    spdlog::warn("EmbeddingService: vector schema alignment failed: {}",
-                                 aligned.error().message);
-                }
-                // Recreate DB handle after alignment
+                // Rows at another dimension are never rewritten here; that takes an explicit,
+                // destructive recreate.
+                spdlog::warn("EmbeddingService: vector DB dim={} != target dim={}; recreate the "
+                             "vector tables at dim={} (`yams model` after switching models, or "
+                             "`yams doctor --recreate-vectors --dim {}`), then re-embed",
+                             cfgDim, vdbConfig.embedding_dim, vdbConfig.embedding_dim,
+                             vdbConfig.embedding_dim);
+                // Reopen the DB handle, as before.
                 vector::VectorDatabaseConfig alignedCfg = vdbConfig;
                 vectorDb = std::make_unique<vector::VectorDatabase>(alignedCfg);
                 if (auto reinit = vectorDb->initializeChecked(); !reinit) {
