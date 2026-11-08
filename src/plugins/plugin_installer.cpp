@@ -13,12 +13,16 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <fstream>
 #include <optional>
 #include <regex>
 #include <set>
+#include <string>
 #include <string_view>
+#include <system_error>
+#include <vector>
 
 #ifdef _WIN32
 #include <ShlObj.h>
@@ -232,51 +236,109 @@ Error archiveError(ErrorCode code, struct archive* handle, const std::string& wh
     return Error{code, what + ": " + (detail != nullptr ? detail : "unknown libarchive error")};
 }
 
-// A symlink may only point at a relative target that stays inside `root`. ".." is allowed only
-// as a leading run ("../libfoo.so.1", common for versioned libraries): those steps walk the
-// link's own ancestors, which are real directories because SECURE_SYMLINKS refuses to create an
-// entry under a symlinked parent, so the lexical result matches the filesystem. A ".." after a
-// name could step back out of a symlinked directory to somewhere the lexical check cannot see,
-// so it is rejected.
+// The components of `path` below `root` ("a/b/c" -> {a, b, c}), or nullopt if it is not below.
+std::optional<std::vector<fs::path>> componentsBelow(const fs::path& root, const fs::path& path) {
+    const fs::path rel = absoluteLexical(path).lexically_relative(absoluteLexical(root));
+    if (rel.empty()) {
+        return std::nullopt;
+    }
+    std::vector<fs::path> parts;
+    for (const auto& part : rel) {
+        if (part == "..") {
+            return std::nullopt;
+        }
+        if (!part.empty() && part != ".") {
+            parts.push_back(part);
+        }
+    }
+    return parts;
+}
+
+// A symlink may only point at a relative target that stays inside `root`. The target is walked
+// one component at a time from the link's directory, and a ".." that would climb above `root`
+// is rejected even if later components would come back down by name: "../evil/x" from
+// root/evil names a sibling of `root` once `root` is moved somewhere else.
+//
+// ".." is allowed only as a leading run ("../libfoo.so.1", common for versioned libraries):
+// those steps walk the link's own ancestors, which are real directories because
+// SECURE_SYMLINKS refuses to create an entry under a symlinked parent. A ".." after a name could
+// step back out of a symlinked directory, so it is rejected. A link that names itself is
+// rejected too; longer cycles are caught by scanExtractedPlugin().
 bool isSymlinkTargetSafe(const fs::path& root, const fs::path& linkPath, const fs::path& target) {
     if (target.empty() || target.is_absolute() || target.has_root_name() ||
         target.has_root_directory()) {
         return false;
     }
+    auto linkParts = componentsBelow(root, linkPath);
+    if (!linkParts || linkParts->empty()) {
+        return false;
+    }
+    std::vector<fs::path> resolved(linkParts->begin(), linkParts->end() - 1); // link's directory
     bool seenName = false;
     for (const auto& part : target) {
-        if (part == "..") {
-            if (seenName) {
-                return false;
-            }
-        } else if (!part.empty() && part != ".") {
-            seenName = true;
-        }
-    }
-    const fs::path resolved = (linkPath.parent_path() / target).lexically_normal();
-    return isPathWithin(root, resolved);
-}
-
-// After the plugin directory is chosen, every symlink in it must still resolve inside it; a
-// link that only stayed inside the wider extraction root would point at a sibling of the
-// installed plugin once it is moved into the install directory.
-Result<void> verifySymlinksWithin(const fs::path& pluginRoot) {
-    std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(pluginRoot, ec);
-         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (!it->is_symlink(ec)) {
+        if (part.empty() || part == ".") {
             continue;
         }
-        const fs::path target = fs::read_symlink(it->path(), ec);
-        if (ec || !isSymlinkTargetSafe(pluginRoot, it->path(), target)) {
-            return Error{ErrorCode::InvalidPath, "Symlink points outside the plugin directory: " +
-                                                     it->path().filename().string()};
+        if (part == "..") {
+            if (seenName || resolved.empty()) {
+                return false;
+            }
+            resolved.pop_back();
+            continue;
+        }
+        seenName = true;
+        resolved.push_back(part);
+    }
+    return resolved != *linkParts;
+}
+
+// Walks the chosen plugin directory without following links and without throwing. Every
+// symlink must still resolve inside it (a link that only stayed inside the wider extraction
+// root would point at a sibling of the installed plugin after the move) and must not loop.
+// Returns the total size of regular files; links are not counted.
+Result<std::uint64_t> scanExtractedPlugin(const fs::path& pluginRoot) {
+    std::error_code ec;
+    std::uint64_t totalBytes = 0;
+    auto it = fs::recursive_directory_iterator(pluginRoot, ec);
+    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const fs::path& path = it->path();
+        const auto status = it->symlink_status(ec);
+        if (ec) {
+            break;
+        }
+        if (fs::is_symlink(status)) {
+            const fs::path target = fs::read_symlink(path, ec);
+            if (ec || !isSymlinkTargetSafe(pluginRoot, path, target)) {
+                return Error{ErrorCode::InvalidPath,
+                             "Symlink points outside the plugin directory: " +
+                                 path.filename().string()};
+            }
+            std::error_code followEc;
+            (void)fs::status(path, followEc);
+            if (followEc && followEc != std::errc::no_such_file_or_directory) {
+                return Error{ErrorCode::InvalidPath, "Symlink cannot be resolved (" +
+                                                         followEc.message() +
+                                                         "): " + path.filename().string()};
+            }
+        } else if (fs::is_regular_file(status)) {
+            const auto size = fs::file_size(path, ec);
+            if (ec) {
+                break;
+            }
+            totalBytes += size;
         }
     }
     if (ec) {
         return Error{ErrorCode::IOError, "Failed to scan extracted plugin: " + ec.message()};
     }
-    return {};
+    return totalBytes;
+}
+
+// Top-level archive metadata that is never plugin content: macOS resource forks and Finder
+// files that archivers on macOS add next to the real entries.
+bool isArchiveJunk(const fs::path& name) {
+    const std::string s = name.filename().string();
+    return s == "__MACOSX" || s == ".DS_Store" || s.rfind("._", 0) == 0;
 }
 
 // Extract a tar.gz archive into `destDir`, refusing any entry that could write outside it.
@@ -426,19 +488,33 @@ Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir
 
 // The directory whose contents become the installed plugin: the extraction root, unless it
 // holds exactly one entry and that entry is a real directory (the "<name>/..." layout).
-fs::path selectPluginSourceDir(const fs::path& extractDir) {
+// Top-level archive junk (isArchiveJunk) is removed first so it neither changes that decision
+// nor gets installed.
+Result<fs::path> selectPluginSourceDir(const fs::path& extractDir) {
     std::error_code ec;
-    std::optional<fs::path> onlyChild;
-    size_t count = 0;
-    for (const auto& child : fs::directory_iterator(extractDir, ec)) {
-        if (++count > 1) {
-            return extractDir;
-        }
-        onlyChild = child.path();
+    std::vector<fs::path> children;
+    for (auto it = fs::directory_iterator(extractDir, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        children.push_back(it->path());
     }
-    if (count == 1 && onlyChild &&
-        fs::symlink_status(*onlyChild, ec).type() == fs::file_type::directory) {
-        return *onlyChild;
+    if (ec) {
+        return Error{ErrorCode::IOError, "Failed to list extracted plugin: " + ec.message()};
+    }
+
+    std::vector<fs::path> content;
+    for (const auto& child : children) {
+        if (!isArchiveJunk(child)) {
+            content.push_back(child);
+            continue;
+        }
+        if (auto removed = removeAllScoped(child, extractDir, "archive metadata"); !removed) {
+            return removed.error();
+        }
+    }
+
+    if (content.size() == 1 &&
+        fs::symlink_status(content.front(), ec).type() == fs::file_type::directory) {
+        return content.front();
     }
     return extractDir;
 }
@@ -526,13 +602,58 @@ public:
             return versionValidation.error();
         }
 
-        // Every installed archive is verified before it is extracted or trusted. A caller-supplied
-        // checksum overrides the repository's; with neither there is nothing to verify against,
-        // so refuse rather than install (and auto-trust) an unverified download. A dry run
+        result.pluginName = info.name;
+        result.version = info.version;
+
+        // Determine install directory
+        fs::path targetDir = options.installDir.empty() ? installDir_ : options.installDir;
+        fs::path pluginDir = targetDir / info.name;
+
+        // Check if already installed (before the checksum checks, so a reinstall without
+        // --force reports the real reason).
+        auto installedVer = installedVersion(info.name);
+        if (installedVer && installedVer.value()) {
+            result.wasUpgrade = true;
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+            result.previousVersion = *installedVer.value();
+            if (!options.force && result.previousVersion == info.version) {
+                return Error{ErrorCode::InvalidOperation,
+                             "Plugin " + info.name + "@" + info.version +
+                                 " is already installed. Use --force to reinstall."};
+            }
+        }
+
+        // Every installed archive is verified before it is extracted or trusted. With no
+        // checksum from the caller or the repository there is nothing to verify against, so
+        // refuse rather than install (and auto-trust) an unverified download. A dry run
         // downloads and trusts nothing, so it only reports that a checksum will be required.
-        const std::string declaredChecksum = options.checksum.value_or(info.checksum);
-        std::string expectedChecksum;
-        if (declaredChecksum.empty()) {
+        std::optional<std::string> callerChecksum;
+        if (options.checksum && !options.checksum->empty()) {
+            auto normalized = normalizeSha256(*options.checksum);
+            if (!normalized) {
+                return normalized.error(); // InvalidArgument: the caller's value is malformed
+            }
+            callerChecksum = normalized.value();
+        }
+        std::optional<std::string> repoChecksum;
+        if (!info.checksum.empty()) {
+            auto normalized = normalizeSha256(info.checksum);
+            if (!normalized) {
+                return Error{ErrorCode::InvalidData,
+                             "The plugin repository published a malformed checksum for " +
+                                 info.name + "@" + info.version + ": " + info.checksum};
+            }
+            repoChecksum = normalized.value();
+        }
+        if (callerChecksum && repoChecksum && *callerChecksum != *repoChecksum) {
+            return Error{ErrorCode::InvalidData,
+                         "--checksum " + *callerChecksum +
+                             " does not match the checksum the plugin repository published for " +
+                             info.name + "@" + info.version + " (" + *repoChecksum + ")"};
+        }
+
+        std::string expectedChecksum = callerChecksum.value_or(repoChecksum.value_or(""));
+        if (expectedChecksum.empty()) {
             if (!options.dryRun) {
                 const std::string reason =
                     isUrl
@@ -546,32 +667,6 @@ public:
                                  "`yams plugin update <name>`)."};
             }
             result.checksumRequired = true;
-        } else {
-            auto expectedChecksumRes = normalizeSha256(declaredChecksum);
-            if (!expectedChecksumRes) {
-                return expectedChecksumRes.error();
-            }
-            expectedChecksum = expectedChecksumRes.value();
-        }
-
-        result.pluginName = info.name;
-        result.version = info.version;
-
-        // Determine install directory
-        fs::path targetDir = options.installDir.empty() ? installDir_ : options.installDir;
-        fs::path pluginDir = targetDir / info.name;
-
-        // Check if already installed
-        auto installedVer = installedVersion(info.name);
-        if (installedVer && installedVer.value()) {
-            result.wasUpgrade = true;
-            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-            result.previousVersion = *installedVer.value();
-            if (!options.force && result.previousVersion == info.version) {
-                return Error{ErrorCode::InvalidOperation,
-                             "Plugin " + info.name + "@" + info.version +
-                                 " is already installed. Use --force to reinstall."};
-            }
         }
 
         if (options.dryRun) {
@@ -627,49 +722,76 @@ public:
 
         // Plugin content is either the archive root or its single top-level directory. Validate
         // it before touching any existing installation.
-        const fs::path sourceDir = selectPluginSourceDir(extractDir);
-        if (auto linkCheck = verifySymlinksWithin(sourceDir); !linkCheck) {
+        auto sourceDirRes = selectPluginSourceDir(extractDir);
+        if (!sourceDirRes) {
             (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
-            return linkCheck.error();
+            return sourceDirRes.error();
+        }
+        const fs::path sourceDir = sourceDirRes.value();
+        auto scanRes = scanExtractedPlugin(sourceDir);
+        if (!scanRes) {
+            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
+            return scanRes.error();
         }
 
         // Install (move to plugin directory)
         notifyProgress(InstallProgress::Stage::Installing, "Installing plugin...");
-
-        // Remove existing installation if upgrading
-        if (result.wasUpgrade) {
-            auto removeRes = removeAllScoped(pluginDir, targetDir, "plugin install");
-            if (!removeRes) {
-                (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
-                return removeRes.error();
-            }
-        }
 
         if (!yams::common::ensureDirectories(targetDir)) {
             (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return Error{ErrorCode::IOError, "Failed to create plugin directory"};
         }
 
-        // Move extracted content to plugin directory
+        // Stage an upgrade: set the existing installation aside, put the new one in place, and
+        // only then delete the old one, so a failed move or copy restores the previous plugin.
+        fs::path backupDir;
+        if (fs::symlink_status(pluginDir, ec).type() != fs::file_type::not_found && !ec) {
+            backupDir =
+                targetDir /
+                ("." + info.name + ".yams-backup-" +
+                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            fs::rename(pluginDir, backupDir, ec);
+            if (ec) {
+                (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
+                return Error{ErrorCode::IOError,
+                             "Failed to set aside the existing plugin: " + ec.message()};
+            }
+        }
+        ec.clear();
+
         fs::rename(sourceDir, pluginDir, ec);
         if (ec) {
             // If rename fails (cross-device), fall back to copy. Symlinks were validated to stay
-            // inside the archive, so copy them as links rather than following them.
+            // inside the plugin, so copy them as links rather than following them.
+            ec.clear();
             fs::copy(sourceDir, pluginDir,
                      fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
-            if (ec) {
-                (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
-                return Error{ErrorCode::IOError, "Failed to install plugin: " + ec.message()};
+        }
+        if (ec) {
+            const std::string message = "Failed to install plugin: " + ec.message();
+            std::error_code cleanupEc;
+            if (fs::symlink_status(pluginDir, cleanupEc).type() != fs::file_type::not_found) {
+                (void)removeAllScoped(pluginDir, targetDir, "partial plugin install");
+            }
+            if (!backupDir.empty()) {
+                fs::rename(backupDir, pluginDir, cleanupEc);
+                if (cleanupEc) {
+                    spdlog::error("Failed to restore previous plugin '{}' from '{}': {}",
+                                  pluginDir.string(), backupDir.string(), cleanupEc.message());
+                }
+            }
+            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
+            return Error{ErrorCode::IOError, message};
+        }
+        if (!backupDir.empty()) {
+            if (auto removed = removeAllScoped(backupDir, targetDir, "previous plugin"); !removed) {
+                spdlog::warn("Installed {} but could not remove the previous copy at '{}': {}",
+                             info.name, backupDir.string(), removed.error().message);
             }
         }
 
         result.installedPath = pluginDir;
-        result.sizeBytes = 0;
-        for (const auto& entry : fs::recursive_directory_iterator(pluginDir)) {
-            if (entry.is_regular_file()) {
-                result.sizeBytes += entry.file_size();
-            }
-        }
+        result.sizeBytes = scanRes.value();
 
         // Cleanup temp directory
         (void)removeAllScoped(tempDir, tempRoot, "plugin temp");

@@ -541,6 +541,55 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install verifies the archive checksum 
         CHECK_FALSE(fs::exists(pluginDir));
     }
 
+    SECTION("a caller checksum that matches the repository's is accepted") {
+        repo->info.checksum = actualChecksum;
+        options.checksum = actualChecksum;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("a caller checksum that contradicts the repository's is refused") {
+        repo->info.checksum = actualChecksum;
+        options.checksum = "sha256:" + std::string(64, 'a');
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidData));
+        CHECK((result.error().message.find(actualChecksum) != std::string::npos));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+    }
+
+    SECTION("a malformed repository checksum is reported as bad repository data") {
+        repo->info.checksum = "sha256:not-a-digest";
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidData));
+        CHECK((result.error().message.find("repository") != std::string::npos));
+        CHECK_FALSE(fs::exists(pluginDir));
+    }
+
+    SECTION("reinstalling the installed version reports that, not the missing checksum") {
+        fs::create_directories(pluginDir);
+        std::ofstream(pluginDir / "yams-plugin.json") << R"({"version": "1.0.0"})";
+        repo->info.checksum.clear();
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidOperation));
+    }
+
     SECTION("a dry run without a checksum reports that one will be required") {
         repo->info.checksum.clear();
         options.dryRun = true;
@@ -639,7 +688,41 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
         CHECK((fs::is_directory(pluginDir / "current")));
         CHECK((fs::canonical(pluginDir / "current") == fs::canonical(pluginDir / "lib")));
 
+        CHECK((result.value().sizeBytes == 3u)); // only libfoo.so.1 ("FOO"); links not counted
         CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("macOS archive metadata does not hide a single top-level directory") {
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"},
+                                   {"._plugin", "resource fork"},
+                                   {".DS_Store", "finder"},
+                                   {"__MACOSX/", "", TarType::Directory},
+                                   {"__MACOSX/._x", "fork"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "yams-plugin.json")));
+        CHECK_FALSE(fs::exists(pluginDir / "._plugin"));
+        CHECK_FALSE(fs::exists(pluginDir / ".DS_Store"));
+        CHECK_FALSE(fs::exists(pluginDir / "__MACOSX"));
+    }
+
+    SECTION("an upgrade replaces the previous installation") {
+        fs::create_directories(pluginDir);
+        std::ofstream(pluginDir / "yams-plugin.json") << R"({"version": "0.9.0"})";
+        std::ofstream(pluginDir / "stale.so") << "OLD";
+
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().wasUpgrade));
+        CHECK((result.value().previousVersion == "0.9.0"));
+        CHECK_FALSE(fs::exists(pluginDir / "stale.so"));
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+        auto listed = installer->listInstalled();
+        REQUIRE((listed.has_value()));
+        CHECK((listed.value() == std::vector<std::string>{"fake-plugin"})); // no backup left
     }
 }
 
@@ -701,6 +784,72 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects archive links and root
 
     SECTION("a symlink entry named '.'") {
         expectRejected(installFrom({{".", "", TarType::Symlink, "plugin"}}));
+    }
+
+    SECTION("a symlink that climbs out of the plugin directory and back in by name") {
+        // Resolves to evil/x lexically, but after the move into <install>/fake-plugin it would
+        // name <install>/evil/x, another plugin.
+        expectRejected(installFrom({{"evil/", "", TarType::Directory},
+                                    {"evil/x", "X"},
+                                    {"evil/lib.so", "", TarType::Symlink, "../evil/x"}}));
+    }
+
+    SECTION("an archive-root symlink that climbs out through the extraction directory name") {
+        expectRejected(installFrom({{"x", "X"}, {"l", "", TarType::Symlink, "../extracted/x"}}));
+    }
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install rejects looping symlinks without throwing",
+                 "[plugins][installer][security]") {
+    // A unique plugin name makes this test's install temp directories identifiable.
+    const std::string name = "loop-" + testDir.filename().string();
+    const fs::path pluginDir = installDir / name;
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = name;
+    repo->info.version = "1.0.0";
+
+    auto leftoverTempDirs = [&] {
+        const std::string prefix = "yams-plugin-" + name + "-";
+        size_t count = 0;
+        std::error_code ec;
+        for (auto it = fs::directory_iterator(fs::temp_directory_path(), ec);
+             !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            if (it->path().filename().string().rfind(prefix, 0) == 0) {
+                ++count;
+            }
+        }
+        return count;
+    };
+
+    auto installFrom = [&](const std::vector<TarEntry>& entries) {
+        const fs::path archive = writePluginArchive(testDir / "source" / "loop.tar.gz", entries);
+        repo->info.downloadUrl = fileUrl(archive);
+        repo->info.checksum = sha256Of(archive);
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+        return installer->install(name, InstallOptions{});
+    };
+
+    SECTION("a link to itself") {
+        Result<InstallResult> result = Error{ErrorCode::Unknown, "not run"};
+        REQUIRE_NOTHROW(result = installFrom({{"plugin/", "", TarType::Directory},
+                                              {"plugin/l", "", TarType::Symlink, "l"}}));
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidPath));
+        CHECK_FALSE(fs::exists(fs::symlink_status(pluginDir)));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+        CHECK((leftoverTempDirs() == 0u));
+    }
+
+    SECTION("two links that point at each other") {
+        Result<InstallResult> result = Error{ErrorCode::Unknown, "not run"};
+        REQUIRE_NOTHROW(result = installFrom({{"plugin/", "", TarType::Directory},
+                                              {"plugin/a", "", TarType::Symlink, "b"},
+                                              {"plugin/b", "", TarType::Symlink, "a"}}));
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidPath));
+        CHECK_FALSE(fs::exists(fs::symlink_status(pluginDir)));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+        CHECK((leftoverTempDirs() == 0u));
     }
 }
 
