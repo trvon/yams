@@ -312,7 +312,6 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
     ctx.getKgStore = [services] { return services->getKgStore(); };
     ctx.getGraphComponent = [services] { return services->getGraphComponent(); };
     ctx.getPostIngestQueue = [services] { return services->getPostIngestQueue(); };
-    ctx.getRepairManager = [services] { return services->getRepairManager(); };
     ctx.getModelProvider = [services] { return services->getModelProvider(); };
     ctx.getEmbeddingQueuedJobs = [services] { return services->getEmbeddingQueuedJobs(); };
     ctx.getEmbeddingInFlightJobs = [services] { return services->getEmbeddingInFlightJobs(); };
@@ -395,13 +394,6 @@ void RepairService::start() {
         });
 
     spdlog::debug("RepairService started (enable={}, batch={})", cfg_.enable, cfg_.maxBatch);
-
-    // Enqueue initial PathTreeRepair job
-    static auto pathTreeQueue =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PathTreeJob>(
-            "path_tree_repair_jobs", 32);
-    InternalEventBus::PathTreeJob initialJob{1, true};
-    (void)pathTreeQueue->try_push(initialJob);
 }
 
 void RepairService::stop() {
@@ -455,14 +447,6 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
     std::uint32_t deferTicks = 0;
     const std::uint32_t minDeferTicks = shutdownState->config.initialScanDeferTicks;
 
-    static auto pruneQueue =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PruneJob>("prune_jobs",
-                                                                                       128);
-    static auto pathTreeQueue =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PathTreeJob>(
-            "path_tree_repair_jobs", 32);
-
-    bool pathTreeRepairDone = false;
     auto nextVectorVacuum = std::chrono::steady_clock::now() + cfg_.maintenanceDelay;
     auto nextSessionExpiry = std::chrono::steady_clock::now() + cfg_.maintenanceDelay;
 
@@ -477,31 +461,9 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         if (fsm.hints().closing)
             break;
 
-        bool didWork = false;
-
-        // Process prune jobs
-        InternalEventBus::PruneJob pruneJob;
-        if (pruneQueue->try_pop(pruneJob)) {
-            didWork = true;
-            InternalEventBus::instance().incPostConsumed();
-            spdlog::debug("RepairService: prune job {} needs storage engine refactor",
-                          pruneJob.requestId);
-        }
-
-        // Process PathTreeRepair jobs
-        if (!pathTreeRepairDone) {
-            InternalEventBus::PathTreeJob pathTreeJob;
-            if (pathTreeQueue->try_pop(pathTreeJob)) {
-                didWork = true;
-                InternalEventBus::instance().incPostConsumed();
-                co_await processPathTreeRepair();
-                pathTreeRepairDone = true;
-            }
-        }
-
-        // Idle backoff
+        // Idle backoff: every tick waits one poll interval (longer while the daemon is idle).
         bool sleptIdleTick = false;
-        if (!didWork) {
+        { // scoped so snap/pollMs stay local to the backoff
             auto snap = TuningSnapshotRegistry::instance().get();
             uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
             if (snap && snap->daemonIdle) {
@@ -988,56 +950,6 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startA
         spdlog::warn("RepairService: initial scan exception: {}", e.what());
     }
     co_return;
-}
-
-boost::asio::awaitable<void> RepairService::processPathTreeRepair() {
-    using namespace std::chrono_literals;
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-
-    auto repairMgr = ctx_.getRepairManager ? ctx_.getRepairManager() : nullptr;
-    auto metaRepo = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
-    if (!repairMgr || !metaRepo)
-        co_return;
-
-    try {
-        auto docsResult = metaRepo->queryDocuments(metadata::DocumentQueryOptions{});
-        if (!docsResult || docsResult.value().empty())
-            co_return;
-
-        uint64_t created = 0, errors = 0;
-        const size_t batchSz = TuneAdvisor::repairStartupBatchSize();
-
-        for (size_t i = 0; i < docsResult.value().size(); i += batchSz) {
-            if (!running_.load(std::memory_order_relaxed))
-                break;
-            size_t batchEnd = std::min(i + batchSz, docsResult.value().size());
-            for (size_t j = i; j < batchEnd; ++j) {
-                const auto& doc = docsResult.value()[j];
-                if (doc.filePath.empty())
-                    continue;
-                auto existingNode = metaRepo->findPathTreeNodeByFullPath(doc.filePath);
-                if (existingNode && existingNode.value().has_value())
-                    continue;
-                try {
-                    auto treeRes = metaRepo->upsertPathTreeForDocument(doc, doc.id, true,
-                                                                       std::span<const float>());
-                    if (treeRes)
-                        ++created;
-                    else
-                        ++errors;
-                } catch (...) {
-                    ++errors;
-                }
-            }
-            timer.expires_after(10ms);
-            co_await timer.async_wait(boost::asio::use_awaitable);
-        }
-
-        spdlog::debug("RepairService: PathTreeRepair complete (created={}, errors={})", created,
-                      errors);
-    } catch (const std::exception& e) {
-        spdlog::debug("RepairService: PathTreeRepair exception: {}", e.what());
-    }
 }
 
 bool RepairService::backfillLegacySnapshotKeysBatch() {

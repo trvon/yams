@@ -14,7 +14,6 @@
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/extraction/extraction_util.h>
-#include <yams/integrity/repair_manager.h>
 #include <yams/metadata/knowledge_graph_store.h>
 
 #include <boost/asio/awaitable.hpp>

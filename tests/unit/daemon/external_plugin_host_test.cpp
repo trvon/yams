@@ -371,6 +371,38 @@ TEST_CASE("ExternalPluginHost - Scan Empty Directory", "[external-plugin][host][
     CHECK(result.value().empty());
 }
 
+TEST_CASE("ExternalPluginHost - Scan skips dot-prefixed directories",
+          "[external-plugin][host][scan]") {
+    ExternalPluginHostFixture fixture;
+    ExternalPluginHostConfig config;
+    ExternalPluginHost host(nullptr, fixture.trustFile_, config);
+
+    const auto scanDir = fixture.tempDir_ / "dot_dir_scan";
+    auto writePlugin = [](const fs::path& dir, const std::string& name) {
+        fs::create_directories(dir);
+        nlohmann::json manifest;
+        manifest["name"] = name;
+        manifest["version"] = "1.0.0";
+        manifest["entry"] = {{"fallback_cmd", nlohmann::json::array({"python", "plugin.py"})}};
+        std::ofstream(dir / "yams-plugin.json") << manifest.dump(2);
+    };
+    // A plugin directory the installer staged (or set aside during an upgrade).
+    writePlugin(scanDir / ".hidden_plugin", "hidden_plugin");
+    writePlugin(scanDir / "visible_plugin", "visible_plugin");
+
+    auto result = host.scanDirectory(scanDir);
+
+    REQUIRE(result.has_value());
+    bool sawVisible = false;
+    bool sawHidden = false;
+    for (const auto& desc : result.value()) {
+        sawVisible = sawVisible || desc.name == "visible_plugin";
+        sawHidden = sawHidden || desc.name == "hidden_plugin";
+    }
+    CHECK(sawVisible);
+    CHECK_FALSE(sawHidden);
+}
+
 TEST_CASE("ExternalPluginHost - Scan Non-Existent Directory", "[external-plugin][host][scan]") {
     ExternalPluginHostFixture fixture;
     ExternalPluginHostConfig config;

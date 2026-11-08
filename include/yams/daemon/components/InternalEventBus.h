@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -28,7 +29,6 @@ template <typename... Args> inline void error(const char*, Args&&...) {}
 #endif
 #include <yams/daemon/components/knowledge_graph_completion.h>
 #include <yams/daemon/ipc/ipc_protocol_requests.h>
-#include <yams/integrity/repair_manager.h>
 
 namespace yams::daemon {
 
@@ -435,18 +435,6 @@ public:
     struct ModelLoadFailedEvent {
         std::string modelId;
         std::string error;
-    };
-
-    // PBI-062: Prune job
-    struct PruneJob {
-        uint64_t requestId; // To match response
-        yams::integrity::PruneConfig config;
-    };
-
-    // PathTreeRepair job - creates missing path tree entries for documents
-    struct PathTreeJob {
-        uint64_t requestId{0}; // To match response
-        bool runOnce{true};    // Run once at startup vs periodic
     };
 
     // Storage garbage collection job (routed through bus for centralized dispatch)

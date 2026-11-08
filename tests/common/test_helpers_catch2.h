@@ -86,7 +86,9 @@ inline std::filesystem::path make_temp_dir(std::string_view prefix = "yams_test_
             return candidate;
         }
     }
-    return base;
+    // Never fall back to the shared temp root: callers remove_all() the returned path.
+    throw std::runtime_error("make_temp_dir: failed to create a unique directory under " +
+                             base.string());
 }
 
 /**

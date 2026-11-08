@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -2001,6 +2002,87 @@ TEST_CASE("Daemon client concurrent requests", "[daemon][socket][concurrency]") 
         REQUIRE(listResult.has_value());
         REQUIRE(listResult.value().items.size() >= 3);
     }
+}
+
+TEST_CASE("Daemon client parallel status from independent clients",
+          "[daemon][socket][concurrency]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    // Fail, don't skip, when the daemon cannot start: this case must actually run.
+    DaemonHarness harness;
+    CAPTURE(harness.socketPath());
+    REQUIRE(harness.startWithRetry(30s, 3));
+
+    static constexpr int kClients = 4;
+    static constexpr int kRequestsPerClient = 5;
+    // Generous per-call bound for arm64/TSAN runners; a failed status() is still a bug.
+    static constexpr auto kStatusTimeout = 15s;
+
+    // Pooled clients share one AsioConnectionPool per socket path, so disable pooling: each
+    // status() opens its own daemon connection and the daemon serves kClients sessions at once.
+    std::vector<std::unique_ptr<DaemonClient>> clients;
+    clients.reserve(kClients);
+    for (int i = 0; i < kClients; ++i) {
+        ClientConfig config;
+        config.socketPath = harness.socketPath();
+        config.singleUseConnections = true;
+        config.connectTimeout = 5s;
+        config.requestTimeout = kStatusTimeout;
+        config.autoStart = false;
+        clients.push_back(std::make_unique<DaemonClient>(config));
+
+        yams::Result<void> connectResult;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            connectResult = yams::cli::run_sync(clients.back()->connect(), 5s);
+            if (connectResult.has_value())
+                break;
+            std::this_thread::sleep_for(200ms);
+        }
+        INFO("client " << i);
+        REQUIRE(connectResult.has_value());
+    }
+
+    // Declared before the promise so it is destroyed after it: if std::async throws before
+    // set_value(), the promise breaks first, waiting workers bail out, and only then do the
+    // futures' destructors join them.
+    std::vector<std::future<std::string>> workers;
+    workers.reserve(kClients);
+
+    // Release every worker at once so the status() calls overlap.
+    std::promise<void> startSignal;
+    std::shared_future<void> start = startSignal.get_future().share();
+
+    for (int i = 0; i < kClients; ++i) {
+        workers.push_back(std::async(std::launch::async, [&clients, start, i]() -> std::string {
+            try {
+                start.get();
+            } catch (const std::future_error&) {
+                return "client " + std::to_string(i) + ": start signal abandoned";
+            }
+            for (int req = 0; req < kRequestsPerClient; ++req) {
+                auto sres = yams::cli::run_sync(clients[i]->status(), kStatusTimeout);
+                if (!sres.has_value()) {
+                    return "client " + std::to_string(i) + " request " + std::to_string(req) +
+                           ": " + sres.error().message;
+                }
+            }
+            return {};
+        }));
+    }
+    startSignal.set_value();
+
+    // Each worker issues kRequestsPerClient sequential calls bounded by kStatusTimeout each.
+    const auto deadline =
+        std::chrono::steady_clock::now() + kRequestsPerClient * kStatusTimeout + 10s;
+    for (auto& worker : workers) {
+        REQUIRE(worker.wait_until(deadline) == std::future_status::ready);
+        const auto failure = worker.get();
+        INFO(failure);
+        CHECK(failure.empty());
+    }
+
+    REQUIRE(harness.daemon() != nullptr);
+    CHECK(harness.daemon()->isRunning());
 }
 
 TEST_CASE("Daemon client timeout behavior", "[daemon][socket][timeout]") {

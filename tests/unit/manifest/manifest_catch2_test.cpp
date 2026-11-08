@@ -19,28 +19,13 @@
 #include <thread>
 #include <type_traits>
 
+#include "../../common/test_helpers_catch2.h"
+
 using namespace yams;
 using namespace yams::manifest;
 using namespace yams::chunking;
 
 namespace {
-
-std::filesystem::path make_temp_dir(std::string_view prefix = "yams_manifest_test_") {
-    namespace fs = std::filesystem;
-    const auto base = fs::temp_directory_path();
-    std::uniform_int_distribution<int> dist(0, 9999);
-    thread_local std::mt19937_64 rng{std::random_device{}()};
-    for (int attempt = 0; attempt < 512; ++attempt) {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        auto candidate =
-            base / (std::string(prefix) + std::to_string(stamp) + "_" + std::to_string(dist(rng)));
-        std::error_code ec;
-        if (fs::create_directories(candidate, ec)) {
-            return candidate;
-        }
-    }
-    return base;
-}
 
 std::vector<std::byte> generateRandomBytes(std::size_t size) {
     static thread_local std::mt19937_64 engine{std::random_device{}()};
@@ -98,7 +83,7 @@ std::vector<std::byte> makeBinaryManifestFixture(bool legacy64BitFlags,
 
 struct ManifestTestFixture {
     ManifestTestFixture() {
-        testDir = make_temp_dir();
+        testDir = yams::test::make_temp_dir("yams_manifest_test_");
 
         ManifestManager::Config config{.enableCompression = false, // Disable for predictable tests
                                        .enableChecksums = true,
