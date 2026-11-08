@@ -51,11 +51,26 @@ struct VectorSchemaRepairFixture {
         backend.close();
     }
 
+    // Create the tables at `dim` with an empty `vectors` and one `entity_vectors` row at `dim`.
+    void seedEntityOnly(std::size_t dim) const {
+        std::filesystem::create_directories(dataDir);
+        SqliteVecBackend backend;
+        REQUIRE(backend.initialize(dbPath()).has_value());
+        REQUIRE(backend.createTables(dim).has_value());
+        EntityVectorRecord rec;
+        rec.node_key = "node-seed";
+        rec.embedding.assign(dim, 0.25f);
+        rec.content = "seed";
+        REQUIRE(backend.insertEntityVector(rec).has_value());
+        backend.close();
+    }
+
     struct Snapshot {
         bool vectorsTable = false;
         bool entityVectorsTable = false;
         std::optional<std::size_t> storedDim;
         std::size_t rows = 0;
+        std::size_t entityRows = 0;
     };
 
     Snapshot snapshot() const {
@@ -69,6 +84,9 @@ struct VectorSchemaRepairFixture {
         s.storedDim = backend.getStoredEmbeddingDimension();
         if (s.vectorsTable) {
             s.rows = countRows(db, "SELECT COUNT(*) FROM vectors");
+        }
+        if (s.entityVectorsTable) {
+            s.entityRows = countRows(db, "SELECT COUNT(*) FROM entity_vectors");
         }
         backend.close();
         return s;
@@ -158,6 +176,36 @@ TEST_CASE_METHOD(VectorSchemaRepairFixture,
     const auto s = snapshot();
     CHECK(s.rows == 1);
     CHECK(s.storedDim == std::optional<std::size_t>{8});
+}
+
+TEST_CASE_METHOD(VectorSchemaRepairFixture,
+                 "ensureVectorSchemaAligned treats stale entity_vectors as a mismatch",
+                 "[unit][vector][schema-repair][catch2]") {
+    seedEntityOnly(8);
+    {
+        const auto before = snapshot();
+        REQUIRE(before.rows == 0);
+        REQUIRE(before.entityRows == 1);
+    }
+
+    SECTION("recreate allowed: entity_vectors is dropped and recreated empty") {
+        REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/true).has_value());
+        const auto s = snapshot();
+        CHECK(s.vectorsTable);
+        CHECK(s.entityVectorsTable);
+        CHECK(s.rows == 0);
+        CHECK(s.entityRows == 0);
+    }
+    SECTION("recreate off: success, stale entity rows are left untouched") {
+        REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/false).has_value());
+        const auto s = snapshot();
+        CHECK(s.entityVectorsTable);
+        CHECK(s.entityRows == 1);
+    }
+    SECTION("matching dimension: no-op, entity rows kept") {
+        REQUIRE(ensureVectorSchemaAligned(dataDir, 8, /*recreateIfMismatch=*/true).has_value());
+        CHECK(snapshot().entityRows == 1);
+    }
 }
 
 TEST_CASE_METHOD(VectorSchemaRepairFixture,

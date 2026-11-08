@@ -7,15 +7,18 @@
 
 namespace yams::vector {
 
-/// Ensure `<dataDir>/vectors.db` holds vector tables for `targetDim`.
+/// Ensure `<dataDir>/vectors.db` holds vector tables for `targetDim`. Always creates `dataDir`.
 ///
-/// - Creates `dataDir` and the tables when the database or its tables are missing.
-/// - The stored dimension is probed from existing rows, so an empty `vectors` table counts as
-///   missing and is (idempotently) created at `targetDim`.
-/// - When rows exist at a different dimension: with `recreateIfMismatch` the tables are dropped
-///   and recreated empty at `targetDim`; without it the database is left untouched and the call
-///   still succeeds.
-/// - A matching dimension is a no-op.
+/// Dimensions are probed from rows, not from the schema: every distinct dimension recorded in
+/// `vectors` (embedding_dim, else blob length), `entity_vectors` (blob length) and the
+/// `simeon_pq_meta` / `simeon_pq_codes` tables (their `dim` column).
+///
+/// - Mismatch (any probed dimension differs from `targetDim`): with `recreateIfMismatch` every
+///   vector table is dropped and recreated empty at `targetDim`; without it the database is left
+///   untouched, including rows at other dimensions, and the call still succeeds.
+/// - No mismatch and `vectors` has no rows (or does not exist): creates the tables
+///   at `targetDim` (CREATE IF NOT EXISTS, so existing rows are kept).
+/// - No mismatch and `vectors` has rows: no-op.
 ///
 /// Errors: DatabaseError when the database cannot be opened, the backend's error when dropping
 /// or creating tables fails, InternalError when an exception escapes the backend.
