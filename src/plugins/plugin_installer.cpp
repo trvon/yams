@@ -10,8 +10,11 @@
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/plugin_installer.hpp>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -90,7 +93,7 @@ bool isSafePathSegment(std::string_view value, bool allowPlus = false) {
 }
 
 Result<void> validatePluginName(std::string_view name) {
-    // A leading '.' is reserved for the installer's own entries (upgrade backups), so a plugin
+    // A leading '.' is reserved for the installer's own entries (.yams-staging), so a plugin
     // directory can never be mistaken for one.
     if (!isSafePathSegment(name) || name.front() == '.') {
         return Error{ErrorCode::InvalidArgument,
@@ -164,14 +167,6 @@ Result<void> removeAllScoped(const fs::path& path, const fs::path& root,
                      "Failed to remove " + std::string(description) + ": " + ec.message()};
     }
     return {};
-}
-
-Result<fs::path> makePluginTempDir(const std::string& name, const std::string& version) {
-    auto tempDir = yams::common::createTempDirectory("yams-plugin-" + name + "-" + version + "-");
-    if (tempDir.empty()) {
-        return Error{ErrorCode::IOError, "Failed to create plugin temp directory"};
-    }
-    return tempDir;
 }
 
 // SHA-256 of a file in the "sha256:<lowercase hex>" form; empty on failure.
@@ -265,8 +260,9 @@ std::optional<std::vector<fs::path>> componentsBelow(const fs::path& root, const
 // ".." is allowed only as a leading run ("../libfoo.so.1", common for versioned libraries):
 // those steps walk the link's own ancestors, which are real directories because
 // SECURE_SYMLINKS refuses to create an entry under a symlinked parent. A ".." after a name could
-// step back out of a symlinked directory, so it is rejected. A link that names itself is
-// rejected too; longer cycles are caught by scanExtractedPlugin().
+// step back out of a symlinked directory, so it is rejected. A link that names itself, its own
+// directory or one of that directory's ancestors ("sub -> .", "d/up -> ..", "d/x -> ../d") is
+// a cycle and is rejected; loops through several links are caught by scanExtractedPlugin().
 bool isSymlinkTargetSafe(const fs::path& root, const fs::path& linkPath, const fs::path& target) {
     if (target.empty() || target.is_absolute() || target.has_root_name() ||
         target.has_root_directory()) {
@@ -292,7 +288,13 @@ bool isSymlinkTargetSafe(const fs::path& root, const fs::path& linkPath, const f
         seenName = true;
         resolved.push_back(part);
     }
-    return resolved != *linkParts;
+    if (resolved == *linkParts) {
+        return false; // the link itself
+    }
+    const size_t dirDepth = linkParts->size() - 1;
+    const bool isDirOrAncestor = resolved.size() <= dirDepth &&
+                                 std::equal(resolved.begin(), resolved.end(), linkParts->begin());
+    return !isDirOrAncestor;
 }
 
 // Walks the chosen plugin directory without following links and without throwing. Every
@@ -360,8 +362,9 @@ Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir
     // so ARCHIVE_EXTRACT_SECURE_NOABSOLUTEPATHS cannot be used; absolute names, root names and
     // ".." components are rejected by isRelativePathSafe() before the rewrite instead.
     // SECURE_SYMLINKS stops a later entry from being written through an extracted symlink.
+    // ACLs and file flags are not restored: plugins do not need them, and flags such as
+    // macOS uchg would make the installed files undeletable.
     archive_write_disk_set_options(ext, ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM |
-                                            ARCHIVE_EXTRACT_ACL | ARCHIVE_EXTRACT_FFLAGS |
                                             ARCHIVE_EXTRACT_SECURE_SYMLINKS |
                                             ARCHIVE_EXTRACT_SECURE_NODOTDOT);
 
@@ -579,56 +582,150 @@ Result<void> ensureOwnerAccess(const fs::path& root) {
     return {};
 }
 
-// Removes an install's temp directory on every exit path, restoring owner access first so a
-// read-only directory from the archive cannot make the removal fail.
-struct ScopedPluginTempDir {
-    fs::path path;
+// Installs stage under <targetDir>/.yams-staging, on the same filesystem as the installed
+// plugins, so putting a new tree in place is always a rename. Each install owns one directory
+// there named "<plugin>@<start-ms>@<n>"; '@' cannot occur in a plugin name, so the owner and
+// start time of any staging directory can be read back from its name.
+constexpr std::string_view kStagingDirName = ".yams-staging";
 
-    explicit ScopedPluginTempDir(fs::path dir) : path(std::move(dir)) {}
-    ScopedPluginTempDir(const ScopedPluginTempDir&) = delete;
-    ScopedPluginTempDir& operator=(const ScopedPluginTempDir&) = delete;
-    ~ScopedPluginTempDir() {
-        if (path.empty()) {
-            return;
-        }
+std::int64_t nowMillis() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+// The start time encoded in `dirName` if it is a staging directory of `plugin`.
+std::optional<std::int64_t> stagingStartMs(std::string_view dirName, const std::string& plugin) {
+    if (dirName.size() <= plugin.size() + 1 || dirName.substr(0, plugin.size()) != plugin ||
+        dirName[plugin.size()] != '@') {
+        return std::nullopt;
+    }
+    const std::string_view rest = dirName.substr(plugin.size() + 1);
+    const auto at = rest.find('@');
+    if (at == std::string_view::npos || at == 0) {
+        return std::nullopt;
+    }
+    std::int64_t startMs = 0;
+    const auto* end = rest.data() + at;
+    const auto [parsedEnd, err] = std::from_chars(rest.data(), end, startMs);
+    if (err != std::errc{} || parsedEnd != end) {
+        return std::nullopt;
+    }
+    return startMs;
+}
+
+// Creates this install's staging directory. It must not exist yet: fs::create_directory
+// reports an existing directory as "not created" without an error, which is treated as a
+// collision and retried with another suffix.
+Result<fs::path> createStagingDir(const fs::path& stagingRoot, const std::string& plugin,
+                                  std::int64_t startMs) {
+    static std::atomic<std::uint64_t> counter{0};
+    constexpr int kAttempts = 16;
+    for (int attempt = 0; attempt < kAttempts; ++attempt) {
+        const auto suffix =
+            counter.fetch_add(1, std::memory_order_relaxed) ^
+            static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+        const fs::path candidate =
+            stagingRoot / (plugin + "@" + std::to_string(startMs) + "@" + std::to_string(suffix));
         std::error_code ec;
-        const fs::path tempRoot = fs::temp_directory_path(ec);
-        if (ec) {
+        if (fs::create_directory(candidate, ec)) {
+            return candidate;
+        }
+        if (ec && ec != std::errc::file_exists) {
+            return Error{ErrorCode::IOError,
+                         "Failed to create plugin staging directory: " + ec.message()};
+        }
+    }
+    return Error{ErrorCode::IOError, "Failed to create a unique plugin staging directory under " +
+                                         stagingRoot.string()};
+}
+
+// Owns one install's staging directory and removes it on every exit path (restoring owner
+// access first so a read-only directory from the archive cannot block the removal), unless
+// `keep` is set because it holds a previous version that could not be restored.
+struct ScopedStagingDir {
+    fs::path path;
+    fs::path stagingRoot;
+    bool keep{false};
+
+    ScopedStagingDir(fs::path dir, fs::path root)
+        : path(std::move(dir)), stagingRoot(std::move(root)) {}
+    ScopedStagingDir(const ScopedStagingDir&) = delete;
+    ScopedStagingDir& operator=(const ScopedStagingDir&) = delete;
+    ~ScopedStagingDir() {
+        if (keep) {
             return;
         }
         (void)ensureOwnerAccess(path);
-        if (auto removed = removeAllScoped(path, tempRoot, "plugin temp"); !removed) {
-            spdlog::warn("Failed to remove plugin temp directory '{}': {}", path.string(),
+        if (auto removed = removeAllScoped(path, stagingRoot, "plugin staging"); !removed) {
+            spdlog::warn("Failed to remove plugin staging directory '{}': {}", path.string(),
                          removed.error().message);
         }
+        std::error_code ec;
+        fs::remove(stagingRoot, ec); // only succeeds once no install is staging there
     }
 };
 
-// Name prefix of the directory an upgrade sets the previous installation aside in.
-std::string backupPrefix(const std::string& pluginName) {
-    return "." + pluginName + ".yams-backup-";
+// After a successful install of `plugin`, staging directories earlier installs of it left
+// behind (a failed upgrade's preserved previous version) are no longer needed. Directories
+// started at or after `startMs` may belong to a concurrent install and are kept.
+void removeLeftoverStaging(const fs::path& stagingRoot, const std::string& plugin,
+                           std::int64_t startMs, const fs::path& ownStagingDir) {
+    std::vector<fs::path> leftovers;
+    std::error_code ec;
+    for (auto it = fs::directory_iterator(stagingRoot, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (it->path() == ownStagingDir) {
+            continue;
+        }
+        const auto started = stagingStartMs(it->path().filename().string(), plugin);
+        if (started && *started < startMs) {
+            leftovers.push_back(it->path());
+        }
+    }
+    for (const auto& dir : leftovers) {
+        (void)ensureOwnerAccess(dir);
+        if (auto removed = removeAllScoped(dir, stagingRoot, "leftover plugin staging"); removed) {
+            spdlog::info("Removed leftover plugin staging directory '{}'", dir.string());
+        } else {
+            spdlog::warn("Could not remove leftover plugin staging directory '{}': {}",
+                         dir.string(), removed.error().message);
+        }
+    }
 }
 
-// Best-effort removal of upgrade backups for `pluginName` that an interrupted install left in
-// `targetDir`. Failures are logged; they do not block the install.
-void removeStaleBackups(const fs::path& targetDir, const std::string& pluginName) {
-    const std::string prefix = backupPrefix(pluginName);
-    std::vector<fs::path> stale;
-    std::error_code ec;
-    for (auto it = fs::directory_iterator(targetDir, ec); !ec && it != fs::directory_iterator();
-         it.increment(ec)) {
-        if (it->path().filename().string().rfind(prefix, 0) == 0) {
-            stale.push_back(it->path());
+// Version of the plugin installed at `pluginDir`: nullopt when nothing is there, "unknown"
+// when it has no readable manifest.
+Result<std::optional<std::string>> installedVersionAt(const fs::path& pluginDir) {
+    std::error_code existsEc;
+    if (!fs::exists(pluginDir, existsEc)) {
+        return std::optional<std::string>(std::nullopt);
+    }
+
+    // Try external-plugin then package-style manifest names.
+    for (const auto& manifestName : {"yams-plugin.json", "manifest.json"}) {
+        fs::path manifestPath = pluginDir / manifestName;
+        if (!fs::exists(manifestPath)) {
+            continue;
+        }
+
+        std::ifstream file(manifestPath);
+        if (!file) {
+            continue;
+        }
+
+        try {
+            nlohmann::json manifest;
+            file >> manifest;
+            return std::optional<std::string>(manifest.value("version", "unknown"));
+        } catch (const std::exception& e) {
+            spdlog::debug("Failed to parse plugin manifest '{}': {}", manifestPath.string(),
+                          e.what());
+            // Malformed manifests fall through to the conservative "unknown" version.
         }
     }
-    for (const auto& dir : stale) {
-        if (auto removed = removeAllScoped(dir, targetDir, "stale plugin backup"); removed) {
-            spdlog::info("Removed stale plugin backup '{}'", dir.string());
-        } else {
-            spdlog::warn("Could not remove stale plugin backup '{}': {}", dir.string(),
-                         removed.error().message);
-        }
-    }
+
+    return std::optional<std::string>("unknown");
 }
 
 } // namespace
@@ -751,12 +848,18 @@ public:
         std::optional<std::string> repoChecksum;
         if (!info.checksum.empty()) {
             auto normalized = normalizeSha256(info.checksum);
-            if (!normalized) {
+            if (normalized) {
+                repoChecksum = normalized.value();
+            } else if (callerChecksum) {
+                spdlog::warn("The plugin repository published a malformed checksum for {}@{} "
+                             "('{}'); verifying against --checksum only, without a "
+                             "cross-check.",
+                             info.name, info.version, info.checksum);
+            } else {
                 return Error{ErrorCode::InvalidData,
                              "The plugin repository published a malformed checksum for " +
                                  info.name + "@" + info.version + ": " + info.checksum};
             }
-            repoChecksum = normalized.value();
         }
         if (callerChecksum && repoChecksum && *callerChecksum != *repoChecksum) {
             return Error{ErrorCode::InvalidData,
@@ -791,18 +894,24 @@ public:
             return result;
         }
 
-        // Best-effort: drop upgrade backups a crashed earlier install of this plugin left behind.
-        removeStaleBackups(targetDir, info.name);
-
-        // Create a unique scoped temp directory for download/extract; removed on every exit.
-        auto tempDirRes = makePluginTempDir(info.name, info.version);
-        if (!tempDirRes) {
-            return tempDirRes.error();
+        // Stage this install on the install filesystem (see kStagingDirName).
+        if (!yams::common::ensureDirectories(targetDir)) {
+            return Error{ErrorCode::IOError, "Failed to create plugin directory"};
         }
-        const ScopedPluginTempDir tempScope{tempDirRes.value()};
-        const fs::path& tempDir = tempScope.path;
+        const fs::path stagingRoot = targetDir / std::string(kStagingDirName);
         std::error_code ec;
-        fs::path archivePath = tempDir / (info.name + "-" + info.version + ".tar.gz");
+        fs::create_directories(stagingRoot, ec);
+        if (ec) {
+            return Error{ErrorCode::IOError,
+                         "Failed to create plugin staging directory: " + ec.message()};
+        }
+        const std::int64_t startMs = nowMillis();
+        auto stagingDirRes = createStagingDir(stagingRoot, info.name, startMs);
+        if (!stagingDirRes) {
+            return stagingDirRes.error();
+        }
+        ScopedStagingDir staging{stagingDirRes.value(), stagingRoot};
+        const fs::path archivePath = staging.path / "archive.tar.gz";
 
         // Download
         notifyProgress(InstallProgress::Stage::Downloading, "Downloading " + info.name + "...");
@@ -826,7 +935,7 @@ public:
 
         // Extract
         notifyProgress(InstallProgress::Stage::Extracting, "Extracting archive...");
-        fs::path extractDir = tempDir / "extracted";
+        const fs::path extractDir = staging.path / "extracted";
         auto extractRes = extractArchive(archivePath, extractDir);
         if (!extractRes) {
             return extractRes.error();
@@ -847,22 +956,15 @@ public:
             return scanRes.error();
         }
 
-        // Install (move to plugin directory)
         notifyProgress(InstallProgress::Stage::Installing, "Installing plugin...");
 
-        if (!yams::common::ensureDirectories(targetDir)) {
-            return Error{ErrorCode::IOError, "Failed to create plugin directory"};
-        }
-
-        // Stage an upgrade: set the existing installation aside, put the new one in place, and
-        // only then delete the old one, so a failed move or copy restores the previous plugin.
-        fs::path backupDir;
+        // Upgrade: move the existing installation into this install's staging directory, then
+        // the new tree into place; the staging cleanup deletes the old one. Both are renames on
+        // one filesystem. If the second fails, the previous version is moved back.
+        fs::path previousDir;
         if (fs::symlink_status(pluginDir, ec).type() != fs::file_type::not_found && !ec) {
-            backupDir =
-                targetDir /
-                (backupPrefix(info.name) +
-                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-            fs::rename(pluginDir, backupDir, ec);
+            previousDir = staging.path / "previous";
+            fs::rename(pluginDir, previousDir, ec);
             if (ec) {
                 return Error{ErrorCode::IOError,
                              "Failed to set aside the existing plugin: " + ec.message()};
@@ -872,36 +974,23 @@ public:
 
         fs::rename(sourceDir, pluginDir, ec);
         if (ec) {
-            // If rename fails (cross-device), fall back to copy. Symlinks were validated to stay
-            // inside the plugin, so copy them as links rather than following them.
-            ec.clear();
-            fs::copy(sourceDir, pluginDir,
-                     fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
-        }
-        if (ec) {
             std::string message = "Failed to install plugin: " + ec.message();
-            std::error_code cleanupEc;
-            if (fs::symlink_status(pluginDir, cleanupEc).type() != fs::file_type::not_found) {
-                (void)removeAllScoped(pluginDir, targetDir, "partial plugin install");
-            }
-            if (!backupDir.empty()) {
-                fs::rename(backupDir, pluginDir, cleanupEc);
-                if (cleanupEc) {
+            if (!previousDir.empty()) {
+                std::error_code restoreEc;
+                fs::rename(previousDir, pluginDir, restoreEc);
+                if (restoreEc) {
+                    staging.keep = true;
                     spdlog::error("Failed to restore previous plugin '{}' from '{}': {}",
-                                  pluginDir.string(), backupDir.string(), cleanupEc.message());
+                                  pluginDir.string(), previousDir.string(), restoreEc.message());
                     message += ". Restoring the previous version also failed (" +
-                               cleanupEc.message() + "); it is preserved at " + backupDir.string() +
-                               " and can be moved back to " + pluginDir.string();
+                               restoreEc.message() + "); it is preserved at " +
+                               previousDir.string() + " and can be moved back to " +
+                               pluginDir.string();
                 }
             }
             return Error{ErrorCode::IOError, message};
         }
-        if (!backupDir.empty()) {
-            if (auto removed = removeAllScoped(backupDir, targetDir, "previous plugin"); !removed) {
-                spdlog::warn("Installed {} but could not remove the previous copy at '{}': {}",
-                             info.name, backupDir.string(), removed.error().message);
-            }
-        }
+        removeLeftoverStaging(stagingRoot, info.name, startMs, staging.path);
 
         result.installedPath = pluginDir;
         result.sizeBytes = scanRes.value();
@@ -971,12 +1060,8 @@ public:
                                                  installDir_.string() + ": " + ec.message()};
         }
         for (const fs::directory_iterator end; it != end; it.increment(ec)) {
-            if (ec) {
-                return Error{ErrorCode::IOError, "Cannot list plugin directory " +
-                                                     installDir_.string() + ": " + ec.message()};
-            }
             auto name = it->path().filename().string();
-            // Dot-prefixed entries are upgrade backups (possibly left by a crash), not plugins.
+            // Dot-prefixed entries (.yams-staging) are installer bookkeeping, not plugins.
             if (name.empty() || name.front() == '.') {
                 continue;
             }
@@ -984,6 +1069,10 @@ public:
             if (it->is_directory(typeEc)) {
                 installed.push_back(std::move(name));
             }
+        }
+        if (ec) { // a failed increment ends the loop with `it` at end
+            return Error{ErrorCode::IOError, "Cannot list plugin directory " +
+                                                 installDir_.string() + ": " + ec.message()};
         }
 
         return installed;
@@ -996,42 +1085,6 @@ public:
         return installedVersionAt(installDir_ / name);
     }
 
-private:
-    // Version of the plugin installed at `pluginDir`: nullopt when nothing is there, "unknown"
-    // when it has no readable manifest.
-    static Result<std::optional<std::string>> installedVersionAt(const fs::path& pluginDir) {
-        std::error_code existsEc;
-        if (!fs::exists(pluginDir, existsEc)) {
-            return std::optional<std::string>(std::nullopt);
-        }
-
-        // Try external-plugin then package-style manifest names.
-        for (const auto& manifestName : {"yams-plugin.json", "manifest.json"}) {
-            fs::path manifestPath = pluginDir / manifestName;
-            if (!fs::exists(manifestPath)) {
-                continue;
-            }
-
-            std::ifstream file(manifestPath);
-            if (!file) {
-                continue;
-            }
-
-            try {
-                nlohmann::json manifest;
-                file >> manifest;
-                return std::optional<std::string>(manifest.value("version", "unknown"));
-            } catch (const std::exception& e) {
-                spdlog::debug("Failed to parse plugin manifest '{}': {}", manifestPath.string(),
-                              e.what());
-                // Malformed manifests fall through to the conservative "unknown" version.
-            }
-        }
-
-        return std::optional<std::string>("unknown");
-    }
-
-public:
     Result<std::map<std::string, std::string>> checkUpdates(const std::string& name) override {
         std::map<std::string, std::string> updates;
 

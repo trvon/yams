@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -285,9 +286,9 @@ TEST_CASE_METHOD(PluginInstallerFixture, "listInstalled behavior", "[plugins][in
         CHECK((std::find(plugins.begin(), plugins.end(), "plugin-b") != plugins.end()));
     }
 
-    SECTION("skips upgrade backups and other dot-prefixed entries") {
+    SECTION("skips the installer's staging area and other dot-prefixed entries") {
         fs::create_directories(installDir / "plugin-a");
-        fs::create_directories(installDir / ".plugin-a.yams-backup-12345");
+        fs::create_directories(installDir / ".yams-staging" / "plugin-a@1@0");
         fs::create_directories(installDir / ".hidden");
 
         auto installer = makePluginInstaller(stubClient, installDir, trustFile);
@@ -580,6 +581,18 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install verifies the archive checksum 
         CHECK_FALSE(isTrusted(trustFile, pluginDir));
     }
 
+    SECTION("a malformed repository checksum defers to a valid caller checksum") {
+        repo->info.checksum = "sha256:not-a-digest";
+        options.checksum = actualChecksum;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().checksum == actualChecksum));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
     SECTION("a malformed repository checksum is reported as bad repository data") {
         repo->info.checksum = "sha256:not-a-digest";
         auto installer = makePluginInstaller(repo, installDir, trustFile);
@@ -653,10 +666,10 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
     }
 
     SECTION("a '..' entry is rejected and nothing escapes the extraction root") {
-        // The installer extracts into <temp>/<install-temp>/extracted, so "../../<name>" would
-        // land directly in the system temp directory if it were honored.
+        // The installer extracts into <install>/.yams-staging/<install>/extracted, so
+        // "../../<name>" would land in the shared staging directory if it were honored.
         const std::string escapeName = "esc-" + testDir.filename().string();
-        const fs::path escapeTarget = fs::temp_directory_path() / escapeName;
+        const fs::path escapeTarget = installDir / ".yams-staging" / escapeName;
         REQUIRE_FALSE(fs::exists(escapeTarget));
 
         auto result = installFrom({{"../../" + escapeName, "evil"}});
@@ -733,25 +746,36 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
         CHECK((result.value().wasUpgrade));
         CHECK((result.value().previousVersion == "0.9.0"));
         CHECK_FALSE(fs::exists(pluginDir / "stale.so"));
+        CHECK_FALSE(fs::exists(installDir / ".yams-staging")); // previous version cleaned up
         auto installer = makePluginInstaller(repo, installDir, trustFile);
         auto listed = installer->listInstalled();
         REQUIRE((listed.has_value()));
-        CHECK((listed.value() == std::vector<std::string>{"fake-plugin"})); // no backup left
+        CHECK((listed.value() == std::vector<std::string>{"fake-plugin"}));
     }
 
-    SECTION("stale upgrade backups for this plugin are removed; other plugins' are kept") {
-        const fs::path staleBackup = installDir / ".fake-plugin.yams-backup-123";
-        const fs::path otherBackup = installDir / ".other-plugin.yams-backup-456";
-        fs::create_directories(staleBackup);
-        std::ofstream(staleBackup / "libyams_fake.so") << "OLD";
-        fs::create_directories(otherBackup);
+    SECTION("a successful install removes only older leftover staging for the same plugin") {
+        // Staging directories are "<plugin>@<start-ms>@<n>". An old one is what a failed
+        // upgrade leaves behind; a newer one may belong to a concurrent install.
+        const fs::path staging = installDir / ".yams-staging";
+        const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+        const fs::path olderLeftover = staging / "fake-plugin@1@0";
+        const fs::path newerInstall =
+            staging / ("fake-plugin@" + std::to_string(nowMs + 3600 * 1000) + "@0");
+        const fs::path otherPlugin = staging / "other-plugin@1@0";
+        fs::create_directories(olderLeftover / "previous");
+        std::ofstream(olderLeftover / "previous" / "yams-plugin.json") << R"({"version": "0.1"})";
+        fs::create_directories(newerInstall);
+        fs::create_directories(otherPlugin);
 
         auto result = installFrom({{"plugin/", "", TarType::Directory},
                                    {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
 
         REQUIRE((result.has_value()));
-        CHECK_FALSE(fs::exists(staleBackup));
-        CHECK((fs::exists(otherBackup)));
+        CHECK_FALSE(fs::exists(olderLeftover));
+        CHECK((fs::exists(newerInstall)));
+        CHECK((fs::exists(otherPlugin)));
     }
 
     SECTION("a single top-level directory is used even with files beside it") {
@@ -850,15 +874,18 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects archive links and root
         return installer->install("fake-plugin", InstallOptions{});
     };
 
-    // If a link were honored, the follow-up entry would be written to <system temp>/<name>.
+    // If a link were honored, the follow-up entry would be written outside the extraction
+    // root: to the shared staging directory or, through an absolute link, the system temp dir.
     const std::string escapeName = "esc-" + testDir.filename().string();
-    const fs::path escapeTarget = fs::temp_directory_path() / escapeName;
-    REQUIRE_FALSE(fs::exists(escapeTarget));
+    const fs::path escapeTarget = installDir / ".yams-staging" / escapeName;
+    const fs::path tempEscapeTarget = fs::temp_directory_path() / escapeName;
+    REQUIRE_FALSE(fs::exists(tempEscapeTarget));
 
     auto expectRejected = [&](const Result<InstallResult>& result) {
         REQUIRE_FALSE(result.has_value());
         CHECK((result.error().code == ErrorCode::InvalidPath));
         CHECK_FALSE(fs::exists(escapeTarget));
+        CHECK_FALSE(fs::exists(tempEscapeTarget));
         CHECK_FALSE(fs::exists(pluginDir));
         CHECK_FALSE(isTrusted(trustFile, pluginDir));
     };
@@ -869,7 +896,7 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects archive links and root
     }
 
     SECTION("a symlink with a '..' target") {
-        // extracted/plugin/up -> ../../.. resolves to the system temp directory.
+        // extracted/plugin/up -> ../../.. resolves to the shared staging directory.
         expectRejected(installFrom({{"plugin/up", "", TarType::Symlink, "../../.."},
                                     {"plugin/up/" + escapeName, "evil"}}));
     }
@@ -905,29 +932,33 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects archive links and root
     SECTION("an archive-root symlink that climbs out through the extraction directory name") {
         expectRejected(installFrom({{"x", "X"}, {"l", "", TarType::Symlink, "../extracted/x"}}));
     }
+
+    SECTION("a symlink to its own directory") {
+        expectRejected(installFrom(
+            {{"plugin/", "", TarType::Directory}, {"plugin/sub", "", TarType::Symlink, "."}}));
+    }
+
+    SECTION("a symlink to its parent directory") {
+        expectRejected(installFrom(
+            {{"plugin/d/", "", TarType::Directory}, {"plugin/d/up", "", TarType::Symlink, ".."}}));
+    }
+
+    SECTION("a symlink back to its own directory by name") {
+        expectRejected(installFrom(
+            {{"plugin/d/", "", TarType::Directory}, {"plugin/d/x", "", TarType::Symlink, "../d"}}));
+    }
 }
 
 TEST_CASE_METHOD(PluginInstallerFixture, "install rejects looping symlinks without throwing",
                  "[plugins][installer][security]") {
-    // A unique plugin name makes this test's install temp directories identifiable.
     const std::string name = "loop-" + testDir.filename().string();
     const fs::path pluginDir = installDir / name;
     auto repo = std::make_shared<FixedPluginRepoClient>();
     repo->info.name = name;
     repo->info.version = "1.0.0";
 
-    auto leftoverTempDirs = [&] {
-        const std::string prefix = "yams-plugin-" + name + "-";
-        size_t count = 0;
-        std::error_code ec;
-        for (auto it = fs::directory_iterator(fs::temp_directory_path(), ec);
-             !ec && it != fs::directory_iterator(); it.increment(ec)) {
-            if (it->path().filename().string().rfind(prefix, 0) == 0) {
-                ++count;
-            }
-        }
-        return count;
-    };
+    // A failed install removes its staging directory (and the then-empty staging root).
+    auto leftoverStaging = [&] { return fs::exists(installDir / ".yams-staging"); };
 
     auto installFrom = [&](const std::vector<TarEntry>& entries) {
         const fs::path archive = writePluginArchive(testDir / "source" / "loop.tar.gz", entries);
@@ -945,7 +976,7 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects looping symlinks witho
         CHECK((result.error().code == ErrorCode::InvalidPath));
         CHECK_FALSE(fs::exists(fs::symlink_status(pluginDir)));
         CHECK_FALSE(isTrusted(trustFile, pluginDir));
-        CHECK((leftoverTempDirs() == 0u));
+        CHECK_FALSE(leftoverStaging());
     }
 
     SECTION("two links that point at each other") {
@@ -957,7 +988,7 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects looping symlinks witho
         CHECK((result.error().code == ErrorCode::InvalidPath));
         CHECK_FALSE(fs::exists(fs::symlink_status(pluginDir)));
         CHECK_FALSE(isTrusted(trustFile, pluginDir));
-        CHECK((leftoverTempDirs() == 0u));
+        CHECK_FALSE(leftoverStaging());
     }
 }
 
