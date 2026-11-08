@@ -282,6 +282,18 @@ TEST_CASE_METHOD(PluginInstallerFixture, "listInstalled behavior", "[plugins][in
         CHECK((std::find(plugins.begin(), plugins.end(), "plugin-a") != plugins.end()));
         CHECK((std::find(plugins.begin(), plugins.end(), "plugin-b") != plugins.end()));
     }
+
+    SECTION("skips upgrade backups and other dot-prefixed entries") {
+        fs::create_directories(installDir / "plugin-a");
+        fs::create_directories(installDir / ".plugin-a.yams-backup-12345");
+        fs::create_directories(installDir / ".hidden");
+
+        auto installer = makePluginInstaller(stubClient, installDir, trustFile);
+        auto result = installer->listInstalled();
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value() == std::vector<std::string>{"plugin-a"}));
+    }
 }
 
 TEST_CASE_METHOD(PluginInstallerFixture, "installedVersion behavior",

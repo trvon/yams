@@ -90,9 +90,12 @@ bool isSafePathSegment(std::string_view value, bool allowPlus = false) {
 }
 
 Result<void> validatePluginName(std::string_view name) {
-    if (!isSafePathSegment(name)) {
+    // A leading '.' is reserved for the installer's own entries (upgrade backups), so a plugin
+    // directory can never be mistaken for one.
+    if (!isSafePathSegment(name) || name.front() == '.') {
         return Error{ErrorCode::InvalidArgument,
-                     "Invalid plugin name. Use only letters, numbers, '.', '_' and '-'."};
+                     "Invalid plugin name. Use only letters, numbers, '.', '_' and '-', and do "
+                     "not start it with '.'."};
     }
     return {};
 }
@@ -854,9 +857,25 @@ public:
             return installed;
         }
 
-        for (const auto& entry : fs::directory_iterator(installDir_)) {
-            if (entry.is_directory()) {
-                installed.push_back(entry.path().filename().string());
+        std::error_code ec;
+        fs::directory_iterator it(installDir_, ec);
+        if (ec) {
+            return Error{ErrorCode::IOError, "Cannot list plugin directory " +
+                                                 installDir_.string() + ": " + ec.message()};
+        }
+        for (const fs::directory_iterator end; it != end; it.increment(ec)) {
+            if (ec) {
+                return Error{ErrorCode::IOError, "Cannot list plugin directory " +
+                                                     installDir_.string() + ": " + ec.message()};
+            }
+            auto name = it->path().filename().string();
+            // Dot-prefixed entries are upgrade backups (possibly left by a crash), not plugins.
+            if (name.empty() || name.front() == '.') {
+                continue;
+            }
+            std::error_code typeEc;
+            if (it->is_directory(typeEc)) {
+                installed.push_back(std::move(name));
             }
         }
 
