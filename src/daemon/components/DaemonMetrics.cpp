@@ -1268,6 +1268,8 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
         out.repairBusyTicks = state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
         out.repairTotalBacklog = state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
         out.repairProcessed = state_->stats.repairProcessed.load(std::memory_order_relaxed);
+        out.repairPathTreeRepaired =
+            state_->stats.repairPathTreeRepaired.load(std::memory_order_relaxed);
         out.repairCurrentOperationCode =
             state_->stats.repairCurrentOperationCode.load(std::memory_order_relaxed);
         const auto repairStartedMs =

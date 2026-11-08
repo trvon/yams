@@ -259,6 +259,7 @@ constexpr std::string_view kRepairIdleTicks = "repair_idle_ticks";
 constexpr std::string_view kRepairBusyTicks = "repair_busy_ticks";
 constexpr std::string_view kRepairTotalBacklog = "repair_total_backlog";
 constexpr std::string_view kRepairProcessed = "repair_processed";
+constexpr std::string_view kRepairPathTreeRepaired = "repair_path_tree_repaired";
 constexpr std::string_view kRepairCurrentOperationCode = "repair_current_operation_code";
 constexpr std::string_view kRepairCurrentOperationElapsedMs = "repair_current_operation_elapsed_ms";
 

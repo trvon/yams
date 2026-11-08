@@ -1206,6 +1206,7 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
     const uint64_t repairFailed = findPostIngestCount("repair_failed_operations");
     const uint64_t repairBacklog = findPostIngestCount("repair_total_backlog");
     const uint64_t repairProcessed = findPostIngestCount("repair_processed");
+    const uint64_t repairPathTree = findPostIngestCount("repair_path_tree_repaired");
     const uint64_t repairCurrentOp = findPostIngestCount("repair_current_operation_code");
     const uint64_t repairCurrentElapsedMs =
         findPostIngestCount("repair_current_operation_elapsed_ms");
@@ -1246,6 +1247,9 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
 
     std::ostringstream repairStats;
     repairStats << repairBatches << " batches · " << repairEmbeddings << " embeddings";
+    if (repairPathTree > 0) {
+        repairStats << " · " << repairPathTree << " path-tree";
+    }
     Severity repairStatsSev = repairFailed > 0 ? Severity::Warn : Severity::Good;
     if (repairFailed > 0) {
         repairStats << " · " << repairFailed << " failed";

@@ -5,6 +5,7 @@
 #include <yams/daemon/components/sqlite_vacuum.h>
 #include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/metadata/path_tree_repair.h>
 
 #include <atomic>
 #include <chrono>
@@ -203,6 +204,11 @@ public:
         std::chrono::days sessionExpiry{30};
         // Session store to expire; empty means the user's session directory.
         std::filesystem::path sessionsDir{};
+        // How often idle maintenance re-runs a path-tree repair pass over all documents (0
+        // disables). The first pass starts maintenanceDelay after the loop starts.
+        std::chrono::hours pathTreeRepairInterval{24};
+        // Documents examined per path-tree repair batch; the loop runs one batch per tick.
+        std::size_t pathTreeRepairBatch{256};
     };
 
     struct RecoveryArtifactMaintenanceStats {
@@ -229,6 +235,20 @@ public:
     /// embedding writes, no index rebuild or bulk load, no on-demand repair, and no host
     /// pressure from other processes.
     [[nodiscard]] static bool vectorVacuumAdmitted(const VectorVacuumSignals& signals) noexcept;
+
+    /// Everything that decides whether the next background path-tree repair batch may run.
+    struct PathTreeRepairSignals {
+        bool shuttingDown{false};
+        bool maintenanceAllowed{false};
+        ResourcePressureLevel pressure{};
+        bool repairInProgress{false};
+        bool hostDeferred{false}; // the host is busy and the governor is holding repair work
+    };
+
+    /// A path-tree repair batch writes the metadata DB, so it runs only while no client is
+    /// connected, there is no resource pressure, no on-demand repair is running (which may be
+    /// repairing the path tree itself), and the governor admits deferrable repair work.
+    [[nodiscard]] static bool pathTreeRepairAdmitted(const PathTreeRepairSignals& signals) noexcept;
 
     // Event types for document operations (same as old RepairCoordinator)
     struct DocumentAddedEvent {
@@ -314,6 +334,9 @@ public:
     }
     std::optional<app::services::SessionExpiryResult> testing_runSessionExpiryMaintenance() {
         return runSessionExpiryMaintenance();
+    }
+    std::optional<metadata::PathTreeRepairStats> testing_runPathTreeRepairBatch() {
+        return runPathTreeRepairBatch();
     }
     /// Runs one startup-scan pass to completion, then drains the queue as the embedding consumer
     /// would. Returns the hashes the pass queued, in order.
@@ -475,6 +498,17 @@ private:
     /// Deletes idle session files when maintenance is allowed. Returns nullopt when the check
     /// did not run (disabled, or clients are connected).
     std::optional<app::services::SessionExpiryResult> runSessionExpiryMaintenance();
+
+    // ── Path-tree repair (idle maintenance) ──
+    PathTreeRepairSignals collectPathTreeRepairSignals() const;
+    /// Runs one batch of the background path-tree repair pass when admitted, resuming from
+    /// pathTreeRepairCursor_, and schedules the next batch (soon while the pass is unfinished,
+    /// pathTreeRepairInterval once it completes). Returns the running totals of the pass, or
+    /// nullopt when no batch ran (not admitted, or no metadata repository).
+    std::optional<metadata::PathTreeRepairStats> runPathTreeRepairBatch();
+    std::int64_t pathTreeRepairCursor_{0};
+    metadata::PathTreeRepairStats pathTreeRepairPass_{};
+    std::chrono::steady_clock::time_point nextPathTreeRepair_{};
 
     // ── Detect missing work ──
     struct MissingWorkResult {

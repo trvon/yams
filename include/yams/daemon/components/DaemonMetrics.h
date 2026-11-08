@@ -405,6 +405,7 @@ struct MetricsSnapshot {
     std::uint64_t repairBusyTicks{0};
     std::uint64_t repairTotalBacklog{0};
     std::uint64_t repairProcessed{0};
+    std::uint64_t repairPathTreeRepaired{0};
     std::uint64_t repairCurrentOperationCode{0};
     std::uint64_t repairCurrentOperationElapsedMs{0};
 

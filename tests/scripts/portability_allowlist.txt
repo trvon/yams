@@ -77,7 +77,7 @@ src/cli/commands/search_command.cpp:1099:portability/env-read # reviewed raw env
 src/cli/commands/update_command.cpp:512:portability/env-read # reviewed raw environment read
 src/cli/hot_cold_utils.h:13:portability/env-read # reviewed raw environment read
 src/daemon/components/DaemonMetrics.cpp:237:portability/env-read # reviewed raw environment read
-src/daemon/components/DaemonMetrics.cpp:2166:portability/env-read # reviewed raw environment read
+src/daemon/components/DaemonMetrics.cpp:2168:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestDispatcher.cpp:599:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestDispatcher.cpp:602:portability/env-read # reviewed raw environment read
 src/metadata/connection_pool.cpp:1000:portability/jthread # feature-test guarded std::jthread

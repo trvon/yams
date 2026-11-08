@@ -370,6 +370,7 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         setVal(metrics::kRepairBusyTicks, snap.repairBusyTicks);
         setVal(metrics::kRepairTotalBacklog, snap.repairTotalBacklog);
         setVal(metrics::kRepairProcessed, snap.repairProcessed);
+        setVal(metrics::kRepairPathTreeRepaired, snap.repairPathTreeRepaired);
         setVal(metrics::kRepairRunning, snap.repairRunning ? 1 : 0);
         setVal(metrics::kRepairInProgress, snap.repairInProgress ? 1 : 0);
         setVal(metrics::kRepairCurrentOperationCode, snap.repairCurrentOperationCode);
@@ -976,6 +977,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
                     res.requestCounts[std::string(metrics::kRepairProcessed)] =
                         state_->stats.repairProcessed.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairPathTreeRepaired)] =
+                        state_->stats.repairPathTreeRepaired.load(std::memory_order_relaxed);
                     const auto opCode =
                         state_->stats.repairCurrentOperationCode.load(std::memory_order_relaxed);
                     res.requestCounts[std::string(metrics::kRepairCurrentOperationCode)] = opCode;
