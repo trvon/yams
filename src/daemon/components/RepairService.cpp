@@ -32,6 +32,7 @@
 #include <yams/metadata/path_tree_repair.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/repair/embedding_repair_util.h>
+#include <yams/storage/block_reference_repair.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
@@ -3182,7 +3183,7 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
         return result;
     }
 
-    auto repairResult = integrity::RepairManager::repairBlockReferences(
+    auto repairResult = yams::storage::repairBlockReferences(
         objectsPath, refsDbPath, dryRun, [&progress](uint64_t processed, uint64_t total) {
             if (!progress)
                 return;
