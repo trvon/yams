@@ -3,19 +3,22 @@
 // The stored embedding dimension is probed from rows in `vectors`, so an empty table reports no
 // dimension. Cases seed a row at a known dimension and assert on the probed dimension and the row
 // count after repair, not only on the returned Result.
+//
+// No environment-based skip: neither the repair functions nor SqliteVecBackend read
+// YAMS_DISABLE_VECTORS / YAMS_SQLITE_VEC_SKIP_INIT, and sqlite-vec-cpp is statically linked
+// (ensureVecLoaded is a no-op), so these cases run as-is in the CI unit lane, which exports both.
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <atomic>
+#include "../../common/test_helpers_catch2.h"
+
 #include <cstddef>
 #include <filesystem>
 #include <optional>
 #include <string>
-#include <system_error>
 #include <vector>
 
 #include <sqlite3.h>
-#include <yams/config/config_helpers.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_schema_repair.h>
 
@@ -23,35 +26,11 @@ using namespace yams::vector;
 
 namespace {
 
-bool envFlagSet(const char* name) {
-    auto value = yams::config::getenv_optional(name);
-    return value && (*value == "1" || *value == "true");
-}
-
 struct VectorSchemaRepairFixture {
-    VectorSchemaRepairFixture() {
-        if (envFlagSet("YAMS_SQLITE_VEC_SKIP_INIT")) {
-            skipReason = "Skipping (YAMS_SQLITE_VEC_SKIP_INIT=1)";
-        } else if (envFlagSet("YAMS_DISABLE_VECTORS")) {
-            skipReason = "Skipping (YAMS_DISABLE_VECTORS=1)";
-        }
-        static std::atomic<int> counter{0};
-        dataDir = std::filesystem::temp_directory_path() /
-                  ("yams_vector_schema_repair_" + std::to_string(++counter));
-        std::error_code ec;
-        std::filesystem::remove_all(dataDir, ec);
-    }
-
-    ~VectorSchemaRepairFixture() {
-        std::error_code ec;
-        std::filesystem::remove_all(dataDir, ec);
-    }
-
-    void skipIfNeeded() const {
-        if (!skipReason.empty()) {
-            SKIP(skipReason);
-        }
-    }
+    // Unique per run (make_temp_dir), removed on scope exit. The data dir itself is a
+    // not-yet-created child so the "missing" case can observe directory creation.
+    yams::test::TempDirGuard tempRoot{"yams_vector_schema_repair_"};
+    std::filesystem::path dataDir = tempRoot.path() / "data";
 
     std::string dbPath() const { return (dataDir / "vectors.db").string(); }
 
@@ -117,9 +96,6 @@ struct VectorSchemaRepairFixture {
         sqlite3_finalize(stmt);
         return present;
     }
-
-    std::string skipReason;
-    std::filesystem::path dataDir;
 };
 
 } // namespace
@@ -127,7 +103,6 @@ struct VectorSchemaRepairFixture {
 TEST_CASE_METHOD(VectorSchemaRepairFixture,
                  "ensureVectorSchemaAligned creates the data dir and tables when missing",
                  "[unit][vector][schema-repair][catch2]") {
-    skipIfNeeded();
     REQUIRE_FALSE(std::filesystem::exists(dataDir));
 
     REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/false).has_value());
@@ -148,7 +123,6 @@ TEST_CASE_METHOD(VectorSchemaRepairFixture,
 TEST_CASE_METHOD(VectorSchemaRepairFixture,
                  "ensureVectorSchemaAligned recreates mismatched tables when allowed",
                  "[unit][vector][schema-repair][catch2]") {
-    skipIfNeeded();
     seed(8);
     REQUIRE(snapshot().storedDim == std::optional<std::size_t>{8});
 
@@ -164,7 +138,6 @@ TEST_CASE_METHOD(VectorSchemaRepairFixture,
 TEST_CASE_METHOD(VectorSchemaRepairFixture,
                  "ensureVectorSchemaAligned leaves mismatched tables alone when recreate is off",
                  "[unit][vector][schema-repair][catch2]") {
-    skipIfNeeded();
     seed(8);
 
     // Documented contract: success, database untouched.
@@ -178,7 +151,6 @@ TEST_CASE_METHOD(VectorSchemaRepairFixture,
 TEST_CASE_METHOD(VectorSchemaRepairFixture,
                  "ensureVectorSchemaAligned is a no-op when the dimension already matches",
                  "[unit][vector][schema-repair][catch2]") {
-    skipIfNeeded();
     seed(8);
 
     REQUIRE(ensureVectorSchemaAligned(dataDir, 8, /*recreateIfMismatch=*/true).has_value());
@@ -191,7 +163,6 @@ TEST_CASE_METHOD(VectorSchemaRepairFixture,
 TEST_CASE_METHOD(VectorSchemaRepairFixture,
                  "recreateVectorTables discards vectors and is idempotent",
                  "[unit][vector][schema-repair][catch2]") {
-    skipIfNeeded();
     seed(8);
 
     SECTION("at a new dimension") {
