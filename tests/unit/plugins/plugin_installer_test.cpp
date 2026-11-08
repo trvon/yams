@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -27,6 +28,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <memory>
 #include <optional>
@@ -876,6 +878,55 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
         CHECK_FALSE(fs::exists(pluginDir));
     }
 #endif
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture,
+                 "an install that waited for the lock re-checks what is installed",
+                 "[plugins][installer][lock]") {
+    const fs::path pluginDir = installDir / "fake-plugin";
+    const fs::path archive =
+        writePluginArchive(testDir / "source" / "fake-plugin.tar.gz",
+                           {{"plugin/", "", TarType::Directory},
+                            {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+    repo->info.downloadUrl = fileUrl(archive);
+    repo->info.checksum = sha256Of(archive);
+    auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+    // Hold the target directory's install lock, as a concurrent install would.
+    yams::common::ExclusiveFileLock otherInstall;
+    REQUIRE((otherInstall.acquire(installDir / ".yams-install.lock", std::chrono::milliseconds(0))
+                 .has_value()));
+
+    // The download and checksum run before the lock, so "Verifying" proves this install
+    // passed its early "already installed" check and is headed for the lock.
+    std::promise<void> verifying;
+    auto verifyingSeen = verifying.get_future();
+    std::atomic<bool> signalled{false};
+    InstallOptions options;
+    options.onProgress = [&](const InstallProgress& progress) {
+        if (progress.stage == InstallProgress::Stage::Verifying && !signalled.exchange(true)) {
+            verifying.set_value();
+        }
+    };
+    auto pending =
+        std::async(std::launch::async, [&] { return installer->install("fake-plugin", options); });
+
+    REQUIRE((verifyingSeen.wait_for(std::chrono::seconds(10)) == std::future_status::ready));
+    // The concurrent install finishes the same version while this one waits.
+    fs::create_directories(pluginDir);
+    std::ofstream(pluginDir / "yams-plugin.json") << R"({"version": "1.0.0"})";
+    std::ofstream(pluginDir / "first.so") << "FIRST";
+    otherInstall.release();
+
+    REQUIRE((pending.wait_for(std::chrono::seconds(30)) == std::future_status::ready));
+    auto result = pending.get();
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error().code == ErrorCode::InvalidOperation));
+    CHECK((result.error().message.find("already installed") != std::string::npos));
+    CHECK((fs::exists(pluginDir / "first.so"))); // not reinstalled
 }
 
 TEST_CASE_METHOD(PluginInstallerFixture, "install honors --force in a custom install directory",
