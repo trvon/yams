@@ -27,11 +27,12 @@
 #include <ios>
 #include <random>
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "../../common/test_helpers_catch2.h"
 
 using namespace yams;
 using namespace yams::crypto;
@@ -41,27 +42,6 @@ using namespace yams::crypto;
 // ============================================================================
 
 namespace {
-
-/**
- * @brief Create a temporary directory for test files
- */
-std::filesystem::path makeTempDir(std::string_view prefix = "yams_crypto_test_") {
-    const auto base = std::filesystem::temp_directory_path();
-    std::uniform_int_distribution<int> dist(0, 9999);
-    thread_local std::mt19937_64 rng{std::random_device{}()};
-    for (int attempt = 0; attempt < 512; ++attempt) {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        auto candidate =
-            base / (std::string(prefix) + std::to_string(stamp) + "_" + std::to_string(dist(rng)));
-        std::error_code ec;
-        if (std::filesystem::create_directories(candidate, ec)) {
-            return candidate;
-        }
-    }
-    // Never fall back to the shared temp root: callers remove_all() the returned path.
-    throw std::runtime_error("makeTempDir: failed to create a unique directory under " +
-                             base.string());
-}
 
 /**
  * @brief Generate random bytes for testing
@@ -117,7 +97,9 @@ struct TestVectors {
  */
 class CryptoTestFixture {
 public:
-    CryptoTestFixture() : testDir(makeTempDir()), hasher(std::make_unique<SHA256Hasher>()) {}
+    CryptoTestFixture()
+        : testDir(yams::test::make_temp_dir("yams_crypto_test_")),
+          hasher(std::make_unique<SHA256Hasher>()) {}
 
     ~CryptoTestFixture() {
         std::error_code ec;

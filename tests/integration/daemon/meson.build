@@ -216,15 +216,19 @@ else
       args: ['Daemon client concurrent requests', '--allow-running-no-tests'],
     )
 
-    # Slow lane: independent clients issue overlapping status() calls on one live daemon.
-    test('daemon_socket_parallel_status_slow',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket', 'concurrency', 'slow'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client parallel status from independent clients', '--allow-running-no-tests'],
-    )
+    # Independent clients issue overlapping status() calls on one live daemon.
+    # No --allow-running-no-tests: a filter that selects nothing must fail. The case SKIPs on
+    # Windows (daemon IPC), which Catch2 reports as exit 4, so register it on POSIX only.
+    if host_machine.system() != 'windows'
+      test('daemon_socket_parallel_status',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket', 'concurrency'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client parallel status from independent clients'],
+      )
+    endif
 
     test('daemon_socket_timeout_behavior',
       daemon_catch2_exe,

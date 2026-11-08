@@ -152,6 +152,7 @@ TEST_CASE("MCP Apps Tool - Visibility Model and App",
         if (!linkedTools.contains(name)) {
             if (tool.contains("_meta")) {
                 CHECK_FALSE(tool["_meta"].contains("ui"));
+                CHECK_FALSE(tool["_meta"].contains("ui/resourceUri"));
                 CHECK_FALSE(tool["_meta"].contains("ui/visibility"));
             }
             continue;

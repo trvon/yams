@@ -1831,6 +1831,21 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector basic collection",
     }
 }
 
+TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector collect on empty store",
+                 "[storage][gc][edge][catch2]") {
+    GCOptions options{
+        .maxBlocksPerRun = 100, .minAgeSeconds = 0, .dryRun = false, .progressCallback = nullptr};
+
+    auto result = gc->collect(options);
+    REQUIRE(result.has_value());
+
+    const auto& stats = result.value();
+    CHECK(stats.blocksScanned == 0u);
+    CHECK(stats.blocksDeleted == 0u);
+    CHECK(stats.bytesReclaimed == 0u);
+    CHECK(stats.errors.empty());
+}
+
 TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector dry run collection",
                  "[storage][gc][catch2]") {
     // Store some unreferenced blocks

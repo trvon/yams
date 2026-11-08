@@ -2005,25 +2005,36 @@ TEST_CASE("Daemon client concurrent requests", "[daemon][socket][concurrency]") 
 }
 
 TEST_CASE("Daemon client parallel status from independent clients",
-          "[daemon][socket][concurrency][slow]") {
+          "[daemon][socket][concurrency]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
+    // Fail, don't skip, when the daemon cannot start: this case must actually run.
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    CAPTURE(harness.socketPath());
+    REQUIRE(harness.startWithRetry(30s, 3));
 
-    constexpr int kClients = 4;
-    constexpr int kRequestsPerClient = 5;
+    static constexpr int kClients = 4;
+    static constexpr int kRequestsPerClient = 5;
+    // Generous per-call bound for arm64/TSAN runners; a failed status() is still a bug.
+    static constexpr auto kStatusTimeout = 15s;
 
     // One connection per client so the daemon serves kClients sockets at once.
     std::vector<std::unique_ptr<DaemonClient>> clients;
     clients.reserve(kClients);
     for (int i = 0; i < kClients; ++i) {
-        clients.push_back(std::make_unique<DaemonClient>(createClient(harness.socketPath())));
+        ClientConfig config;
+        config.socketPath = harness.socketPath();
+        config.connectTimeout = 5s;
+        config.requestTimeout = kStatusTimeout;
+        config.autoStart = false;
+        clients.push_back(std::make_unique<DaemonClient>(config));
+
         yams::Result<void> connectResult;
         for (int attempt = 0; attempt < 3; ++attempt) {
             connectResult = yams::cli::run_sync(clients.back()->connect(), 5s);
             if (connectResult.has_value())
                 break;
+            std::this_thread::sleep_for(200ms);
         }
         INFO("client " << i);
         REQUIRE(connectResult.has_value());
@@ -2036,10 +2047,10 @@ TEST_CASE("Daemon client parallel status from independent clients",
     std::vector<std::future<std::string>> workers;
     workers.reserve(kClients);
     for (int i = 0; i < kClients; ++i) {
-        workers.push_back(std::async(std::launch::async, [&, i]() -> std::string {
+        workers.push_back(std::async(std::launch::async, [&clients, start, i]() -> std::string {
             start.wait();
             for (int req = 0; req < kRequestsPerClient; ++req) {
-                auto sres = yams::cli::run_sync(clients[i]->status(), 5s);
+                auto sres = yams::cli::run_sync(clients[i]->status(), kStatusTimeout);
                 if (!sres.has_value()) {
                     return "client " + std::to_string(i) + " request " + std::to_string(req) +
                            ": " + sres.error().message;
@@ -2050,8 +2061,9 @@ TEST_CASE("Daemon client parallel status from independent clients",
     }
     startSignal.set_value();
 
-    // Each worker issues kRequestsPerClient calls bounded by 5s each.
-    const auto deadline = std::chrono::steady_clock::now() + kRequestsPerClient * 5s + 10s;
+    // Each worker issues kRequestsPerClient sequential calls bounded by kStatusTimeout each.
+    const auto deadline =
+        std::chrono::steady_clock::now() + kRequestsPerClient * kStatusTimeout + 10s;
     for (auto& worker : workers) {
         REQUIRE(worker.wait_until(deadline) == std::future_status::ready);
         const auto failure = worker.get();

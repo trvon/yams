@@ -157,14 +157,15 @@ TEST_CASE("PluginProcess spawns and terminates", "[extraction][plugin]") {
         PluginProcess process{std::move(config)};
         std::this_thread::sleep_for(std::chrono::milliseconds{100});
 
-        // Lower bounds and monotonicity only: sleep_for guarantees a minimum, never a maximum,
-        // so any wall-clock upper bound flakes on loaded or sanitizer runners.
+        // sleep_for guarantees a minimum, never a maximum, so the upper bound is only a sanity
+        // limit that still catches a never-set or stale start time.
         const auto first = process.uptime();
         REQUIRE(first >= std::chrono::milliseconds{100});
 
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
         const auto second = process.uptime();
         REQUIRE(second > first);
+        REQUIRE(second < std::chrono::seconds{60});
     }
 }
 
