@@ -19,6 +19,7 @@
 
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/resource/plugin_trust.h>
+#include <yams/plugins/plugin_dir_names.h>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -247,12 +248,8 @@ struct ExternalPluginHost::Impl {
 
         for (const auto& entry : fs::directory_iterator(dir)) {
             if (entry.is_directory()) {
-                // Dot-prefixed directories are never plugins: plugin names may not start with
-                // '.', and the plugin installer stages installs and upgrades (including a
-                // previous version it is replacing) under .yams-staging. Same rule as
-                // AbiPluginLoader::scanDirectory.
-                if (const auto dirName = entry.path().filename().string();
-                    !dirName.empty() && dirName.front() == '.') {
+                // Installer bookkeeping such as .yams-staging may hold a stale or partial copy.
+                if (yams::plugins::isReservedPluginDirName(entry.path().filename().string())) {
                     continue;
                 }
                 if (isPluginDirectory(entry.path())) {

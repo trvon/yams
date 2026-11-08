@@ -49,6 +49,7 @@ static const char* dlerror() {
 #include <yams/daemon/resource/plugin_host_services.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/abi.h>
+#include <yams/plugins/plugin_dir_names.h>
 
 namespace yams::daemon {
 
@@ -266,12 +267,8 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
         if (!entry.is_directory()) {
             continue;
         }
-        // Dot-prefixed directories are never plugins: plugin names may not start with '.', and
-        // the plugin installer stages installs and upgrades (including a previous version it is
-        // replacing) under .yams-staging. Loading from there would run a stale or partial copy.
-        // Same rule as ExternalPluginHost::scanDirectory.
-        if (const auto dirName = entry.path().filename().string();
-            !dirName.empty() && dirName.front() == '.') {
+        // Installer bookkeeping such as .yams-staging may hold a stale or partial copy.
+        if (yams::plugins::isReservedPluginDirName(entry.path().filename().string())) {
             continue;
         }
         for (const auto& nested : std::filesystem::directory_iterator(entry.path())) {
