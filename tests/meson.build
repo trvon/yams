@@ -1791,6 +1791,7 @@ if catch2_dep.found()
 #Migrated from GTest as part of yams - 3s4 / yams - 8b9
   catch2_storage_submodule_exe = executable('catch2_storage_submodule',
     files(
+      'unit/storage/block_reference_repair_catch2_test.cpp',
       'unit/storage/compressed_storage_engine_catch2_test.cpp',
       'unit/storage/compressed_storage_stats_catch2_test.cpp',
       'unit/storage/storage_backend_engine_adapter_catch2_test.cpp',
