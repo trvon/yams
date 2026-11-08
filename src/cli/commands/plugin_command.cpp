@@ -1213,7 +1213,7 @@ void PluginCommand::installPlugin() {
     } catch (const CLI::RuntimeError&) {
         throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Installation");
     }
 }
 
@@ -1226,11 +1226,13 @@ void PluginCommand::uninstallPlugin() {
             makePluginInstaller(std::shared_ptr<IPluginRepoClient>(repoClient.release()));
 
         auto result = installer->uninstall(uninstallName_, !uninstallKeepTrust_);
-        returnOnError(result, "Uninstall");
+        exitOnError(result, "Uninstall");
 
         std::cout << "Uninstalled: " << uninstallName_ << "\n";
+    } catch (const CLI::RuntimeError&) {
+        throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Uninstall");
     }
 }
 
@@ -1250,10 +1252,7 @@ void PluginCommand::updatePlugins() {
 
         // Check for updates
         auto updates = installer->checkUpdates(updateAll_ ? "" : updateName_);
-        if (!updates) {
-            std::cout << "Failed to check for updates: " << updates.error().message << "\n";
-            return;
-        }
+        exitOnError(updates, "Failed to check for updates");
 
         if (updates.value().empty()) {
             std::cout << "All plugins are up to date.\n";
@@ -1306,7 +1305,7 @@ void PluginCommand::updatePlugins() {
     } catch (const CLI::RuntimeError&) {
         throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Update");
     }
 }
 
