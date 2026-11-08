@@ -1712,6 +1712,14 @@ if catch2_dep.found()
   )
 
   catch2_test_table += [{
+    'name': 'memory_sync_failure_reporter',
+    'sources': files('unit/memory_sync/sync_failure_reporter_catch2_test.cpp'),
+    'deps': [],
+    'suite': ['catch2', 'unit', 'memory-sync'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'memory_sync_records',
     'sources': files('unit/memory_sync/records_catch2_test.cpp'),
     'deps': [dependency('nlohmann_json')],

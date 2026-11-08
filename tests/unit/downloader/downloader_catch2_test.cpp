@@ -9,6 +9,7 @@
 #include <yams/downloader/downloader.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
@@ -19,6 +20,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,6 +35,7 @@ std::unique_ptr<IIntegrityVerifier> makeIntegrityVerifierSha256Only();
 std::unique_ptr<IResumeStore> makeInMemoryResumeStore();
 std::unique_ptr<IRateLimiter> makeRateLimiter();
 std::unique_ptr<IHttpAdapter> makeCurlHttpAdapter();
+std::string resolveCaBundle(const TlsConfig& tls, std::span<const std::string_view> candidates);
 } // namespace yams::downloader
 
 namespace {
@@ -1383,6 +1386,42 @@ TEST_CASE("Durable replace leaves no partial object when the copy fails",
             ++entries;
         CHECK(entries == 1);
     }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("CA bundle: an explicit path wins over the platform candidates", "[downloader][tls]") {
+    const auto dir = fs::temp_directory_path() / "yams_ca_bundle_test";
+    fs::create_directories(dir);
+    const auto bundle = dir / "roots.pem";
+    std::ofstream(bundle) << "-----BEGIN CERTIFICATE-----\n";
+    const std::string bundleStr = bundle.string();
+    const std::array<std::string_view, 2> candidates{"/nonexistent/yams/cert.pem", bundleStr};
+
+    SECTION("configured path is used as given") {
+        TlsConfig tls;
+        tls.caPath = "/custom/ca.pem";
+        CHECK(resolveCaBundle(tls, candidates) == "/custom/ca.pem");
+    }
+    SECTION("first existing candidate is used when none is configured") {
+        CHECK(resolveCaBundle(TlsConfig{}, candidates) == bundleStr);
+    }
+    SECTION("insecure mode does not name a bundle") {
+        TlsConfig tls;
+        tls.insecure = true;
+        CHECK(resolveCaBundle(tls, candidates).empty());
+    }
+    SECTION("no existing candidate keeps libcurl's default") {
+        const std::array<std::string_view, 1> missing{"/nonexistent/yams/cert.pem"};
+        CHECK(resolveCaBundle(TlsConfig{}, missing).empty());
+        CHECK(resolveCaBundle(TlsConfig{}, {}).empty());
+    }
+    SECTION("a directory is not a bundle") {
+        const std::string dirStr = dir.string();
+        const std::array<std::string_view, 1> dirOnly{dirStr};
+        CHECK(resolveCaBundle(TlsConfig{}, dirOnly).empty());
+    }
+
     std::error_code ec;
     fs::remove_all(dir, ec);
 }

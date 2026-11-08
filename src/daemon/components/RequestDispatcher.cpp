@@ -341,6 +341,8 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
     response.outboundFailures = status.value().outboundFailures;
     response.lastOutboundFailure = std::move(status.value().lastOutboundFailure);
     response.lastOutboundFailureAgeMs = status.value().lastOutboundFailureAgeMs;
+    response.lastSyncError = std::move(status.value().lastSyncError);
+    response.lastSyncErrorAgeMs = status.value().lastSyncErrorAgeMs;
     using memory_sync::ApplyStage;
     auto& apply = status.value().apply;
     response.applyCycles = apply.applyCycles;

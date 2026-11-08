@@ -500,11 +500,13 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         }
 
         // Idle backoff
+        bool sleptIdleTick = false;
         if (!didWork) {
             auto snap = TuningSnapshotRegistry::instance().get();
             uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
             if (snap && snap->daemonIdle) {
                 pollMs = std::max<uint32_t>(TuneAdvisor::idleTickMs(), pollMs);
+                sleptIdleTick = true;
             }
             timer.expires_after(std::chrono::milliseconds(std::max<uint32_t>(10, pollMs)));
             co_await timer.async_wait(boost::asio::use_awaitable);
@@ -616,8 +618,12 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         if (batch.empty()) {
             if (state_)
                 state_->stats.repairIdleTicks++;
-            timer.expires_after(100ms);
-            co_await timer.async_wait(boost::asio::use_awaitable);
+            // On an idle daemon this iteration already slept a full idle tick above; a second
+            // wait here only doubled the loop's wakeups. A busy daemon keeps both waits.
+            if (!sleptIdleTick) {
+                timer.expires_after(100ms);
+                co_await timer.async_wait(boost::asio::use_awaitable);
+            }
             continue;
         }
 

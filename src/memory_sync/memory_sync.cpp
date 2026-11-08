@@ -4,12 +4,21 @@
 #include <yams/profiling.h>
 
 #include <spdlog/spdlog.h>
+#include <yams/memory_sync/sync_failure_reporter.h>
 
 #include <typeinfo>
 
 #include "sweep_store.h"
 
 namespace yams::memory_sync {
+
+void logSyncCycleReport(std::string_view line, bool failure) {
+    if (failure) {
+        spdlog::warn("[MemorySync] {}", line);
+    } else {
+        spdlog::info("[MemorySync] {}", line);
+    }
+}
 
 namespace {
 /// One attempt per window once a sweep proves it cannot satisfy its own bounds.
