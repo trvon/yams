@@ -149,7 +149,8 @@ public:
             install->add_flag("--dry-run", installDryRun_, "Preview only, don't install");
             install->add_option("--checksum", installChecksum_,
                                 "Expected sha256:<hex> digest of the plugin archive (required "
-                                "for URL installs or when the repository publishes none)");
+                                "for URL installs or when the repository publishes none; must "
+                                "match the repository's when both exist)");
             install->callback([this]() { installPlugin(); });
 
             // plugin repo (remote repository commands)
@@ -184,7 +185,8 @@ public:
             update->add_flag("--all,-a", updateAll_, "Update all installed plugins");
             update->add_option("--checksum", updateChecksum_,
                                "Expected sha256:<hex> digest of the new archive (single named "
-                               "plugin only; required when the repository publishes none)");
+                               "plugin only; required when the repository publishes none; must "
+                               "match the repository's when both exist)");
             update->callback([this]() { updatePlugins(); });
         };
 

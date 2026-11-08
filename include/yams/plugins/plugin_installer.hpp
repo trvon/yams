@@ -63,8 +63,9 @@ struct InstallOptions {
     bool autoLoad{false};               // Request caller-managed daemon load after install
     bool force{false};                  // Overwrite if already installed
     bool dryRun{false};                 // Preview only, don't install
-    // Expected "sha256:<hex>" digest of the archive; overrides the repository's. Installation
-    // fails when neither this nor the repository metadata provides one.
+    // Expected "sha256:<hex>" digest of the archive. Required when the repository publishes no
+    // checksum (and for direct URL installs); when both exist they must match. Installation
+    // fails when neither provides one.
     std::optional<std::string> checksum;
     InstallProgressCallback onProgress{nullptr};   // Progress callback
     InstallLoadCallback loadAfterInstall{nullptr}; // Optional daemon/plugin load hook

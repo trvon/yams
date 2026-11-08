@@ -103,6 +103,7 @@ struct TarEntry {
     std::string body; // regular files only
     TarType type{TarType::File};
     std::string linkTarget; // symlinks and hard links only
+    unsigned mode{0};       // 0: 0755 for directories, 0644 otherwise
 };
 
 char tarTypeflag(TarType type) {
@@ -135,12 +136,13 @@ std::string makeTar(const std::vector<TarEntry>& entries) {
             std::snprintf(header.data() + offset, width, "%0*llo", static_cast<int>(width - 1),
                           static_cast<unsigned long long>(value));
         };
-        putOctal(100, 8, entry.type == TarType::Directory ? 0755 : 0644); // mode
-        putOctal(108, 8, 0);                                              // uid
-        putOctal(116, 8, 0);                                              // gid
-        putOctal(124, 12, body.size());                                   // size
-        putOctal(136, 12, 0);                                             // mtime
-        header[156] = tarTypeflag(entry.type);                            // typeflag
+        putOctal(100, 8,
+                 entry.mode != 0 ? entry.mode : (entry.type == TarType::Directory ? 0755 : 0644));
+        putOctal(108, 8, 0);                   // uid
+        putOctal(116, 8, 0);                   // gid
+        putOctal(124, 12, body.size());        // size
+        putOctal(136, 12, 0);                  // mtime
+        header[156] = tarTypeflag(entry.type); // typeflag
         std::memcpy(header.data() + 157, entry.linkTarget.data(), entry.linkTarget.size());
         std::memcpy(header.data() + 257, "ustar", 6);
         std::memcpy(header.data() + 263, "00", 2);
@@ -735,6 +737,100 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
         auto listed = installer->listInstalled();
         REQUIRE((listed.has_value()));
         CHECK((listed.value() == std::vector<std::string>{"fake-plugin"})); // no backup left
+    }
+
+    SECTION("stale upgrade backups for this plugin are removed; other plugins' are kept") {
+        const fs::path staleBackup = installDir / ".fake-plugin.yams-backup-123";
+        const fs::path otherBackup = installDir / ".other-plugin.yams-backup-456";
+        fs::create_directories(staleBackup);
+        std::ofstream(staleBackup / "libyams_fake.so") << "OLD";
+        fs::create_directories(otherBackup);
+
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
+
+        REQUIRE((result.has_value()));
+        CHECK_FALSE(fs::exists(staleBackup));
+        CHECK((fs::exists(otherBackup)));
+    }
+
+    SECTION("a single top-level directory is used even with files beside it") {
+        auto result = installFrom({{"myplugin/", "", TarType::Directory},
+                                   {"myplugin/yams-plugin.json", R"({"version": "1.0.0"})"},
+                                   {"myplugin/libyams_x.so", "ELF"},
+                                   {"LICENSE", "MIT"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "yams-plugin.json")));
+        CHECK((fs::is_regular_file(pluginDir / "libyams_x.so")));
+    }
+
+    SECTION("a manifest at the archive root keeps the root as the plugin") {
+        auto result = installFrom({{"yams-plugin.json", R"({"version": "1.0.0"})"},
+                                   {"lib/", "", TarType::Directory},
+                                   {"lib/dep.so", "DEP"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "yams-plugin.json")));
+        CHECK((fs::is_regular_file(pluginDir / "lib" / "dep.so")));
+    }
+
+#if !defined(_WIN32)
+    SECTION("read-only directories from the archive stay removable") {
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"},
+                                   {"plugin/lib/", "", TarType::Directory, "", 0555},
+                                   {"plugin/lib/dep.so", "DEP", TarType::File, "", 0444}});
+
+        REQUIRE((result.has_value()));
+        REQUIRE((fs::is_regular_file(pluginDir / "lib" / "dep.so")));
+        const auto libPerms = fs::status(pluginDir / "lib").permissions();
+        CHECK(((libPerms & fs::perms::owner_all) == fs::perms::owner_all));
+
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+        REQUIRE((installer->uninstall("fake-plugin").has_value()));
+        CHECK_FALSE(fs::exists(pluginDir));
+    }
+#endif
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install honors --force in a custom install directory",
+                 "[plugins][installer][install]") {
+    const fs::path customDir = testDir / "custom-plugins";
+    const fs::path pluginDir = customDir / "fake-plugin";
+    fs::create_directories(pluginDir);
+    std::ofstream(pluginDir / "yams-plugin.json") << R"({"version": "1.0.0"})";
+    std::ofstream(pluginDir / "keep.so") << "KEEP";
+
+    const fs::path archive =
+        writePluginArchive(testDir / "source" / "fake-plugin.tar.gz",
+                           {{"plugin/", "", TarType::Directory},
+                            {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+    repo->info.downloadUrl = fileUrl(archive);
+    repo->info.checksum = sha256Of(archive);
+    auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+    InstallOptions options;
+    options.installDir = customDir;
+
+    SECTION("the same version there is not replaced without --force") {
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidOperation));
+        CHECK((fs::exists(pluginDir / "keep.so")));
+    }
+
+    SECTION("--force replaces it") {
+        options.force = true;
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().wasUpgrade));
+        CHECK_FALSE(fs::exists(pluginDir / "keep.so"));
     }
 }
 

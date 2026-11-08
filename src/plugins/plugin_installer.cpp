@@ -489,10 +489,21 @@ Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir
     return {};
 }
 
-// The directory whose contents become the installed plugin: the extraction root, unless it
-// holds exactly one entry and that entry is a real directory (the "<name>/..." layout).
-// Top-level archive junk (isArchiveJunk) is removed first so it neither changes that decision
-// nor gets installed.
+// Files whose presence at a directory's top level marks it as the plugin itself.
+bool isPluginRootMarker(const fs::path& path) {
+    const std::string name = path.filename().string();
+    if (name == "yams-plugin.json" || name == "manifest.json") {
+        return true;
+    }
+    const std::string ext = path.extension().string();
+    return ext == ".so" || ext == ".dylib" || ext == ".dll";
+}
+
+// The directory whose contents become the installed plugin. Top-level archive junk
+// (isArchiveJunk) is removed first so it neither changes the decision nor gets installed. Then:
+// the extraction root if it holds a manifest or plugin library itself; otherwise its only
+// top-level directory if there is exactly one (the "<name>/..." layout, possibly with README or
+// LICENSE files beside it); otherwise the root.
 Result<fs::path> selectPluginSourceDir(const fs::path& extractDir) {
     std::error_code ec;
     std::vector<fs::path> children;
@@ -515,11 +526,109 @@ Result<fs::path> selectPluginSourceDir(const fs::path& extractDir) {
         }
     }
 
-    if (content.size() == 1 &&
-        fs::symlink_status(content.front(), ec).type() == fs::file_type::directory) {
-        return content.front();
+    std::vector<fs::path> directories;
+    for (const auto& child : content) {
+        std::error_code typeEc;
+        if (fs::symlink_status(child, typeEc).type() == fs::file_type::directory) {
+            directories.push_back(child);
+        } else if (isPluginRootMarker(child)) {
+            return extractDir;
+        }
+    }
+    if (directories.size() == 1) {
+        return directories.front();
     }
     return extractDir;
+}
+
+// Archive modes are kept (plugins may ship executables), but the installer must always be able
+// to traverse, update and delete what it extracted: a 0555 directory cannot be emptied. Grants
+// owner rwx on directories and owner rw on files under `root`, without following links.
+Result<void> ensureOwnerAccess(const fs::path& root) {
+    std::error_code ec;
+    auto it = fs::recursive_directory_iterator(root, ec);
+    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        std::error_code entryEc;
+        const auto status = it->symlink_status(entryEc);
+        if (entryEc) {
+            return Error{ErrorCode::IOError, "Failed to inspect extracted plugin file " +
+                                                 it->path().filename().string() + ": " +
+                                                 entryEc.message()};
+        }
+        fs::perms wanted = fs::perms::none;
+        if (fs::is_directory(status)) {
+            wanted = fs::perms::owner_all;
+        } else if (fs::is_regular_file(status)) {
+            wanted = fs::perms::owner_read | fs::perms::owner_write;
+        } else {
+            continue; // symlinks: their mode is irrelevant and chmod would follow them
+        }
+        if ((status.permissions() & wanted) == wanted) {
+            continue;
+        }
+        fs::permissions(it->path(), wanted, fs::perm_options::add, entryEc);
+        if (entryEc) {
+            return Error{ErrorCode::IOError, "Failed to make extracted plugin file " +
+                                                 it->path().filename().string() +
+                                                 " writable: " + entryEc.message()};
+        }
+    }
+    if (ec) {
+        return Error{ErrorCode::IOError, "Failed to scan extracted plugin: " + ec.message()};
+    }
+    return {};
+}
+
+// Removes an install's temp directory on every exit path, restoring owner access first so a
+// read-only directory from the archive cannot make the removal fail.
+struct ScopedPluginTempDir {
+    fs::path path;
+
+    explicit ScopedPluginTempDir(fs::path dir) : path(std::move(dir)) {}
+    ScopedPluginTempDir(const ScopedPluginTempDir&) = delete;
+    ScopedPluginTempDir& operator=(const ScopedPluginTempDir&) = delete;
+    ~ScopedPluginTempDir() {
+        if (path.empty()) {
+            return;
+        }
+        std::error_code ec;
+        const fs::path tempRoot = fs::temp_directory_path(ec);
+        if (ec) {
+            return;
+        }
+        (void)ensureOwnerAccess(path);
+        if (auto removed = removeAllScoped(path, tempRoot, "plugin temp"); !removed) {
+            spdlog::warn("Failed to remove plugin temp directory '{}': {}", path.string(),
+                         removed.error().message);
+        }
+    }
+};
+
+// Name prefix of the directory an upgrade sets the previous installation aside in.
+std::string backupPrefix(const std::string& pluginName) {
+    return "." + pluginName + ".yams-backup-";
+}
+
+// Best-effort removal of upgrade backups for `pluginName` that an interrupted install left in
+// `targetDir`. Failures are logged; they do not block the install.
+void removeStaleBackups(const fs::path& targetDir, const std::string& pluginName) {
+    const std::string prefix = backupPrefix(pluginName);
+    std::vector<fs::path> stale;
+    std::error_code ec;
+    for (auto it = fs::directory_iterator(targetDir, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (it->path().filename().string().rfind(prefix, 0) == 0) {
+            stale.push_back(it->path());
+        }
+    }
+    for (const auto& dir : stale) {
+        if (auto removed = removeAllScoped(dir, targetDir, "stale plugin backup"); removed) {
+            spdlog::info("Removed stale plugin backup '{}'", dir.string());
+        } else {
+            spdlog::warn("Could not remove stale plugin backup '{}': {}", dir.string(),
+                         removed.error().message);
+        }
+    }
 }
 
 } // namespace
@@ -613,8 +722,9 @@ public:
         fs::path pluginDir = targetDir / info.name;
 
         // Check if already installed (before the checksum checks, so a reinstall without
-        // --force reports the real reason).
-        auto installedVer = installedVersion(info.name);
+        // --force reports the real reason). Look in the effective target directory, which is the
+        // one the replace logic below acts on.
+        auto installedVer = installedVersionAt(pluginDir);
         if (installedVer && installedVer.value()) {
             result.wasUpgrade = true;
             // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
@@ -681,13 +791,16 @@ public:
             return result;
         }
 
-        // Create a unique scoped temp directory for download/extract.
+        // Best-effort: drop upgrade backups a crashed earlier install of this plugin left behind.
+        removeStaleBackups(targetDir, info.name);
+
+        // Create a unique scoped temp directory for download/extract; removed on every exit.
         auto tempDirRes = makePluginTempDir(info.name, info.version);
         if (!tempDirRes) {
             return tempDirRes.error();
         }
-        fs::path tempDir = tempDirRes.value();
-        const fs::path tempRoot = fs::temp_directory_path();
+        const ScopedPluginTempDir tempScope{tempDirRes.value()};
+        const fs::path& tempDir = tempScope.path;
         std::error_code ec;
         fs::path archivePath = tempDir / (info.name + "-" + info.version + ".tar.gz");
 
@@ -695,7 +808,6 @@ public:
         notifyProgress(InstallProgress::Stage::Downloading, "Downloading " + info.name + "...");
         auto downloadRes = downloadFile(info.downloadUrl, archivePath, options);
         if (!downloadRes) {
-            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return downloadRes.error();
         }
 
@@ -703,12 +815,10 @@ public:
         notifyProgress(InstallProgress::Stage::Verifying, "Verifying integrity...", 0.0f);
         const std::string actualChecksum = computeSha256(archivePath);
         if (actualChecksum.empty()) {
-            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return Error{ErrorCode::IOError,
                          "Failed to compute checksum of downloaded plugin archive"};
         }
         if (actualChecksum != expectedChecksum) {
-            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return Error{ErrorCode::HashMismatch, "Checksum mismatch: expected " +
                                                       expectedChecksum + ", got " + actualChecksum};
         }
@@ -719,21 +829,21 @@ public:
         fs::path extractDir = tempDir / "extracted";
         auto extractRes = extractArchive(archivePath, extractDir);
         if (!extractRes) {
-            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return extractRes.error();
+        }
+        if (auto permsRes = ensureOwnerAccess(extractDir); !permsRes) {
+            return permsRes.error();
         }
 
         // Plugin content is either the archive root or its single top-level directory. Validate
         // it before touching any existing installation.
         auto sourceDirRes = selectPluginSourceDir(extractDir);
         if (!sourceDirRes) {
-            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return sourceDirRes.error();
         }
         const fs::path sourceDir = sourceDirRes.value();
         auto scanRes = scanExtractedPlugin(sourceDir);
         if (!scanRes) {
-            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return scanRes.error();
         }
 
@@ -741,7 +851,6 @@ public:
         notifyProgress(InstallProgress::Stage::Installing, "Installing plugin...");
 
         if (!yams::common::ensureDirectories(targetDir)) {
-            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return Error{ErrorCode::IOError, "Failed to create plugin directory"};
         }
 
@@ -751,11 +860,10 @@ public:
         if (fs::symlink_status(pluginDir, ec).type() != fs::file_type::not_found && !ec) {
             backupDir =
                 targetDir /
-                ("." + info.name + ".yams-backup-" +
+                (backupPrefix(info.name) +
                  std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
             fs::rename(pluginDir, backupDir, ec);
             if (ec) {
-                (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
                 return Error{ErrorCode::IOError,
                              "Failed to set aside the existing plugin: " + ec.message()};
             }
@@ -771,7 +879,7 @@ public:
                      fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
         }
         if (ec) {
-            const std::string message = "Failed to install plugin: " + ec.message();
+            std::string message = "Failed to install plugin: " + ec.message();
             std::error_code cleanupEc;
             if (fs::symlink_status(pluginDir, cleanupEc).type() != fs::file_type::not_found) {
                 (void)removeAllScoped(pluginDir, targetDir, "partial plugin install");
@@ -781,9 +889,11 @@ public:
                 if (cleanupEc) {
                     spdlog::error("Failed to restore previous plugin '{}' from '{}': {}",
                                   pluginDir.string(), backupDir.string(), cleanupEc.message());
+                    message += ". Restoring the previous version also failed (" +
+                               cleanupEc.message() + "); it is preserved at " + backupDir.string() +
+                               " and can be moved back to " + pluginDir.string();
                 }
             }
-            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return Error{ErrorCode::IOError, message};
         }
         if (!backupDir.empty()) {
@@ -795,9 +905,6 @@ public:
 
         result.installedPath = pluginDir;
         result.sizeBytes = scanRes.value();
-
-        // Cleanup temp directory
-        (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
 
         // Add to trust list
         if (options.autoTrust) {
@@ -886,9 +993,15 @@ public:
         if (auto nameValidation = validatePluginName(name); !nameValidation) {
             return nameValidation.error();
         }
-        fs::path pluginDir = installDir_ / name;
+        return installedVersionAt(installDir_ / name);
+    }
 
-        if (!fs::exists(pluginDir)) {
+private:
+    // Version of the plugin installed at `pluginDir`: nullopt when nothing is there, "unknown"
+    // when it has no readable manifest.
+    static Result<std::optional<std::string>> installedVersionAt(const fs::path& pluginDir) {
+        std::error_code existsEc;
+        if (!fs::exists(pluginDir, existsEc)) {
             return std::optional<std::string>(std::nullopt);
         }
 
@@ -918,6 +1031,7 @@ public:
         return std::optional<std::string>("unknown");
     }
 
+public:
     Result<std::map<std::string, std::string>> checkUpdates(const std::string& name) override {
         std::map<std::string, std::string> updates;
 
