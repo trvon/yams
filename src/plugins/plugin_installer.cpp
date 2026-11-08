@@ -639,6 +639,25 @@ bool isStagingDirOf(std::string_view dirName, const std::string& plugin) {
            dirName[plugin.size()] == '@';
 }
 
+// Owns the private directory an install downloads and verifies its archive in, outside the
+// target directory's install lock, and removes it on every exit path.
+struct ScopedDownloadDir {
+    fs::path path;
+
+    explicit ScopedDownloadDir(fs::path dir) : path(std::move(dir)) {}
+    ScopedDownloadDir(const ScopedDownloadDir&) = delete;
+    ScopedDownloadDir& operator=(const ScopedDownloadDir&) = delete;
+    ~ScopedDownloadDir() {
+        if (path.empty()) {
+            return;
+        }
+        if (auto removed = removeAllScoped(path, path.parent_path(), "plugin download"); !removed) {
+            spdlog::warn("Failed to remove plugin download directory '{}': {}", path.string(),
+                         removed.error().message);
+        }
+    }
+};
+
 // Owns one install's staging directory and removes it on every exit path (restoring owner
 // access first so a read-only directory from the archive cannot block the removal), unless
 // `keep` is set because it holds a previous version that could not be restored. The staging
@@ -722,6 +741,26 @@ Result<std::optional<std::string>> installedVersionAt(const fs::path& pluginDir)
     }
 
     return std::optional<std::string>("unknown");
+}
+
+// Records in `result` whether `pluginDir` already holds an install, and refuses to reinstall the
+// same version without --force.
+Result<void> checkInstalled(const fs::path& pluginDir, const RemotePluginInfo& info,
+                            const InstallOptions& options, InstallResult& result) {
+    result.wasUpgrade = false;
+    result.previousVersion.clear();
+    auto installedVer = installedVersionAt(pluginDir);
+    if (installedVer && installedVer.value()) {
+        result.wasUpgrade = true;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+        result.previousVersion = *installedVer.value();
+        if (!options.force && result.previousVersion == info.version) {
+            return Error{ErrorCode::InvalidOperation,
+                         "Plugin " + info.name + "@" + info.version +
+                             " is already installed. Use --force to reinstall."};
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -817,16 +856,9 @@ public:
         // Check if already installed (before the checksum checks, so a reinstall without
         // --force reports the real reason). Look in the effective target directory, which is the
         // one the replace logic below acts on.
-        auto installedVer = installedVersionAt(pluginDir);
-        if (installedVer && installedVer.value()) {
-            result.wasUpgrade = true;
-            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-            result.previousVersion = *installedVer.value();
-            if (!options.force && result.previousVersion == info.version) {
-                return Error{ErrorCode::InvalidOperation,
-                             "Plugin " + info.name + "@" + info.version +
-                                 " is already installed. Use --force to reinstall."};
-            }
+        // This early check avoids a pointless download; it is repeated under the install lock.
+        if (auto installed = checkInstalled(pluginDir, info, options, result); !installed) {
+            return installed.error();
         }
 
         // Every installed archive is verified before it is extracted or trusted. With no
@@ -890,39 +922,27 @@ public:
             return result;
         }
 
-        // Stage this install on the install filesystem (see kStagingDirName), holding the
-        // target directory's install lock until return. The lock is declared before the staging
-        // guard so it is released after the guard's cleanup.
-        if (!yams::common::ensureDirectories(targetDir)) {
-            return Error{ErrorCode::IOError, "Failed to create plugin directory"};
+        // Download and verify outside the target directory's install lock, so a slow download
+        // never blocks other installs. The archive goes to a fresh private directory.
+        const ScopedDownloadDir download{
+            yams::common::createTempDirectory("yams-plugin-download-")};
+        if (download.path.empty()) {
+            return Error{ErrorCode::IOError, "Failed to create a plugin download directory"};
         }
-        yams::common::ExclusiveFileLock targetLock;
-        if (auto locked = lockTargetDir(targetLock, targetDir); !locked) {
-            return locked.error();
-        }
-        const fs::path stagingRoot = targetDir / std::string(kStagingDirName);
         std::error_code ec;
-        fs::create_directories(stagingRoot, ec);
+        fs::permissions(download.path, fs::perms::owner_all, fs::perm_options::replace, ec);
         if (ec) {
             return Error{ErrorCode::IOError,
-                         "Failed to create plugin staging directory: " + ec.message()};
+                         "Failed to restrict the plugin download directory: " + ec.message()};
         }
-        const fs::path stagingDir = yams::common::createTempDirectory(info.name + "@", stagingRoot);
-        if (stagingDir.empty()) {
-            return Error{ErrorCode::IOError, "Failed to create a plugin staging directory under " +
-                                                 stagingRoot.string()};
-        }
-        ScopedStagingDir staging{stagingDir, stagingRoot};
-        const fs::path archivePath = staging.path / "archive.tar.gz";
+        const fs::path archivePath = download.path / "archive.tar.gz";
 
-        // Download
         notifyProgress(InstallProgress::Stage::Downloading, "Downloading " + info.name + "...");
         auto downloadRes = downloadFile(info.downloadUrl, archivePath, options);
         if (!downloadRes) {
             return downloadRes.error();
         }
 
-        // Verify checksum
         notifyProgress(InstallProgress::Stage::Verifying, "Verifying integrity...", 0.0f);
         const std::string actualChecksum = computeSha256(archivePath);
         if (actualChecksum.empty()) {
@@ -935,64 +955,99 @@ public:
         }
         result.checksum = actualChecksum;
 
-        // Extract
-        notifyProgress(InstallProgress::Stage::Extracting, "Extracting archive...");
-        const fs::path extractDir = staging.path / "extracted";
-        auto extractRes = extractArchive(archivePath, extractDir);
-        if (!extractRes) {
-            return extractRes.error();
+        // Everything that reads or changes the target directory runs under its install lock.
+        // The staging guard is declared after the lock in this scope, so its cleanup (including
+        // removing the empty staging root) finishes before the lock is released.
+        if (!yams::common::ensureDirectories(targetDir)) {
+            return Error{ErrorCode::IOError, "Failed to create plugin directory"};
         }
+        {
+            yams::common::ExclusiveFileLock targetLock;
+            if (auto locked = lockTargetDir(targetLock, targetDir); !locked) {
+                return locked.error();
+            }
 
-        // Plugin content is either the archive root or its single top-level directory. Validate
-        // it before touching any existing installation.
-        auto sourceDirRes = selectPluginSourceDir(extractDir);
-        if (!sourceDirRes) {
-            return sourceDirRes.error();
-        }
-        const fs::path sourceDir = sourceDirRes.value();
-        auto scanRes = prepareExtractedPlugin(sourceDir);
-        if (!scanRes) {
-            return scanRes.error();
-        }
+            // Re-check now that no other install can change the target directory: one that
+            // finished while this one was downloading may have installed this version already.
+            if (auto installed = checkInstalled(pluginDir, info, options, result); !installed) {
+                return installed.error();
+            }
 
-        notifyProgress(InstallProgress::Stage::Installing, "Installing plugin...");
-
-        // Upgrade: move the existing installation into this install's staging directory, then
-        // the new tree into place; the staging cleanup deletes the old one. Both are renames on
-        // one filesystem. If the second fails, the previous version is moved back.
-        fs::path previousDir;
-        if (fs::symlink_status(pluginDir, ec).type() != fs::file_type::not_found && !ec) {
-            previousDir = staging.path / "previous";
-            fs::rename(pluginDir, previousDir, ec);
+            const fs::path stagingRoot = targetDir / std::string(kStagingDirName);
+            fs::create_directories(stagingRoot, ec);
             if (ec) {
                 return Error{ErrorCode::IOError,
-                             "Failed to set aside the existing plugin: " + ec.message()};
+                             "Failed to create plugin staging directory: " + ec.message()};
             }
-        }
-        ec.clear();
+            const fs::path stagingDir =
+                yams::common::createTempDirectory(info.name + "@", stagingRoot);
+            if (stagingDir.empty()) {
+                return Error{ErrorCode::IOError,
+                             "Failed to create a plugin staging directory under " +
+                                 stagingRoot.string()};
+            }
+            ScopedStagingDir staging{stagingDir, stagingRoot};
 
-        fs::rename(sourceDir, pluginDir, ec);
-        if (ec) {
-            std::string message = "Failed to install plugin: " + ec.message();
-            if (!previousDir.empty()) {
-                std::error_code restoreEc;
-                fs::rename(previousDir, pluginDir, restoreEc);
-                if (restoreEc) {
-                    staging.keep = true;
-                    spdlog::error("Failed to restore previous plugin '{}' from '{}': {}",
-                                  pluginDir.string(), previousDir.string(), restoreEc.message());
-                    message += ". Restoring the previous version also failed (" +
-                               restoreEc.message() + "); it is preserved at " +
-                               previousDir.string() + " and can be moved back to " +
-                               pluginDir.string();
+            notifyProgress(InstallProgress::Stage::Extracting, "Extracting archive...");
+            const fs::path extractDir = staging.path / "extracted";
+            auto extractRes = extractArchive(archivePath, extractDir);
+            if (!extractRes) {
+                return extractRes.error();
+            }
+
+            // Plugin content is either the archive root or its single top-level directory.
+            // Validate it before touching any existing installation.
+            auto sourceDirRes = selectPluginSourceDir(extractDir);
+            if (!sourceDirRes) {
+                return sourceDirRes.error();
+            }
+            const fs::path sourceDir = sourceDirRes.value();
+            auto scanRes = prepareExtractedPlugin(sourceDir);
+            if (!scanRes) {
+                return scanRes.error();
+            }
+
+            notifyProgress(InstallProgress::Stage::Installing, "Installing plugin...");
+
+            // Upgrade: move the existing installation into this install's staging directory,
+            // then the new tree into place; the staging cleanup deletes the old one. Both are
+            // renames on one filesystem. If the second fails, the previous version is moved
+            // back.
+            fs::path previousDir;
+            if (fs::symlink_status(pluginDir, ec).type() != fs::file_type::not_found && !ec) {
+                previousDir = staging.path / "previous";
+                fs::rename(pluginDir, previousDir, ec);
+                if (ec) {
+                    return Error{ErrorCode::IOError,
+                                 "Failed to set aside the existing plugin: " + ec.message()};
                 }
             }
-            return Error{ErrorCode::IOError, message};
-        }
-        removeLeftoverStaging(stagingRoot, info.name, staging.path);
+            ec.clear();
 
-        result.installedPath = pluginDir;
-        result.sizeBytes = scanRes.value();
+            fs::rename(sourceDir, pluginDir, ec);
+            if (ec) {
+                std::string message = "Failed to install plugin: " + ec.message();
+                if (!previousDir.empty()) {
+                    std::error_code restoreEc;
+                    fs::rename(previousDir, pluginDir, restoreEc);
+                    if (restoreEc) {
+                        staging.keep = true;
+                        spdlog::error("Failed to restore previous plugin '{}' from '{}': {}",
+                                      pluginDir.string(), previousDir.string(),
+                                      restoreEc.message());
+                        message += ". Restoring the previous version also failed (" +
+                                   restoreEc.message() + "); it is preserved at " +
+                                   previousDir.string() + " and can be moved back to " +
+                                   pluginDir.string();
+                    }
+                }
+                return Error{ErrorCode::IOError, message};
+            }
+            removeLeftoverStaging(stagingRoot, info.name, staging.path);
+
+            result.installedPath = pluginDir;
+            result.sizeBytes = scanRes.value();
+        } // staging cleaned up, then the install lock released
 
         // Add to trust list
         if (options.autoTrust) {
@@ -1029,13 +1084,18 @@ public:
         }
         fs::path pluginDir = installDir_ / name;
 
-        if (!fs::exists(pluginDir)) {
+        std::error_code existsEc;
+        if (!fs::is_directory(installDir_, existsEc)) {
             return Error{ErrorCode::NotFound, "Plugin not installed: " + name};
         }
 
         yams::common::ExclusiveFileLock targetLock;
         if (auto locked = lockTargetDir(targetLock, installDir_); !locked) {
             return locked.error();
+        }
+        // Checked under the lock: an upgrade in flight may have moved the plugin into staging.
+        if (!fs::exists(pluginDir, existsEc)) {
+            return Error{ErrorCode::NotFound, "Plugin not installed: " + name};
         }
 
         if (removeFromTrust) {
