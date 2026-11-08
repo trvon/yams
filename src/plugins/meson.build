@@ -14,6 +14,7 @@ yams_plugins_mgmt = static_library('yams_plugins_mgmt',
   [
     'plugin_repo_client.cpp',
     'plugin_installer.cpp',
+    'file_lock.cpp',
   ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, json_dep, threads_dep, curl_dep, libarchive_dep, yams_core, yams_config, yams_plugins_crypto_dep] + yams_tracy_deps,

@@ -1317,7 +1317,7 @@ void PluginCommand::repoListPlugins() {
     try {
         auto repoClient = makePluginRepoClient();
         auto result = repoClient->list(repoFilter_);
-        returnOnError(result, "Failed to list plugins");
+        exitOnError(result, "Failed to list plugins");
 
         const auto& plugins = result.value();
         if (plugins.empty()) {
@@ -1347,8 +1347,10 @@ void PluginCommand::repoListPlugins() {
             }
             std::cout << "\n";
         }
+    } catch (const CLI::RuntimeError&) {
+        throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Plugin repository");
     }
 }
 
@@ -1360,7 +1362,7 @@ void PluginCommand::repoShowInfo() {
         std::optional<std::string> version =
             repoVersion_.empty() ? std::nullopt : std::make_optional(repoVersion_);
         auto result = repoClient->get(repoPluginName_, version);
-        returnOnError(result, "Failed to get plugin info");
+        exitOnError(result, "Failed to get plugin info");
 
         const auto& info = result.value();
         std::cout << "Plugin: " << info.name << "\n";
@@ -1395,8 +1397,10 @@ void PluginCommand::repoShowInfo() {
             std::cout << "  Downloads: " << info.downloads << "\n";
         if (!info.publishedAt.empty())
             std::cout << "  Published: " << info.publishedAt << "\n";
+    } catch (const CLI::RuntimeError&) {
+        throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Plugin repository");
     }
 }
 
@@ -1406,7 +1410,7 @@ void PluginCommand::repoShowVersions() {
     try {
         auto repoClient = makePluginRepoClient();
         auto result = repoClient->versions(repoPluginName_);
-        returnOnError(result, "Failed to get versions");
+        exitOnError(result, "Failed to get versions");
 
         const auto& versions = result.value();
         if (versions.empty()) {
@@ -1418,8 +1422,10 @@ void PluginCommand::repoShowVersions() {
         for (const auto& v : versions) {
             std::cout << "  " << v << "\n";
         }
+    } catch (const CLI::RuntimeError&) {
+        throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Plugin repository");
     }
 }
 
