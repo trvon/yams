@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -2001,6 +2002,65 @@ TEST_CASE("Daemon client concurrent requests", "[daemon][socket][concurrency]") 
         REQUIRE(listResult.has_value());
         REQUIRE(listResult.value().items.size() >= 3);
     }
+}
+
+TEST_CASE("Daemon client parallel status from independent clients",
+          "[daemon][socket][concurrency][slow]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    DaemonHarness harness;
+    startHarnessWithRetry(harness);
+
+    constexpr int kClients = 4;
+    constexpr int kRequestsPerClient = 5;
+
+    // One connection per client so the daemon serves kClients sockets at once.
+    std::vector<std::unique_ptr<DaemonClient>> clients;
+    clients.reserve(kClients);
+    for (int i = 0; i < kClients; ++i) {
+        clients.push_back(std::make_unique<DaemonClient>(createClient(harness.socketPath())));
+        yams::Result<void> connectResult;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            connectResult = yams::cli::run_sync(clients.back()->connect(), 5s);
+            if (connectResult.has_value())
+                break;
+        }
+        INFO("client " << i);
+        REQUIRE(connectResult.has_value());
+    }
+
+    // Release every worker at once so the status() calls overlap.
+    std::promise<void> startSignal;
+    std::shared_future<void> start = startSignal.get_future().share();
+
+    std::vector<std::future<std::string>> workers;
+    workers.reserve(kClients);
+    for (int i = 0; i < kClients; ++i) {
+        workers.push_back(std::async(std::launch::async, [&, i]() -> std::string {
+            start.wait();
+            for (int req = 0; req < kRequestsPerClient; ++req) {
+                auto sres = yams::cli::run_sync(clients[i]->status(), 5s);
+                if (!sres.has_value()) {
+                    return "client " + std::to_string(i) + " request " + std::to_string(req) +
+                           ": " + sres.error().message;
+                }
+            }
+            return {};
+        }));
+    }
+    startSignal.set_value();
+
+    // Each worker issues kRequestsPerClient calls bounded by 5s each.
+    const auto deadline = std::chrono::steady_clock::now() + kRequestsPerClient * 5s + 10s;
+    for (auto& worker : workers) {
+        REQUIRE(worker.wait_until(deadline) == std::future_status::ready);
+        const auto failure = worker.get();
+        INFO(failure);
+        CHECK(failure.empty());
+    }
+
+    REQUIRE(harness.daemon() != nullptr);
+    CHECK(harness.daemon()->isRunning());
 }
 
 TEST_CASE("Daemon client timeout behavior", "[daemon][socket][timeout]") {

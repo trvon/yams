@@ -27,6 +27,7 @@
 #include <ios>
 #include <random>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -57,7 +58,9 @@ std::filesystem::path makeTempDir(std::string_view prefix = "yams_crypto_test_")
             return candidate;
         }
     }
-    return base;
+    // Never fall back to the shared temp root: callers remove_all() the returned path.
+    throw std::runtime_error("makeTempDir: failed to create a unique directory under " +
+                             base.string());
 }
 
 /**

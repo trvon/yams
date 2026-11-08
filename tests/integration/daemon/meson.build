@@ -216,6 +216,16 @@ else
       args: ['Daemon client concurrent requests', '--allow-running-no-tests'],
     )
 
+    # Slow lane: independent clients issue overlapping status() calls on one live daemon.
+    test('daemon_socket_parallel_status_slow',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket', 'concurrency', 'slow'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: daemon_integration_timeout,
+      args: ['Daemon client parallel status from independent clients', '--allow-running-no-tests'],
+    )
+
     test('daemon_socket_timeout_behavior',
       daemon_catch2_exe,
       suite: ['integration', 'daemon', 'catch2', 'socket'],

@@ -9,6 +9,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/mcp/mcp_server.h>
 
+#include <set>
+#include <string>
+
 using namespace yams::mcp;
 using json = nlohmann::json;
 
@@ -104,4 +107,66 @@ TEST_CASE("MCP Apps Tool - UI Linkage Without Support",
             CHECK_FALSE(tool["_meta"].contains("ui"));
         }
     }
+}
+
+TEST_CASE("MCP Apps Tool - Visibility Model and App",
+          "[mcp][apps][tool][mcp-apps-tool-03][phase1]") {
+    auto transport = std::make_unique<NullTransport>();
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
+
+    json initRequest = {{"jsonrpc", "2.0"},
+                        {"id", 1},
+                        {"method", "initialize"},
+                        {"params",
+                         {{"protocolVersion", "2025-11-25"},
+                          {"clientInfo", {{"name", "test"}, {"version", "1.0"}}},
+                          {"capabilities",
+                           {{"extensions",
+                             {{"io.modelcontextprotocol/ui",
+                               {{"mimeTypes", json::array({"text/html;profile=mcp-app"})}}}}}}}}}};
+
+    auto initResponse = server->handleRequestPublic(initRequest);
+    REQUIRE(initResponse.has_value());
+
+    json toolsRequest = {
+        {"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/list"}, {"params", json::object()}};
+
+    auto toolsResponse = server->handleRequestPublic(toolsRequest);
+    REQUIRE(toolsResponse.has_value());
+
+    json result = toolsResponse.value();
+    REQUIRE(result.contains("result"));
+    REQUIRE(result["result"].contains("tools"));
+
+    // MCPServer links exactly these tools to the dashboard UI (listTools shaping in
+    // mcp_server.cpp); "query" is the code-mode composite.
+    const std::set<std::string> linkedTools = {"search", "grep", "graph", "query"};
+    const json expectedVisibility = json::array({"model", "app"});
+
+    int linkedSeen = 0;
+    for (const auto& tool : result["result"]["tools"]) {
+        REQUIRE(tool.contains("name"));
+        const auto name = tool["name"].get<std::string>();
+        INFO("tool " << name);
+
+        if (!linkedTools.contains(name)) {
+            if (tool.contains("_meta")) {
+                CHECK_FALSE(tool["_meta"].contains("ui"));
+                CHECK_FALSE(tool["_meta"].contains("ui/visibility"));
+            }
+            continue;
+        }
+
+        ++linkedSeen;
+        REQUIRE(tool.contains("_meta"));
+        const auto& meta = tool["_meta"];
+        REQUIRE(meta.contains("ui"));
+        CHECK(meta.at("ui").at("resourceUri") == "ui://yams/dashboard");
+        CHECK(meta.at("ui").at("visibility") == expectedVisibility);
+        CHECK(meta.at("ui/resourceUri") == "ui://yams/dashboard");
+        CHECK(meta.at("ui/visibility") == expectedVisibility);
+    }
+
+    // At least one linked tool is listed in every tool mode.
+    CHECK(linkedSeen > 0);
 }

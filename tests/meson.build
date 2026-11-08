@@ -2485,11 +2485,10 @@ if catch2_dep.found()
     'timeout': 120,
   }]
 
-#FTS5 Tests(Catch2) - FTS5 support detection and fallback
-#Migrated from GTest as part of yams - 3s4 / yams - aqc
+#FTS5 query sanitizer and search query helper tests(Catch2)
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
   catch2_test_table += [{
-    'name': 'fts5',
+    'name': 'fts5_query_sanitizer',
     'sources': files(
       'unit/metadata/fts5_query_sanitizer_catch2_test.cpp',
       'unit/metadata/search_query_helpers_catch2_test.cpp',

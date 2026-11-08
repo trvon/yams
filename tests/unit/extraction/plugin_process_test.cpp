@@ -157,9 +157,14 @@ TEST_CASE("PluginProcess spawns and terminates", "[extraction][plugin]") {
         PluginProcess process{std::move(config)};
         std::this_thread::sleep_for(std::chrono::milliseconds{100});
 
-        auto uptime = process.uptime();
-        REQUIRE(uptime >= std::chrono::milliseconds{100});
-        REQUIRE(uptime < std::chrono::seconds{1});
+        // Lower bounds and monotonicity only: sleep_for guarantees a minimum, never a maximum,
+        // so any wall-clock upper bound flakes on loaded or sanitizer runners.
+        const auto first = process.uptime();
+        REQUIRE(first >= std::chrono::milliseconds{100});
+
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        const auto second = process.uptime();
+        REQUIRE(second > first);
     }
 }
 

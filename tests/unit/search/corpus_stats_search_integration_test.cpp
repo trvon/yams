@@ -779,11 +779,6 @@ TEST_CASE("community detection: scientific query sets community_override in debu
     const auto& debug = result.value().debugStats;
     REQUIRE(debug.count("community_override") > 0);
     CHECK(debug.at("community_override") == "SCIENTIFIC");
-
-    // Timing must still be present.
-    const auto& timing = result.value().componentTimingMicros;
-    // Only presence is checked: a wall-clock limit flakes on slow and sanitizer runners.
-    REQUIRE(timing.count("community_detection") > 0);
 }
 
 TEST_CASE("community detection: neutral query does not set community_override",

@@ -279,15 +279,6 @@ Result<yams::daemon::GrepResponse> RetrievalService::grep(const GrepOptions& req
         opts, "grep", [client, req = std::move(req)]() { return client->streamingGrep(req); });
 }
 
-Result<yams::daemon::GrepResponse>
-RetrievalService::grep(const GrepOptions& req_opts, const RetrievalOptions& opts,
-                       const std::optional<PathTreeOptions>& /*pathTree*/
-) const {
-    // PBI-058: PathTreeOptions overload currently delegates to standard grep.
-    // Future: implement path-tree-aware behavior when enabled.
-    return grep(req_opts, opts);
-}
-
 Result<yams::daemon::ListResponse> RetrievalService::list(const ListOptions& req_opts,
                                                           const RetrievalOptions& opts) const {
     auto req = makeListRequest(req_opts);
