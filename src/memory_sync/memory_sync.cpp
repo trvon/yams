@@ -1003,6 +1003,7 @@ bool MemorySyncLoop::verifiedEnvelope(const std::string& envelopeHash,
 
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
     lastSyncReusedCompleteScan_ = false;
+    scanBudgetGrew_ = false;
     if (control_.isCancelled && control_.isCancelled()) {
         discardSweep();
         return Error{ErrorCode::OperationCancelled, "memory sync reconciliation cancelled"};
@@ -1017,6 +1018,11 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         // and must retry freely, so they are excluded even though a governor denial
         // also reports ResourceExhausted.
         if (result.error().code == ErrorCode::ResourceExhausted && sweepBoundExhausted_) {
+            // A store that outgrew the scan budget is not stuck: retry with a larger one.
+            if (scanBudgetExhausted_ && growScanBudget()) {
+                scanBudgetGrew_ = true;
+                return result;
+            }
             noteSweepFailure(result.error().code, result.error().message);
         }
         return result;
@@ -1112,7 +1118,7 @@ Result<std::shared_ptr<MemorySyncLoop::SweepStore>> MemorySyncLoop::makeSweepSto
     const auto rowBytes = std::max<std::size_t>(
         4096,
         std::min<std::size_t>(limits_.maxEnvelopeBytes, std::numeric_limits<int>::max() / 4) * 4);
-    auto store = SweepStore::create(sweepDirectory_, limits_.maxScanBytes, std::move(verifier),
+    auto store = SweepStore::create(sweepDirectory_, scanBudget_, std::move(verifier),
                                     limits_.maxIndexObjectsPerSync, rowBytes,
                                     [this] { return beforeRemoteWork(); });
     if (store) {
@@ -1150,6 +1156,7 @@ Result<void> MemorySyncLoop::ensureCommittedStore() {
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
     YAMS_ZONE_SCOPED_N("memory_sync.sync");
     sweepBoundExhausted_ = false;
+    scanBudgetExhausted_ = false;
     // Any failed/throwing page restarts the entire security decision. Keeping a cursor
     // with half-observed identities could miss forks or double-charge a retried page.
     const auto resetScan = [&]() noexcept { discardSweep(); };
@@ -1186,6 +1193,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
         auto workspace = makeSweepStore();
         if (!workspace) {
             sweepBoundExhausted_ = workspace.error().code == ErrorCode::ResourceExhausted;
+            scanBudgetExhausted_ = sweepBoundExhausted_;
             return workspace.error();
         }
         sweepStore_ = std::move(workspace.value());
@@ -1300,10 +1308,11 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
         // Charge every causally valid observation BEFORE retaining identities, including
         // misplaced envelopes which will not become candidates. Otherwise oversized index
         // keys could fill operations_ without ever being charged to the sweep budget.
-        const auto remaining = limits_.maxScanBytes - std::min(scanBytes_, limits_.maxScanBytes);
+        const auto remaining = scanBudget_ - std::min(scanBytes_, scanBudget_);
         if (key.size() > remaining || envelopeBytes > remaining - key.size() ||
             (!sweepStore_ && scanCandidates_.size() >= limits_.maxTrackedIdentities)) {
             sweepBoundExhausted_ = true;
+            scanBudgetExhausted_ = sweepStore_ != nullptr;
             return Error{ErrorCode::ResourceExhausted,
                          "memory sync complete-sweep candidate budget exhausted"};
         }
@@ -1316,6 +1325,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
                                                      logicalKey, validIdentity);
                 !observed) {
                 sweepBoundExhausted_ = observed.error().code == ErrorCode::ResourceExhausted;
+                scanBudgetExhausted_ = sweepBoundExhausted_; // workspace full (sized by budget)
                 return observed.error();
             }
             if (!validIdentity) {
@@ -1326,6 +1336,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
                     ScanCandidate{key, logicalKey, candidateRecordHash, std::move(record.value())});
                 !appended) {
                 sweepBoundExhausted_ = appended.error().code == ErrorCode::ResourceExhausted;
+                scanBudgetExhausted_ = sweepBoundExhausted_; // workspace full (sized by budget)
                 return appended.error();
             }
             continue;
@@ -1715,10 +1726,39 @@ Result<void> MemorySyncLoop::finalizeExclusiveSweep() {
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncFully() {
     for (;;) {
         auto result = sync();
+        if (!result && scanBudgetGrew_) {
+            continue; // the sweep restarts with the larger budget
+        }
         if (!result || scanCursor_.empty()) {
             return result;
         }
     }
+}
+
+bool MemorySyncLoop::growScanBudget() {
+    if (sweepDirectory_.empty()) {
+        return false; // the in-memory sweep keeps its fixed bound
+    }
+    const auto ceiling = std::max(limits_.maxScanBytes, limits_.maxScanBytesCeiling);
+    if (scanBudget_ >= ceiling) {
+        return false;
+    }
+    const auto next =
+        scanBudget_ > ceiling / 4 ? ceiling : std::max<std::size_t>(scanBudget_ * 4, 1);
+    // The workspace holds roughly the bytes it scans; do not grow into a full disk.
+    std::error_code ec;
+    const auto space = std::filesystem::space(sweepDirectory_, ec);
+    if (ec || space.available < next) {
+        spdlog::warn("[MemorySync] complete sweep needs more than its {} MiB scan budget, but "
+                     "{} has too little free space to raise it to {} MiB",
+                     scanBudget_ >> 20, sweepDirectory_.string(), next >> 20);
+        return false;
+    }
+    spdlog::info("[MemorySync] complete sweep exceeded its {} MiB scan budget; retrying with "
+                 "{} MiB (ceiling {} MiB)",
+                 scanBudget_ >> 20, next >> 20, ceiling >> 20);
+    scanBudget_ = next;
+    return true;
 }
 
 Result<MemoryDeltaBatch> MemorySyncLoop::exportLocalDeltasAfter(const VersionVector& peerVersion,
