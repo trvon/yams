@@ -96,39 +96,47 @@ public:
     RemotePluginInfo info;
 };
 
-// Writes a single-file ustar archive ("fake-plugin/yams-plugin.json"), gzip-compressed, to
-// `archivePath`. Built in-process so the test needs no external tar tool or binary fixture.
-fs::path writeFakePluginArchive(const fs::path& archivePath) {
-    const std::string entryName = "fake-plugin/yams-plugin.json";
-    const std::string body = R"({"name": "fake-plugin", "version": "1.0.0"})"
-                             "\n";
+struct TarEntry {
+    std::string name;
+    std::string body; // ignored for directories
+    bool isDirectory{false};
+};
 
+// Writes `entries` as a gzip-compressed ustar archive to `archivePath`. Built in-process so the
+// tests need no external tar tool or binary fixture.
+fs::path writePluginArchive(const fs::path& archivePath, const std::vector<TarEntry>& entries) {
     constexpr size_t kBlock = 512;
-    std::array<char, kBlock> header{};
-    std::memcpy(header.data(), entryName.data(), entryName.size());
-    auto putOctal = [&header](size_t offset, size_t width, std::uint64_t value) {
-        std::snprintf(header.data() + offset, width, "%0*llo", static_cast<int>(width - 1),
-                      static_cast<unsigned long long>(value));
-    };
-    putOctal(100, 8, 0644);         // mode
-    putOctal(108, 8, 0);            // uid
-    putOctal(116, 8, 0);            // gid
-    putOctal(124, 12, body.size()); // size
-    putOctal(136, 12, 0);           // mtime
-    header[156] = '0';              // regular file
-    std::memcpy(header.data() + 257, "ustar", 6);
-    std::memcpy(header.data() + 263, "00", 2);
-    std::memset(header.data() + 148, ' ', 8);
-    unsigned int sum = 0;
-    for (char ch : header) {
-        sum += static_cast<unsigned char>(ch);
-    }
-    std::snprintf(header.data() + 148, 7, "%06o", sum);
-    header[155] = ' ';
+    std::string tar;
+    for (const auto& entry : entries) {
+        REQUIRE((entry.name.size() < 100u));
+        const std::string body = entry.isDirectory ? std::string{} : entry.body;
 
-    std::string tar(header.data(), header.size());
-    tar += body;
-    tar.append((kBlock - body.size() % kBlock) % kBlock, '\0');
+        std::array<char, kBlock> header{};
+        std::memcpy(header.data(), entry.name.data(), entry.name.size());
+        auto putOctal = [&header](size_t offset, size_t width, std::uint64_t value) {
+            std::snprintf(header.data() + offset, width, "%0*llo", static_cast<int>(width - 1),
+                          static_cast<unsigned long long>(value));
+        };
+        putOctal(100, 8, entry.isDirectory ? 0755 : 0644); // mode
+        putOctal(108, 8, 0);                               // uid
+        putOctal(116, 8, 0);                               // gid
+        putOctal(124, 12, body.size());                    // size
+        putOctal(136, 12, 0);                              // mtime
+        header[156] = entry.isDirectory ? '5' : '0';       // typeflag
+        std::memcpy(header.data() + 257, "ustar", 6);
+        std::memcpy(header.data() + 263, "00", 2);
+        std::memset(header.data() + 148, ' ', 8);
+        unsigned int sum = 0;
+        for (char ch : header) {
+            sum += static_cast<unsigned char>(ch);
+        }
+        std::snprintf(header.data() + 148, 7, "%06o", sum);
+        header[155] = ' ';
+
+        tar.append(header.data(), header.size());
+        tar += body;
+        tar.append((kBlock - body.size() % kBlock) % kBlock, '\0');
+    }
     tar.append(2 * kBlock, '\0'); // end-of-archive marker
 
     z_stream zs{};
@@ -150,6 +158,13 @@ fs::path writeFakePluginArchive(const fs::path& archivePath) {
     out.close();
     REQUIRE((fs::file_size(archivePath) == gz.size()));
     return archivePath;
+}
+
+// A single-file plugin archive: "fake-plugin/yams-plugin.json" at version 1.0.0.
+fs::path writeFakePluginArchive(const fs::path& archivePath) {
+    return writePluginArchive(archivePath, {{"fake-plugin/yams-plugin.json",
+                                             R"({"name": "fake-plugin", "version": "1.0.0"})"
+                                             "\n"}});
 }
 
 std::string sha256Of(const fs::path& path) {
@@ -464,6 +479,57 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install verifies the archive checksum 
         REQUIRE((result.has_value()));
         CHECK((result.value().checksum == actualChecksum));
         CHECK((isTrusted(trustFile, pluginDir)));
+    }
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive entries safely",
+                 "[plugins][installer][security]") {
+    const fs::path pluginDir = installDir / "fake-plugin";
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+
+    auto installFrom = [&](const std::vector<TarEntry>& entries) {
+        const fs::path archive =
+            writePluginArchive(testDir / "source" / "fake-plugin.tar.gz", entries);
+        repo->info.downloadUrl = fileUrl(archive);
+        repo->info.checksum = sha256Of(archive);
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+        return installer->install("fake-plugin", InstallOptions{});
+    };
+
+    SECTION("a directory entry with a trailing slash installs") {
+        // What `tar czf out.tar.gz plugin` produces.
+        auto result = installFrom({{"plugin/", "", true}, {"plugin/lib.so", "ELF"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "lib.so")));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("'./' entries install") {
+        // What `tar -C dir -czf out.tar.gz .` produces.
+        auto result = installFrom({{"./", "", true}, {"./plugin.so", "ELF"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "plugin.so")));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("a '..' entry is rejected and nothing escapes the extraction root") {
+        // The installer extracts into <temp>/<install-temp>/extracted, so "../../<name>" would
+        // land directly in the system temp directory if it were honored.
+        const std::string escapeName = "esc-" + testDir.filename().string();
+        const fs::path escapeTarget = fs::temp_directory_path() / escapeName;
+        REQUIRE_FALSE(fs::exists(escapeTarget));
+
+        auto result = installFrom({{"../../" + escapeName, "evil"}});
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidPath));
+        CHECK_FALSE(fs::exists(escapeTarget));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
     }
 }
 

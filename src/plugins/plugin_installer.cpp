@@ -100,12 +100,15 @@ Result<void> validatePluginVersion(std::string_view version) {
     return {};
 }
 
+// Archive entry names must stay relative and never step upward. "." components ("./lib.so")
+// and the empty trailing component of a directory entry ("plugin/") are harmless and are what
+// `tar czf` / `tar -C dir .` produce. Containment is re-checked with isPathWithin().
 bool isRelativePathSafe(const fs::path& path) {
-    if (path.empty() || path.is_absolute()) {
+    if (path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory()) {
         return false;
     }
     for (const auto& part : path) {
-        if (part == "." || part == ".." || part.empty()) {
+        if (part == "..") {
             return false;
         }
     }
