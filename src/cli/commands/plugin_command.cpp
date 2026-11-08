@@ -147,6 +147,9 @@ public:
             install->add_flag("--no-trust", installNoTrust_, "Don't add to trust list");
             install->add_flag("--no-load", installNoLoad_, "Don't load plugin after install");
             install->add_flag("--dry-run", installDryRun_, "Preview only, don't install");
+            install->add_option("--checksum", installChecksum_,
+                                "Expected sha256:<hex> digest of the plugin archive (required "
+                                "for URL installs or when the repository publishes none)");
             install->callback([this]() { installPlugin(); });
 
             // plugin repo (remote repository commands)
@@ -234,6 +237,7 @@ private:
     bool installNoTrust_{false};
     bool installNoLoad_{false};
     bool installDryRun_{false};
+    std::string installChecksum_;
 
     // Repo options
     std::string repoFilter_;
@@ -1140,6 +1144,9 @@ void PluginCommand::installPlugin() {
         options.autoTrust = !installNoTrust_;
         options.autoLoad = !installNoLoad_;
         options.dryRun = installDryRun_;
+        if (!installChecksum_.empty()) {
+            options.checksum = installChecksum_;
+        }
         if (options.autoLoad) {
             options.loadAfterInstall = [this](const InstallResult& installResult) {
                 return autoLoadInstalledPlugin(installResult.installedPath);
@@ -1165,7 +1172,11 @@ void PluginCommand::installPlugin() {
         };
 
         auto result = installer->install(installSrc_, options);
-        returnOnError(result, "Installation");
+        if (!result) {
+            std::cout << "\n";
+            returnOnError(result, "Installation");
+            return;
+        }
 
         const auto& r = result.value();
         std::cout << "\nInstalled: " << r.pluginName << " v" << r.version << "\n";

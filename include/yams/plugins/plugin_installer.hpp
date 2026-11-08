@@ -6,7 +6,7 @@
  * The PluginInstaller orchestrates the full plugin installation workflow:
  * 1. Query repository for plugin metadata
  * 2. Download plugin bundle (.tar.gz)
- * 3. Verify integrity (SHA-256 checksum)
+ * 3. Verify integrity (SHA-256 checksum; mandatory, install fails closed without one)
  * 4. Extract to plugin directory
  * 5. Add to trust list
  * 6. Optionally ask the caller to load the plugin into a running daemon
@@ -57,13 +57,15 @@ using InstallLoadCallback = std::function<Result<void>(const InstallResult&)>;
  * Installation options.
  */
 struct InstallOptions {
-    std::optional<std::string> version;  // Specific version (default: latest)
-    std::filesystem::path installDir;    // Target directory (default: ~/.local/lib/yams/plugins)
-    bool autoTrust{true};                // Add to trust list after install
-    bool autoLoad{false};                // Request caller-managed daemon load after install
-    bool force{false};                   // Overwrite if already installed
-    bool dryRun{false};                  // Preview only, don't install
-    std::optional<std::string> checksum; // Override checksum verification
+    std::optional<std::string> version; // Specific version (default: latest)
+    std::filesystem::path installDir;   // Target directory (default: ~/.local/lib/yams/plugins)
+    bool autoTrust{true};               // Add to trust list after install
+    bool autoLoad{false};               // Request caller-managed daemon load after install
+    bool force{false};                  // Overwrite if already installed
+    bool dryRun{false};                 // Preview only, don't install
+    // Expected "sha256:<hex>" digest of the archive; overrides the repository's. Installation
+    // fails when neither this nor the repository metadata provides one.
+    std::optional<std::string> checksum;
     InstallProgressCallback onProgress{nullptr};   // Progress callback
     InstallLoadCallback loadAfterInstall{nullptr}; // Optional daemon/plugin load hook
 };

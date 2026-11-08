@@ -12,16 +12,27 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/crypto/hasher.h>
+#include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/plugin_installer.hpp>
 #include <yams/plugins/plugin_repo_client.hpp>
 
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
+
+#include <zlib.h>
 
 #include "tests/support/temp_dir_scope.hpp"
 
@@ -56,6 +67,113 @@ public:
 
     Result<bool> exists(const std::string& /*name*/) override { return false; }
 };
+
+namespace {
+
+/**
+ * @brief Repository client that serves one fixed release, so install() runs end to end.
+ */
+class FixedPluginRepoClient : public IPluginRepoClient {
+public:
+    Result<std::vector<RemotePluginSummary>> list(const std::string& /*filter*/) override {
+        return std::vector<RemotePluginSummary>{};
+    }
+
+    Result<RemotePluginInfo> get(const std::string& name,
+                                 const std::optional<std::string>& /*version*/) override {
+        if (name != info.name) {
+            return Error{ErrorCode::NotFound, "Fixed repo: plugin not found"};
+        }
+        return info;
+    }
+
+    Result<std::vector<std::string>> versions(const std::string& /*name*/) override {
+        return std::vector<std::string>{info.version};
+    }
+
+    Result<bool> exists(const std::string& name) override { return name == info.name; }
+
+    RemotePluginInfo info;
+};
+
+// Writes a single-file ustar archive ("fake-plugin/yams-plugin.json"), gzip-compressed, to
+// `archivePath`. Built in-process so the test needs no external tar tool or binary fixture.
+fs::path writeFakePluginArchive(const fs::path& archivePath) {
+    const std::string entryName = "fake-plugin/yams-plugin.json";
+    const std::string body = R"({"name": "fake-plugin", "version": "1.0.0"})"
+                             "\n";
+
+    constexpr size_t kBlock = 512;
+    std::array<char, kBlock> header{};
+    std::memcpy(header.data(), entryName.data(), entryName.size());
+    auto putOctal = [&header](size_t offset, size_t width, std::uint64_t value) {
+        std::snprintf(header.data() + offset, width, "%0*llo", static_cast<int>(width - 1),
+                      static_cast<unsigned long long>(value));
+    };
+    putOctal(100, 8, 0644);         // mode
+    putOctal(108, 8, 0);            // uid
+    putOctal(116, 8, 0);            // gid
+    putOctal(124, 12, body.size()); // size
+    putOctal(136, 12, 0);           // mtime
+    header[156] = '0';              // regular file
+    std::memcpy(header.data() + 257, "ustar", 6);
+    std::memcpy(header.data() + 263, "00", 2);
+    std::memset(header.data() + 148, ' ', 8);
+    unsigned int sum = 0;
+    for (char ch : header) {
+        sum += static_cast<unsigned char>(ch);
+    }
+    std::snprintf(header.data() + 148, 7, "%06o", sum);
+    header[155] = ' ';
+
+    std::string tar(header.data(), header.size());
+    tar += body;
+    tar.append((kBlock - body.size() % kBlock) % kBlock, '\0');
+    tar.append(2 * kBlock, '\0'); // end-of-archive marker
+
+    z_stream zs{};
+    REQUIRE((deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) ==
+             Z_OK));
+    std::vector<unsigned char> gz(deflateBound(&zs, static_cast<uLong>(tar.size())) + 64);
+    zs.next_in = reinterpret_cast<Bytef*>(tar.data());
+    zs.avail_in = static_cast<uInt>(tar.size());
+    zs.next_out = gz.data();
+    zs.avail_out = static_cast<uInt>(gz.size());
+    const int rc = deflate(&zs, Z_FINISH);
+    gz.resize(zs.total_out);
+    deflateEnd(&zs);
+    REQUIRE((rc == Z_STREAM_END));
+
+    fs::create_directories(archivePath.parent_path());
+    std::ofstream out(archivePath, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(gz.data()), static_cast<std::streamsize>(gz.size()));
+    out.close();
+    REQUIRE((fs::file_size(archivePath) == gz.size()));
+    return archivePath;
+}
+
+std::string sha256Of(const fs::path& path) {
+    return "sha256:" + yams::crypto::SHA256Hasher{}.hashFile(path);
+}
+
+// The installer downloads through libcurl, which serves file:// URLs locally.
+std::string fileUrl(const fs::path& path) {
+    std::string generic = fs::absolute(path).generic_string();
+    if (generic.empty() || generic.front() != '/') {
+        generic.insert(generic.begin(), '/'); // Windows drive paths: file:///C:/...
+    }
+    return "file://" + generic;
+}
+
+bool isTrusted(const fs::path& trustFile, const fs::path& pluginDir) {
+    std::set<fs::path> entries;
+    if (!yams::daemon::plugin_trust::readTrustStore(trustFile, entries)) {
+        return false;
+    }
+    return entries.count(yams::daemon::plugin_trust::normalizePath(pluginDir)) > 0;
+}
+
+} // namespace
 
 /**
  * @brief Test fixture for PluginInstaller tests
@@ -276,32 +394,77 @@ TEST_CASE("InstallOptions defaults", "[plugins][installer][security]") {
     }
 }
 
-TEST_CASE("Checksum format requirements", "[plugins][installer][security]") {
-    // Valid SHA-256 checksum (empty file hash)
-    const std::string emptyFileSha256 =
-        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+TEST_CASE_METHOD(PluginInstallerFixture, "install verifies the archive checksum before trusting it",
+                 "[plugins][installer][security]") {
+    const fs::path archive = writeFakePluginArchive(testDir / "source" / "fake-plugin.tar.gz");
+    const std::string actualChecksum = sha256Of(archive);
+    const fs::path pluginDir = installDir / "fake-plugin";
 
-    SECTION("prefix is sha256:") {
-        CHECK((emptyFileSha256.substr(0, 7) == "sha256:"));
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+    repo->info.downloadUrl = fileUrl(archive);
+
+    InstallOptions options;
+    REQUIRE((options.autoTrust)); // trust is the default, so verification must gate it
+
+    SECTION("checksum mismatch is rejected and nothing is installed or trusted") {
+        repo->info.checksum = "sha256:" + std::string(64, '0');
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::HashMismatch));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
     }
 
-    SECTION("total length is 71 characters") {
-        CHECK((emptyFileSha256.length() == 7 + 64));
+    SECTION("a release without a published checksum is refused") {
+        repo->info.checksum.clear();
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidData));
+        CHECK((result.error().message.find("--checksum") != std::string::npos));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
     }
-}
 
-TEST_CASE("InstallResult contains security info", "[plugins][installer][security]") {
-    InstallResult result;
-    result.pluginName = "test-plugin";
-    result.version = "1.0.0";
-    result.checksum = "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd";
-    result.sizeBytes = 1024ULL * 1024ULL; // 1MB
-    result.wasUpgrade = false;
-    result.elapsed = std::chrono::milliseconds{500};
+    SECTION("a matching repository checksum installs and trusts the plugin") {
+        repo->info.checksum = actualChecksum;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
 
-    CHECK_FALSE(result.checksum.empty());
-    CHECK((result.checksum.substr(0, 7) == "sha256:"));
-    CHECK((result.sizeBytes > 0u));
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().checksum == actualChecksum));
+        CHECK((fs::exists(pluginDir / "yams-plugin.json")));
+        auto version = installer->installedVersion("fake-plugin");
+        REQUIRE((version.has_value()));
+        REQUIRE((version.value().has_value()));
+        CHECK((*version.value() == "1.0.0"));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("a caller-supplied checksum verifies a release the repository left unsigned") {
+        repo->info.checksum.clear();
+        // Bare upper-case hex, as copied from `sha256sum` output, is accepted.
+        std::string bareHex = actualChecksum.substr(std::string("sha256:").size());
+        for (auto& ch : bareHex) {
+            ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        }
+        options.checksum = bareHex;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().checksum == actualChecksum));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
 }
 
 // =============================================================================
@@ -330,25 +493,6 @@ TEST_CASE("InstallProgress default values", "[plugins][installer][progress]") {
     CHECK((progress.progress == 0.0f));
     CHECK((progress.bytesDownloaded == 0u));
     CHECK((progress.totalBytes == 0u));
-}
-
-// =============================================================================
-// Trust List Tests
-// =============================================================================
-
-TEST_CASE_METHOD(PluginInstallerFixture, "Trust file location", "[plugins][installer][trust]") {
-    // Create a plugin to reference trust file location
-    fs::create_directories(installDir / "trusted-plugin");
-    std::ofstream manifestFile(installDir / "trusted-plugin" / "manifest.json");
-    manifestFile << R"({"version": "1.0.0"})";
-    manifestFile.close();
-
-    auto installer = makePluginInstaller(stubClient, installDir, trustFile);
-
-    SECTION("trust file is in config directory") {
-        CHECK((trustFile.parent_path().filename() == "data"));
-        CHECK((trustFile.filename() == "plugins.trust"));
-    }
 }
 
 // =============================================================================
@@ -396,30 +540,6 @@ TEST_CASE("Default paths", "[plugins][installer][defaults]") {
         CHECK_FALSE(defaultFile.empty());
         CHECK((defaultFile.string().find("yams") != std::string::npos));
         CHECK((defaultFile.filename().string() == "plugins.trust"));
-    }
-}
-
-// =============================================================================
-// Security Best Practices Verification Tests
-// =============================================================================
-
-TEST_CASE("Security best practices for plugin installer", "[plugins][installer][security]") {
-    SECTION("SHA-256 used for integrity verification") {
-        const size_t sha256HexLength = 64;
-        const size_t expectedTotalLength = 7 + sha256HexLength;
-
-        const std::string sampleChecksum =
-            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        CHECK((sampleChecksum.length() == expectedTotalLength));
-    }
-
-    SECTION("HTTPS is enforced for downloads") {
-        CHECK((std::string(DEFAULT_PLUGIN_REPO_URL).substr(0, 8) == "https://"));
-    }
-
-    SECTION("TLS verification enabled by default") {
-        PluginRepoConfig config;
-        CHECK((config.verifyTls));
     }
 }
 

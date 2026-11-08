@@ -203,6 +203,41 @@ std::string computeSha256(const fs::path& filepath) {
     return "sha256:" + oss.str();
 }
 
+// Canonicalize a SHA-256 digest to the "sha256:<lowercase hex>" form computeSha256() produces.
+// Accepts an optional "sha256:" prefix (any case) and upper- or lower-case hex.
+Result<std::string> normalizeSha256(std::string_view value) {
+    constexpr std::string_view kPrefix = "sha256:";
+    if (value.size() >= kPrefix.size()) {
+        bool hasPrefix = true;
+        for (size_t i = 0; i < kPrefix.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(value[i])) != kPrefix[i]) {
+                hasPrefix = false;
+                break;
+            }
+        }
+        if (hasPrefix) {
+            value.remove_prefix(kPrefix.size());
+        }
+    }
+
+    constexpr size_t kSha256HexLength = 64;
+    if (value.size() != kSha256HexLength) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Malformed plugin checksum: expected sha256:<64 hex characters>"};
+    }
+
+    std::string normalized(kPrefix);
+    normalized.reserve(kPrefix.size() + kSha256HexLength);
+    for (unsigned char ch : value) {
+        if (!std::isxdigit(ch)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Malformed plugin checksum: expected sha256:<64 hex characters>"};
+        }
+        normalized.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    return normalized;
+}
+
 // Extract tar.gz archive
 Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir) {
     struct archive* a = archive_read_new();
@@ -362,6 +397,25 @@ public:
             return versionValidation.error();
         }
 
+        // Every installed archive is verified before it is extracted or trusted. A caller-supplied
+        // checksum overrides the repository's; with neither there is nothing to verify against,
+        // so refuse rather than install (and auto-trust) an unverified download.
+        const std::string declaredChecksum = options.checksum.value_or(info.checksum);
+        if (declaredChecksum.empty()) {
+            const std::string reason =
+                isUrl ? std::string("direct URL installs do not carry one")
+                      : std::string("the plugin repository did not publish one for this release");
+            return Error{ErrorCode::InvalidData,
+                         "Refusing to install " + info.name + "@" + info.version +
+                             " without a SHA-256 checksum (" + reason +
+                             "). Pass the expected digest with --checksum sha256:<hex>."};
+        }
+        auto expectedChecksumRes = normalizeSha256(declaredChecksum);
+        if (!expectedChecksumRes) {
+            return expectedChecksumRes.error();
+        }
+        const std::string expectedChecksum = expectedChecksumRes.value();
+
         result.pluginName = info.name;
         result.version = info.version;
 
@@ -384,7 +438,7 @@ public:
 
         if (options.dryRun) {
             result.installedPath = pluginDir;
-            result.checksum = info.checksum;
+            result.checksum = expectedChecksum;
             result.sizeBytes = info.sizeBytes;
             spdlog::info("[dry-run] Would install {} {} to {}", info.name, info.version,
                          pluginDir.string());
@@ -411,19 +465,18 @@ public:
 
         // Verify checksum
         notifyProgress(InstallProgress::Stage::Verifying, "Verifying integrity...", 0.0f);
-        std::string expectedChecksum = options.checksum.value_or(info.checksum);
-        if (!expectedChecksum.empty()) {
-            std::string actualChecksum = computeSha256(archivePath);
-            if (actualChecksum != expectedChecksum) {
-                (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
-                return Error{ErrorCode::HashMismatch, "Checksum mismatch: expected " +
-                                                          expectedChecksum + ", got " +
-                                                          actualChecksum};
-            }
-            result.checksum = actualChecksum;
-        } else {
-            result.checksum = computeSha256(archivePath);
+        const std::string actualChecksum = computeSha256(archivePath);
+        if (actualChecksum.empty()) {
+            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
+            return Error{ErrorCode::IOError,
+                         "Failed to compute checksum of downloaded plugin archive"};
         }
+        if (actualChecksum != expectedChecksum) {
+            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
+            return Error{ErrorCode::HashMismatch, "Checksum mismatch: expected " +
+                                                      expectedChecksum + ", got " + actualChecksum};
+        }
+        result.checksum = actualChecksum;
 
         // Extract
         notifyProgress(InstallProgress::Stage::Extracting, "Extracting archive...");
