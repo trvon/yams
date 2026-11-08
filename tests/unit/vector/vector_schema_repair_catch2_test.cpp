@@ -13,6 +13,7 @@
 #include "../../common/test_helpers_catch2.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -111,6 +112,42 @@ struct VectorSchemaRepairFixture {
         }
         backend.close();
         return s;
+    }
+
+    // Plain SQLite connection, so setup and checks bypass SqliteVecBackend's own schema healing.
+    struct RawDb {
+        explicit RawDb(const std::string& path) {
+            REQUIRE(sqlite3_open_v2(path.data(), &db, SQLITE_OPEN_READWRITE, nullptr) == SQLITE_OK);
+        }
+        ~RawDb() { sqlite3_close(db); }
+        RawDb(const RawDb&) = delete;
+        RawDb& operator=(const RawDb&) = delete;
+
+        void exec(const char* sql) const {
+            char* err = nullptr;
+            const int rc = sqlite3_exec(db, sql, nullptr, nullptr, &err);
+            const std::string message = err ? err : "";
+            sqlite3_free(err);
+            INFO(sql << ": " << message);
+            REQUIRE(rc == SQLITE_OK);
+        }
+
+        std::int64_t integer(const char* sql) const {
+            sqlite3_stmt* stmt = nullptr;
+            REQUIRE(sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK);
+            REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+            const std::int64_t value = sqlite3_column_int64(stmt, 0);
+            sqlite3_finalize(stmt);
+            return value;
+        }
+
+        sqlite3* db = nullptr;
+    };
+
+    std::int64_t structuralGeneration() const {
+        RawDb raw(dbPath());
+        return raw.integer(
+            "SELECT structural_generation FROM vector_index_generation WHERE id = 1");
     }
 
     static std::size_t countRows(sqlite3* db, const char* sql) {
@@ -250,6 +287,71 @@ TEST_CASE_METHOD(VectorSchemaRepairFixture,
         CHECK_FALSE(s.storedDim.has_value());
         CHECK(s.entityRows == 1);
     }
+}
+
+TEST_CASE_METHOD(VectorSchemaRepairFixture,
+                 "ensureVectorSchemaAligned bumps the index generation only when vectors go",
+                 "[unit][vector][schema-repair][catch2]") {
+    SECTION("vectors group dropped") {
+        seed(8);
+        const auto before = structuralGeneration();
+        REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/true).has_value());
+        CHECK(structuralGeneration() > before);
+    }
+    SECTION("only entity_vectors dropped") {
+        seedMixed(/*vectorsDim=*/16, /*entityDim=*/8);
+        const auto before = structuralGeneration();
+        REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/true).has_value());
+        CHECK(structuralGeneration() == before);
+        CHECK(snapshot().rows == 1);
+    }
+}
+
+TEST_CASE_METHOD(VectorSchemaRepairFixture,
+                 "ensureVectorSchemaAligned creates missing tables next to a stale group",
+                 "[unit][vector][schema-repair][catch2]") {
+    // Empty `vectors`, PQ codes at an old dimension, entity_vectors missing.
+    std::filesystem::create_directories(dataDir);
+    {
+        SqliteVecBackend backend;
+        REQUIRE(backend.initialize(dbPath()).has_value());
+        REQUIRE(backend.createTables(8).has_value());
+        backend.close();
+    }
+    {
+        RawDb raw(dbPath());
+        raw.exec("INSERT INTO simeon_pq_codes (dim, rowid, code) VALUES (8, 1, x'00')");
+        raw.exec("DROP TABLE entity_vectors");
+    }
+
+    REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/false).has_value());
+
+    RawDb raw(dbPath());
+    CHECK(raw.integer("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "
+                      "name='entity_vectors'") == 1);
+    // recreate is off: the stale PQ rows are kept.
+    CHECK(raw.integer("SELECT COUNT(*) FROM simeon_pq_codes WHERE dim = 8") == 1);
+}
+
+TEST_CASE_METHOD(VectorSchemaRepairFixture,
+                 "ensureVectorSchemaAligned returns probe failures instead of succeeding",
+                 "[unit][vector][schema-repair][catch2]") {
+    // A prepare failure stands in for a mid-scan step failure (BUSY/IOERR/CORRUPT), which is not
+    // injectable here: both go through the same error return. simeon_pq_codes without its `dim`
+    // column makes the PQ probe fail to prepare.
+    seed(16);
+    {
+        RawDb raw(dbPath());
+        raw.exec("DROP TABLE simeon_pq_codes");
+        raw.exec("CREATE TABLE simeon_pq_codes (unexpected INTEGER)");
+    }
+
+    auto aligned = ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/true);
+    REQUIRE_FALSE(aligned.has_value());
+    CHECK(aligned.error().code == yams::ErrorCode::DatabaseError);
+
+    RawDb raw(dbPath());
+    CHECK(raw.integer("SELECT COUNT(*) FROM vectors") == 1);
 }
 
 TEST_CASE_METHOD(VectorSchemaRepairFixture,

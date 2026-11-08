@@ -1,11 +1,10 @@
 #include <yams/vector/vector_schema_repair.h>
 
-#include <cstdint>
 #include <exception>
-#include <set>
+#include <initializer_list>
+#include <optional>
 #include <string>
 #include <system_error>
-#include <vector>
 
 #include <sqlite3.h>
 
@@ -34,149 +33,129 @@ Result<void> dropAndCreateTables(SqliteVecBackend& backend, std::size_t dim) {
     return backend.createTables(dim);
 }
 
-// Collect the positive values of a single-column query. Returns false when the statement cannot
-// be prepared (missing table or column), leaving `out` untouched.
-bool collectDimensions(sqlite3* db, const char* sql, std::set<std::size_t>& out) {
+Error sqliteError(sqlite3* db, const std::string& action) {
+    return Error{ErrorCode::DatabaseError, action + ": " + sqlite3_errmsg(db)};
+}
+
+// Run a single-value boolean query (`SELECT EXISTS(...)`), binding `dim` to every `?1`.
+// Any prepare or step result other than one row followed by SQLITE_DONE is an error.
+Result<bool> queryFlag(sqlite3* db, const char* sql, std::optional<std::size_t> dim) {
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        auto err =
+            sqliteError(db, std::string("Failed to prepare vector schema probe '") + sql + "'");
         sqlite3_finalize(stmt);
-        return false;
+        return err;
     }
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const std::int64_t dim = sqlite3_column_int64(stmt, 0);
-        if (dim > 0)
-            out.insert(static_cast<std::size_t>(dim));
+    if (dim)
+        sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(*dim));
+
+    int rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        auto err = sqliteError(db, std::string("Vector schema probe '") + sql + "' failed");
+        sqlite3_finalize(stmt);
+        return err;
+    }
+    const bool flag = sqlite3_column_int64(stmt, 0) != 0;
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        auto err = sqliteError(db, std::string("Vector schema probe '") + sql + "' failed");
+        sqlite3_finalize(stmt);
+        return err;
     }
     sqlite3_finalize(stmt);
-    return true;
+    return flag;
 }
 
-// Embedding dimensions recorded by rows, per table group.
-struct StoredDimensions {
-    std::set<std::size_t> vectors; // `vectors`
-    std::set<std::size_t> entity;  // `entity_vectors`
-    std::set<std::size_t> pq;      // `simeon_pq_meta` + `simeon_pq_codes`
-};
-
-StoredDimensions probeStoredDimensions(SqliteVecBackend& backend) {
-    StoredDimensions stored;
-    sqlite3* db = backend.getDbHandle();
-
-    const bool probed =
-        db != nullptr &&
-        collectDimensions(db,
-                          "SELECT DISTINCT COALESCE(embedding_dim, LENGTH(embedding) / 4) "
-                          "FROM vectors",
-                          stored.vectors);
-    if (!probed) {
-        // Schema without a readable embedding_dim column: fall back to the backend's probe.
-        if (auto dim = backend.getStoredEmbeddingDimension())
-            stored.vectors.insert(*dim);
-    }
-
-    if (db != nullptr) {
-        (void)collectDimensions(db, "SELECT DISTINCT LENGTH(embedding) / 4 FROM entity_vectors",
-                                stored.entity);
-        (void)collectDimensions(db, "SELECT DISTINCT dim FROM simeon_pq_meta", stored.pq);
-        (void)collectDimensions(db, "SELECT DISTINCT dim FROM simeon_pq_codes", stored.pq);
-    }
-    return stored;
-}
-
-bool hasOtherDimension(const std::set<std::size_t>& dims, std::size_t targetDim) {
-    for (auto dim : dims) {
-        if (dim != targetDim)
-            return true;
-    }
-    return false;
-}
-
-// Table groups that hold rows at a dimension other than the target.
-struct StaleGroups {
-    bool vectors = false;
-    bool entity = false;
-    bool pq = false;
-
-    bool any() const { return vectors || entity || pq; }
-};
-
-StaleGroups findStaleGroups(const StoredDimensions& stored, std::size_t targetDim) {
-    StaleGroups stale;
-    stale.vectors = hasOtherDimension(stored.vectors, targetDim);
-    stale.entity = hasOtherDimension(stored.entity, targetDim);
-    // The PQ index is derived from `vectors` rows (codes are keyed by its rowid), so it goes
-    // whenever `vectors` does.
-    stale.pq = stale.vectors || hasOtherDimension(stored.pq, targetDim);
-    return stale;
-}
-
-Result<void> execSql(sqlite3* db, const std::string& sql) {
-    char* errMsg = nullptr;
-    if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &errMsg) != SQLITE_OK) {
-        std::string err = errMsg ? errMsg : "Unknown error";
-        sqlite3_free(errMsg);
-        return Error{ErrorCode::DatabaseError, err};
-    }
-    return Result<void>();
-}
-
-// Tables derived from `vectors`: per-dimension vec0 virtual tables and legacy HNSW shadow
-// tables. Mirrors the selection in SqliteVecBackend::dropTables.
-std::vector<std::string> vectorsDerivedTables(sqlite3* db) {
-    std::vector<std::string> names;
-    const char* sql =
-        "SELECT name FROM sqlite_master WHERE type='table' AND "
-        "(name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
-        " name = 'vectors_hnsw_meta' OR name = 'vectors_hnsw_nodes' OR "
-        " (name LIKE 'vectors\\_%\\_vec0' ESCAPE '\\' AND sql LIKE 'CREATE VIRTUAL TABLE%'))";
+Result<bool> tableExists(sqlite3* db, const char* table) {
     sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            if (const auto* name = sqlite3_column_text(stmt, 0))
-                names.emplace_back(reinterpret_cast<const char*>(name));
-        }
+    if (sqlite3_prepare_v2(db,
+                           "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' "
+                           "AND name = ?1)",
+                           -1, &stmt, nullptr) != SQLITE_OK) {
+        auto err = sqliteError(db, "Failed to prepare vector table lookup");
+        sqlite3_finalize(stmt);
+        return err;
     }
+    sqlite3_bind_text(stmt, 1, table, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    const bool present = rc == SQLITE_ROW && sqlite3_column_int64(stmt, 0) != 0;
+    if (rc == SQLITE_ROW)
+        rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
-    return names;
+    if (rc != SQLITE_DONE)
+        return sqliteError(db, std::string("Vector table lookup for '") + table + "' failed");
+    return present;
 }
 
-// Drop only the stale table groups in one transaction, then recreate the dropped tables at
-// `targetDim` (CREATE IF NOT EXISTS keeps the rest). The caller closes the backend.
-Result<void> dropStaleAndCreateTables(SqliteVecBackend& backend, const StaleGroups& stale,
-                                      std::size_t targetDim) {
+// What the vector tables currently hold, relative to the target dimension.
+struct SchemaState {
+    bool vectorsHasRows = false; // `vectors` exists and holds at least one row
+    VectorTableGroups stale;     // groups with a row at a dimension other than the target
+};
+
+// Early-exit probes: only "any rows?" and "any row at another dimension?" are asked, so a
+// matching corpus costs an index lookup on idx_vectors_embedding_dim rather than a full scan.
+// entity_vectors has no dimension column or index; its probe stops at the first mismatch.
+// The backend is private to the calling function, so reading through its handle is unshared.
+Result<SchemaState> probeSchemaState(SqliteVecBackend& backend, std::size_t targetDim) {
+    SchemaState state;
     sqlite3* db = backend.getDbHandle();
     if (db == nullptr)
-        return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        return Error{ErrorCode::NotInitialized, "Vector database not initialized"};
 
-    std::vector<std::string> drops;
-    if (stale.vectors) {
-        for (const auto& name : vectorsDerivedTables(db))
-            drops.push_back("DROP TABLE IF EXISTS \"" + name + "\"");
-        drops.emplace_back("DROP TABLE IF EXISTS vectors");
-    }
-    if (stale.entity)
-        drops.emplace_back("DROP TABLE IF EXISTS entity_vectors");
-    if (stale.pq) {
-        drops.emplace_back("DROP TABLE IF EXISTS simeon_pq_meta");
-        drops.emplace_back("DROP TABLE IF EXISTS simeon_pq_codes");
+    auto hasVectors = tableExists(db, "vectors");
+    if (!hasVectors)
+        return hasVectors.error();
+    if (hasVectors.value()) {
+        auto rows = queryFlag(db, "SELECT EXISTS(SELECT 1 FROM vectors)", std::nullopt);
+        if (!rows)
+            return rows.error();
+        state.vectorsHasRows = rows.value();
+
+        auto stale = queryFlag(db,
+                               "SELECT EXISTS(SELECT 1 FROM vectors WHERE embedding_dim > 0 "
+                               "AND embedding_dim != ?1) OR "
+                               "EXISTS(SELECT 1 FROM vectors WHERE embedding_dim IS NULL "
+                               "AND LENGTH(embedding) / 4 > 0 AND LENGTH(embedding) / 4 != ?1)",
+                               targetDim);
+        if (!stale)
+            return stale.error();
+        state.stale.vectors = stale.value();
     }
 
-    if (auto begin = execSql(db, "BEGIN IMMEDIATE"); !begin)
-        return Error{ErrorCode::DatabaseError,
-                     "Failed to begin drop transaction: " + begin.error().message};
-    for (const auto& sql : drops) {
-        if (auto dropped = execSql(db, sql); !dropped) {
-            (void)execSql(db, "ROLLBACK");
-            return Error{ErrorCode::DatabaseError,
-                         "Failed to drop tables: " + dropped.error().message};
-        }
+    auto hasEntity = tableExists(db, "entity_vectors");
+    if (!hasEntity)
+        return hasEntity.error();
+    if (hasEntity.value()) {
+        auto stale = queryFlag(db,
+                               "SELECT EXISTS(SELECT 1 FROM entity_vectors WHERE "
+                               "LENGTH(embedding) / 4 > 0 AND LENGTH(embedding) / 4 != ?1)",
+                               targetDim);
+        if (!stale)
+            return stale.error();
+        state.stale.entityVectors = stale.value();
     }
-    if (auto commit = execSql(db, "COMMIT"); !commit) {
-        (void)execSql(db, "ROLLBACK");
-        return Error{ErrorCode::DatabaseError,
-                     "Failed to commit table drop: " + commit.error().message};
+
+    // The PQ index is derived from `vectors` rows (codes are keyed by its rowid), so it goes
+    // whenever `vectors` does.
+    state.stale.simeonPq = state.stale.vectors;
+    for (const char* table : {"simeon_pq_meta", "simeon_pq_codes"}) {
+        if (state.stale.simeonPq)
+            break;
+        auto present = tableExists(db, table);
+        if (!present)
+            return present.error();
+        if (!present.value())
+            continue;
+        const std::string sql =
+            std::string("SELECT EXISTS(SELECT 1 FROM ") + table + " WHERE dim != ?1)";
+        auto stale = queryFlag(db, sql.c_str(), targetDim);
+        if (!stale)
+            return stale.error();
+        state.stale.simeonPq = stale.value();
     }
-    return backend.createTables(targetDim);
+    return state;
 }
 
 } // namespace
@@ -192,16 +171,22 @@ Result<void> ensureVectorSchemaAligned(const std::filesystem::path& dataDir, std
         if (auto open = openBackend(backend, dbPath); !open)
             return open;
 
-        const auto stored = probeStoredDimensions(backend);
-        const auto stale = findStaleGroups(stored, targetDim);
+        auto state = probeSchemaState(backend, targetDim);
+        if (!state) {
+            backend.close();
+            return state.error();
+        }
 
         Result<void> result;
-        if (stale.any()) {
-            if (recreateIfMismatch)
-                result = dropStaleAndCreateTables(backend, stale, targetDim);
-        } else if (stored.vectors.empty()) {
-            result = backend.createTables(targetDim);
+        // Missing or empty `vectors`: (re)create the tables at the target, whatever the state of
+        // the other groups. CREATE IF NOT EXISTS keeps existing tables and their rows.
+        bool create = !state.value().vectorsHasRows;
+        if (recreateIfMismatch && state.value().stale.any()) {
+            result = backend.dropTableGroups(state.value().stale);
+            create = true;
         }
+        if (result && create)
+            result = backend.createTables(targetDim);
         backend.close();
         return result;
     } catch (const std::exception& e) {

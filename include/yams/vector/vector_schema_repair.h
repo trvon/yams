@@ -9,25 +9,25 @@ namespace yams::vector {
 
 /// Ensure `<dataDir>/vectors.db` holds vector tables for `targetDim`. Always creates `dataDir`.
 ///
-/// Dimensions are probed from rows, not from the schema: every distinct dimension recorded in
-/// `vectors` (embedding_dim, else blob length), `entity_vectors` (blob length) and the
-/// `simeon_pq_meta` / `simeon_pq_codes` tables (their `dim` column).
+/// Dimensions are probed from rows, not from the schema: `vectors` (embedding_dim, else blob
+/// length), `entity_vectors` (blob length) and `simeon_pq_meta` / `simeon_pq_codes` (`dim`).
+/// Tables are judged per group (see VectorTableGroups): `vectors` with its derived tables,
+/// `entity_vectors`, and the two Simeon PQ tables as one unit. A group is stale when any of its
+/// rows is at a dimension other than `targetDim`; the PQ group is also stale whenever `vectors`
+/// is, since its codes are derived from `vectors` rows.
 ///
-/// Tables are judged per group: `vectors` (with its derived vec0 / legacy HNSW tables),
-/// `entity_vectors`, and `simeon_pq_meta` + `simeon_pq_codes` as one unit. A group is stale when
-/// any of its rows is at a dimension other than `targetDim`; the PQ group is also stale whenever
-/// `vectors` is, since its codes are derived from `vectors` rows.
+/// - Stale groups and `recreateIfMismatch`: only the stale groups are dropped (bumping the
+///   vector index generation when `vectors` goes), then the tables are recreated at
+///   `targetDim`. Groups with matching rows or no rows keep their rows.
+/// - Stale groups without `recreateIfMismatch`: nothing is dropped, rows at other dimensions
+///   stay, and the call still succeeds.
+/// - `vectors` missing or empty: the tables are created at `targetDim` regardless of the other
+///   groups (CREATE IF NOT EXISTS, plus the persistence schema), so existing rows are kept.
+/// - Otherwise (no stale group, `vectors` has rows): no-op.
 ///
-/// - Some group stale: with `recreateIfMismatch` only the stale groups are dropped, then the
-///   missing tables are recreated empty at `targetDim`; groups with matching rows or no rows keep
-///   their rows. Without it the database is left untouched, including rows at other
-///   dimensions, and the call still succeeds.
-/// - No mismatch and `vectors` has no rows (or does not exist): creates the tables
-///   at `targetDim` (CREATE IF NOT EXISTS, so existing rows are kept).
-/// - No mismatch and `vectors` has rows: no-op.
-///
-/// Errors: DatabaseError when the database cannot be opened, the backend's error when dropping
-/// or creating tables fails, InternalError when an exception escapes the backend.
+/// Errors: DatabaseError when the database cannot be opened, a probe fails to prepare or step
+/// (e.g. busy, I/O error, corruption, unexpected schema), or dropping or creating tables fails;
+/// InternalError when an exception escapes the backend.
 Result<void> ensureVectorSchemaAligned(const std::filesystem::path& dataDir, std::size_t targetDim,
                                        bool recreateIfMismatch);
 

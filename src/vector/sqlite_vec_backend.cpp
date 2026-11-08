@@ -2682,8 +2682,8 @@ public:
         return dim;
     }
 
-    // Drop all vector tables
-    Result<void> dropTables() {
+    // Drop the selected vector table groups.
+    Result<void> dropTableGroups(VectorTableGroups groups) {
         std::unique_lock lock(mutex_);
 
         if (!db_) {
@@ -2693,34 +2693,92 @@ public:
         // Finalize all prepared statements
         finalizeStatements();
 
-        // Drop legacy HNSW shadow tables (orphaned by HNSW removal).
-        // plus SimeonPQ metadata tables and any per-dim vec0 virtual tables.
-        std::vector<std::string> tables_to_drop;
-        const char* find_tables =
-            "SELECT name FROM sqlite_master WHERE type='table' AND "
-            "(name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
-            " name = 'vectors_hnsw_meta' OR name = 'vectors_hnsw_nodes' OR "
-            " name = 'simeon_pq_meta' OR "
-            " name = 'simeon_pq_codes' OR "
-            // vec0 virtual tables (their shadow tables go with them) and entity vectors,
-            // which share the embedding dimension.
-            " (name LIKE 'vectors\\_%\\_vec0' ESCAPE '\\' AND sql LIKE 'CREATE VIRTUAL TABLE%') OR "
-            " name = 'entity_vectors')";
+        // Vectors group: legacy HNSW shadow tables (orphaned by HNSW removal) and per-dim vec0
+        // virtual tables (their shadow tables go with them), then `vectors` itself.
+        // SimeonPq group: simeon_pq_meta + simeon_pq_codes. EntityVectors: entity_vectors.
+        std::string selection;
+        const auto addSelection = [&selection](const char* clause) {
+            selection += selection.empty() ? "(" : " OR ";
+            selection += clause;
+        };
+        if (groups.vectors) {
+            addSelection("name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
+                         "name = 'vectors_hnsw_meta' OR name = 'vectors_hnsw_nodes' OR "
+                         "(name LIKE 'vectors\\_%\\_vec0' ESCAPE '\\' AND "
+                         "sql LIKE 'CREATE VIRTUAL TABLE%')");
+        }
+        if (groups.simeonPq) {
+            addSelection("name = 'simeon_pq_meta' OR name = 'simeon_pq_codes'");
+        }
+        if (groups.entityVectors) {
+            addSelection("name = 'entity_vectors'");
+        }
 
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, find_tables, -1, &stmt, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
+        std::vector<std::string> tables_to_drop;
+        if (!selection.empty()) {
+            const std::string find_tables =
+                "SELECT name FROM sqlite_master WHERE type='table' AND " + selection + ")";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db_, find_tables.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+                return Error{ErrorCode::DatabaseError,
+                             std::string("Failed to list vector tables: ") + sqlite3_errmsg(db_)};
+            }
+            int rc = SQLITE_ROW;
+            while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
                 const char* table_name =
                     reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
                 if (table_name) {
-                    tables_to_drop.push_back(std::string("DROP TABLE IF EXISTS ") + table_name);
+                    tables_to_drop.push_back(std::string("DROP TABLE IF EXISTS \"") + table_name +
+                                             "\"");
                 }
             }
             sqlite3_finalize(stmt);
+            if (rc != SQLITE_DONE) {
+                return Error{ErrorCode::DatabaseError,
+                             std::string("Failed to list vector tables: ") + sqlite3_errstr(rc)};
+            }
         }
 
-        // Drop main vectors and auxiliary metadata tables
-        tables_to_drop.push_back("DROP TABLE IF EXISTS vectors");
+        if (groups.vectors) {
+            tables_to_drop.push_back("DROP TABLE IF EXISTS vectors");
+            // DROP TABLE does not fire the delete trigger. Bump both counters so a holder of an
+            // in-memory PQ index sees that the rows it was built from are gone.
+            // pragma_table_info yields no rows when the table does not exist.
+            bool hasGeneration = false;
+            bool hasStructural = false;
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db_,
+                                   "SELECT name FROM pragma_table_info('vector_index_generation')",
+                                   -1, &stmt, nullptr) != SQLITE_OK) {
+                return Error{ErrorCode::DatabaseError,
+                             std::string("Failed to inspect vector_index_generation: ") +
+                                 sqlite3_errmsg(db_)};
+            }
+            int rc = SQLITE_ROW;
+            while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+                const auto* name = sqlite3_column_text(stmt, 0);
+                if (name == nullptr)
+                    continue;
+                const std::string_view column(reinterpret_cast<const char*>(name));
+                hasGeneration = hasGeneration || column == "generation";
+                hasStructural = hasStructural || column == "structural_generation";
+            }
+            sqlite3_finalize(stmt);
+            if (rc != SQLITE_DONE) {
+                return Error{ErrorCode::DatabaseError,
+                             std::string("Failed to inspect vector_index_generation: ") +
+                                 sqlite3_errstr(rc)};
+            }
+            if (hasStructural) {
+                tables_to_drop.push_back("UPDATE vector_index_generation "
+                                         "SET generation = generation + 1, "
+                                         "structural_generation = structural_generation + 1 "
+                                         "WHERE id = 1");
+            } else if (hasGeneration) {
+                tables_to_drop.push_back(
+                    "UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1");
+            }
+        }
 
         // One transaction: a failure leaves the previous schema intact.
         auto exec = [this](const char* sql, std::string& err) {
@@ -2753,6 +2811,9 @@ public:
         spdlog::info("Dropped {} vector-related tables", tables_to_drop.size());
         return Result<void>{};
     }
+
+    // Drop all vector tables
+    Result<void> dropTables() { return dropTableGroups(VectorTableGroups::all()); }
 
     // =========================================================================
     // Entity Vector Operations
@@ -5165,6 +5226,10 @@ std::optional<size_t> SqliteVecBackend::getStoredEmbeddingDimension() const {
 
 Result<void> SqliteVecBackend::dropTables() {
     return impl_->dropTables();
+}
+
+Result<void> SqliteVecBackend::dropTableGroups(VectorTableGroups groups) {
+    return impl_->dropTableGroups(groups);
 }
 
 Result<void> SqliteVecBackend::ensureEmbeddingRowIdColumn() {
