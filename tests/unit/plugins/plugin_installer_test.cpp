@@ -617,6 +617,30 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
         CHECK((fs::is_regular_file(pluginDir / "yams-plugin.json")));
         CHECK((fs::is_regular_file(pluginDir / "lib" / "dep.so")));
     }
+
+    SECTION("versioned library symlinks inside the plugin install as symlinks") {
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/libfoo.so.1", "FOO"},
+                                   {"plugin/libfoo.so", "", TarType::Symlink, "libfoo.so.1"},
+                                   {"plugin/lib/", "", TarType::Directory},
+                                   {"plugin/lib/libbar.so", "", TarType::Symlink, "../libfoo.so.1"},
+                                   {"plugin/current", "", TarType::Symlink, "lib"}});
+
+        REQUIRE((result.has_value()));
+        const fs::path realLib = fs::canonical(pluginDir / "libfoo.so.1");
+
+        CHECK((fs::is_symlink(pluginDir / "libfoo.so")));
+        CHECK((fs::canonical(pluginDir / "libfoo.so") == realLib));
+
+        CHECK((fs::is_symlink(pluginDir / "lib" / "libbar.so")));
+        CHECK((fs::canonical(pluginDir / "lib" / "libbar.so") == realLib));
+
+        CHECK((fs::is_symlink(pluginDir / "current")));
+        CHECK((fs::is_directory(pluginDir / "current")));
+        CHECK((fs::canonical(pluginDir / "current") == fs::canonical(pluginDir / "lib")));
+
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
 }
 
 TEST_CASE_METHOD(PluginInstallerFixture, "install rejects archive links and root replacement",
@@ -662,6 +686,17 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects archive links and root
     SECTION("a hard link entry") {
         expectRejected(installFrom({{"plugin/lib.so", "ELF"},
                                     {"plugin/alias.so", "", TarType::Hardlink, "plugin/lib.so"}}));
+    }
+
+    SECTION("a symlink that leaves the plugin directory for a sibling") {
+        // In the extraction root, but would point next to the plugin once installed.
+        expectRejected(installFrom({{"plugin/", "", TarType::Directory},
+                                    {"plugin/sibling", "", TarType::Symlink, "../other"}}));
+    }
+
+    SECTION("a symlink with '..' after a name") {
+        expectRejected(installFrom({{"plugin/lib/", "", TarType::Directory},
+                                    {"plugin/odd", "", TarType::Symlink, "lib/../lib"}}));
     }
 
     SECTION("a symlink entry named '.'") {
