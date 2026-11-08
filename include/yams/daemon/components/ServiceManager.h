@@ -223,6 +223,9 @@ public:
         std::uint64_t outboundFailures{0};
         std::string lastOutboundFailure;
         std::uint64_t lastOutboundFailureAgeMs{0};
+        /// Error of the current run of failed reconciliation cycles; empty after a success.
+        std::string lastSyncError;
+        std::uint64_t lastSyncErrorAgeMs{0};
     };
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);
