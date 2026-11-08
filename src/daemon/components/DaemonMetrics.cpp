@@ -106,6 +106,41 @@ std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept {
     return std::clamp(scaled, kMinTtlMs, kMaxTtlMs);
 }
 
+std::uint64_t storageTreeFingerprint(const std::filesystem::path& root) noexcept {
+    namespace fs = std::filesystem;
+    std::uint64_t fingerprint = 0;
+    std::error_code ec;
+    const auto mix = [&fingerprint](const fs::path& path, fs::file_time_type mtime) {
+        std::uint64_t h = std::hash<std::string>{}(path.string());
+        h ^= static_cast<std::uint64_t>(mtime.time_since_epoch().count()) + 0x9e3779b97f4a7c15ULL +
+             (h << 6) + (h >> 2);
+        // Order-independent: directory iteration order is unspecified.
+        fingerprint += h * 0xff51afd7ed558ccdULL;
+    };
+    try {
+        const auto rootTime = fs::last_write_time(root, ec);
+        if (ec) {
+            return 0;
+        }
+        mix(root, rootTime);
+        for (const auto& child : fs::directory_iterator(root, ec)) {
+            if (!child.is_directory(ec)) {
+                continue;
+            }
+            mix(child.path(), child.last_write_time(ec));
+            for (const auto& shard : fs::directory_iterator(child.path(), ec)) {
+                if (shard.is_directory(ec)) {
+                    mix(shard.path(), shard.last_write_time(ec));
+                }
+            }
+        }
+    } catch (...) {
+        return 0; // a failed probe forces the full walk
+    }
+    // 0 means "no fingerprint"; never return it for an existing tree.
+    return fingerprint == 0 ? 1 : fingerprint;
+}
+
 namespace {
 
 // Logs snapshot sections that take more than a few milliseconds so the per-iteration cost
@@ -643,7 +678,32 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
         } catch (...) {
             spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
         }
-        if (!root.empty() && fs::exists(root, ec)) {
+        const auto fingerprint = root.empty() ? 0 : storageTreeFingerprint(root);
+        StorageWalkTotals previous;
+        {
+            std::shared_lock lock(self->cacheMutex_);
+            previous = self->lastStorageWalk_;
+        }
+        const bool reuseWalk = fingerprint != 0 && fingerprint == previous.fingerprint &&
+                               walkStart - previous.at < kStorageWalkMaxReuse;
+        if (reuseWalk) {
+            // No object was added or removed. refs.db changes in place, so re-read only it.
+            std::uint64_t refsNow = 0;
+#ifdef __unix__
+            struct stat st;
+            if (::stat((root / "refs.db").c_str(), &st) == 0) {
+                refsNow = static_cast<std::uint64_t>(st.st_blocks) * 512ULL;
+            }
+#else
+            refsNow = static_cast<std::uint64_t>(fs::file_size(root / "refs.db", ec));
+#endif
+            casObjectsBytes = previous.casObjects;
+            tmpBytes = previous.tmp;
+            refsDbBytes = refsNow;
+            total = previous.total - std::min(previous.total, previous.refsDb) + refsNow;
+        } else if (!root.empty() && fs::exists(root, ec)) {
+            const std::string objectsPrefix = (root / "objects").string();
+            const std::string tempPrefix = (root / "temp").string();
             for (fs::recursive_directory_iterator
                      it(root, fs::directory_options::skip_permission_denied, ec),
                  end;
@@ -669,12 +729,13 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
                         add = 0;
                     }
                     total += add;
-                    auto p = it->path();
-                    if (p.string().find((root / "objects").string()) == 0) {
+                    const auto& p = it->path();
+                    const std::string& native = p.native();
+                    if (native.starts_with(objectsPrefix)) {
                         casObjectsBytes += add;
                     } else if (p.filename() == "refs.db") {
                         refsDbBytes += add;
-                    } else if (p.string().find((root / "temp").string()) == 0) {
+                    } else if (native.starts_with(tempPrefix)) {
                         tmpBytes += add;
                     }
                 }
@@ -720,6 +781,14 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
             std::chrono::duration_cast<std::chrono::milliseconds>(walkEnd - walkStart).count();
 
         std::unique_lock lock(self->cacheMutex_);
+        if (!reuseWalk) {
+            self->lastStorageWalk_ = {.fingerprint = fingerprint,
+                                      .at = walkStart,
+                                      .total = total,
+                                      .casObjects = casObjectsBytes,
+                                      .refsDb = refsDbBytes,
+                                      .tmp = tmpBytes};
+        }
         self->lastPhysicalBytes_ = (totalComputed > 0) ? totalComputed : total;
         self->lastPhysicalAt_ = walkEnd;
         self->lastWalkDurationMs_ =

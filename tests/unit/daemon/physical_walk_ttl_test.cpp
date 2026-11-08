@@ -2,10 +2,15 @@
 
 #include <yams/daemon/components/DaemonMetrics.h>
 
+#include <filesystem>
+#include <fstream>
+#include <string>
+
 using yams::daemon::computePhysicalWalkTtl;
 using yams::daemon::PssSampleState;
 using yams::daemon::pssSampleTtl;
 using yams::daemon::sampleProcessPssKb;
+using yams::daemon::storageTreeFingerprint;
 using namespace std::chrono_literals;
 
 TEST_CASE("computePhysicalWalkTtl: zero last-duration returns 60s floor",
@@ -61,4 +66,65 @@ TEST_CASE("sampleProcessPssKb reads smaps_rollup at most once per TTL",
 TEST_CASE("pssSampleTtl is 5 s busy and 10 s idle", "[unit][daemon][metrics][catch2]") {
     CHECK(pssSampleTtl(false) == 5000ms);
     CHECK(pssSampleTtl(true) == 10000ms);
+}
+
+namespace {
+namespace fs = std::filesystem;
+
+// A small CAS-shaped tree: objects/<shard>/<object>. Directory mtimes are pinned to a fixed
+// past time so that a later change always moves them, whatever the kernel's timestamp tick.
+struct StorageTree {
+    fs::path root =
+        fs::temp_directory_path() /
+        ("yams_fp_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::path shard = root / "objects" / "ab";
+    fs::file_time_type pinned = fs::file_time_type::clock::now() - std::chrono::hours(24);
+
+    StorageTree() {
+        fs::remove_all(root);
+        fs::create_directories(shard);
+        std::ofstream(shard / "abcdef") << "object";
+        pin();
+    }
+    ~StorageTree() {
+        std::error_code ec;
+        fs::remove_all(root, ec);
+    }
+    void pin() const {
+        for (const auto& dir : {root, root / "objects", shard}) {
+            fs::last_write_time(dir, pinned);
+        }
+    }
+};
+} // namespace
+
+TEST_CASE("storageTreeFingerprint is stable while nothing changes",
+          "[unit][daemon][metrics][catch2]") {
+    StorageTree tree;
+    const auto first = storageTreeFingerprint(tree.root);
+    CHECK(first != 0);
+    CHECK(storageTreeFingerprint(tree.root) == first);
+}
+
+TEST_CASE("storageTreeFingerprint changes when an object is added or removed",
+          "[unit][daemon][metrics][catch2]") {
+    StorageTree tree;
+    const auto before = storageTreeFingerprint(tree.root);
+
+    SECTION("added to an existing shard") {
+        std::ofstream(tree.shard / "123456") << "new object";
+        CHECK(storageTreeFingerprint(tree.root) != before);
+    }
+    SECTION("removed from a shard") {
+        fs::remove(tree.shard / "abcdef");
+        CHECK(storageTreeFingerprint(tree.root) != before);
+    }
+    SECTION("a new shard") {
+        fs::create_directories(tree.root / "objects" / "cd");
+        CHECK(storageTreeFingerprint(tree.root) != before);
+    }
+}
+
+TEST_CASE("storageTreeFingerprint is 0 for a missing root", "[unit][daemon][metrics][catch2]") {
+    CHECK(storageTreeFingerprint(fs::temp_directory_path() / "yams_fp_does_not_exist") == 0);
 }
