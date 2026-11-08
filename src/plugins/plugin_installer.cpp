@@ -232,22 +232,51 @@ Error archiveError(ErrorCode code, struct archive* handle, const std::string& wh
     return Error{code, what + ": " + (detail != nullptr ? detail : "unknown libarchive error")};
 }
 
-// A symlink entry may only point at a relative target with no ".." that stays inside `root`.
-bool isSymlinkTargetSafe(const fs::path& root, const fs::path& linkPath, const char* rawTarget) {
-    if (rawTarget == nullptr || *rawTarget == '\0') {
+// A symlink may only point at a relative target that stays inside `root`. ".." is allowed only
+// as a leading run ("../libfoo.so.1", common for versioned libraries): those steps walk the
+// link's own ancestors, which are real directories because SECURE_SYMLINKS refuses to create an
+// entry under a symlinked parent, so the lexical result matches the filesystem. A ".." after a
+// name could step back out of a symlinked directory to somewhere the lexical check cannot see,
+// so it is rejected.
+bool isSymlinkTargetSafe(const fs::path& root, const fs::path& linkPath, const fs::path& target) {
+    if (target.empty() || target.is_absolute() || target.has_root_name() ||
+        target.has_root_directory()) {
         return false;
     }
-    const fs::path target{rawTarget};
-    if (target.is_absolute() || target.has_root_name() || target.has_root_directory()) {
-        return false;
-    }
+    bool seenName = false;
     for (const auto& part : target) {
         if (part == "..") {
-            return false;
+            if (seenName) {
+                return false;
+            }
+        } else if (!part.empty() && part != ".") {
+            seenName = true;
         }
     }
     const fs::path resolved = (linkPath.parent_path() / target).lexically_normal();
     return isPathWithin(root, resolved);
+}
+
+// After the plugin directory is chosen, every symlink in it must still resolve inside it; a
+// link that only stayed inside the wider extraction root would point at a sibling of the
+// installed plugin once it is moved into the install directory.
+Result<void> verifySymlinksWithin(const fs::path& pluginRoot) {
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(pluginRoot, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_symlink(ec)) {
+            continue;
+        }
+        const fs::path target = fs::read_symlink(it->path(), ec);
+        if (ec || !isSymlinkTargetSafe(pluginRoot, it->path(), target)) {
+            return Error{ErrorCode::InvalidPath, "Symlink points outside the plugin directory: " +
+                                                     it->path().filename().string()};
+        }
+    }
+    if (ec) {
+        return Error{ErrorCode::IOError, "Failed to scan extracted plugin: " + ec.message()};
+    }
+    return {};
 }
 
 // Extract a tar.gz archive into `destDir`, refusing any entry that could write outside it.
@@ -338,7 +367,9 @@ Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir
         }
 
         if (fileType == AE_IFLNK) {
-            if (!isSymlinkTargetSafe(root, entryPath, archive_entry_symlink(entry))) {
+            const char* rawTarget = archive_entry_symlink(entry);
+            if (rawTarget == nullptr ||
+                !isSymlinkTargetSafe(root, entryPath, fs::path{std::string{rawTarget}})) {
                 return Error{ErrorCode::InvalidPath,
                              "Symlink entry points outside the extraction root: " + name};
             }
@@ -594,6 +625,14 @@ public:
             return extractRes.error();
         }
 
+        // Plugin content is either the archive root or its single top-level directory. Validate
+        // it before touching any existing installation.
+        const fs::path sourceDir = selectPluginSourceDir(extractDir);
+        if (auto linkCheck = verifySymlinksWithin(sourceDir); !linkCheck) {
+            (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
+            return linkCheck.error();
+        }
+
         // Install (move to plugin directory)
         notifyProgress(InstallProgress::Stage::Installing, "Installing plugin...");
 
@@ -610,9 +649,6 @@ public:
             (void)removeAllScoped(tempDir, tempRoot, "plugin temp");
             return Error{ErrorCode::IOError, "Failed to create plugin directory"};
         }
-
-        // Plugin content is either the archive root or its single top-level directory.
-        const fs::path sourceDir = selectPluginSourceDir(extractDir);
 
         // Move extracted content to plugin directory
         fs::rename(sourceDir, pluginDir, ec);
