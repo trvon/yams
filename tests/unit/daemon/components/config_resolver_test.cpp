@@ -653,6 +653,14 @@ TEST_CASE("ConfigResolver applies the path-tree repair maintenance keys",
         ConfigResolver::applyDaemonMaintenance(sections, config);
         CHECK(config.maintenance.pathTreeRepairInterval.count() == 0);
     }
+    SECTION("an interval beyond a year is clamped to a year") {
+        sections["daemon.maintenance"] = {{"path_tree_repair_interval_hours", "4000000000"}};
+        ConfigResolver::applyDaemonMaintenance(sections, config);
+        CHECK(config.maintenance.pathTreeRepairInterval == std::chrono::hours{24 * 365});
+        sections["daemon.maintenance"] = {{"path_tree_repair_interval_hours", "8760"}};
+        ConfigResolver::applyDaemonMaintenance(sections, config);
+        CHECK(config.maintenance.pathTreeRepairInterval == std::chrono::hours{8760});
+    }
     SECTION("an invalid interval keeps the previous value") {
         sections["daemon.maintenance"] = {{"path_tree_repair_interval_hours", "-1"}};
         ConfigResolver::applyDaemonMaintenance(sections, config);

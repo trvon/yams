@@ -1976,8 +1976,18 @@ void ConfigResolver::applyDaemonMaintenance(const ConfigSections& sections, Daem
     }
     if (const auto it = section->second.find("path_tree_repair_interval_hours");
         it != section->second.end()) {
+        // A year is long enough to mean "rarely" and keeps `now + interval` far from
+        // steady_clock overflow.
+        constexpr std::uint32_t kMaxPathTreeRepairIntervalHours = 24 * 365;
         if (const auto parsed = parseUnsignedIntegral<std::uint32_t>(it->second)) {
-            config.maintenance.pathTreeRepairInterval = std::chrono::hours{*parsed};
+            if (*parsed > kMaxPathTreeRepairIntervalHours) {
+                spdlog::warn("Config: daemon.maintenance.path_tree_repair_interval_hours {} "
+                             "exceeds {}; using {}",
+                             *parsed, kMaxPathTreeRepairIntervalHours,
+                             kMaxPathTreeRepairIntervalHours);
+            }
+            config.maintenance.pathTreeRepairInterval =
+                std::chrono::hours{std::min(*parsed, kMaxPathTreeRepairIntervalHours)};
         } else {
             spdlog::warn("Config: daemon.maintenance.path_tree_repair_interval_hours must be an "
                          "unsigned integer; keeping {}h",
