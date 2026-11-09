@@ -152,14 +152,10 @@ struct ContentStoreBuilder::Impl {
 
         // Create chunker if not provided
         if (!chunker) {
-            chunking::ChunkingConfig chunkerConfig{
-                .windowSize = 48,
-                .minChunkSize = MIN_CHUNK_SIZE,
-                .targetChunkSize = config.chunkSize,
-                .maxChunkSize = MAX_CHUNK_SIZE,
-                .polynomial = 0x3DA3358B4DC173LL,
-                .chunkMask = 0x1FFF // For 64KB average chunks
-            };
+            // Gear-hash CDC: the average chunk size follows targetChunkSize.
+            chunking::ChunkingConfig chunkerConfig{.minChunkSize = MIN_CHUNK_SIZE,
+                                                   .targetChunkSize = config.chunkSize,
+                                                   .maxChunkSize = MAX_CHUNK_SIZE};
             // Use streaming chunker to avoid loading entire files in memory
             chunker = chunking::createStreamingChunker(chunkerConfig);
             spdlog::debug("Using StreamingChunker for memory-efficient file processing");

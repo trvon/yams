@@ -1,5 +1,6 @@
 #pragma once
 
+#include <yams/chunking/gear_cutter.h>
 #include <yams/core/concepts.h>
 #include <yams/core/span.h>
 #include <yams/core/types.h>
@@ -40,14 +41,16 @@ struct ChunkRef {
     }
 };
 
-// Chunking configuration
+// Chunking configuration. Boundaries are content-defined by a gear rolling hash (see
+// GearCutter): no cut before minChunkSize, a forced cut at maxChunkSize, and an expected average
+// chunk size close to targetChunkSize (roughly minChunkSize + 1.1 * 2^round(log2(target - min))).
 struct ChunkingConfig {
-    size_t windowSize = 48;
+    size_t windowSize = 48; ///< Unused since the gear hash (fixed 64-byte window); kept for API.
     size_t minChunkSize = MIN_CHUNK_SIZE;
     size_t targetChunkSize = DEFAULT_CHUNK_SIZE;
     size_t maxChunkSize = MAX_CHUNK_SIZE;
-    uint64_t polynomial = 0x3DA3358B4DC173LL;
-    uint64_t chunkMask = 0x1FFF; // For 64KB average chunks
+    uint64_t polynomial = 0x3DA3358B4DC173LL; ///< Unused since the gear hash; kept for API.
+    uint64_t chunkMask = 0x1FFF;              ///< Unused: the mask is derived from targetChunkSize.
 };
 
 // Concepts for chunking
@@ -91,7 +94,9 @@ public:
     virtual void setProgressCallback(ProgressCallback callback) = 0;
 };
 
-// Rabin fingerprinting chunker
+// Content-defined chunker over an in-memory buffer. The name is historical: boundaries come from
+// the gear rolling hash in GearCutter, shared with StreamingChunker so both produce identical
+// boundaries for the same input and config.
 class RabinChunker : public IChunker {
 public:
     explicit RabinChunker(ChunkingConfig config = {});
@@ -123,25 +128,13 @@ public:
     // std::generator<Chunk> chunkStream(yams::span<const std::byte> data);
 
 private:
-    struct RabinWindow {
-        std::array<std::byte, 48> window{};
-        size_t pos = 0;
-        uint64_t hash = 0;
-    };
-
     struct Impl;
     std::unique_ptr<Impl> pImpl;
     ChunkingConfig config_;
+    GearCutter cutter_;
 
     // Shared implementation for chunkData/chunkDataLazy
     std::vector<Chunk> chunkDataImpl(yams::span<const std::byte> data, bool lazy);
-
-    // Find next chunk boundary
-    std::pair<size_t, bool> findChunkBoundary(yams::span<const std::byte> data, size_t start,
-                                              RabinWindow& window);
-
-    // Update rolling hash
-    void updateHash(RabinWindow& window, std::byte newByte);
 };
 
 // Factory function
