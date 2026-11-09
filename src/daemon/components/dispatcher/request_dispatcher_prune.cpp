@@ -10,6 +10,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/system/system_error.hpp>
+#include <yams/app/services/prune_planner.h>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -17,7 +18,6 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon_lifecycle.h>
-#include <yams/integrity/repair_manager.h>
 
 namespace yams::daemon {
 
@@ -33,7 +33,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
     }
 
     // Build config from request
-    integrity::PruneConfig config;
+    app::services::PruneConfig config;
     config.dryRun = req.dryRun;
     config.categories = req.categories;
     config.extensions = req.extensions;
@@ -114,8 +114,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
     response.totalBytesFreed = 0;
 
     try {
-        auto candidates = integrity::RepairManager::queryCandidatesForPrune(
-            *metaRepo, config, serviceManager_->getContentStore());
+        auto candidates = app::services::queryPruneCandidates(*metaRepo, config,
+                                                              serviceManager_->getContentStore());
 
         // Aggregate by category for preview
         for (const auto& candidate : candidates) {

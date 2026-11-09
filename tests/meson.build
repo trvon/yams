@@ -3196,6 +3196,15 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'prune_planner',
+    'target': 'prune_planner',
+    'sources': files('unit/app/services/prune_planner_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'prune'],
+    'timeout': 30,
+  }]
+
+  catch2_test_table += [{
     'name': 'service_deadline',
     'target': 'service_deadline',
     'sources': files('unit/app/services/service_deadline_catch2_test.cpp'),
