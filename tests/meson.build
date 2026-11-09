@@ -983,7 +983,7 @@ if catch2_dep.found()
     'sources': files('unit/metadata/fts5_performance_stress_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'stress', 'metadata', 'fts5'],
-    'args': ['--allow-running-no-tests'],
+    'args': ['--allow-running-no-tests'],  # every case SKIPs unless YAMS_RUN_STRESS_TESTS=1
     'timeout': 300,
     'is_parallel': false,
   }]
@@ -1081,12 +1081,15 @@ if catch2_dep.found()
       install: false,
     )
 
-    test('onnx_embedding_diagnostic', catch2_onnx_embedding_diag_exe,
-      suite: ['catch2', 'unit', 'daemon', 'onnx', 'diagnostic'],
-      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-      args: ['--allow-running-no-tests'],
-      timeout: 120,
-    )
+    # The diagnostic cases are all hidden ([.requires_model]); the only default cases are the
+    # CoreML provider checks compiled on Apple. Elsewhere a default run selects zero tests.
+    if host_machine.system() == 'darwin'
+      test('onnx_embedding_diagnostic', catch2_onnx_embedding_diag_exe,
+        suite: ['catch2', 'unit', 'daemon', 'onnx', 'diagnostic'],
+        env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+        timeout: 120,
+      )
+    endif
   endif
 
   catch2_plugin_infrastructure_exe = executable('catch2_plugin_infrastructure',
@@ -1236,7 +1239,7 @@ if catch2_dep.found()
     'sources': files('unit/daemon/streaming_processor_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'streaming', 'concurrency'],
-    'args': ['--allow-running-no-tests'],  # Skips entirely on Windows
+    # Two cases SKIP on Windows; the search-metadata case runs everywhere.
     'timeout': 60,
   }]
 
@@ -1263,7 +1266,9 @@ if catch2_dep.found()
     'sources': files('unit/daemon/multiplex_client_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'multiplex'],
-    'args': ['--allow-running-no-tests'],  # All tests have [.requires_daemon] tag
+    # Every case is hidden ([.requires_daemon]), so a default run selects zero tests. Build it,
+    # do not register a test that can only pass by running nothing.
+    'register': false,
     'timeout': 60,
   }]
 
@@ -1406,7 +1411,7 @@ if catch2_dep.found()
     'sources': files('unit/daemon/embedding_provider_recovery_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon'],
-    'args': ['--allow-running-no-tests'],  # Skips entirely on Windows
+    'posix_only': true,  # the single case SKIPs on Windows
     'timeout': 120,
     'is_parallel': false,
   }]
@@ -1416,7 +1421,7 @@ if catch2_dep.found()
     'sources': files('unit/daemon/request_handler_io_edge_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'concurrency'],
-    'args': ['--allow-running-no-tests'],  # Placeholder tests - all skipped
+    'posix_only': true,  # every case uses AF_UNIX socket pairs and SKIPs on Windows
     'timeout': 120,
     'is_parallel': false,
   }]
@@ -1435,7 +1440,9 @@ if catch2_dep.found()
     'sources': files('unit/daemon/request_handler_lifetime_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon'],
-    'args': ['--allow-running-no-tests'],  # Skips when streaming disabled
+    # The only case is hidden ([.streaming_disabled]) until the streaming path is re-enabled, so
+    # a default run selects zero tests. Build it, do not register an empty run.
+    'register': false,
     'timeout': 120,
     'is_parallel': false,
   }]
@@ -1445,7 +1452,7 @@ if catch2_dep.found()
     'sources': files('unit/daemon/request_handler_writer_drain_cleanup_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'ipc', 'mux'],
-    'args': ['--allow-running-no-tests'],  # Skips entirely on Windows
+    'posix_only': true,  # the single case SKIPs on Windows
     'timeout': 60,
     'is_parallel': false,
   }]
@@ -2373,7 +2380,6 @@ if catch2_dep.found()
     'sources': files('unit/repair/embedding_repair_scan_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'repair'],
-    'args': ['--allow-running-no-tests'],
     'timeout': 180,
   }]
 
@@ -3282,14 +3288,14 @@ if catch2_dep.found()
 
   test('metadata_schema', catch2_metadata_schema_exe,
     suite: ['catch2', 'unit', 'metadata', 'schema'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
   )
 
   test('metadata_schema_slow', catch2_metadata_schema_exe,
     suite: ['catch2', 'slow', 'metadata', 'schema'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300,
     is_parallel: false
@@ -3331,7 +3337,7 @@ if catch2_dep.found()
 #Search tests
   test('hybrid_search', hybrid_search_exe,
     suite: ['catch2', 'unit', 'search', 'hybrid', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'YAMS_DISABLE_VECTORS': '1',
@@ -3341,7 +3347,7 @@ if catch2_dep.found()
 
   test('hybrid_search_slow', hybrid_search_exe,
     suite: ['catch2', 'slow', 'search', 'hybrid', 'concurrency'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'YAMS_DISABLE_VECTORS': '1',
@@ -3428,13 +3434,15 @@ if catch2_dep.found()
 
   test('daemon_background_processing', catch2_daemon_background_exe,
     suite: ['catch2', 'unit', 'daemon', 'background', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
 
   test('daemon_background_processing_slow', catch2_daemon_background_exe,
     suite: ['catch2', 'slow', 'daemon', 'background', 'concurrency'],
+    # Keeps --allow-running-no-tests: the one [slow] case SKIPs unless
+    # YAMS_INTERNAL_BUS_MPMC=1 (runtime capability), which would otherwise exit 4.
     args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
@@ -3442,25 +3450,27 @@ if catch2_dep.found()
 
   test('work_coordinator', catch2_work_coordinator_exe,
     suite: ['catch2', 'unit', 'daemon', 'work-coordinator', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
 
   test('work_coordinator_slow', catch2_work_coordinator_exe,
     suite: ['catch2', 'slow', 'daemon', 'work-coordinator', 'concurrency'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
 
-  test('assert_val', catch2_assert_val_exe,
-    suite: ['catch2', 'unit', 'core', 'assert'],
-    args: ['--allow-running-no-tests'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: host_machine.system() == 'windows' ? 60 : 30,
-    is_parallel: false
-  )
+  # Every case forks and SKIPs on Windows; Catch2 exits 4 when all selected cases skip.
+  if host_machine.system() != 'windows'
+    test('assert_val', catch2_assert_val_exe,
+      suite: ['catch2', 'unit', 'core', 'assert'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 30,
+      is_parallel: false
+    )
+  endif
 
   test('search_service', catch2_search_service_exe,
     suite: ['catch2', 'unit', 'services', 'search', 'concurrency'],
@@ -3509,7 +3519,7 @@ if catch2_dep.found()
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugins', 'infrastructure', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
@@ -3517,7 +3527,7 @@ if catch2_dep.found()
 
   test('plugin_infrastructure_slow', catch2_plugin_infrastructure_exe,
     suite: ['catch2', 'slow', 'daemon', 'plugins', 'infrastructure', 'concurrency'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
@@ -3530,12 +3540,14 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  test('in_process_transport', catch2_in_process_transport_exe,
-    suite: ['catch2', 'unit', 'daemon', 'streaming', 'inprocess', 'concurrency'],
-    args: ['--allow-running-no-tests'],  # Skips entirely on Windows
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
+  # Every case SKIPs on Windows (the executor-drain case runs under UBSan/TSAN too).
+  if host_machine.system() != 'windows'
+    test('in_process_transport', catch2_in_process_transport_exe,
+      suite: ['catch2', 'unit', 'daemon', 'streaming', 'inprocess', 'concurrency'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 60
+    )
+  endif
 
   test('asio_transport_exhaustion', catch2_asio_transport_exhaustion_exe,
     suite: ['catch2', 'unit', 'daemon', 'transport', 'max-inflight', 'concurrency'],
@@ -3643,14 +3655,14 @@ if catch2_dep.found()
 
   test('storage_submodule', catch2_storage_submodule_exe,
     suite: ['catch2', 'unit', 'storage', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
   )
 
   test('storage_submodule_slow', catch2_storage_submodule_exe,
     suite: ['catch2', 'slow', 'storage', 'concurrency'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
   )
@@ -3678,14 +3690,14 @@ if catch2_dep.found()
 
   test('mcp_submodule', catch2_mcp_submodule_exe,
     suite: ['catch2', 'unit', 'mcp', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
   )
 
   test('mcp_submodule_slow', catch2_mcp_submodule_exe,
     suite: ['catch2', 'slow', 'mcp', 'concurrency'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
   )
@@ -3761,6 +3773,11 @@ if catch2_dep.found()
 
 endif
 
+# Table keys beyond the basics:
+#   'register': false   build the executable but declare no test (every case is hidden).
+#   'posix_only': true  every selected case SKIPs on Windows; Catch2 exits 4 when all selected
+#                       cases skip, so the test is not declared there. Prefer this over
+#                       --allow-running-no-tests, which also passes a run that selected nothing.
 foreach t : catch2_test_table
   t_exe = executable(t.get('target', 'catch2_' + t['name']), t['sources'],
     include_directories: incs,
@@ -3769,11 +3786,14 @@ foreach t : catch2_test_table
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  test(t['name'], t_exe,
-    suite: t['suite'],
-    args: t.get('args', []),
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: t['timeout'],
-    is_parallel: t.get('is_parallel', true),
-  )
+  if t.get('register', true) and (not t.get('posix_only', false)
+      or host_machine.system() != 'windows')
+    test(t['name'], t_exe,
+      suite: t['suite'],
+      args: t.get('args', []),
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: t['timeout'],
+      is_parallel: t.get('is_parallel', true),
+    )
+  endif
 endforeach

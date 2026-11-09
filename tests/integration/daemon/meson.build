@@ -88,6 +88,14 @@ else
       'TSAN_OPTIONS': _test_tsan_options,
     }
 
+    # Registrations carry no --allow-running-no-tests: in Catch2 v3 that flag also turns
+    # "every selected case skipped" into exit 0, so a daemon that never started (or a filter
+    # that matches nothing) passed silently. Most daemon IPC cases SKIP on Windows
+    # (SKIP_DAEMON_TEST_ON_WINDOWS), and an all-skipped run exits 4, so those registrations are
+    # declared on POSIX only. tests/scripts/check_test_filters.py (catch2_filter_policy) fails any
+    # registration whose filter selects zero test cases.
+    _daemon_ipc_supported = host_machine.system() != 'windows'
+
     daemon_catch2_exe = executable('yams_daemon_socket_tests_catch2',
       daemon_catch2_srcs,
       include_directories: incs,
@@ -99,127 +107,116 @@ else
     # Split socket tests into individual processes to avoid static pool state issues
     # Each test case creates/destroys a daemon, and static singletons (RepairThreadPool,
     # ConnectionRegistry) don't reset properly between runs, causing future_error crashes.
-    test('daemon_socket_connection_lifecycle',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon socket connection lifecycle', '--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('daemon_socket_connection_lifecycle',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon socket connection lifecycle'],
+      )
 
-    test('daemon_socket_request_execution',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client request execution', '--allow-running-no-tests'],
-    )
+      test('daemon_socket_request_execution',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client request execution'],
+      )
 
-    test('daemon_socket_download_job_request_execution',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket', 'download-jobs'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client download job request execution', '--allow-running-no-tests'],
-    )
+      test('daemon_socket_download_job_request_execution',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket', 'download-jobs'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client download job request execution'],
+      )
 
-    test('daemon_socket_model_request_execution',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client model request execution', '--allow-running-no-tests'],
-    )
+      test('daemon_socket_model_request_execution',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client model request execution'],
+      )
 
-    test('daemon_socket_plugin_request_execution',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client plugin request execution', '--allow-running-no-tests'],
-    )
+      test('daemon_socket_plugin_request_execution',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client plugin request execution'],
+      )
 
-    test('daemon_socket_prune_request_execution',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client prune request execution', '--allow-running-no-tests'],
-    )
+      test('daemon_socket_prune_request_execution',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client prune request execution'],
+      )
 
-    test('daemon_socket_graph_request_execution',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client graph maintenance request execution', '--allow-running-no-tests'],
-    )
+      test('daemon_socket_graph_request_execution',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client graph maintenance request execution'],
+      )
 
-    test('daemon_socket_collection_request_execution',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client collection request execution', '--allow-running-no-tests'],
-    )
+      test('daemon_socket_collection_request_execution',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client collection request execution'],
+      )
 
-    test('daemon_socket_tree_diff_request_execution',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client tree diff request execution', '--allow-running-no-tests'],
-    )
+      test('daemon_socket_session_request_execution',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client session request execution'],
+      )
 
-    test('daemon_socket_session_request_execution',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client session request execution', '--allow-running-no-tests'],
-    )
+      test('daemon_socket_repair_request_execution',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client repair request execution'],
+      )
 
-    test('daemon_socket_repair_request_execution',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client repair request execution', '--allow-running-no-tests'],
-    )
+      test('daemon_socket_error_handling',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client error handling'],
+      )
 
-    test('daemon_socket_error_handling',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client error handling', '--allow-running-no-tests'],
-    )
+      test('daemon_socket_concurrent_requests',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket', 'concurrency'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client concurrent requests'],
+      )
 
-    test('daemon_socket_concurrent_requests',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket', 'concurrency'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client concurrent requests', '--allow-running-no-tests'],
-    )
-
-    # Independent clients issue overlapping status() calls on one live daemon.
-    # No --allow-running-no-tests: a filter that selects nothing must fail. The case SKIPs on
-    # Windows (daemon IPC), which Catch2 reports as exit 4, so register it on POSIX only.
-    if host_machine.system() != 'windows'
+      # Independent clients issue overlapping status() calls on one live daemon.
       test('daemon_socket_parallel_status',
         daemon_catch2_exe,
         suite: ['integration', 'daemon', 'catch2', 'socket', 'concurrency'],
@@ -228,34 +225,34 @@ else
         timeout: daemon_integration_timeout,
         args: ['Daemon client parallel status from independent clients'],
       )
+
+      test('daemon_socket_timeout_behavior',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client timeout behavior'],
+      )
+
+      test('daemon_socket_move_semantics',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon client move semantics'],
+      )
+
+      test('daemon_socket_file_lifecycle',
+        daemon_catch2_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon socket file lifecycle'],
+      )
     endif
-
-    test('daemon_socket_timeout_behavior',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client timeout behavior', '--allow-running-no-tests'],
-    )
-
-    test('daemon_socket_move_semantics',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon client move semantics', '--allow-running-no-tests'],
-    )
-
-    test('daemon_socket_file_lifecycle',
-      daemon_catch2_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon socket file lifecycle', '--allow-running-no-tests'],
-    )
 
     daemon_shutdown_exe = executable('yams_daemon_shutdown_tests_catch2',
       daemon_shutdown_srcs,
@@ -273,17 +270,16 @@ else
       install: false,
     )
 
-    test('daemon_harness_startup_rollback',
-      daemon_harness_exe,
-      suite: ['integration', 'daemon', 'catch2', 'harness'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: [
-        'DaemonHarness rolls back owned endpoints when startup callback fails',
-        '--allow-running-no-tests',
-      ],
-    )
+    if _daemon_ipc_supported
+      test('daemon_harness_startup_rollback',
+        daemon_harness_exe,
+        suite: ['integration', 'daemon', 'catch2', 'harness'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['DaemonHarness rolls back owned endpoints when startup callback fails'],
+      )
+    endif
 
     test('daemon_harness_endpoint_ownership',
       daemon_harness_exe,
@@ -291,10 +287,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: daemon_integration_timeout,
-      args: [
-        'DaemonHarness preserves endpoints claimed after fixture construction',
-        '--allow-running-no-tests',
-      ],
+      args: ['DaemonHarness preserves endpoints claimed after fixture construction'],
     )
 
     test('daemon_harness_config_exception',
@@ -303,100 +296,93 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: daemon_integration_timeout,
-      args: [
-        'DaemonHarness restores process state when configuration throws',
-        '--allow-running-no-tests',
-      ],
+      args: ['DaemonHarness restores process state when configuration throws'],
     )
 
-    test('daemon_harness_config_lifecycle',
-      daemon_harness_exe,
-      suite: ['integration', 'daemon', 'catch2', 'harness'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: [
-        'DaemonHarness isolates config and observes lifecycle cleanup',
-        '--allow-running-no-tests',
-      ],
-    )
+    if _daemon_ipc_supported
+      test('daemon_harness_config_lifecycle',
+        daemon_harness_exe,
+        suite: ['integration', 'daemon', 'catch2', 'harness'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['DaemonHarness isolates config and observes lifecycle cleanup'],
+      )
 
-    test('daemon_harness_full_isolation',
-      daemon_harness_exe,
-      suite: ['integration', 'daemon', 'catch2', 'harness'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: [
-        'DaemonHarness full isolation ignores ambient developer config and data',
-        '--allow-running-no-tests',
-      ],
-    )
+      test('daemon_harness_full_isolation',
+        daemon_harness_exe,
+        suite: ['integration', 'daemon', 'catch2', 'harness'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['DaemonHarness full isolation ignores ambient developer config and data'],
+      )
 
-    # Split shutdown tests into individual processes
-    test('daemon_shutdown_timing',
-      daemon_shutdown_exe,
-      suite: ['integration', 'daemon', 'catch2', 'shutdown', 'concurrency'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon shutdown timing', '--allow-running-no-tests'],
-    )
+      # Split shutdown tests into individual processes
+      test('daemon_shutdown_timing',
+        daemon_shutdown_exe,
+        suite: ['integration', 'daemon', 'catch2', 'shutdown', 'concurrency'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon shutdown timing'],
+      )
 
-    test('daemon_shutdown_inflight_ops',
-      daemon_shutdown_exe,
-      suite: ['integration', 'daemon', 'catch2', 'shutdown', 'concurrency'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon shutdown with in-flight operations', '--allow-running-no-tests'],
-    )
+      test('daemon_shutdown_inflight_ops',
+        daemon_shutdown_exe,
+        suite: ['integration', 'daemon', 'catch2', 'shutdown', 'concurrency'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon shutdown with in-flight operations'],
+      )
 
-    test('daemon_shutdown_draining_connections',
-      daemon_shutdown_exe,
-      suite: ['integration', 'daemon', 'catch2', 'shutdown', 'concurrency'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon stop outlives connections still draining on the IO threads',
-        '--allow-running-no-tests'],
-    )
+      test('daemon_shutdown_draining_connections',
+        daemon_shutdown_exe,
+        suite: ['integration', 'daemon', 'catch2', 'shutdown', 'concurrency'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon stop outlives connections still draining on the IO threads'],
+      )
 
-    # Restored: idempotency, after-operations, under-load and graceful shutdown. The two that
-    # raced (an immediate list after async adds, a fixed 200 ms before shutdown) now wait for the
-    # condition they check.
-    test('daemon_shutdown_graceful',
-      daemon_shutdown_exe,
-      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon graceful shutdown behavior', '--allow-running-no-tests'],
-    )
-    test('daemon_shutdown_after_operations',
-      daemon_shutdown_exe,
-      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon shutdown after operations', '--allow-running-no-tests'],
-    )
-    test('daemon_shutdown_idempotency',
-      daemon_shutdown_exe,
-      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon shutdown idempotency', '--allow-running-no-tests'],
-    )
-    test('daemon_shutdown_under_load',
-      daemon_shutdown_exe,
-      suite: ['integration', 'daemon', 'catch2', 'shutdown'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon shutdown under load', '--allow-running-no-tests'],
-    )
+      # Restored: idempotency, after-operations, under-load and graceful shutdown. The two that
+      # raced (an immediate list after async adds, a fixed 200 ms before shutdown) now wait for the
+      # condition they check.
+      test('daemon_shutdown_graceful',
+        daemon_shutdown_exe,
+        suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon graceful shutdown behavior'],
+      )
+      test('daemon_shutdown_after_operations',
+        daemon_shutdown_exe,
+        suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon shutdown after operations'],
+      )
+      test('daemon_shutdown_idempotency',
+        daemon_shutdown_exe,
+        suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon shutdown idempotency'],
+      )
+      test('daemon_shutdown_under_load',
+        daemon_shutdown_exe,
+        suite: ['integration', 'daemon', 'catch2', 'shutdown'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon shutdown under load'],
+      )
+    endif
+
     # Core shutdown behavior is covered by timing and inflight_ops tests above
     
     post_ingest_queue_validation_exe = executable('yams_post_ingest_queue_validation',
@@ -407,16 +393,19 @@ else
       install: false,
     )
 
-    test('post_ingest_queue_validation',
-      post_ingest_queue_validation_exe,
-      suite: ['integration', 'daemon', 'catch2', 'post-ingest', 'concurrency'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('post_ingest_queue_validation',
+        post_ingest_queue_validation_exe,
+        suite: ['integration', 'daemon', 'catch2', 'post-ingest', 'concurrency'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+      )
+    endif
 
-    if get_option('enable-bench-tests')
+    # Both benchmark cases SKIP on Windows; the first also SKIPs without a source corpus, the
+    # second always runs, so the registration never reports all-skipped on POSIX.
+    if get_option('enable-bench-tests') and _daemon_ipc_supported
       post_ingest_queue_benchmark_exe = executable('yams_post_ingest_queue_benchmark',
         post_ingest_queue_benchmark_srcs,
         include_directories: incs,
@@ -431,7 +420,6 @@ else
         env: _daemon_test_env,
         is_parallel: false,
         timeout: 600, # Longer timeout for benchmark
-        args: ['--allow-running-no-tests'],
       )
     endif
 
@@ -443,14 +431,15 @@ else
       install: false,
     )
 
-    test('client_timeout_recovery',
-      client_timeout_recovery_exe,
-      suite: ['integration', 'daemon', 'catch2', 'timeout'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('client_timeout_recovery',
+        client_timeout_recovery_exe,
+        suite: ['integration', 'daemon', 'catch2', 'timeout'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+      )
+    endif
 
     # idle_streaming and writer_drain executables/tests removed (flaky)
 
@@ -462,14 +451,15 @@ else
       install: false,
     )
 
-    test('socket_memory_pressure',
-      socket_memory_pressure_exe,
-      suite: ['integration', 'daemon', 'catch2', 'socket', 'memory-pressure', 'crash'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('socket_memory_pressure',
+        socket_memory_pressure_exe,
+        suite: ['integration', 'daemon', 'catch2', 'socket', 'memory-pressure', 'crash'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+      )
+    endif
 
     daemon_db_corruption_recovery_exe = executable('yams_daemon_db_corruption_recovery_tests_catch2',
       daemon_db_corruption_recovery_srcs,
@@ -479,14 +469,15 @@ else
       install: false,
     )
 
-    test('daemon_db_corruption_recovery',
-      daemon_db_corruption_recovery_exe,
-      suite: ['integration', 'daemon', 'catch2', 'db-recovery'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('daemon_db_corruption_recovery',
+        daemon_db_corruption_recovery_exe,
+        suite: ['integration', 'daemon', 'catch2', 'db-recovery'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+      )
+    endif
 
     cli_responsiveness_under_load_exe = executable('yams_cli_responsiveness_under_load_tests_catch2',
       cli_responsiveness_under_load_srcs,
@@ -496,14 +487,15 @@ else
       install: false,
     )
 
-    test('cli_responsiveness_under_load',
-      cli_responsiveness_under_load_exe,
-      suite: ['integration', 'daemon', 'catch2', 'cli', 'responsiveness', 'load', 'concurrency'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: 120,  # 2 minutes for load testing
-      args: ['--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('cli_responsiveness_under_load',
+        cli_responsiveness_under_load_exe,
+        suite: ['integration', 'daemon', 'catch2', 'cli', 'responsiveness', 'load', 'concurrency'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: 120,  # 2 minutes for load testing
+      )
+    endif
 
     # KG tests need vectors enabled, but still disable session watcher
     _kg_test_env = {
@@ -520,14 +512,15 @@ else
       install: false,
     )
 
-    test('ghidra_kg_entity_ingestion',
-      ghidra_kg_entity_ingestion_exe,
-      suite: ['integration', 'daemon', 'catch2', 'kg', 'ghidra'],
-      env: _kg_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('ghidra_kg_entity_ingestion',
+        ghidra_kg_entity_ingestion_exe,
+        suite: ['integration', 'daemon', 'catch2', 'kg', 'ghidra'],
+        env: _kg_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+      )
+    endif
 
     codex_sandbox_embedding_regression_exe = executable('yams_codex_sandbox_embedding_regression_tests_catch2',
       codex_sandbox_embedding_regression_srcs,
@@ -538,14 +531,15 @@ else
       install: false,
     )
 
-    test('codex_sandbox_embedding_regression',
-      codex_sandbox_embedding_regression_exe,
-      suite: ['integration', 'daemon', 'catch2', 'sandbox', 'embeddings'],
-      env: _kg_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('codex_sandbox_embedding_regression',
+        codex_sandbox_embedding_regression_exe,
+        suite: ['integration', 'daemon', 'catch2', 'sandbox', 'embeddings'],
+        env: _kg_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+      )
+    endif
 
     # SIGTERM signal handling tests (yams-qe6r)
     daemon_sigterm_exe = executable('yams_daemon_sigterm_tests_catch2',
@@ -564,41 +558,42 @@ else
       install: false,
     )
 
-    test('proxy_slot_starvation',
-      proxy_slot_starvation_exe,
-      suite: ['integration', 'daemon', 'catch2', 'proxy', 'slots'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('proxy_slot_starvation',
+        proxy_slot_starvation_exe,
+        suite: ['integration', 'daemon', 'catch2', 'proxy', 'slots'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+      )
 
-    test('daemon_sigterm_external_flag',
-      daemon_sigterm_exe,
-      suite: ['integration', 'daemon', 'catch2', 'sigterm'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon responds to external shutdown flag', '--allow-running-no-tests'],
-    )
+      test('daemon_sigterm_external_flag',
+        daemon_sigterm_exe,
+        suite: ['integration', 'daemon', 'catch2', 'sigterm'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon responds to external shutdown flag'],
+      )
 
-    test('daemon_sigterm_timing',
-      daemon_sigterm_exe,
-      suite: ['integration', 'daemon', 'catch2', 'sigterm'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon shutdown timing with external flag', '--allow-running-no-tests'],
-    )
+      test('daemon_sigterm_timing',
+        daemon_sigterm_exe,
+        suite: ['integration', 'daemon', 'catch2', 'sigterm'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon shutdown timing with external flag'],
+      )
 
-    test('daemon_sigterm_signal',
-      daemon_sigterm_exe,
-      suite: ['integration', 'daemon', 'catch2', 'sigterm'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Daemon handles actual SIGTERM signal', '--allow-running-no-tests'],
-    )
+      test('daemon_sigterm_signal',
+        daemon_sigterm_exe,
+        suite: ['integration', 'daemon', 'catch2', 'sigterm'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Daemon handles actual SIGTERM signal'],
+      )
+    endif
 
     # Data-dir single-instance enforcement tests
     lifecycle_single_instance_exe = executable('yams_lifecycle_single_instance_tests_catch2',
@@ -609,23 +604,25 @@ else
       install: false,
     )
 
-    test('lifecycle_single_instance_lock',
-      lifecycle_single_instance_exe,
-      suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'single-instance'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: 120,  # 2 minutes for takeover scenarios
-      args: ['Data-dir lock prevents concurrent access', '--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('lifecycle_single_instance_lock',
+        lifecycle_single_instance_exe,
+        suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'single-instance'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: 120,  # 2 minutes for takeover scenarios
+        args: ['Data-dir lock prevents concurrent access'],
+      )
 
-    test('lifecycle_single_instance_release',
-      lifecycle_single_instance_exe,
-      suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'single-instance'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: 60,  # 1 minute for sequential start/stop
-      args: ['Data-dir lock released on shutdown', '--allow-running-no-tests'],
-    )
+      test('lifecycle_single_instance_release',
+        lifecycle_single_instance_exe,
+        suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'single-instance'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: 60,  # 1 minute for sequential start/stop
+        args: ['Data-dir lock released on shutdown'],
+      )
+    endif
 
     memory_sync_service_integration_exe = executable('yams_memory_sync_service_integration',
       memory_sync_service_integration_srcs,
@@ -641,7 +638,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 30,
-      args: ['Daemon refuses enabled memory sync when writer authentication cannot initialize', '--allow-running-no-tests'],
+      args: ['Daemon refuses enabled memory sync when writer authentication cannot initialize'],
     )
     test('daemon_memory_sync_periodic_convergence',
       memory_sync_service_integration_exe,
@@ -649,7 +646,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon memory sync periodically converges and stops cleanly', '--allow-running-no-tests'],
+      args: ['Daemon memory sync periodically converges and stops cleanly'],
     )
     test('daemon_memory_sync_delete_integrity',
       memory_sync_service_integration_exe,
@@ -657,7 +654,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Production document deletion also replicates content-byte deletion', '--allow-running-no-tests'],
+      args: ['Production document deletion also replicates content-byte deletion'],
     )
     test('daemon_memory_sync_apply_stop',
       memory_sync_service_integration_exe,
@@ -665,7 +662,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon memory sync stop during production apply prevents later adapters', '--allow-running-no-tests'],
+      args: ['Daemon memory sync stop during production apply prevents later adapters'],
     )
     test('daemon_memory_sync_apply_serialization',
       memory_sync_service_integration_exe,
@@ -673,7 +670,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon serializes concurrent memory sync apply callbacks', '--allow-running-no-tests'],
+      args: ['Daemon serializes concurrent memory sync apply callbacks'],
     )
     test('daemon_memory_sync_offresident_read',
       memory_sync_service_integration_exe,
@@ -713,7 +710,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon memory sync stage failures neither skip later stages nor block retry', '--allow-running-no-tests'],
+      args: ['Daemon memory sync stage failures neither skip later stages nor block retry'],
     )
     test('daemon_memory_sync_content_prerequisite',
       memory_sync_service_integration_exe,
@@ -721,7 +718,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon memory sync requires content before metadata visibility', '--allow-running-no-tests'],
+      args: ['Daemon memory sync requires content before metadata visibility'],
     )
     test('daemon_memory_sync_backfill_stop',
       memory_sync_service_integration_exe,
@@ -729,7 +726,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon memory sync stop during production backfill bounds published documents', '--allow-running-no-tests'],
+      args: ['Daemon memory sync stop during production backfill bounds published documents'],
     )
     test('daemon_memory_sync_backfill_budget',
       memory_sync_service_integration_exe,
@@ -737,7 +734,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon memory sync backfill budget resumes document cursor', '--allow-running-no-tests'],
+      args: ['Daemon memory sync backfill budget resumes document cursor'],
     )
     test('daemon_memory_sync_poisoned_blob',
       memory_sync_service_integration_exe,
@@ -745,7 +742,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon memory sync backfill skips a poisoned blob and continues', '--allow-running-no-tests'],
+      args: ['Daemon memory sync backfill skips a poisoned blob and continues'],
     )
     test('daemon_memory_sync_oversized_blob',
       memory_sync_service_integration_exe,
@@ -753,7 +750,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon memory sync backfill skips an oversized blob and continues', '--allow-running-no-tests'],
+      args: ['Daemon memory sync backfill skips an oversized blob and continues'],
     )
     test('daemon_memory_sync_p2p_recovery_readiness',
       memory_sync_service_integration_exe,
@@ -761,7 +758,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon readiness and search do not wait for direct P2P recovery', '--allow-running-no-tests'],
+      args: ['Daemon readiness and search do not wait for direct P2P recovery'],
     )
     test('daemon_memory_sync_p2p_recovery_throws',
       memory_sync_service_integration_exe,
@@ -769,7 +766,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Direct P2P recovery that throws degrades P2P instead of terminating', '--allow-running-no-tests'],
+      args: ['Direct P2P recovery that throws degrades P2P instead of terminating'],
     )
     test('daemon_memory_sync_direct_delta_hydration',
       memory_sync_service_integration_exe,
@@ -777,7 +774,7 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon direct deltas immediately hydrate content and metadata', '--allow-running-no-tests'],
+      args: ['Daemon direct deltas immediately hydrate content and metadata'],
     )
     test('daemon_memory_sync_temporary',
       memory_sync_service_integration_exe,
@@ -785,26 +782,24 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 60,
-      args: ['Daemon temporary memory sync converges inside one session and cleans only its namespace', '--allow-running-no-tests'],
+      args: ['Daemon temporary memory sync converges inside one session and cleans only its namespace'],
     )
 
-    test('lifecycle_repair_hysteresis',
-      lifecycle_single_instance_exe,
-      suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'repair'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: 120,
-      args: ['[repair-hysteresis]~[slow]', '--allow-running-no-tests'],
-    )
-
-    test('lifecycle_repair_hysteresis_slow',
-      lifecycle_single_instance_exe,
-      suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'repair', 'slow'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: 300,
-      args: ['[slow]', '--allow-running-no-tests'],
-    )
+    # One registration for both hysteresis cases. They carry [slow] (two auto-repair daemon
+    # starts with 400 ms holds), but there is no separate slow lane in CI: the former
+    # '[repair-hysteresis]~[slow]' registration selected zero cases and only the '[slow]' one ran.
+    # The idle-connection case SKIPs on hosts that do not count silent sockets (macOS); the
+    # cross-instance case always runs, so the registration never reports all-skipped.
+    if _daemon_ipc_supported
+      test('lifecycle_repair_hysteresis',
+        lifecycle_single_instance_exe,
+        suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'repair', 'slow'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: 300,
+        args: ['[repair-hysteresis]'],
+      )
+    endif
 
     # ONNX Concurrency / TuneAdvisor integration tests
     onnx_tuning_integration_srcs = files(
@@ -820,79 +815,85 @@ else
     )
 
     # Split ONNX tuning tests into separate test cases to avoid state leakage
-    test('onnx_tuning_env_settings',
-      onnx_tuning_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'onnx', 'tuning'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: 300,  # 5 sections, ~32s/section (EmbeddingService quiesce dominates)
-      args: ['OnnxConcurrencyRegistry respects TuneAdvisor env settings', '--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('onnx_tuning_env_settings',
+        onnx_tuning_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'onnx', 'tuning'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: 300,  # 5 sections, ~32s/section (EmbeddingService quiesce dominates)
+        args: ['OnnxConcurrencyRegistry respects TuneAdvisor env settings'],
+      )
 
-    test('onnx_tuning_embedding_lanes',
-      onnx_tuning_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'onnx', 'embedding'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Embedding lane slots are configured correctly', '--allow-running-no-tests'],
-    )
+      test('onnx_tuning_embedding_lanes',
+        onnx_tuning_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'onnx', 'embedding'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Embedding lane slots are configured correctly'],
+      )
 
-    test('onnx_tuning_fsm_metrics',
-      onnx_tuning_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'onnx', 'metrics'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['FSM metrics reflect ONNX configuration', '--allow-running-no-tests'],
-    )
+      test('onnx_tuning_fsm_metrics',
+        onnx_tuning_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'onnx', 'metrics'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['FSM metrics reflect ONNX configuration'],
+      )
 
-    test('onnx_tuning_lifecycle',
-      onnx_tuning_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'onnx', 'lifecycle'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: 120,  # 2 minutes for daemon restarts
-      args: ['OnnxConcurrencyRegistry state resets on daemon restart', '--allow-running-no-tests'],
-    )
+      test('onnx_tuning_lifecycle',
+        onnx_tuning_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'onnx', 'lifecycle'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: 120,  # 2 minutes for daemon restarts
+        args: ['OnnxConcurrencyRegistry state resets on daemon restart'],
+      )
 
-    test('onnx_tuning_lanes',
-      onnx_tuning_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'onnx', 'lanes'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Lane metrics update during slot acquisition', '--allow-running-no-tests'],
-    )
+      test('onnx_tuning_lanes',
+        onnx_tuning_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'onnx', 'lanes'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Lane metrics update during slot acquisition'],
+      )
 
-    # Adapter test needs vectors ENABLED to test real ONNX plugin path
-    # Use _kg_test_env which doesn't have YAMS_DISABLE_VECTORS=1
-    test('onnx_tuning_adapter',
-      onnx_tuning_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'onnx', 'adapter'],
-      env: _kg_test_env,
-      is_parallel: false,
-      timeout: 300,  # 5 minutes - real ONNX model loading is slow
-      args: ['AbiModelProviderAdapter acquires SlotGuard during real embedding', '--allow-running-no-tests'],
-    )
+      # Adapter test needs vectors ENABLED to test real ONNX plugin path
+      # Use _kg_test_env which doesn't have YAMS_DISABLE_VECTORS=1
+      # adapter/config_backend keep --allow-running-no-tests: each selects one case that SKIPs
+      # at runtime when the ONNX plugin, model, or vector support is absent (CI exports
+      # YAMS_DISABLE_VECTORS / YAMS_SQLITE_VEC_SKIP_INIT and builds with ONNX disabled). That is
+      # a capability skip that cannot be decided at configure time.
+      test('onnx_tuning_adapter',
+        onnx_tuning_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'onnx', 'adapter'],
+        env: _kg_test_env,
+        is_parallel: false,
+        timeout: 300,  # 5 minutes - real ONNX model loading is slow
+        args: ['AbiModelProviderAdapter acquires SlotGuard during real embedding', '--allow-running-no-tests'],
+      )
 
-    test('onnx_tuning_config_backend',
-      onnx_tuning_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'onnx', 'config'],
-      env: _kg_test_env,
-      is_parallel: false,
-      timeout: 300,
-      args: ['Config selecting onnx backend uses ONNX provider for embeddings', '--allow-running-no-tests'],
-    )
+      test('onnx_tuning_config_backend',
+        onnx_tuning_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'onnx', 'config'],
+        env: _kg_test_env,
+        is_parallel: false,
+        timeout: 300,
+        args: ['Config selecting onnx backend uses ONNX provider for embeddings', '--allow-running-no-tests'],
+      )
 
-    test('onnx_tuning_timeout',
-      onnx_tuning_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'onnx', 'timeout'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['ONNX slot exhaustion causes graceful timeout', '--allow-running-no-tests'],
-    )
+      test('onnx_tuning_timeout',
+        onnx_tuning_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'onnx', 'timeout'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['ONNX slot exhaustion causes graceful timeout'],
+      )
+    endif
 
     # ResourceGovernor integration tests - verify throttling behavior during real operations
     resource_governor_integration_srcs = files(
@@ -908,77 +909,86 @@ else
     )
 
     # Split governor tests into separate test cases to avoid state leakage
-    test('resource_governor_status_metrics',
-      resource_governor_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'governor', 'status'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['ResourceGovernor metrics exposed in daemon status', '--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('resource_governor_status_metrics',
+        resource_governor_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'governor', 'status'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['ResourceGovernor metrics exposed in daemon status'],
+      )
 
-    test('resource_governor_singleton',
-      resource_governor_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'governor', 'singleton'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['ResourceGovernor singleton is accessible during daemon operation', '--allow-running-no-tests'],
-    )
+      test('resource_governor_singleton',
+        resource_governor_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'governor', 'singleton'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['ResourceGovernor singleton is accessible during daemon operation'],
+      )
 
-    test('resource_governor_pressure_detection',
-      resource_governor_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'governor', 'pressure'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: 120,  # 2 minutes for ingest + processing
-      args: ['Governor detects pressure with low CPU threshold', '--allow-running-no-tests'],
-    )
+    endif
 
-    test('resource_governor_scaling_caps',
-      resource_governor_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'governor', 'scaling'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Governor scaling caps adjust based on pressure level', '--allow-running-no-tests'],
-    )
+    # The pressure case SKIPs under UBSan (known Boost.Asio kqueue teardown race), so it is not
+    # registered in UBSan builds rather than reporting an all-skipped run.
+    if _daemon_ipc_supported and not yams_sanitize_undefined
+      test('resource_governor_pressure_detection',
+        resource_governor_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'governor', 'pressure'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: 120,  # 2 minutes for ingest + processing
+        args: ['Governor detects pressure with low CPU threshold'],
+      )
+    endif
 
-    test('resource_governor_ingest_metrics',
-      resource_governor_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'governor', 'ingest'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: 120,  # 2 minutes for ingest + processing
-      args: ['Status response contains governor metrics during ingest', '--allow-running-no-tests'],
-    )
+    if _daemon_ipc_supported
+      test('resource_governor_scaling_caps',
+        resource_governor_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'governor', 'scaling'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Governor scaling caps adjust based on pressure level'],
+      )
 
-    test('resource_governor_snapshot',
-      resource_governor_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'governor', 'snapshot'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['ResourceGovernor snapshot contains valid metrics', '--allow-running-no-tests'],
-    )
+      test('resource_governor_ingest_metrics',
+        resource_governor_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'governor', 'ingest'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: 120,  # 2 minutes for ingest + processing
+        args: ['Status response contains governor metrics during ingest'],
+      )
 
-    test('resource_governor_concurrent',
-      resource_governor_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'governor', 'concurrency'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['Concurrent status queries return consistent governor data', '--allow-running-no-tests'],
-    )
+      test('resource_governor_snapshot',
+        resource_governor_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'governor', 'snapshot'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['ResourceGovernor snapshot contains valid metrics'],
+      )
 
-    test('resource_governor_policy_surfaces',
-      resource_governor_integration_exe,
-      suite: ['integration', 'daemon', 'catch2', 'governor'],
-      env: _daemon_test_env,
-      is_parallel: false,
-      timeout: daemon_integration_timeout,
-      args: ['ResourceGovernor phase-4 policy surfaces respond during daemon operation', '--allow-running-no-tests'],
-    )
+      test('resource_governor_concurrent',
+        resource_governor_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'governor', 'concurrency'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['Concurrent status queries return consistent governor data'],
+      )
+
+      test('resource_governor_policy_surfaces',
+        resource_governor_integration_exe,
+        suite: ['integration', 'daemon', 'catch2', 'governor'],
+        env: _daemon_test_env,
+        is_parallel: false,
+        timeout: daemon_integration_timeout,
+        args: ['ResourceGovernor phase-4 policy surfaces respond during daemon operation'],
+      )
+    endif
 
     # Diagnostic tool (not a test, but helpful for debugging)
     post_ingest_trace_exe = executable('yams_post_ingest_trace',
@@ -1002,6 +1012,8 @@ else
       install: false,
     )
 
+    # Keeps --allow-running-no-tests: the single case SKIPs when no ONNX models_root or embeddings
+    # are available (capability skip, decided at runtime). Daemon startup failure is a FAIL.
     test('hnsw_retrieval_diagnostic',
       hnsw_retrieval_diagnostic_exe,
       suite: ['integration', 'daemon', 'catch2', 'hnsw', 'vector', 'diagnostic'],
