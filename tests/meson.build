@@ -3825,7 +3825,7 @@ endforeach
 # The registrations are read from this build directory's Meson introspection data at run time,
 # so the check covers every subdir and cannot drift from what is declared. It lists cases with
 # the registered binaries, so it belongs to the integration lane, where the full test build
-# exists (unbuilt binaries are reported and skipped).
+# exists; an unbuilt registered binary fails it (ad-hoc runs on a partial build: --allow-missing).
 test('catch2_filter_policy_unit',
   python_exe,
   args: [files('scripts/test_check_test_filters.py')],

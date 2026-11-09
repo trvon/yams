@@ -13,8 +13,20 @@ A registration that selects nothing is a test that can only "pass" by running
 nothing; with --allow-running-no-tests it even exits 0. That hid a deleted test
 case and a '[tag]~[slow]' filter whose cases were all tagged [slow].
 
-Binaries that are not built yet are reported and skipped (a partial build).
-The check fails when no registration could be checked at all.
+Registrations outside a 'catch2' suite, or run through a wrapper other than
+catch2_allow_all_skipped.py, are not checked; they are counted in the summary
+(named with -v), and one that looks like a Catch2 test binary (name contains
+"catch2", or built under <build>/tests) gets a WARN line.
+
+A registered binary that is not built is a failure: under `meson test` the
+build already exists. Pass --allow-missing for ad-hoc runs on a partial build.
+
+Environment: each listing gets this process's environment plus the
+registration's own env. Meson does not expose add_test_setup() environments in
+its introspection data, so a setup's env (here, the default 'tsan' setup's
+TSAN_OPTIONS) applies only when this script itself runs under `meson test`,
+which exports it to this process and so to every listing. Ad-hoc runs do not
+get it; listing does not depend on it.
 """
 
 from __future__ import annotations
@@ -47,6 +59,15 @@ class Registration:
 
 
 @dataclass
+class Unchecked:
+    """A registration this check does not list, and why."""
+
+    name: str
+    reason: str
+    warn: bool = False
+
+
+@dataclass
 class Outcome:
     registration: Registration
     status: str  # "ok", "empty", "missing", "error"
@@ -59,20 +80,45 @@ def _suite_names(entry: dict) -> set[str]:
     return {str(s).split(":")[-1] for s in entry.get("suite", [])}
 
 
-def registration_from_entry(entry: dict) -> Registration | None:
-    """Return the Catch2 binary invocation for one intro-tests entry, or None."""
-    if CATCH2_SUITE not in _suite_names(entry):
-        return None
+def _is_script(path: str) -> bool:
+    return Path(path).name.startswith("python") or path.endswith((".py", ".sh"))
+
+
+def _looks_like_catch2_binary(path: str, build_dir: Path | None) -> bool:
+    if _is_script(path):
+        return False
+    if "catch2" in Path(path).name:
+        return True
+    if build_dir is None:
+        return False
+    try:
+        Path(path).resolve().relative_to((build_dir / "tests").resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def registration_from_entry(entry: dict,
+                            build_dir: Path | None = None) -> Registration | Unchecked:
+    """Return the Catch2 binary invocation for one intro-tests entry, or why it is unchecked."""
+    name = str(entry.get("name", ""))
     cmd = [str(c) for c in entry.get("cmd", [])]
     if not cmd:
-        return None
+        return Unchecked(name, "no command")
+    if CATCH2_SUITE not in _suite_names(entry):
+        if _looks_like_catch2_binary(cmd[0], build_dir):
+            return Unchecked(name, f"looks like a Catch2 test ({Path(cmd[0]).name}) but is not "
+                             "in a 'catch2' suite", warn=True)
+        return Unchecked(name, "not in a 'catch2' suite")
     # python <wrapper> <binary> args...: check the wrapped binary.
     if len(cmd) >= 3 and Path(cmd[1]).name == ALLOW_ALL_SKIPPED_WRAPPER:
         cmd = cmd[2:]
-    elif Path(cmd[0]).name.startswith("python") or cmd[0].endswith((".py", ".sh")):
-        return None
+    elif _is_script(cmd[0]):
+        wrapper = Path(cmd[1]).name if len(cmd) > 1 else Path(cmd[0]).name
+        return Unchecked(name, f"'catch2' suite but runs through unknown wrapper {wrapper}",
+                         warn=True)
     return Registration(
-        name=str(entry.get("name", "")),
+        name=name,
         binary=Path(cmd[0]),
         args=cmd[1:],
         env={str(k): str(v) for k, v in (entry.get("env") or {}).items()},
@@ -128,20 +174,17 @@ def check(reg: Registration, timeout: float) -> Outcome:
     return Outcome(reg, "ok" if count > 0 else "empty", count=count)
 
 
-def load_registrations(build_dir: Path) -> list[Registration]:
+def load_entries(build_dir: Path) -> list[dict]:
     intro = build_dir / "meson-info" / "intro-tests.json"
     if intro.is_file():
-        entries = json.loads(intro.read_text(encoding="utf-8"))
-    else:
-        completed = subprocess.run(
-            ["meson", "introspect", "--tests", str(build_dir)],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        entries = json.loads(completed.stdout)
-    regs = [registration_from_entry(entry) for entry in entries]
-    return [reg for reg in regs if reg is not None]
+        return json.loads(intro.read_text(encoding="utf-8"))
+    completed = subprocess.run(
+        ["meson", "introspect", "--tests", str(build_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -149,9 +192,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--build-dir", required=True, type=Path)
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=60.0, help="per-binary seconds")
+    parser.add_argument("--allow-missing", action="store_true",
+                        help="report unbuilt binaries instead of failing (partial builds)")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="name every registration that is not checked")
     options = parser.parse_args(argv)
 
-    registrations = load_registrations(options.build_dir)
+    registrations: list[Registration] = []
+    unchecked: list[Unchecked] = []
+    for entry in load_entries(options.build_dir):
+        result = registration_from_entry(entry, options.build_dir)
+        (registrations if isinstance(result, Registration) else unchecked).append(result)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, options.jobs)) as pool:
         outcomes = list(pool.map(lambda r: check(r, options.timeout), registrations))
 
@@ -159,9 +211,16 @@ def main(argv: list[str] | None = None) -> int:
     errors = [o for o in outcomes if o.status == "error"]
     missing = [o for o in outcomes if o.status == "missing"]
     checked = [o for o in outcomes if o.status in ("ok", "empty")]
+    warned = [u for u in unchecked if u.warn]
 
+    for item in unchecked:
+        if item.warn:
+            print(f"WARN {item.name}: not checked: {item.reason}")
+        elif options.verbose:
+            print(f"UNCHECKED {item.name}: {item.reason}")
+    missing_label = "SKIP" if options.allow_missing else "MISSING"
     for outcome in missing:
-        print(f"SKIP {outcome.registration.name}: binary not built ({outcome.detail})")
+        print(f"{missing_label} {outcome.registration.name}: binary not built ({outcome.detail})")
     for outcome in errors:
         reg = outcome.registration
         print(f"ERROR {reg.name}: {reg.binary.name} {reg.args!r} could not list tests: "
@@ -171,9 +230,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"EMPTY {reg.name}: {reg.binary.name} {reg.args!r} selects zero test cases")
 
     print(f"checked {len(checked)} Catch2 registrations "
-          f"({len(empty)} empty, {len(errors)} errors, {len(missing)} not built)")
+          f"({len(empty)} empty, {len(errors)} errors, {len(missing)} not built); "
+          f"{len(unchecked)} registrations not checked ({len(warned)} warnings"
+          f"{'' if options.verbose else '; -v names them'})")
     if not checked and not errors:
         print("no Catch2 registration could be checked; is the build directory built?")
+        return 1
+    if missing and not options.allow_missing:
         return 1
     return 1 if empty or errors else 0
 

@@ -34,19 +34,31 @@ def entry(name: str, cmd: list[str], suite: list[str] | None = None) -> dict:
 
 
 class RegistrationTest(unittest.TestCase):
-    def test_non_catch2_suite_is_ignored(self) -> None:
-        self.assertIsNone(checker.registration_from_entry(entry("t", ["/b"], ["unit"])))
+    def test_non_catch2_suite_is_unchecked_quietly(self) -> None:
+        result = checker.registration_from_entry(entry("t", ["/usr/bin/tool"], ["unit"]))
+        self.assertIsInstance(result, checker.Unchecked)
+        self.assertFalse(result.warn)
 
-    def test_python_command_is_ignored(self) -> None:
-        self.assertIsNone(
-            checker.registration_from_entry(entry("t", ["/usr/bin/python3", "x.py"]))
+    def test_catch2_looking_binary_outside_suite_warns(self) -> None:
+        by_name = checker.registration_from_entry(entry("t", ["/b/catch2_x"], ["unit"]))
+        self.assertIsInstance(by_name, checker.Unchecked)
+        self.assertTrue(by_name.warn)
+        by_dir = checker.registration_from_entry(
+            entry("t", ["/build/tests/unit/x_test"], ["unit"]), Path("/build")
         )
+        self.assertIsInstance(by_dir, checker.Unchecked)
+        self.assertTrue(by_dir.warn)
+
+    def test_unknown_wrapper_in_catch2_suite_warns(self) -> None:
+        result = checker.registration_from_entry(entry("t", ["/usr/bin/python3", "x.py"]))
+        self.assertIsInstance(result, checker.Unchecked)
+        self.assertTrue(result.warn)
 
     def test_allow_all_skipped_wrapper_checks_wrapped_binary(self) -> None:
         reg = checker.registration_from_entry(
             entry("t", ["/usr/bin/python3", "/s/catch2_allow_all_skipped.py", "/b", "[x]"])
         )
-        self.assertIsNotNone(reg)
+        self.assertIsInstance(reg, checker.Registration)
         self.assertEqual(reg.binary, Path("/b"))
         self.assertEqual(reg.args, ["[x]"])
 
@@ -80,8 +92,8 @@ class EndToEndTest(unittest.TestCase):
             json.dumps(entries), encoding="utf-8"
         )
 
-    def run_check(self) -> int:
-        return checker.main(["--build-dir", str(self.build), "--jobs", "1"])
+    def run_check(self, *extra: str) -> int:
+        return checker.main(["--build-dir", str(self.build), "--jobs", "1", *extra])
 
     def test_selecting_registrations_pass(self) -> None:
         self.write_intro([
@@ -97,14 +109,23 @@ class EndToEndTest(unittest.TestCase):
         ])
         self.assertEqual(self.run_check(), 1)
 
-    def test_missing_binary_is_skipped_but_not_alone(self) -> None:
+    def test_missing_binary_fails_unless_allowed(self) -> None:
         self.write_intro([
             entry("ok", [str(self.binary), "Some case"]),
             entry("unbuilt", [str(self.build / "absent"), "x"]),
         ])
-        self.assertEqual(self.run_check(), 0)
-        self.write_intro([entry("unbuilt", [str(self.build / "absent"), "x"])])
         self.assertEqual(self.run_check(), 1)
+        self.assertEqual(self.run_check("--allow-missing"), 0)
+        self.write_intro([entry("unbuilt", [str(self.build / "absent"), "x"])])
+        self.assertEqual(self.run_check("--allow-missing"), 1)
+
+    def test_unchecked_registrations_do_not_fail(self) -> None:
+        self.write_intro([
+            entry("ok", [str(self.binary), "Some case"]),
+            entry("policy", ["/usr/bin/python3", "check.py"], ["unit", "policy"]),
+            entry("odd", ["/b/catch2_odd"], ["unit"]),
+        ])
+        self.assertEqual(self.run_check("-v"), 0)
 
 
 if __name__ == "__main__":
