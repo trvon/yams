@@ -3827,12 +3827,16 @@ test('catch2_filter_policy_unit',
   suite: ['unit', 'policy', 'catch2-filters'],
   timeout: 30,
 )
-test('catch2_filter_policy',
-  python_exe,
-  args: [
-    files('scripts/check_test_filters.py'),
-    '--build-dir', meson.project_build_root(),
-  ],
-  suite: ['integration', 'policy', 'catch2-filters'],
-  timeout: 600,
-)
+# Without Catch2 there are no Catch2 registrations to check (the script would report "nothing
+# checked" and fail a valid configuration), so the guard exists only alongside them.
+if catch2_dep.found()
+  test('catch2_filter_policy',
+    python_exe,
+    args: [
+      files('scripts/check_test_filters.py'),
+      '--build-dir', meson.project_build_root(),
+    ],
+    suite: ['integration', 'policy', 'catch2-filters'],
+    timeout: 600,
+  )
+endif
