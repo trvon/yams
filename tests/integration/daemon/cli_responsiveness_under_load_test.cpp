@@ -60,7 +60,9 @@ bool connectWithRetry(DaemonClient& client, int maxRetries = 3) {
 
 void startHarnessWithRetry(DaemonHarness& harness, std::size_t maxRetries = 3) {
     if (!harness.startWithRetry(30s, maxRetries)) {
-        SKIP("Skipping CLI responsiveness section due to daemon startup instability");
+        // Startup failure is a failure, not a skip (a SKIP let a broken daemon report green).
+        FAIL("Daemon failed to start after " << maxRetries
+                                             << " attempts: " << harness.startupDiagnostics());
     }
 }
 

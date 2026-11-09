@@ -75,7 +75,8 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
         if (!started) {
-            throw std::runtime_error("Failed to start daemon for FSM tuning integration tests");
+            throw std::runtime_error("Failed to start daemon for FSM tuning integration tests: " +
+                                     harness_.startupDiagnostics());
         }
 
         // Create daemon client
@@ -529,7 +530,8 @@ TEST_CASE("FSM Tuning Integration: End-to-end tuning validation",
         }
     }
     if (!fixture) {
-        SKIP("Skipping e2e tuning validation due to daemon startup instability: " + fixtureError);
+        // Startup failure is a failure, not a skip (a SKIP let a broken daemon report green).
+        FAIL("FSM tuning fixture failed to start the daemon after 3 attempts: " << fixtureError);
     }
 
     // 1. Ingest documents to create a code-heavy corpus

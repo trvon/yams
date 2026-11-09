@@ -215,7 +215,10 @@ void startHarnessWithRetry(DaemonHarness& harness, int maxRetries = 3,
         std::this_thread::sleep_for(retryDelay);
     }
 
-    SKIP("Skipping socket integration section due to daemon startup instability");
+    // A daemon that cannot start is a failure, not a skip: a SKIP here let a broken startup
+    // path report green (every selected case skipped).
+    FAIL("Daemon failed to start after " << maxRetries
+                                         << " attempts: " << harness.startupDiagnostics());
 }
 
 // Helper to retry get request with delay - handles async post-ingest processing

@@ -6,12 +6,14 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
 #include <optional>
 #include <random>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -188,12 +190,15 @@ public:
 
     bool start(std::chrono::milliseconds timeout = std::chrono::seconds(10),
                PreRunLoopCallback preRunLoopCallback = nullptr) {
+        lastStartError_.clear();
         try {
             return startUnchecked(timeout, std::move(preRunLoopCallback));
         } catch (const std::exception& error) {
             spdlog::error("[DaemonHarness] Startup threw: {}", error.what());
+            lastStartError_ = std::string("startup threw: ") + error.what();
         } catch (...) {
             spdlog::error("[DaemonHarness] Startup threw an unknown exception");
+            lastStartError_ = "startup threw an unknown exception";
         }
         rollbackFailedStart();
         return false;
@@ -204,6 +209,7 @@ private:
         ensureDefaultLogger();
         if (daemon_ || runLoopThread_.joinable()) {
             spdlog::error("[DaemonHarness] start called while a prior start is active");
+            lastStartError_ = "start called while a prior start is active";
             return false;
         }
         if (!claimEndpointNamespace()) {
@@ -238,6 +244,8 @@ private:
             if (!configFile) {
                 spdlog::error("[DaemonHarness] Failed to create isolated config: {}",
                               effectiveConfigPath->string());
+                lastStartError_ =
+                    "failed to create isolated config " + effectiveConfigPath->string();
                 rollbackFailedStart();
                 return false;
             }
@@ -291,6 +299,7 @@ private:
         auto s = daemon_->start();
         if (!s) {
             spdlog::error("[DaemonHarness] daemon_->start() failed: {}", s.error().message);
+            lastStartError_ = "YamsDaemon::start() failed: " + s.error().message;
             stop();
             return false;
         }
@@ -304,10 +313,12 @@ private:
                 preRunLoopCallback(daemon_.get());
             } catch (const std::exception& error) {
                 spdlog::error("[DaemonHarness] pre-runLoop callback failed: {}", error.what());
+                lastStartError_ = std::string("pre-runLoop callback failed: ") + error.what();
                 stop();
                 return false;
             } catch (...) {
                 spdlog::error("[DaemonHarness] pre-runLoop callback failed");
+                lastStartError_ = "pre-runLoop callback failed";
                 stop();
                 return false;
             }
@@ -318,6 +329,7 @@ private:
             auto entry = daemon_->testingStartAsyncInitWithoutRunLoopChecked();
             if (!entry) {
                 spdlog::error("[DaemonHarness] Async init entry failed: {}", entry.error().message);
+                lastStartError_ = "async init entry failed: " + entry.error().message;
                 stop();
                 return false;
             }
@@ -381,6 +393,7 @@ private:
         }
         spdlog::error("[DaemonHarness] Daemon Ready but socket connection failed at: {}",
                       sock_.string());
+        lastStartError_ = "daemon reached Ready but the socket did not accept a connection";
         stop();
         return false;
     }
@@ -497,6 +510,34 @@ public:
         }
     }
 
+    // Why the most recent start()/startWithRetry() attempt failed, plus the endpoint paths and the
+    // daemon log tail when one was written. Intended for FAIL() messages so a startup failure is
+    // reported as a failure with evidence rather than skipped.
+    [[nodiscard]] std::string startupDiagnostics(std::size_t logTailLines = 40) const {
+        std::ostringstream out;
+        out << "last start error: "
+            << (lastStartError_.empty() ? "(none recorded)" : lastStartError_)
+            << "\nsocket: " << sock_.string() << "\ndata dir: " << data_.string()
+            << "\nlog file: " << log_.string();
+        std::ifstream log(log_);
+        if (!log) {
+            out << " (not written)";
+            return out.str();
+        }
+        std::deque<std::string> tail;
+        for (std::string line; std::getline(log, line);) {
+            tail.push_back(std::move(line));
+            if (tail.size() > logTailLines) {
+                tail.pop_front();
+            }
+        }
+        out << "\nlog tail (" << tail.size() << " lines):";
+        for (const auto& line : tail) {
+            out << "\n  " << line;
+        }
+        return out.str();
+    }
+
     const std::filesystem::path& socketPath() const { return sock_; }
     const std::filesystem::path& proxySocketPath() const { return proxySock_; }
     const std::filesystem::path& pidPath() const { return pid_; }
@@ -519,6 +560,7 @@ private:
         const auto lifecycle = daemon_->getLifecycle().snapshot();
         if (backgroundFailed_.load(std::memory_order_acquire)) {
             spdlog::error("[DaemonHarness] Rejected failed background lifecycle entry/close");
+            lastStartError_ = "background runLoop entry/close failed";
             return false;
         }
         const bool usable = lifecycle.state == yams::daemon::LifecycleState::Ready ||
@@ -532,12 +574,17 @@ private:
         if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
             spdlog::error("[DaemonHarness] Daemon lifecycle reached Failed state: {}",
                           lifecycle.lastError);
+            lastStartError_ = "lifecycle reached Failed: " + lifecycle.lastError;
             return false;
         }
         spdlog::error("[DaemonHarness] {} waiting for usable lifecycle after {}ms "
                       "(current state: {})",
                       reachedTerminal ? "Rejected lifecycle state while" : "Timeout",
                       timeout.count(), static_cast<int>(lifecycle.state));
+        lastStartError_ = std::string(reachedTerminal ? "rejected lifecycle state "
+                                                      : "timed out waiting for usable lifecycle ") +
+                          std::to_string(static_cast<int>(lifecycle.state)) + " after " +
+                          std::to_string(timeout.count()) + "ms";
         return false;
     }
 
@@ -605,6 +652,7 @@ private:
         if (!std::filesystem::create_directory(ownershipMarker_, ec)) {
             spdlog::error("[DaemonHarness] Socket namespace is already claimed: {} ({})",
                           sock_.string(), ec ? ec.message() : "ownership marker exists");
+            lastStartError_ = "socket namespace already claimed";
             return false;
         }
         endpointClaimed_ = true;
@@ -613,6 +661,7 @@ private:
             spdlog::error("[DaemonHarness] Refusing pre-existing daemon artifacts in claimed "
                           "namespace: {}",
                           sock_.string());
+            lastStartError_ = "pre-existing daemon artifacts in the claimed socket namespace";
             releaseEndpointNamespace();
             return false;
         }
@@ -744,6 +793,8 @@ private:
     bool endpointClaimed_ = false;
     bool shutdownSucceeded_ = false;
     bool startAttempted_ = false;
+    // mutable: waitForUsableLifecycle() is const but records why startup was rejected.
+    mutable std::string lastStartError_;
     std::optional<ScopedEnvVar> xdgStateEnvironment_;
     std::optional<ScopedEnvVar> xdgConfigEnvironment_;
     std::optional<ScopedEnvVar> configEnvironment_;

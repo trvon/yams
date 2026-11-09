@@ -66,7 +66,9 @@ void startHarnessWithRetry(DaemonHarness& harness, int maxRetries = 3,
         std::this_thread::sleep_for(retryDelay);
     }
 
-    SKIP("Skipping socket memory-pressure section due to daemon startup instability");
+    // Startup failure is a failure, not a skip (a SKIP let a broken daemon report green).
+    FAIL("Daemon failed to start after " << maxRetries
+                                         << " attempts: " << harness.startupDiagnostics());
 }
 
 } // namespace

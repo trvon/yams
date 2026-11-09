@@ -179,20 +179,23 @@ public:
 
         spdlog::info("Plugin directory: {}", opts.pluginDir->string());
         bool started = false;
+        std::string startupDiagnostics;
         for (int attempt = 0; attempt < 3 && !started; ++attempt) {
             harness_ = std::make_unique<test::DaemonHarness>(opts);
             started = harness_->start(60s);
             if (!started) {
                 spdlog::warn("Daemon start attempt {} failed in HNSW diagnostic; retrying",
                              attempt + 1);
+                startupDiagnostics = harness_->startupDiagnostics();
                 harness_->stop();
                 harness_.reset();
                 std::this_thread::sleep_for(500ms);
             }
         }
         if (!started) {
-            SKIP("Daemon failed to start for HNSW diagnostic after retries (likely TSAN/CI "
-                 "contention)");
+            // Startup failure is a failure, not a skip (a SKIP let a broken daemon report green).
+            FAIL("Daemon failed to start for HNSW diagnostic after 3 attempts: "
+                 << startupDiagnostics);
         }
         spdlog::info("Daemon started");
 
