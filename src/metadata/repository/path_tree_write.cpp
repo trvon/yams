@@ -5,6 +5,8 @@
 #include <string_view>
 #include <vector>
 
+#include <yams/metadata/metadata_repository.h>
+
 #include "path_tree_write.hpp"
 #include "result_helpers.hpp"
 
