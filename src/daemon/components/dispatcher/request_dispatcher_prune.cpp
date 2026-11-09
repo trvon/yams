@@ -2,11 +2,13 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <limits>
 #include <system_error>
 #include <boost/asio/cancellation_state.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/system/system_error.hpp>
@@ -16,6 +18,7 @@
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon_lifecycle.h>
@@ -166,10 +169,28 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                     const auto executor = co_await boost::asio::this_coro::executor;
                     std::size_t processed = 0;
 
+                    // A prune the user asked for must finish, but its storage and metadata writes
+                    // should not compete with the daemon while it is over its memory or CPU
+                    // budget. Between batches, wait on a timer while the governor refuses new
+                    // work; the wait is cancellable, so WorkCoordinator::stop() still ends it.
+                    constexpr auto kPressureBackoff = std::chrono::milliseconds(250);
+                    boost::asio::steady_timer backoffTimer(executor);
+                    bool loggedPressureWait = false;
+
                     for (const auto& candidate : candidates) {
                         if (processed++ % kYieldEveryCandidates == 0) {
                             try {
                                 co_await boost::asio::post(executor, boost::asio::use_awaitable);
+                                while (!ResourceGovernor::instance().canAdmitWork()) {
+                                    if (!loggedPressureWait) {
+                                        spdlog::info("Prune waiting for resource pressure to ease "
+                                                     "after deleted={} failed={}",
+                                                     deleted, failed);
+                                        loggedPressureWait = true;
+                                    }
+                                    backoffTimer.expires_after(kPressureBackoff);
+                                    co_await backoffTimer.async_wait(boost::asio::use_awaitable);
+                                }
                             } catch (const boost::system::system_error&) {
                                 spdlog::info("Prune cancelled after deleted={} failed={}", deleted,
                                              failed);
