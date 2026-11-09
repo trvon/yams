@@ -27,6 +27,10 @@ struct PathTreeRepairOptions {
     /// Checked before every batch; returning false stops the run with `finished == false` so
     /// the caller can resume later (or report a cancellation). Empty means always continue.
     std::function<bool()> shouldContinue;
+    /// Checked before every document upsert inside a batch (cancel, shutdown). Returning true
+    /// commits the documents done so far and stops with `finished == false`; the cursor then
+    /// resumes at the first document not handled. Empty means never abort.
+    std::function<bool()> shouldAbort;
 };
 
 /// Outcome of a path-tree repair run. Batches committed before a failure are reported even

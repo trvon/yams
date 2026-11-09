@@ -1022,6 +1022,10 @@ public:
         std::uint64_t repaired{0};
         /// Missing documents whose upsert failed and was rolled back (repairPathTreeWindow only).
         std::uint64_t failed{0};
+        /// repairPathTreeWindow stopped early because `shouldAbort` returned true. `scanned`,
+        /// `lastScannedId` and `missingIds` then cover only the documents handled before the
+        /// stop, so resuming after `lastScannedId` revisits the rest.
+        bool aborted{false};
     };
 
     /// Examine the next `windowSize` documents with id > `afterId` (in id order) and report the
@@ -1032,7 +1036,11 @@ public:
     /// Like scanPathTreeWindow, and link every missing document into the path tree in one
     /// transaction. Each document's upsert runs under its own savepoint, so one failure is
     /// counted in `failed` and rolled back without aborting the rest of the window.
-    Result<PathTreeRepairWindow> repairPathTreeWindow(std::int64_t afterId, std::size_t windowSize);
+    /// `shouldAbort` is checked before every upsert; when it returns true the documents done so
+    /// far are committed and the window is returned with `aborted` set.
+    Result<PathTreeRepairWindow>
+    repairPathTreeWindow(std::int64_t afterId, std::size_t windowSize,
+                         const std::function<bool()>& shouldAbort = {});
 
     /// Count documents missing from the path tree under the same rule, walking the documents
     /// table window by window (dry runs).
