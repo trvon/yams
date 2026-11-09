@@ -3112,7 +3112,8 @@ if catch2_dep.found()
   catch2_test_table += [{
     'name': 'chunking',
     'target': 'chunking',
-    'sources': files('unit/chunking/chunking_test.cpp'),
+    'sources': files('unit/chunking/chunking_test.cpp',
+                     'unit/chunking/gear_cdc_catch2_test.cpp'),
     'deps': chunking_test_deps,
     'suite': ['catch2', 'unit', 'chunking'],
     'timeout': 60,
