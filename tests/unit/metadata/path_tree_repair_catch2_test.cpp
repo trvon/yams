@@ -381,3 +381,39 @@ TEST_CASE("repairMissingPathTree reports committed batches when a later batch fa
     CHECK(fix.hasNode("/partial/doc-1.txt"));
     CHECK_FALSE(fix.hasNode("/partial/doc-2.txt"));
 }
+
+TEST_CASE("repairMissingPathTree commits the documents done when aborted mid-batch",
+          "[unit][metadata][path-tree][repair]") {
+    PathTreeRepairFixture fix;
+    std::vector<DocumentInfo> docs;
+    docs.push_back(fix.insertWithTree("/abort/kept.txt"));
+    for (int i = 0; i < 5; ++i) {
+        docs.push_back(fix.insertWithoutTree("/abort/doc-" + std::to_string(i) + ".txt"));
+    }
+
+    int upserts = 0;
+    PathTreeRepairOptions options;
+    options.batchSize = 100; // one window holds every document
+    options.shouldAbort = [&upserts] { return upserts++ >= 2; };
+
+    const auto stopped = repairMissingPathTree(*fix.repo, options);
+    REQUIRE_FALSE(stopped.error.has_value());
+    CHECK_FALSE(stopped.finished);
+    CHECK(stopped.batches == 1);
+    CHECK(stopped.nodesCreated == 2);
+    CHECK(stopped.documentsMissing == 2);
+    CHECK(stopped.documentsScanned == 3); // the linked document and the two repaired ones
+    CHECK(stopped.lastDocumentId == docs[3].id - 1);
+    CHECK(fix.hasNode("/abort/doc-1.txt"));
+    CHECK_FALSE(fix.hasNode("/abort/doc-2.txt"));
+    CHECK(fix.missing() == 3);
+
+    PathTreeRepairOptions resume;
+    resume.batchSize = 100;
+    resume.startAfterId = stopped.lastDocumentId;
+    const auto rest = repairMissingPathTree(*fix.repo, resume);
+    REQUIRE_FALSE(rest.error.has_value());
+    CHECK(rest.finished);
+    CHECK(rest.nodesCreated == 3);
+    CHECK(fix.missing() == 0);
+}
