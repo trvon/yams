@@ -86,7 +86,8 @@ constexpr std::uint64_t topBitsMask(unsigned bits) noexcept {
     return bits == 0 ? 0 : ~std::uint64_t{0} << (64U - bits);
 }
 
-// round(log2(spacing)), computed as floor(log2(1.5 * spacing)).
+// The power of two nearest `spacing`, as floor(log2(1.5 * spacing)): it rounds up from
+// 4/3 * 2^k rather than from sqrt(2) * 2^k. The golden-offset test pins this choice.
 unsigned maskBitsFor(std::size_t spacing) noexcept {
     if (spacing <= 1) {
         return 0;

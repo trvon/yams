@@ -152,10 +152,14 @@ struct ContentStoreBuilder::Impl {
 
         // Create chunker if not provided
         if (!chunker) {
-            // Gear-hash CDC: the average chunk size follows targetChunkSize.
-            chunking::ChunkingConfig chunkerConfig{.minChunkSize = MIN_CHUNK_SIZE,
-                                                   .targetChunkSize = config.chunkSize,
-                                                   .maxChunkSize = MAX_CHUNK_SIZE};
+            // Gear-hash CDC: the average chunk size follows targetChunkSize. The min stays well
+            // below the target and the max well above it: a target at the min leaves no room for
+            // a content-defined cut (fixed-size blocks), and one near the max forces most cuts
+            // at the max.
+            chunking::ChunkingConfig chunkerConfig{
+                .minChunkSize = std::min(MIN_CHUNK_SIZE, config.chunkSize / 4),
+                .targetChunkSize = config.chunkSize,
+                .maxChunkSize = std::max(MAX_CHUNK_SIZE, config.chunkSize * 4)};
             // Use streaming chunker to avoid loading entire files in memory
             chunker = chunking::createStreamingChunker(chunkerConfig);
             spdlog::debug("Using StreamingChunker for memory-efficient file processing");

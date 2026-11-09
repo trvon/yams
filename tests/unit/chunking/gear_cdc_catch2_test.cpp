@@ -320,7 +320,8 @@ TEST_CASE("GearCutter - chunk sizes follow the configured target", "[chunking][g
 }
 
 TEST_CASE("GearCutter - default config cuts text before maxChunkSize", "[chunking][gear][cdc]") {
-    // Production defaults (16 KiB / 256 KiB / 1 MiB). The old Rabin hash cut this at 1 MiB.
+    // Production defaults (4 KiB / 64 KiB / 256 KiB). The old Rabin hash found no boundaries in
+    // text and cut it at its maximum.
     const ChunkingConfig defaults{};
     const std::string prose = makeProse(2 * 1024 * 1024, 24);
     const auto chunks = chunkLazy(defaults, prose);
@@ -430,10 +431,14 @@ TEST_CASE("GearCutter - degenerate configs", "[chunking][gear]") {
     }
 
     SECTION("mask width follows target - min") {
-        // round(log2(240 KiB)) = 18: 20 bits before the target, 16 after (FastCDC level 2).
-        const GearCutter defaults(16 * 1024, 256 * 1024, 1024 * 1024);
-        REQUIRE(defaults.smallMaskBits() == 20);
-        REQUIRE(defaults.largeMaskBits() == 16);
+        // 240 KiB spacing rounds to 2^18: 20 bits before the target, 16 after (FastCDC level 2).
+        const GearCutter wide(16 * 1024, 256 * 1024, 1024 * 1024);
+        REQUIRE(wide.smallMaskBits() == 20);
+        REQUIRE(wide.largeMaskBits() == 16);
+        // The production defaults: 60 KiB spacing rounds to 2^16, so 18 and 14 bits.
+        const GearCutter defaults(4 * 1024, 64 * 1024, 256 * 1024);
+        REQUIRE(defaults.smallMaskBits() == 18);
+        REQUIRE(defaults.largeMaskBits() == 14);
         const GearCutter small(2 * 1024, 8 * 1024, 64 * 1024);
         REQUIRE(small.smallMaskBits() == 15);
         REQUIRE(small.largeMaskBits() == 11);

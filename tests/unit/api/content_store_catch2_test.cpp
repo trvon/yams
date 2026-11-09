@@ -14,12 +14,14 @@
 #include <yams/storage/storage_engine.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <mutex>
 #include <random>
+#include <span>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
@@ -509,6 +511,114 @@ TEST_CASE("ContentStore: Deduplication", "[api][content-store][dedup]") {
         REQUIRE(removeThird.has_value());
         CHECK_FALSE(removeThird.value());
     }
+}
+
+namespace {
+
+std::size_t countObjectFiles(const fs::path& root) {
+    std::size_t count = 0;
+    for (const auto& entry : fs::recursive_directory_iterator(root / "objects")) {
+        count += entry.is_regular_file() ? 1 : 0;
+    }
+    return count;
+}
+
+// Text-like content several chunks long at every chunk size used below.
+std::string makeMultiChunkText(std::size_t size) {
+    std::mt19937 rng(7);
+    const std::array<std::string_view, 8> words{"block",  "manifest", "chunk", "store",
+                                                "daemon", "search",   "index", "repair"};
+    std::string text;
+    text.reserve(size + 16);
+    while (text.size() < size) {
+        text += words[rng() % words.size()];
+        text += (rng() % 9 == 0) ? '\n' : ' ';
+    }
+    text.resize(size);
+    return text;
+}
+
+} // namespace
+
+TEST_CASE("ContentStore: storing stored content again reuses its manifest's chunks",
+          "[api][content-store][dedup][manifest]") {
+    const auto dir = makeTempDir("content_store_restore_manifest");
+    const std::string content = makeMultiChunkText(768 * 1024);
+    const auto source = dir / "source.txt";
+    std::ofstream(source, std::ios::binary) << content;
+
+    auto openStore = [&dir](std::size_t chunkSize) {
+        auto built = ContentStoreBuilder().withStoragePath(dir).withChunkSize(chunkSize).build();
+        REQUIRE(built.has_value());
+        return std::move(built).value();
+    };
+    auto retrievedText = [](IContentStore& store, const std::string& hash) {
+        auto bytes = store.retrieveBytes(hash);
+        REQUIRE(bytes.has_value());
+        return std::string(reinterpret_cast<const char*>(bytes.value().data()),
+                           bytes.value().size());
+    };
+
+    // First stored with a different chunker configuration, as before an upgrade.
+    std::string hash;
+    {
+        auto store = openStore(16 * 1024);
+        auto stored = store->store(source);
+        REQUIRE(stored.has_value());
+        hash = stored.value().contentHash;
+    }
+    const auto objectsBefore = countObjectFiles(dir);
+
+    auto store = openStore(DEFAULT_CHUNK_SIZE);
+
+    SECTION("a second store adds no chunks and counts as a second reference") {
+        auto again = store->store(source);
+        REQUIRE(again.has_value());
+        CHECK(again.value().contentHash == hash);
+        CHECK(again.value().bytesDeduped == content.size());
+        CHECK(countObjectFiles(dir) == objectsBefore);
+
+        auto bytesAgain = store->storeBytes(std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(content.data()), content.size()));
+        REQUIRE(bytesAgain.has_value());
+        CHECK(bytesAgain.value().contentHash == hash);
+        CHECK(countObjectFiles(dir) == objectsBefore);
+
+        // Three references now: two removals keep the content, the third drops it.
+        REQUIRE(store->remove(hash).has_value());
+        REQUIRE(store->remove(hash).has_value());
+        CHECK(retrievedText(*store, hash) == content);
+        auto last = store->remove(hash);
+        REQUIRE(last.has_value());
+        CHECK(last.value());
+        auto gone = store->remove(hash);
+        REQUIRE(gone.has_value());
+        CHECK_FALSE(gone.value());
+    }
+
+    SECTION("a chunk missing from storage is restored from the source") {
+        // objects/ holds only chunks (manifests live under manifests/): drop one.
+        fs::path victim;
+        for (const auto& entry : fs::recursive_directory_iterator(dir / "objects")) {
+            if (entry.is_regular_file()) {
+                victim = entry.path();
+                break;
+            }
+        }
+        REQUIRE_FALSE(victim.empty());
+        fs::remove(victim);
+        REQUIRE_FALSE(store->retrieveBytes(hash).has_value());
+
+        auto again = store->store(source);
+        REQUIRE(again.has_value());
+        CHECK(fs::exists(victim));
+        CHECK(countObjectFiles(dir) == objectsBefore);
+        CHECK(retrievedText(*store, hash) == content);
+    }
+
+    store.reset();
+    std::error_code ec;
+    fs::remove_all(dir, ec);
 }
 
 // =============================================================================
