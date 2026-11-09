@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 
+#include "require_daemon_started.h"
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include "test_helpers_catch2.h"
@@ -56,21 +57,6 @@ bool connectWithRetry(DaemonClient& client, int maxRetries = 3,
     return false;
 }
 
-void startHarnessWithRetry(DaemonHarness& harness, int maxRetries = 3,
-                           std::chrono::milliseconds retryDelay = 250ms) {
-    for (int attempt = 0; attempt < maxRetries; ++attempt) {
-        if (harness.start(30s)) {
-            return;
-        }
-        harness.stop();
-        std::this_thread::sleep_for(retryDelay);
-    }
-
-    // Startup failure is a failure, not a skip (a SKIP let a broken daemon report green).
-    FAIL("Daemon failed to start after " << maxRetries
-                                         << " attempts: " << harness.startupDiagnostics());
-}
-
 } // namespace
 
 TEST_CASE("Socket memory pressure - rapid connect/disconnect cycles",
@@ -78,7 +64,7 @@ TEST_CASE("Socket memory pressure - rapid connect/disconnect cycles",
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     std::atomic<int> successfulOps{0};
     std::atomic<int> failedOps{0};
@@ -154,7 +140,7 @@ TEST_CASE("Socket memory pressure - concurrent idle connections",
     ScopedEnvVar maxIdleEnv{"YAMS_MAX_IDLE_TIMEOUTS", std::string{"3"}};
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     // Initial delay for GlobalIOContext threads to stabilize
     std::this_thread::sleep_for(200ms);
@@ -221,7 +207,7 @@ TEST_CASE("Socket memory pressure - handle validity after close",
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createTestClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -252,7 +238,7 @@ TEST_CASE("Socket memory pressure - native_handle safety",
     ScopedEnvVar maxIdleEnv{"YAMS_MAX_IDLE_TIMEOUTS", std::string{"3"}};
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     SECTION("native_handle after socket close returns invalid value") {
         auto client = createTestClient(harness.socketPath());
@@ -290,7 +276,7 @@ TEST_CASE("Socket memory pressure - stress test with mixed operations",
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     std::atomic<int> totalOps{0};
     std::atomic<int> crashes{0};

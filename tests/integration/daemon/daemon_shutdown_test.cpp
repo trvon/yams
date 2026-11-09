@@ -9,6 +9,7 @@
 #include <latch>
 #include <thread>
 #include <vector>
+#include "require_daemon_started.h"
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include <boost/asio/post.hpp>
@@ -58,14 +59,6 @@ bool connectWithRetry(DaemonClient& client, int maxRetries = 3,
     return false;
 }
 
-void startHarnessWithRetry(DaemonHarness& harness, std::size_t maxRetries = 3) {
-    if (!harness.startWithRetry(30s, maxRetries)) {
-        // Startup failure is a failure, not a skip (a SKIP let a broken daemon report green).
-        FAIL("Daemon failed to start after " << maxRetries
-                                             << " attempts: " << harness.startupDiagnostics());
-    }
-}
-
 bool waitForLifecycleState(const YamsDaemon& daemon, LifecycleState state,
                            std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -111,7 +104,7 @@ TEST_CASE("Daemon shutdown timing", "[daemon][shutdown][timing]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -227,7 +220,7 @@ TEST_CASE("Daemon shutdown with in-flight operations", "[daemon][shutdown][opera
     opts.enableModelProvider = false;
     opts.useMockModelProvider = false;
     DaemonHarness harness(opts);
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -304,7 +297,7 @@ TEST_CASE("Daemon shutdown idempotency", "[daemon][shutdown][idempotent]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -343,7 +336,7 @@ TEST_CASE("Daemon shutdown after operations", "[daemon][shutdown][lifecycle]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -392,7 +385,7 @@ TEST_CASE("Daemon shutdown under load", "[daemon][shutdown][stress]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -546,7 +539,7 @@ int connectRawUnixSocket(const std::filesystem::path& socketPath) {
 TEST_CASE("Daemon stop outlives connections still draining on the IO threads",
           "[daemon][shutdown][socket]") {
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto* daemon = harness.daemon();
     REQUIRE(daemon != nullptr);

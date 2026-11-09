@@ -15,6 +15,7 @@
  * with real documents and the actual search infrastructure.
  */
 
+#include "tests/integration/daemon/require_daemon_started.h"
 #include "tests/integration/daemon/test_async_helpers.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
 
@@ -63,21 +64,14 @@ namespace yams::test {
 
 class FSMTuningIntegrationFixture {
 public:
+    static constexpr std::size_t kStartAttempts = 2;
+    static constexpr std::chrono::milliseconds kStartTimeout = std::chrono::seconds(25);
+
     FSMTuningIntegrationFixture() : harness_(makeHarnessOptions()) {
-        // Start daemon with full search infrastructure
-        bool started = false;
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            started = harness_.start(std::chrono::seconds(30));
-            if (started) {
-                break;
-            }
-            harness_.stop();
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        }
-        if (!started) {
-            throw std::runtime_error("Failed to start daemon for FSM tuning integration tests: " +
-                                     harness_.startupDiagnostics());
-        }
+        // Start daemon with full search infrastructure. One retry layer, sized so that two
+        // fixtures (corpus-stats and e2e cases) that both exhaust it (2 x 2 x 25 s) still FAIL
+        // with diagnostics inside the 180 s fsm_tuning_integration registration timeout.
+        requireStarted(harness_, kStartAttempts, kStartTimeout);
 
         // Create daemon client
         ClientConfig clientCfg;
@@ -518,21 +512,8 @@ TEST_CASE("FSM Tuning Integration: BenchmarkResults summary",
 TEST_CASE("FSM Tuning Integration: End-to-end tuning validation",
           "[integration][search][fsm][e2e]") {
     SKIP_ON_WINDOWS_DAEMON();
-    std::unique_ptr<FSMTuningIntegrationFixture> fixture;
-    std::string fixtureError;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        try {
-            fixture = std::make_unique<FSMTuningIntegrationFixture>();
-            break;
-        } catch (const std::exception& e) {
-            fixtureError = e.what();
-            std::this_thread::sleep_for(300ms);
-        }
-    }
-    if (!fixture) {
-        // Startup failure is a failure, not a skip (a SKIP let a broken daemon report green).
-        FAIL("FSM tuning fixture failed to start the daemon after 3 attempts: " << fixtureError);
-    }
+    // The fixture FAILs with startup diagnostics when the daemon cannot start.
+    auto fixture = std::make_unique<FSMTuningIntegrationFixture>();
 
     // 1. Ingest documents to create a code-heavy corpus
     INFO("Ingesting test documents...");

@@ -191,16 +191,26 @@ public:
     bool start(std::chrono::milliseconds timeout = std::chrono::seconds(10),
                PreRunLoopCallback preRunLoopCallback = nullptr) {
         lastStartError_.clear();
+        bool started = false;
         try {
-            return startUnchecked(timeout, std::move(preRunLoopCallback));
+            started = startUnchecked(timeout, std::move(preRunLoopCallback));
         } catch (const std::exception& error) {
             spdlog::error("[DaemonHarness] Startup threw: {}", error.what());
             lastStartError_ = std::string("startup threw: ") + error.what();
+            rollbackFailedStart();
         } catch (...) {
             spdlog::error("[DaemonHarness] Startup threw an unknown exception");
             lastStartError_ = "startup threw an unknown exception";
+            rollbackFailedStart();
         }
-        rollbackFailedStart();
+        if (started) {
+            startAttemptErrors_.clear();
+            return true;
+        }
+        startAttemptErrors_.push_back(
+            "attempt " + std::to_string(startAttemptErrors_.size() + 1) + " (" +
+            std::to_string(timeout.count()) +
+            "ms): " + (lastStartError_.empty() ? "(no reason recorded)" : lastStartError_));
         return false;
     }
 
@@ -399,9 +409,15 @@ private:
     }
 
 public:
+    // Each failed attempt's reason is kept (see startupDiagnostics()); a sequence starts fresh.
     [[nodiscard]] bool startWithRetry(std::chrono::milliseconds timeout, std::size_t maxAttempts,
-                                      PreRunLoopCallback preRunLoopCallback = nullptr) {
+                                      PreRunLoopCallback preRunLoopCallback = nullptr,
+                                      std::chrono::milliseconds retryDelay = {}) {
+        startAttemptErrors_.clear();
         for (std::size_t attempt = 0; attempt < maxAttempts; ++attempt) {
+            if (attempt > 0 && retryDelay.count() > 0) {
+                std::this_thread::sleep_for(retryDelay);
+            }
             if (start(timeout, preRunLoopCallback)) {
                 return true;
             }
@@ -510,30 +526,51 @@ public:
         }
     }
 
-    // Why the most recent start()/startWithRetry() attempt failed, plus the endpoint paths and the
-    // daemon log tail when one was written. Intended for FAIL() messages so a startup failure is
-    // reported as a failure with evidence rather than skipped.
+    // Why every failed start() attempt since the last success (or the start of the current
+    // startWithRetry() sequence) was rejected, plus the endpoint paths and the daemon log tail
+    // when one was written. Intended for FAIL() messages so a startup failure is reported as a
+    // failure with evidence rather than skipped.
     [[nodiscard]] std::string startupDiagnostics(std::size_t logTailLines = 40) const {
+        constexpr std::streamoff kMaxLogBytes = 64 * 1024;
+        constexpr std::size_t kMaxLineChars = 400;
         std::ostringstream out;
-        out << "last start error: "
-            << (lastStartError_.empty() ? "(none recorded)" : lastStartError_)
-            << "\nsocket: " << sock_.string() << "\ndata dir: " << data_.string()
+        out << "start attempts:";
+        if (startAttemptErrors_.empty()) {
+            out << " (none failed)";
+        }
+        for (const auto& attemptError : startAttemptErrors_) {
+            out << "\n  " << attemptError;
+        }
+        out << "\nsocket: " << sock_.string() << "\ndata dir: " << data_.string()
             << "\nlog file: " << log_.string();
-        std::ifstream log(log_);
+        std::ifstream log(log_, std::ios::binary);
         if (!log) {
             out << " (not written)";
             return out.str();
         }
+        // Read only the last kMaxLogBytes; a partial first line is dropped.
+        log.seekg(0, std::ios::end);
+        const std::streamoff size = log.tellg();
+        const bool seeked = size > kMaxLogBytes;
+        log.seekg(seeked ? size - kMaxLogBytes : 0, std::ios::beg);
         std::deque<std::string> tail;
-        for (std::string line; std::getline(log, line);) {
+        std::string line;
+        if (seeked) {
+            std::getline(log, line);
+        }
+        while (std::getline(log, line)) {
+            if (line.size() > kMaxLineChars) {
+                line.resize(kMaxLineChars);
+                line += "...";
+            }
             tail.push_back(std::move(line));
             if (tail.size() > logTailLines) {
                 tail.pop_front();
             }
         }
         out << "\nlog tail (" << tail.size() << " lines):";
-        for (const auto& line : tail) {
-            out << "\n  " << line;
+        for (const auto& tailLine : tail) {
+            out << "\n  " << tailLine;
         }
         return out.str();
     }
@@ -795,6 +832,7 @@ private:
     bool startAttempted_ = false;
     // mutable: waitForUsableLifecycle() is const but records why startup was rejected.
     mutable std::string lastStartError_;
+    std::vector<std::string> startAttemptErrors_;
     std::optional<ScopedEnvVar> xdgStateEnvironment_;
     std::optional<ScopedEnvVar> xdgConfigEnvironment_;
     std::optional<ScopedEnvVar> configEnvironment_;
