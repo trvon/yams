@@ -714,7 +714,11 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
         repo->info.downloadUrl = fileUrl(archive);
         repo->info.checksum = sha256Of(archive);
         auto installer = makePluginInstaller(repo, installDir, trustFile);
-        return installer->install("fake-plugin", InstallOptions{});
+        auto result = installer->install("fake-plugin", InstallOptions{});
+        if (!result) {
+            UNSCOPED_INFO("install error: " << result.error().message);
+        }
+        return result;
     };
 
     SECTION("a directory entry with a trailing slash installs") {
@@ -1006,7 +1010,11 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects archive links and root
         repo->info.downloadUrl = fileUrl(archive);
         repo->info.checksum = sha256Of(archive);
         auto installer = makePluginInstaller(repo, installDir, trustFile);
-        return installer->install("fake-plugin", InstallOptions{});
+        auto result = installer->install("fake-plugin", InstallOptions{});
+        if (!result) {
+            UNSCOPED_INFO("install error: " << result.error().message);
+        }
+        return result;
     };
 
     // If a link were honored, the follow-up entry would be written outside the extraction
@@ -1102,7 +1110,11 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects looping symlinks witho
         repo->info.downloadUrl = fileUrl(archive);
         repo->info.checksum = sha256Of(archive);
         auto installer = makePluginInstaller(repo, installDir, trustFile);
-        return installer->install(name, InstallOptions{});
+        auto result = installer->install(name, InstallOptions{});
+        if (!result) {
+            UNSCOPED_INFO("install error: " << result.error().message);
+        }
+        return result;
     };
 
     SECTION("a link to itself") {
