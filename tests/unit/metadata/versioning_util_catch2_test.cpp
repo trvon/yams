@@ -15,37 +15,14 @@
 #include <yams/metadata/query_helpers.h>
 #include <yams/metadata/versioning_util.h>
 
+#include "../../common/metadata_test_documents.h"
 #include "../../common/test_helpers_catch2.h"
 
 using namespace yams;
 using namespace yams::metadata;
+using yams::test::makeDocInfo;
 
 namespace {
-
-DocumentInfo makeDocInfo(const std::string& filePath, const std::string& hash,
-                         const std::string& fileName) {
-    DocumentInfo info;
-    info.filePath = filePath;
-    info.fileName = fileName;
-    info.fileExtension = ".txt";
-    info.fileSize = 100;
-    info.sha256Hash = hash;
-    info.mimeType = "text/plain";
-    auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-    info.createdTime = now;
-    info.modifiedTime = now;
-    info.indexedTime = now;
-    info.contentExtracted = true;
-    info.extractionStatus = ExtractionStatus::Success;
-    auto derived = computePathDerivedValues(filePath);
-    info.filePath = derived.normalizedPath;
-    info.pathPrefix = derived.pathPrefix;
-    info.reversePath = derived.reversePath;
-    info.pathHash = derived.pathHash;
-    info.parentHash = derived.parentHash;
-    info.pathDepth = derived.pathDepth;
-    return info;
-}
 
 class BatchFailingMetadataRepository : public MetadataRepository {
 public:

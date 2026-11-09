@@ -1,5 +1,7 @@
 #pragma once
 
+#include <yams/core/types.h>
+
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -20,11 +22,10 @@ namespace yams::app::services {
 /// Filters that select which indexed documents a prune would remove.
 struct PruneConfig {
     std::vector<std::string> categories; ///< Prune categories (build-artifacts, logs, etc.)
-    std::vector<std::string> extensions; ///< Specific file extensions
+    std::vector<std::string> extensions; ///< File extensions; case and leading dot ignored
     std::chrono::seconds minAge{0};      ///< Minimum file age to prune
     int64_t minSize{0};                  ///< Minimum file size to prune
     int64_t maxSize{std::numeric_limits<int64_t>::max()}; ///< Maximum file size to prune
-    bool dryRun{true};                                    ///< Preview mode (don't actually delete)
 };
 
 /// Document selected for pruning.
@@ -39,8 +40,9 @@ struct PruneCandidate {
 /// Scan the metadata repository and return the documents that match `config`.
 ///
 /// Documents are classified by path, extension and MIME type. When `contentStore` is provided,
-/// extensionless documents are also classified by their leading content signature.
-[[nodiscard]] std::vector<PruneCandidate>
+/// extensionless documents are also classified by their leading content signature. Fails when
+/// the repository cannot be queried.
+[[nodiscard]] Result<std::vector<PruneCandidate>>
 queryPruneCandidates(metadata::MetadataRepository& repo, const PruneConfig& config,
                      const std::shared_ptr<api::IContentStore>& contentStore = nullptr);
 

@@ -34,7 +34,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
 
     // Build config from request
     app::services::PruneConfig config;
-    config.dryRun = req.dryRun;
     config.categories = req.categories;
     config.extensions = req.extensions;
 
@@ -114,8 +113,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
     response.totalBytesFreed = 0;
 
     try {
-        auto candidates = app::services::queryPruneCandidates(*metaRepo, config,
-                                                              serviceManager_->getContentStore());
+        auto candidatesResult = app::services::queryPruneCandidates(
+            *metaRepo, config, serviceManager_->getContentStore());
+        if (!candidatesResult) {
+            spdlog::error("Prune query failed: {}", candidatesResult.error().message);
+            co_return dispatch::makeErrorResponse(candidatesResult);
+        }
+        auto candidates = std::move(candidatesResult).value();
 
         // Aggregate by category for preview
         for (const auto& candidate : candidates) {
