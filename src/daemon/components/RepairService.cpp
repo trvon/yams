@@ -1249,9 +1249,10 @@ std::optional<metadata::PathTreeRepairStats> RepairService::runPathTreeRepairBat
     options.startAfterId = pathTreeRepairCursor_;
     options.maxBatches = 1; // yield to the loop between batches
     // Stop mid-window on shutdown; what is done commits and the cursor resumes after it.
+    // stop() clears shutdownState_->running; running_ only says the loop was started, so it is not
+    // a stop signal (it is false whenever the batch runs outside the loop).
     options.shouldAbort = [this] {
-        return !running_.load(std::memory_order_relaxed) ||
-               (shutdownState_ && !shutdownState_->running.load(std::memory_order_acquire));
+        return shutdownState_ && !shutdownState_->running.load(std::memory_order_acquire);
     };
     const auto step = metadata::repairMissingPathTree(*repo, options);
     const auto now = std::chrono::steady_clock::now();
