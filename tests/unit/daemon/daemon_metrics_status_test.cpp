@@ -1748,11 +1748,11 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
 
         auto resp = dispatchRequest(dispatcher, Request{PruneRequest{}});
 
-        REQUIRE(std::holds_alternative<PruneResponse>(resp));
-        const auto& pruneResp = std::get<PruneResponse>(resp);
-        CHECK(pruneResp.errorMessage.empty());
-        CHECK(pruneResp.totalBytesFreed == 0);
-        CHECK(pruneResp.categoryCounts.empty());
+        // A failed metadata query is an error, not "nothing to prune".
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("query boom") != std::string::npos);
     }
 
     SECTION("dry run handles repository exceptions") {

@@ -10,12 +10,28 @@
 #include <filesystem>
 #include <ranges>
 #include <span>
+#include <string>
+#include <string_view>
 
 namespace yams::app::services {
 
 namespace {
 
 constexpr std::size_t kPruneSignatureBytes = 4096;
+
+// Extensions compare without a leading dot and without case: metadata stores ".LOG" or ".log",
+// while users pass "log", ".log" or "LOG".
+std::string normalizeExtension(std::string_view ext) {
+    if (ext.starts_with('.')) {
+        ext.remove_prefix(1);
+    }
+    std::string out;
+    out.reserve(ext.size());
+    for (const char c : ext) {
+        out.push_back((c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c);
+    }
+    return out;
+}
 
 magic::PruneCategory
 classifyPruneCandidate(const metadata::DocumentInfo& doc,
@@ -68,8 +84,9 @@ buildPruneCandidates(std::span<const metadata::DocumentInfo> docs, const PruneCo
     auto meetsExtensionCriteria = [&](const metadata::DocumentInfo& doc) -> bool {
         if (config.extensions.empty())
             return true;
+        const auto docExtension = normalizeExtension(doc.fileExtension);
         return std::ranges::any_of(config.extensions, [&](const auto& ext) {
-            return doc.fileExtension == ext || doc.fileExtension == ("." + ext);
+            return docExtension == normalizeExtension(ext);
         });
     };
 
@@ -99,13 +116,13 @@ buildPruneCandidates(std::span<const metadata::DocumentInfo> docs, const PruneCo
 
 } // namespace
 
-std::vector<PruneCandidate>
+Result<std::vector<PruneCandidate>>
 queryPruneCandidates(metadata::MetadataRepository& repo, const PruneConfig& config,
                      const std::shared_ptr<api::IContentStore>& contentStore) {
     auto docsResult = repo.queryDocuments(metadata::DocumentQueryOptions{});
     if (!docsResult) {
-        spdlog::error("Failed to query documents: {}", docsResult.error().message);
-        return {};
+        return Error{docsResult.error().code,
+                     "Failed to query documents for prune: " + docsResult.error().message};
     }
 
     auto& allDocs = docsResult.value();

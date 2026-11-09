@@ -7,9 +7,9 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/metadata/path_utils.h>
 
 #include "../../../common/metadata_test_db.h"
+#include "../../../common/metadata_test_documents.h"
 
 #include <algorithm>
 #include <chrono>
@@ -21,32 +21,9 @@
 using namespace yams;
 using namespace yams::app::services;
 using namespace yams::metadata;
+using yams::test::makeDocInfo;
 
 namespace {
-
-DocumentInfo makeDocInfo(const std::string& filePath, const std::string& hash) {
-    DocumentInfo info;
-    info.filePath = filePath;
-    info.fileName = std::filesystem::path(filePath).filename().string();
-    info.fileExtension = ".txt";
-    info.fileSize = 100;
-    info.sha256Hash = hash;
-    info.mimeType = "text/plain";
-    auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-    info.createdTime = now;
-    info.modifiedTime = now;
-    info.indexedTime = now;
-    info.contentExtracted = true;
-    info.extractionStatus = ExtractionStatus::Success;
-    auto derived = computePathDerivedValues(filePath);
-    info.filePath = derived.normalizedPath;
-    info.pathPrefix = derived.pathPrefix;
-    info.reversePath = derived.reversePath;
-    info.pathHash = derived.pathHash;
-    info.parentHash = derived.parentHash;
-    info.pathDepth = derived.pathDepth;
-    return info;
-}
 
 struct PrunePlannerFixture {
     PrunePlannerFixture() {
@@ -100,7 +77,9 @@ TEST_CASE_METHOD(PrunePlannerFixture, "Prune candidates include stored native bu
 
     PruneConfig config;
     config.categories = {"build-artifacts"};
-    const auto candidates = queryPruneCandidates(*repo, config);
+    const auto result = queryPruneCandidates(*repo, config);
+    REQUIRE(result);
+    const auto& candidates = result.value();
 
     REQUIRE(candidates.size() == 2);
     CHECK(sortedHashes(candidates) == std::vector<std::string>{"build-dsym", "build-ilk"});
@@ -124,11 +103,59 @@ TEST_CASE_METHOD(PrunePlannerFixture, "Prune candidates match dotted metadata ex
 
     PruneConfig config;
     config.categories = {"all"};
-    const auto candidates = queryPruneCandidates(*repo, config);
+    const auto result = queryPruneCandidates(*repo, config);
+    REQUIRE(result);
+    const auto& candidates = result.value();
 
     REQUIRE(candidates.size() == 1);
     CHECK(candidates.front().hash == "dotted-log");
     CHECK(candidates.front().path.ends_with("daemon.log"));
     CHECK(candidates.front().category == "logs");
     CHECK(candidates.front().fileSize == 100);
+}
+
+TEST_CASE_METHOD(PrunePlannerFixture, "Prune extension filter ignores case and a leading dot",
+                 "[prune][app][services][catch2]") {
+    auto upper = makeDocInfo("/workspace/logs/DAEMON.LOG", "upper-log");
+    upper.fileExtension = ".LOG";
+    insert(upper);
+    auto bare = makeDocInfo("/workspace/logs/worker.log", "bare-log");
+    bare.fileExtension = "log";
+    insert(bare);
+    insert(makeDocInfo("/workspace/notes/readme.txt", "notes-txt"));
+
+    for (const std::string filter : {"log", ".log", "LOG", ".Log"}) {
+        INFO("extension filter: " << filter);
+        PruneConfig config;
+        config.extensions = {filter};
+        const auto result = queryPruneCandidates(*repo, config);
+        REQUIRE(result);
+        CHECK(sortedHashes(result.value()) == std::vector<std::string>{"bare-log", "upper-log"});
+    }
+}
+
+namespace {
+
+class QueryFailingMetadataRepository : public MetadataRepository {
+public:
+    explicit QueryFailingMetadataRepository(ConnectionPool& pool)
+        : MetadataRepository(pool, nullptr, SchemaBootstrapMode::AssumeReady) {}
+
+    Result<std::vector<DocumentInfo>> queryDocuments(const DocumentQueryOptions&) override {
+        return Error{ErrorCode::DatabaseError, "injected query failure"};
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(PrunePlannerFixture, "Prune planning reports a failed metadata query",
+                 "[prune][app][services][catch2]") {
+    insert(makeDocInfo("/workspace/logs/daemon.log", "unreached-log"));
+    QueryFailingMetadataRepository failing(*pool);
+
+    const auto result = queryPruneCandidates(failing, PruneConfig{});
+
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == ErrorCode::DatabaseError);
+    CHECK(result.error().message.find("injected query failure") != std::string::npos);
 }

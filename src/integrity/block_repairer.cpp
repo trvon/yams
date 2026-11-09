@@ -7,6 +7,17 @@
 
 namespace yams::integrity {
 
+namespace {
+
+std::string sha256Of(std::span<const std::byte> bytes) {
+    auto hasher = yams::crypto::createSHA256Hasher();
+    hasher->init();
+    hasher->update(bytes);
+    return hasher->finalize();
+}
+
+} // namespace
+
 BlockRepairer::BlockRepairer(storage::IStorageEngine& storage, BlockRepairerConfig config)
     : storage_(&storage), config_(std::move(config)) {}
 
@@ -64,8 +75,7 @@ bool BlockRepairer::attemptRepair(const std::string& blockHash,
     return false;
 }
 
-bool BlockRepairer::canRepair(const std::string& blockHash) const {
-    (void)blockHash;
+bool BlockRepairer::hasRepairSources() const {
     return config_.backupFetcher || config_.p2pFetcher || config_.parityReconstructor ||
            config_.manifestReconstructor;
 }
@@ -83,23 +93,40 @@ bool BlockRepairer::storeIfValid(const std::string& blockHash,
         return false;
     }
 
-    auto hasher = yams::crypto::createSHA256Hasher();
-    hasher->init();
-    hasher->update(
-        std::span<const std::byte>(fetchResult.value().data(), fetchResult.value().size()));
-    auto computed = hasher->finalize();
+    const std::span<const std::byte> bytes(fetchResult.value().data(), fetchResult.value().size());
+    auto computed = sha256Of(bytes);
     if (computed != blockHash) {
         spdlog::warn("Repaired data hash mismatch for {} (computed {})", blockHash.substr(0, 8),
                      computed.substr(0, 8));
         return false;
     }
 
-    auto storeRes =
-        storage_->store(blockHash, std::span<const std::byte>(fetchResult.value().data(),
-                                                              fetchResult.value().size()));
+    // store() keeps an object that already exists (content addressing assumes the bytes match
+    // the key), so a corrupt copy has to be removed before the verified bytes can replace it.
+    auto exists = storage_->exists(blockHash);
+    if (exists && exists.value()) {
+        auto current = storage_->retrieve(blockHash);
+        if (current && sha256Of(current.value()) == blockHash) {
+            return true;
+        }
+        auto removed = storage_->remove(blockHash);
+        if (!removed && removed.error().code != ErrorCode::ChunkNotFound) {
+            spdlog::error("Failed to remove corrupt block {} before repair: {}",
+                          blockHash.substr(0, 8), removed.error().message);
+            return false;
+        }
+    }
+
+    auto storeRes = storage_->store(blockHash, bytes);
     if (!storeRes.has_value()) {
         spdlog::error("Failed to store repaired block {}: {}", blockHash.substr(0, 8),
                       storeRes.error().message);
+        return false;
+    }
+
+    auto stored = storage_->retrieve(blockHash);
+    if (!stored || sha256Of(stored.value()) != blockHash) {
+        spdlog::error("Repaired block {} does not read back with its hash", blockHash.substr(0, 8));
         return false;
     }
     return true;

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -75,12 +76,8 @@ struct RepairFixture {
 } // namespace
 
 TEST_CASE_METHOD(RepairFixture, "BlockRepairer basic operations", "[integrity][repair]") {
-    SECTION("canRepair checks availability of repair sources") {
-        // canRepair returns true when repair sources are configured,
-        // even if the block doesn't exist (it checks capability, not block existence)
-        (void)manager->canRepair("some-hash");
-        // Just verify the method is callable without crashing
-        CHECK(true);
+    SECTION("hasRepairSources reports configured sources") {
+        CHECK(manager->hasRepairSources());
     }
 
     SECTION("attemptRepair returns false when no repair sources available") {
@@ -262,20 +259,20 @@ TEST_CASE("BlockRepairer: backup fetcher preferred over P2P", "[integrity][repai
     CHECK(storage.exists(recoveryHash).value());
 }
 
-TEST_CASE("BlockRepairer: canRepair reflects source availability", "[integrity][repair]") {
+TEST_CASE("BlockRepairer: hasRepairSources reflects configured sources", "[integrity][repair]") {
     TempDir tempDir;
     StorageConfig storageConfig;
     storageConfig.basePath = tempDir.path / "storage";
     std::filesystem::create_directories(storageConfig.basePath);
     StorageEngine storage(storageConfig);
 
-    SECTION("canRepair false when no repair sources configured") {
+    SECTION("hasRepairSources false when no repair sources configured") {
         BlockRepairerConfig config; // no fetchers set at all
         BlockRepairer manager(storage, config);
-        CHECK_FALSE(manager.canRepair("any-hash"));
+        CHECK_FALSE(manager.hasRepairSources());
     }
 
-    SECTION("canRepair true when backup fetcher is configured") {
+    SECTION("hasRepairSources true when backup fetcher is configured") {
         BlockRepairerConfig config;
         config.backupFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
             std::string data = "backup-data";
@@ -286,10 +283,10 @@ TEST_CASE("BlockRepairer: canRepair reflects source availability", "[integrity][
         };
 
         BlockRepairer manager(storage, config);
-        CHECK(manager.canRepair("any-hash"));
+        CHECK(manager.hasRepairSources());
     }
 
-    SECTION("canRepair true when p2p fetcher returns data") {
+    SECTION("hasRepairSources true when p2p fetcher is configured") {
         BlockRepairerConfig config;
         config.backupFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
             return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
@@ -300,6 +297,45 @@ TEST_CASE("BlockRepairer: canRepair reflects source availability", "[integrity][
         };
 
         BlockRepairer manager(storage, config);
-        CHECK(manager.canRepair("any-hash"));
+        CHECK(manager.hasRepairSources());
     }
+}
+
+TEST_CASE("BlockRepairer replaces a stored block whose bytes are corrupt", "[integrity][repair]") {
+    TempDir tempDir;
+    StorageConfig storageConfig;
+    storageConfig.basePath = tempDir.path / "storage";
+    std::filesystem::create_directories(storageConfig.basePath);
+    StorageEngine storage(storageConfig);
+
+    const std::string goodData = "intact-block-contents-0123456789";
+    const auto goodBytes = toBytes(goodData);
+    const std::string hash = yams::crypto::SHA256Hasher::hash(goodBytes);
+    REQUIRE(storage.store(hash, goodBytes).has_value());
+
+    // Corrupt the object in place, the way bit rot or a torn write would.
+    const auto objectPath = storageConfig.basePath / "objects" / hash.substr(0, 2) / hash.substr(2);
+    REQUIRE(std::filesystem::is_regular_file(objectPath));
+    {
+        std::ofstream out(objectPath, std::ios::binary | std::ios::trunc);
+        out << "corrupted-bytes";
+    }
+    auto corrupted = storage.retrieve(hash);
+    REQUIRE(corrupted);
+    REQUIRE(yams::crypto::SHA256Hasher::hash(corrupted.value()) != hash);
+
+    BlockRepairerConfig config;
+    config.backupFetcher =
+        [&goodBytes](const std::string&) -> yams::Result<std::vector<std::byte>> {
+        return goodBytes;
+    };
+    config.defaultOrder = {RepairStrategy::FromBackup};
+    BlockRepairer repairer(storage, config);
+
+    REQUIRE(repairer.attemptRepair(hash));
+
+    auto repaired = storage.retrieve(hash);
+    REQUIRE(repaired);
+    CHECK((repaired.value() == goodBytes));
+    CHECK(yams::crypto::SHA256Hasher::hash(repaired.value()) == hash);
 }

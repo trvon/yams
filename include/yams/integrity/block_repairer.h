@@ -31,11 +31,15 @@ public:
     BlockRepairer(const BlockRepairer&) = delete;
     BlockRepairer& operator=(const BlockRepairer&) = delete;
 
-    // Repair operations
+    /// Fetch `blockHash` from the configured sources in order and store the first copy whose
+    /// bytes hash to `blockHash`, replacing a stored copy that does not. Returns true only when
+    /// storage holds verified bytes for the block afterwards.
     [[nodiscard]] bool attemptRepair(const std::string& blockHash,
                                      const std::vector<RepairStrategy>& order = {});
 
-    [[nodiscard]] bool canRepair(const std::string& blockHash) const;
+    /// Whether any repair source is configured. The sources are fetch-only, so this cannot tell
+    /// whether a particular block is recoverable; attemptRepair is the only way to find out.
+    [[nodiscard]] bool hasRepairSources() const;
 
 private:
     [[nodiscard]] bool storeIfValid(const std::string& blockHash,
