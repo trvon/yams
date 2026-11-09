@@ -1087,15 +1087,10 @@ if catch2_dep.found()
       install: false,
     )
 
-    # The diagnostic cases are all hidden ([.requires_model]); the only default cases are the
-    # CoreML provider checks compiled on Apple. Elsewhere a default run selects zero tests.
-    if host_machine.system() == 'darwin'
-      test('onnx_embedding_diagnostic', catch2_onnx_embedding_diag_exe,
-        suite: ['catch2', 'unit', 'daemon', 'onnx', 'diagnostic'],
-        env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-        timeout: 120,
-      )
-    endif
+    # Not registered: every case in onnx_embedding_diagnostic_test.cpp is hidden
+    # ([.requires_model]), so a default run selects zero tests on every platform (the CoreML
+    # provider checks are a separate binary, gpu_provider_coreml). Run it by hand with a model:
+    #   catch2_onnx_embedding_diag '[requires_model]'  (Catch2 v3: [.x] means [.][x])
   endif
 
   catch2_plugin_infrastructure_exe = executable('catch2_plugin_infrastructure',
