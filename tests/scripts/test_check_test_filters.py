@@ -62,6 +62,19 @@ class RegistrationTest(unittest.TestCase):
         self.assertEqual(reg.binary, Path("/b"))
         self.assertEqual(reg.args, ["[x]"])
 
+    def test_windows_listing_puts_extra_paths_on_path(self) -> None:
+        e = entry("t", ["/b/catch2_t.exe"])
+        e["env"] = {"A": "1"}
+        e["extra_paths"] = ["/dlls/one", "/dlls/two"]
+        reg = checker.registration_from_entry(e)
+        self.assertIsInstance(reg, checker.Registration)
+        base = {"PATH": "/usr/bin"}
+        windows = checker.listing_env(reg, base, windows=True)
+        self.assertEqual(windows["PATH"], os.pathsep.join(["/dlls/one", "/dlls/two", "/usr/bin"]))
+        self.assertEqual(windows["A"], "1")
+        # meson test leaves PATH alone elsewhere (shared libraries load through rpath).
+        self.assertEqual(checker.listing_env(reg, base, windows=False)["PATH"], "/usr/bin")
+
     def test_listing_args_drop_reporter_and_keep_specs(self) -> None:
         self.assertEqual(
             checker.listing_args(["[a]~[slow]", "-r", "junit", "--out=x", "--allow-running-no-tests"]),
