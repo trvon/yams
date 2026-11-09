@@ -13,6 +13,7 @@
 #include <yams/app/services/prune_planner.h>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
+#include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -113,8 +114,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
     response.totalBytesFreed = 0;
 
     try {
-        auto candidatesResult = app::services::queryPruneCandidates(
-            *metaRepo, config, serviceManager_->getContentStore());
+        // The candidate scan walks the whole metadata table on a large corpus; run it on the
+        // worker pool so the dispatcher's strand stays free for other requests.
+        auto candidatesResult = co_await dispatch::offload_to_worker(
+            serviceManager_, "prune.query_candidates",
+            [metaRepo, config, contentStore = serviceManager_->getContentStore()]() {
+                return app::services::queryPruneCandidates(*metaRepo, config, contentStore);
+            });
         if (!candidatesResult) {
             spdlog::error("Prune query failed: {}", candidatesResult.error().message);
             co_return dispatch::makeErrorResponse(candidatesResult);
