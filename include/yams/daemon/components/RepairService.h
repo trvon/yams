@@ -109,7 +109,6 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services);
  *  - Background scan + detect + repair loop (runs continuously)
  *  - On-demand repair triggered by RPC (RepairRequest)
  *  - Stuck-document recovery (failed extraction, ghost success, stalled)
- *  - Delegates to RepairManager for block-level operations
  *  - Delegates to InternalEventBus for embedding / FTS5 jobs
  */
 // Progress of the startup repair scan across queue drains. Positions are document ids (the scan

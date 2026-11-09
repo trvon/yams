@@ -1346,8 +1346,6 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
         readiness::kPluginsReady,
         readiness::kPluginsDegraded,
         readiness::kContentExtractorsReady,
-        readiness::kEntityExtractorsReady,
-        readiness::kTitleExtractorReady,
         readiness::kRepairService,
         readiness::kSearchEngineBuildReasonInitial,
         readiness::kSearchEngineBuildReasonRebuild,
@@ -1367,6 +1365,10 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
     // Symbol extraction was removed in v0.20; status must not advertise it as unavailable.
     CHECK(status.readinessStates.count("symbol_extractors_ready") == 0);
     CHECK(status.requestCounts.count("symbol_extractors_loaded") == 0);
+    // Entity and title extractors are optional plugins, reported only as capability counts: a
+    // readiness flag for them reads as "waiting on" in `yams daemon status` when none is installed.
+    CHECK(status.readinessStates.count("entity_extractors_ready") == 0);
+    CHECK(status.readinessStates.count("title_extractor_ready") == 0);
 
     const std::array<std::string_view, 4> requiredCapabilityMetricKeys = {
         metrics::kContentExtractorsLoaded,
@@ -1748,11 +1750,11 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
 
         auto resp = dispatchRequest(dispatcher, Request{PruneRequest{}});
 
-        REQUIRE(std::holds_alternative<PruneResponse>(resp));
-        const auto& pruneResp = std::get<PruneResponse>(resp);
-        CHECK(pruneResp.errorMessage.empty());
-        CHECK(pruneResp.totalBytesFreed == 0);
-        CHECK(pruneResp.categoryCounts.empty());
+        // A failed metadata query is an error, not "nothing to prune".
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("query boom") != std::string::npos);
     }
 
     SECTION("dry run handles repository exceptions") {

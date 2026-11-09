@@ -26,7 +26,6 @@
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/extraction/extraction_util.h>
-#include <yams/integrity/repair_manager.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_tree_repair.h>

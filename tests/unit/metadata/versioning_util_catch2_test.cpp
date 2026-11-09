@@ -8,7 +8,6 @@
 #include <tuple>
 
 #include <yams/compat/unistd.h>
-#include <yams/integrity/repair_manager.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
@@ -16,37 +15,14 @@
 #include <yams/metadata/query_helpers.h>
 #include <yams/metadata/versioning_util.h>
 
+#include "../../common/metadata_test_documents.h"
 #include "../../common/test_helpers_catch2.h"
 
 using namespace yams;
 using namespace yams::metadata;
+using yams::test::makeDocInfo;
 
 namespace {
-
-DocumentInfo makeDocInfo(const std::string& filePath, const std::string& hash,
-                         const std::string& fileName) {
-    DocumentInfo info;
-    info.filePath = filePath;
-    info.fileName = fileName;
-    info.fileExtension = ".txt";
-    info.fileSize = 100;
-    info.sha256Hash = hash;
-    info.mimeType = "text/plain";
-    auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-    info.createdTime = now;
-    info.modifiedTime = now;
-    info.indexedTime = now;
-    info.contentExtracted = true;
-    info.extractionStatus = ExtractionStatus::Success;
-    auto derived = computePathDerivedValues(filePath);
-    info.filePath = derived.normalizedPath;
-    info.pathPrefix = derived.pathPrefix;
-    info.reversePath = derived.reversePath;
-    info.pathHash = derived.pathHash;
-    info.parentHash = derived.parentHash;
-    info.pathDepth = derived.pathDepth;
-    return info;
-}
 
 class BatchFailingMetadataRepository : public MetadataRepository {
 public:
@@ -502,44 +478,6 @@ TEST_CASE_METHOD(VersioningFixture, "Retention never selects the marked latest v
     REQUIRE(candidates);
     REQUIRE(candidates.value().size() == 1);
     CHECK(candidates.value().front().version == 2);
-}
-
-TEST_CASE_METHOD(VersioningFixture, "Prune candidates include stored native build artifacts",
-                 "[prune][metadata][catch2]") {
-    auto repo = makeRepo();
-    const auto insert = [&](const std::string& path, const std::string& hash) {
-        auto result = repo->insertDocument(
-            makeDocInfo(path, hash, std::filesystem::path(path).filename().string()));
-        REQUIRE(result);
-    };
-    insert("/workspace/x64/Release/tool.ilk", "build-ilk");
-    insert("/workspace/build/Debug/tool.dSYM/Contents/Resources/DWARF/tool", "build-dsym");
-    insert("/workspace/src/tool.cpp", "source-cpp");
-
-    integrity::PruneConfig config;
-    config.categories = {"build-artifacts"};
-    const auto candidates = integrity::RepairManager::queryCandidatesForPrune(*repo, config);
-
-    REQUIRE(candidates.size() == 2);
-    CHECK(std::ranges::any_of(
-        candidates, [](const auto& candidate) { return candidate.path.ends_with("tool.ilk"); }));
-    CHECK(std::ranges::any_of(
-        candidates, [](const auto& candidate) { return candidate.path.ends_with("/tool"); }));
-}
-
-TEST_CASE_METHOD(VersioningFixture, "Prune candidates match dotted metadata extensions",
-                 "[prune][metadata][catch2]") {
-    auto repo = makeRepo();
-    auto log = makeDocInfo("/workspace/logs/daemon.log", "dotted-log", "daemon.log");
-    log.fileExtension = ".log";
-    REQUIRE(repo->insertDocument(log));
-
-    integrity::PruneConfig config;
-    config.categories = {"all"};
-    const auto candidates = integrity::RepairManager::queryCandidatesForPrune(*repo, config);
-
-    REQUIRE(candidates.size() == 1);
-    CHECK(candidates.front().category == "logs");
 }
 
 // `yams update --tag` and the MCP update tool wrote tags only to the metadata table. With path

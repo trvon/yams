@@ -23,6 +23,7 @@
 #include <thread>
 
 #include "../../common/test_helpers_catch2.h"
+#include "require_daemon_started.h"
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include <boost/asio.hpp>
@@ -203,19 +204,6 @@ DaemonClient createClient(const std::filesystem::path& socketPath,
     config.autoStart = autoStart;
     config.requestTimeout = 10s;
     return DaemonClient(config);
-}
-
-void startHarnessWithRetry(DaemonHarness& harness, int maxRetries = 3,
-                           std::chrono::milliseconds retryDelay = 250ms) {
-    for (int attempt = 0; attempt < maxRetries; ++attempt) {
-        if (harness.start(30s)) {
-            return;
-        }
-        harness.stop();
-        std::this_thread::sleep_for(retryDelay);
-    }
-
-    SKIP("Skipping socket integration section due to daemon startup instability");
 }
 
 // Helper to retry get request with delay - handles async post-ingest processing
@@ -428,7 +416,7 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
 
     SECTION("connects to running daemon") {
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
 
         auto client = createClient(harness.socketPath());
         auto result = yams::cli::run_sync(client.connect(), 5s);
@@ -450,7 +438,7 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
     SECTION("connects after daemon restart") {
         // This test needs its own daemon to restart
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
 
         auto client = createClient(harness.socketPath());
         auto connectResult = yams::cli::run_sync(client.connect(), 5s);
@@ -462,7 +450,7 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
         std::this_thread::sleep_for(500ms);
 
         // Restart daemon
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
 
         // Create NEW client after restart (old client's io_context was reset)
         // Allow extra time for GlobalIOContext threads to fully stabilize after restart
@@ -491,7 +479,7 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
 
     SECTION("handles explicit disconnect") {
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
 
         auto client = createClient(harness.socketPath());
         auto connectResult = yams::cli::run_sync(client.connect(), 5s);
@@ -521,7 +509,7 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
 
         for (int i = 0; i < cycles; ++i) {
             INFO("restart cycle " << i);
-            startHarnessWithRetry(harness);
+            requireStarted(harness);
 
             // Allow time for GlobalIOContext to stabilize after restart
             std::this_thread::sleep_for(200ms);
@@ -553,7 +541,7 @@ TEST_CASE("Daemon client request execution", "[daemon][socket][requests]") {
 
     // Use isolated daemon for tests that modify database state
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     // Allow time for GlobalIOContext to stabilize
     std::this_thread::sleep_for(200ms);
@@ -833,7 +821,7 @@ TEST_CASE("Daemon client download job request execution", "[daemon][socket][down
         cfg.downloadPolicy.timeout = 5s;
     };
     DaemonHarness harness(options);
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -957,7 +945,7 @@ TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][m
     DaemonHarnessOptions options;
     options.useMockModelProvider = false;
     DaemonHarness harness(options);
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1100,7 +1088,7 @@ TEST_CASE("Daemon client plugin request execution", "[daemon][socket][requests][
     options.trustedPluginPaths = {pluginDir};
 
     DaemonHarness harness(options);
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1221,7 +1209,7 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1387,7 +1375,7 @@ TEST_CASE("Daemon client graph maintenance request execution",
     options.isolateConfig = true;
     options.isolateState = true;
     DaemonHarness harness{std::move(options)};
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1453,7 +1441,7 @@ TEST_CASE("Daemon client collection request execution", "[daemon][socket][reques
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1740,7 +1728,7 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness({.isolateState = true});
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1792,7 +1780,7 @@ TEST_CASE("Daemon client repair request execution", "[daemon][socket][requests][
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness({.enableModelProvider = false, .useMockModelProvider = false});
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1869,7 +1857,7 @@ TEST_CASE("Daemon client error handling", "[daemon][socket][errors]") {
 
     // Use isolated daemon for tests that modify database state
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     // Allow time for GlobalIOContext to stabilize
     std::this_thread::sleep_for(200ms);
@@ -1923,7 +1911,7 @@ TEST_CASE("Daemon client concurrent requests", "[daemon][socket][concurrency]") 
 
     // Use isolated daemon for tests that modify database state
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     // Allow time for GlobalIOContext to stabilize
     std::this_thread::sleep_for(200ms);
@@ -2011,7 +1999,7 @@ TEST_CASE("Daemon client parallel status from independent clients",
     // Fail, don't skip, when the daemon cannot start: this case must actually run.
     DaemonHarness harness;
     CAPTURE(harness.socketPath());
-    REQUIRE(harness.startWithRetry(30s, 3));
+    requireStarted(harness);
 
     static constexpr int kClients = 4;
     static constexpr int kRequestsPerClient = 5;
@@ -2090,7 +2078,7 @@ TEST_CASE("Daemon client timeout behavior", "[daemon][socket][timeout]") {
 
     // Use isolated daemon
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     SECTION("short header timeout") {
         ClientConfig config;
@@ -2151,7 +2139,7 @@ TEST_CASE("Daemon client move semantics", "[daemon][socket][move]") {
 
     // Use isolated daemon
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     SECTION("move construction") {
         // Allow time for GlobalIOContext to stabilize
@@ -2211,7 +2199,7 @@ TEST_CASE("Daemon socket file lifecycle", "[daemon][socket][filesystem]") {
     SECTION("socket file created on start") {
         // Use its own daemon
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
         REQUIRE(std::filesystem::exists(harness.socketPath()));
         harness.stop();
     }
@@ -2219,7 +2207,7 @@ TEST_CASE("Daemon socket file lifecycle", "[daemon][socket][filesystem]") {
     SECTION("daemon stops on shutdown request") {
         // This test needs its own daemon to shutdown
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
         REQUIRE(std::filesystem::exists(harness.socketPath()));
 
         // Allow time for GlobalIOContext to stabilize
@@ -2248,7 +2236,7 @@ TEST_CASE("Daemon socket file lifecycle", "[daemon][socket][filesystem]") {
     SECTION("socket file removed on stop") {
         // This test needs its own daemon to stop
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
         REQUIRE(std::filesystem::exists(harness.socketPath()));
 
         harness.stop();
@@ -2261,7 +2249,7 @@ TEST_CASE("Daemon socket file lifecycle", "[daemon][socket][filesystem]") {
 
     SECTION("multiple clients can connect to same socket") {
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
 
         auto client1 = createClient(harness.socketPath());
         auto client2 = createClient(harness.socketPath());

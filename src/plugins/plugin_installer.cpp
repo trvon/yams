@@ -297,6 +297,28 @@ bool isSymlinkTargetSafe(const fs::path& root, const fs::path& linkPath, const f
     return !isDirOrAncestor;
 }
 
+// Windows has two kinds of symlink, and only a directory symlink can be traversed into a
+// directory. libarchive makes a file symlink unless the tar entry marks the link as a
+// directory link, which ordinary tar files do not, so "current -> lib" fails with "Access is
+// denied". A link that does not open as a directory but whose target is one is recreated as
+// a directory symlink. Elsewhere the first check always passes and nothing changes.
+Result<void> repairDirectorySymlink(const fs::path& link, const fs::path& target) {
+    std::error_code ec;
+    if (fs::is_directory(fs::status(link, ec)) ||
+        !fs::is_directory(link.parent_path() / target, ec)) {
+        return {};
+    }
+    fs::remove(link, ec);
+    if (!ec) {
+        fs::create_directory_symlink(target, link, ec);
+    }
+    if (ec) {
+        return Error{ErrorCode::IOError, "Failed to recreate directory symlink " +
+                                             link.filename().string() + ": " + ec.message()};
+    }
+    return {};
+}
+
 // Archive metadata that is never plugin content, at any depth: macOS resource forks and
 // Finder files that archivers on macOS add next to the real entries.
 bool isArchiveJunk(const fs::path& name) {
@@ -594,6 +616,9 @@ Result<std::uint64_t> prepareExtractedPlugin(const fs::path& pluginRoot) {
                 return Error{ErrorCode::InvalidPath,
                              "Symlink points outside the plugin directory: " +
                                  path.filename().string()};
+            }
+            if (auto repaired = repairDirectorySymlink(path, target); !repaired) {
+                return repaired.error();
             }
             std::error_code followEc;
             (void)fs::status(path, followEc);

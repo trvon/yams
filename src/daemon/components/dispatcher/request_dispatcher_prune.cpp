@@ -10,6 +10,7 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/system/system_error.hpp>
+#include <yams/app/services/prune_planner.h>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -17,7 +18,6 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon_lifecycle.h>
-#include <yams/integrity/repair_manager.h>
 
 namespace yams::daemon {
 
@@ -33,8 +33,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
     }
 
     // Build config from request
-    integrity::PruneConfig config;
-    config.dryRun = req.dryRun;
+    app::services::PruneConfig config;
     config.categories = req.categories;
     config.extensions = req.extensions;
 
@@ -114,8 +113,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
     response.totalBytesFreed = 0;
 
     try {
-        auto candidates = integrity::RepairManager::queryCandidatesForPrune(
+        auto candidatesResult = app::services::queryPruneCandidates(
             *metaRepo, config, serviceManager_->getContentStore());
+        if (!candidatesResult) {
+            spdlog::error("Prune query failed: {}", candidatesResult.error().message);
+            co_return dispatch::makeErrorResponse(candidatesResult);
+        }
+        auto candidates = std::move(candidatesResult).value();
 
         // Aggregate by category for preview
         for (const auto& candidate : candidates) {

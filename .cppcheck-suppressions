@@ -71,7 +71,7 @@ syntaxError:*atomic_utils.h
 
 # C++20 ranges and other features
 syntaxError:*ui_helpers.hpp
-syntaxError:*repair_manager.h
+syntaxError:*block_repairer.h
 syntaxError:*mcp_server.cpp
 
 # nlohmann::json-heavy test inputs with "$prev" expressions trip cppcheck's parser.
