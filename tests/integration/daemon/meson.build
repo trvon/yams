@@ -92,9 +92,9 @@ else
     # "every selected case skipped" into exit 0, so a daemon that never started (or a filter
     # that matches nothing) passed silently. Most daemon IPC cases SKIP on Windows
     # (SKIP_DAEMON_TEST_ON_WINDOWS), and an all-skipped run exits 4, so those registrations are
-    # declared on POSIX only. tests/scripts/check_test_filters.py (catch2_filter_policy) fails any
-    # registration whose filter selects zero test cases.
-    _daemon_ipc_supported = host_machine.system() != 'windows'
+    # declared under daemon_ipc_supported (tests/meson.build) only.
+    # tests/scripts/check_test_filters.py (catch2_filter_policy) fails any registration whose
+    # filter selects zero test cases.
 
     daemon_catch2_exe = executable('yams_daemon_socket_tests_catch2',
       daemon_catch2_srcs,
@@ -107,7 +107,7 @@ else
     # Split socket tests into individual processes to avoid static pool state issues
     # Each test case creates/destroys a daemon, and static singletons (RepairThreadPool,
     # ConnectionRegistry) don't reset properly between runs, causing future_error crashes.
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('daemon_socket_connection_lifecycle',
         daemon_catch2_exe,
         suite: ['integration', 'daemon', 'catch2', 'socket'],
@@ -270,7 +270,7 @@ else
       install: false,
     )
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('daemon_harness_startup_rollback',
         daemon_harness_exe,
         suite: ['integration', 'daemon', 'catch2', 'harness'],
@@ -299,7 +299,7 @@ else
       args: ['DaemonHarness restores process state when configuration throws'],
     )
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('daemon_harness_config_lifecycle',
         daemon_harness_exe,
         suite: ['integration', 'daemon', 'catch2', 'harness'],
@@ -393,7 +393,7 @@ else
       install: false,
     )
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('post_ingest_queue_validation',
         post_ingest_queue_validation_exe,
         suite: ['integration', 'daemon', 'catch2', 'post-ingest', 'concurrency'],
@@ -405,7 +405,7 @@ else
 
     # Both benchmark cases SKIP on Windows; the first also SKIPs without a source corpus, the
     # second always runs, so the registration never reports all-skipped on POSIX.
-    if get_option('enable-bench-tests') and _daemon_ipc_supported
+    if get_option('enable-bench-tests') and daemon_ipc_supported
       post_ingest_queue_benchmark_exe = executable('yams_post_ingest_queue_benchmark',
         post_ingest_queue_benchmark_srcs,
         include_directories: incs,
@@ -431,7 +431,7 @@ else
       install: false,
     )
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('client_timeout_recovery',
         client_timeout_recovery_exe,
         suite: ['integration', 'daemon', 'catch2', 'timeout'],
@@ -451,7 +451,7 @@ else
       install: false,
     )
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('socket_memory_pressure',
         socket_memory_pressure_exe,
         suite: ['integration', 'daemon', 'catch2', 'socket', 'memory-pressure', 'crash'],
@@ -469,7 +469,7 @@ else
       install: false,
     )
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('daemon_db_corruption_recovery',
         daemon_db_corruption_recovery_exe,
         suite: ['integration', 'daemon', 'catch2', 'db-recovery'],
@@ -487,7 +487,7 @@ else
       install: false,
     )
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('cli_responsiveness_under_load',
         cli_responsiveness_under_load_exe,
         suite: ['integration', 'daemon', 'catch2', 'cli', 'responsiveness', 'load', 'concurrency'],
@@ -512,7 +512,7 @@ else
       install: false,
     )
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('ghidra_kg_entity_ingestion',
         ghidra_kg_entity_ingestion_exe,
         suite: ['integration', 'daemon', 'catch2', 'kg', 'ghidra'],
@@ -531,7 +531,7 @@ else
       install: false,
     )
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('codex_sandbox_embedding_regression',
         codex_sandbox_embedding_regression_exe,
         suite: ['integration', 'daemon', 'catch2', 'sandbox', 'embeddings'],
@@ -558,7 +558,7 @@ else
       install: false,
     )
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('proxy_slot_starvation',
         proxy_slot_starvation_exe,
         suite: ['integration', 'daemon', 'catch2', 'proxy', 'slots'],
@@ -604,7 +604,7 @@ else
       install: false,
     )
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('lifecycle_single_instance_lock',
         lifecycle_single_instance_exe,
         suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'single-instance'],
@@ -790,7 +790,7 @@ else
     # '[repair-hysteresis]~[slow]' registration selected zero cases and only the '[slow]' one ran.
     # The idle-connection case SKIPs on hosts that do not count silent sockets (macOS); the
     # cross-instance case always runs, so the registration never reports all-skipped.
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('lifecycle_repair_hysteresis',
         lifecycle_single_instance_exe,
         suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'repair', 'slow'],
@@ -815,7 +815,7 @@ else
     )
 
     # Split ONNX tuning tests into separate test cases to avoid state leakage
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('onnx_tuning_env_settings',
         onnx_tuning_integration_exe,
         suite: ['integration', 'daemon', 'catch2', 'onnx', 'tuning'],
@@ -909,7 +909,7 @@ else
     )
 
     # Split governor tests into separate test cases to avoid state leakage
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('resource_governor_status_metrics',
         resource_governor_integration_exe,
         suite: ['integration', 'daemon', 'catch2', 'governor', 'status'],
@@ -932,7 +932,7 @@ else
 
     # The pressure case SKIPs under UBSan (known Boost.Asio kqueue teardown race), so it is not
     # registered in UBSan builds rather than reporting an all-skipped run.
-    if _daemon_ipc_supported and not yams_sanitize_undefined
+    if daemon_ipc_supported and not yams_sanitize_undefined
       test('resource_governor_pressure_detection',
         resource_governor_integration_exe,
         suite: ['integration', 'daemon', 'catch2', 'governor', 'pressure'],
@@ -943,7 +943,7 @@ else
       )
     endif
 
-    if _daemon_ipc_supported
+    if daemon_ipc_supported
       test('resource_governor_scaling_caps',
         resource_governor_integration_exe,
         suite: ['integration', 'daemon', 'catch2', 'governor', 'scaling'],

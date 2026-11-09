@@ -471,6 +471,12 @@ if catch2_dep.found()
   )
 endif
 
+# One POSIX gate for every registration whose cases all SKIP or are compiled out on Windows
+# (daemon IPC, AF_UNIX socket pairs, fork). Catch2 exits 4 when every selected case is
+# skipped and the catch2_filter_policy guard rejects a registration that selects nothing, so
+# such registrations are not declared on Windows instead of passing --allow-running-no-tests.
+daemon_ipc_supported = host_machine.system() != 'windows'
+
 #Meson - native test registration via structured subdirs(no shell globs).
 #Unit tests are now individual Catch2 executables; tests / unit keeps only a
 #compatibility stub for older yams_unit_objs references.
@@ -3354,15 +3360,21 @@ if catch2_dep.found()
     timeout: 120
   )
 
-  test('hybrid_search_slow', hybrid_search_exe,
-    suite: ['catch2', 'slow', 'search', 'hybrid', 'concurrency'],
-    args: ['[slow]'],
-    env: {
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'YAMS_DISABLE_VECTORS': '1',
-    },
-    timeout: 120
-  )
+  # On Windows the source compiles only a stub case (no [slow]) unless the ONNX Runtime header
+  # it finds reports API >= 23. Meson cannot see which header that __has_include picks (and the
+  # Windows CI lane builds without ONNX, so the stub is what it gets), so '[slow]' would select
+  # zero cases there: POSIX only.
+  if daemon_ipc_supported
+    test('hybrid_search_slow', hybrid_search_exe,
+      suite: ['catch2', 'slow', 'search', 'hybrid', 'concurrency'],
+      args: ['[slow]'],
+      env: {
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'YAMS_DISABLE_VECTORS': '1',
+      },
+      timeout: 120
+    )
+  endif
 
   if not _test_address_sanitizer
     test('corpus_stats_search_integration', corpus_stats_search_integration_exe,
@@ -3472,7 +3484,7 @@ if catch2_dep.found()
   )
 
   # Every case forks and SKIPs on Windows; Catch2 exits 4 when all selected cases skip.
-  if host_machine.system() != 'windows'
+  if daemon_ipc_supported
     test('assert_val', catch2_assert_val_exe,
       suite: ['catch2', 'unit', 'core', 'assert'],
       env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -3550,7 +3562,7 @@ if catch2_dep.found()
   )
 
   # Every case SKIPs on Windows (the executor-drain case runs under UBSan/TSAN too).
-  if host_machine.system() != 'windows'
+  if daemon_ipc_supported
     test('in_process_transport', catch2_in_process_transport_exe,
       suite: ['catch2', 'unit', 'daemon', 'streaming', 'inprocess', 'concurrency'],
       env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -3598,19 +3610,22 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  test('socket_proxy_request_activity', catch2_socket_proxy_request_activity_exe,
-    suite: ['catch2', 'slow', 'daemon', 'socket', 'proxy', 'activity'],
-    env: {
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
-      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
-      'YAMS_TESTING': '1',
-    },
-    timeout: 120,
-    is_parallel: false
-  )
+  # The only case is inside #ifndef _WIN32: on Windows the binary has zero cases.
+  if daemon_ipc_supported
+    test('socket_proxy_request_activity', catch2_socket_proxy_request_activity_exe,
+      suite: ['catch2', 'slow', 'daemon', 'socket', 'proxy', 'activity'],
+      env: {
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+        'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+        'YAMS_TESTING': '1',
+      },
+      timeout: 120,
+      is_parallel: false
+    )
+  endif
 
-  if host_machine.system() != 'windows'
+  if daemon_ipc_supported
     test('socket_server_teardown', catch2_socket_server_teardown_exe,
       suite: ['catch2', 'unit', 'daemon', 'socket', 'shutdown'],
       env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -3795,8 +3810,7 @@ foreach t : catch2_test_table
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  if t.get('register', true) and (not t.get('posix_only', false)
-      or host_machine.system() != 'windows')
+  if t.get('register', true) and (not t.get('posix_only', false) or daemon_ipc_supported)
     test(t['name'], t_exe,
       suite: t['suite'],
       args: t.get('args', []),

@@ -34,7 +34,7 @@ else
     # Every case SKIPs on Windows (daemon IPC), and Catch2 reports an all-skipped run as exit 4,
     # so register it on POSIX only instead of passing --allow-running-no-tests (which would also
     # hide a filter or startup failure that selects/runs nothing).
-    if host_machine.system() != 'windows'
+    if daemon_ipc_supported
       test('hybrid_search_integration',
         hybrid_search_integration_exe,
         suite: ['integration', 'search', 'hybrid', 'semantic', 'catch2'],
@@ -81,7 +81,7 @@ else
     )
 
     # Every case SKIPs on Windows (daemon IPC): POSIX only, see hybrid_search_integration.
-    if host_machine.system() != 'windows'
+    if daemon_ipc_supported
       test('corpus_relevance',
         corpus_relevance_exe,
         suite: ['integration', 'search', 'relevance', 'fts', 'catch2'],
