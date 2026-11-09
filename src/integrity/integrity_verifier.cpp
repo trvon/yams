@@ -1,5 +1,5 @@
 #include <yams/crypto/hasher.h>
-#include <yams/integrity/repair_manager.h>
+#include <yams/integrity/block_repairer.h>
 #include <yams/integrity/verifier.h>
 
 #include <spdlog/spdlog.h>
@@ -152,7 +152,7 @@ struct IntegrityVerifier::Impl {
 
     // Monitoring
     std::unique_ptr<VerificationMonitor> monitor;
-    std::shared_ptr<RepairManager> repairManager;
+    std::shared_ptr<BlockRepairer> blockRepairer;
 
     // Statistics
     mutable IntegrityVerifier::Statistics stats;
@@ -198,9 +198,9 @@ struct IntegrityVerifier::Impl {
             }
 
             if (!existsResult.value()) {
-                if (config.enableAutoRepair && repairManager && repairManager->canRepair(hash)) {
+                if (config.enableAutoRepair && blockRepairer && blockRepairer->canRepair(hash)) {
                     stats.repairsAttemptedTotal++;
-                    if (repairManager->attemptRepair(hash)) {
+                    if (blockRepairer->attemptRepair(hash)) {
                         auto repairedData = storage.retrieve(hash);
                         if (repairedData.has_value()) {
                             hasher->init();
@@ -251,12 +251,12 @@ struct IntegrityVerifier::Impl {
                 result.errorDetails = "Hash mismatch: expected " + hash + ", got " + computedHash;
                 stats.verificationErrorsTotal++;
 
-                if (config.enableAutoRepair && repairManager && repairManager->canRepair(hash)) {
+                if (config.enableAutoRepair && blockRepairer && blockRepairer->canRepair(hash)) {
                     bool repaired = false;
                     for (size_t attempt = 0; attempt < config.maxRepairAttempts && !repaired;
                          ++attempt) {
                         stats.repairsAttemptedTotal++;
-                        if (!repairManager->attemptRepair(hash)) {
+                        if (!blockRepairer->attemptRepair(hash)) {
                             continue;
                         }
 
@@ -517,8 +517,8 @@ void IntegrityVerifier::updateConfig(const VerificationConfig& newConfig) {
     spdlog::info("Updated verification configuration");
 }
 
-void IntegrityVerifier::setRepairManager(std::shared_ptr<RepairManager> manager) {
-    pImpl->repairManager = std::move(manager);
+void IntegrityVerifier::setBlockRepairer(std::shared_ptr<BlockRepairer> repairer) {
+    pImpl->blockRepairer = std::move(repairer);
 }
 
 bool IntegrityVerifier::isRunning() const {

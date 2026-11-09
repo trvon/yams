@@ -8,15 +8,11 @@
 #include <string>
 #include <vector>
 
-namespace yams::metadata {
-class MetadataRepository;
-} // namespace yams::metadata
-
 namespace yams::integrity {
 
 enum class RepairStrategy { FromBackup, FromP2P, FromParity, FromManifest };
 
-struct RepairManagerConfig {
+struct BlockRepairerConfig {
     std::function<Result<std::vector<std::byte>>(const std::string&)> backupFetcher;
     std::function<Result<std::vector<std::byte>>(const std::string&)> p2pFetcher;
     std::function<Result<std::vector<std::byte>>(const std::string&)> parityReconstructor;
@@ -26,17 +22,14 @@ struct RepairManagerConfig {
                                                 RepairStrategy::FromManifest};
 };
 
-class RepairManager {
+/// Restores a missing or corrupt block from the configured sources (backup, P2P, parity,
+/// manifest), storing it only when the recovered bytes hash to the requested block hash.
+class BlockRepairer {
 public:
-    /// Constructor for repair-only operations
-    RepairManager(storage::IStorageEngine& storage, RepairManagerConfig config = {});
+    BlockRepairer(storage::IStorageEngine& storage, BlockRepairerConfig config = {});
 
-    /// Constructor with metadata repository
-    RepairManager(storage::IStorageEngine& storage, metadata::MetadataRepository& repo,
-                  RepairManagerConfig config = {});
-
-    RepairManager(const RepairManager&) = delete;
-    RepairManager& operator=(const RepairManager&) = delete;
+    BlockRepairer(const BlockRepairer&) = delete;
+    BlockRepairer& operator=(const BlockRepairer&) = delete;
 
     // Repair operations
     [[nodiscard]] bool attemptRepair(const std::string& blockHash,
@@ -49,11 +42,10 @@ private:
                                     const Result<std::vector<std::byte>>& fetchResult) const;
 
     storage::IStorageEngine* storage_{nullptr};
-    RepairManagerConfig config_;
-    metadata::MetadataRepository* repo_{nullptr};
+    BlockRepairerConfig config_;
 };
 
-std::shared_ptr<RepairManager> makeRepairManager(storage::IStorageEngine& storage,
-                                                 RepairManagerConfig config = {});
+std::shared_ptr<BlockRepairer> makeBlockRepairer(storage::IStorageEngine& storage,
+                                                 BlockRepairerConfig config = {});
 
 } // namespace yams::integrity

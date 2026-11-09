@@ -1,6 +1,5 @@
 #include <yams/crypto/hasher.h>
-#include <yams/integrity/repair_manager.h>
-#include <yams/metadata/metadata_repository.h>
+#include <yams/integrity/block_repairer.h>
 
 #include <spdlog/spdlog.h>
 
@@ -8,14 +7,10 @@
 
 namespace yams::integrity {
 
-RepairManager::RepairManager(storage::IStorageEngine& storage, RepairManagerConfig config)
-    : storage_(&storage), config_(std::move(config)), repo_(nullptr) {}
+BlockRepairer::BlockRepairer(storage::IStorageEngine& storage, BlockRepairerConfig config)
+    : storage_(&storage), config_(std::move(config)) {}
 
-RepairManager::RepairManager(storage::IStorageEngine& storage, metadata::MetadataRepository& repo,
-                             RepairManagerConfig config)
-    : storage_(&storage), config_(std::move(config)), repo_(&repo) {}
-
-bool RepairManager::attemptRepair(const std::string& blockHash,
+bool BlockRepairer::attemptRepair(const std::string& blockHash,
                                   const std::vector<RepairStrategy>& order) {
     const auto& strategies = order.empty() ? config_.defaultOrder : order;
     for (auto strategy : strategies) {
@@ -69,13 +64,13 @@ bool RepairManager::attemptRepair(const std::string& blockHash,
     return false;
 }
 
-bool RepairManager::canRepair(const std::string& blockHash) const {
+bool BlockRepairer::canRepair(const std::string& blockHash) const {
     (void)blockHash;
     return config_.backupFetcher || config_.p2pFetcher || config_.parityReconstructor ||
            config_.manifestReconstructor;
 }
 
-bool RepairManager::storeIfValid(const std::string& blockHash,
+bool BlockRepairer::storeIfValid(const std::string& blockHash,
                                  const Result<std::vector<std::byte>>& fetchResult) const {
     if (!storage_) {
         spdlog::error("Storage engine not available for repair");
@@ -110,9 +105,9 @@ bool RepairManager::storeIfValid(const std::string& blockHash,
     return true;
 }
 
-std::shared_ptr<RepairManager> makeRepairManager(storage::IStorageEngine& storage,
-                                                 RepairManagerConfig config) {
-    return std::make_shared<RepairManager>(storage, std::move(config));
+std::shared_ptr<BlockRepairer> makeBlockRepairer(storage::IStorageEngine& storage,
+                                                 BlockRepairerConfig config) {
+    return std::make_shared<BlockRepairer>(storage, std::move(config));
 }
 
 } // namespace yams::integrity

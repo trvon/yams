@@ -2969,7 +2969,7 @@ if catch2_dep.found()
       'unit/integrity/chunk_validator_test.cpp',
       'unit/integrity/integrity_verifier_simple_test.cpp',
       'unit/integrity/integrity_verifier_catch2_test.cpp',
-      'unit/integrity/repair_manager_test.cpp',
+      'unit/integrity/block_repairer_catch2_test.cpp',
       'unit/integrity/verification_monitor_test.cpp',
       'unit/integrity/verification_scheduler_test.cpp',
     ),
