@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -212,21 +213,25 @@ uint64_t approximateBlockCount(sqlite3* db) {
 }
 
 // On-disk size is the stored size; a valid compression header names the uncompressed size.
-int64_t uncompressedSizeOf(const fs::path& path, int64_t diskSize, std::vector<std::byte>& buffer,
-                           BlockRefsRepairResult& result) {
+// Returns nullopt when an object large enough to carry a header cannot be read: guessing
+// "uncompressed" there could overwrite a correct compressed row.
+std::optional<int64_t> uncompressedSizeOf(const fs::path& path, int64_t diskSize,
+                                          std::vector<std::byte>& buffer,
+                                          BlockRefsRepairResult& result) {
     if (diskSize >= static_cast<int64_t>(compression::CompressionHeader::SIZE)) {
         std::ifstream file(path, std::ios::binary);
-        if (file) {
-            file.read(reinterpret_cast<char*>(buffer.data()),
-                      static_cast<std::streamsize>(compression::CompressionHeader::SIZE));
-            if (file.gcount() ==
-                static_cast<std::streamsize>(compression::CompressionHeader::SIZE)) {
-                auto header = compression::CompressionHeader::parse(buffer);
-                if (header && header.value().validate()) {
-                    result.compressedBlocks++;
-                    return static_cast<int64_t>(header.value().uncompressedSize);
-                }
-            }
+        if (!file) {
+            return std::nullopt;
+        }
+        file.read(reinterpret_cast<char*>(buffer.data()),
+                  static_cast<std::streamsize>(compression::CompressionHeader::SIZE));
+        if (file.gcount() != static_cast<std::streamsize>(compression::CompressionHeader::SIZE)) {
+            return std::nullopt;
+        }
+        auto header = compression::CompressionHeader::parse(buffer);
+        if (header && header.value().validate()) {
+            result.compressedBlocks++;
+            return static_cast<int64_t>(header.value().uncompressedSize);
         }
     }
     result.uncompressedBlocks++;
@@ -313,7 +318,8 @@ Result<BlockRefsRepairResult> repairBlockReferences(const fs::path& objectsPath,
         if (auto r = applyDelta(db.get(), addStatStmt.get(), delta); !r) {
             return r;
         }
-        if (last && result.blocksUpdated > 0) {
+        // Always on the final batch: cached totals can be stale even when every row is right.
+        if (last) {
             if (auto r =
                     exec(db.get(), kRecomputeStatisticsSql, "Failed to recompute ref_statistics");
                 !r) {
@@ -396,9 +402,17 @@ Result<BlockRefsRepairResult> repairBlockReferences(const fs::path& objectsPath,
             } else {
                 result.blocksScanned++;
                 const auto diskSize = static_cast<int64_t>(rawSize);
-                result.totalDiskBytes += static_cast<uint64_t>(diskSize);
-                const int64_t uncompressedSize =
+                const auto readSize =
                     uncompressedSizeOf(objectPath, diskSize, headerBuffer, result);
+                if (!readSize) {
+                    // Unreadable (permissions, I/O error): leave its row alone.
+                    result.errors++;
+                    spdlog::warn("Block refs repair: cannot read header of {}; row left unchanged",
+                                 blockHash.substr(0, 8));
+                    continue;
+                }
+                const int64_t uncompressedSize = *readSize;
+                result.totalDiskBytes += static_cast<uint64_t>(diskSize);
                 result.totalUncompressedBytes += static_cast<uint64_t>(uncompressedSize);
 
                 auto outcome = reconcileRow(db.get(), select, updateStmt.get(), blockHash, diskSize,

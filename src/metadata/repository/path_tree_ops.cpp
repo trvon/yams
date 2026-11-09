@@ -304,6 +304,7 @@ namespace {
 struct PathTreeWindowDoc {
     int64_t id{0};
     std::string filePath;
+    std::uint64_t position{0}; // documents examined before this one in the window
 };
 
 // Reads the window and fills `window`; `missing` receives the missing documents' paths.
@@ -336,7 +337,9 @@ Result<void> scanPathTreeWindowInDb(Database& db, int64_t afterId, std::size_t w
                                      "JOIN path_tree_node_documents l ON l.node_id = p.node_id "
                                      "WHERE p.full_path = ? AND l.document_id = ? LIMIT 1"));
     auto& linkStmt = *linkHolder;
-    for (auto& doc : docs) {
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        auto& doc = docs[i];
+        doc.position = i;
         const auto leaf = repository::pathTreeLeafPath(doc.filePath);
         if (leaf.empty())
             continue; // no segments: nothing to link
@@ -368,7 +371,8 @@ MetadataRepository::scanPathTreeWindow(std::int64_t afterId, std::size_t windowS
 }
 
 Result<MetadataRepository::PathTreeRepairWindow>
-MetadataRepository::repairPathTreeWindow(std::int64_t afterId, std::size_t windowSize) {
+MetadataRepository::repairPathTreeWindow(std::int64_t afterId, std::size_t windowSize,
+                                         const std::function<bool()>& shouldAbort) {
     if (windowSize == 0)
         return Error{ErrorCode::InvalidArgument, "path tree scan window must be positive"};
     return executeQuery<PathTreeRepairWindow>([&](Database& db) -> Result<PathTreeRepairWindow> {
@@ -384,7 +388,16 @@ MetadataRepository::repairPathTreeWindow(std::int64_t afterId, std::size_t windo
         std::vector<PathTreeWindowDoc> missing;
         YAMS_TRY(scanPathTreeWindowInDb(db, afterId, windowSize, window, &missing));
 
-        for (const auto& doc : missing) {
+        for (std::size_t k = 0; k < missing.size(); ++k) {
+            const auto& doc = missing[k];
+            if (shouldAbort && shouldAbort()) {
+                // Report only what was handled; the next window starts at this document.
+                window.aborted = true;
+                window.scanned = doc.position;
+                window.lastScannedId = doc.id - 1;
+                window.missingIds.resize(k);
+                break;
+            }
             YAMS_TRY(db.execute("SAVEPOINT yams_path_tree_repair"));
             DocumentInfo info;
             info.id = doc.id;

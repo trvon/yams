@@ -1,8 +1,8 @@
-#include <CLI/CLI.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <CLI/CLI.hpp>
 
 #include <yams/crypto/hasher.h>
-#include <yams/integrity/repair_manager.h>
+#include <yams/integrity/block_repairer.h>
 #include <yams/integrity/verifier.h>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
@@ -66,8 +66,8 @@ TEST_CASE("IntegrationSmoke.IntegrityAutoRepair_FromBackupDir", "[smoke][integra
     vcfg.maxRepairAttempts = 1;
     IntegrityVerifier verifier(storage, static_cast<storage::ReferenceCounter&>(*refCounter), vcfg);
 
-    // Wire RepairManager with a backup fetcher to our backup dir
-    RepairManagerConfig rmCfg;
+    // Wire BlockRepairer with a backup fetcher to our backup dir
+    BlockRepairerConfig rmCfg;
     rmCfg.backupFetcher = [&](const std::string& requested) -> Result<std::vector<std::byte>> {
         fs::path p = temp / "backup" / requested;
         if (!fs::exists(p))
@@ -78,8 +78,8 @@ TEST_CASE("IntegrationSmoke.IntegrityAutoRepair_FromBackupDir", "[smoke][integra
         std::memcpy(out.data(), buf.data(), buf.size());
         return out;
     };
-    auto rm = makeRepairManager(storage, rmCfg);
-    verifier.setRepairManager(rm);
+    auto rm = makeBlockRepairer(storage, rmCfg);
+    verifier.setBlockRepairer(rm);
 
     // Verify the block: should be repaired
     auto result = verifier.verifyBlock(hash);
@@ -124,7 +124,7 @@ TEST_CASE("IntegrationSmoke.IntegrityAutoRepair_FromP2PDir", "[smoke][integratio
     vcfg.enableAutoRepair = true;
     IntegrityVerifier verifier(storage, static_cast<storage::ReferenceCounter&>(*refCounter), vcfg);
 
-    RepairManagerConfig rmCfg;
+    BlockRepairerConfig rmCfg;
     rmCfg.p2pFetcher = [&](const std::string& requested) -> Result<std::vector<std::byte>> {
         fs::path p = temp / "p2p" / requested;
         if (!fs::exists(p))
@@ -135,7 +135,7 @@ TEST_CASE("IntegrationSmoke.IntegrityAutoRepair_FromP2PDir", "[smoke][integratio
         std::memcpy(out.data(), buf.data(), buf.size());
         return out;
     };
-    verifier.setRepairManager(makeRepairManager(storage, rmCfg));
+    verifier.setBlockRepairer(makeBlockRepairer(storage, rmCfg));
 
     auto result = verifier.verifyBlock(hash);
     CHECK(result.status == VerificationStatus::Repaired);
@@ -217,7 +217,7 @@ TEST_CASE("IntegrationSmoke.VerifyCLIRepairsFromBackupFlag", "[smoke][integratio
     IntegrityVerifier verifier(storageEngine,
                                static_cast<storage::ReferenceCounter&>(*refCounterPtr), vcfg);
 
-    RepairManagerConfig rmCfg;
+    BlockRepairerConfig rmCfg;
     rmCfg.backupFetcher =
         [backupRoot](const std::string& requested) -> Result<std::vector<std::byte>> {
         fs::path p = backupRoot / requested;
@@ -231,7 +231,7 @@ TEST_CASE("IntegrationSmoke.VerifyCLIRepairsFromBackupFlag", "[smoke][integratio
         std::memcpy(out.data(), buf.data(), buf.size());
         return out;
     };
-    verifier.setRepairManager(makeRepairManager(storageEngine, rmCfg));
+    verifier.setBlockRepairer(makeBlockRepairer(storageEngine, rmCfg));
 
     auto result = verifier.verifyBlock(hashArg);
     CHECK(result.status == VerificationStatus::Repaired);

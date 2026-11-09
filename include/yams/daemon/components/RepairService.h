@@ -109,7 +109,6 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services);
  *  - Background scan + detect + repair loop (runs continuously)
  *  - On-demand repair triggered by RPC (RepairRequest)
  *  - Stuck-document recovery (failed extraction, ghost success, stalled)
- *  - Delegates to RepairManager for block-level operations
  *  - Delegates to InternalEventBus for embedding / FTS5 jobs
  */
 // Progress of the startup repair scan across queue drains. Positions are document ids (the scan
@@ -348,6 +347,12 @@ public:
     std::optional<metadata::PathTreeRepairStats> testing_runPathTreeRepairBatch() {
         return runPathTreeRepairBatch();
     }
+    /// Hold or release the on-demand repair gate as an executing RPC repair would.
+    bool testing_claimRepairGate() {
+        bool expected = false;
+        return repairInProgress_.compare_exchange_strong(expected, true);
+    }
+    void testing_releaseRepairGate() { repairInProgress_.store(false); }
     /// Run the on-demand path-tree repair (`yams repair --path-tree`).
     RepairOperationResult testing_rebuildPathTree(bool dryRun, const ProgressFn& progress,
                                                   std::atomic<bool>* cancelRequested) {
@@ -524,9 +529,16 @@ private:
     std::int64_t pathTreeRepairCursor_{0};
     metadata::PathTreeRepairStats pathTreeRepairPass_{};
     std::chrono::steady_clock::time_point nextPathTreeRepair_{};
-    // Held by a background batch (try_lock) and by on-demand `repair --path-tree` (lock), so
-    // the two never write the path tree at the same time. Never held across a co_await.
-    std::mutex pathTreeRepairMutex_;
+    // Held for the duration of a background batch and of on-demand `repair --path-tree`, so
+    // stop() can wait (bounded) for an in-flight batch. Never held across a co_await.
+    std::timed_mutex pathTreeRepairMutex_;
+    // True while a background maintenance batch holds the on-demand repair gate
+    // (repairInProgress_); on-demand requests that find the gate taken say so.
+    std::atomic<bool> maintenanceHoldsRepairGate_{false};
+    // Claims repairInProgress_ for a background batch; false when an on-demand repair holds it.
+    bool claimRepairGateForMaintenance() noexcept;
+    void releaseRepairGateForMaintenance() noexcept;
+    std::string repairBusyMessage() const;
 
     // ── Detect missing work ──
     struct MissingWorkResult {

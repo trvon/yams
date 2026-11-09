@@ -144,6 +144,42 @@ struct VectorSchemaRepairFixture {
         sqlite3* db = nullptr;
     };
 
+    // One simeon_pq_meta row and one simeon_pq_codes row at `dim` (tables must already exist).
+    void seedPq(std::size_t dim) const {
+        RawDb raw(dbPath());
+        const auto d = std::to_string(dim);
+        const std::string meta =
+            "INSERT OR REPLACE INTO simeon_pq_meta (dim, m, k, seed, rerank_factor, vector_count, "
+            "codebooks_blob) VALUES (" +
+            d + ", 4, 16, 1, 2, 1, x'00')";
+        const std::string codes =
+            "INSERT OR REPLACE INTO simeon_pq_codes (dim, rowid, code) VALUES (" + d +
+            ", 1, x'00')";
+        raw.exec(meta.c_str());
+        raw.exec(codes.c_str());
+    }
+
+    struct PqSnapshot {
+        bool metaTable = false;
+        bool codesTable = false;
+        std::int64_t metaRows = 0;
+        std::int64_t codesRows = 0;
+    };
+
+    PqSnapshot pqSnapshot() const {
+        RawDb raw(dbPath());
+        PqSnapshot s;
+        s.metaTable = raw.integer("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "
+                                  "name='simeon_pq_meta'") == 1;
+        s.codesTable = raw.integer("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "
+                                   "name='simeon_pq_codes'") == 1;
+        if (s.metaTable)
+            s.metaRows = raw.integer("SELECT COUNT(*) FROM simeon_pq_meta");
+        if (s.codesTable)
+            s.codesRows = raw.integer("SELECT COUNT(*) FROM simeon_pq_codes");
+        return s;
+    }
+
     std::int64_t structuralGeneration() const {
         RawDb raw(dbPath());
         return raw.integer(
@@ -352,6 +388,57 @@ TEST_CASE_METHOD(VectorSchemaRepairFixture,
 
     RawDb raw(dbPath());
     CHECK(raw.integer("SELECT COUNT(*) FROM vectors") == 1);
+}
+
+TEST_CASE_METHOD(VectorSchemaRepairFixture,
+                 "ensureVectorSchemaAligned treats the Simeon PQ tables as one group",
+                 "[unit][vector][schema-repair][simeon-pq][catch2]") {
+    SECTION("stale vectors take the PQ group with them") {
+        seed(8);
+        seedPq(8);
+        REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/true).has_value());
+        const auto pq = pqSnapshot();
+        CHECK(pq.metaTable);
+        CHECK(pq.codesTable);
+        CHECK(pq.metaRows == 0);
+        CHECK(pq.codesRows == 0);
+        CHECK(snapshot().rows == 0);
+    }
+    SECTION("stale entity_vectors leave a matching PQ group alone") {
+        seedMixed(/*vectorsDim=*/16, /*entityDim=*/8);
+        seedPq(16);
+        REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/true).has_value());
+        const auto pq = pqSnapshot();
+        CHECK(pq.metaRows == 1);
+        CHECK(pq.codesRows == 1);
+        const auto s = snapshot();
+        CHECK(s.rows == 1);
+        CHECK(s.entityRows == 0);
+    }
+    SECTION("a stale PQ group alone is dropped without touching vectors") {
+        seed(16);
+        seedPq(8);
+        const auto generation = structuralGeneration();
+        REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/true).has_value());
+        const auto pq = pqSnapshot();
+        CHECK(pq.metaTable);
+        CHECK(pq.codesTable);
+        CHECK(pq.metaRows == 0);
+        CHECK(pq.codesRows == 0);
+        const auto s = snapshot();
+        CHECK(s.rows == 1);
+        CHECK(s.storedDim == std::optional<std::size_t>{16});
+        CHECK(structuralGeneration() == generation);
+    }
+    SECTION("recreate off leaves a stale PQ group untouched") {
+        seed(16);
+        seedPq(8);
+        REQUIRE(ensureVectorSchemaAligned(dataDir, 16, /*recreateIfMismatch=*/false).has_value());
+        const auto pq = pqSnapshot();
+        CHECK(pq.metaRows == 1);
+        CHECK(pq.codesRows == 1);
+        CHECK(snapshot().rows == 1);
+    }
 }
 
 TEST_CASE_METHOD(VectorSchemaRepairFixture,

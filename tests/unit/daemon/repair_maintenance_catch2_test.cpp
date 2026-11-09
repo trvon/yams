@@ -492,13 +492,44 @@ TEST_CASE("RepairService maintenance restores missing path-tree nodes in batches
     REQUIRE(missing() == 5);
 
     std::size_t activeConnections = 0;
+    // Set by a section to issue an on-demand repair while the background batch is running.
+    RepairService* probeService = nullptr;
+    std::optional<RepairResponse> probeResponse;
     RepairServiceContext ctx;
-    ctx.getMetadataRepo = [repo] { return repo; };
+    ctx.getMetadataRepo = [repo, &probeService, &probeResponse] {
+        if (probeService && !probeResponse) {
+            RepairRequest request;
+            request.repairPathTree = true;
+            probeResponse = probeService->executeRepair(request, {});
+        }
+        return repo;
+    };
     RepairService::Config cfg;
     cfg.enable = true;
     cfg.pathTreeRepairBatch = 2;
     StateComponent state;
     RepairService service(ctx, &state, [&activeConnections] { return activeConnections; }, cfg);
+
+    SECTION("an on-demand repair holding the gate defers it") {
+        REQUIRE(service.testing_claimRepairGate());
+        CHECK_FALSE(service.testing_runPathTreeRepairBatch().has_value());
+        CHECK(missing() == 5);
+        service.testing_releaseRepairGate();
+        CHECK(service.testing_runPathTreeRepairBatch().has_value());
+        CHECK(missing() == 3);
+    }
+    SECTION("a running batch holds the gate, so an on-demand repair is told to retry") {
+        probeService = &service;
+        auto batch = service.testing_runPathTreeRepairBatch();
+        REQUIRE(batch.has_value());
+        REQUIRE(probeResponse.has_value());
+        CHECK_FALSE(probeResponse->success);
+        REQUIRE(probeResponse->errors.size() == 1);
+        CHECK(probeResponse->errors.front().find("Retry") != std::string::npos);
+        CHECK(missing() == 3); // only the background batch wrote
+        // The gate is released once the batch returns.
+        CHECK_FALSE(service.isRepairInProgress());
+    }
 
     SECTION("a connected client defers it") {
         activeConnections = 1;

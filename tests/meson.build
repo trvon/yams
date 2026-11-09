@@ -2975,7 +2975,7 @@ if catch2_dep.found()
       'unit/integrity/chunk_validator_test.cpp',
       'unit/integrity/integrity_verifier_simple_test.cpp',
       'unit/integrity/integrity_verifier_catch2_test.cpp',
-      'unit/integrity/repair_manager_test.cpp',
+      'unit/integrity/block_repairer_catch2_test.cpp',
       'unit/integrity/verification_monitor_test.cpp',
       'unit/integrity/verification_scheduler_test.cpp',
     ),
@@ -3199,6 +3199,15 @@ if catch2_dep.found()
     'suite': ['catch2', 'unit', 'services', 'utilities'],
     'timeout': 60,
     'is_parallel': false,
+  }]
+
+  catch2_test_table += [{
+    'name': 'prune_planner',
+    'target': 'prune_planner',
+    'sources': files('unit/app/services/prune_planner_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'prune'],
+    'timeout': 30,
   }]
 
   catch2_test_table += [{

@@ -26,7 +26,6 @@
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/extraction/extraction_util.h>
-#include <yams/integrity/repair_manager.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_tree_repair.h>
@@ -417,6 +416,14 @@ void RepairService::stop() {
         std::unique_lock<std::mutex> lk(activeRepairMutex_);
         activeRepairCv_.wait_for(lk, std::chrono::milliseconds(5000),
                                  [this] { return activeRepairExecutions_ == 0; });
+    }
+    {
+        // A path-tree batch checks the stop flags before every document, so this wait is
+        // short; it is bounded anyway.
+        std::unique_lock<std::timed_mutex> lk(pathTreeRepairMutex_, std::defer_lock);
+        if (!lk.try_lock_for(std::chrono::milliseconds(5000))) {
+            spdlog::warn("RepairService: path-tree repair still running at shutdown");
+        }
     }
     spdlog::debug("RepairService stopped");
 }
@@ -1182,6 +1189,29 @@ RepairService::PathTreeRepairSignals RepairService::collectPathTreeRepairSignals
     return signals;
 }
 
+bool RepairService::claimRepairGateForMaintenance() noexcept {
+    bool expected = false;
+    maintenanceHoldsRepairGate_.store(true, std::memory_order_release);
+    if (!repairInProgress_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        maintenanceHoldsRepairGate_.store(false, std::memory_order_release);
+        return false;
+    }
+    return true;
+}
+
+void RepairService::releaseRepairGateForMaintenance() noexcept {
+    repairInProgress_.store(false, std::memory_order_release);
+    maintenanceHoldsRepairGate_.store(false, std::memory_order_release);
+}
+
+std::string RepairService::repairBusyMessage() const {
+    if (maintenanceHoldsRepairGate_.load(std::memory_order_acquire)) {
+        return "Background repair maintenance (path-tree repair) is running. Retry in a few "
+               "seconds.";
+    }
+    return "Repair is already in progress. Please wait for the current run to finish.";
+}
+
 std::optional<metadata::PathTreeRepairStats> RepairService::runPathTreeRepairBatch() {
     YAMS_ZONE_SCOPED_N("RepairSvc::runPathTreeRepairBatch");
     using namespace std::chrono_literals;
@@ -1192,8 +1222,17 @@ std::optional<metadata::PathTreeRepairStats> RepairService::runPathTreeRepairBat
         nextPathTreeRepair_ = std::chrono::steady_clock::now() + refusedBackoff;
         return std::nullopt;
     }
-    // An on-demand `repair --path-tree` owns the path tree; try again later.
-    std::unique_lock<std::mutex> exclusive(pathTreeRepairMutex_, std::try_to_lock);
+    // Reserve the on-demand repair gate for the batch, so no `yams repair` starts while it
+    // writes; such a request is rejected with a retry hint (the batch is one bounded window).
+    if (!claimRepairGateForMaintenance()) {
+        nextPathTreeRepair_ = std::chrono::steady_clock::now() + refusedBackoff;
+        return std::nullopt;
+    }
+    struct GateRelease {
+        RepairService* self;
+        ~GateRelease() { self->releaseRepairGateForMaintenance(); }
+    } gateRelease{this};
+    std::unique_lock<std::timed_mutex> exclusive(pathTreeRepairMutex_, std::try_to_lock);
     if (!exclusive.owns_lock()) {
         nextPathTreeRepair_ = std::chrono::steady_clock::now() + refusedBackoff;
         return std::nullopt;
@@ -1208,6 +1247,12 @@ std::optional<metadata::PathTreeRepairStats> RepairService::runPathTreeRepairBat
     options.batchSize = std::max<std::size_t>(1, cfg_.pathTreeRepairBatch);
     options.startAfterId = pathTreeRepairCursor_;
     options.maxBatches = 1; // yield to the loop between batches
+    // Stop mid-window on shutdown; what is done commits and the cursor resumes after it.
+    // stop() clears shutdownState_->running; running_ only says the loop was started, so it is not
+    // a stop signal (it is false whenever the batch runs outside the loop).
+    options.shouldAbort = [this] {
+        return shutdownState_ && !shutdownState_->running.load(std::memory_order_acquire);
+    };
     const auto step = metadata::repairMissingPathTree(*repo, options);
     const auto now = std::chrono::steady_clock::now();
     if (step.error) {
@@ -1750,8 +1795,7 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
     if (!executionGuard) {
         RepairResponse busy;
         busy.success = false;
-        busy.errors.push_back(
-            "Repair is already in progress. Please wait for the current run to finish.");
+        busy.errors.push_back(repairBusyMessage());
         spdlog::info("[RepairService] executeRepair rejected: repair already in progress");
         return busy;
     }
@@ -1777,8 +1821,7 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
     if (!executionGuard) {
         RepairResponse busy;
         busy.success = false;
-        busy.errors.push_back(
-            "Repair is already in progress. Please wait for the current run to finish.");
+        busy.errors.push_back(repairBusyMessage());
         spdlog::info("[RepairService] executeRepairAsync rejected: repair already in progress");
         co_return busy;
     }
@@ -2672,13 +2715,18 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, const Progress
         return result;
     }
 
-    // Waits for an in-flight background batch (one bounded window) to finish.
-    std::lock_guard<std::mutex> exclusive(pathTreeRepairMutex_);
+    // The background batch cannot start while this request holds the repair gate; the lock
+    // lets stop() wait for this pass.
+    std::lock_guard<std::timed_mutex> exclusive(pathTreeRepairMutex_);
 
     // The on-demand repair runs a full pass; only the background pass works in slices.
     metadata::PathTreeRepairOptions options;
     options.shouldContinue = [cancelRequested] {
         return !(cancelRequested && cancelRequested->load(std::memory_order_relaxed));
+    };
+    options.shouldAbort = [this, cancelRequested] {
+        return (cancelRequested && cancelRequested->load(std::memory_order_relaxed)) ||
+               (shutdownState_ && !shutdownState_->running.load(std::memory_order_acquire));
     };
     const auto stats = metadata::repairMissingPathTree(
         *concreteRepo, options, [&progress](const metadata::PathTreeRepairStats& running) {

@@ -24,7 +24,8 @@ PathTreeRepairStats repairMissingPathTree(MetadataRepository& repo,
             break;
         }
 
-        auto batch = repo.repairPathTreeWindow(stats.lastDocumentId, options.batchSize);
+        auto batch =
+            repo.repairPathTreeWindow(stats.lastDocumentId, options.batchSize, options.shouldAbort);
         if (!batch) {
             spdlog::warn("Path tree repair: batch after document {} failed: {}",
                          stats.lastDocumentId, batch.error().message);
@@ -33,7 +34,7 @@ PathTreeRepairStats repairMissingPathTree(MetadataRepository& repo,
         }
 
         const auto& window = batch.value();
-        if (window.scanned == 0) {
+        if (!window.aborted && window.scanned == 0) {
             stats.finished = true;
             break;
         }
@@ -47,6 +48,9 @@ PathTreeRepairStats repairMissingPathTree(MetadataRepository& repo,
 
         if (progress) {
             progress(stats);
+        }
+        if (window.aborted) {
+            break;
         }
 
         // A short window means the table ended inside it; skip the empty follow-up query.

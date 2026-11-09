@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/crypto/hasher.h>
-#include <yams/integrity/repair_manager.h>
+#include <yams/integrity/block_repairer.h>
 #include <yams/storage/storage_engine.h>
 
 #include <chrono>
@@ -46,8 +46,8 @@ struct RepairFixture {
     TempDir tempDir;
     StorageConfig storageConfig;
     std::unique_ptr<StorageEngine> storage;
-    RepairManagerConfig repairConfig;
-    std::unique_ptr<RepairManager> manager;
+    BlockRepairerConfig repairConfig;
+    std::unique_ptr<BlockRepairer> manager;
 
     RepairFixture() {
         storageConfig.basePath = tempDir.path / "storage";
@@ -63,7 +63,7 @@ struct RepairFixture {
             return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
         };
 
-        manager = std::make_unique<RepairManager>(*storage, repairConfig);
+        manager = std::make_unique<BlockRepairer>(*storage, repairConfig);
     }
 
     void storeTestData(const std::string& hash, const std::string& data) {
@@ -74,7 +74,7 @@ struct RepairFixture {
 
 } // namespace
 
-TEST_CASE_METHOD(RepairFixture, "RepairManager basic operations", "[integrity][repair]") {
+TEST_CASE_METHOD(RepairFixture, "BlockRepairer basic operations", "[integrity][repair]") {
     SECTION("canRepair checks availability of repair sources") {
         // canRepair returns true when repair sources are configured,
         // even if the block doesn't exist (it checks capability, not block existence)
@@ -90,14 +90,14 @@ TEST_CASE_METHOD(RepairFixture, "RepairManager basic operations", "[integrity][r
     }
 }
 
-TEST_CASE("RepairManager with working backup fetcher", "[integrity][repair]") {
+TEST_CASE("BlockRepairer with working backup fetcher", "[integrity][repair]") {
     TempDir tempDir;
     StorageConfig storageConfig;
     storageConfig.basePath = tempDir.path / "storage";
     std::filesystem::create_directories(storageConfig.basePath);
     StorageEngine storage(storageConfig);
 
-    RepairManagerConfig config;
+    BlockRepairerConfig config;
     config.backupFetcher = [](const std::string& hash) -> yams::Result<std::vector<std::byte>> {
         if (hash == "recoverable-hash") {
             std::string data = "recovered data";
@@ -108,7 +108,7 @@ TEST_CASE("RepairManager with working backup fetcher", "[integrity][repair]") {
         return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
     };
 
-    RepairManager manager(storage, config);
+    BlockRepairer manager(storage, config);
 
     SECTION("attemptRepair succeeds when backup fetcher returns data") {
         // The repair should attempt to use the backup fetcher
@@ -118,7 +118,7 @@ TEST_CASE("RepairManager with working backup fetcher", "[integrity][repair]") {
     }
 }
 
-TEST_CASE("RepairManager repair strategy order", "[integrity][repair]") {
+TEST_CASE("BlockRepairer repair strategy order", "[integrity][repair]") {
     TempDir tempDir;
     StorageConfig storageConfig;
     storageConfig.basePath = tempDir.path / "storage";
@@ -127,7 +127,7 @@ TEST_CASE("RepairManager repair strategy order", "[integrity][repair]") {
 
     std::vector<std::string> callOrder;
 
-    RepairManagerConfig config;
+    BlockRepairerConfig config;
     config.backupFetcher =
         [&callOrder](const std::string&) -> yams::Result<std::vector<std::byte>> {
         callOrder.push_back("backup");
@@ -139,7 +139,7 @@ TEST_CASE("RepairManager repair strategy order", "[integrity][repair]") {
     };
     config.defaultOrder = {RepairStrategy::FromBackup, RepairStrategy::FromP2P};
 
-    RepairManager manager(storage, config);
+    BlockRepairer manager(storage, config);
 
     SECTION("attempts repair strategies in configured order") {
         (void)manager.attemptRepair("some-hash");
@@ -151,7 +151,7 @@ TEST_CASE("RepairManager repair strategy order", "[integrity][repair]") {
     }
 }
 
-TEST_CASE("RepairManager rejects P2P data with wrong hash", "[integrity][repair]") {
+TEST_CASE("BlockRepairer rejects P2P data with wrong hash", "[integrity][repair]") {
     TempDir tempDir;
     StorageConfig storageConfig;
     storageConfig.basePath = tempDir.path / "storage";
@@ -162,7 +162,7 @@ TEST_CASE("RepairManager rejects P2P data with wrong hash", "[integrity][repair]
         "a1b2c3d4e5f60001112223334444555566667777888899990000aaaabbbbcccc";
     std::string wrongData = "wrong data that produces a different hash";
 
-    RepairManagerConfig config;
+    BlockRepairerConfig config;
     config.backupFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
         return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
     };
@@ -171,14 +171,14 @@ TEST_CASE("RepairManager rejects P2P data with wrong hash", "[integrity][repair]
     };
     config.defaultOrder = {RepairStrategy::FromP2P};
 
-    RepairManager manager(storage, config);
+    BlockRepairer manager(storage, config);
     auto repaired = manager.attemptRepair(targetHash);
     CHECK_FALSE(repaired);
 
     CHECK_FALSE(storage.exists(targetHash).value());
 }
 
-TEST_CASE("RepairManager recovers block from P2P with verified hash", "[integrity][repair]") {
+TEST_CASE("BlockRepairer recovers block from P2P with verified hash", "[integrity][repair]") {
     TempDir tempDir;
     StorageConfig storageConfig;
     storageConfig.basePath = tempDir.path / "storage";
@@ -194,7 +194,7 @@ TEST_CASE("RepairManager recovers block from P2P with verified hash", "[integrit
         recoveryHash = hasher->hash(bytes);
     }
 
-    RepairManagerConfig config;
+    BlockRepairerConfig config;
     config.backupFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
         return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
     };
@@ -204,7 +204,7 @@ TEST_CASE("RepairManager recovers block from P2P with verified hash", "[integrit
     };
     config.defaultOrder = {RepairStrategy::FromP2P};
 
-    RepairManager manager(storage, config);
+    BlockRepairer manager(storage, config);
     auto repaired = manager.attemptRepair(recoveryHash);
     CHECK(repaired);
 
@@ -219,7 +219,7 @@ TEST_CASE("RepairManager recovers block from P2P with verified hash", "[integrit
     CHECK(retrievedStr == recoveryData);
 }
 
-TEST_CASE("RepairManager: backup fetcher preferred over P2P", "[integrity][repair]") {
+TEST_CASE("BlockRepairer: backup fetcher preferred over P2P", "[integrity][repair]") {
     TempDir tempDir;
     StorageConfig storageConfig;
     storageConfig.basePath = tempDir.path / "storage";
@@ -238,7 +238,7 @@ TEST_CASE("RepairManager: backup fetcher preferred over P2P", "[integrity][repai
     bool backupUsed = false;
     bool p2pUsed = false;
 
-    RepairManagerConfig config;
+    BlockRepairerConfig config;
     config.backupFetcher =
         [&backupUsed, &backupData](const std::string&) -> yams::Result<std::vector<std::byte>> {
         backupUsed = true;
@@ -250,7 +250,7 @@ TEST_CASE("RepairManager: backup fetcher preferred over P2P", "[integrity][repai
     };
     config.defaultOrder = {RepairStrategy::FromBackup, RepairStrategy::FromP2P};
 
-    RepairManager manager(storage, config);
+    BlockRepairer manager(storage, config);
     auto repaired = manager.attemptRepair(recoveryHash);
     REQUIRE(repaired);
 
@@ -262,7 +262,7 @@ TEST_CASE("RepairManager: backup fetcher preferred over P2P", "[integrity][repai
     CHECK(storage.exists(recoveryHash).value());
 }
 
-TEST_CASE("RepairManager: canRepair reflects source availability", "[integrity][repair]") {
+TEST_CASE("BlockRepairer: canRepair reflects source availability", "[integrity][repair]") {
     TempDir tempDir;
     StorageConfig storageConfig;
     storageConfig.basePath = tempDir.path / "storage";
@@ -270,13 +270,13 @@ TEST_CASE("RepairManager: canRepair reflects source availability", "[integrity][
     StorageEngine storage(storageConfig);
 
     SECTION("canRepair false when no repair sources configured") {
-        RepairManagerConfig config; // no fetchers set at all
-        RepairManager manager(storage, config);
+        BlockRepairerConfig config; // no fetchers set at all
+        BlockRepairer manager(storage, config);
         CHECK_FALSE(manager.canRepair("any-hash"));
     }
 
     SECTION("canRepair true when backup fetcher is configured") {
-        RepairManagerConfig config;
+        BlockRepairerConfig config;
         config.backupFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
             std::string data = "backup-data";
             return toBytes(data);
@@ -285,12 +285,12 @@ TEST_CASE("RepairManager: canRepair reflects source availability", "[integrity][
             return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
         };
 
-        RepairManager manager(storage, config);
+        BlockRepairer manager(storage, config);
         CHECK(manager.canRepair("any-hash"));
     }
 
     SECTION("canRepair true when p2p fetcher returns data") {
-        RepairManagerConfig config;
+        BlockRepairerConfig config;
         config.backupFetcher = [](const std::string&) -> yams::Result<std::vector<std::byte>> {
             return yams::Result<std::vector<std::byte>>(yams::ErrorCode::NotFound);
         };
@@ -299,7 +299,7 @@ TEST_CASE("RepairManager: canRepair reflects source availability", "[integrity][
             return toBytes(data);
         };
 
-        RepairManager manager(storage, config);
+        BlockRepairer manager(storage, config);
         CHECK(manager.canRepair("any-hash"));
     }
 }
