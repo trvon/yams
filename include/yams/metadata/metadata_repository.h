@@ -1004,30 +1004,39 @@ public:
 
     // --- Repair helpers (non-virtual, concrete-class only) ---
 
-    /// Count documents that have a non-empty file_path but no matching path_tree_nodes entry.
-    /// Uses a single efficient LEFT JOIN anti-join query.
-    Result<uint64_t> countDocsMissingPathTree();
-
-    /// Return documents that have a non-empty file_path but no matching path_tree_nodes entry.
-    /// Uses a single efficient LEFT JOIN anti-join query. Limited to `limit` rows (0 = no limit).
-    Result<std::vector<DocumentInfo>> findDocsMissingPathTree(int limit = 0);
-
-    /// One keyset page of the path-tree repair scan.
-    struct PathTreeScanPage {
-        /// Documents in the window with a non-empty file_path but no path_tree_nodes entry,
-        /// ordered by id.
-        std::vector<DocumentInfo> missing;
-        /// Number of documents examined (at most the requested window).
+    /// One keyset window of the path-tree repair scan.
+    ///
+    /// A document is missing from the path tree when it is not linked (path_tree_node_documents)
+    /// to the leaf node its file path normalizes to: the same leaf upsertPathTreeForDocument
+    /// writes ("a//b/" -> "a/b"). A node for the path that only links another document (an
+    /// older version) does not count. Documents whose path has no segments are never missing.
+    struct PathTreeRepairWindow {
+        /// Documents examined (at most the requested window).
         std::uint64_t scanned{0};
-        /// Largest document id examined; the next page starts after it. Equals `afterId` when
+        /// Largest document id examined; the next window starts after it. Equals `afterId` when
         /// the window was empty.
         std::int64_t lastScannedId{0};
+        /// Examined documents missing from the path tree, in id order.
+        std::vector<std::int64_t> missingIds;
+        /// Missing documents linked into the path tree (repairPathTreeWindow only).
+        std::uint64_t repaired{0};
+        /// Missing documents whose upsert failed and was rolled back (repairPathTreeWindow only).
+        std::uint64_t failed{0};
     };
 
-    /// Examine the next `windowSize` documents with id > `afterId` (in id order) and return the
-    /// ones missing from the path tree. Bounded by the window, not by the number of misses, so
-    /// a page costs the same whether the tree is complete or empty.
-    Result<PathTreeScanPage> scanDocsMissingPathTree(std::int64_t afterId, std::size_t windowSize);
+    /// Examine the next `windowSize` documents with id > `afterId` (in id order) and report the
+    /// ones missing from the path tree. Read-only; bounded by the window, not by the number of
+    /// misses.
+    Result<PathTreeRepairWindow> scanPathTreeWindow(std::int64_t afterId, std::size_t windowSize);
+
+    /// Like scanPathTreeWindow, and link every missing document into the path tree in one
+    /// transaction. Each document's upsert runs under its own savepoint, so one failure is
+    /// counted in `failed` and rolled back without aborting the rest of the window.
+    Result<PathTreeRepairWindow> repairPathTreeWindow(std::int64_t afterId, std::size_t windowSize);
+
+    /// Count documents missing from the path tree under the same rule, walking the documents
+    /// table window by window (dry runs).
+    Result<uint64_t> countDocsMissingPathTree();
 
     void setKnowledgeGraphStore(std::shared_ptr<KnowledgeGraphStore> kgStore) {
         std::atomic_store_explicit(&kgStore_, std::move(kgStore), std::memory_order_release);

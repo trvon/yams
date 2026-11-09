@@ -19,6 +19,7 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -77,6 +78,22 @@ std::uint64_t fileBytes(const fs::path& path) {
 }
 
 using namespace std::chrono_literals;
+
+// Overrides the global governor pressure level and restores Normal on scope exit, so a failed
+// assertion cannot leak the override into later cases.
+class ScopedPressureLevel {
+public:
+    explicit ScopedPressureLevel(ResourcePressureLevel level) {
+        ResourceGovernor::instance().testing_setPressureState(level,
+                                                              std::chrono::steady_clock::now());
+    }
+    ~ScopedPressureLevel() {
+        ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Normal,
+                                                              std::chrono::steady_clock::now());
+    }
+    ScopedPressureLevel(const ScopedPressureLevel&) = delete;
+    ScopedPressureLevel& operator=(const ScopedPressureLevel&) = delete;
+};
 
 std::int64_t epochSeconds(std::chrono::system_clock::time_point when) {
     return std::chrono::duration_cast<std::chrono::seconds>(when.time_since_epoch()).count();
@@ -434,6 +451,10 @@ TEST_CASE("Background path-tree repair is admitted only while the daemon is idle
     CHECK_FALSE(RepairService::pathTreeRepairAdmitted(busy));
 
     busy = idle;
+    busy.startupScanInFlight = true; // the startup scan is RepairScan work too
+    CHECK_FALSE(RepairService::pathTreeRepairAdmitted(busy));
+
+    busy = idle;
     busy.hostDeferred = true;
     CHECK_FALSE(RepairService::pathTreeRepairAdmitted(busy));
 }
@@ -485,12 +506,9 @@ TEST_CASE("RepairService maintenance restores missing path-tree nodes in batches
         CHECK(missing() == 5);
     }
     SECTION("resource pressure defers it") {
-        ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Warning,
-                                                              std::chrono::steady_clock::now());
+        ScopedPressureLevel warning(ResourcePressureLevel::Warning);
         CHECK_FALSE(service.testing_runPathTreeRepairBatch().has_value());
         CHECK(missing() == 5);
-        ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Normal,
-                                                              std::chrono::steady_clock::now());
     }
     SECTION("an idle daemon repairs one batch per call and resumes until the pass completes") {
         auto first = service.testing_runPathTreeRepairBatch();
@@ -518,6 +536,29 @@ TEST_CASE("RepairService maintenance restores missing path-tree nodes in batches
         CHECK(third->errors == 0);
         CHECK(missing() == 0);
         CHECK(state.stats.repairPathTreeRepaired.load() == 5);
+    }
+    SECTION("on-demand rebuild reports progress, counts, and honors cancellation") {
+        std::atomic<bool> cancel{true};
+        auto canceled = service.testing_rebuildPathTree(false, {}, &cancel);
+        CHECK(canceled.succeeded == 0);
+        CHECK(canceled.message.find("canceled") != std::string::npos);
+        CHECK(missing() == 5);
+
+        auto dry = service.testing_rebuildPathTree(true, {}, nullptr);
+        CHECK(dry.processed == 5);
+        CHECK(missing() == 5);
+
+        cancel = false;
+        std::vector<RepairEvent> events;
+        auto done = service.testing_rebuildPathTree(
+            false, [&events](const RepairEvent& ev) { events.push_back(ev); }, &cancel);
+        CHECK(done.processed == 5);
+        CHECK(done.succeeded == 5);
+        CHECK(done.failed == 0);
+        REQUIRE(events.size() == 1); // one batch at the default batch size
+        CHECK(events.front().operation == "path_tree");
+        CHECK(events.front().succeeded == 5);
+        CHECK(missing() == 0);
     }
 
     repo.reset();

@@ -3662,10 +3662,10 @@ TEST_CASE("MetadataRepository: path tree child listing and repair helpers",
     REQUIRE((missingCount.has_value()));
     CHECK((missingCount.value() == 1));
 
-    auto missingDocs = fix.repository_->findDocsMissingPathTree(5);
-    REQUIRE((missingDocs.has_value()));
-    REQUIRE((missingDocs.value().size() == 1));
-    CHECK((missingDocs.value().front().sha256Hash == missingDoc.sha256Hash));
+    auto window = fix.repository_->scanPathTreeWindow(0, 5);
+    REQUIRE((window.has_value()));
+    REQUIRE((window.value().missingIds.size() == 1));
+    CHECK((window.value().missingIds.front() == missingId.value()));
 
     auto rootChildren = fix.repository_->listPathTreeChildren("/", 10);
     REQUIRE((rootChildren.has_value()));

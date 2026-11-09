@@ -105,8 +105,8 @@ TEST_CASE("repairMissingPathTree creates nodes for documents missing from the tr
     REQUIRE(fix.missing() == 2);
 
     auto result = repairMissingPathTree(*fix.repo);
-    REQUIRE(result.has_value());
-    const auto& stats = result.value();
+    REQUIRE_FALSE(result.error.has_value());
+    const auto& stats = result;
     CHECK(stats.finished);
     CHECK(stats.documentsScanned == 2);
     CHECK(stats.documentsMissing == 2);
@@ -120,10 +120,10 @@ TEST_CASE("repairMissingPathTree creates nodes for documents missing from the tr
 
     // A second pass finds nothing to do and changes nothing.
     auto again = repairMissingPathTree(*fix.repo);
-    REQUIRE(again.has_value());
-    CHECK(again.value().finished);
-    CHECK(again.value().documentsMissing == 0);
-    CHECK(again.value().nodesCreated == 0);
+    REQUIRE_FALSE(again.error.has_value());
+    CHECK(again.finished);
+    CHECK(again.documentsMissing == 0);
+    CHECK(again.nodesCreated == 0);
     CHECK(fix.docCount("/repair") == 2);
 }
 
@@ -137,10 +137,10 @@ TEST_CASE("repairMissingPathTree leaves documents that already have nodes untouc
     REQUIRE(fix.docCount("/kept/tree/a.txt") == 1);
 
     auto result = repairMissingPathTree(*fix.repo);
-    REQUIRE(result.has_value());
-    CHECK(result.value().documentsScanned == 3);
-    CHECK(result.value().documentsMissing == 1);
-    CHECK(result.value().nodesCreated == 1);
+    REQUIRE_FALSE(result.error.has_value());
+    CHECK(result.documentsScanned == 3);
+    CHECK(result.documentsMissing == 1);
+    CHECK(result.nodesCreated == 1);
 
     // Only the lost document was upserted; the indexed ones kept their nodes and counts.
     CHECK(fix.docCount("/kept/tree") == 2);
@@ -163,40 +163,40 @@ TEST_CASE("repairMissingPathTree respects the batch size and resumes from its cu
     options.maxBatches = 1;
 
     auto first = repairMissingPathTree(*fix.repo, options);
-    REQUIRE(first.has_value());
-    CHECK_FALSE(first.value().finished);
-    CHECK(first.value().batches == 1);
-    CHECK(first.value().documentsScanned == 2);
-    CHECK(first.value().nodesCreated == 2);
-    CHECK(first.value().lastDocumentId == docs[1].id);
+    REQUIRE_FALSE(first.error.has_value());
+    CHECK_FALSE(first.finished);
+    CHECK(first.batches == 1);
+    CHECK(first.documentsScanned == 2);
+    CHECK(first.nodesCreated == 2);
+    CHECK(first.lastDocumentId == docs[1].id);
     CHECK(fix.hasNode("/batch/doc-0.txt"));
     CHECK(fix.hasNode("/batch/doc-1.txt"));
     CHECK_FALSE(fix.hasNode("/batch/doc-2.txt"));
     CHECK(fix.missing() == 3);
 
-    options.startAfterId = first.value().lastDocumentId;
+    options.startAfterId = first.lastDocumentId;
     auto second = repairMissingPathTree(*fix.repo, options);
-    REQUIRE(second.has_value());
-    CHECK_FALSE(second.value().finished);
-    CHECK(second.value().documentsScanned == 2);
-    CHECK(second.value().lastDocumentId == docs[3].id);
+    REQUIRE_FALSE(second.error.has_value());
+    CHECK_FALSE(second.finished);
+    CHECK(second.documentsScanned == 2);
+    CHECK(second.lastDocumentId == docs[3].id);
     CHECK(fix.hasNode("/batch/doc-3.txt"));
 
-    options.startAfterId = second.value().lastDocumentId;
+    options.startAfterId = second.lastDocumentId;
     auto third = repairMissingPathTree(*fix.repo, options);
-    REQUIRE(third.has_value());
-    CHECK(third.value().finished); // short window: the table ended inside it
-    CHECK(third.value().documentsScanned == 1);
-    CHECK(third.value().lastDocumentId == docs[4].id);
+    REQUIRE_FALSE(third.error.has_value());
+    CHECK(third.finished); // short window: the table ended inside it
+    CHECK(third.documentsScanned == 1);
+    CHECK(third.lastDocumentId == docs[4].id);
     CHECK(fix.missing() == 0);
 
     // Resuming past the end examines nothing and reports the pass finished.
-    options.startAfterId = third.value().lastDocumentId;
+    options.startAfterId = third.lastDocumentId;
     auto past = repairMissingPathTree(*fix.repo, options);
-    REQUIRE(past.has_value());
-    CHECK(past.value().finished);
-    CHECK(past.value().documentsScanned == 0);
-    CHECK(past.value().lastDocumentId == docs[4].id);
+    REQUIRE_FALSE(past.error.has_value());
+    CHECK(past.finished);
+    CHECK(past.documentsScanned == 0);
+    CHECK(past.lastDocumentId == docs[4].id);
 
     SECTION("progress is reported once per batch") {
         for (int i = 5; i < 9; ++i) {
@@ -209,8 +209,8 @@ TEST_CASE("repairMissingPathTree respects the batch size and resumes from its cu
         auto run = repairMissingPathTree(*fix.repo, all, [&](const PathTreeRepairStats& s) {
             created.push_back(s.nodesCreated);
         });
-        REQUIRE(run.has_value());
-        CHECK(run.value().finished);
+        REQUIRE_FALSE(run.error.has_value());
+        CHECK(run.finished);
         // Two full windows, then an empty one that ends the scan without reporting.
         CHECK(created == std::vector<std::uint64_t>{2, 4});
     }
@@ -229,10 +229,10 @@ TEST_CASE("repairMissingPathTree stops between batches when told to yield",
     options.shouldContinue = [&checks] { return ++checks <= 2; };
 
     auto result = repairMissingPathTree(*fix.repo, options);
-    REQUIRE(result.has_value());
-    CHECK_FALSE(result.value().finished);
-    CHECK(result.value().batches == 2);
-    CHECK(result.value().nodesCreated == 4);
+    REQUIRE_FALSE(result.error.has_value());
+    CHECK_FALSE(result.finished);
+    CHECK(result.batches == 2);
+    CHECK(result.nodesCreated == 4);
     CHECK(checks == 3); // checked before each batch, including the one it refused
     CHECK(fix.missing() == 2);
 
@@ -240,19 +240,19 @@ TEST_CASE("repairMissingPathTree stops between batches when told to yield",
         PathTreeRepairOptions refused;
         refused.shouldContinue = [] { return false; };
         auto none = repairMissingPathTree(*fix.repo, refused);
-        REQUIRE(none.has_value());
-        CHECK_FALSE(none.value().finished);
-        CHECK(none.value().batches == 0);
+        REQUIRE_FALSE(none.error.has_value());
+        CHECK_FALSE(none.finished);
+        CHECK(none.batches == 0);
         CHECK(fix.missing() == 2);
     }
     SECTION("resuming from the cursor finishes the pass") {
         PathTreeRepairOptions resume;
         resume.batchSize = 2;
-        resume.startAfterId = result.value().lastDocumentId;
+        resume.startAfterId = result.lastDocumentId;
         auto rest = repairMissingPathTree(*fix.repo, resume);
-        REQUIRE(rest.has_value());
-        CHECK(rest.value().finished);
-        CHECK(rest.value().nodesCreated == 2);
+        REQUIRE_FALSE(rest.error.has_value());
+        CHECK(rest.finished);
+        CHECK(rest.nodesCreated == 2);
         CHECK(fix.missing() == 0);
     }
 }
@@ -262,10 +262,13 @@ TEST_CASE("repairMissingPathTree rejects a zero batch size",
     PathTreeRepairFixture fix;
     PathTreeRepairOptions options;
     options.batchSize = 0;
-    CHECK_FALSE(repairMissingPathTree(*fix.repo, options).has_value());
+    const auto stats = repairMissingPathTree(*fix.repo, options);
+    REQUIRE(stats.error.has_value());
+    CHECK(stats.error->code == yams::ErrorCode::InvalidArgument);
+    CHECK(stats.batches == 0);
 }
 
-TEST_CASE("scanDocsMissingPathTree pages by a document window, not by misses",
+TEST_CASE("scanPathTreeWindow pages by a document window, not by misses",
           "[unit][metadata][path-tree][repair]") {
     PathTreeRepairFixture fix;
     fix.insertWithTree("/scan/a.txt");
@@ -273,25 +276,108 @@ TEST_CASE("scanDocsMissingPathTree pages by a document window, not by misses",
     auto c = fix.insertWithTree("/scan/c.txt");
     auto d = fix.insertWithoutTree("/scan/d.txt");
 
-    auto first = fix.repo->scanDocsMissingPathTree(0, 3);
+    auto first = fix.repo->scanPathTreeWindow(0, 3);
     REQUIRE(first.has_value());
     CHECK(first.value().scanned == 3);
     CHECK(first.value().lastScannedId == c.id);
-    REQUIRE(first.value().missing.size() == 1);
-    CHECK(first.value().missing.front().id == b.id);
+    CHECK(first.value().missingIds == std::vector<std::int64_t>{b.id});
 
-    auto second = fix.repo->scanDocsMissingPathTree(c.id, 3);
+    auto second = fix.repo->scanPathTreeWindow(c.id, 3);
     REQUIRE(second.has_value());
     CHECK(second.value().scanned == 1);
     CHECK(second.value().lastScannedId == d.id);
-    REQUIRE(second.value().missing.size() == 1);
-    CHECK(second.value().missing.front().filePath == "/scan/d.txt");
+    CHECK(second.value().missingIds == std::vector<std::int64_t>{d.id});
 
-    auto end = fix.repo->scanDocsMissingPathTree(d.id, 3);
+    auto end = fix.repo->scanPathTreeWindow(d.id, 3);
     REQUIRE(end.has_value());
     CHECK(end.value().scanned == 0);
     CHECK(end.value().lastScannedId == d.id);
-    CHECK(end.value().missing.empty());
+    CHECK(end.value().missingIds.empty());
 
-    CHECK_FALSE(fix.repo->scanDocsMissingPathTree(0, 0).has_value());
+    // Read-only: scanning repaired nothing.
+    CHECK(fix.missing() == 2);
+    CHECK_FALSE(fix.repo->scanPathTreeWindow(0, 0).has_value());
+    CHECK_FALSE(fix.repo->repairPathTreeWindow(0, 0).has_value());
+}
+
+TEST_CASE("repairMissingPathTree matches the normalized leaf the upsert writes",
+          "[unit][metadata][path-tree][repair]") {
+    PathTreeRepairFixture fix;
+    auto doc = fix.insertWithoutTree("/notes//a.md/");
+    REQUIRE(fix.missing() == 1);
+
+    auto first = repairMissingPathTree(*fix.repo);
+    REQUIRE_FALSE(first.error.has_value());
+    CHECK(first.documentsMissing == 1);
+    CHECK(first.nodesCreated == 1);
+    CHECK(fix.hasNode("/notes/a.md"));
+    CHECK(fix.docCount("/notes/a.md") == 1);
+
+    // The raw file_path never matches a node, but the document is linked to its leaf.
+    CHECK(fix.missing() == 0);
+    auto second = repairMissingPathTree(*fix.repo);
+    REQUIRE_FALSE(second.error.has_value());
+    CHECK(second.documentsMissing == 0);
+    CHECK(second.nodesCreated == 0);
+    CHECK(fix.docCount("/notes/a.md") == 1);
+    (void)doc;
+}
+
+TEST_CASE("repairMissingPathTree links a document whose path already has a node",
+          "[unit][metadata][path-tree][repair]") {
+    PathTreeRepairFixture fix;
+    // An older version of the file owns the node; the re-ingested document's upsert was lost.
+    fix.insertWithTree("/reingest/file.txt");
+    auto current = fix.insertWithoutTree("/reingest/staging.txt");
+    // Point the new row at the same path directly, independent of insert-time dedupe rules.
+    auto moved = fix.pool->withConnection([&](Database& db) -> yams::Result<void> {
+        return db.execute("UPDATE documents SET file_path = '/reingest/file.txt' WHERE id = " +
+                          std::to_string(current.id));
+    });
+    REQUIRE(moved.has_value());
+    REQUIRE(fix.hasNode("/reingest/file.txt"));
+    REQUIRE(fix.docCount("/reingest/file.txt") == 1);
+    REQUIRE(fix.missing() == 1);
+
+    auto window = fix.repo->scanPathTreeWindow(0, 10);
+    REQUIRE(window.has_value());
+    CHECK(window.value().missingIds == std::vector<std::int64_t>{current.id});
+
+    auto stats = repairMissingPathTree(*fix.repo);
+    REQUIRE_FALSE(stats.error.has_value());
+    CHECK(stats.documentsMissing == 1);
+    CHECK(stats.nodesCreated == 1);
+    CHECK(fix.docCount("/reingest/file.txt") == 2);
+    CHECK(fix.missing() == 0);
+}
+
+TEST_CASE("repairMissingPathTree reports committed batches when a later batch fails",
+          "[unit][metadata][path-tree][repair]") {
+    PathTreeRepairFixture fix;
+    for (int i = 0; i < 4; ++i) {
+        fix.insertWithoutTree("/partial/doc-" + std::to_string(i) + ".txt");
+    }
+
+    PathTreeRepairOptions options;
+    options.batchSize = 2;
+    int checks = 0;
+    // Break the schema after the first batch commits, so the second batch cannot run.
+    options.shouldContinue = [&] {
+        if (++checks == 2) {
+            auto dropped = fix.pool->withConnection([](Database& db) -> yams::Result<void> {
+                return db.execute("DROP TABLE path_tree_node_documents");
+            });
+            REQUIRE(dropped.has_value());
+        }
+        return true;
+    };
+
+    const auto stats = repairMissingPathTree(*fix.repo, options);
+    REQUIRE(stats.error.has_value());
+    CHECK_FALSE(stats.finished);
+    CHECK(stats.batches == 1);
+    CHECK(stats.documentsScanned == 2);
+    CHECK(stats.nodesCreated == 2);
+    CHECK(fix.hasNode("/partial/doc-1.txt"));
+    CHECK_FALSE(fix.hasNode("/partial/doc-2.txt"));
 }

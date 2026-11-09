@@ -484,20 +484,24 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 
         // Legacy snapshot history backfill (migration 42): small batches, paused between,
         // and only while the daemon is not under resource pressure.
+        // RepairScan-class work (backfill, path-tree repair, VACUUM, startup scan) runs at most
+        // one job per tick, so their DB writes never stack up in one iteration.
+        bool repairScanWorkThisTick = false;
         if (!snapshotBackfillDone && std::chrono::steady_clock::now() >= nextSnapshotBackfill &&
             maintenanceAllowed() &&
             ResourceGovernor::instance().getPressureLevel() < ResourcePressureLevel::Warning &&
             ResourceGovernor::instance().admitDeferrable(DeferrableWork::RepairScan)) {
             snapshotBackfillDone = backfillLegacySnapshotKeysBatch();
             nextSnapshotBackfill = std::chrono::steady_clock::now() + 200ms;
+            repairScanWorkThisTick = true;
         }
 
         // Path-tree repair: documents whose path-tree upsert was lost get their nodes back.
         // One bounded batch per tick, resumed from a cursor; idle until the next interval once
         // a pass completes. runPathTreeRepairBatch checks admission and reschedules itself.
-        if (cfg_.pathTreeRepairInterval.count() > 0 &&
+        if (!repairScanWorkThisTick && cfg_.pathTreeRepairInterval.count() > 0 &&
             std::chrono::steady_clock::now() >= nextPathTreeRepair_) {
-            (void)runPathTreeRepairBatch();
+            repairScanWorkThisTick = runPathTreeRepairBatch().has_value();
         }
 
         // Retention cleanup of crash-recovery leftovers (corrupt DB copies, ...): owned here
@@ -510,7 +514,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         }
 
         // vectors.db VACUUM: rare, idle-only, and yields to any writer that shows up.
-        if (cfg_.vectorVacuumInterval.count() > 0 &&
+        if (!repairScanWorkThisTick && cfg_.vectorVacuumInterval.count() > 0 &&
             std::chrono::steady_clock::now() >= nextVectorVacuum &&
             vectorVacuumAdmitted(collectVectorVacuumSignals())) {
             const auto outcome = runVectorVacuumMaintenance();
@@ -559,7 +563,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         if (queueEmpty && scanCursor_.shouldStart() && (embedIdle || !scanCursor_.retryDue())) {
             if (!initialScanEnqueued && deferTicks < minDeferTicks) {
                 ++deferTicks;
-            } else if (maintenanceAllowed() &&
+            } else if (!repairScanWorkThisTick && maintenanceAllowed() &&
                        ResourceGovernor::instance().admitDeferrable(DeferrableWork::RepairScan)) {
                 recoverOrphanedProcessingOnce();
                 auto scanExec = RepairThreadPool::instance().get_executor();
@@ -1158,7 +1162,7 @@ std::optional<app::services::SessionExpiryResult> RepairService::runSessionExpir
 bool RepairService::pathTreeRepairAdmitted(const PathTreeRepairSignals& signals) noexcept {
     return !signals.shuttingDown && signals.maintenanceAllowed &&
            signals.pressure < ResourcePressureLevel::Warning && !signals.repairInProgress &&
-           !signals.hostDeferred;
+           !signals.startupScanInFlight && !signals.hostDeferred;
 }
 
 RepairService::PathTreeRepairSignals RepairService::collectPathTreeRepairSignals() const {
@@ -1168,6 +1172,7 @@ RepairService::PathTreeRepairSignals RepairService::collectPathTreeRepairSignals
     signals.maintenanceAllowed = maintenanceAllowed();
     signals.pressure = ResourceGovernor::instance().getPressureLevel();
     signals.repairInProgress = repairInProgress_.load(std::memory_order_acquire);
+    signals.startupScanInFlight = scanCursor_.inFlight();
     // Ask the host-pressure gate last, and only when nothing else blocks the batch, so the
     // deferral clock measures time spent waiting on other processes.
     if (pathTreeRepairAdmitted(signals)) {
@@ -1180,11 +1185,22 @@ RepairService::PathTreeRepairSignals RepairService::collectPathTreeRepairSignals
 std::optional<metadata::PathTreeRepairStats> RepairService::runPathTreeRepairBatch() {
     YAMS_ZONE_SCOPED_N("RepairSvc::runPathTreeRepairBatch");
     using namespace std::chrono_literals;
+    // A refused admission backs off instead of asking the governor again every tick.
+    const auto refusedBackoff = std::max<std::chrono::steady_clock::duration>(
+        1s, std::chrono::duration_cast<std::chrono::seconds>(cfg_.maintenanceDelay) / 30);
     if (!pathTreeRepairAdmitted(collectPathTreeRepairSignals())) {
-        return std::nullopt; // re-checked on a later tick
+        nextPathTreeRepair_ = std::chrono::steady_clock::now() + refusedBackoff;
+        return std::nullopt;
+    }
+    // An on-demand `repair --path-tree` owns the path tree; try again later.
+    std::unique_lock<std::mutex> exclusive(pathTreeRepairMutex_, std::try_to_lock);
+    if (!exclusive.owns_lock()) {
+        nextPathTreeRepair_ = std::chrono::steady_clock::now() + refusedBackoff;
+        return std::nullopt;
     }
     auto repo = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!repo) {
+        nextPathTreeRepair_ = std::chrono::steady_clock::now() + refusedBackoff;
         return std::nullopt;
     }
 
@@ -1192,17 +1208,16 @@ std::optional<metadata::PathTreeRepairStats> RepairService::runPathTreeRepairBat
     options.batchSize = std::max<std::size_t>(1, cfg_.pathTreeRepairBatch);
     options.startAfterId = pathTreeRepairCursor_;
     options.maxBatches = 1; // yield to the loop between batches
-    auto batch = metadata::repairMissingPathTree(*repo, options);
+    const auto step = metadata::repairMissingPathTree(*repo, options);
     const auto now = std::chrono::steady_clock::now();
-    if (!batch) {
+    if (step.error) {
         // Keep the cursor; a busy or failing DB is retried after the maintenance delay.
         spdlog::debug("RepairService: path-tree repair batch after document {} failed: {}",
-                      pathTreeRepairCursor_, batch.error().message);
+                      pathTreeRepairCursor_, step.error->message);
         nextPathTreeRepair_ = now + cfg_.maintenanceDelay;
         return std::nullopt;
     }
 
-    const auto& step = batch.value();
     pathTreeRepairCursor_ = step.lastDocumentId;
     pathTreeRepairPass_.documentsScanned += step.documentsScanned;
     pathTreeRepairPass_.documentsMissing += step.documentsMissing;
@@ -1233,7 +1248,9 @@ std::optional<metadata::PathTreeRepairStats> RepairService::runPathTreeRepairBat
     }
     pathTreeRepairCursor_ = 0;
     pathTreeRepairPass_ = {};
-    nextPathTreeRepair_ = now + cfg_.pathTreeRepairInterval;
+    // The resolver caps the interval at a year; clamp again so a directly built Config cannot
+    // overflow steady_clock.
+    nextPathTreeRepair_ = now + std::min(cfg_.pathTreeRepairInterval, kMaxPathTreeRepairInterval);
     return pass;
 }
 
@@ -1701,7 +1718,7 @@ RepairOperationResult RepairService::runRepairOperation(OnDemandRepairOperation 
         case OnDemandRepairOperation::Downloads:
             return repairDownloads(request.dryRun, request.verbose, progress);
         case OnDemandRepairOperation::PathTree:
-            return rebuildPathTree(request.dryRun, request.verbose, progress);
+            return rebuildPathTree(request.dryRun, progress, cancelRequested);
         case OnDemandRepairOperation::Dedupe:
             return applySemanticDedupe(request, progress);
         case OnDemandRepairOperation::Chunks:
@@ -2625,8 +2642,8 @@ RepairOperationResult RepairService::applySemanticDedupe(const RepairRequest& re
     return result;
 }
 
-RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
-                                                     ProgressFn progress) {
+RepairOperationResult RepairService::rebuildPathTree(bool dryRun, const ProgressFn& progress,
+                                                     std::atomic<bool>* cancelRequested) {
     RepairOperationResult result;
     result.operation = "path_tree";
 
@@ -2655,21 +2672,48 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
         return result;
     }
 
-    // The on-demand repair runs a full pass; only the background pass works in slices.
-    auto repairResult = metadata::repairMissingPathTree(*concreteRepo);
-    if (!repairResult) {
-        result.message = "Path tree repair failed: " + repairResult.error().message;
-        result.failed = 1;
-        return result;
-    }
+    // Waits for an in-flight background batch (one bounded window) to finish.
+    std::lock_guard<std::mutex> exclusive(pathTreeRepairMutex_);
 
-    const auto& stats = repairResult.value();
-    spdlog::info("Path tree repair complete: scanned={} missing={} created={} errors={}",
-                 stats.documentsScanned, stats.documentsMissing, stats.nodesCreated, stats.errors);
+    // The on-demand repair runs a full pass; only the background pass works in slices.
+    metadata::PathTreeRepairOptions options;
+    options.shouldContinue = [cancelRequested] {
+        return !(cancelRequested && cancelRequested->load(std::memory_order_relaxed));
+    };
+    const auto stats = metadata::repairMissingPathTree(
+        *concreteRepo, options, [&progress](const metadata::PathTreeRepairStats& running) {
+            if (!progress)
+                return;
+            RepairEvent ev;
+            ev.phase = "repairing";
+            ev.operation = "path_tree";
+            ev.processed = running.documentsScanned;
+            ev.succeeded = running.nodesCreated;
+            ev.failed = running.errors;
+            ev.message = "Rebuilding path tree";
+            progress(ev);
+        });
+    if (state_ && stats.nodesCreated > 0) {
+        state_->stats.repairPathTreeRepaired.fetch_add(stats.nodesCreated,
+                                                       std::memory_order_relaxed);
+    }
+    spdlog::info("Path tree repair: scanned={} missing={} created={} errors={} finished={}",
+                 stats.documentsScanned, stats.documentsMissing, stats.nodesCreated, stats.errors,
+                 stats.finished);
+
     result.processed = stats.documentsMissing;
     result.succeeded = stats.nodesCreated;
     result.failed = stats.errors;
-    result.message = "Created " + std::to_string(stats.nodesCreated) + " path tree entries";
+    std::string message = "Created " + std::to_string(stats.nodesCreated) + " path tree entries";
+    if (stats.error) {
+        // Committed batches stay committed; report them alongside the failure.
+        result.failed += 1;
+        message += "; path tree repair failed after " + std::to_string(stats.documentsScanned) +
+                   " documents: " + stats.error->message;
+    } else if (!stats.finished) {
+        message += "; canceled after " + std::to_string(stats.documentsScanned) + " documents";
+    }
+    result.message = std::move(message);
     return result;
 }
 

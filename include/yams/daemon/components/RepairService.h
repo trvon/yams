@@ -127,6 +127,11 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         return !inFlight_ && (!started_ || incomplete_);
     }
+    // True while a scan is running.
+    bool inFlight() const noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        return inFlight_;
+    }
     // True when the next scan starts a retry sweep (rather than resuming a capped one).
     bool retryDue() const noexcept {
         std::lock_guard<std::mutex> lk(mu_);
@@ -211,6 +216,9 @@ public:
         std::size_t pathTreeRepairBatch{256};
     };
 
+    /// Longest path-tree repair interval honored (one year); longer values are clamped.
+    static constexpr std::chrono::hours kMaxPathTreeRepairInterval{24 * 365};
+
     struct RecoveryArtifactMaintenanceStats {
         std::size_t corruptDbsRemoved{0};
         std::size_t corruptDbsRetained{0};
@@ -242,12 +250,14 @@ public:
         bool maintenanceAllowed{false};
         ResourcePressureLevel pressure{};
         bool repairInProgress{false};
-        bool hostDeferred{false}; // the host is busy and the governor is holding repair work
+        bool startupScanInFlight{false}; // the startup repair scan (also RepairScan work) runs
+        bool hostDeferred{false};        // the host is busy and the governor is holding repair work
     };
 
     /// A path-tree repair batch writes the metadata DB, so it runs only while no client is
     /// connected, there is no resource pressure, no on-demand repair is running (which may be
-    /// repairing the path tree itself), and the governor admits deferrable repair work.
+    /// repairing the path tree itself), the startup repair scan is not running, and the
+    /// governor admits deferrable repair work.
     [[nodiscard]] static bool pathTreeRepairAdmitted(const PathTreeRepairSignals& signals) noexcept;
 
     // Event types for document operations (same as old RepairCoordinator)
@@ -337,6 +347,11 @@ public:
     }
     std::optional<metadata::PathTreeRepairStats> testing_runPathTreeRepairBatch() {
         return runPathTreeRepairBatch();
+    }
+    /// Run the on-demand path-tree repair (`yams repair --path-tree`).
+    RepairOperationResult testing_rebuildPathTree(bool dryRun, const ProgressFn& progress,
+                                                  std::atomic<bool>* cancelRequested) {
+        return rebuildPathTree(dryRun, progress, cancelRequested);
     }
     /// Runs one startup-scan pass to completion, then drains the queue as the embedding consumer
     /// would. Returns the hashes the pass queued, in order.
@@ -509,6 +524,9 @@ private:
     std::int64_t pathTreeRepairCursor_{0};
     metadata::PathTreeRepairStats pathTreeRepairPass_{};
     std::chrono::steady_clock::time_point nextPathTreeRepair_{};
+    // Held by a background batch (try_lock) and by on-demand `repair --path-tree` (lock), so
+    // the two never write the path tree at the same time. Never held across a co_await.
+    std::mutex pathTreeRepairMutex_;
 
     // ── Detect missing work ──
     struct MissingWorkResult {
@@ -541,7 +559,8 @@ private:
                                                 ProgressFn progress);
     RepairOperationResult repairMimeTypes(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult repairDownloads(bool dryRun, bool verbose, ProgressFn progress);
-    RepairOperationResult rebuildPathTree(bool dryRun, bool verbose, ProgressFn progress);
+    RepairOperationResult rebuildPathTree(bool dryRun, const ProgressFn& progress,
+                                          std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult cleanOrphanedChunks(bool dryRun, bool verbose,
                                               const ProgressFn& progress);
     RepairOperationResult repairBlockReferences(bool dryRun, bool verbose,
