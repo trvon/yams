@@ -1,3 +1,5 @@
+#include "storage_key.h"
+
 #include <spdlog/spdlog.h>
 #include <yams/common/fs_utils.h>
 #include <yams/compat/thread_stop_compat.h>
@@ -37,39 +39,8 @@ namespace yams::storage {
 
 namespace {
 
-bool isHexHash(std::string_view hash) noexcept {
-    return hash.size() == HASH_STRING_SIZE &&
-           std::ranges::all_of(hash, [](unsigned char c) { return std::isxdigit(c) != 0; });
-}
-
 std::string errnoMessage(int err) {
     return std::error_code(err, std::generic_category()).message();
-}
-
-bool isValidStorageKey(std::string_view key) noexcept {
-    if (isHexHash(key)) {
-        return true;
-    }
-    constexpr std::string_view manifestSuffix = ".manifest";
-    if (!key.ends_with(manifestSuffix)) {
-        return false;
-    }
-    return isHexHash(key.substr(0, key.size() - manifestSuffix.size()));
-}
-
-std::string storageHashFromObjectPath(const std::filesystem::path& objectsRoot,
-                                      const std::filesystem::path& objectPath) {
-    std::error_code ec;
-    const auto relative = std::filesystem::relative(objectPath, objectsRoot, ec);
-    if (ec || relative.empty()) {
-        return {};
-    }
-
-    std::string hash;
-    for (const auto& part : relative) {
-        hash += part.string();
-    }
-    return hash;
 }
 
 std::optional<compression::CompressionHeader>

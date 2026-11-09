@@ -545,7 +545,8 @@ private:
     RepairOperationResult cleanOrphanedChunks(bool dryRun, bool verbose,
                                               const ProgressFn& progress);
     RepairOperationResult repairBlockReferences(bool dryRun, bool verbose,
-                                                const ProgressFn& progress);
+                                                const ProgressFn& progress,
+                                                std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult repairKnowledgeGraph(const RepairRequest& req, const ProgressFn& progress,
                                                std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult rebuildTopologyArtifacts(const RepairRequest& req,

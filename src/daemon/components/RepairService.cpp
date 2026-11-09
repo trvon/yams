@@ -1707,7 +1707,8 @@ RepairOperationResult RepairService::runRepairOperation(OnDemandRepairOperation 
         case OnDemandRepairOperation::Chunks:
             return cleanOrphanedChunks(request.dryRun, request.verbose, progress);
         case OnDemandRepairOperation::BlockReferences:
-            return repairBlockReferences(request.dryRun, request.verbose, progress);
+            return repairBlockReferences(request.dryRun, request.verbose, progress,
+                                         cancelRequested);
         case OnDemandRepairOperation::Graph:
             return repairKnowledgeGraph(request, progress, cancelRequested);
         case OnDemandRepairOperation::Fts5:
@@ -3170,7 +3171,8 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
 }
 
 RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool verbose,
-                                                           const ProgressFn& progress) {
+                                                           const ProgressFn& progress,
+                                                           std::atomic<bool>* cancelRequested) {
     RepairOperationResult result;
     result.operation = "block_refs";
 
@@ -3184,7 +3186,8 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
     }
 
     auto repairResult = yams::storage::repairBlockReferences(
-        objectsPath, refsDbPath, dryRun, [&progress](uint64_t processed, uint64_t total) {
+        objectsPath, refsDbPath, dryRun,
+        [&progress](uint64_t processed, uint64_t total) {
             if (!progress)
                 return;
             RepairEvent ev;
@@ -3194,7 +3197,14 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
             ev.total = total;
             ev.message = "Scanning block references";
             progress(ev);
+        },
+        [cancelRequested]() {
+            return !(cancelRequested && cancelRequested->load(std::memory_order_relaxed));
         });
+    if (!repairResult && repairResult.error().code == ErrorCode::OperationCancelled) {
+        result.message = repairResult.error().message;
+        return result;
+    }
     if (!repairResult) {
         result.message = "Block refs repair failed: " + repairResult.error().message;
         result.failed = 1;
