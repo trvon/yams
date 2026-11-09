@@ -34,14 +34,27 @@ struct BlockRefsStore {
                          .build();
         REQUIRE(built);
         store = std::move(built.value());
-        // Compressible text, several chunks.
-        std::string text;
-        for (int i = 0; text.size() < 600 * 1024; ++i)
-            text += "line " + std::to_string(i) + " of compressible repeated content\n";
-        std::vector<std::byte> bytes(text.size());
-        std::memcpy(bytes.data(), text.data(), text.size());
-        REQUIRE(store->storeBytes(bytes));
+        // Several distinct compressible payloads. Each is larger than the chunk size, so it goes
+        // through the chunked path that records block_references rows (smaller payloads are
+        // stored whole, without rows), and each yields at least one block of its own whatever
+        // boundaries the content-defined chunker picks.
+        for (int file = 0; file < kFiles; ++file) {
+            std::string text;
+            for (int i = 0; text.size() < 96 * 1024; ++i)
+                text += "file " + std::to_string(file) + " line " + std::to_string(i) +
+                        " of compressible repeated content\n";
+            std::vector<std::byte> bytes(text.size());
+            std::memcpy(bytes.data(), text.data(), text.size());
+            REQUIRE(store->storeBytes(bytes));
+        }
+        const auto referenced = referencedBlocks();
+        INFO("fixture setup: expected at least "
+             << kMinBlocks << " referenced blocks in refs.db, found " << referenced
+             << "; did the content store's chunking or small-object path change?");
+        REQUIRE(referenced >= kMinBlocks);
     }
+    static constexpr int kFiles = 4;
+    static constexpr std::int64_t kMinBlocks = 3;
     ~BlockRefsStore() {
         store.reset();
         std::error_code ec;
@@ -105,6 +118,9 @@ struct BlockRefsStore {
     }
     std::optional<std::int64_t> statistic(const std::string& name) const {
         return scalar("SELECT stat_value FROM ref_statistics WHERE stat_name = ?", name);
+    }
+    std::int64_t referencedBlocks() const {
+        return scalar("SELECT COUNT(*) FROM block_references WHERE ref_count > 0").value_or(0);
     }
     std::int64_t rowsWithoutUncompressedSize() const {
         return scalar("SELECT COUNT(*) FROM block_references WHERE uncompressed_size IS NULL")
