@@ -1,7 +1,9 @@
 // yams/common/fs_utils.h - Consolidated filesystem utilities
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -204,27 +206,39 @@ requires std::constructible_from<std::string_view, T>
 }
 
 /**
- * Create a temporary directory with a unique name.
+ * Create a new directory with a unique name. The directory did not exist before the call.
  *
  * @param prefix Prefix for the directory name (default: "yams_")
+ * @param parent Existing directory to create it in (default: the system temp directory)
  * @return Path to created directory, or empty path on failure
  */
-[[nodiscard]] inline std::filesystem::path createTempDirectory(std::string_view prefix = "yams_") {
+[[nodiscard]] inline std::filesystem::path
+createTempDirectory(std::string_view prefix = "yams_", const std::filesystem::path& parent = {}) {
     std::error_code ec;
-    auto tempPath = std::filesystem::temp_directory_path(ec);
+    auto tempPath = parent.empty() ? std::filesystem::temp_directory_path(ec) : parent;
     if (ec) {
         return {};
     }
 
-    // Generate unique name using timestamp + random
-    auto uniqueId = std::chrono::steady_clock::now().time_since_epoch().count();
-    auto path = tempPath / (std::string{prefix} + std::to_string(uniqueId));
-
-    std::filesystem::create_directory(path, ec);
-    if (ec) {
-        return {};
+    // The directory must be new: create_directory() returns false without an error when the
+    // path already exists, which would hand two callers the same directory. Treat that as a
+    // collision and retry with another suffix.
+    static std::atomic<std::uint64_t> counter{0};
+    constexpr int kAttempts = 16;
+    for (int attempt = 0; attempt < kAttempts; ++attempt) {
+        const auto uniqueId = static_cast<std::uint64_t>(
+                                  std::chrono::steady_clock::now().time_since_epoch().count()) ^
+                              (counter.fetch_add(1, std::memory_order_relaxed) << 48U);
+        auto path = tempPath / (std::string{prefix} + std::to_string(uniqueId));
+        if (std::filesystem::create_directory(path, ec)) {
+            return path;
+        }
+        if (ec && ec != std::errc::file_exists) {
+            return {};
+        }
+        ec.clear();
     }
-    return path;
+    return {};
 }
 
 /**

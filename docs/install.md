@@ -288,6 +288,8 @@ lists the full set; copy only the sections you change, because a copied
 | `[daemon] log_level` | `info` | Daemon log verbosity. |
 | `[embeddings] enable` | `true` | Set `false` to run text and grep search without embeddings. |
 | `[daemon.maintenance] vector_vacuum_interval_hours` | `24` | How often idle maintenance checks whether `vectors.db` is worth compacting. `0` disables. |
+| `[daemon.maintenance] path_tree_repair_interval_hours` | `24` | How often idle maintenance re-scans all documents and restores missing path-tree nodes. `0` disables; values above `8760` (one year) are clamped. |
+| `[daemon.maintenance] path_tree_repair_batch` | `256` | Documents examined per path-tree repair batch; one batch runs per repair-loop tick. Accepts `1`–`10000`. |
 | `[daemon.maintenance] session_expiry_days` | `30` | Idle session files older than this are removed. Sessions that are current, watch an existing directory, or still tag documents are kept. `0` disables. |
 | `[tuning.resource] host_pressure` | `true` | Defer background work (topology rebuilds, repair scans, vacuum, backfills) while the machine is busy. |
 | `[tuning.resource] host_cpu_pressure_pct` | from profile (`30` / `40` / `60`) | CPU pressure (Linux PSI `some avg10`) above which the host counts as busy. Raise it on shared build hosts. |

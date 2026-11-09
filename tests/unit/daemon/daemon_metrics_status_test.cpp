@@ -1346,8 +1346,6 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
         readiness::kPluginsReady,
         readiness::kPluginsDegraded,
         readiness::kContentExtractorsReady,
-        readiness::kEntityExtractorsReady,
-        readiness::kTitleExtractorReady,
         readiness::kRepairService,
         readiness::kSearchEngineBuildReasonInitial,
         readiness::kSearchEngineBuildReasonRebuild,
@@ -1367,6 +1365,10 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
     // Symbol extraction was removed in v0.20; status must not advertise it as unavailable.
     CHECK(status.readinessStates.count("symbol_extractors_ready") == 0);
     CHECK(status.requestCounts.count("symbol_extractors_loaded") == 0);
+    // Entity and title extractors are optional plugins, reported only as capability counts: a
+    // readiness flag for them reads as "waiting on" in `yams daemon status` when none is installed.
+    CHECK(status.readinessStates.count("entity_extractors_ready") == 0);
+    CHECK(status.readinessStates.count("title_extractor_ready") == 0);
 
     const std::array<std::string_view, 4> requiredCapabilityMetricKeys = {
         metrics::kContentExtractorsLoaded,
@@ -1650,6 +1652,11 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
         CHECK(pruneResp.categoryCounts.at("build-object") == 1);
         CHECK(pruneResp.categoryCounts.at("logs") == 1);
         CHECK(pruneResp.categoryCounts.at("temp") == 1);
+        // The scan runs on the worker pool; per-category sizes must match the candidates.
+        CHECK(pruneResp.categorySizes.size() == 3);
+        CHECK(pruneResp.categorySizes.at("build-object") == 2048);
+        CHECK(pruneResp.categorySizes.at("logs") == 3 * 1024 * 1024);
+        CHECK(pruneResp.categorySizes.at("temp") == 4096);
     }
 
     SECTION("dry run accepts month and year age units") {
@@ -1748,11 +1755,11 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
 
         auto resp = dispatchRequest(dispatcher, Request{PruneRequest{}});
 
-        REQUIRE(std::holds_alternative<PruneResponse>(resp));
-        const auto& pruneResp = std::get<PruneResponse>(resp);
-        CHECK(pruneResp.errorMessage.empty());
-        CHECK(pruneResp.totalBytesFreed == 0);
-        CHECK(pruneResp.categoryCounts.empty());
+        // A failed metadata query is an error, not "nothing to prune".
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("query boom") != std::string::npos);
     }
 
     SECTION("dry run handles repository exceptions") {
@@ -1815,6 +1822,44 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
         REQUIRE(waitForCondition([&] { return repo->deleteCallCount() == 1; }));
         CHECK_FALSE(store->hasBlob(targetHash));
         CHECK(store->removedHashes() == std::vector<std::string>{targetHash});
+        CHECK(repo->deletedIds() == std::vector<int64_t>{1});
+    }
+
+    SECTION("apply mode backs off under governor pressure and completes once it clears") {
+        const bool originalGovernor = TuneAdvisor::enableResourceGovernor();
+        const bool originalAdmission = TuneAdvisor::enableAdmissionControl();
+        auto restore = ScopeExit([&] {
+            TuneAdvisor::setEnableResourceGovernor(originalGovernor);
+            TuneAdvisor::setEnableAdmissionControl(originalAdmission);
+            ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Normal);
+        });
+        TuneAdvisor::setEnableResourceGovernor(true);
+        TuneAdvisor::setEnableAdmissionControl(true);
+        ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+        REQUIRE_FALSE(ResourceGovernor::instance().canAdmitWork());
+
+        PruneRequest req;
+        req.dryRun = false;
+        req.categories = {"build"};
+        req.extensions = {"log"};
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        // The preview is computed before the governor gate, so pressure does not change it.
+        REQUIRE(std::holds_alternative<PruneResponse>(resp));
+        const auto& pruneResp = std::get<PruneResponse>(resp);
+        CHECK(pruneResp.totalBytesFreed == 2048);
+        REQUIRE(pruneResp.categoryCounts.count("build-object") == 1);
+        CHECK(pruneResp.categoryCounts.at("build-object") == 1);
+        CHECK(pruneResp.categorySizes.at("build-object") == 2048);
+        CHECK_FALSE(pruneResp.statusMessage.empty());
+
+        // Negative window (~400 ms, more than one 250 ms backoff): nothing may be deleted while
+        // the governor refuses work.
+        CHECK_FALSE(waitForCondition([&] { return repo->deleteCallCount() > 0; }, 20));
+
+        ResourceGovernor::instance().testing_updateScalingCaps(ResourcePressureLevel::Normal);
+        REQUIRE(waitForCondition([&] { return repo->deleteCallCount() == 1; }));
         CHECK(repo->deletedIds() == std::vector<int64_t>{1});
     }
 

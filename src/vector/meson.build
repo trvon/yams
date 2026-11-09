@@ -120,6 +120,7 @@ srcs = [
   'vector_utils.cpp',
   'binary_quantization.cpp',
   'vector_schema_migration.cpp',
+  'vector_schema_repair.cpp',
   'mock_embedding_provider.cpp',
   'embedding_provider_registry.cpp',
   'dim_resolver.cpp',

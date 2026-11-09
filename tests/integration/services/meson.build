@@ -5,6 +5,10 @@ dbg = (get_option('buildtype') == 'debug')
 services_stress_iters = yams_sanitize_thread ? '20' : '100'
 services_timeout = 600
 services_ui_timeout = 1200
+# Daemon-backed service suites SKIP every case on Windows (daemon IPC shutdown), and Catch2 exits
+# 4 when every selected case is skipped. Register those under daemon_ipc_supported
+# (tests/meson.build) rather than passing --allow-running-no-tests, which would also pass a run
+# where the daemon never started. The executables still build on Windows.
 
 # integration_services is now Catch2-only; legacy GTest suite removed.
 
@@ -18,19 +22,19 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
     install: false,
   )
 
-  test('retrieval_ingestion_catch2', catch2_retrieval_ingestion_exe,
-    suite: ['catch2', 'integration', 'services', 'isolated', 'concurrency'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'YAMS_STRESS_ITERS': services_stress_iters,
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'TSAN_OPTIONS': _test_tsan_options,
-    },
-    is_parallel: false,
-    timeout: services_timeout,
-    # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
-    args: ['--allow-running-no-tests'],
-  )
+  if daemon_ipc_supported
+    test('retrieval_ingestion_catch2', catch2_retrieval_ingestion_exe,
+      suite: ['catch2', 'integration', 'services', 'isolated', 'concurrency'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_STRESS_ITERS': services_stress_iters,
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'TSAN_OPTIONS': _test_tsan_options,
+      },
+      is_parallel: false,
+      timeout: services_timeout,
+    )
+  endif
 endif
 
 # Catch2 migration: Sync Indexing tests
@@ -43,17 +47,18 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
     install: false,
   )
 
-  test('sync_indexing_catch2', catch2_sync_indexing_exe,
-    suite: ['catch2', 'integration', 'sync', 'indexing'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'TSAN_OPTIONS': _test_tsan_options,
-    },
-    is_parallel: false,
-    timeout: 120,
-    args: ['--allow-running-no-tests'],
-  )
+  if daemon_ipc_supported
+    test('sync_indexing_catch2', catch2_sync_indexing_exe,
+      suite: ['catch2', 'integration', 'sync', 'indexing'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'TSAN_OPTIONS': _test_tsan_options,
+      },
+      is_parallel: false,
+      timeout: 120,
+    )
+  endif
 endif
 
 # Catch2 migration: UI/CLI expectations service tests
@@ -66,20 +71,22 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
     install: false,
   )
 
-  foreach ui_batch : ['batch1', 'batch2', 'batch3a', 'batch3b', 'batch3c', 'batch3d']
-    test('ui_cli_expectations_catch2_' + ui_batch, catch2_ui_cli_expectations_exe,
-      suite: ['catch2', 'integration', 'services', 'ui'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_STRESS_ITERS': services_stress_iters,
-        'LD_LIBRARY_PATH': _test_env_ld_library_path,
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
-      is_parallel: false,
-      timeout: services_ui_timeout,
-      args: ['[ui-cli][' + ui_batch + ']', '--allow-running-no-tests'],
-    )
-  endforeach
+  if daemon_ipc_supported
+    foreach ui_batch : ['batch1', 'batch2', 'batch3a', 'batch3b', 'batch3c', 'batch3d']
+      test('ui_cli_expectations_catch2_' + ui_batch, catch2_ui_cli_expectations_exe,
+        suite: ['catch2', 'integration', 'services', 'ui'],
+        env: {
+          'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+          'YAMS_STRESS_ITERS': services_stress_iters,
+          'LD_LIBRARY_PATH': _test_env_ld_library_path,
+          'TSAN_OPTIONS': _test_tsan_options,
+        },
+        is_parallel: false,
+        timeout: services_ui_timeout,
+        args: ['[ui-cli][' + ui_batch + ']'],
+      )
+    endforeach
+  endif
 endif
 
 # Catch2 migration: grep service expectations
@@ -92,19 +99,20 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
     install: false,
   )
 
-  test('grep_service_expectations_catch2', catch2_grep_service_expectations_exe,
-    suite: ['catch2', 'integration', 'services', 'grep'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'YAMS_DISABLE_SESSION_WATCHER': '1',
-      'YAMS_STRESS_ITERS': services_stress_iters,
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'TSAN_OPTIONS': _test_tsan_options,
-    },
-    is_parallel: false,
-    timeout: services_ui_timeout,
-    args: ['--allow-running-no-tests'],
-  )
+  if daemon_ipc_supported
+    test('grep_service_expectations_catch2', catch2_grep_service_expectations_exe,
+      suite: ['catch2', 'integration', 'services', 'grep'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_DISABLE_SESSION_WATCHER': '1',
+        'YAMS_STRESS_ITERS': services_stress_iters,
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'TSAN_OPTIONS': _test_tsan_options,
+      },
+      is_parallel: false,
+      timeout: services_ui_timeout,
+    )
+  endif
 endif
 
 # Catch2 migration: content extraction service tests
@@ -117,6 +125,8 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
     install: false,
   )
 
+  # Registered everywhere: the fixture cases SKIP on Windows, but the daemon-free file type
+  # detection case runs, so the run is never all-skipped.
   test('content_extraction_catch2', catch2_content_extraction_exe,
     suite: ['catch2', 'integration', 'services', 'content'],
     env: {
@@ -127,7 +137,6 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
     },
     is_parallel: false,
     timeout: services_ui_timeout,
-    args: ['--allow-running-no-tests'],
   )
 endif
 
@@ -141,16 +150,17 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli and catch2_
     install: false,
   )
 
-  test('ipc_conformance_catch2', catch2_ipc_conformance_exe,
-    suite: ['catch2', 'integration', 'services', 'ipc'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'YAMS_STRESS_ITERS': services_stress_iters,
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'TSAN_OPTIONS': _test_tsan_options,
-    },
-    is_parallel: false,
-    timeout: services_ui_timeout,
-    args: ['--allow-running-no-tests'],
-  )
+  if daemon_ipc_supported
+    test('ipc_conformance_catch2', catch2_ipc_conformance_exe,
+      suite: ['catch2', 'integration', 'services', 'ipc'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_STRESS_ITERS': services_stress_iters,
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'TSAN_OPTIONS': _test_tsan_options,
+      },
+      is_parallel: false,
+      timeout: services_ui_timeout,
+    )
+  endif
 endif

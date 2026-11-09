@@ -137,7 +137,9 @@ std::uint64_t storageTreeFingerprint(const std::filesystem::path& root) noexcept
             if (!childIsDir) {
                 continue;
             }
-            const auto childTime = child.last_write_time(ec);
+            // Ask the directory itself: Windows serves cached directory_entry times from the
+            // parent index, which NTFS updates lazily, so a new object would not change them.
+            const auto childTime = fs::last_write_time(child.path(), ec);
             if (ec) {
                 return 0;
             }
@@ -154,7 +156,7 @@ std::uint64_t storageTreeFingerprint(const std::filesystem::path& root) noexcept
                 if (!shardIsDir) {
                     continue;
                 }
-                const auto shardTime = shard.last_write_time(ec);
+                const auto shardTime = fs::last_write_time(shard.path(), ec);
                 if (ec) {
                     return 0;
                 }
@@ -1266,6 +1268,8 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
         out.repairBusyTicks = state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
         out.repairTotalBacklog = state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
         out.repairProcessed = state_->stats.repairProcessed.load(std::memory_order_relaxed);
+        out.repairPathTreeRepaired =
+            state_->stats.repairPathTreeRepaired.load(std::memory_order_relaxed);
         out.repairCurrentOperationCode =
             state_->stats.repairCurrentOperationCode.load(std::memory_order_relaxed);
         const auto repairStartedMs =

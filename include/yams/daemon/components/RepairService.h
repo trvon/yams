@@ -5,6 +5,7 @@
 #include <yams/daemon/components/sqlite_vacuum.h>
 #include <yams/daemon/components/TopologyManager.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/metadata/path_tree_repair.h>
 
 #include <atomic>
 #include <chrono>
@@ -47,10 +48,6 @@ namespace yams::vector {
 class VectorDatabase;
 } // namespace yams::vector
 
-namespace yams::integrity {
-class RepairManager;
-} // namespace yams::integrity
-
 namespace yams::daemon {
 
 class WriteCoordinator;
@@ -77,7 +74,6 @@ struct RepairServiceContext {
     std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore;
     std::function<std::shared_ptr<GraphComponent>()> getGraphComponent;
     std::function<std::shared_ptr<PostIngestQueue>()> getPostIngestQueue;
-    std::function<std::shared_ptr<integrity::RepairManager>()> getRepairManager;
     std::function<std::shared_ptr<IModelProvider>()> getModelProvider;
     std::function<std::size_t()> getEmbeddingQueuedJobs;
     std::function<std::size_t()> getEmbeddingInFlightJobs;
@@ -113,7 +109,6 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services);
  *  - Background scan + detect + repair loop (runs continuously)
  *  - On-demand repair triggered by RPC (RepairRequest)
  *  - Stuck-document recovery (failed extraction, ghost success, stalled)
- *  - Delegates to RepairManager for block-level operations
  *  - Delegates to InternalEventBus for embedding / FTS5 jobs
  */
 // Progress of the startup repair scan across queue drains. Positions are document ids (the scan
@@ -130,6 +125,11 @@ public:
     bool shouldStart() const noexcept {
         std::lock_guard<std::mutex> lk(mu_);
         return !inFlight_ && (!started_ || incomplete_);
+    }
+    // True while a scan is running.
+    bool inFlight() const noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        return inFlight_;
     }
     // True when the next scan starts a retry sweep (rather than resuming a capped one).
     bool retryDue() const noexcept {
@@ -208,7 +208,15 @@ public:
         std::chrono::days sessionExpiry{30};
         // Session store to expire; empty means the user's session directory.
         std::filesystem::path sessionsDir{};
+        // How often idle maintenance re-runs a path-tree repair pass over all documents (0
+        // disables). The first pass starts maintenanceDelay after the loop starts.
+        std::chrono::hours pathTreeRepairInterval{24};
+        // Documents examined per path-tree repair batch; the loop runs one batch per tick.
+        std::size_t pathTreeRepairBatch{256};
     };
+
+    /// Longest path-tree repair interval honored (one year); longer values are clamped.
+    static constexpr std::chrono::hours kMaxPathTreeRepairInterval{24 * 365};
 
     struct RecoveryArtifactMaintenanceStats {
         std::size_t corruptDbsRemoved{0};
@@ -234,6 +242,22 @@ public:
     /// embedding writes, no index rebuild or bulk load, no on-demand repair, and no host
     /// pressure from other processes.
     [[nodiscard]] static bool vectorVacuumAdmitted(const VectorVacuumSignals& signals) noexcept;
+
+    /// Everything that decides whether the next background path-tree repair batch may run.
+    struct PathTreeRepairSignals {
+        bool shuttingDown{false};
+        bool maintenanceAllowed{false};
+        ResourcePressureLevel pressure{};
+        bool repairInProgress{false};
+        bool startupScanInFlight{false}; // the startup repair scan (also RepairScan work) runs
+        bool hostDeferred{false};        // the host is busy and the governor is holding repair work
+    };
+
+    /// A path-tree repair batch writes the metadata DB, so it runs only while no client is
+    /// connected, there is no resource pressure, no on-demand repair is running (which may be
+    /// repairing the path tree itself), the startup repair scan is not running, and the
+    /// governor admits deferrable repair work.
+    [[nodiscard]] static bool pathTreeRepairAdmitted(const PathTreeRepairSignals& signals) noexcept;
 
     // Event types for document operations (same as old RepairCoordinator)
     struct DocumentAddedEvent {
@@ -319,6 +343,20 @@ public:
     }
     std::optional<app::services::SessionExpiryResult> testing_runSessionExpiryMaintenance() {
         return runSessionExpiryMaintenance();
+    }
+    std::optional<metadata::PathTreeRepairStats> testing_runPathTreeRepairBatch() {
+        return runPathTreeRepairBatch();
+    }
+    /// Hold or release the on-demand repair gate as an executing RPC repair would.
+    bool testing_claimRepairGate() {
+        bool expected = false;
+        return repairInProgress_.compare_exchange_strong(expected, true);
+    }
+    void testing_releaseRepairGate() { repairInProgress_.store(false); }
+    /// Run the on-demand path-tree repair (`yams repair --path-tree`).
+    RepairOperationResult testing_rebuildPathTree(bool dryRun, const ProgressFn& progress,
+                                                  std::atomic<bool>* cancelRequested) {
+        return rebuildPathTree(dryRun, progress, cancelRequested);
     }
     /// Runs one startup-scan pass to completion, then drains the queue as the embedding consumer
     /// would. Returns the hashes the pass queued, in order.
@@ -462,7 +500,6 @@ private:
     std::atomic<bool> orphansRecovered_{false};
     /// Last idle sweep that returned stalled Processing attempts to Pending.
     std::chrono::steady_clock::time_point lastStalledRecovery_{};
-    boost::asio::awaitable<void> processPathTreeRepair();
     void performVectorCleanup();
     /// Move one batch of legacy per-snapshot metadata keys into document_snapshots.
     /// Returns true once none remain (or the repository cannot do it).
@@ -481,6 +518,27 @@ private:
     /// Deletes idle session files when maintenance is allowed. Returns nullopt when the check
     /// did not run (disabled, or clients are connected).
     std::optional<app::services::SessionExpiryResult> runSessionExpiryMaintenance();
+
+    // ── Path-tree repair (idle maintenance) ──
+    PathTreeRepairSignals collectPathTreeRepairSignals() const;
+    /// Runs one batch of the background path-tree repair pass when admitted, resuming from
+    /// pathTreeRepairCursor_, and schedules the next batch (soon while the pass is unfinished,
+    /// pathTreeRepairInterval once it completes). Returns the running totals of the pass, or
+    /// nullopt when no batch ran (not admitted, or no metadata repository).
+    std::optional<metadata::PathTreeRepairStats> runPathTreeRepairBatch();
+    std::int64_t pathTreeRepairCursor_{0};
+    metadata::PathTreeRepairStats pathTreeRepairPass_{};
+    std::chrono::steady_clock::time_point nextPathTreeRepair_{};
+    // Held for the duration of a background batch and of on-demand `repair --path-tree`, so
+    // stop() can wait (bounded) for an in-flight batch. Never held across a co_await.
+    std::timed_mutex pathTreeRepairMutex_;
+    // True while a background maintenance batch holds the on-demand repair gate
+    // (repairInProgress_); on-demand requests that find the gate taken say so.
+    std::atomic<bool> maintenanceHoldsRepairGate_{false};
+    // Claims repairInProgress_ for a background batch; false when an on-demand repair holds it.
+    bool claimRepairGateForMaintenance() noexcept;
+    void releaseRepairGateForMaintenance() noexcept;
+    std::string repairBusyMessage() const;
 
     // ── Detect missing work ──
     struct MissingWorkResult {
@@ -513,11 +571,13 @@ private:
                                                 ProgressFn progress);
     RepairOperationResult repairMimeTypes(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult repairDownloads(bool dryRun, bool verbose, ProgressFn progress);
-    RepairOperationResult rebuildPathTree(bool dryRun, bool verbose, ProgressFn progress);
+    RepairOperationResult rebuildPathTree(bool dryRun, const ProgressFn& progress,
+                                          std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult cleanOrphanedChunks(bool dryRun, bool verbose,
                                               const ProgressFn& progress);
     RepairOperationResult repairBlockReferences(bool dryRun, bool verbose,
-                                                const ProgressFn& progress);
+                                                const ProgressFn& progress,
+                                                std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult repairKnowledgeGraph(const RepairRequest& req, const ProgressFn& progress,
                                                std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult rebuildTopologyArtifacts(const RepairRequest& req,

@@ -18,7 +18,7 @@ abstract: >-
   combining SQLite FTS5 full-text search with dense vector embeddings for
   semantic similarity. Designed as persistent memory for LLM applications,
   YAMS features content-addressed storage with SHA-256 hashing, block-level
-  deduplication via Rabin chunking, real-time incremental indexing, and
+  deduplication via content-defined chunking, real-time incremental indexing, and
   ONNX-accelerated embeddings. The hybrid search mechanism achieves
   state-of-the-art retrieval quality on standard benchmarks while maintaining
   low latency for interactive use cases.

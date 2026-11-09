@@ -2,7 +2,6 @@
 #include <yams/chunking/chunker.h>
 #include <yams/crypto/hasher.h>
 
-#include "rabin_fingerprint_table.h"
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
 namespace yamsfmt = std;
@@ -19,95 +18,20 @@ namespace yamsfmt = fmt;
 namespace yams::chunking {
 
 struct RabinChunker::Impl {
-    std::unique_ptr<detail::RabinFingerprintTable> tables;
     ProgressCallback progressCallback;
-
-    explicit Impl(uint64_t polynomial)
-        : tables(std::make_unique<detail::RabinFingerprintTable>(polynomial)) {}
 };
 
 RabinChunker::RabinChunker(ChunkingConfig config)
-    : pImpl(std::make_unique<Impl>(config.polynomial != 0 ? config.polynomial
-                                                          : detail::kDefaultRabinPolynomial)),
-      config_(std::move(config)) {
-    if (config_.polynomial == 0) {
-        spdlog::warn("RabinChunker polynomial was zero; using default polynomial");
-        config_.polynomial = detail::kDefaultRabinPolynomial;
-    }
-    spdlog::debug("Created RabinChunker with target chunk size: {}", config_.targetChunkSize);
+    : pImpl(std::make_unique<Impl>()), config_(std::move(config)),
+      cutter_(config_.minChunkSize, config_.targetChunkSize, config_.maxChunkSize) {
+    spdlog::debug("Created RabinChunker (gear CDC) with target chunk size: {}",
+                  config_.targetChunkSize);
 }
 
 RabinChunker::~RabinChunker() = default;
 
 RabinChunker::RabinChunker(RabinChunker&&) noexcept = default;
 RabinChunker& RabinChunker::operator=(RabinChunker&&) noexcept = default;
-
-void RabinChunker::updateHash(RabinWindow& window, std::byte newByte) {
-    // Remove oldest byte from window
-    std::byte oldByte = window.window[window.pos];
-
-    // Update window
-    window.window[window.pos] = newByte;
-    ++window.pos;
-    if (window.pos == config_.windowSize) {
-        window.pos = 0;
-    }
-
-    // Update hash using precomputed tables
-    uint64_t oldHash = pImpl->tables->outTable[static_cast<uint8_t>(oldByte)];
-    uint64_t newHash = pImpl->tables->outTable[static_cast<uint8_t>(newByte)];
-
-    window.hash = ((window.hash - oldHash) << 8) ^ newHash;
-}
-
-std::pair<size_t, bool> RabinChunker::findChunkBoundary(std::span<const std::byte> data,
-                                                        size_t start, RabinWindow& window) {
-    const size_t dataSize = data.size();
-    const auto* bytes = data.data();
-    const size_t minBoundary = std::min(start + config_.minChunkSize, dataSize);
-    const size_t maxBoundary = std::min(start + config_.maxChunkSize, dataSize);
-    const size_t windowSize = config_.windowSize;
-    const uint64_t chunkMask = config_.chunkMask;
-    const auto& outTable = pImpl->tables->outTable;
-
-    auto& ring = window.window;
-    size_t& ringPos = window.pos;
-    uint64_t hash = window.hash;
-
-    size_t pos = start;
-    while (pos < minBoundary) {
-        const std::byte newByte = bytes[pos++];
-        const std::byte oldByte = ring[ringPos];
-        ring[ringPos] = newByte;
-        ++ringPos;
-        if (ringPos == windowSize) {
-            ringPos = 0;
-        }
-        hash = ((hash - outTable[static_cast<uint8_t>(oldByte)]) << 8) ^
-               outTable[static_cast<uint8_t>(newByte)];
-    }
-
-    while (pos < maxBoundary) {
-        const std::byte newByte = bytes[pos];
-        const std::byte oldByte = ring[ringPos];
-        ring[ringPos] = newByte;
-        ++ringPos;
-        if (ringPos == windowSize) {
-            ringPos = 0;
-        }
-        hash = ((hash - outTable[static_cast<uint8_t>(oldByte)]) << 8) ^
-               outTable[static_cast<uint8_t>(newByte)];
-
-        if ((hash & chunkMask) == chunkMask) {
-            window.hash = hash;
-            return {pos + 1, true};
-        }
-        ++pos;
-    }
-
-    window.hash = hash;
-    return {pos, false};
-}
 
 std::vector<Chunk> RabinChunker::chunkData(std::span<const std::byte> data) {
     return chunkDataImpl(data, /*lazy=*/false);
@@ -123,12 +47,10 @@ std::vector<Chunk> RabinChunker::chunkDataImpl(std::span<const std::byte> data, 
         chunks.reserve((data.size() / config_.targetChunkSize) + 1);
     }
 
-    RabinWindow window{};
     size_t pos = 0;
     while (pos < data.size()) {
-        auto [chunkEnd, foundBoundary] = findChunkBoundary(data, pos, window);
-        (void)foundBoundary;
-        size_t chunkSize = chunkEnd - pos;
+        const size_t chunkSize = cutter_.nextCut(data.subspan(pos));
+        const size_t chunkEnd = pos + chunkSize;
 
         chunks.emplace_back();
         Chunk& chunk = chunks.back();
@@ -194,28 +116,6 @@ RabinChunker::chunkFileAsync(const std::filesystem::path& path) {
 void RabinChunker::setProgressCallback(ProgressCallback callback) {
     pImpl->progressCallback = std::move(callback);
 }
-
-// Note: std::generator requires C++23 or coroutine TS
-// std::generator<Chunk> RabinChunker::chunkStream(std::span<const std::byte> data) {
-//     RabinWindow window{};
-//     size_t pos = 0;
-//
-//     while (pos < data.size()) {
-//         auto [chunkEnd, foundBoundary] = findChunkBoundary(data, pos, window);
-//         size_t chunkSize = chunkEnd - pos;
-//
-//         // Create and yield chunk
-//         Chunk chunk;
-//         chunk.offset = pos;
-//         chunk.size = chunkSize;
-//         chunk.data.assign(data.begin() + static_cast<std::ptrdiff_t>(pos),
-//                            data.begin() + static_cast<std::ptrdiff_t>(chunkEnd));
-//         chunk.hash = pImpl->hasher->hash(chunk.data);
-//
-//         co_yield chunk;
-//         pos = chunkEnd;
-//     }
-// }
 
 std::unique_ptr<IChunker> createRabinChunker(ChunkingConfig config) {
     return std::make_unique<RabinChunker>(std::move(config));

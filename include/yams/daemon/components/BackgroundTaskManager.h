@@ -92,7 +92,6 @@ public:
      * Launches several coroutines:
      * - Fts5Job consumer (handles full-text indexing)
      * - OrphanScan task (periodic maintenance)
-     * - PathTreeRepair task
      * - Checkpoint task
      * - StorageGc task
      * - AutoRepair task

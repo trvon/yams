@@ -95,7 +95,8 @@ TEST_CASE("Metrics consistency: unique keys", "[unit][daemon][metrics]") {
         // Repair
         kRepairRunning, kRepairInProgress, kRepairQueueDepth, kRepairBatchesAttempted,
         kRepairEmbeddingsGenerated, kRepairEmbeddingsSkipped, kRepairFailedOperations,
-        kRepairIdleTicks, kRepairBusyTicks, kRepairTotalBacklog, kRepairProcessed};
+        kRepairIdleTicks, kRepairBusyTicks, kRepairTotalBacklog, kRepairProcessed,
+        kRepairPathTreeRepaired};
 
     CHECK(keys.size() >= 81);
 }

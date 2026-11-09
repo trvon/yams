@@ -31,20 +31,23 @@ else
       install: false,
     )
 
-    test('hybrid_search_integration',
-      hybrid_search_integration_exe,
-      suite: ['integration', 'search', 'hybrid', 'semantic', 'catch2'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_SESSION_WATCHER': '1',
-        'TSAN_OPTIONS': _test_tsan_options,
-        # Note: Do NOT set YAMS_DISABLE_VECTORS - we need vector search for hybrid tests
-      },
-      is_parallel: false,
-      timeout: 300,  # 5 minutes - allows time for daemon startup + embedding model load
-      # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
-      args: ['--allow-running-no-tests'],
-    )
+    # Every case SKIPs on Windows (daemon IPC), and Catch2 reports an all-skipped run as exit 4,
+    # so register it on POSIX only instead of passing --allow-running-no-tests (which would also
+    # hide a filter or startup failure that selects/runs nothing).
+    if daemon_ipc_supported
+      test('hybrid_search_integration',
+        hybrid_search_integration_exe,
+        suite: ['integration', 'search', 'hybrid', 'semantic', 'catch2'],
+        env: {
+          'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+          'YAMS_DISABLE_SESSION_WATCHER': '1',
+          'TSAN_OPTIONS': _test_tsan_options,
+          # Note: Do NOT set YAMS_DISABLE_VECTORS - we need vector search for hybrid tests
+        },
+        is_parallel: false,
+        timeout: 300,  # 5 minutes - allows time for daemon startup + embedding model load
+      )
+    endif
 
     # FSM Tuning integration tests (Phase 4 of yams-7ez4)
     fsm_tuning_integration_exe = executable('yams_fsm_tuning_integration',
@@ -65,8 +68,7 @@ else
       },
       is_parallel: false,
       timeout: 180,  # 3 minutes - FSM tests run multiple search operations
-      # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
-      args: ['--allow-running-no-tests'],
+      # Two daemon-backed cases SKIP on Windows; the in-process cases run everywhere.
     )
 
     # Provable multi-corpus relevance gate (FTS completeness, collection isolation, path scoping)
@@ -78,18 +80,20 @@ else
       install: false,
     )
 
-    test('corpus_relevance',
-      corpus_relevance_exe,
-      suite: ['integration', 'search', 'relevance', 'fts', 'catch2'],
-      env: {
-        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-        'YAMS_DISABLE_VECTORS': '1',  # keyword/FTS + metadata scoping; no embeddings needed
-        'TSAN_OPTIONS': _test_tsan_options,
-      },
-      is_parallel: false,
-      timeout: 180,
-      args: ['--allow-running-no-tests'],
-    )
+    # Every case SKIPs on Windows (daemon IPC): POSIX only, see hybrid_search_integration.
+    if daemon_ipc_supported
+      test('corpus_relevance',
+        corpus_relevance_exe,
+        suite: ['integration', 'search', 'relevance', 'fts', 'catch2'],
+        env: {
+          'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+          'YAMS_DISABLE_VECTORS': '1',  # keyword/FTS + metadata scoping; no embeddings needed
+          'TSAN_OPTIONS': _test_tsan_options,
+        },
+        is_parallel: false,
+        timeout: 180,
+      )
+    endif
   else
     message('hybrid_search_integration test disabled (enable with -Denable-integration-tests=true).')
   endif

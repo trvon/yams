@@ -14,6 +14,19 @@ struct sqlite3;
 
 namespace yams::vector {
 
+/// Vector table groups that share an embedding dimension and are dropped as a unit.
+struct VectorTableGroups {
+    /// `vectors` plus its derived per-dimension vec0 and legacy HNSW tables.
+    bool vectors = false;
+    /// `entity_vectors`.
+    bool entityVectors = false;
+    /// `simeon_pq_meta` + `simeon_pq_codes`.
+    bool simeonPq = false;
+
+    bool any() const noexcept { return vectors || entityVectors || simeonPq; }
+    static VectorTableGroups all() noexcept { return {true, true, true}; }
+};
+
 /**
  * @brief SQLite-vec backend implementation using sqlite-vec-cpp
  *
@@ -200,8 +213,13 @@ public:
     /// Return the embedding dimension from config/schema
     std::optional<size_t> getStoredEmbeddingDimension() const;
 
-    /// Drop vector tables (safe when reinitializing)
+    /// Drop vector tables (safe when reinitializing). Same as dropTableGroups(all()).
     Result<void> dropTables();
+
+    /// Drop only the selected table groups, in one transaction (a failure keeps the previous
+    /// schema). Dropping the vectors group bumps vector_index_generation (generation and
+    /// structural_generation). Call createTables() afterwards to recreate the dropped tables.
+    Result<void> dropTableGroups(VectorTableGroups groups);
 
     /// Checkpoint vectors.db WAL to reclaim disk space
     Result<void> checkpointWal();

@@ -119,7 +119,7 @@ enum class SchedulingStrategy {
  */
 class VerificationScheduler;
 class VerificationMonitor;
-class RepairManager;
+class BlockRepairer;
 
 /**
  * Main integrity verification system
@@ -172,7 +172,7 @@ public:
     void setProgressCallback(ProgressCallback callback);
     void setAlertCallback(AlertCallback callback);
     void updateConfig(const VerificationConfig& newConfig);
-    void setRepairManager(std::shared_ptr<RepairManager> manager);
+    void setBlockRepairer(std::shared_ptr<BlockRepairer> repairer);
 
     /**
      * Status and reporting

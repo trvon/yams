@@ -356,18 +356,14 @@ public:
                                 caps["title_extractor_enabled"] =
                                     getCount("title_extractor_enabled") != 0;
                                 caps["plugin_skipped_count"] = getCount("plugin_skipped_count");
+                                // The *_ready fields are kept for existing scripts; they say
+                                // whether each extractor kind is loaded.
                                 caps["content_extractors_ready"] =
-                                    s.readinessStates.contains("content_extractors_ready")
-                                        ? s.readinessStates.at("content_extractors_ready")
-                                        : false;
+                                    getCount("content_extractors_loaded") > 0;
                                 caps["entity_extractors_ready"] =
-                                    s.readinessStates.contains("entity_extractors_ready")
-                                        ? s.readinessStates.at("entity_extractors_ready")
-                                        : false;
+                                    getCount("entity_extractors_loaded") > 0;
                                 caps["title_extractor_ready"] =
-                                    s.readinessStates.contains("title_extractor_ready")
-                                        ? s.readinessStates.at("title_extractor_ready")
-                                        : false;
+                                    getCount("title_extractor_enabled") != 0;
                                 caps["plugin_warnings_present"] =
                                     getCount("plugin_skipped_count") > 0;
                                 j["capabilities"] = std::move(caps);

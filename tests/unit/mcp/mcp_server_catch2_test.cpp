@@ -5,7 +5,6 @@
 
 #include <chrono>
 #include <future>
-#include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -47,11 +46,6 @@ TEST_CASE("MCP Transport - StdioTransport basics", "[mcp][transport][catch2]") {
     // Test close functionality
     transport.close();
     CHECK_FALSE(transport.isConnected());
-}
-
-TEST_CASE("MCP Types - Basic type availability", "[mcp][types][catch2]") {
-    // Test basic types are available - compilation test
-    CHECK(true);
 }
 
 // ============================================================================
@@ -254,28 +248,6 @@ TEST_CASE("MCP Server - handles tools/list without params field",
     CHECK(result["id"] == 3);
     REQUIRE(result.contains("result"));
     REQUIRE(result["result"].contains("tools"));
-}
-
-TEST_CASE("MCP Server - debug print tools/list response", "[mcp][server][tools][debug][catch2]") {
-    auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
-
-    json request = {
-        {"jsonrpc", "2.0"}, {"id", 99}, {"method", "tools/list"}, {"params", json::object()}};
-
-    auto response = server->handleRequestPublic(request);
-
-    REQUIRE(response.has_value());
-
-    // Print the full response for debugging
-    std::cout << "\n=== MCP tools/list Response ===\n";
-    std::cout << response.value().dump(2) << "\n";
-    std::cout << "================================\n" << std::endl;
-
-    // Also print just the listTools result
-    std::cout << "\n=== Direct listTools() Result ===\n";
-    std::cout << server->testListTools().dump(2) << "\n";
-    std::cout << "==================================\n" << std::endl;
 }
 
 TEST_CASE("MCP Server - tools/list response has no null fields",

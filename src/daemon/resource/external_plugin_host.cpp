@@ -19,6 +19,7 @@
 
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/resource/plugin_trust.h>
+#include <yams/plugins/plugin_dir_names.h>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -247,6 +248,10 @@ struct ExternalPluginHost::Impl {
 
         for (const auto& entry : fs::directory_iterator(dir)) {
             if (entry.is_directory()) {
+                // Installer bookkeeping such as .yams-staging may hold a stale or partial copy.
+                if (yams::plugins::isReservedPluginDirName(entry.path().filename().string())) {
+                    continue;
+                }
                 if (isPluginDirectory(entry.path())) {
                     if (auto r = scanTarget(entry.path())) {
                         results.push_back(std::move(r.value()));
