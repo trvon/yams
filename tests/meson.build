@@ -3797,3 +3797,24 @@ foreach t : catch2_test_table
     )
   endif
 endforeach
+
+# Catch2 registration guard: every test() in a 'catch2' suite must select at least one case.
+# The registrations are read from this build directory's Meson introspection data at run time,
+# so the check covers every subdir and cannot drift from what is declared. It lists cases with
+# the registered binaries, so it belongs to the integration lane, where the full test build
+# exists (unbuilt binaries are reported and skipped).
+test('catch2_filter_policy_unit',
+  python_exe,
+  args: [files('scripts/test_check_test_filters.py')],
+  suite: ['unit', 'policy', 'catch2-filters'],
+  timeout: 30,
+)
+test('catch2_filter_policy',
+  python_exe,
+  args: [
+    files('scripts/check_test_filters.py'),
+    '--build-dir', meson.project_build_root(),
+  ],
+  suite: ['integration', 'policy', 'catch2-filters'],
+  timeout: 600,
+)
