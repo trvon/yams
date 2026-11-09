@@ -22,7 +22,9 @@ A registered binary that is not built is a failure: under `meson test` the
 build already exists. Pass --allow-missing for ad-hoc runs on a partial build.
 
 Environment: each listing gets this process's environment plus the
-registration's own env. Meson does not expose add_test_setup() environments in
+registration's own env. On Windows the registration's extra_paths (the
+directories of the DLLs it links) go in front of PATH, as `meson test` does;
+without them every binary that links a project DLL exits 0xC0000135. Meson does not expose add_test_setup() environments in
 its introspection data, so a setup's env (here, the default 'tsan' setup's
 TSAN_OPTIONS) applies only when this script itself runs under `meson test`,
 which exports it to this process and so to every listing. Ad-hoc runs do not
@@ -56,6 +58,7 @@ class Registration:
     args: list[str]
     env: dict[str, str] = field(default_factory=dict)
     workdir: str | None = None
+    extra_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -123,7 +126,17 @@ def registration_from_entry(entry: dict,
         args=cmd[1:],
         env={str(k): str(v) for k, v in (entry.get("env") or {}).items()},
         workdir=entry.get("workdir"),
+        extra_paths=[str(p) for p in entry.get("extra_paths") or []],
     )
+
+
+def listing_env(reg: Registration, base: dict[str, str], windows: bool) -> dict[str, str]:
+    """The environment `meson test` would give this registration."""
+    env = dict(base)
+    env.update(reg.env)
+    if windows and reg.extra_paths:
+        env["PATH"] = os.pathsep.join([*reg.extra_paths, env.get("PATH", "")])
+    return env
 
 
 def listing_args(args: list[str]) -> list[str]:
@@ -150,8 +163,7 @@ def count_listed(xml_output: str) -> int:
 def check(reg: Registration, timeout: float) -> Outcome:
     if not reg.binary.is_file():
         return Outcome(reg, "missing", detail=str(reg.binary))
-    env = dict(os.environ)
-    env.update(reg.env)
+    env = listing_env(reg, dict(os.environ), windows=os.name == "nt")
     try:
         completed = subprocess.run(
             [str(reg.binary), *listing_args(reg.args)],
