@@ -329,3 +329,45 @@ TEST_CASE("Block reference repair only scans storage-key object files",
     CHECK(result.value().blocksScanned == baseline.value().blocksScanned);
     CHECK(result.value().entriesIgnored == baseline.value().entriesIgnored + 4);
 }
+
+TEST_CASE("Block reference repair refreshes stale ref_statistics even when every row is correct",
+          "[storage][repair][block-refs]") {
+    BlockRefsStore s;
+    // Only the cached totals are wrong; every block_references row matches its object.
+    s.exec("UPDATE ref_statistics SET stat_value = 1 WHERE stat_name IN ('total_bytes', "
+           "'total_uncompressed_bytes', 'unreferenced_bytes')");
+
+    auto result = yams::storage::repairBlockReferences(s.objects(), s.refs(), /*dryRun=*/false);
+    REQUIRE(result);
+    CHECK(result.value().blocksUpdated == 0);
+    s.checkStatisticsMatchTriggers();
+}
+
+TEST_CASE("Block reference repair leaves the row of an unreadable object unchanged",
+          "[storage][repair][block-refs]") {
+#ifdef _WIN32
+    SKIP("POSIX permissions");
+#else
+    BlockRefsStore s;
+    const auto [hash, original, uncompressed] = s.block();
+    const auto objectPath = s.objects() / hash.substr(0, 2) / hash.substr(2);
+    constexpr std::int64_t kDrifted = 7;
+    s.setBlockSize(hash, kDrifted);
+
+    std::filesystem::permissions(objectPath, std::filesystem::perms::none);
+    if (std::ifstream probe(objectPath, std::ios::binary); probe.good()) {
+        std::filesystem::permissions(objectPath, std::filesystem::perms::owner_read |
+                                                     std::filesystem::perms::owner_write);
+        SKIP("running with permission to read any file");
+    }
+
+    auto result = yams::storage::repairBlockReferences(s.objects(), s.refs(), /*dryRun=*/false);
+    std::filesystem::permissions(objectPath, std::filesystem::perms::owner_read |
+                                                 std::filesystem::perms::owner_write);
+    REQUIRE(result);
+    CHECK(result.value().errors >= 1);
+    // The repair could not read the header, so it must not guess a size for this row.
+    CHECK(s.scalar("SELECT block_size FROM block_references WHERE block_hash = ?", hash) ==
+          kDrifted);
+#endif
+}
