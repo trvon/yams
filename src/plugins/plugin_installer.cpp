@@ -411,6 +411,15 @@ Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir
             spdlog::warn("Plugin archive entry '{}' extracted with warning: {}", name,
                          archive_error_string(ext));
         } else if (r != ARCHIVE_OK) {
+#ifdef _WIN32
+            if (fileType == AE_IFLNK) {
+                // Creating a symlink needs Developer Mode or SeCreateSymbolicLinkPrivilege.
+                return archiveError(ErrorCode::PermissionDenied, ext,
+                                    "Cannot create symlink " + name +
+                                        " from the plugin archive (Windows requires Developer "
+                                        "Mode or the 'Create symbolic links' privilege)");
+            }
+#endif
             return archiveError(ErrorCode::CorruptedData, ext, "Failed to extract " + name);
         }
 
@@ -637,6 +646,28 @@ Result<void> lockTargetDir(yams::common::ExclusiveFileLock& lock, const fs::path
 bool isStagingDirOf(std::string_view dirName, const std::string& plugin) {
     return dirName.size() > plugin.size() + 1 && dirName.substr(0, plugin.size()) == plugin &&
            dirName[plugin.size()] == '@';
+}
+
+// `dir` must be a real directory, not a symlink or other file, whose canonical path lies
+// directly inside `canonicalParent`. Staging through anything else would write, and later
+// recursively delete, outside the plugin directory.
+Result<void> verifyRealDirectoryIn(const fs::path& dir, const fs::path& canonicalParent) {
+    std::error_code ec;
+    const auto status = fs::symlink_status(dir, ec);
+    if (ec || fs::is_symlink(status) || !fs::is_directory(status)) {
+        return Error{ErrorCode::InvalidPath,
+                     dir.string() + " is not a real directory (a symlink or another file is in "
+                                    "its place); remove it and retry"};
+    }
+    const fs::path canonical = fs::canonical(dir, ec);
+    if (ec) {
+        return Error{ErrorCode::IOError, "Failed to resolve " + dir.string() + ": " + ec.message()};
+    }
+    if (canonical.parent_path() != canonicalParent) {
+        return Error{ErrorCode::InvalidPath,
+                     dir.string() + " resolves outside " + canonicalParent.string()};
+    }
+    return {};
 }
 
 // Owns the private directory an install downloads and verifies its archive in, outside the
@@ -973,11 +1004,23 @@ public:
                 return installed.error();
             }
 
+            // The target directory itself may be a symlink (a relocated plugin directory); that
+            // is resolved once here and only used to check that staging stays inside it.
+            const fs::path canonicalTarget = fs::canonical(targetDir, ec);
+            if (ec) {
+                return Error{ErrorCode::IOError, "Failed to resolve plugin directory " +
+                                                     targetDir.string() + ": " + ec.message()};
+            }
             const fs::path stagingRoot = targetDir / std::string(kStagingDirName);
             fs::create_directories(stagingRoot, ec);
             if (ec) {
                 return Error{ErrorCode::IOError,
                              "Failed to create plugin staging directory: " + ec.message()};
+            }
+            // create_directories accepts an existing symlink to a directory; staging through
+            // one would extract (and later clean up) outside the plugin directory.
+            if (auto real = verifyRealDirectoryIn(stagingRoot, canonicalTarget); !real) {
+                return real.error();
             }
             const fs::path stagingDir =
                 yams::common::createTempDirectory(info.name + "@", stagingRoot);
@@ -987,6 +1030,11 @@ public:
                                  stagingRoot.string()};
             }
             ScopedStagingDir staging{stagingDir, stagingRoot};
+            if (auto real = verifyRealDirectoryIn(stagingDir, canonicalTarget / kStagingDirName);
+                !real) {
+                staging.keep = true; // never clean up through an unexpected path
+                return real.error();
+            }
 
             notifyProgress(InstallProgress::Stage::Extracting, "Extracting archive...");
             const fs::path extractDir = staging.path / "extracted";
@@ -1110,10 +1158,18 @@ public:
         }
 
         // A failed upgrade may have preserved a previous version under .yams-staging.
+        // Only a real staging directory inside the plugin directory is cleaned up.
         const fs::path stagingRoot = installDir_ / std::string(kStagingDirName);
-        removeLeftoverStaging(stagingRoot, name, {});
         std::error_code ec;
-        fs::remove(stagingRoot, ec); // only succeeds when empty
+        const fs::path canonicalInstallDir = fs::canonical(installDir_, ec);
+        if (!ec && fs::symlink_status(stagingRoot, ec).type() != fs::file_type::not_found) {
+            if (auto real = verifyRealDirectoryIn(stagingRoot, canonicalInstallDir); real) {
+                removeLeftoverStaging(stagingRoot, name, {});
+                fs::remove(stagingRoot, ec); // only succeeds when empty
+            } else {
+                spdlog::warn("Not cleaning plugin staging: {}", real.error().message);
+            }
+        }
 
         return {};
     }

@@ -225,6 +225,29 @@ bool isTrusted(const fs::path& trustFile, const fs::path& pluginDir) {
     return entries.count(yams::daemon::plugin_trust::normalizePath(pluginDir)) > 0;
 }
 
+// Whether this process can create symlinks in `dir`. Windows needs Developer Mode or
+// SeCreateSymbolicLinkPrivilege, which CI runners usually lack.
+bool canCreateSymlinks(const fs::path& dir) {
+    std::error_code ec;
+    const fs::path probe = dir / "symlink-probe";
+    fs::create_symlink("symlink-probe-target", probe, ec);
+    if (ec) {
+        return false;
+    }
+    fs::remove(probe, ec);
+    return true;
+}
+
+// For cases where the archive's symlinks must actually be created: either the install should
+// succeed with them, or they are only rejected after extraction. Cases rejected before any
+// link is written run everywhere.
+void skipWithoutSymlinkSupport(const fs::path& dir) {
+    if (!canCreateSymlinks(dir)) {
+        SKIP("this process cannot create symlinks (on Windows: Developer Mode or the "
+             "'Create symbolic links' privilege)");
+    }
+}
+
 } // namespace
 
 /**
@@ -742,6 +765,7 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive ent
     }
 
     SECTION("versioned library symlinks inside the plugin install as symlinks") {
+        skipWithoutSymlinkSupport(testDir);
         auto result = installFrom({{"plugin/", "", TarType::Directory},
                                    {"plugin/libfoo.so.1", "FOO"},
                                    {"plugin/libfoo.so", "", TarType::Symlink, "libfoo.so.1"},
@@ -1018,6 +1042,7 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects archive links and root
     }
 
     SECTION("a symlink that leaves the plugin directory for a sibling") {
+        skipWithoutSymlinkSupport(testDir);
         // In the extraction root, but would point next to the plugin once installed.
         expectRejected(installFrom({{"plugin/", "", TarType::Directory},
                                     {"plugin/sibling", "", TarType::Symlink, "../other"}}));
@@ -1033,6 +1058,7 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects archive links and root
     }
 
     SECTION("a symlink that climbs out of the plugin directory and back in by name") {
+        skipWithoutSymlinkSupport(testDir);
         // Resolves to evil/x lexically, but after the move into <install>/fake-plugin it would
         // name <install>/evil/x, another plugin.
         expectRejected(installFrom({{"evil/", "", TarType::Directory},
@@ -1091,6 +1117,7 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects looping symlinks witho
     }
 
     SECTION("two links that point at each other") {
+        skipWithoutSymlinkSupport(testDir);
         Result<InstallResult> result = Error{ErrorCode::Unknown, "not run"};
         REQUIRE_NOTHROW(result = installFrom({{"plugin/", "", TarType::Directory},
                                               {"plugin/a", "", TarType::Symlink, "b"},
@@ -1101,6 +1128,33 @@ TEST_CASE_METHOD(PluginInstallerFixture, "install rejects looping symlinks witho
         CHECK_FALSE(isTrusted(trustFile, pluginDir));
         CHECK_FALSE(leftoverStaging());
     }
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install refuses a symlinked staging directory",
+                 "[plugins][installer][security]") {
+    skipWithoutSymlinkSupport(testDir);
+    const fs::path elsewhere = testDir / "elsewhere";
+    fs::create_directories(elsewhere);
+    fs::create_directory_symlink(elsewhere, installDir / ".yams-staging");
+
+    const fs::path archive =
+        writePluginArchive(testDir / "source" / "fake-plugin.tar.gz",
+                           {{"plugin/", "", TarType::Directory},
+                            {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+    repo->info.downloadUrl = fileUrl(archive);
+    repo->info.checksum = sha256Of(archive);
+    auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+    auto result = installer->install("fake-plugin", InstallOptions{});
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error().code == ErrorCode::InvalidPath));
+    CHECK((fs::is_empty(elsewhere)));
+    CHECK_FALSE(fs::exists(installDir / "fake-plugin"));
+    CHECK((fs::is_symlink(installDir / ".yams-staging"))); // left alone, not followed
 }
 
 TEST_CASE_METHOD(PluginInstallerFixture, "install rejects a truncated archive",
