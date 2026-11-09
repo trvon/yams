@@ -198,7 +198,7 @@ struct IntegrityVerifier::Impl {
             }
 
             if (!existsResult.value()) {
-                if (config.enableAutoRepair && blockRepairer && blockRepairer->canRepair(hash)) {
+                if (config.enableAutoRepair && blockRepairer && blockRepairer->hasRepairSources()) {
                     stats.repairsAttemptedTotal++;
                     if (blockRepairer->attemptRepair(hash)) {
                         auto repairedData = storage.retrieve(hash);
@@ -251,7 +251,7 @@ struct IntegrityVerifier::Impl {
                 result.errorDetails = "Hash mismatch: expected " + hash + ", got " + computedHash;
                 stats.verificationErrorsTotal++;
 
-                if (config.enableAutoRepair && blockRepairer && blockRepairer->canRepair(hash)) {
+                if (config.enableAutoRepair && blockRepairer && blockRepairer->hasRepairSources()) {
                     bool repaired = false;
                     for (size_t attempt = 0; attempt < config.maxRepairAttempts && !repaired;
                          ++attempt) {
