@@ -255,9 +255,9 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                 setVal(metrics::kTitleExtractorEnabled, titleExtractorReady ? 1 : 0);
                 setVal(metrics::kPluginSkippedCount, skippedPlugins);
 
+                // Entity and title extractors are optional plugins: their counts above say
+                // whether they are loaded, and a daemon without them is not waiting on them.
                 setReady(readiness::kContentExtractorsReady, contentExtractorCount > 0);
-                setReady(readiness::kEntityExtractorsReady, entityExtractorCount > 0);
-                setReady(readiness::kTitleExtractorReady, titleExtractorReady);
             } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
@@ -805,10 +805,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
 
                     res.readinessStates[std::string(readiness::kContentExtractorsReady)] =
                         contentExtractorCount > 0;
-                    res.readinessStates[std::string(readiness::kEntityExtractorsReady)] =
-                        entityExtractorCount > 0;
-                    res.readinessStates[std::string(readiness::kTitleExtractorReady)] =
-                        titleExtractorReady;
                 }
             } catch (...) { // NOLINT(bugprone-empty-catch)
             }
