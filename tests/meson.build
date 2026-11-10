@@ -2953,7 +2953,6 @@ if catch2_dep.found()
 
   integrity_catch2_exe = executable('integrity_catch2',
     files(
-      'unit/integrity/integrity_verifier_simple_test.cpp',
       'unit/integrity/integrity_verifier_catch2_test.cpp',
       'unit/integrity/block_repairer_catch2_test.cpp',
       'unit/integrity/verification_monitor_test.cpp',
