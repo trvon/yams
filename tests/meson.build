@@ -1263,17 +1263,6 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
-    'name': 'multiplex_client',
-    'sources': files('unit/daemon/multiplex_client_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'multiplex'],
-    # Every case is hidden ([.requires_daemon]), so a default run selects zero tests. Build it,
-    # do not register a test that can only pass by running nothing.
-    'register': false,
-    'timeout': 60,
-  }]
-
-  catch2_test_table += [{
     'name': 'entity_graph_service',
     'sources': files('unit/daemon/entity_graph_service_catch2_test.cpp'),
     'deps': test_deps,
@@ -1435,18 +1424,6 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-
-  catch2_test_table += [{
-    'name': 'request_lifetime',
-    'sources': files('unit/daemon/request_handler_lifetime_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon'],
-    # The only case is hidden ([.streaming_disabled]) until the streaming path is re-enabled, so
-    # a default run selects zero tests. Build it, do not register an empty run.
-    'register': false,
-    'timeout': 120,
-    'is_parallel': false,
-  }]
 
   catch2_test_table += [{
     'name': 'writer_drain_cleanup',
@@ -3772,7 +3749,6 @@ if catch2_dep.found()
 endif
 
 # Table keys beyond the basics:
-#   'register': false   build the executable but declare no test (every case is hidden).
 #   'posix_only': true  every selected case SKIPs on Windows; Catch2 exits 4 when all selected
 #                       cases skip, so the test is not declared there. Prefer this over
 #                       --allow-running-no-tests, which also passes a run that selected nothing.
@@ -3784,7 +3760,7 @@ foreach t : catch2_test_table
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  if t.get('register', true) and (not t.get('posix_only', false) or daemon_ipc_supported)
+  if not t.get('posix_only', false) or daemon_ipc_supported
     test(t['name'], t_exe,
       suite: t['suite'],
       args: t.get('args', []),
