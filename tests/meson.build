@@ -1425,6 +1425,21 @@ if catch2_dep.found()
     install: false,
   )
 
+  # The only case is hidden ([.bench][.slow]) and env-gated, so it is selected by tag and runs
+  # only in the bench lane (-Denable-bench-tests=true).
+  if get_option('enable-bench-tests') and daemon_ipc_supported
+    test('daemon_idle_control_bench', catch2_daemon_idle_control_bench_exe,
+      suite: ['catch2', 'bench', 'daemon'],
+      args: ['[bench]'],
+      env: {
+        'YAMS_ENABLE_DAEMON_IDLE_BENCH': '1',
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      },
+      is_parallel: false,
+      timeout: bench_timeout,
+    )
+  endif
+
   catch2_test_table += [{
     'name': 'writer_drain_cleanup',
     'sources': files('unit/daemon/request_handler_writer_drain_cleanup_catch2_test.cpp'),
