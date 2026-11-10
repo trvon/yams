@@ -186,6 +186,9 @@ private:
             curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 0L);
             // nosemgrep: yams.cpp.curl-tls-verification-disabled -- guarded to loopback test repos.
             curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 0L);
+            // The loopback check covers only this URL: a redirect could name a remote host, which
+            // would then be fetched unverified. Do not follow redirects without verification.
+            curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 0L);
         }
 
         if (config_.proxy) {
