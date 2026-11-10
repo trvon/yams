@@ -21,6 +21,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -210,6 +211,7 @@ public:
         }
         recordContentStorePhase("hash", hashStart);
         spdlog::debug("File hash: {} for {}", fileHash, path.string());
+        const std::scoped_lock contentLock(contentStripes_[contentStripe(fileHash)]);
 
         const auto readFileRange = fileRangeReader(path);
         if (auto existing = storeAgainstExistingManifest(fileHash, fileSize, metadata,
@@ -688,13 +690,6 @@ public:
         if (auto committed = commitReferenceBatch(std::move(refBatch)); !committed) {
             return committed.error();
         }
-        // A concurrent last remove() may have deleted the manifest between the read above and
-        // the reference commit. Storing it again is a no-op when it is still there.
-        if (auto kept = storage_->store(hash + ".manifest",
-                                        std::span<const std::byte>(existing.value()->bytes));
-            !kept) {
-            return kept.error();
-        }
         {
             std::unique_lock lock(metadataMutex_);
             metadataStore_[hash] = sanitizeStoredMetadata(metadata, hash, size);
@@ -714,6 +709,7 @@ public:
         auto startTime = std::chrono::steady_clock::now();
 
         const std::string dataHash = crypto::SHA256Hasher::hash(data);
+        const std::scoped_lock contentLock(contentStripes_[contentStripe(dataHash)]);
 
         // For small data, store directly without chunking
         if (data.size() <= config_.chunkSize) {
@@ -1001,6 +997,7 @@ public:
 
     // Remove content
     Result<bool> remove(const std::string& hash) override {
+        const std::scoped_lock contentLock(contentStripes_[contentStripe(hash)]);
         // Retrieve manifest first
         auto manifestHash = hash + ".manifest";
         auto manifestResult = storage_->retrieve(manifestHash);
@@ -1151,6 +1148,26 @@ public:
                 continue;
             }
             prepared[i] = std::move(item).value();
+        }
+        std::set<std::size_t> stripes;
+        for (const auto& item : prepared) {
+            if (item) {
+                stripes.insert(contentStripe(item->fileHash));
+            }
+        }
+        std::vector<std::unique_lock<std::mutex>> contentLocks;
+        contentLocks.reserve(stripes.size());
+        for (const auto stripe : stripes) {
+            contentLocks.emplace_back(contentStripes_[stripe]);
+        }
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            if (!prepared[i]) {
+                continue;
+            }
+            if (auto layout = prepareBatchLayout(*prepared[i], paths[i]); !layout) {
+                outcomes[i] = layout.error();
+                prepared[i].reset();
+            }
         }
         recordContentStorePhase("batch_prepare", batchPrepareStart);
 
@@ -1684,6 +1701,16 @@ private:
 
     // Metadata storage (in-memory for now)
     mutable std::shared_mutex metadataMutex_;
+
+    // store(), storeBytes(), storeBatch() and remove() of one content hash run one at a time:
+    // each reads the manifest, changes chunk references and then keeps or deletes the manifest,
+    // and interleaving those steps can leave referenced chunks without a manifest. Striped by
+    // hash so unrelated content does not contend; a batch locks its stripes in index order.
+    static constexpr std::size_t kContentStripes = 256;
+    std::array<std::mutex, kContentStripes> contentStripes_;
+    static std::size_t contentStripe(const std::string& hash) {
+        return std::hash<std::string>{}(hash) % kContentStripes;
+    }
     std::unordered_map<std::string, ContentMetadata> metadataStore_;
 
     // Statistics
@@ -1721,6 +1748,13 @@ private:
             prepared.fileHash = fileHasher->hashFile(path);
         }
 
+        return prepared;
+    }
+
+    // Second half of batch preparation, run with the item's content stripe held: choose the
+    // chunk layout and build the manifest.
+    Result<void> prepareBatchLayout(PreparedBatchStore& prepared,
+                                    const std::filesystem::path& path) {
         // Stored content keeps its manifest's chunk layout (see storeAgainstExistingManifest):
         // the batch then adds one reference per listed chunk and rewrites nothing.
         auto existing = loadExistingManifest(prepared.fileHash, prepared.fileSize);
@@ -1752,7 +1786,7 @@ private:
             prepared.manifestData = std::move(existing.value()->bytes);
             prepared.manifestPreexisting = true;
             prepared.refBatch.operations.reserve(prepared.chunks.size());
-            return prepared;
+            return {};
         }
 
         try {
@@ -1777,7 +1811,7 @@ private:
         prepared.manifestHash = prepared.fileHash + ".manifest";
         prepared.manifestData = std::move(manifest).value();
         prepared.refBatch.operations.reserve(prepared.chunks.size());
-        return prepared;
+        return {};
     }
 
     // Update statistics
