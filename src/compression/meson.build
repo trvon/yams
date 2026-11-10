@@ -12,10 +12,6 @@ compression_src = files(
   'compression_header.cpp',
   'compression_policy.cpp',
   'compression_monitor.cpp',
-  'error_handler.cpp',
-  'integrity_validator.cpp',
-  'recovery_manager.cpp',
-  'transaction_manager.cpp',
 )
 
 yams_compression = static_library('yams_compression',
