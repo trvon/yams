@@ -758,9 +758,14 @@ StoreCallSnapshot runQueuedDocuments(std::size_t count, std::uint32_t batchSize 
             .lastBatchSize = contentStore->lastBatchSize()};
 }
 
-bool isMpmcEnabled() {
-    const char* m = std::getenv("YAMS_INTERNAL_BUS_MPMC");
-    return m && std::string(m) == "1";
+// YAMS_INTERNAL_BUS_MPMC is a compile-time switch (InternalEventBus.h, default 1), not an
+// environment variable: reading the environment made these cases skip in every lane.
+constexpr bool isMpmcEnabled() {
+#if YAMS_INTERNAL_BUS_MPMC
+    return true;
+#else
+    return false;
+#endif
 }
 
 } // namespace
@@ -1564,7 +1569,7 @@ TEST_CASE("PostIngestQueue: full-channel enqueueBatch waits only log at debug",
 TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
           "[daemon][background][bus][stress][slow]") {
     if (!isMpmcEnabled()) {
-        SKIP("MPMC bus not enabled (set YAMS_INTERNAL_BUS_MPMC=1)");
+        SKIP("MPMC bus not compiled in (built with -DYAMS_INTERNAL_BUS_MPMC=0)");
     }
 
     BusToggleGuard busGuard(true); // Enable bus routing
@@ -1648,7 +1653,7 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
 TEST_CASE("InternalEventBus: MPMC queue correctness under concurrent load",
           "[daemon][background][concurrency][mpmc]") {
     if (!isMpmcEnabled()) {
-        SKIP("MPMC not enabled (set YAMS_INTERNAL_BUS_MPMC=1)");
+        SKIP("MPMC bus not compiled in (built with -DYAMS_INTERNAL_BUS_MPMC=0)");
     }
 
     SECTION("4 producers × 4 consumers × 5000 items") {

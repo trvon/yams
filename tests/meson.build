@@ -3458,9 +3458,7 @@ if catch2_dep.found()
 
   test('daemon_background_processing_slow', catch2_daemon_background_exe,
     suite: ['catch2', 'slow', 'daemon', 'background', 'concurrency'],
-    # Keeps --allow-running-no-tests: the one [slow] case SKIPs unless
-    # YAMS_INTERNAL_BUS_MPMC=1 (runtime capability), which would otherwise exit 4.
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
