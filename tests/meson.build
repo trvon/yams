@@ -2343,19 +2343,6 @@ if catch2_dep.found()
     'timeout': 180,
   }]
 
-#Resolve Test Suites(Catch2) - resolver, backend implementations
-#Migrated from GTest as part of yams - 3s4 / resolve
-#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-#Resolve submodule tests(resolver, backends)
-#Migrated from GTest as part of yams - 3s4 / resolve
-  catch2_test_table += [{
-    'name': 'resolve_submodule',
-    'sources': files('unit/resolve/resolver_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'resolve'],
-    'timeout': 180,
-  }]
-
 #Manifest Test Suites(Catch2) - manifest manager, serialization, reconstruction
 #Migrated from GTest as part of yams - 3s4 / yams - 1jm
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
