@@ -203,7 +203,6 @@ tests/benchmarks/topology_build_bench.cpp:65:portability/env-read # reviewed raw
 tests/benchmarks/topology_build_bench.cpp:79:portability/env-read # reviewed raw environment read
 tests/benchmarks/write_coordinator_bench.cpp:72:portability/env-read # reviewed raw environment read
 tests/benchmarks/write_coordinator_bench.cpp:419:portability/env-read # reviewed raw environment read
-tests/integration/daemon/client_timeout_recovery_test.cpp:616:portability/env-read # reviewed raw environment read
 tests/integration/daemon/onnx_tuning_integration_test.cpp:409:portability/env-read # reviewed raw environment read
 tests/integration/daemon/onnx_tuning_integration_test.cpp:410:portability/env-read # reviewed raw environment read
 tests/integration/services/grep_service_expectations_catch2_test.cpp:676:portability/env-read # reviewed raw environment read
@@ -215,8 +214,7 @@ tests/integration/services/ui_cli_expectations_catch2_test.cpp:1270:portability/
 tests/integration/smoke/add_command_sandbox_smoke_catch2_test.cpp:41:portability/env-read # reviewed raw environment read
 tests/integration/smoke/cli_subprocess_segfault_regression_smoke_catch2_test.cpp:97:portability/env-read # reviewed raw environment read
 tests/integration/smoke/cli_subprocess_segfault_regression_smoke_catch2_test.cpp:153:portability/env-read # reviewed raw environment read
-tests/integration/smoke/cli_transport_fallback_smoke_catch2_test.cpp:39:portability/env-read # reviewed raw environment read
-tests/integration/smoke/cli_transport_fallback_smoke_catch2_test.cpp:90:portability/env-read # reviewed raw environment read
+tests/integration/smoke/cli_transport_fallback_smoke_catch2_test.cpp:40:portability/env-read # reviewed raw environment read
 tests/integration/smoke/daemon_cli_start_status_regression_smoke_catch2_test.cpp:99:portability/env-read # reviewed raw environment read
 tests/integration/smoke/daemon_cli_start_status_regression_smoke_catch2_test.cpp:126:portability/env-read # reviewed raw environment read
 tests/integration/smoke/daemon_embeddings_regression_smoke_catch2_test.cpp:313:portability/env-read # reviewed raw environment read
@@ -227,8 +225,7 @@ tests/integration/smoke/daemon_embeddings_regression_smoke_catch2_test.cpp:359:p
 tests/integration/smoke/daemon_embeddings_regression_smoke_catch2_test.cpp:397:portability/env-read # reviewed raw environment read
 tests/integration/smoke/daemon_ingestion_reliability_smoke_catch2_test.cpp:103:portability/env-read # reviewed raw environment read
 tests/integration/smoke/graph_command_sandbox_smoke_catch2_test.cpp:68:portability/env-read # reviewed raw environment read
-tests/integration/smoke/search_graph_ux_smoke_catch2_test.cpp:77:portability/env-read # reviewed raw environment read
-tests/integration/smoke/search_graph_ux_smoke_catch2_test.cpp:362:portability/env-read # reviewed raw environment read
+tests/integration/smoke/search_graph_ux_smoke_catch2_test.cpp:78:portability/env-read # reviewed raw environment read
 tests/integration/vector/hnsw_retrieval_diagnostic.cpp:158:portability/env-read # reviewed raw environment read
 tests/integration/vector/hnsw_retrieval_diagnostic.cpp:165:portability/env-read # reviewed raw environment read
 tests/plugins/s3/s3_plugin_smoke_test.cpp:17:portability/env-read # reviewed raw environment read

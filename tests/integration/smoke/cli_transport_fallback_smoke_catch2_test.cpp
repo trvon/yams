@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "common/sanitizer_build.h"
 #include "common/test_helpers_catch2.h"
 
 #include <yams/cli/yams_cli.h>
@@ -87,7 +88,7 @@ int run_cli(const std::vector<std::string>& args, std::string* output = nullptr,
 
 TEST_CASE("IntegrationSmoke.CliCommandsPreferInProcessFallbackOverLocalServices",
           "[smoke][integrationsmoke]") {
-    if (std::getenv("TSAN_OPTIONS") != nullptr) {
+    if (yams::test::kThreadSanitizerBuild) {
         SKIP("TSAN-only teardown flake in repeated CLI fallback path");
     }
 
