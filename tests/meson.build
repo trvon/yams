@@ -2950,6 +2950,7 @@ if catch2_dep.found()
     'sources': files(
       'unit/plugins/plugin_installer_test.cpp',
       'unit/plugins/plugin_repo_client_test.cpp',
+      'unit/plugins/loopback_url_catch2_test.cpp',
       'unit/plugins/onnx_request_test.cpp',
     ),
     'deps': test_deps,
