@@ -477,6 +477,16 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             pmi_sample_texts.reserve(reserveDocs);
         }
 
+        // Concept mining reads the text BM25 indexed, kept from this pass. Its PMI divides
+        // bigram counts by the index's unigram counts, so both must come from the same text;
+        // and holding the reduced text is bounded by max_corpus_bytes, where re-reading every
+        // raw document was not (a few very large documents can be most of a corpus).
+        const bool mineConcepts = cfg_.concept_mining_enabled && ids.size() >= 100;
+        std::vector<std::string> conceptTexts;
+        if (mineConcepts) {
+            conceptTexts.reserve(ids.size());
+        }
+
         std::uint32_t dense = 0;
         std::size_t missing = 0;
         std::size_t rawCorpusBytes = 0;
@@ -554,6 +564,11 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                     pmiSampleBytes += buildDocBytes;
                 }
             }
+            if (mineConcepts) {
+                // Last use of buildText: one entry per indexed document, in dense-id order.
+                conceptTexts.emplace_back(buildText.chunked ? std::move(buildText.owned)
+                                                            : std::string(buildText.view));
+            }
             mapping.emplace(docId, dense++);
             dense_doc_ids.push_back(docId);
             if (cfg_.strategy_router_enabled) {
@@ -574,65 +589,30 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             primary->memory_bytes() + (atire ? atire->memory_bytes() : 0);
         releaseTransientPages("post-bm25-finalize");
 
-        // Concept mining: second pass over the corpus to discover word-bigram
-        // concepts via PMI and blend them into BM25 scores at query time.
+        // Concept mining: discover word-bigram concepts via PMI and blend them into BM25
+        // scores at query time. Document i here is dense id i in the index.
         std::unique_ptr<simeon::ConceptIndex> conceptIdx;
-        if (cfg_.concept_mining_enabled && ids.size() >= 100) {
+        if (mineConcepts && !stopRequested()) {
             try {
+                YAMS_ZONE_SCOPED_N("simeon::mine_concepts");
                 const auto cmt0 = std::chrono::steady_clock::now();
-                // Bound retained raw text, not total process memory: getContent still
-                // materializes the next document before this check, and mining has its own
-                // allocations. Exceeding this budget disables the entire concept-scoring
-                // layer for this build; it is not sampling or a quality-neutral shortcut.
-                std::vector<std::string> conceptTexts;
-                conceptTexts.reserve(ids.size());
-                std::size_t conceptCorpusBytes = 0;
-                bool conceptBudgetExceeded = false;
-                for (auto docId : ids) {
-                    if (stopRequested())
-                        break;
-                    auto contentResult = repo->getContent(docId);
-                    if (contentResult && contentResult.value()) {
-                        auto& text = contentResult.value()->contentText;
-                        if (exceedsBudget(conceptCorpusBytes, text.size(), cfg_.max_corpus_bytes)) {
-                            conceptBudgetExceeded = true;
-                            break;
-                        }
-                        conceptCorpusBytes += text.size();
-                        conceptTexts.emplace_back(std::move(text));
-                    } else {
-                        conceptTexts.emplace_back();
-                    }
-                }
-                if (conceptBudgetExceeded) {
-                    spdlog::warn("[simeon-lexical] concept mining skipped: raw corpus exceeds "
-                                 "max_corpus_bytes (docs_loaded={} bytes={} cap={})",
-                                 conceptTexts.size(), conceptCorpusBytes, cfg_.max_corpus_bytes);
-                    conceptTexts.clear();
-                    conceptTexts.shrink_to_fit();
-                }
-                if (!conceptBudgetExceeded && !stopRequested() &&
-                    conceptTexts.size() == ids.size()) {
-                    YAMS_ZONE_SCOPED_N("simeon::mine_concepts");
-                    std::vector<std::string_view> docViews;
-                    docViews.reserve(conceptTexts.size());
-                    for (const auto& t : conceptTexts)
-                        docViews.emplace_back(t);
-                    simeon::ConceptConfig conceptConfig;
-                    conceptConfig.concept_weight = cfg_.concept_weight;
-                    conceptIdx = std::make_unique<simeon::ConceptIndex>(simeon::mine_concepts(
-                        *primary, std::span<const std::string_view>(docViews), conceptConfig));
-                    const auto cmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                          std::chrono::steady_clock::now() - cmt0)
-                                          .count();
-                    spdlog::info("[simeon-lexical] concept mining: {} concepts in {} ms",
-                                 conceptIdx->size(), cmMs);
-                }
+                const std::vector<std::string_view> docViews(conceptTexts.begin(),
+                                                             conceptTexts.end());
+                simeon::ConceptConfig conceptConfig;
+                conceptConfig.concept_weight = cfg_.concept_weight;
+                conceptIdx = std::make_unique<simeon::ConceptIndex>(simeon::mine_concepts(
+                    *primary, std::span<const std::string_view>(docViews), conceptConfig));
+                const auto cmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now() - cmt0)
+                                      .count();
+                spdlog::info("[simeon-lexical] concept mining: {} concepts in {} ms",
+                             conceptIdx->size(), cmMs);
             } catch (const std::exception& e) {
                 spdlog::warn("[simeon-lexical] concept mining failed: {}", e.what());
                 conceptIdx.reset();
             }
         }
+        std::vector<std::string>().swap(conceptTexts);
 
         // Router uses the Atire index when available (matches simeon bench
         // convention — df/idf values are BM25-variant-independent, so the
