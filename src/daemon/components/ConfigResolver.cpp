@@ -869,6 +869,32 @@ ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePo
     return policy;
 }
 
+ConfigResolver::QueryLogPolicy ConfigResolver::resolveQueryLogPolicy() {
+    QueryLogPolicy policy;
+    try {
+        namespace fs = std::filesystem;
+        const fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            const auto kv = yams::config::parse_simple_toml(cfgPath);
+            if (auto it = kv.find("search.query_log.enabled"); it != kv.end()) {
+                policy.enabled = parseBoolValue(it->second).value_or(policy.enabled);
+            }
+            if (auto it = kv.find("search.query_log.max_entries"); it != kv.end()) {
+                try {
+                    policy.maxEntries =
+                        static_cast<std::size_t>(std::stoull(std::string(trimView(it->second))));
+                } catch (const std::exception&) {
+                    spdlog::warn("[search.query_log] max_entries is not a number; keeping {}",
+                                 policy.maxEntries);
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("[search.query_log] config read failed: {}", e.what());
+    }
+    return policy;
+}
+
 ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPolicy() {
     TopologyRoutingPolicy policy;
 

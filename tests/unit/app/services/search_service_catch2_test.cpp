@@ -389,6 +389,50 @@ TEST_CASE("SearchService: basic text search", "[unit][services][search]") {
     }
 }
 
+TEST_CASE("SearchService: the query log records queries only when enabled",
+          "[unit][services][search][query-log]") {
+    SearchServiceFixture f;
+
+    SECTION("disabled by default for embedded contexts") {
+        REQUIRE(runAwait(f.searchService->search(f.createBasicSearchRequest("programming"))));
+        auto recent = f.metadataRepo->getRecentSearches(10);
+        REQUIRE(recent);
+        CHECK(recent.value().empty());
+    }
+
+    SECTION("enabled: text queries are kept newest first, hash lookups are not") {
+        f.appContext.queryLogMaxEntries = 100;
+        auto service = makeSearchService(f.appContext);
+        REQUIRE(runAwait(service->search(f.createBasicSearchRequest("programming"))));
+        REQUIRE(runAwait(service->search(f.createBasicSearchRequest("database design"))));
+
+        auto hashRequest = f.createBasicSearchRequest("");
+        hashRequest.type = "hash";
+        hashRequest.hash = "abcdef0123456789";
+        (void)runAwait(service->search(hashRequest));
+
+        auto recent = f.metadataRepo->getRecentSearches(10);
+        REQUIRE(recent);
+        REQUIRE(recent.value().size() == 2u);
+        CHECK(recent.value()[0].query == "database design");
+        CHECK(recent.value()[1].query == "programming");
+        CHECK(recent.value()[0].executionTimeMs >= 0);
+    }
+
+    SECTION("enabled: only the newest entries up to the cap are retained") {
+        f.appContext.queryLogMaxEntries = 3;
+        auto service = makeSearchService(f.appContext);
+        for (const char* query : {"alpha", "beta", "gamma", "delta", "epsilon"}) {
+            REQUIRE(runAwait(service->search(f.createBasicSearchRequest(query))));
+        }
+        auto recent = f.metadataRepo->getRecentSearches(10);
+        REQUIRE(recent);
+        REQUIRE(recent.value().size() == 3u);
+        CHECK(recent.value()[0].query == "epsilon");
+        CHECK(recent.value()[2].query == "gamma");
+    }
+}
+
 TEST_CASE("SearchService: host cancellation stops the search", "[unit][services][search]") {
     SearchServiceFixture f;
     auto cancelled = std::make_shared<std::atomic<bool>>(true);

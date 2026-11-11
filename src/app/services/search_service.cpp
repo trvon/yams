@@ -960,7 +960,32 @@ public:
             result = Result<SearchResponse>(std::move(resp));
         }
 
+        if (result) {
+            recordQuery(req, type, result.value());
+        }
         co_return result;
+    }
+
+    // Local query log. Only queries that state an information need are kept: hash lookups and
+    // empty queries are skipped, and so is anything too long to be a query.
+    void recordQuery(const SearchRequest& req, const std::string& effectiveType,
+                     const SearchResponse& resp) const {
+        constexpr std::size_t kMaxLoggedQueryBytes = 4096;
+        if (ctx_.queryLogMaxEntries == 0 || !ctx_.metadataRepo || req.query.empty() ||
+            req.query.size() > kMaxLoggedQueryBytes || !req.hash.empty() ||
+            effectiveType == "hash") {
+            return;
+        }
+        metadata::SearchHistoryEntry entry;
+        entry.query = req.query;
+        entry.queryTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        entry.resultsCount = static_cast<int64_t>(resp.results.size());
+        entry.executionTimeMs = resp.executionTimeMs;
+        if (auto recorded = ctx_.metadataRepo->recordSearchQuery(entry, ctx_.queryLogMaxEntries);
+            !recorded) {
+            spdlog::debug("SearchService: query log write dropped: {}", recorded.error().message);
+        }
     }
 
     boost::asio::awaitable<Result<void>> lightIndexForHash_impl(const std::string& hash,

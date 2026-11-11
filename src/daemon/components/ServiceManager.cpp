@@ -4087,6 +4087,11 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
         spdlog::debug("AppContext: search repair status probe failed with unknown exception");
     }
 
+    // Read once per process; a config change takes effect on restart like the other policies.
+    static const std::size_t queryLogMaxEntries =
+        ConfigResolver::resolveQueryLogPolicy().effectiveMaxEntries();
+    ctx.queryLogMaxEntries = queryLogMaxEntries;
+
     return ctx;
 }
 
