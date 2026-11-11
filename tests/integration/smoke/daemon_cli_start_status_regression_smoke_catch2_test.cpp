@@ -245,7 +245,24 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
     fs::create_directories(binDir);
 #endif
 
+    // Own config file: without one the CLI and daemon read the developer's config, resolve the
+    // real data directory and collide with (or get refused by) a daemon already running there.
+    const fs::path configPath = root / "config.toml";
+    {
+        std::ofstream cfg(configPath);
+        cfg << "[version]\n";
+        cfg << "config_version = 3\n";
+        cfg << "[core]\n";
+        cfg << "data_dir = \"" << dataDir.string() << "\"\n";
+        cfg << "[storage]\n";
+        cfg << "path = \"" << dataDir.string() << "\"\n";
+        cfg << "[daemon]\n";
+        cfg << "socket_path = \"" << socketPath.string() << "\"\n";
+        cfg << "pid_file = \"" << pidFile.string() << "\"\n";
+    }
+    ScopedEnvVar cfgEnv("YAMS_CONFIG", configPath.string());
     ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
+    ScopedEnvVar storageEnv("YAMS_STORAGE", dataDir.string());
     ScopedEnvVar runtimeEnv("XDG_RUNTIME_DIR", runtimeDir.string());
     ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "0");
     ScopedEnvVar daemonBinEnv("YAMS_DAEMON_BIN", daemonBinary->string());
