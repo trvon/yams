@@ -13,11 +13,11 @@
 //                   production multi-representative cover)
 //   hot_R           max over the centroid and the R-1 members that are most often the exact
 //                   best match for the training queries
-//   ridge           centroid plus a per-cluster correction vector fitted by ridge regression
-//                   to the cluster's support function h_c(q) = max over members of <q, key>
-//                   on the training queries (a one-layer form of a learned support-function
-//                   router). The regularization strength is chosen on held-out training
-//                   queries, never on the evaluation queries.
+//   ridge           yams::topology::fitRouteVectors: centroid plus a per-cluster correction
+//                   fitted by ridge regression to the cluster's support function
+//                   h_c(q) = max over members of <q, key> on the training queries. The
+//                   strength is chosen on held-out training queries, never on the evaluation
+//                   queries; "ridge(kept)" means the fit kept the centroids.
 //   maxaff_R        R fitted vectors per cluster scored by their maximum (a max-affine, hence
 //                   convex, model of h_c), trained by gradient descent from the ridge vector
 //                   and the hot members, stopped at the best held-out training epoch
@@ -49,8 +49,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -64,6 +66,7 @@
 #include <yams/topology/topology_alternate_engines.h>
 #include <yams/topology/topology_artifacts.h>
 #include <yams/topology/topology_baseline.h>
+#include <yams/topology/topology_route_fit.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/simeon_embedding_backend.h>
 
@@ -178,8 +181,13 @@ std::vector<Document> loadCorpus(const fs::path& path, std::size_t maxDocs) {
     return docs;
 }
 
-std::vector<std::string> loadQueries(const fs::path& path) {
-    std::vector<std::string> queries;
+struct QueryRow {
+    std::string id;
+    std::string text;
+};
+
+std::vector<QueryRow> loadQueries(const fs::path& path) {
+    std::vector<QueryRow> queries;
     std::ifstream in(path);
     std::string line;
     while (std::getline(in, line)) {
@@ -192,10 +200,36 @@ std::vector<std::string> loadQueries(const fs::path& path) {
         }
         auto text = row.value("text", std::string{});
         if (!text.empty()) {
-            queries.push_back(std::move(text));
+            queries.push_back({row.value("_id", std::string{}), std::move(text)});
         }
     }
     return queries;
+}
+
+// BEIR qrels: "query-id<TAB>corpus-id<TAB>score" with a header line. Positive grades only.
+std::unordered_map<std::string, std::vector<std::pair<std::string, int>>>
+loadQrels(const fs::path& path) {
+    std::unordered_map<std::string, std::vector<std::pair<std::string, int>>> qrels;
+    std::ifstream in(path);
+    std::string line;
+    bool header = true;
+    while (std::getline(in, line)) {
+        if (header) {
+            header = false;
+            continue;
+        }
+        const auto first = line.find('\t');
+        const auto second = first == std::string::npos ? first : line.find('\t', first + 1);
+        if (second == std::string::npos) {
+            continue;
+        }
+        const int grade = std::atoi(line.c_str() + second + 1);
+        if (grade > 0) {
+            qrels[line.substr(0, first)].emplace_back(line.substr(first + 1, second - first - 1),
+                                                      grade);
+        }
+    }
+    return qrels;
 }
 
 std::vector<std::string_view> splitWords(std::string_view text) {
@@ -396,6 +430,56 @@ Support computeSupport(const Matrix& queries, const Matrix& keys, const Partitio
 constexpr std::size_t kProbes[] = {1, 2, 3, 5, 8, 16};
 constexpr double kBudgets[] = {0.01, 0.02, 0.05, 0.10, 0.20};
 
+// Exhaustive ranking of the corpus for every evaluation query, and its judged documents. Set
+// once in main when the dataset has relevance judgments.
+struct Retrieval {
+    // Per query: every document index, best score first.
+    std::vector<std::vector<std::uint32_t>> ranked;
+    // Per query: (document index, grade) for judged-relevant documents in the corpus.
+    std::vector<std::vector<std::pair<std::uint32_t, int>>> relevant;
+};
+const Retrieval* gRetrieval = nullptr;
+
+constexpr std::size_t kCutoff = 10;
+
+// Recall@10 and nDCG@10 of the first ten ranked documents that pass `admitted`.
+template <typename Admitted>
+void scoreTopTen(const std::vector<std::uint32_t>& ranked,
+                 const std::vector<std::pair<std::uint32_t, int>>& relevant, Admitted&& admitted,
+                 double& recall, double& ndcg) {
+    double dcg = 0.0;
+    std::size_t hits = 0;
+    std::size_t taken = 0;
+    for (const auto doc : ranked) {
+        if (!admitted(doc)) {
+            continue;
+        }
+        for (const auto& [relevantDoc, grade] : relevant) {
+            if (relevantDoc == doc) {
+                ++hits;
+                dcg += static_cast<double>(grade) / std::log2(static_cast<double>(taken) + 2.0);
+                break;
+            }
+        }
+        if (++taken == kCutoff) {
+            break;
+        }
+    }
+    std::vector<int> grades;
+    grades.reserve(relevant.size());
+    for (const auto& [doc, grade] : relevant) {
+        (void)doc;
+        grades.push_back(grade);
+    }
+    std::ranges::sort(grades, std::greater<>{});
+    double ideal = 0.0;
+    for (std::size_t i = 0; i < std::min(grades.size(), kCutoff); ++i) {
+        ideal += static_cast<double>(grades[i]) / std::log2(static_cast<double>(i) + 2.0);
+    }
+    recall = static_cast<double>(hits) / static_cast<double>(relevant.size());
+    ndcg = ideal > 0.0 ? dcg / ideal : 0.0;
+}
+
 struct Curve {
     std::string arm;
     std::string training;
@@ -404,6 +488,10 @@ struct Curve {
     double scanAtProbe[std::size(kProbes)] = {};
     double recallAtBudget[std::size(kBudgets)] = {};
     double meanRankOfTrueCluster{0.0};
+    // Retrieval quality against relevance judgments when only the top-s clusters are searched.
+    double recall10AtProbe[std::size(kProbes)] = {};
+    double ndcg10AtProbe[std::size(kProbes)] = {};
+    std::size_t judgedQueries{0};
 };
 
 // scores: rows = queries, dim = clusters; higher is better.
@@ -426,6 +514,26 @@ Curve evaluate(std::string arm, std::string training, std::size_t vectorsPerClus
         const std::size_t rank =
             static_cast<std::size_t>(std::ranges::find(order, trueCluster) - order.begin());
         rankSum += static_cast<double>(rank + 1);
+
+        if (gRetrieval != nullptr && !gRetrieval->relevant[q].empty()) {
+            std::vector<std::uint32_t> clusterRank(partition.clusters);
+            for (std::size_t position = 0; position < order.size(); ++position) {
+                clusterRank[order[position]] = static_cast<std::uint32_t>(position);
+            }
+            ++curve.judgedQueries;
+            for (std::size_t p = 0; p < std::size(kProbes); ++p) {
+                double recall = 0.0;
+                double ndcg = 0.0;
+                scoreTopTen(
+                    gRetrieval->ranked[q], gRetrieval->relevant[q],
+                    [&](std::uint32_t doc) {
+                        return clusterRank[partition.clusterOfDoc[doc]] < kProbes[p];
+                    },
+                    recall, ndcg);
+                curve.recall10AtProbe[p] += recall;
+                curve.ndcg10AtProbe[p] += ndcg;
+            }
+        }
 
         std::size_t scanned = 0;
         std::size_t probeIndex = 0;
@@ -465,6 +573,14 @@ Curve evaluate(std::string arm, std::string training, std::size_t vectorsPerClus
         value /= n;
     }
     curve.meanRankOfTrueCluster = rankSum / n;
+    if (curve.judgedQueries > 0) {
+        for (auto& value : curve.recall10AtProbe) {
+            value /= static_cast<double>(curve.judgedQueries);
+        }
+        for (auto& value : curve.ndcg10AtProbe) {
+            value /= static_cast<double>(curve.judgedQueries);
+        }
+    }
     return curve;
 }
 
@@ -488,94 +604,6 @@ Matrix scoreMaxOver(const Matrix& queries, const Matrix& centroids, const Matrix
         }
     }
     return scores;
-}
-
-// Normal equations of the ridge fit: gram = QtQ (lower triangle), moments = Qt R with one
-// column per cluster. R is the residual h_c(q) - <q, centroid_c>.
-struct NormalEquations {
-    std::size_t dim{0};
-    std::size_t clusters{0};
-    std::vector<double> gram;
-    std::vector<double> moments;
-};
-
-NormalEquations accumulateNormalEquations(const Matrix& queries, const Matrix& residuals) {
-    NormalEquations eq;
-    eq.dim = queries.dim;
-    eq.clusters = residuals.dim;
-    const std::size_t d = eq.dim;
-    const std::size_t k = eq.clusters;
-    eq.gram.assign(d * d, 0.0);
-    eq.moments.assign(d * k, 0.0);
-    for (std::size_t n = 0; n < queries.rows; ++n) {
-        const float* q = queries.row(n);
-        const float* r = residuals.row(n);
-        for (std::size_t i = 0; i < d; ++i) {
-            const double qi = q[i];
-            double* gramRow = eq.gram.data() + i * d;
-            for (std::size_t j = 0; j <= i; ++j) {
-                gramRow[j] += qi * static_cast<double>(q[j]);
-            }
-            double* momentRow = eq.moments.data() + i * k;
-            for (std::size_t c = 0; c < k; ++c) {
-                momentRow[c] += qi * static_cast<double>(r[c]);
-            }
-        }
-    }
-    return eq;
-}
-
-// Solve (QtQ + lambda * mean_diagonal * I) X = Qt R by Cholesky; returns row-major
-// clusters x dim correction vectors.
-Matrix solveRidge(const NormalEquations& eq, double lambda) {
-    const std::size_t d = eq.dim;
-    const std::size_t k = eq.clusters;
-    std::vector<double> factor = eq.gram;
-    double meanDiagonal = 0.0;
-    for (std::size_t i = 0; i < d; ++i) {
-        meanDiagonal += factor[i * d + i];
-    }
-    meanDiagonal /= static_cast<double>(d);
-    for (std::size_t i = 0; i < d; ++i) {
-        factor[i * d + i] += lambda * meanDiagonal;
-    }
-    for (std::size_t i = 0; i < d; ++i) {
-        for (std::size_t j = 0; j <= i; ++j) {
-            double sum = factor[i * d + j];
-            for (std::size_t p = 0; p < j; ++p) {
-                sum -= factor[i * d + p] * factor[j * d + p];
-            }
-            factor[i * d + j] = i == j ? std::sqrt(std::max(sum, 1e-12)) : sum / factor[j * d + j];
-        }
-    }
-    Matrix corrections;
-    corrections.rows = k;
-    corrections.dim = d;
-    corrections.data.assign(k * d, 0.0F);
-    std::vector<double> rhs(d);
-    for (std::size_t c = 0; c < k; ++c) {
-        for (std::size_t i = 0; i < d; ++i) {
-            rhs[i] = eq.moments[i * k + c];
-        }
-        for (std::size_t i = 0; i < d; ++i) {
-            double sum = rhs[i];
-            for (std::size_t p = 0; p < i; ++p) {
-                sum -= factor[i * d + p] * rhs[p];
-            }
-            rhs[i] = sum / factor[i * d + i];
-        }
-        for (std::size_t i = d; i-- > 0;) {
-            double sum = rhs[i];
-            for (std::size_t p = i + 1; p < d; ++p) {
-                sum -= factor[p * d + i] * rhs[p];
-            }
-            rhs[i] = sum / factor[i * d + i];
-        }
-        for (std::size_t i = 0; i < d; ++i) {
-            corrections.row(c)[i] = static_cast<float>(rhs[i]);
-        }
-    }
-    return corrections;
 }
 
 Matrix centroidScores(const Matrix& queries, const Matrix& centroids) {
@@ -735,7 +763,22 @@ int main(int argc, char** argv) {
     }
 
     const auto docs = loadCorpus(options.dataset / "corpus.jsonl", options.maxDocs);
-    const auto realQueries = loadQueries(options.dataset / "queries.jsonl");
+    const auto queryRows = loadQueries(options.dataset / "queries.jsonl");
+    const auto qrels = loadQrels(options.dataset / "qrels" / "test.tsv");
+    // With relevance judgments, the judged queries are the evaluation set and every other
+    // query may be trained on. Without them, odd-indexed queries are evaluated.
+    std::vector<std::string> realTrainTexts;
+    std::vector<std::string> realTestTexts;
+    std::vector<std::string> realTestIds;
+    for (std::size_t i = 0; i < queryRows.size(); ++i) {
+        const bool evaluated = qrels.empty() ? i % 2 == 1 : qrels.contains(queryRows[i].id);
+        if (evaluated) {
+            realTestTexts.push_back(queryRows[i].text);
+            realTestIds.push_back(queryRows[i].id);
+        } else {
+            realTrainTexts.push_back(queryRows[i].text);
+        }
+    }
     if (docs.size() < 16) {
         std::cerr << "dataset too small or unreadable: " << options.dataset << "\n";
         return 2;
@@ -758,7 +801,7 @@ int main(int argc, char** argv) {
         docTexts.push_back(std::move(text));
     }
 
-    const bool realEvaluation = realQueries.size() >= 100;
+    const bool realEvaluation = realTestTexts.size() >= 50;
     Matrix keys;
     Matrix test;
     Matrix trainReal;
@@ -767,13 +810,11 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (realEvaluation) {
-        Matrix allReal;
-        if (!embed(*backend, realQueries, allReal)) {
+        if (!embed(*backend, realTestTexts, test) ||
+            (!realTrainTexts.empty() && !embed(*backend, realTrainTexts, trainReal))) {
             std::cerr << "embedding failed\n";
             return 2;
         }
-        trainReal = selectRows(allReal, 0);
-        test = selectRows(allReal, 1);
     } else {
         // No usable query log: evaluate on a separate draw of short synthetic queries.
         auto evaluation = generateQueries(docs, QueryStyle::Span6, 500, 0xE7A1ULL);
@@ -847,6 +888,53 @@ int main(int argc, char** argv) {
     }
 
     const Support truth = computeSupport(test, keys, partition);
+
+    Retrieval retrieval;
+    double exhaustiveRecall = 0.0;
+    double exhaustiveNdcg = 0.0;
+    std::size_t judged = 0;
+    if (realEvaluation && !qrels.empty()) {
+        std::unordered_map<std::string, std::uint32_t> corpusIndex;
+        for (std::size_t i = 0; i < docs.size(); ++i) {
+            corpusIndex.emplace(docs[i].id, static_cast<std::uint32_t>(i));
+        }
+        retrieval.ranked.resize(test.rows);
+        retrieval.relevant.resize(test.rows);
+        std::vector<float> scores(docs.size());
+        for (std::size_t q = 0; q < test.rows; ++q) {
+            for (std::size_t k = 0; k < docs.size(); ++k) {
+                scores[k] = dot(test.row(q), keys.row(k), keys.dim);
+            }
+            auto& ranked = retrieval.ranked[q];
+            ranked.resize(docs.size());
+            std::iota(ranked.begin(), ranked.end(), 0U);
+            std::ranges::sort(ranked, [&](std::uint32_t a, std::uint32_t b) {
+                return scores[a] != scores[b] ? scores[a] > scores[b] : a < b;
+            });
+            if (const auto it = qrels.find(realTestIds[q]); it != qrels.end()) {
+                for (const auto& [docId, grade] : it->second) {
+                    if (const auto doc = corpusIndex.find(docId); doc != corpusIndex.end()) {
+                        retrieval.relevant[q].emplace_back(doc->second, grade);
+                    }
+                }
+            }
+            if (!retrieval.relevant[q].empty()) {
+                double recall = 0.0;
+                double ndcg = 0.0;
+                scoreTopTen(
+                    ranked, retrieval.relevant[q], [](std::uint32_t) { return true; }, recall,
+                    ndcg);
+                exhaustiveRecall += recall;
+                exhaustiveNdcg += ndcg;
+                ++judged;
+            }
+        }
+        if (judged > 0) {
+            exhaustiveRecall /= static_cast<double>(judged);
+            exhaustiveNdcg /= static_cast<double>(judged);
+            gRetrieval = &retrieval;
+        }
+    }
     const Matrix testCentroid = centroidScores(test, partition.centroids);
 
     // How often the production router agrees with this bench's centroid ranking on top-1.
@@ -887,6 +975,8 @@ int main(int argc, char** argv) {
     }
 
     std::size_t trainGeneratedRows = 0;
+    std::size_t fittedParityChecked = 0;
+    std::size_t fittedParityAgreed = 0;
     const auto fitAndEvaluate = [&](const Matrix& train, const std::string& label, bool deep) {
         const Support trainSupport = computeSupport(train, keys, partition);
 
@@ -922,34 +1012,62 @@ int main(int argc, char** argv) {
         const Support fitSupport = splitSupport(trainSupport, false);
         const Support holdoutSupport = splitSupport(trainSupport, true);
 
-        // Ridge correction; lambda chosen on the held-out training queries.
-        const Matrix fitCentroid = centroidScores(fitQueries, partition.centroids);
-        Matrix residuals = fitSupport.values;
-        for (std::size_t i = 0; i < residuals.data.size(); ++i) {
-            residuals.data[i] -= fitCentroid.data[i];
-        }
-        const NormalEquations equations = accumulateNormalEquations(fitQueries, residuals);
+        // Ridge correction from the production fitting code, which chooses its strength on the
+        // same held-out training queries and keeps the centroids when it cannot beat them.
         Matrix bestRouted = partition.centroids;
-        double bestScore = -1.0;
-        double bestLambda = 0.0;
-        for (const double lambda : {0.1, 0.3, 1.0, 3.0, 10.0}) {
-            Matrix routed = partition.centroids;
-            const Matrix corrections = solveRidge(equations, lambda);
-            for (std::size_t i = 0; i < routed.data.size(); ++i) {
-                routed.data[i] += corrections.data[i];
+        std::string ridgeName = "ridge(kept)";
+        {
+            const yams::topology::RouteFitInput fitInput{.dim = keys.dim,
+                                                         .keys = keys.data,
+                                                         .clusterOfKey = partition.clusterOfDoc,
+                                                         .centroids = partition.centroids.data,
+                                                         .queries = train.data};
+            auto fitted = yams::topology::fitRouteVectors(fitInput);
+            if (!fitted) {
+                std::cerr << "route fit failed: " << fitted.error().message << "\n";
+                return;
             }
-            const double score =
-                recallAtFive(centroidScores(holdoutQueries, routed), holdoutSupport, partition);
-            if (score > bestScore) {
-                bestScore = score;
-                bestLambda = lambda;
-                bestRouted = std::move(routed);
+            if (fitted.value().adopted) {
+                bestRouted.data = std::move(fitted.value().routeVectors);
+                char name[32];
+                std::snprintf(name, sizeof(name), "ridge(%g)", fitted.value().chosenStrength);
+                ridgeName = name;
             }
         }
-        char name[32];
-        std::snprintf(name, sizeof(name), "ridge(%g)", bestLambda);
-        curves.push_back(evaluate(name, label, 1, centroidScores(test, bestRouted), truth,
-                                  partition, docs.size()));
+        const Matrix fittedScores = centroidScores(test, bestRouted);
+        curves.push_back(
+            evaluate(ridgeName, label, 1, fittedScores, truth, partition, docs.size()));
+
+        if (deep && label == "mix") {
+            // The production router, given these vectors, must pick the same top cluster.
+            auto fittedArtifacts = artifacts;
+            for (std::size_t c = 0; c < fittedArtifacts.clusters.size(); ++c) {
+                fittedArtifacts.clusters[c].fittedRouteVector.assign(bestRouted.row(c),
+                                                                     bestRouted.row(c) + keys.dim);
+            }
+            const yams::topology::SparseGuidedClusterRouter router;
+            std::unordered_map<std::string, std::uint32_t> clusterIndex;
+            for (std::size_t c = 0; c < fittedArtifacts.clusters.size(); ++c) {
+                clusterIndex.emplace(fittedArtifacts.clusters[c].clusterId,
+                                     static_cast<std::uint32_t>(c));
+            }
+            for (std::size_t q = 0; q < std::min<std::size_t>(test.rows, 64); ++q) {
+                yams::topology::TopologyRouteRequest request;
+                request.queryEmbedding.assign(test.row(q), test.row(q) + test.dim);
+                request.sparseDenseAlpha = 0.0F;
+                request.limit = 1;
+                auto routes = router.route(request, fittedArtifacts);
+                if (!routes || routes.value().empty()) {
+                    continue;
+                }
+                const float* row = fittedScores.row(q);
+                const auto benchTop = static_cast<std::uint32_t>(
+                    std::max_element(row, row + partition.clusters) - row);
+                ++fittedParityChecked;
+                const auto it = clusterIndex.find(routes.value().front().clusterId);
+                fittedParityAgreed += (it != clusterIndex.end() && it->second == benchTop) ? 1 : 0;
+            }
+        }
 
         if (deep) {
             for (const std::size_t pieces : {4, 8}) {
@@ -994,7 +1112,7 @@ int main(int argc, char** argv) {
         }
         fitAndEvaluate(train, label, style == QueryStyle::Mix);
     }
-    if (realEvaluation) {
+    if (realEvaluation && trainReal.rows > 0) {
         fitAndEvaluate(trainReal, "real", true);
     }
 
@@ -1007,11 +1125,34 @@ int main(int argc, char** argv) {
                 trainReal.rows, backend->getEmbeddingSpaceIdentity().c_str());
     std::printf("production router top-1 agreement with the centroid arm: %zu/%zu\n", parityAgreed,
                 parityChecked);
+    std::printf("production router top-1 agreement with the fitted arm (mix): %zu/%zu\n",
+                fittedParityAgreed, fittedParityChecked);
     std::printf("%-12s %-9s %3s | recall%% at probes 1 2 3 5 8 16         | recall%% at scan "
                 "1%% 2%% 5%% 10%% 20%%   | mean rank\n",
                 "arm", "training", "vec");
     for (const auto& curve : curves) {
         print(curve);
+    }
+    if (gRetrieval != nullptr) {
+        std::printf("\nretrieval against relevance judgments (%zu judged queries), searching only "
+                    "the top-s clusters\nexhaustive search of this embedding: recall@10 %.1f "
+                    "nDCG@10 %.1f\n",
+                    judged, 100.0 * exhaustiveRecall, 100.0 * exhaustiveNdcg);
+        std::printf("%-12s %-9s %3s | recall@10 %% at probes 1 2 3 5 8 16      | nDCG@10 %% at "
+                    "probes 1 2 3 5 8 16\n",
+                    "arm", "training", "vec");
+        for (const auto& c : curves) {
+            std::printf("%-12s %-9s %3zu |", c.arm.c_str(), c.training.c_str(),
+                        c.vectorsPerCluster);
+            for (std::size_t p = 0; p < std::size(kProbes); ++p) {
+                std::printf(" %5.1f", 100.0 * c.recall10AtProbe[p]);
+            }
+            std::printf(" |");
+            for (std::size_t p = 0; p < std::size(kProbes); ++p) {
+                std::printf(" %5.1f", 100.0 * c.ndcg10AtProbe[p]);
+            }
+            std::printf("\n");
+        }
     }
 
     if (!options.out.empty()) {
@@ -1031,6 +1172,10 @@ int main(int argc, char** argv) {
             for (std::size_t i = 0; i < std::size(kProbes); ++i) {
                 row["recall_at_probes"][std::to_string(kProbes[i])] = c.recallAtProbe[i];
                 row["scan_fraction_at_probes"][std::to_string(kProbes[i])] = c.scanAtProbe[i];
+                if (c.judgedQueries > 0) {
+                    row["recall10_at_probes"][std::to_string(kProbes[i])] = c.recall10AtProbe[i];
+                    row["ndcg10_at_probes"][std::to_string(kProbes[i])] = c.ndcg10AtProbe[i];
+                }
             }
             for (std::size_t i = 0; i < std::size(kBudgets); ++i) {
                 row["recall_at_scan_budget"][std::to_string(kBudgets[i])] = c.recallAtBudget[i];
