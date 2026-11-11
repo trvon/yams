@@ -596,6 +596,54 @@ TEST_CASE("ContentStore: storing stored content again reuses its manifest's chun
         CHECK_FALSE(gone.value());
     }
 
+    SECTION("a batch store reuses the manifest's chunks too") {
+        // A batch of two takes the batch path (a single request falls back to store()).
+        const auto other = dir / "other.txt";
+        std::ofstream(other, std::ios::binary) << makeMultiChunkText(300 * 1024) << "other";
+        const auto otherObjects = [&] {
+            auto probe = ContentStoreBuilder().withStoragePath(dir / "probe").build();
+            REQUIRE(probe.has_value());
+            REQUIRE(probe.value()->store(other).has_value());
+            return countObjectFiles(dir / "probe");
+        }();
+
+        auto results = store->storeBatch({source, other});
+        REQUIRE(results.size() == 2);
+        REQUIRE(results[0].has_value());
+        REQUIRE(results[1].has_value());
+        CHECK(results[0].value().contentHash == hash);
+        // Only the new file's chunks were written.
+        CHECK(countObjectFiles(dir) == objectsBefore + otherObjects);
+
+        // Two references to the first file now: it survives one removal.
+        REQUIRE(store->remove(hash).has_value());
+        CHECK(retrievedText(*store, hash) == content);
+        auto last = store->remove(hash);
+        REQUIRE(last.has_value());
+        CHECK(last.value());
+        CHECK_FALSE(store->retrieveBytes(hash).has_value());
+    }
+
+    SECTION("a batch store restores a chunk missing from storage") {
+        fs::path victim;
+        for (const auto& entry : fs::recursive_directory_iterator(dir / "objects")) {
+            if (entry.is_regular_file()) {
+                victim = entry.path();
+                break;
+            }
+        }
+        REQUIRE_FALSE(victim.empty());
+        fs::remove(victim);
+        const auto other = dir / "other.txt";
+        std::ofstream(other, std::ios::binary) << "small second file";
+
+        auto results = store->storeBatch({source, other});
+        REQUIRE(results.size() == 2);
+        REQUIRE(results[0].has_value());
+        CHECK(fs::exists(victim));
+        CHECK(retrievedText(*store, hash) == content);
+    }
+
     SECTION("a chunk missing from storage is restored from the source") {
         // objects/ holds only chunks (manifests live under manifests/): drop one.
         fs::path victim;
@@ -1171,6 +1219,115 @@ TEST_CASE("ContentStore: Batch reference failure publishes no metadata",
         REQUIRE(manifestExists.has_value());
         CHECK_FALSE(manifestExists.value());
     }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: concurrent stores and removes of one content keep references exact",
+          "[api][content-store][concurrency]") {
+    const auto dir = makeTempDir("content_store_store_remove_race");
+    const std::string content = makeMultiChunkText(400 * 1024);
+    const auto source = dir / "source.txt";
+    std::ofstream(source, std::ios::binary) << content;
+    auto built = ContentStoreBuilder().withStoragePath(dir).build();
+    REQUIRE(built.has_value());
+    auto store = std::move(built).value();
+    const std::string hash = yams::crypto::SHA256Hasher{}.hashFile(source);
+
+    constexpr int kThreads = 4;
+    constexpr int kRounds = 25;
+    std::atomic<int> failures{0};
+    std::promise<void> go;
+    auto start = go.get_future().share();
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t] {
+            start.wait();
+            for (int i = 0; i < kRounds; ++i) {
+                // Half the threads use the batch path (two items, so it does not fall back).
+                const bool stored = (t % 2 == 0)
+                                        ? store->store(source).has_value()
+                                        : store->storeBatch({source, source})[0].has_value();
+                if (!stored) {
+                    ++failures;
+                    continue;
+                }
+                const int removes = (t % 2 == 0) ? 1 : 2;
+                for (int r = 0; r < removes; ++r) {
+                    auto removed = store->remove(hash);
+                    if (!removed || !removed.value()) {
+                        ++failures;
+                    }
+                }
+            }
+        });
+    }
+    go.set_value();
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    CHECK(failures.load() == 0);
+
+    // Every store was matched by a remove, so nothing is left: one more store is the only
+    // reference, and a leaked reference would keep the manifest alive past its remove.
+    REQUIRE(store->store(source).has_value());
+    auto bytes = store->retrieveBytes(hash);
+    REQUIRE(bytes.has_value());
+    CHECK(bytes.value().size() == content.size());
+    auto last = store->remove(hash);
+    REQUIRE(last.has_value());
+    CHECK(last.value());
+    auto gone = store->remove(hash);
+    REQUIRE(gone.has_value());
+    CHECK_FALSE(gone.value());
+
+    store.reset();
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("ContentStore: Batch reference failure keeps a manifest stored before the batch",
+          "[api][content-store][batch][rollback]") {
+    auto tempDir = makeTempDir("content_store_batch_failure_existing");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    auto refCounter = std::make_shared<ScriptedReferenceCounter>();
+
+    ContentStoreBuilder builder;
+    auto built = builder.withConfig(readinessConfig(tempDir))
+                     .withStorageEngine(storage)
+                     .withReferenceCounter(refCounter)
+                     .build();
+    REQUIRE(built.has_value());
+    auto store = std::move(built).value();
+
+    const auto existing = tempDir / "existing.txt";
+    std::ofstream(existing, std::ios::binary) << "stored before the batch";
+    auto stored = store->store(existing);
+    REQUIRE(stored.has_value());
+    const auto existingHash = stored.value().contentHash;
+
+    const auto fresh = tempDir / "fresh.txt";
+    std::ofstream(fresh, std::ios::binary) << "new in the batch";
+    const auto freshHash = yams::crypto::SHA256Hasher{}.hashFile(fresh);
+
+    refCounter->failCommit = true;
+    auto results = store->storeBatch({existing, fresh});
+    REQUIRE(results.size() == 2);
+    CHECK_FALSE(results[0].has_value());
+    CHECK_FALSE(results[1].has_value());
+
+    auto keptManifest = storage->exists(existingHash + ".manifest");
+    REQUIRE(keptManifest.has_value());
+    CHECK(keptManifest.value());
+    auto freshManifest = storage->exists(freshHash + ".manifest");
+    REQUIRE(freshManifest.has_value());
+    CHECK_FALSE(freshManifest.value());
+
+    refCounter->failCommit = false;
+    auto bytes = store->retrieveBytes(existingHash);
+    REQUIRE(bytes.has_value());
+    CHECK(bytes.value().size() == std::string_view("stored before the batch").size());
 
     std::error_code ec;
     fs::remove_all(tempDir, ec);
