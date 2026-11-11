@@ -220,6 +220,17 @@ void cleanupChild(pid_t pid) {
 
 TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive",
           "[smoke][daemonclistartstatusregression]") {
+    // This case has never run on Windows. cmd.exe strips the outer quotes of the quoted command
+    // line built below, and a detached daemon may keep the _popen pipe open; neither has been
+    // worked through on a Windows host.
+#ifdef _WIN32
+    const bool commandLineAdapted = false;
+#else
+    const bool commandLineAdapted = true;
+#endif
+    if (!commandLineAdapted) {
+        SKIP("Skipping: start/status command line is not adapted to cmd.exe");
+    }
     auto yamsBinary = findYamsBinary();
     auto daemonBinary = findYamsDaemonBinary();
     if (!yamsBinary.has_value()) {
