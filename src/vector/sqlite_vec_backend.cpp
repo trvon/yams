@@ -3492,6 +3492,36 @@ private:
         return std::pair<size_t, std::vector<float>>{rowid, std::move(embedding)};
     }
 
+    /// Visit every finite vector of `dim` in rowid order without materializing the set.
+    /// `visit(rowid, embedding)` owns the embedding for the duration of the call and may move
+    /// from it.
+    template <typename Visitor>
+    Result<void> scanVectorsForDimUnlocked(size_t dim, Visitor&& visit) {
+        const char* sql =
+            "SELECT rowid, embedding FROM vectors WHERE embedding_dim = ? ORDER BY rowid";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError, "Failed to prepare vector scan for dim " +
+                                                       std::to_string(dim) + ": " +
+                                                       sqlite3_errmsg(db_)};
+        }
+        StmtFinalizeGuard finalize(stmt);
+
+        sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            if (auto decoded = decodeVectorForDimRowUnlocked(stmt, dim)) {
+                visit(decoded->first, decoded->second);
+            }
+        }
+        if (rc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError, "Failed to scan vectors for dim " +
+                                                       std::to_string(dim) + ": " +
+                                                       sqlite3_errmsg(db_)};
+        }
+        return Result<void>{};
+    }
+
     Result<std::vector<std::pair<size_t, std::vector<float>>>>
     queryVectorsForDimUnlocked(size_t dim, std::optional<size_t> afterRowid = std::nullopt) {
         std::vector<std::pair<size_t, std::vector<float>>> rows;
@@ -3784,20 +3814,14 @@ private:
             return Result<void>{};
         };
 
-        auto rowsResult = queryVectorsForDimUnlocked(dim);
-        if (!rowsResult) {
-            return rowsResult.error();
-        }
-        auto rows = std::move(rowsResult.value());
         simeon_pq_indices_.erase(dim);
 
-        if (rows.empty()) {
+        // No row of a zero dimension can decode, so there is nothing to index.
+        if (dim == 0) {
             simeon_pq_dirty_dims_.erase(dim);
             simeon_pq_ready_dims_.insert(dim);
             return Result<void>{};
         }
-
-        YAMS_PRECONDITION(dim > 0, "Simeon PQ rebuild requires a positive dimension");
         YAMS_PRECONDITION(dim <= static_cast<size_t>(std::numeric_limits<std::uint32_t>::max()),
                           "Simeon PQ rebuild dimension must fit in uint32_t");
         const std::uint32_t m = normalizedSimeonPqSubquantizers(dim);
@@ -3813,24 +3837,65 @@ private:
         };
 
         auto state = std::make_unique<SimeonPqIndexState>(pqConfig);
-        const std::size_t trainCap = std::min(rows.size(), config_.simeon_pq_train_limit);
-        state->rowids.reserve(rows.size());
 
-        // Pass 1: normalize in place and collect rowids. SQLite rowids reflect
-        // ingestion order, so they must not choose or order the PQ training set:
-        // two identical corpora inserted in different orders must build the same
-        // codebook and return the same neighbors.
-        std::vector<std::size_t> trainingOrder;
-        trainingOrder.reserve(rows.size());
-        for (std::size_t index = 0; index < rows.size(); ++index) {
-            auto& [rowid, embedding] = rows[index];
-            if (!normalizeEmbeddingInPlace(embedding)) {
-                embedding.clear();
-                embedding.shrink_to_fit();
-                continue;
+        // Pass 1: collect rowids and the training sample. The whole vector set is never held:
+        // a store of a few hundred thousand 1024-float rows is gigabytes, while training uses at
+        // most `simeon_pq_train_limit` of them.
+        //
+        // SQLite rowids reflect ingestion order, so they must not choose or order the training
+        // set: two identical corpora inserted in different orders must build the same codebook
+        // and return the same neighbors. The sample is the `trainCap` rows with the smallest
+        // content key, ties broken by the embedding itself.
+        struct TrainingCandidate {
+            std::uint64_t key = 0;
+            std::vector<float> embedding;
+        };
+        const auto candidateLess = [](const TrainingCandidate& lhs, const TrainingCandidate& rhs) {
+            if (lhs.key != rhs.key) {
+                return lhs.key < rhs.key;
             }
-            state->rowids.push_back(rowid);
-            trainingOrder.push_back(index);
+            return std::lexicographical_compare(lhs.embedding.begin(), lhs.embedding.end(),
+                                                rhs.embedding.begin(), rhs.embedding.end());
+        };
+        const std::size_t trainCap = config_.simeon_pq_train_limit;
+        // Max-heap under candidateLess: the front is the largest candidate still kept.
+        std::vector<TrainingCandidate> sample;
+        sample.reserve(std::min<std::size_t>(trainCap, 4096));
+
+        auto firstPass =
+            scanVectorsForDimUnlocked(dim, [&](std::size_t rowid, std::vector<float>& embedding) {
+                if (!normalizeEmbeddingInPlace(embedding)) {
+                    return;
+                }
+                state->rowids.push_back(rowid);
+                if (trainCap == 0) {
+                    return;
+                }
+                TrainingCandidate candidate{.key = stableEmbeddingSampleKey(embedding),
+                                            .embedding = {}};
+                if (sample.size() < trainCap) {
+                    candidate.embedding = std::move(embedding);
+                    sample.push_back(std::move(candidate));
+                    std::ranges::push_heap(sample, candidateLess);
+                    return;
+                }
+                // Compare against the kept maximum before taking ownership of the floats.
+                const auto& largest = sample.front();
+                const bool smaller = candidate.key != largest.key
+                                         ? candidate.key < largest.key
+                                         : std::lexicographical_compare(
+                                               embedding.begin(), embedding.end(),
+                                               largest.embedding.begin(), largest.embedding.end());
+                if (!smaller) {
+                    return;
+                }
+                candidate.embedding = std::move(embedding);
+                std::ranges::pop_heap(sample, candidateLess);
+                sample.back() = std::move(candidate);
+                std::ranges::push_heap(sample, candidateLess);
+            });
+        if (!firstPass) {
+            return firstPass;
         }
 
         if (state->rowids.empty()) {
@@ -3839,32 +3904,15 @@ private:
             return Result<void>{};
         }
 
-        std::vector<std::uint64_t> trainingKeys(rows.size(), 0);
-        for (const auto index : trainingOrder) {
-            trainingKeys[index] = stableEmbeddingSampleKey(rows[index].second);
-        }
-        std::ranges::sort(trainingOrder, [&](std::size_t lhs, std::size_t rhs) {
-            if (trainingKeys[lhs] != trainingKeys[rhs]) {
-                return trainingKeys[lhs] < trainingKeys[rhs];
-            }
-            const auto& left = rows[lhs].second;
-            const auto& right = rows[rhs].second;
-            return std::lexicographical_compare(left.begin(), left.end(), right.begin(),
-                                                right.end());
-        });
-        if (trainingOrder.size() > trainCap) {
-            trainingOrder.resize(trainCap);
-        }
-
+        std::ranges::sort(sample, candidateLess);
+        const auto trainSamples = sample.size();
         std::vector<float> training;
-        training.reserve(trainingOrder.size() * dim);
-        for (const auto index : trainingOrder) {
-            const auto& embedding = rows[index].second;
-            training.insert(training.end(), embedding.begin(), embedding.end());
+        training.reserve(trainSamples * dim);
+        for (auto& candidate : sample) {
+            training.insert(training.end(), candidate.embedding.begin(), candidate.embedding.end());
+            std::vector<float>().swap(candidate.embedding);
         }
-        const auto trainSamples = trainingOrder.size();
-        std::vector<std::uint64_t>().swap(trainingKeys);
-        std::vector<std::size_t>().swap(trainingOrder);
+        std::vector<TrainingCandidate>().swap(sample);
 
         bool trained = false;
         if (trainSamples >= k) {
@@ -3876,11 +3924,10 @@ private:
                              e.what());
             }
         }
+        std::vector<float>().swap(training);
         if (!trained) {
             state->exact_fallback = true;
             state->rerank_factor = std::max<std::size_t>(1, config_.simeon_pq_rerank_factor);
-            std::vector<float>().swap(training);
-            std::vector<std::pair<size_t, std::vector<float>>>().swap(rows);
             auto generationCurrent = verifySourceGeneration();
             if (!generationCurrent) {
                 return generationCurrent;
@@ -3899,26 +3946,32 @@ private:
         const auto trainMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                  std::chrono::steady_clock::now() - buildStart)
                                  .count();
-        // Training buffer is no longer needed; release before encoding so
-        // peak footprint during encode == size(rows) rather than size(rows)
-        // + size(training).
-        std::vector<float>().swap(training);
 
+        // Pass 2: read the rows again and encode each one as it arrives. The rows must be the
+        // ones pass 1 saw, in the same order; anything else means the table changed underneath.
         state->codes.resize(state->rowids.size() * state->pq.m());
-        std::size_t codeOffset = 0;
-        // Pass 2: encode and progressively release each embedding so the
-        // ~dim*4 bytes per row are returned to the allocator as we go.
-        // Skips entries whose embedding was zeroed above (normalize failed).
-        for (auto& [rowid, embedding] : rows) {
-            (void)rowid;
-            if (embedding.empty()) {
-                continue;
-            }
-            state->pq.encode(embedding.data(), state->codes.data() + codeOffset);
-            codeOffset += state->pq.m();
-            std::vector<float>().swap(embedding);
+        std::size_t encoded = 0;
+        bool sameRows = true;
+        auto secondPass =
+            scanVectorsForDimUnlocked(dim, [&](std::size_t rowid, std::vector<float>& embedding) {
+                if (!sameRows || !normalizeEmbeddingInPlace(embedding)) {
+                    return;
+                }
+                if (encoded >= state->rowids.size() || state->rowids[encoded] != rowid) {
+                    sameRows = false;
+                    return;
+                }
+                state->pq.encode(embedding.data(), state->codes.data() + encoded * state->pq.m());
+                ++encoded;
+            });
+        if (!secondPass) {
+            return secondPass;
         }
-        std::vector<std::pair<size_t, std::vector<float>>>().swap(rows);
+        if (!sameRows || encoded != state->rowids.size()) {
+            markSimeonPqDimDirtyUnlocked(dim);
+            return Error{ErrorCode::InvalidState,
+                         "Vectors changed while building the Simeon PQ snapshot"};
+        }
         if (!loadSimeonRowMetadataUnlocked(dim, state->rowids, state->tie_break_keys,
                                            state->document_indices)) {
             return Error{ErrorCode::DatabaseError,
@@ -3945,10 +3998,7 @@ private:
                      "rerank={} in {} ms (train {} ms, encode {} ms)",
                      dim, simeon_pq_indices_[dim]->rowids.size(), m, k,
                      config_.simeon_pq_rerank_factor, totalMs, trainMs, totalMs - trainMs);
-        // Return the bulk training/encode scratch pages to the OS.
-        // The SPQ rebuild churns up to ~1 GB of transient float buffers
-        // (per-row vectors + codebook training set) which macOS's
-        // DefaultMallocZone otherwise keeps parked in MALLOC_LARGE regions.
+        // Return the training scratch pages to the OS; allocators otherwise keep them parked.
 #if defined(__APPLE__)
         ::malloc_zone_pressure_relief(nullptr, 0);
 #elif defined(__GLIBC__)
