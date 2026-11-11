@@ -14,9 +14,21 @@
 
 #include <yams/plugins/plugin_repo_client.hpp>
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <poll.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
 
 namespace yams::plugins::test {
 
@@ -151,5 +163,99 @@ TEST_CASE_METHOD(PluginRepoClientFixture, "Exists check (disabled - requires net
     auto result = client->exists("test-plugin");
     CHECK(result.has_value());
 }
+
+#ifndef _WIN32
+namespace {
+
+// A one-thread HTTP listener on 127.0.0.1 that answers every connection with `response` and
+// counts the connections it accepted.
+class LoopbackHttpServer {
+public:
+    LoopbackHttpServer() {
+        fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        REQUIRE(fd_ >= 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        REQUIRE(::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+        socklen_t len = sizeof(addr);
+        REQUIRE(::getsockname(fd_, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        port_ = ntohs(addr.sin_port);
+        REQUIRE(::listen(fd_, 4) == 0);
+    }
+
+    ~LoopbackHttpServer() {
+        stop_ = true;
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        ::close(fd_);
+    }
+
+    void serve(std::string response) {
+        thread_ = std::thread([this, response = std::move(response)] {
+            while (!stop_) {
+                pollfd pfd{fd_, POLLIN, 0};
+                if (::poll(&pfd, 1, 20) <= 0) {
+                    continue;
+                }
+                const int client = ::accept(fd_, nullptr, nullptr);
+                if (client < 0) {
+                    continue;
+                }
+                ++connections_;
+                char buffer[2048];
+                (void)::recv(client, buffer, sizeof(buffer), 0);
+                (void)::send(client, response.data(), response.size(), MSG_NOSIGNAL);
+                ::close(client);
+            }
+        });
+    }
+
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(port_); }
+    int connections() const { return connections_.load(); }
+
+private:
+    int fd_{-1};
+    std::uint16_t port_{0};
+    std::atomic<bool> stop_{false};
+    std::atomic<int> connections_{0};
+    std::thread thread_;
+};
+
+} // namespace
+
+TEST_CASE("Repo client does not follow redirects when TLS verification is off",
+          "[plugins][repo-client][security]") {
+    LoopbackHttpServer target;
+    target.serve("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n"
+                 "Connection: close\r\n\r\n[]");
+    LoopbackHttpServer redirector;
+    redirector.serve("HTTP/1.1 302 Found\r\nLocation: " + target.url() +
+                     "/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+
+    PluginRepoConfig config;
+    config.repoUrl = redirector.url();
+    config.timeout = std::chrono::milliseconds{5000};
+
+    SECTION("verification off: the redirect target is never contacted") {
+        config.verifyTls = false;
+        auto client = makePluginRepoClient(config);
+        auto listed = client->list();
+        CHECK_FALSE(listed.has_value());
+        CHECK(redirector.connections() == 1);
+        CHECK(target.connections() == 0);
+    }
+
+    SECTION("verification on: the redirect is followed (shows the listener would be reached)") {
+        config.verifyTls = true;
+        auto client = makePluginRepoClient(config);
+        (void)client->list();
+        CHECK(redirector.connections() == 1);
+        CHECK(target.connections() == 1);
+    }
+}
+#endif // !_WIN32
 
 } // namespace yams::plugins::test

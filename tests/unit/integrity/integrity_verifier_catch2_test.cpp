@@ -107,6 +107,12 @@ TEST_CASE_METHOD(IntegrityVerifierFixture, "ConstructorAndDestructor", "[integri
     const auto& stats = verifier->getStatistics();
     CHECK(stats.blocksVerifiedTotal.load() == 0);
     CHECK(stats.verificationErrorsTotal.load() == 0);
+
+    const auto report = verifier->generateReport();
+    CHECK(report.blocksVerified == 0u);
+    CHECK(report.blocksPassed == 0u);
+    CHECK(report.blocksFailed == 0u);
+    CHECK(verifier->getRecentFailures().empty());
 }
 
 TEST_CASE_METHOD(IntegrityVerifierFixture, "VerifyValidBlock", "[integrity][verifier]") {

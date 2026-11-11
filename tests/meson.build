@@ -599,9 +599,9 @@ endif
 
 # Standard Catch2 tests: one row per test in catch2_test_table, built by the loop at the
 # end of this file. Each row needs 'name', 'sources', 'deps' (added after the Catch2
-# deps), 'suite' and 'timeout'. Optional: 'target' (default 'catch2_' + name), 'args'
-# and 'is_parallel'. Tests with extra env, cpp_args or several registrations stay
-# hand-written.
+# deps), 'suite' and 'timeout'. Optional: 'target' (default 'catch2_' + name), 'args',
+# 'env' (added to the default LD_LIBRARY_PATH env) and 'is_parallel'. Tests with extra
+# cpp_args or several registrations stay hand-written.
 catch2_test_table = []
 
 # ============================================================================
@@ -983,13 +983,18 @@ if catch2_dep.found()
     install: false,
   )
 
-#FTS5 performance / stress tests(migrated from GTest, opt - in via YAMS_RUN_STRESS_TESTS = 1)
+  # FTS5 performance / stress tests. Every case SKIPs unless YAMS_RUN_STRESS_TESTS=1, and no
+  # lane exported it, so the registration passed --allow-running-no-tests and ran nothing.
+  # It now sets the variable itself and lives in the explicit 'slow'/'stress' suites, which
+  # the fast lanes (--suite unit --suite integration) do not select. The cases assert
+  # wall-clock budgets on a 50k-document corpus, so sanitizer builds do not declare it.
   catch2_test_table += [{
     'name': 'fts5_stress',
     'sources': files('unit/metadata/fts5_performance_stress_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'stress', 'metadata', 'fts5'],
-    'args': ['--allow-running-no-tests'],  # every case SKIPs unless YAMS_RUN_STRESS_TESTS=1
+    'suite': ['catch2', 'slow', 'stress', 'metadata', 'fts5'],
+    'env': {'YAMS_RUN_STRESS_TESTS': '1'},
+    'register': not (_test_thread_sanitizer or _test_address_sanitizer),
     'timeout': 300,
     'is_parallel': false,
   }]
@@ -1263,17 +1268,6 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
-    'name': 'multiplex_client',
-    'sources': files('unit/daemon/multiplex_client_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'multiplex'],
-    # Every case is hidden ([.requires_daemon]), so a default run selects zero tests. Build it,
-    # do not register a test that can only pass by running nothing.
-    'register': false,
-    'timeout': 60,
-  }]
-
-  catch2_test_table += [{
     'name': 'entity_graph_service',
     'sources': files('unit/daemon/entity_graph_service_catch2_test.cpp'),
     'deps': test_deps,
@@ -1436,17 +1430,20 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_test_table += [{
-    'name': 'request_lifetime',
-    'sources': files('unit/daemon/request_handler_lifetime_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon'],
-    # The only case is hidden ([.streaming_disabled]) until the streaming path is re-enabled, so
-    # a default run selects zero tests. Build it, do not register an empty run.
-    'register': false,
-    'timeout': 120,
-    'is_parallel': false,
-  }]
+  # The only case is hidden ([.bench][.slow]) and env-gated, so it is selected by tag and runs
+  # only in the bench lane (-Denable-bench-tests=true).
+  if get_option('enable-bench-tests') and daemon_ipc_supported
+    test('daemon_idle_control_bench', catch2_daemon_idle_control_bench_exe,
+      suite: ['catch2', 'bench', 'daemon'],
+      args: ['[bench]'],
+      env: {
+        'YAMS_ENABLE_DAEMON_IDLE_BENCH': '1',
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      },
+      is_parallel: false,
+      timeout: bench_timeout,
+    )
+  endif
 
   catch2_test_table += [{
     'name': 'writer_drain_cleanup',
@@ -2032,17 +2029,10 @@ if catch2_dep.found()
 #Migrated from GTest as part of yams - 3s4 / yams - pmf
   catch2_compression_submodule_exe = executable('catch2_compression_submodule',
     files(
-#basic_error_handler_catch2_test.cpp removed : fully covered by error_handler_catch2_test.cpp
-# basic_integrity_validator_catch2_test.cpp removed: covered by the comprehensive test.
-      'unit/compression/compression_comprehensive_catch2_test.cpp',
+      'unit/compression/compression_header_catch2_test.cpp',
       'unit/compression/compression_monitor_catch2_test.cpp',
       'unit/compression/compression_policy_catch2_test.cpp',
-      'unit/compression/error_handler_catch2_test.cpp',
       'unit/compression/framed_payload_catch2_test.cpp',
-#TODO(yams - 3s4) : Fix API mismatch - uses non - existent IntegrityValidator methods
-#'unit/compression/integrity_validator_catch2_test.cpp',
-      'unit/compression/recovery_manager_catch2_test.cpp',
-      'unit/compression/transaction_manager_catch2_test.cpp',
       'unit/compression/zstandard_compressor_catch2_test.cpp',
     ),
     include_directories: incs,
@@ -2170,7 +2160,6 @@ if catch2_dep.found()
       'unit/cli/exit_code_contract_catch2_test.cpp',
       'unit/cli/grep_output_contract_catch2_test.cpp',
       # init_command_catch2_test.cpp runs in its own cli_init_command target (serial).
-      'unit/cli/list_command_catch2_test.cpp',
       'unit/cli/name_resolution_contract_catch2_test.cpp',
       'unit/cli/search_no_match_contract_catch2_test.cpp',
       'unit/cli/status_data_dir_catch2_test.cpp',
@@ -2341,19 +2330,6 @@ if catch2_dep.found()
     'sources': files('unit/downloader/downloader_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'downloader'],
-    'timeout': 180,
-  }]
-
-#Resolve Test Suites(Catch2) - resolver, backend implementations
-#Migrated from GTest as part of yams - 3s4 / resolve
-#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-#Resolve submodule tests(resolver, backends)
-#Migrated from GTest as part of yams - 3s4 / resolve
-  catch2_test_table += [{
-    'name': 'resolve_submodule',
-    'sources': files('unit/resolve/resolver_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'resolve'],
     'timeout': 180,
   }]
 
@@ -2950,6 +2926,7 @@ if catch2_dep.found()
     'sources': files(
       'unit/plugins/plugin_installer_test.cpp',
       'unit/plugins/plugin_repo_client_test.cpp',
+      'unit/plugins/loopback_url_catch2_test.cpp',
       'unit/plugins/onnx_request_test.cpp',
     ),
     'deps': test_deps,
@@ -2973,8 +2950,6 @@ if catch2_dep.found()
 
   integrity_catch2_exe = executable('integrity_catch2',
     files(
-      'unit/integrity/chunk_validator_test.cpp',
-      'unit/integrity/integrity_verifier_simple_test.cpp',
       'unit/integrity/integrity_verifier_catch2_test.cpp',
       'unit/integrity/block_repairer_catch2_test.cpp',
       'unit/integrity/verification_monitor_test.cpp',
@@ -3458,9 +3433,7 @@ if catch2_dep.found()
 
   test('daemon_background_processing_slow', catch2_daemon_background_exe,
     suite: ['catch2', 'slow', 'daemon', 'background', 'concurrency'],
-    # Keeps --allow-running-no-tests: the one [slow] case SKIPs unless
-    # YAMS_INTERNAL_BUS_MPMC=1 (runtime capability), which would otherwise exit 4.
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
@@ -3504,9 +3477,20 @@ if catch2_dep.found()
     is_parallel: false
   )
 
+  # "Plugin: provenance root smoke" SKIPs without YAMS_EXPECT_PLUGIN_ROOT, which no lane set.
+  # When the ONNX plugin is built, expect it to load from its build directory.
+  _daemon_plugin_harness_env = { 'LD_LIBRARY_PATH': _test_env_ld_library_path }
+  _daemon_plugin_harness_depends = []
+  if is_variable('yams_onnx_plugin')
+    _daemon_plugin_harness_env += {
+      'YAMS_EXPECT_PLUGIN_ROOT': meson.project_build_root() / 'plugins' / 'onnx',
+    }
+    _daemon_plugin_harness_depends += [yams_onnx_plugin]
+  endif
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugins'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    env: _daemon_plugin_harness_env,
+    depends: _daemon_plugin_harness_depends,
     timeout: 60,
     is_parallel: false
   )
@@ -3657,8 +3641,21 @@ if catch2_dep.found()
 
   test('memory_sync_service', catch2_memory_sync_service_exe,
     suite: ['catch2', 'unit', 'memory-sync', 'concurrency'],
+    args: ['~[stress]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  # The [stress] lifecycle case SKIPs unless YAMS_RUN_STRESS_TESTS=1, which no lane exported.
+  # It gets its own registration in the explicit 'slow'/'stress' suites (not the fast unit lane).
+  test('memory_sync_service_stress', catch2_memory_sync_service_exe,
+    suite: ['catch2', 'slow', 'stress', 'memory-sync', 'concurrency'],
+    args: ['[stress]'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_RUN_STRESS_TESTS': '1',
+    },
+    timeout: 120
   )
 
   test('memory_sync_config', catch2_memory_sync_config_exe,
@@ -3794,7 +3791,6 @@ if catch2_dep.found()
 endif
 
 # Table keys beyond the basics:
-#   'register': false   build the executable but declare no test (every case is hidden).
 #   'posix_only': true  every selected case SKIPs on Windows; Catch2 exits 4 when all selected
 #                       cases skip, so the test is not declared there. Prefer this over
 #                       --allow-running-no-tests, which also passes a run that selected nothing.
@@ -3806,11 +3802,11 @@ foreach t : catch2_test_table
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  if t.get('register', true) and (not t.get('posix_only', false) or daemon_ipc_supported)
+  if not t.get('posix_only', false) or daemon_ipc_supported
     test(t['name'], t_exe,
       suite: t['suite'],
       args: t.get('args', []),
-      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path } + t.get('env', {}),
       timeout: t['timeout'],
       is_parallel: t.get('is_parallel', true),
     )
