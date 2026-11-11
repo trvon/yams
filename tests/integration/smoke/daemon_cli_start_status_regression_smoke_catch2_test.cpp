@@ -253,14 +253,17 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
         cfg << "[version]\n";
         cfg << "config_version = 3\n";
         cfg << "[core]\n";
-        cfg << "data_dir = \"" << dataDir.string() << "\"\n";
+        cfg << "data_dir = \"" << dataDir.generic_string() << "\"\n";
         cfg << "[storage]\n";
-        cfg << "path = \"" << dataDir.string() << "\"\n";
+        cfg << "path = \"" << dataDir.generic_string() << "\"\n";
         cfg << "[daemon]\n";
-        cfg << "socket_path = \"" << socketPath.string() << "\"\n";
-        cfg << "pid_file = \"" << pidFile.string() << "\"\n";
+        cfg << "socket_path = \"" << socketPath.generic_string() << "\"\n";
+        cfg << "pid_file = \"" << pidFile.generic_string() << "\"\n";
     }
     ScopedEnvVar cfgEnv("YAMS_CONFIG", configPath.string());
+    // These take precedence over YAMS_CONFIG and the config's socket when a shell exports them.
+    ScopedEnvVar cfgPathEnv("YAMS_CONFIG_PATH", configPath.string());
+    ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", socketPath.string());
     ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
     ScopedEnvVar storageEnv("YAMS_STORAGE", dataDir.string());
     ScopedEnvVar runtimeEnv("XDG_RUNTIME_DIR", runtimeDir.string());
@@ -350,10 +353,10 @@ TEST_CASE("DaemonCliStartStatusRegression.StopTimeoutPathDoesNotEmitWarnNoise",
         cfg << "[version]\n";
         cfg << "config_version = 3\n";
         cfg << "[storage]\n";
-        cfg << "path = \"" << dataDir.string() << "\"\n";
+        cfg << "path = \"" << dataDir.generic_string() << "\"\n";
         cfg << "[daemon]\n";
-        cfg << "socket_path = \"" << socketPath.string() << "\"\n";
-        cfg << "pid_file = \"" << pidFile.string() << "\"\n";
+        cfg << "socket_path = \"" << socketPath.generic_string() << "\"\n";
+        cfg << "pid_file = \"" << pidFile.generic_string() << "\"\n";
     }
 
     ScopedEnvVar cfgEnv("YAMS_CONFIG", configPath.string());
@@ -424,10 +427,10 @@ TEST_CASE("DaemonCliStartStatusRegression.StartRefusesUnverifiedDataDirLockHolde
         cfg << "[version]\n";
         cfg << "config_version = 3\n";
         cfg << "[core]\n";
-        cfg << "data_dir = \"" << dataDir.string() << "\"\n";
+        cfg << "data_dir = \"" << dataDir.generic_string() << "\"\n";
         cfg << "[daemon]\n";
-        cfg << "socket_path = \"" << socketPath.string() << "\"\n";
-        cfg << "pid_file = \"" << pidFile.string() << "\"\n";
+        cfg << "socket_path = \"" << socketPath.generic_string() << "\"\n";
+        cfg << "pid_file = \"" << pidFile.generic_string() << "\"\n";
     }
 
     ScopedEnvVar cfgEnv("YAMS_CONFIG", configPath.string());
