@@ -21,6 +21,14 @@ catch2_allow_all_skipped.py, are not checked; they are counted in the summary
 A registered binary that is not built is a failure: under `meson test` the
 build already exists. Pass --allow-missing for ad-hoc runs on a partial build.
 
+Separately, every registration (any suite) that passes --allow-running-no-tests
+must be named in ALLOW_NO_TESTS_ALLOWLIST below with a reason. In Catch2 v3 that
+flag also turns "every selected case skipped" into exit 0, so a registration
+whose cases can never run (an env var no lane sets, a daemon that never starts)
+reports green. Prefer gating the test() in meson on the capability. An
+allowlisted name that is registered without the flag is reported as stale, so
+the list cannot outlive its entries.
+
 Environment: each listing gets this process's environment plus the
 registration's own env. On Windows the registration's extra_paths (the
 directories of the DLLs it links) go in front of PATH, as `meson test` does;
@@ -49,6 +57,26 @@ ALLOW_ALL_SKIPPED_WRAPPER = "catch2_allow_all_skipped.py"
 # Registered options that would fight the listing invocation; dropped with their value.
 _OPTIONS_WITH_VALUE = {"-r", "--reporter", "-o", "--out"}
 _TEST_CASE_RE = re.compile(r"<TestCase\b")
+
+ALLOW_NO_TESTS_FLAG = "--allow-running-no-tests"
+_BENCH_REASON = (
+    "suite 'bench', declared only with -Denable-bench-tests and outside the unit/integration "
+    "lanes; the flag predates this guard and has not been audited"
+)
+# Registration name -> why an all-skipped run may pass. Keep this short: every entry is a
+# registration that can report green without running a single case.
+ALLOW_NO_TESTS_ALLOWLIST: dict[str, str] = {
+    "hnsw_retrieval_diagnostic": (
+        "declared only when the ONNX plugin is built; its one case still SKIPs when the host "
+        "has no ONNX models_root / embedding model, which meson cannot know at configure time"
+    ),
+    "write_coordinator_bench": _BENCH_REASON,
+    "simeon_lexical_score_bench": _BENCH_REASON,
+    "metadata_contention_bench": _BENCH_REASON,
+    "hnsw_entity_search_bench": _BENCH_REASON,
+    "multi_client_ingestion_bench": _BENCH_REASON,
+    "topology_ablation_bench": _BENCH_REASON,
+}
 
 
 @dataclass
@@ -128,6 +156,27 @@ def registration_from_entry(entry: dict,
         workdir=entry.get("workdir"),
         extra_paths=[str(p) for p in entry.get("extra_paths") or []],
     )
+
+
+def allow_no_tests_findings(
+    entries: list[dict], allowlist: dict[str, str] | None = None
+) -> tuple[list[str], list[str]]:
+    """Return (unlisted, stale) registration names for the --allow-running-no-tests policy.
+
+    unlisted: passes the flag without an allowlist entry.
+    stale: allowlisted, registered in this build, and no registration of that name passes it.
+    """
+    allowed = ALLOW_NO_TESTS_ALLOWLIST if allowlist is None else allowlist
+    with_flag: set[str] = set()
+    registered: set[str] = set()
+    for entry in entries:
+        name = str(entry.get("name", ""))
+        registered.add(name)
+        if ALLOW_NO_TESTS_FLAG in [str(c) for c in entry.get("cmd", [])]:
+            with_flag.add(name)
+    unlisted = sorted(with_flag - set(allowed))
+    stale = sorted((set(allowed) & registered) - with_flag)
+    return unlisted, stale
 
 
 def listing_env(reg: Registration, base: dict[str, str], windows: bool) -> dict[str, str]:
@@ -212,7 +261,9 @@ def main(argv: list[str] | None = None) -> int:
 
     registrations: list[Registration] = []
     unchecked: list[Unchecked] = []
-    for entry in load_entries(options.build_dir):
+    entries = load_entries(options.build_dir)
+    unlisted_flag, stale_flag = allow_no_tests_findings(entries)
+    for entry in entries:
         result = registration_from_entry(entry, options.build_dir)
         (registrations if isinstance(result, Registration) else unchecked).append(result)
 
@@ -240,9 +291,19 @@ def main(argv: list[str] | None = None) -> int:
     for outcome in empty:
         reg = outcome.registration
         print(f"EMPTY {reg.name}: {reg.binary.name} {reg.args!r} selects zero test cases")
+    for name in unlisted_flag:
+        print(f"ALLOW-NO-TESTS {name}: passes {ALLOW_NO_TESTS_FLAG}, which also passes a run "
+              "whose every case skipped; gate the registration in meson, or add it to "
+              "ALLOW_NO_TESTS_ALLOWLIST with a reason")
+    for name in stale_flag:
+        print(f"STALE-ALLOW {name}: on ALLOW_NO_TESTS_ALLOWLIST but registered without "
+              f"{ALLOW_NO_TESTS_FLAG}; remove the entry")
 
+    flag_failed = bool(unlisted_flag or stale_flag)
     print(f"checked {len(checked)} Catch2 registrations "
-          f"({len(empty)} empty, {len(errors)} errors, {len(missing)} not built); "
+          f"({len(empty)} empty, {len(errors)} errors, {len(missing)} not built, "
+          f"{len(unlisted_flag)} unlisted {ALLOW_NO_TESTS_FLAG}, "
+          f"{len(stale_flag)} stale allowlist entries); "
           f"{len(unchecked)} registrations not checked ({len(warned)} warnings"
           f"{'' if options.verbose else '; -v names them'})")
     if not checked and not errors:
@@ -250,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if missing and not options.allow_missing:
         return 1
-    return 1 if empty or errors else 0
+    return 1 if empty or errors or flag_failed else 0
 
 
 if __name__ == "__main__":

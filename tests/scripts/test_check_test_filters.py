@@ -81,6 +81,39 @@ class RegistrationTest(unittest.TestCase):
             ["[a]~[slow]", "--allow-running-no-tests", "--list-tests", "--reporter", "xml"],
         )
 
+    def test_allow_no_tests_flag_needs_an_allowlist_entry(self) -> None:
+        entries = [
+            entry("plain", ["/b/catch2_a", "[x]"]),
+            entry("flagged", ["/b/catch2_b", "[x]", "--allow-running-no-tests"]),
+            entry("listed", ["/b/catch2_c", "--allow-running-no-tests"]),
+            # Any suite, and through a wrapper: the flag is what matters.
+            entry("bench", ["/usr/bin/python3", "wrap.py", "/b/bench", "--allow-running-no-tests"],
+                  ["bench"]),
+        ]
+        unlisted, stale = checker.allow_no_tests_findings(entries, {"listed": "capability skip"})
+        self.assertEqual(unlisted, ["bench", "flagged"])
+        self.assertEqual(stale, [])
+
+    def test_allowlist_entry_without_the_flag_is_stale(self) -> None:
+        entries = [entry("listed", ["/b/catch2_c", "[x]"])]
+        allowlist = {"listed": "capability skip", "not_registered_here": "other configuration"}
+        unlisted, stale = checker.allow_no_tests_findings(entries, allowlist)
+        self.assertEqual(unlisted, [])
+        # A name this build does not register (option off, plugin absent) is not stale.
+        self.assertEqual(stale, ["listed"])
+
+    def test_same_name_registered_twice_is_not_stale_when_one_passes_the_flag(self) -> None:
+        entries = [
+            entry("listed", ["/b/catch2_c", "[x]"]),
+            entry("listed", ["/b/catch2_c", "[y]", "--allow-running-no-tests"]),
+        ]
+        self.assertEqual(checker.allow_no_tests_findings(entries, {"listed": "r"}), ([], []))
+
+    def test_shipped_allowlist_entries_carry_a_reason(self) -> None:
+        self.assertLessEqual(len(checker.ALLOW_NO_TESTS_ALLOWLIST), 8)
+        for name, reason in checker.ALLOW_NO_TESTS_ALLOWLIST.items():
+            self.assertTrue(reason.strip(), name)
+
     def test_count_listed(self) -> None:
         xml = "<MatchingTests><TestCase><Name>a</Name></TestCase>\n<TestCase/></MatchingTests>"
         self.assertEqual(checker.count_listed(xml), 2)
@@ -120,6 +153,23 @@ class EndToEndTest(unittest.TestCase):
             entry("ok", [str(self.binary), "Some case"]),
             entry("empty", [str(self.binary), "nothing", "--allow-running-no-tests"]),
         ])
+        self.assertEqual(self.run_check(), 1)
+
+    def test_unlisted_allow_flag_fails_a_selecting_registration(self) -> None:
+        self.write_intro([entry("flagged", [str(self.binary), "Some case"])])
+        self.assertEqual(self.run_check(), 0)
+        self.write_intro([
+            entry("flagged", [str(self.binary), "Some case", "--allow-running-no-tests"]),
+        ])
+        self.assertEqual(self.run_check(), 1)
+
+    def test_allowlisted_allow_flag_passes_and_stale_entry_fails(self) -> None:
+        listed = next(iter(checker.ALLOW_NO_TESTS_ALLOWLIST))
+        self.write_intro([
+            entry(listed, [str(self.binary), "Some case", "--allow-running-no-tests"]),
+        ])
+        self.assertEqual(self.run_check(), 0)
+        self.write_intro([entry(listed, [str(self.binary), "Some case"])])
         self.assertEqual(self.run_check(), 1)
 
     def test_missing_binary_fails_unless_allowed(self) -> None:

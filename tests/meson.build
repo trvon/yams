@@ -599,9 +599,9 @@ endif
 
 # Standard Catch2 tests: one row per test in catch2_test_table, built by the loop at the
 # end of this file. Each row needs 'name', 'sources', 'deps' (added after the Catch2
-# deps), 'suite' and 'timeout'. Optional: 'target' (default 'catch2_' + name), 'args'
-# and 'is_parallel'. Tests with extra env, cpp_args or several registrations stay
-# hand-written.
+# deps), 'suite' and 'timeout'. Optional: 'target' (default 'catch2_' + name), 'args',
+# 'env' (added to the default LD_LIBRARY_PATH env) and 'is_parallel'. Tests with extra
+# cpp_args or several registrations stay hand-written.
 catch2_test_table = []
 
 # ============================================================================
@@ -983,13 +983,18 @@ if catch2_dep.found()
     install: false,
   )
 
-#FTS5 performance / stress tests(migrated from GTest, opt - in via YAMS_RUN_STRESS_TESTS = 1)
+  # FTS5 performance / stress tests. Every case SKIPs unless YAMS_RUN_STRESS_TESTS=1, and no
+  # lane exported it, so the registration passed --allow-running-no-tests and ran nothing.
+  # It now sets the variable itself and lives in the explicit 'slow'/'stress' suites, which
+  # the fast lanes (--suite unit --suite integration) do not select. The cases assert
+  # wall-clock budgets on a 50k-document corpus, so sanitizer builds do not declare it.
   catch2_test_table += [{
     'name': 'fts5_stress',
     'sources': files('unit/metadata/fts5_performance_stress_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'stress', 'metadata', 'fts5'],
-    'args': ['--allow-running-no-tests'],  # every case SKIPs unless YAMS_RUN_STRESS_TESTS=1
+    'suite': ['catch2', 'slow', 'stress', 'metadata', 'fts5'],
+    'env': {'YAMS_RUN_STRESS_TESTS': '1'},
+    'register': not (_test_thread_sanitizer or _test_address_sanitizer),
     'timeout': 300,
     'is_parallel': false,
   }]
@@ -3428,9 +3433,7 @@ if catch2_dep.found()
 
   test('daemon_background_processing_slow', catch2_daemon_background_exe,
     suite: ['catch2', 'slow', 'daemon', 'background', 'concurrency'],
-    # Keeps --allow-running-no-tests: the one [slow] case SKIPs unless
-    # YAMS_INTERNAL_BUS_MPMC=1 (runtime capability), which would otherwise exit 4.
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
@@ -3474,9 +3477,20 @@ if catch2_dep.found()
     is_parallel: false
   )
 
+  # "Plugin: provenance root smoke" SKIPs without YAMS_EXPECT_PLUGIN_ROOT, which no lane set.
+  # When the ONNX plugin is built, expect it to load from its build directory.
+  _daemon_plugin_harness_env = { 'LD_LIBRARY_PATH': _test_env_ld_library_path }
+  _daemon_plugin_harness_depends = []
+  if is_variable('yams_onnx_plugin')
+    _daemon_plugin_harness_env += {
+      'YAMS_EXPECT_PLUGIN_ROOT': meson.project_build_root() / 'plugins' / 'onnx',
+    }
+    _daemon_plugin_harness_depends += [yams_onnx_plugin]
+  endif
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugins'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    env: _daemon_plugin_harness_env,
+    depends: _daemon_plugin_harness_depends,
     timeout: 60,
     is_parallel: false
   )
@@ -3627,8 +3641,21 @@ if catch2_dep.found()
 
   test('memory_sync_service', catch2_memory_sync_service_exe,
     suite: ['catch2', 'unit', 'memory-sync', 'concurrency'],
+    args: ['~[stress]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  # The [stress] lifecycle case SKIPs unless YAMS_RUN_STRESS_TESTS=1, which no lane exported.
+  # It gets its own registration in the explicit 'slow'/'stress' suites (not the fast unit lane).
+  test('memory_sync_service_stress', catch2_memory_sync_service_exe,
+    suite: ['catch2', 'slow', 'stress', 'memory-sync', 'concurrency'],
+    args: ['[stress]'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_RUN_STRESS_TESTS': '1',
+    },
+    timeout: 120
   )
 
   test('memory_sync_config', catch2_memory_sync_config_exe,
@@ -3779,7 +3806,7 @@ foreach t : catch2_test_table
     test(t['name'], t_exe,
       suite: t['suite'],
       args: t.get('args', []),
-      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path } + t.get('env', {}),
       timeout: t['timeout'],
       is_parallel: t.get('is_parallel', true),
     )
