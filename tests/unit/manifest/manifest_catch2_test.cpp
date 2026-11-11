@@ -666,6 +666,14 @@ TEST_CASE_METHOD(ManifestTestFixture,
                                                   .enableCaching = true,
                                                   .cacheSize = capacity});
 
+    // Every stored field must survive the cache, so compare the bytes a restored manifest
+    // serializes to. Manifest equality would not do: timestamps are not serialized.
+    const auto reserializesTo = [&small](const Manifest& restored,
+                                         const std::vector<std::byte>& expected) {
+        auto bytes = small.serialize(restored);
+        return bytes.has_value() && bytes.value() == expected;
+    };
+
     // Repeats keep some entries hot while the sweep pushes others out.
     const std::vector<size_t> order = {0, 1, 0, 2, 3, 0, 4, 1, 5, 6, 0, 7, 7, 2, 1,
                                        0, 3, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7};
@@ -675,7 +683,7 @@ TEST_CASE_METHOD(ManifestTestFixture,
             auto restored = small.deserialize(serialized[index]);
             REQUIRE(restored.has_value());
             CHECK(restored.value().fileHash == originals[index].fileHash);
-            CHECK(restored.value().chunks.size() == originals[index].chunks.size());
+            CHECK(reserializesTo(restored.value(), serialized[index]));
         }
     }
 
@@ -689,8 +697,7 @@ TEST_CASE_METHOD(ManifestTestFixture,
                         const size_t index = (step + t) % serialized.size();
                         auto restored = small.deserialize(serialized[index]);
                         if (!restored.has_value() ||
-                            restored.value().fileHash != originals[index].fileHash ||
-                            restored.value().chunks.size() != originals[index].chunks.size()) {
+                            !reserializesTo(restored.value(), serialized[index])) {
                             wrong.fetch_add(1);
                         }
                     }

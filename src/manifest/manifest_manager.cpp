@@ -242,7 +242,7 @@ struct ManifestManager::Impl {
     }
 
     std::optional<Manifest> getFromCache(const std::string& key) const {
-        if (!config.enableCaching)
+        if (!config.enableCaching || config.cacheSize == 0)
             return std::nullopt;
 
         std::lock_guard lock(cacheMutex);
