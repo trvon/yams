@@ -264,6 +264,7 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
     // These take precedence over YAMS_CONFIG and the config's socket when a shell exports them.
     ScopedEnvVar cfgPathEnv("YAMS_CONFIG_PATH", configPath.string());
     ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", socketPath.string());
+    ScopedEnvVar socketPathEnv("YAMS_DAEMON_SOCKET_PATH", socketPath.string());
     ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
     ScopedEnvVar storageEnv("YAMS_STORAGE", dataDir.string());
     ScopedEnvVar runtimeEnv("XDG_RUNTIME_DIR", runtimeDir.string());
