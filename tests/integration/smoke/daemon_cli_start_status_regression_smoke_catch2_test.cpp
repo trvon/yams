@@ -310,7 +310,7 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
 #ifndef _WIN32
     ScopedEnvVar pathEnv("PATH", binDir.string());
 #endif
-    auto statusRes = runCommandCapture(yams + " daemon status -d" + socketArg + pidArg);
+    auto statusRes = runCommandCapture(yams + " daemon status -d" + socketArg);
     INFO("daemon status -d failed after list succeeded:\n" << statusRes.output);
     CHECK(statusRes.exitCode == 0);
     INFO("status command reported IPC unavailable after daemon was already serving list:\n"
