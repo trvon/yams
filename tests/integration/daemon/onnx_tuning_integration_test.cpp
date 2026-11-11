@@ -6,11 +6,13 @@
 
 #include "../../common/env_compat.h"
 #include "../../common/test_helpers_catch2.h"
+#include "require_daemon_started.h"
 #include "test_daemon_harness.h"
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/cli/cli_sync.h>
 #include <yams/compat/unistd.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -22,6 +24,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -39,6 +43,30 @@ constexpr auto kHarnessStartTimeout = 30s;
 /// each section's explicit configuration contract rather than live compatibility-environment reads.
 bool startOnnxHarness(DaemonHarness& harness, std::chrono::milliseconds timeout) {
     return harness.start(timeout);
+}
+
+constexpr auto kRealOnnxStartTimeout = 60s;
+
+/// Directory holding the built ONNX plugin module, or nullopt when it was not built.
+///
+/// Meson exports YAMS_TEST_PLUGIN_DIR (harness-only) for the registrations that load the real
+/// plugin, and declares those registrations only when the plugin target exists. The test used to
+/// derive `<cwd>/build/debug/plugins`, which does not exist when meson runs it from the build
+/// directory, so the daemon never started and the case skipped in every lane.
+std::optional<std::filesystem::path> builtOnnxPluginDir() {
+    const auto configured = yams::config::getenv_optional("YAMS_TEST_PLUGIN_DIR");
+    if (!configured || configured->empty()) {
+        return std::nullopt;
+    }
+    const std::filesystem::path dir(*configured);
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->path().filename().string().find("yams_onnx_plugin") != std::string::npos &&
+            it->is_regular_file(ec)) {
+            return dir;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace
@@ -410,6 +438,10 @@ TEST_CASE("AbiModelProviderAdapter acquires SlotGuard during real embedding",
         ConfigResolver::envTruthy(std::getenv("YAMS_SQLITE_VEC_SKIP_INIT"))) {
         SKIP("Real ONNX adapter test requires vector support enabled");
     }
+    const auto onnxPluginDir = builtOnnxPluginDir();
+    if (!onnxPluginDir) {
+        SKIP("ONNX plugin not built (YAMS_TEST_PLUGIN_DIR unset or holds no yams_onnx_plugin)");
+    }
 
     // Configure conservative slot limits to observe contention
     ScopedEnvVar maxEnv("YAMS_ONNX_MAX_CONCURRENT", "4");
@@ -424,8 +456,7 @@ TEST_CASE("AbiModelProviderAdapter acquires SlotGuard during real embedding",
     opts.modelPoolLazyLoading = false; // Preload model on startup
     opts.preloadModels = {"all-MiniLM-L6-v2"};
 
-    // Set plugin directory to build/debug/plugins
-    opts.pluginDir = std::filesystem::current_path() / "build/debug" / "plugins";
+    opts.pluginDir = *onnxPluginDir;
 
     // Configure ONNX plugin with preferred model (uses plugin's model resolution)
     opts.pluginConfigs["onnx_plugin"] = R"({"preferred_model": "all-MiniLM-L6-v2"})";
@@ -433,10 +464,8 @@ TEST_CASE("AbiModelProviderAdapter acquires SlotGuard during real embedding",
     DaemonHarness harness(opts);
 
     INFO("Starting daemon with real ONNX plugin (model preloading may take time)...");
-    // If model not found, start() will fail - this makes it clear the model must be installed
-    if (!startOnnxHarness(harness, std::chrono::seconds(60))) {
-        SKIP("Failed to start daemon with ONNX plugin - model may not be available");
-    }
+    // The plugin is built, so a daemon that cannot start is a failure, not a skip.
+    requireStarted(harness, 3, kRealOnnxStartTimeout);
 
     REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
@@ -561,6 +590,10 @@ TEST_CASE("AbiModelProviderAdapter acquires SlotGuard during real embedding",
 TEST_CASE("Config selecting onnx backend uses ONNX provider for embeddings",
           "[daemon][onnx][config][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
+    const auto onnxPluginDir = builtOnnxPluginDir();
+    if (!onnxPluginDir) {
+        SKIP("ONNX plugin not built (YAMS_TEST_PLUGIN_DIR unset or holds no yams_onnx_plugin)");
+    }
 
     ScopedEnvVar profileEnv("YAMS_TUNING_PROFILE", "balanced");
     ScopedEnvVar forceCpuEnv("YAMS_ONNX_FORCE_CPU", "1");
@@ -588,17 +621,13 @@ TEST_CASE("Config selecting onnx backend uses ONNX provider for embeddings",
     opts.configureModelPool = true;
     opts.modelPoolLazyLoading = false;
     opts.preloadModels = {"all-MiniLM-L6-v2"};
-    opts.pluginDir = std::filesystem::current_path() / "build/debug" / "plugins";
+    opts.pluginDir = *onnxPluginDir;
     opts.pluginConfigs["onnx_plugin"] = R"({"preferred_model": "all-MiniLM-L6-v2"})";
     opts.configPath = configPath;
 
     DaemonHarness harness(opts);
-    if (!startOnnxHarness(harness, std::chrono::seconds(60))) {
-        std::error_code ec;
-        std::filesystem::remove_all(configRoot, ec);
-        SKIP(
-            "Failed to start daemon with ONNX backend config - plugin or model may be unavailable");
-    }
+    // The plugin is built, so a daemon that cannot start is a failure, not a skip.
+    requireStarted(harness, 3, kRealOnnxStartTimeout);
 
     ClientConfig clientCfg;
     clientCfg.socketPath = harness.socketPath();

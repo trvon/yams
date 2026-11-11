@@ -1255,35 +1255,6 @@ private:
         return fields;
     }
 
-    static std::string globToSqlLikePattern(const std::string& glob) {
-        std::string result;
-        result.reserve(glob.size());
-
-        for (size_t i = 0; i < glob.size(); ++i) {
-            char c = glob[i];
-            if (c == '*') {
-                if (i + 1 < glob.size() && glob[i + 1] == '*') {
-                    result += '%';
-                    i++;
-                    if (i + 1 < glob.size() && glob[i + 1] == '/') {
-                        i++;
-                    }
-                } else {
-                    result += '%';
-                }
-            } else if (c == '?') {
-                result += '_';
-            } else if (c == '%' || c == '_') {
-                result += '\\';
-                result += c;
-            } else {
-                result += c;
-            }
-        }
-
-        return result;
-    }
-
     std::string formatSnippetForDisplay(std::string_view snippet, size_t maxLength) const {
         if (snippet.empty()) {
             return {};
@@ -1801,34 +1772,6 @@ private:
         for (const auto& doc : documents) {
             std::cout << doc.info.sha256Hash << "\n";
         }
-    }
-
-    std::string extractSnippet(const std::string& content, int maxLength) {
-        if (content.empty())
-            return "";
-
-        std::string snippet = content;
-
-        // Remove excessive whitespace and newlines for better display
-        std::string result;
-        bool lastWasSpace = false;
-        for (char c : snippet) {
-            if (std::isspace(c)) {
-                if (!lastWasSpace) {
-                    result += ' ';
-                    lastWasSpace = true;
-                }
-            } else {
-                result += c;
-                lastWasSpace = false;
-            }
-        }
-
-        if (result.length() > static_cast<size_t>(maxLength)) {
-            return result.substr(0, static_cast<size_t>(maxLength - 3)) + "...";
-        }
-
-        return result;
     }
 
     Result<void> fallbackToFilesystemScanning() {

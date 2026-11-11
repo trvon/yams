@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 from pathlib import Path
 
 FORGEJO_URL = "https://git.trevon.dev/trevon/yams"
@@ -39,14 +40,91 @@ SKIP_PARTS = {".git", "build", "builddir", "node_modules", "site", "subprojects"
 RETIRED_PATHS = (".build.yml", "scripts/srht-collect-artifacts.sh")
 
 
-def repository_files(root: Path):
+def tracked_files(root: Path) -> list[str] | None:
+    """Paths git tracks under root (relative, POSIX), or None when root is not a checkout root.
+
+    The policy is about what the repository publishes. Walking the filesystem also read
+    untracked, gitignored copies of the tree (agent worktrees under .claude/worktrees/, local
+    caches), so an old copy of a file failed the check for a clean checkout.
+    """
+    # A hook exports GIT_DIR/GIT_INDEX_FILE for the repository it runs in; --root must win.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+    def git(*args: str) -> str | None:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(root), *args],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        if completed.returncode != 0:
+            return None
+        return completed.stdout.decode("utf-8", errors="surrogateescape")
+
+    toplevel = git("rev-parse", "--show-toplevel")
+    # Only when root is the checkout itself: a plain directory nested inside some other
+    # repository (a temporary tree, an exported tarball) is walked instead.
+    if toplevel is None or Path(toplevel.strip()).resolve() != root:
+        return None
+    listing = git("ls-files", "-z")
+    if listing is None:
+        return None
+    return sorted(name for name in listing.split("\0") if name)
+
+
+def ignored_dot_directories(root: Path) -> tuple[set[str], set[str]]:
+    """Dot-directories the root .gitignore names literally: (any depth, root only).
+
+    Used only without git. Glob patterns and negations are not interpreted; a plain entry
+    such as `.claude/` or `/.cache` is enough to keep local tool state out of the walk.
+    """
+    anywhere: set[str] = set()
+    root_only: set[str] = set()
+    try:
+        lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return anywhere, root_only
+    for line in lines:
+        pattern = line.strip()
+        if not pattern or pattern.startswith(("#", "!")):
+            continue
+        anchored = pattern.startswith("/")
+        name = pattern.strip("/")
+        if not name.startswith(".") or "/" in name or any(c in name for c in "*?[\\"):
+            continue
+        (root_only if anchored else anywhere).add(name)
+    return anywhere, root_only
+
+
+def walked_files(root: Path):
+    anywhere, root_only = ignored_dot_directories(root)
     # Prune before descent: filtering rglob results still traverses build/cache trees.
     for directory, directories, filenames in os.walk(root, followlinks=False):
-        directories[:] = sorted(name for name in directories if name not in SKIP_PARTS)
+        skipped = SKIP_PARTS | anywhere | (root_only if Path(directory) == root else set())
+        directories[:] = sorted(name for name in directories if name not in skipped)
         for name in sorted(filenames):
             path = Path(directory) / name
             if name not in SKIP_PARTS and path.is_file():
                 yield path
+
+
+def repository_files(root: Path):
+    """Files the SourceHut scan reads: tracked files in a checkout, else a pruned walk."""
+    tracked = tracked_files(root)
+    if tracked is None:
+        yield from walked_files(root)
+        return
+    for relative in tracked:
+        if SKIP_PARTS.intersection(relative.split("/")):
+            continue
+        path = root / relative
+        # Submodule gitlinks are directories; a file deleted in the working tree is absent.
+        if path.is_file():
+            yield path
 
 
 def find_text_markers(path: Path, markers: tuple[str, ...]) -> set[str]:
