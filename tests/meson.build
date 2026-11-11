@@ -3036,6 +3036,15 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'language_detector',
+    'target': 'language_detector',
+    'sources': files('unit/extraction/language_detector_catch2_test.cpp'),
+    'deps': content_test_deps,
+    'suite': ['catch2', 'unit', 'extraction'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'text_basic_handler',
     'target': 'text_basic_handler',
     'sources': files('unit/extraction/text_basic_handler_catch2_test.cpp'),

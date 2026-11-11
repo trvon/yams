@@ -2,8 +2,12 @@
 #include <yams/extraction/text_extractor.h>
 
 #include <algorithm>
+#include <array>
+#include <bitset>
 #include <cctype>
+#include <cstddef>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace yams::extraction {
@@ -137,50 +141,116 @@ Result<std::string> EncodingDetector::convertToUtf8(const std::string& text,
     return Error{ErrorCode::InvalidOperation, "Unsupported encoding conversion: " + fromEncoding};
 }
 
-// Basic language detection implementation (centralized)
-std::string LanguageDetector::detectLanguage(const std::string& text, double* confidence) {
-    std::unordered_map<std::string, int> langScores;
-    std::string lowerText = text;
-    std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), ::tolower);
+namespace {
 
-    auto hasWholeWord = [&lowerText](const std::string& word) {
-        size_t pos = 0;
-        while ((pos = lowerText.find(word, pos)) != std::string::npos) {
-            bool validStart =
-                (pos == 0 || !std::isalpha(static_cast<unsigned char>(lowerText[pos - 1])));
-            bool validEnd =
-                (pos + word.length() >= lowerText.length() ||
-                 !std::isalpha(static_cast<unsigned char>(lowerText[pos + word.length()])));
-            if (validStart && validEnd) {
-                return true;
+// Stop words that vote for a language. A word may vote for more than one.
+enum LanguageBit : unsigned { kEnglish = 1U, kSpanish = 2U, kFrench = 4U };
+
+struct StopWord {
+    std::string_view word;
+    unsigned languages;
+};
+
+constexpr std::array<StopWord, 30> kStopWords{{
+    {"the", kEnglish},
+    {"is", kEnglish},
+    {"are", kEnglish},
+    {"and", kEnglish},
+    {"or", kEnglish},
+    {"but", kEnglish},
+    {"in", kEnglish},
+    {"on", kEnglish},
+    {"at", kEnglish},
+    {"to", kEnglish},
+    {"for", kEnglish},
+    {"of", kEnglish},
+    {"el", kSpanish},
+    {"la", kSpanish},
+    {"y", kSpanish},
+    {"en", kSpanish},
+    {"una", kSpanish},
+    {"es", kSpanish},
+    {"por", kSpanish},
+    {"con", kSpanish},
+    {"le", kFrench},
+    {"une", kFrench},
+    {"et", kFrench},
+    {"est", kFrench},
+    {"pour", kFrench},
+    {"dans", kFrench},
+    {"avec", kFrench},
+    {"de", kSpanish | kFrench},
+    {"un", kSpanish | kFrench},
+    {"que", kSpanish | kFrench},
+}};
+
+constexpr std::size_t kLongestStopWord = 4;
+
+} // namespace
+
+// Basic language detection: count which stop words of each language occur as whole words.
+std::string LanguageDetector::detectLanguage(const std::string& text, double* confidence) {
+    std::bitset<kStopWords.size()> seen;
+    std::array<char, kLongestStopWord> word{};
+
+    const auto record = [&seen](std::string_view candidate) {
+        for (std::size_t index = 0; index < kStopWords.size(); ++index) {
+            if (kStopWords[index].word == candidate) {
+                seen.set(index);
+                return;
             }
-            pos++;
         }
-        return false;
     };
 
-    for (const auto& w : std::vector<std::string>{"the", "is", "are", "and", "or", "but", "in",
-                                                  "on", "at", "to", "for", "of"})
-        if (hasWholeWord(w))
-            langScores["en"]++;
+    // One pass over maximal alphabetic runs. Runs longer than any stop word are skipped
+    // without being copied, and the scan ends once every stop word has been seen.
+    // Stop words are ASCII, and in the C and UTF-8 locales no byte above 0x7F is alphabetic,
+    // so an ASCII test bounds words the same way without a libc call per byte.
+    const auto lowerIfAlpha = [](char c) -> char {
+        const auto lowered = static_cast<unsigned char>(static_cast<unsigned char>(c) | 0x20U);
+        return (lowered >= 'a' && lowered <= 'z') ? static_cast<char>(lowered) : '\0';
+    };
 
-    for (const auto& w : std::vector<std::string>{"el", "la", "de", "que", "y", "en", "un", "una",
-                                                  "es", "por", "con"})
-        if (hasWholeWord(w))
-            langScores["es"]++;
-
-    for (const auto& w : std::vector<std::string>{"le", "de", "un", "une", "et", "est", "pour",
-                                                  "dans", "que", "avec"})
-        if (hasWholeWord(w))
-            langScores["fr"]++;
-
-    std::string detectedLang = "en";
-    int maxScore = 0;
-    for (const auto& [lang, score] : langScores) {
-        if (score > maxScore) {
-            maxScore = score;
-            detectedLang = lang;
+    const std::size_t n = text.size();
+    std::size_t i = 0;
+    while (i < n && !seen.all()) {
+        while (i < n && lowerIfAlpha(text[i]) == '\0') {
+            ++i;
         }
+        std::size_t length = 0;
+        for (char lowered = '\0'; i < n && (lowered = lowerIfAlpha(text[i])) != '\0'; ++i) {
+            if (length < kLongestStopWord) {
+                word[length] = lowered;
+            }
+            ++length;
+        }
+        if (length > 0 && length <= kLongestStopWord) {
+            record(std::string_view(word.data(), length));
+        }
+    }
+
+    int english = 0;
+    int spanish = 0;
+    int french = 0;
+    for (std::size_t index = 0; index < kStopWords.size(); ++index) {
+        if (seen.test(index)) {
+            const unsigned languages = kStopWords[index].languages;
+            english += (languages & kEnglish) ? 1 : 0;
+            spanish += (languages & kSpanish) ? 1 : 0;
+            french += (languages & kFrench) ? 1 : 0;
+        }
+    }
+
+    // Ties go to the earlier language in this order, English first.
+    std::string detectedLang = "en";
+    int maxScore = english;
+    if (spanish > maxScore) {
+        maxScore = spanish;
+        detectedLang = "es";
+    }
+    if (french > maxScore) {
+        maxScore = french;
+        detectedLang = "fr";
     }
 
     if (confidence) {
