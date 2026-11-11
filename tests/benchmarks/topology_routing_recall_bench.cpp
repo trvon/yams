@@ -13,22 +13,37 @@
 //                   production multi-representative cover)
 //   hot_R           max over the centroid and the R-1 members that are most often the exact
 //                   best match for the training queries
-//   ridge_L         centroid plus a per-cluster correction vector fitted by ridge regression
+//   ridge           centroid plus a per-cluster correction vector fitted by ridge regression
 //                   to the cluster's support function h_c(q) = max over members of <q, key>
 //                   on the training queries (a one-layer form of a learned support-function
-//                   router; L is the regularization strength)
+//                   router). The regularization strength is chosen on held-out training
+//                   queries, never on the evaluation queries.
+//   maxaff_R        R fitted vectors per cluster scored by their maximum (a max-affine, hence
+//                   convex, model of h_c), trained by gradient descent from the ridge vector
+//                   and the hot members, stopped at the best held-out training epoch
 //   oracle          h_c(q) itself: the best any cluster scorer can do on this partition
 //
-// Training queries come either from the corpus (title, first sentence, a word span: the
-// "generated queries" setting, needing no query log) or from the even-indexed real queries.
-// Evaluation always uses the odd-indexed real queries, which no router is fitted on.
+// Training queries are synthesized from the corpus alone, in several styles, or taken from the
+// even-indexed real queries:
+//   lead      title and first sentence
+//   span12    one 12-word span
+//   span6     one 6-word span
+//   keywords  the document's five rarest words
+//   mix       all of the above
+//   real      even-indexed real queries (an in-distribution upper bound)
+//
+// Evaluation uses the odd-indexed real queries, which no router is fitted on. A corpus with
+// fewer than 100 real queries (for example a local corpus exported without a query log) is
+// evaluated on a separate draw of span6 and keywords queries instead; the header line says
+// which, and those numbers only show how well a router fits synthetic queries.
 //
 // Recall here is routing recall of the exact top-1 document under the embedding, not
 // relevance: it isolates the router from embedding quality.
 //
 // Run (BEIR layout: corpus.jsonl, queries.jsonl):
 //   topology_routing_recall_bench --dataset build/benchmarks/data/scifact \
-//       [--clusters 0] [--max-docs 0] [--max-train 3000] [--out routing_recall.jsonl]
+//       [--clusters 0] [--max-docs 0] [--max-train 3000] [--max-doc-chars 0]
+//       [--out routing_recall.jsonl]
 
 #include <algorithm>
 #include <cmath>
@@ -96,6 +111,8 @@ struct Options {
     std::size_t clusters{0};
     std::size_t maxDocs{0};
     std::size_t maxTrain{3000};
+    // Documents are cut to this many bytes before embedding; 0 keeps them whole.
+    std::size_t maxDocChars{0};
 };
 
 bool parseArgs(int argc, char** argv, Options& options) {
@@ -121,6 +138,10 @@ bool parseArgs(int argc, char** argv, Options& options) {
         } else if (arg == "--max-train") {
             if (const char* v = value()) {
                 options.maxTrain = std::stoull(v);
+            }
+        } else if (arg == "--max-doc-chars") {
+            if (const char* v = value()) {
+                options.maxDocChars = std::stoull(v);
             }
         } else {
             std::cerr << "unknown argument: " << arg << "\n";
@@ -195,28 +216,114 @@ std::vector<std::string_view> splitWords(std::string_view text) {
     return words;
 }
 
-// Queries synthesized from the corpus alone: title, first sentence, and one 12-word span.
-std::vector<std::string> generateQueries(const std::vector<Document>& docs, std::size_t limit) {
-    std::vector<std::string> all;
-    std::mt19937_64 rng(0x5eedULL);
-    for (const auto& doc : docs) {
-        if (!doc.title.empty()) {
-            all.push_back(doc.title);
+std::string joinWords(const std::vector<std::string_view>& words, std::size_t start,
+                      std::size_t count) {
+    std::string out;
+    for (std::size_t w = start; w < start + count && w < words.size(); ++w) {
+        if (!out.empty()) {
+            out.push_back(' ');
         }
-        if (const auto end = doc.text.find(". "); end != std::string::npos && end > 20) {
-            all.push_back(doc.text.substr(0, end));
+        out.append(words[w]);
+    }
+    return out;
+}
+
+std::string lowerAlnum(std::string_view word) {
+    std::string out;
+    for (const char c : word) {
+        const auto u = static_cast<unsigned char>(c);
+        if ((u >= '0' && u <= '9') || (u >= 'a' && u <= 'z')) {
+            out.push_back(c);
+        } else if (u >= 'A' && u <= 'Z') {
+            out.push_back(static_cast<char>(u - 'A' + 'a'));
         }
-        const auto words = splitWords(doc.text);
-        if (words.size() > 24) {
-            const std::size_t start = rng() % (words.size() - 12);
-            std::string span;
-            for (std::size_t w = start; w < start + 12; ++w) {
-                if (!span.empty()) {
-                    span.push_back(' ');
+    }
+    return out;
+}
+
+enum class QueryStyle { Lead, Span12, Span6, Keywords, Mix };
+
+// Queries synthesized from the corpus alone. `seed` separates a training draw from an
+// evaluation draw of the same style.
+std::vector<std::string> generateQueries(const std::vector<Document>& docs, QueryStyle style,
+                                         std::size_t limit, std::uint64_t seed) {
+    const bool lead = style == QueryStyle::Lead || style == QueryStyle::Mix;
+    const bool span12 = style == QueryStyle::Span12 || style == QueryStyle::Mix;
+    const bool span6 = style == QueryStyle::Span6 || style == QueryStyle::Mix;
+    const bool keywords = style == QueryStyle::Keywords || style == QueryStyle::Mix;
+
+    std::unordered_map<std::string, std::uint32_t> documentFrequency;
+    if (keywords) {
+        std::vector<std::string> seen;
+        for (const auto& doc : docs) {
+            seen.clear();
+            for (const auto word : splitWords(doc.text)) {
+                auto token = lowerAlnum(word);
+                if (token.size() >= 4) {
+                    seen.push_back(std::move(token));
                 }
-                span.append(words[w]);
             }
-            all.push_back(std::move(span));
+            std::ranges::sort(seen);
+            seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
+            for (const auto& token : seen) {
+                ++documentFrequency[token];
+            }
+        }
+    }
+
+    std::vector<std::string> all;
+    std::mt19937_64 rng(seed);
+    for (const auto& doc : docs) {
+        const auto words = splitWords(doc.text);
+        if (lead) {
+            if (!doc.title.empty()) {
+                all.push_back(doc.title);
+            }
+            if (const auto end = doc.text.find(". "); end != std::string::npos && end > 20) {
+                all.push_back(doc.text.substr(0, end));
+            }
+        }
+        if (span12 && words.size() > 24) {
+            all.push_back(joinWords(words, rng() % (words.size() - 12), 12));
+        }
+        if (span6 && words.size() > 12) {
+            all.push_back(joinWords(words, rng() % (words.size() - 6), 6));
+        }
+        if (keywords) {
+            // The five rarest words that still occur in another document, in reading order.
+            std::vector<std::pair<std::uint32_t, std::size_t>> ranked;
+            std::vector<std::string> tokens(words.size());
+            for (std::size_t w = 0; w < words.size(); ++w) {
+                tokens[w] = lowerAlnum(words[w]);
+                const auto it = documentFrequency.find(tokens[w]);
+                if (it != documentFrequency.end() && it->second >= 2) {
+                    ranked.emplace_back(it->second, w);
+                }
+            }
+            std::ranges::sort(ranked);
+            std::vector<std::size_t> chosen;
+            for (const auto& [frequency, position] : ranked) {
+                (void)frequency;
+                const bool duplicate = std::ranges::any_of(
+                    chosen, [&](std::size_t other) { return tokens[other] == tokens[position]; });
+                if (!duplicate) {
+                    chosen.push_back(position);
+                }
+                if (chosen.size() == 5) {
+                    break;
+                }
+            }
+            if (chosen.size() >= 3) {
+                std::ranges::sort(chosen);
+                std::string query;
+                for (const auto position : chosen) {
+                    if (!query.empty()) {
+                        query.push_back(' ');
+                    }
+                    query.append(tokens[position]);
+                }
+                all.push_back(std::move(query));
+            }
         }
     }
     if (limit == 0 || all.size() <= limit) {
@@ -383,38 +490,62 @@ Matrix scoreMaxOver(const Matrix& queries, const Matrix& centroids, const Matrix
     return scores;
 }
 
-// Solve (QtQ + lambda I) X = Qt R for X (dim x clusters) by Cholesky; returns row-major
-// clusters x dim correction vectors. R is the residual h_c(q) - <q, centroid_c>.
-Matrix fitRidgeCorrections(const Matrix& trainQueries, const Matrix& residuals, double lambda) {
-    const std::size_t d = trainQueries.dim;
-    const std::size_t k = residuals.dim;
-    std::vector<double> gram(d * d, 0.0);
-    for (std::size_t n = 0; n < trainQueries.rows; ++n) {
-        const float* q = trainQueries.row(n);
+// Normal equations of the ridge fit: gram = QtQ (lower triangle), moments = Qt R with one
+// column per cluster. R is the residual h_c(q) - <q, centroid_c>.
+struct NormalEquations {
+    std::size_t dim{0};
+    std::size_t clusters{0};
+    std::vector<double> gram;
+    std::vector<double> moments;
+};
+
+NormalEquations accumulateNormalEquations(const Matrix& queries, const Matrix& residuals) {
+    NormalEquations eq;
+    eq.dim = queries.dim;
+    eq.clusters = residuals.dim;
+    const std::size_t d = eq.dim;
+    const std::size_t k = eq.clusters;
+    eq.gram.assign(d * d, 0.0);
+    eq.moments.assign(d * k, 0.0);
+    for (std::size_t n = 0; n < queries.rows; ++n) {
+        const float* q = queries.row(n);
+        const float* r = residuals.row(n);
         for (std::size_t i = 0; i < d; ++i) {
             const double qi = q[i];
-            double* gramRow = gram.data() + i * d;
+            double* gramRow = eq.gram.data() + i * d;
             for (std::size_t j = 0; j <= i; ++j) {
                 gramRow[j] += qi * static_cast<double>(q[j]);
             }
+            double* momentRow = eq.moments.data() + i * k;
+            for (std::size_t c = 0; c < k; ++c) {
+                momentRow[c] += qi * static_cast<double>(r[c]);
+            }
         }
     }
+    return eq;
+}
+
+// Solve (QtQ + lambda * mean_diagonal * I) X = Qt R by Cholesky; returns row-major
+// clusters x dim correction vectors.
+Matrix solveRidge(const NormalEquations& eq, double lambda) {
+    const std::size_t d = eq.dim;
+    const std::size_t k = eq.clusters;
+    std::vector<double> factor = eq.gram;
     double meanDiagonal = 0.0;
     for (std::size_t i = 0; i < d; ++i) {
-        meanDiagonal += gram[i * d + i];
+        meanDiagonal += factor[i * d + i];
     }
     meanDiagonal /= static_cast<double>(d);
     for (std::size_t i = 0; i < d; ++i) {
-        gram[i * d + i] += lambda * meanDiagonal;
+        factor[i * d + i] += lambda * meanDiagonal;
     }
-    // In-place lower Cholesky.
     for (std::size_t i = 0; i < d; ++i) {
         for (std::size_t j = 0; j <= i; ++j) {
-            double sum = gram[i * d + j];
+            double sum = factor[i * d + j];
             for (std::size_t p = 0; p < j; ++p) {
-                sum -= gram[i * d + p] * gram[j * d + p];
+                sum -= factor[i * d + p] * factor[j * d + p];
             }
-            gram[i * d + j] = i == j ? std::sqrt(std::max(sum, 1e-12)) : sum / gram[j * d + j];
+            factor[i * d + j] = i == j ? std::sqrt(std::max(sum, 1e-12)) : sum / factor[j * d + j];
         }
     }
     Matrix corrections;
@@ -423,27 +554,22 @@ Matrix fitRidgeCorrections(const Matrix& trainQueries, const Matrix& residuals, 
     corrections.data.assign(k * d, 0.0F);
     std::vector<double> rhs(d);
     for (std::size_t c = 0; c < k; ++c) {
-        std::fill(rhs.begin(), rhs.end(), 0.0);
-        for (std::size_t n = 0; n < trainQueries.rows; ++n) {
-            const double r = residuals.row(n)[c];
-            const float* q = trainQueries.row(n);
-            for (std::size_t i = 0; i < d; ++i) {
-                rhs[i] += r * static_cast<double>(q[i]);
-            }
+        for (std::size_t i = 0; i < d; ++i) {
+            rhs[i] = eq.moments[i * k + c];
         }
         for (std::size_t i = 0; i < d; ++i) {
             double sum = rhs[i];
             for (std::size_t p = 0; p < i; ++p) {
-                sum -= gram[i * d + p] * rhs[p];
+                sum -= factor[i * d + p] * rhs[p];
             }
-            rhs[i] = sum / gram[i * d + i];
+            rhs[i] = sum / factor[i * d + i];
         }
         for (std::size_t i = d; i-- > 0;) {
             double sum = rhs[i];
             for (std::size_t p = i + 1; p < d; ++p) {
-                sum -= gram[p * d + i] * rhs[p];
+                sum -= factor[p * d + i] * rhs[p];
             }
-            rhs[i] = sum / gram[i * d + i];
+            rhs[i] = sum / factor[i * d + i];
         }
         for (std::size_t i = 0; i < d; ++i) {
             corrections.row(c)[i] = static_cast<float>(rhs[i]);
@@ -467,6 +593,125 @@ Matrix selectRows(const Matrix& source, std::size_t parity) {
     return out;
 }
 
+// Every fifth training query is held out for model selection.
+bool isHoldout(std::size_t index) {
+    return index % 5 == 4;
+}
+
+Matrix splitRows(const Matrix& source, bool holdout) {
+    Matrix out;
+    out.dim = source.dim;
+    for (std::size_t r = 0; r < source.rows; ++r) {
+        if (isHoldout(r) == holdout) {
+            out.data.insert(out.data.end(), source.row(r), source.row(r) + source.dim);
+            ++out.rows;
+        }
+    }
+    return out;
+}
+
+Support splitSupport(const Support& source, bool holdout) {
+    Support out;
+    out.values = splitRows(source.values, holdout);
+    for (std::size_t r = 0; r < source.bestDoc.size(); ++r) {
+        if (isHoldout(r) == holdout) {
+            out.bestDoc.push_back(source.bestDoc[r]);
+        }
+    }
+    return out;
+}
+
+// Model-selection score: share of queries whose true cluster is in the top five.
+double recallAtFive(const Matrix& scores, const Support& truth, const Partition& partition) {
+    std::size_t hits = 0;
+    for (std::size_t q = 0; q < scores.rows; ++q) {
+        const float* row = scores.row(q);
+        const std::uint32_t trueCluster = partition.clusterOfDoc[truth.bestDoc[q]];
+        std::size_t better = 0;
+        for (std::size_t c = 0; c < scores.dim; ++c) {
+            if (row[c] > row[trueCluster] || (row[c] == row[trueCluster] && c < trueCluster)) {
+                ++better;
+            }
+        }
+        hits += better < 5 ? 1 : 0;
+    }
+    return scores.rows == 0 ? 0.0 : static_cast<double>(hits) / static_cast<double>(scores.rows);
+}
+
+// R vectors per cluster, laid out cluster-major: row c * pieces + r.
+struct MaxAffine {
+    std::size_t pieces{1};
+    Matrix vectors;
+};
+
+Matrix scoreMaxAffine(const Matrix& queries, const MaxAffine& model) {
+    Matrix scores;
+    scores.rows = queries.rows;
+    scores.dim = model.vectors.rows / model.pieces;
+    scores.data.assign(scores.rows * scores.dim, 0.0F);
+    for (std::size_t q = 0; q < queries.rows; ++q) {
+        for (std::size_t c = 0; c < scores.dim; ++c) {
+            float best = dot(queries.row(q), model.vectors.row(c * model.pieces), queries.dim);
+            for (std::size_t r = 1; r < model.pieces; ++r) {
+                best = std::max(best, dot(queries.row(q), model.vectors.row(c * model.pieces + r),
+                                          queries.dim));
+            }
+            scores.row(q)[c] = best;
+        }
+    }
+    return scores;
+}
+
+// Fit max_r <q, v_cr> to h_c(q) by gradient descent on squared error. Only the piece that
+// attains the maximum moves, so the model stays a maximum of linear functions. Returns the
+// epoch with the best held-out recall, which may be the starting point.
+MaxAffine fitMaxAffine(MaxAffine model, const Matrix& fitQueries, const Support& fitSupport,
+                       const Matrix& holdoutQueries, const Support& holdoutSupport,
+                       const Partition& partition) {
+    constexpr std::size_t kEpochs = 12;
+    const std::size_t clusters = partition.clusters;
+    const std::size_t d = fitQueries.dim;
+    std::vector<std::uint32_t> order(fitQueries.rows);
+    std::iota(order.begin(), order.end(), 0U);
+    std::mt19937_64 rng(0xC0FFEEULL);
+
+    MaxAffine best = model;
+    double bestScore =
+        recallAtFive(scoreMaxAffine(holdoutQueries, model), holdoutSupport, partition);
+    float rate = 0.2F;
+    for (std::size_t epoch = 0; epoch < kEpochs; ++epoch) {
+        std::shuffle(order.begin(), order.end(), rng);
+        for (const auto n : order) {
+            const float* q = fitQueries.row(n);
+            const float* target = fitSupport.values.row(n);
+            for (std::size_t c = 0; c < clusters; ++c) {
+                std::size_t active = 0;
+                float prediction = dot(q, model.vectors.row(c * model.pieces), d);
+                for (std::size_t r = 1; r < model.pieces; ++r) {
+                    const float value = dot(q, model.vectors.row(c * model.pieces + r), d);
+                    if (value > prediction) {
+                        prediction = value;
+                        active = r;
+                    }
+                }
+                const float step = rate * (prediction - target[c]);
+                float* vector = model.vectors.row(c * model.pieces + active);
+                for (std::size_t i = 0; i < d; ++i) {
+                    vector[i] -= step * q[i];
+                }
+            }
+        }
+        rate *= 0.8F;
+        const double score =
+            recallAtFive(scoreMaxAffine(holdoutQueries, model), holdoutSupport, partition);
+        if (score > bestScore) {
+            bestScore = score;
+            best = model;
+        }
+    }
+    return best;
+}
+
 void print(const Curve& c) {
     std::printf("%-12s %-9s %3zu |", c.arm.c_str(), c.training.c_str(), c.vectorsPerCluster);
     for (std::size_t i = 0; i < std::size(kProbes); ++i) {
@@ -485,13 +730,13 @@ int main(int argc, char** argv) {
     Options options;
     if (!parseArgs(argc, argv, options)) {
         std::cerr << "usage: topology_routing_recall_bench --dataset <beir-dir> [--clusters N] "
-                     "[--max-docs N] [--max-train N] [--out file.jsonl]\n";
+                     "[--max-docs N] [--max-train N] [--max-doc-chars N] [--out file.jsonl]\n";
         return 2;
     }
 
     const auto docs = loadCorpus(options.dataset / "corpus.jsonl", options.maxDocs);
     const auto realQueries = loadQueries(options.dataset / "queries.jsonl");
-    if (docs.size() < 16 || realQueries.size() < 4) {
+    if (docs.size() < 16) {
         std::cerr << "dataset too small or unreadable: " << options.dataset << "\n";
         return 2;
     }
@@ -506,20 +751,39 @@ int main(int argc, char** argv) {
     std::vector<std::string> docTexts;
     docTexts.reserve(docs.size());
     for (const auto& doc : docs) {
-        docTexts.push_back(doc.title.empty() ? doc.text : doc.title + "\n" + doc.text);
+        auto text = doc.title.empty() ? doc.text : doc.title + "\n" + doc.text;
+        if (options.maxDocChars != 0 && text.size() > options.maxDocChars) {
+            text.resize(options.maxDocChars);
+        }
+        docTexts.push_back(std::move(text));
     }
-    const auto generated = generateQueries(docs, options.maxTrain);
 
+    const bool realEvaluation = realQueries.size() >= 100;
     Matrix keys;
-    Matrix allReal;
-    Matrix trainGenerated;
-    if (!embed(*backend, docTexts, keys) || !embed(*backend, realQueries, allReal) ||
-        !embed(*backend, generated, trainGenerated)) {
+    Matrix test;
+    Matrix trainReal;
+    if (!embed(*backend, docTexts, keys)) {
         std::cerr << "embedding failed\n";
         return 2;
     }
-    const Matrix trainReal = selectRows(allReal, 0);
-    const Matrix test = selectRows(allReal, 1);
+    if (realEvaluation) {
+        Matrix allReal;
+        if (!embed(*backend, realQueries, allReal)) {
+            std::cerr << "embedding failed\n";
+            return 2;
+        }
+        trainReal = selectRows(allReal, 0);
+        test = selectRows(allReal, 1);
+    } else {
+        // No usable query log: evaluate on a separate draw of short synthetic queries.
+        auto evaluation = generateQueries(docs, QueryStyle::Span6, 500, 0xE7A1ULL);
+        const auto keywordEvaluation = generateQueries(docs, QueryStyle::Keywords, 500, 0xE7A2ULL);
+        evaluation.insert(evaluation.end(), keywordEvaluation.begin(), keywordEvaluation.end());
+        if (!embed(*backend, evaluation, test)) {
+            std::cerr << "embedding failed\n";
+            return 2;
+        }
+    }
 
     // Partition with the production k-means engine, asking for a deep representative cover so
     // every farthest_R arm reads a prefix of the same selection.
@@ -622,7 +886,8 @@ int main(int argc, char** argv) {
                      truth, partition, docs.size()));
     }
 
-    const auto fitAndEvaluate = [&](const Matrix& train, const std::string& label) {
+    std::size_t trainGeneratedRows = 0;
+    const auto fitAndEvaluate = [&](const Matrix& train, const std::string& label, bool deep) {
         const Support trainSupport = computeSupport(train, keys, partition);
 
         // Members that are most often the exact best match, then the farthest-first cover.
@@ -646,39 +911,100 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        for (const std::size_t r : {2, 4, 8}) {
-            curves.push_back(evaluate("hot_" + std::to_string(r), label, r,
-                                      scoreMaxOver(test, partition.centroids, keys, hot, r - 1),
-                                      truth, partition, docs.size()));
+        if (deep) {
+            curves.push_back(evaluate("hot_8", label, 8,
+                                      scoreMaxOver(test, partition.centroids, keys, hot, 7), truth,
+                                      partition, docs.size()));
         }
 
-        const Matrix trainCentroid = centroidScores(train, partition.centroids);
-        Matrix residuals = trainSupport.values;
+        const Matrix fitQueries = splitRows(train, false);
+        const Matrix holdoutQueries = splitRows(train, true);
+        const Support fitSupport = splitSupport(trainSupport, false);
+        const Support holdoutSupport = splitSupport(trainSupport, true);
+
+        // Ridge correction; lambda chosen on the held-out training queries.
+        const Matrix fitCentroid = centroidScores(fitQueries, partition.centroids);
+        Matrix residuals = fitSupport.values;
         for (std::size_t i = 0; i < residuals.data.size(); ++i) {
-            residuals.data[i] -= trainCentroid.data[i];
+            residuals.data[i] -= fitCentroid.data[i];
         }
-        for (const double lambda : {0.1, 1.0, 10.0}) {
+        const NormalEquations equations = accumulateNormalEquations(fitQueries, residuals);
+        Matrix bestRouted = partition.centroids;
+        double bestScore = -1.0;
+        double bestLambda = 0.0;
+        for (const double lambda : {0.1, 0.3, 1.0, 3.0, 10.0}) {
             Matrix routed = partition.centroids;
-            const Matrix corrections = fitRidgeCorrections(train, residuals, lambda);
+            const Matrix corrections = solveRidge(equations, lambda);
             for (std::size_t i = 0; i < routed.data.size(); ++i) {
                 routed.data[i] += corrections.data[i];
             }
-            char name[32];
-            std::snprintf(name, sizeof(name), "ridge_%g", lambda);
-            curves.push_back(evaluate(name, label, 1, centroidScores(test, routed), truth,
-                                      partition, docs.size()));
+            const double score =
+                recallAtFive(centroidScores(holdoutQueries, routed), holdoutSupport, partition);
+            if (score > bestScore) {
+                bestScore = score;
+                bestLambda = lambda;
+                bestRouted = std::move(routed);
+            }
+        }
+        char name[32];
+        std::snprintf(name, sizeof(name), "ridge(%g)", bestLambda);
+        curves.push_back(evaluate(name, label, 1, centroidScores(test, bestRouted), truth,
+                                  partition, docs.size()));
+
+        if (deep) {
+            for (const std::size_t pieces : {4, 8}) {
+                MaxAffine model;
+                model.pieces = pieces;
+                model.vectors.rows = partition.clusters * pieces;
+                model.vectors.dim = keys.dim;
+                model.vectors.data.assign(model.vectors.rows * keys.dim, 0.0F);
+                for (std::size_t c = 0; c < partition.clusters; ++c) {
+                    // Piece 0 starts at the ridge solution, the rest at the hot members; a
+                    // cluster with too few members repeats its first piece.
+                    std::copy(bestRouted.row(c), bestRouted.row(c) + keys.dim,
+                              model.vectors.row(c * pieces));
+                    for (std::size_t r = 1; r < pieces; ++r) {
+                        const float* source =
+                            r - 1 < hot[c].size() ? keys.row(hot[c][r - 1]) : bestRouted.row(c);
+                        std::copy(source, source + keys.dim, model.vectors.row(c * pieces + r));
+                    }
+                }
+                model = fitMaxAffine(std::move(model), fitQueries, fitSupport, holdoutQueries,
+                                     holdoutSupport, partition);
+                curves.push_back(evaluate("maxaff_" + std::to_string(pieces), label, pieces,
+                                          scoreMaxAffine(test, model), truth, partition,
+                                          docs.size()));
+            }
         }
     };
-    fitAndEvaluate(trainGenerated, "generated");
-    fitAndEvaluate(trainReal, "real");
+
+    const std::pair<QueryStyle, const char*> styles[] = {
+        {QueryStyle::Lead, "lead"},   {QueryStyle::Span12, "span12"},
+        {QueryStyle::Span6, "span6"}, {QueryStyle::Keywords, "keywords"},
+        {QueryStyle::Mix, "mix"},
+    };
+    for (const auto& [style, label] : styles) {
+        Matrix train;
+        if (!embed(*backend, generateQueries(docs, style, options.maxTrain, 0x5EEDULL), train)) {
+            std::cerr << "embedding failed\n";
+            return 2;
+        }
+        if (style == QueryStyle::Mix) {
+            trainGeneratedRows = train.rows;
+        }
+        fitAndEvaluate(train, label, style == QueryStyle::Mix);
+    }
+    if (realEvaluation) {
+        fitAndEvaluate(trainReal, "real", true);
+    }
 
     curves.push_back(evaluate("oracle", "none", 0, truth.values, truth, partition, docs.size()));
 
-    std::printf("dataset=%s docs=%zu clusters=%zu dim=%zu test_queries=%zu "
-                "train_generated=%zu train_real=%zu space=%s\n",
+    std::printf("dataset=%s docs=%zu clusters=%zu dim=%zu evaluation=%s test_queries=%zu "
+                "train_mix=%zu train_real=%zu space=%s\n",
                 options.dataset.filename().string().c_str(), docs.size(), partition.clusters,
-                keys.dim, test.rows, trainGenerated.rows, trainReal.rows,
-                backend->getEmbeddingSpaceIdentity().c_str());
+                keys.dim, realEvaluation ? "real" : "generated", test.rows, trainGeneratedRows,
+                trainReal.rows, backend->getEmbeddingSpaceIdentity().c_str());
     std::printf("production router top-1 agreement with the centroid arm: %zu/%zu\n", parityAgreed,
                 parityChecked);
     std::printf("%-12s %-9s %3s | recall%% at probes 1 2 3 5 8 16         | recall%% at scan "
@@ -697,6 +1023,7 @@ int main(int argc, char** argv) {
             row["clusters"] = partition.clusters;
             row["dim"] = keys.dim;
             row["test_queries"] = test.rows;
+            row["evaluation"] = realEvaluation ? "real" : "generated";
             row["arm"] = c.arm;
             row["training"] = c.training;
             row["vectors_per_cluster"] = c.vectorsPerCluster;
