@@ -481,10 +481,23 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         // bigram counts by the index's unigram counts, so both must come from the same text;
         // and holding the reduced text is bounded by max_corpus_bytes, where re-reading every
         // raw document was not (a few very large documents can be most of a corpus).
-        const bool mineConcepts = cfg_.concept_mining_enabled && ids.size() >= 100;
+        bool mineConcepts = cfg_.concept_mining_enabled && ids.size() >= 100;
         std::vector<std::string> conceptTexts;
+        // Keeping the text is optional: if it cannot be allocated, the build goes on and
+        // publishes the BM25 index without concepts. Nothing may throw out of this thread.
+        const auto abandonConcepts = [&](const std::exception& e) {
+            spdlog::warn("[simeon-lexical] concept mining skipped: could not retain indexed "
+                         "text ({})",
+                         e.what());
+            mineConcepts = false;
+            std::vector<std::string>().swap(conceptTexts);
+        };
         if (mineConcepts) {
-            conceptTexts.reserve(ids.size());
+            try {
+                conceptTexts.reserve(ids.size());
+            } catch (const std::exception& e) {
+                abandonConcepts(e);
+            }
         }
 
         std::uint32_t dense = 0;
@@ -566,8 +579,12 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             }
             if (mineConcepts) {
                 // Last use of buildText: one entry per indexed document, in dense-id order.
-                conceptTexts.emplace_back(buildText.chunked ? std::move(buildText.owned)
-                                                            : std::string(buildText.view));
+                try {
+                    conceptTexts.emplace_back(buildText.chunked ? std::move(buildText.owned)
+                                                                : std::string(buildText.view));
+                } catch (const std::exception& e) {
+                    abandonConcepts(e);
+                }
             }
             mapping.emplace(docId, dense++);
             dense_doc_ids.push_back(docId);
