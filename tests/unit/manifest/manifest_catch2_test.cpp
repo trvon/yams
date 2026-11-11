@@ -2,6 +2,7 @@
 // Migrated from GTest: manifest_test.cpp
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <yams/chunking/chunker.h>
 #include <yams/crypto/hasher.h>
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -18,6 +20,7 @@
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <vector>
 
 #include "../../common/test_helpers_catch2.h"
 
@@ -638,4 +641,72 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager accepts the manifest of a
     mismatched.chunks.push_back(
         manifest::ChunkRef{.hash = std::string(64, 'b'), .offset = 4, .size = 6});
     CHECK(mismatched.isValid());
+}
+
+// The cache sits in front of deserialize(). Whatever it holds or evicts, a manifest must come
+// back as the one that was serialized, including with a cache too small for the working set.
+TEST_CASE_METHOD(ManifestTestFixture,
+                 "ManifestManager deserialize is exact at every cache capacity",
+                 "[manifest][catch2]") {
+    std::vector<Manifest> originals;
+    std::vector<std::vector<std::byte>> serialized;
+    for (size_t i = 0; i < 8; ++i) {
+        auto chunks = createTestChunks(i + 1, 64);
+        auto created = manager->createManifest(createTestFileInfo(chunks), chunks);
+        REQUIRE(created.has_value());
+        auto bytes = manager->serialize(created.value());
+        REQUIRE(bytes.has_value());
+        originals.push_back(created.value());
+        serialized.push_back(std::move(bytes.value()));
+    }
+
+    const auto capacity = GENERATE(size_t{0}, size_t{1}, size_t{3}, size_t{100});
+    ManifestManager small(ManifestManager::Config{.enableCompression = false,
+                                                  .enableChecksums = true,
+                                                  .enableCaching = true,
+                                                  .cacheSize = capacity});
+
+    // Every stored field must survive the cache, so compare the bytes a restored manifest
+    // serializes to. Manifest equality would not do: timestamps are not serialized.
+    const auto reserializesTo = [&small](const Manifest& restored,
+                                         const std::vector<std::byte>& expected) {
+        auto bytes = small.serialize(restored);
+        return bytes.has_value() && bytes.value() == expected;
+    };
+
+    // Repeats keep some entries hot while the sweep pushes others out.
+    const std::vector<size_t> order = {0, 1, 0, 2, 3, 0, 4, 1, 5, 6, 0, 7, 7, 2, 1,
+                                       0, 3, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7};
+
+    SECTION("single thread") {
+        for (const size_t index : order) {
+            auto restored = small.deserialize(serialized[index]);
+            REQUIRE(restored.has_value());
+            CHECK(restored.value().fileHash == originals[index].fileHash);
+            CHECK(reserializesTo(restored.value(), serialized[index]));
+        }
+    }
+
+    SECTION("concurrent readers") {
+        std::atomic<int> wrong{0};
+        std::vector<std::thread> readers;
+        for (size_t t = 0; t < 4; ++t) {
+            readers.emplace_back([&, t] {
+                for (int round = 0; round < 20; ++round) {
+                    for (const size_t step : order) {
+                        const size_t index = (step + t) % serialized.size();
+                        auto restored = small.deserialize(serialized[index]);
+                        if (!restored.has_value() ||
+                            !reserializesTo(restored.value(), serialized[index])) {
+                            wrong.fetch_add(1);
+                        }
+                    }
+                }
+            });
+        }
+        for (auto& reader : readers) {
+            reader.join();
+        }
+        CHECK(wrong.load() == 0);
+    }
 }
