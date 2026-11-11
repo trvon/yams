@@ -861,29 +861,40 @@ else
         args: ['Lane metrics update during slot acquisition'],
       )
 
-      # Adapter test needs vectors ENABLED to test real ONNX plugin path
-      # Use _kg_test_env which doesn't have YAMS_DISABLE_VECTORS=1
-      # adapter/config_backend keep --allow-running-no-tests: each selects one case that SKIPs
-      # at runtime when the ONNX plugin, model, or vector support is absent (CI exports
-      # YAMS_DISABLE_VECTORS / YAMS_SQLITE_VEC_SKIP_INIT and builds with ONNX disabled). That is
-      # a capability skip that cannot be decided at configure time.
-      test('onnx_tuning_adapter',
-        onnx_tuning_integration_exe,
-        suite: ['integration', 'daemon', 'catch2', 'onnx', 'adapter'],
-        env: _kg_test_env,
-        is_parallel: false,
-        timeout: 300,  # 5 minutes - real ONNX model loading is slow
-        args: ['AbiModelProviderAdapter acquires SlotGuard during real embedding', '--allow-running-no-tests'],
-      )
+      # adapter/config_backend load the real ONNX plugin, so they are declared only when the
+      # plugin target exists (plugins/onnx/meson.build; CI configures -Denable-onnx=disabled).
+      # Each selects one case, and a build without the plugin could only skip it; gating here
+      # replaces --allow-running-no-tests, which also passed a daemon that never started.
+      # The plugin directory comes from the build root (harness-only YAMS_TEST_PLUGIN_DIR): the
+      # test used to derive <cwd>/build/debug/plugins, which never exists under `meson test`.
+      # They need vectors ENABLED, hence _kg_test_env (no YAMS_DISABLE_VECTORS=1). A lane that
+      # builds the plugin but exports YAMS_DISABLE_VECTORS / YAMS_SQLITE_VEC_SKIP_INIT, or has
+      # no all-MiniLM-L6-v2 model installed, skips the case and fails with exit 4.
+      if is_variable('yams_onnx_plugin')
+        _onnx_real_plugin_env = _kg_test_env + {
+          'YAMS_TEST_PLUGIN_DIR': meson.project_build_root() / 'plugins' / 'onnx',
+        }
 
-      test('onnx_tuning_config_backend',
-        onnx_tuning_integration_exe,
-        suite: ['integration', 'daemon', 'catch2', 'onnx', 'config'],
-        env: _kg_test_env,
-        is_parallel: false,
-        timeout: 300,
-        args: ['Config selecting onnx backend uses ONNX provider for embeddings', '--allow-running-no-tests'],
-      )
+        test('onnx_tuning_adapter',
+          onnx_tuning_integration_exe,
+          suite: ['integration', 'daemon', 'catch2', 'onnx', 'adapter'],
+          env: _onnx_real_plugin_env,
+          depends: [yams_onnx_plugin],
+          is_parallel: false,
+          timeout: 300,  # 5 minutes - real ONNX model loading is slow
+          args: ['AbiModelProviderAdapter acquires SlotGuard during real embedding'],
+        )
+
+        test('onnx_tuning_config_backend',
+          onnx_tuning_integration_exe,
+          suite: ['integration', 'daemon', 'catch2', 'onnx', 'config'],
+          env: _onnx_real_plugin_env,
+          depends: [yams_onnx_plugin],
+          is_parallel: false,
+          timeout: 300,
+          args: ['Config selecting onnx backend uses ONNX provider for embeddings'],
+        )
+      endif
 
       test('onnx_tuning_timeout',
         onnx_tuning_integration_exe,
@@ -1012,16 +1023,21 @@ else
       install: false,
     )
 
-    # Keeps --allow-running-no-tests: the single case SKIPs when no ONNX models_root or embeddings
-    # are available (capability skip, decided at runtime). Daemon startup failure is a FAIL.
-    test('hnsw_retrieval_diagnostic',
-      hnsw_retrieval_diagnostic_exe,
-      suite: ['integration', 'daemon', 'catch2', 'hnsw', 'vector', 'diagnostic'],
-      env: _kg_test_env,
-      is_parallel: false,
-      timeout: 300,  # 5 minutes for embedding generation
-      args: ['--allow-running-no-tests'],
-    )
+    # Declared only when the ONNX plugin is built: without it the single case can only skip.
+    # Keeps --allow-running-no-tests (allowlisted in tests/scripts/check_test_filters.py): the
+    # case still SKIPs when the host has no ONNX models_root / embedding model installed, which
+    # cannot be decided at configure time. Daemon startup failure is a FAIL.
+    if is_variable('yams_onnx_plugin')
+      test('hnsw_retrieval_diagnostic',
+        hnsw_retrieval_diagnostic_exe,
+        suite: ['integration', 'daemon', 'catch2', 'hnsw', 'vector', 'diagnostic'],
+        env: _kg_test_env,
+        depends: [yams_onnx_plugin],
+        is_parallel: false,
+        timeout: 300,  # 5 minutes for embedding generation
+        args: ['--allow-running-no-tests'],
+      )
+    endif
   else
     message('daemon_socket_client test disabled (enable with -Denable-integration-tests=true).')
   endif

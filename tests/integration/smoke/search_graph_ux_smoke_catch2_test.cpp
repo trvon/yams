@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "common/sanitizer_build.h"
 #include "common/test_helpers_catch2.h"
 
 #include <yams/cli/daemon_helpers.h>
@@ -359,7 +360,7 @@ TEST_CASE("IntegrationSmoke.GrepHumanOutputUsesRelativePathsAndGraphHints",
 }
 
 TEST_CASE("IntegrationSmoke.GrepLiveWorkingTreeInspectionIsOptIn", "[smoke][integrationsmoke]") {
-    if (std::getenv("TSAN_OPTIONS") != nullptr) {
+    if (yams::test::kThreadSanitizerBuild) {
         SKIP("Embedded daemon teardown has a known TSAN-only hang after grep requests");
     }
 
