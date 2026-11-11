@@ -919,6 +919,11 @@ public:
 
 struct DownloadServiceOptions {
     std::uint64_t maxFileBytes{0}; // 0 = unlimited
+    // Root for the downloader's own object and staging directories
+    // (<storageRoot>/storage/{objects,staging}). Empty keeps the process-wide default:
+    // $YAMS_STORAGE, else ~/yams. Embedded hosts set this so downloads stay inside the
+    // directory they gave the context instead of the user's home.
+    std::filesystem::path storageRoot;
 };
 
 // ===========================

@@ -256,6 +256,46 @@ TEST_CASE("DownloadService - Factory Construction", "[download][service][factory
 
         CHECK((svc != nullptr));
     }
+
+    SECTION("Explicit storage root wins over the environment default") {
+        const auto base =
+            std::filesystem::temp_directory_path() /
+            ("yams_download_root_" + std::to_string(::getpid()) + "_" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        const auto envRoot = base / "from_env";
+        const auto optRoot = base / "from_options";
+        yams::test::ScopedEnvVar storageEnv{"YAMS_STORAGE", envRoot.string()};
+
+        AppContext ctx;
+        DownloadServiceOptions opts;
+        opts.storageRoot = optRoot;
+        auto svc = makeDownloadService(ctx, opts);
+
+        REQUIRE((svc != nullptr));
+        CHECK(std::filesystem::is_directory(optRoot / "storage" / "objects"));
+        CHECK(std::filesystem::is_directory(optRoot / "storage" / "staging"));
+        CHECK_FALSE(std::filesystem::exists(envRoot));
+
+        std::error_code ec;
+        std::filesystem::remove_all(base, ec);
+    }
+
+    SECTION("Empty storage root keeps the environment default") {
+        const auto envRoot =
+            std::filesystem::temp_directory_path() /
+            ("yams_download_env_" + std::to_string(::getpid()) + "_" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        yams::test::ScopedEnvVar storageEnv{"YAMS_STORAGE", envRoot.string()};
+
+        AppContext ctx;
+        auto svc = makeDownloadService(ctx, DownloadServiceOptions{});
+
+        REQUIRE((svc != nullptr));
+        CHECK(std::filesystem::is_directory(envRoot / "storage" / "objects"));
+
+        std::error_code ec;
+        std::filesystem::remove_all(envRoot, ec);
+    }
 }
 
 TEST_CASE("Service factory handles incomplete context", "[service][factory]") {
