@@ -7,8 +7,10 @@
 // ranks the same clusters for the same held-out queries, so differences come from cluster
 // scoring alone:
 //
-//   centroid        cosine to the cluster centroid (the production dense route, one
-//                   representative per cluster)
+//   centroid        cosine to the cluster centroid
+//   prod_router     the production router's full ranking with one representative: the same
+//                   cosine plus its query-independent persistence bonus
+//   prod_fitted     the production router's ranking given the lead-fitted vectors
 //   farthest_R      max over the centroid and R-1 farthest-first member embeddings (the
 //                   production multi-representative cover)
 //   hot_R           max over the centroid and the R-1 members that are most often the exact
@@ -42,7 +44,8 @@
 //
 // Run (BEIR layout: corpus.jsonl, queries.jsonl):
 //   topology_routing_recall_bench --dataset build/benchmarks/data/scifact \
-//       [--clusters 0] [--max-docs 0] [--max-train 3000] [--max-doc-chars 0]
+//       [--engine kmeans|connected] [--clusters 0] [--max-docs 0] [--max-train 3000]
+//       [--max-doc-chars 0]
 //       [--out routing_recall.jsonl]
 
 #include <algorithm>
@@ -116,6 +119,9 @@ struct Options {
     std::size_t maxTrain{3000};
     // Documents are cut to this many bytes before embedding; 0 keeps them whole.
     std::size_t maxDocChars{0};
+    // "kmeans", or "connected" for the production connected-components engine over an exact
+    // 32-nearest-neighbour graph with the daemon's construction settings.
+    std::string engine{"kmeans"};
 };
 
 bool parseArgs(int argc, char** argv, Options& options) {
@@ -141,6 +147,10 @@ bool parseArgs(int argc, char** argv, Options& options) {
         } else if (arg == "--max-train") {
             if (const char* v = value()) {
                 options.maxTrain = std::stoull(v);
+            }
+        } else if (arg == "--engine") {
+            if (const char* v = value()) {
+                options.engine = v;
             }
         } else if (arg == "--max-doc-chars") {
             if (const char* v = value()) {
@@ -427,7 +437,7 @@ Support computeSupport(const Matrix& queries, const Matrix& keys, const Partitio
     return support;
 }
 
-constexpr std::size_t kProbes[] = {1, 2, 3, 5, 8, 16};
+constexpr std::size_t kProbes[] = {1, 2, 3, 5, 8, 16, 32, 64};
 constexpr double kBudgets[] = {0.01, 0.02, 0.05, 0.10, 0.20};
 
 // Exhaustive ranking of the corpus for every evaluation query, and its judged documents. Set
@@ -841,8 +851,39 @@ int main(int argc, char** argv) {
     buildConfig.kmeansK = options.clusters;
     buildConfig.routingRepresentativeCount = kMaxRepresentatives;
     buildConfig.emitOutliers = false;
-    yams::topology::KMeansTopologyEngine engine;
-    auto built = engine.buildArtifacts(inputs, buildConfig);
+    const bool connected = options.engine == "connected";
+    if (connected) {
+        // The daemon's construction: reciprocal semantic-neighbour edges at or above 0.25,
+        // 32 neighbours per document, components capped at 64 documents.
+        constexpr std::size_t kNeighbors = 32;
+        buildConfig.minEdgeScore = 0.25;
+        buildConfig.maxComponentDocs = 64;
+        buildConfig.reciprocalOnly = true;
+        buildConfig.maxNeighborsPerDocument = kNeighbors;
+        std::vector<std::vector<std::pair<float, std::uint32_t>>> nearest(docs.size());
+        std::vector<std::pair<float, std::uint32_t>> scored(docs.size());
+        for (std::size_t i = 0; i < docs.size(); ++i) {
+            for (std::size_t j = 0; j < docs.size(); ++j) {
+                scored[j] = {i == j ? -2.0F : dot(keys.row(i), keys.row(j), keys.dim),
+                             static_cast<std::uint32_t>(j)};
+            }
+            const auto keep = std::min(kNeighbors, docs.size() - 1);
+            std::partial_sort(scored.begin(), scored.begin() + static_cast<std::ptrdiff_t>(keep),
+                              scored.end(), std::greater<>{});
+            nearest[i].assign(scored.begin(), scored.begin() + static_cast<std::ptrdiff_t>(keep));
+        }
+        for (std::size_t i = 0; i < docs.size(); ++i) {
+            for (const auto& [score, j] : nearest[i]) {
+                const bool reciprocal = std::ranges::any_of(
+                    nearest[j], [&](const auto& back) { return back.second == i; });
+                inputs[i].neighbors.push_back({inputs[j].documentHash, score, reciprocal});
+            }
+        }
+    }
+    yams::topology::KMeansTopologyEngine kmeansEngine;
+    yams::topology::ConnectedComponentTopologyEngine connectedEngine;
+    auto built = connected ? connectedEngine.buildArtifacts(inputs, buildConfig)
+                           : kmeansEngine.buildArtifacts(inputs, buildConfig);
     if (!built) {
         std::cerr << "topology build failed: " << built.error().message << "\n";
         return 2;
@@ -937,36 +978,57 @@ int main(int argc, char** argv) {
     }
     const Matrix testCentroid = centroidScores(test, partition.centroids);
 
-    // How often the production router agrees with this bench's centroid ranking on top-1.
-    std::size_t parityChecked = 0;
-    std::size_t parityAgreed = 0;
-    {
-        const yams::topology::SparseGuidedClusterRouter router;
+    // The production router's own ranking of every cluster. Its route score is the dense
+    // signal plus a query-independent persistence bonus, so it can differ from pure cosine.
+    const auto productionScores = [&](const yams::topology::TopologyArtifactBatch& batch,
+                                      std::size_t maxRepresentatives) {
+        Matrix scores;
+        scores.rows = test.rows;
+        scores.dim = batch.clusters.size();
+        scores.data.assign(scores.rows * scores.dim, -1.0e9F);
         std::unordered_map<std::string, std::uint32_t> clusterIndex;
-        for (std::size_t c = 0; c < artifacts.clusters.size(); ++c) {
-            clusterIndex.emplace(artifacts.clusters[c].clusterId, static_cast<std::uint32_t>(c));
+        for (std::size_t c = 0; c < batch.clusters.size(); ++c) {
+            clusterIndex.emplace(batch.clusters[c].clusterId, static_cast<std::uint32_t>(c));
         }
-        for (std::size_t q = 0; q < std::min<std::size_t>(test.rows, 64); ++q) {
+        const yams::topology::SparseGuidedClusterRouter router;
+        const auto index = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
+            batch, /*buildDenseAnnIndex=*/false, /*buildBqIndex=*/false);
+        for (std::size_t q = 0; q < test.rows; ++q) {
             yams::topology::TopologyRouteRequest request;
             request.queryEmbedding.assign(test.row(q), test.row(q) + test.dim);
             request.sparseDenseAlpha = 0.0F;
-            request.limit = 1;
-            request.maxRoutingRepresentatives = 1;
-            auto routes = router.route(request, artifacts);
-            if (!routes || routes.value().empty()) {
+            request.limit = batch.clusters.size();
+            request.maxRoutingRepresentatives = maxRepresentatives;
+            auto routes = router.route(request, batch, index);
+            if (!routes) {
                 continue;
             }
-            const float* row = testCentroid.row(q);
-            const auto benchTop =
-                static_cast<std::uint32_t>(std::max_element(row, row + partition.clusters) - row);
-            ++parityChecked;
-            const auto it = clusterIndex.find(routes.value().front().clusterId);
-            parityAgreed += (it != clusterIndex.end() && it->second == benchTop) ? 1 : 0;
+            for (const auto& route : routes.value()) {
+                if (const auto it = clusterIndex.find(route.clusterId); it != clusterIndex.end()) {
+                    scores.row(q)[it->second] = static_cast<float>(route.routeScore);
+                }
+            }
         }
-    }
+        return scores;
+    };
+    const auto topAgreement = [&](const Matrix& a, const Matrix& b) {
+        std::size_t agreed = 0;
+        for (std::size_t q = 0; q < a.rows; ++q) {
+            const auto top = [&](const Matrix& m) {
+                return std::max_element(m.row(q), m.row(q) + m.dim) - m.row(q);
+            };
+            agreed += top(a) == top(b) ? 1 : 0;
+        }
+        return agreed;
+    };
+    const Matrix productionCentroid = productionScores(artifacts, 1);
+    const std::size_t parityChecked = test.rows;
+    const std::size_t parityAgreed = topAgreement(productionCentroid, testCentroid);
 
     std::vector<Curve> curves;
     curves.push_back(evaluate("centroid", "none", 1, testCentroid, truth, partition, docs.size()));
+    curves.push_back(
+        evaluate("prod_router", "none", 1, productionCentroid, truth, partition, docs.size()));
     for (const std::size_t r : {2, 4, 8}) {
         curves.push_back(
             evaluate("farthest_" + std::to_string(r), "none", r,
@@ -1038,35 +1100,18 @@ int main(int argc, char** argv) {
         curves.push_back(
             evaluate(ridgeName, label, 1, fittedScores, truth, partition, docs.size()));
 
-        if (deep && label == "mix") {
-            // The production router, given these vectors, must pick the same top cluster.
+        if (label == "lead") {
+            // The same vectors, ranked by the production router.
             auto fittedArtifacts = artifacts;
             for (std::size_t c = 0; c < fittedArtifacts.clusters.size(); ++c) {
                 fittedArtifacts.clusters[c].fittedRouteVector.assign(bestRouted.row(c),
                                                                      bestRouted.row(c) + keys.dim);
             }
-            const yams::topology::SparseGuidedClusterRouter router;
-            std::unordered_map<std::string, std::uint32_t> clusterIndex;
-            for (std::size_t c = 0; c < fittedArtifacts.clusters.size(); ++c) {
-                clusterIndex.emplace(fittedArtifacts.clusters[c].clusterId,
-                                     static_cast<std::uint32_t>(c));
-            }
-            for (std::size_t q = 0; q < std::min<std::size_t>(test.rows, 64); ++q) {
-                yams::topology::TopologyRouteRequest request;
-                request.queryEmbedding.assign(test.row(q), test.row(q) + test.dim);
-                request.sparseDenseAlpha = 0.0F;
-                request.limit = 1;
-                auto routes = router.route(request, fittedArtifacts);
-                if (!routes || routes.value().empty()) {
-                    continue;
-                }
-                const float* row = fittedScores.row(q);
-                const auto benchTop = static_cast<std::uint32_t>(
-                    std::max_element(row, row + partition.clusters) - row);
-                ++fittedParityChecked;
-                const auto it = clusterIndex.find(routes.value().front().clusterId);
-                fittedParityAgreed += (it != clusterIndex.end() && it->second == benchTop) ? 1 : 0;
-            }
+            const Matrix productionFitted = productionScores(fittedArtifacts, 1);
+            fittedParityChecked = test.rows;
+            fittedParityAgreed = topAgreement(productionFitted, fittedScores);
+            curves.push_back(
+                evaluate("prod_fitted", label, 1, productionFitted, truth, partition, docs.size()));
         }
 
         if (deep) {
@@ -1110,26 +1155,27 @@ int main(int argc, char** argv) {
         if (style == QueryStyle::Mix) {
             trainGeneratedRows = train.rows;
         }
-        fitAndEvaluate(train, label, style == QueryStyle::Mix);
+        fitAndEvaluate(train, label, style == QueryStyle::Mix && partition.clusters <= 512);
     }
     if (realEvaluation && trainReal.rows > 0) {
-        fitAndEvaluate(trainReal, "real", true);
+        fitAndEvaluate(trainReal, "real", partition.clusters <= 512);
     }
 
     curves.push_back(evaluate("oracle", "none", 0, truth.values, truth, partition, docs.size()));
 
-    std::printf("dataset=%s docs=%zu clusters=%zu dim=%zu evaluation=%s test_queries=%zu "
+    std::printf("dataset=%s engine=%s docs=%zu clusters=%zu dim=%zu evaluation=%s test_queries=%zu "
                 "train_mix=%zu train_real=%zu space=%s\n",
-                options.dataset.filename().string().c_str(), docs.size(), partition.clusters,
-                keys.dim, realEvaluation ? "real" : "generated", test.rows, trainGeneratedRows,
-                trainReal.rows, backend->getEmbeddingSpaceIdentity().c_str());
+                options.dataset.filename().string().c_str(), options.engine.c_str(), docs.size(),
+                partition.clusters, keys.dim, realEvaluation ? "real" : "generated", test.rows,
+                trainGeneratedRows, trainReal.rows, backend->getEmbeddingSpaceIdentity().c_str());
     std::printf("production router top-1 agreement with the centroid arm: %zu/%zu\n", parityAgreed,
                 parityChecked);
-    std::printf("production router top-1 agreement with the fitted arm (mix): %zu/%zu\n",
+    std::printf("production router top-1 agreement with the fitted arm (lead): %zu/%zu\n",
                 fittedParityAgreed, fittedParityChecked);
-    std::printf("%-12s %-9s %3s | recall%% at probes 1 2 3 5 8 16         | recall%% at scan "
-                "1%% 2%% 5%% 10%% 20%%   | mean rank\n",
-                "arm", "training", "vec");
+    std::printf(
+        "%-12s %-9s %3s | recall%% at probes 1 2 3 5 8 16 32 64               | recall%% at scan "
+        "1%% 2%% 5%% 10%% 20%%   | mean rank\n",
+        "arm", "training", "vec");
     for (const auto& curve : curves) {
         print(curve);
     }
@@ -1138,9 +1184,10 @@ int main(int argc, char** argv) {
                     "the top-s clusters\nexhaustive search of this embedding: recall@10 %.1f "
                     "nDCG@10 %.1f\n",
                     judged, 100.0 * exhaustiveRecall, 100.0 * exhaustiveNdcg);
-        std::printf("%-12s %-9s %3s | recall@10 %% at probes 1 2 3 5 8 16      | nDCG@10 %% at "
-                    "probes 1 2 3 5 8 16\n",
-                    "arm", "training", "vec");
+        std::printf(
+            "%-12s %-9s %3s | recall@10 %% at probes 1 2 3 5 8 16 32 64            | nDCG@10 %% at "
+            "probes 1 2 3 5 8 16 32 64\n",
+            "arm", "training", "vec");
         for (const auto& c : curves) {
             std::printf("%-12s %-9s %3zu |", c.arm.c_str(), c.training.c_str(),
                         c.vectorsPerCluster);
@@ -1162,6 +1209,7 @@ int main(int argc, char** argv) {
             row["dataset"] = options.dataset.filename().string();
             row["docs"] = docs.size();
             row["clusters"] = partition.clusters;
+            row["engine"] = options.engine;
             row["dim"] = keys.dim;
             row["test_queries"] = test.rows;
             row["evaluation"] = realEvaluation ? "real" : "generated";
