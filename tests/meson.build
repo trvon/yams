@@ -2624,6 +2624,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'topology_route_fit',
+    'sources': files('unit/topology/topology_route_fit_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'topology_representative_rule',
     'sources': files('unit/topology/topology_representative_rule_catch2_test.cpp'),
     'deps': test_deps,
