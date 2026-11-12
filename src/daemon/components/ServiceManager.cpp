@@ -296,9 +296,11 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
               return std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
           },
           &config_, &resolvedDataDir_, [this]() { return getResolvedEmbeddingConfig(); }}),
-      topologyManager_(TopologyManager::Dependencies{[this]() { return getMetadataRepo(); },
-                                                     [this]() { return getKgStore(); },
-                                                     [this]() { return getVectorDatabase(); }}),
+      topologyManager_(TopologyManager::Dependencies{
+          [this]() { return getMetadataRepo(); }, [this]() { return getKgStore(); },
+          [this]() { return getVectorDatabase(); },
+          [this](std::span<const std::string> texts) { return embedTextsForTopology(texts); },
+          []() { return !ResourceGovernor::instance().canAdmitWork(); }}),
       lifecycleFsm_(lifecycleFsm) {
     spdlog::debug("[ServiceManager] Constructor start");
     {
@@ -4094,6 +4096,11 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     } catch (...) {
         spdlog::debug("AppContext: search repair status probe failed with unknown exception");
     }
+
+    // Read once per process; a config change takes effect on restart like the other policies.
+    static const std::size_t queryLogMaxEntries =
+        ConfigResolver::resolveQueryLogPolicy().effectiveMaxEntries();
+    ctx.queryLogMaxEntries = queryLogMaxEntries;
 
     return ctx;
 }

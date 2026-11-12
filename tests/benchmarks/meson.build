@@ -46,6 +46,23 @@ topology_build_bench = executable('topology_build_bench', files('topology_build_
 )
 alias_target('bench_topology_build', topology_build_bench)
 
+# Routing recall of cluster scorers (centroid, representative covers, fitted support-function
+# corrections, oracle) on one k-means partition of a BEIR-layout corpus. Optimized even in a
+# debug tree: it runs exhaustive scans to get exact ground truth.
+topology_routing_recall_bench = executable('topology_routing_recall_bench',
+  files('topology_routing_recall_bench.cpp'),
+  include_directories: incs,
+  dependencies: tune_advisor_testing_link + [
+    dependency('yams_topology'),
+    dependency('yams_vector'),
+    dependency('nlohmann_json'),
+  ] + yams_tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
+  override_options: ['optimization=3'],
+  install: false,
+)
+alias_target('bench_topology_routing_recall', topology_routing_recall_bench)
+
 grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
   include_directories: incs,
   dependencies: [test_deps, dependency('yams_benchmarks')] + yams_tracy_deps,

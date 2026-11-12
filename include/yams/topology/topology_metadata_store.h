@@ -21,6 +21,10 @@ public:
     /// and always before the latest pointer. Optional on load; see `attachRoadSidecar`.
     static constexpr std::string_view kRoadSidecarNodePrefix = "topology:roads:";
     static constexpr std::string_view kRoadSidecarNodeType = "topology_road_snapshot";
+    /// Route-fit sidecar node: `topology:routefit:<snapshotId>`, written only when a cluster has
+    /// a fitted route vector. Optional on load; see `attachRouteFitSidecar`.
+    static constexpr std::string_view kRouteFitSidecarNodePrefix = "topology:routefit:";
+    static constexpr std::string_view kRouteFitSidecarNodeType = "topology_route_fit_snapshot";
 
     MetadataKgTopologyArtifactStore(
         std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
@@ -57,6 +61,10 @@ private:
     /// roads empty with no error; an undecodable or invalid one leaves roads empty and sets
     /// `batch.roadUnavailableReason`. Only storage errors propagate.
     Result<void> attachRoadSidecar(TopologyArtifactBatch& batch) const;
+    /// Fill the clusters' `fittedRouteVector` from the sidecar node of `batch.snapshotId`. A
+    /// missing sidecar leaves them empty with no error; an undecodable or mismatched one leaves
+    /// them empty and sets `batch.routeFitUnavailableReason`. Only storage errors propagate.
+    Result<void> attachRouteFitSidecar(TopologyArtifactBatch& batch) const;
 
     std::shared_ptr<metadata::IMetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
