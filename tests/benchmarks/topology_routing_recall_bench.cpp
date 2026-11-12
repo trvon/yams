@@ -617,8 +617,9 @@ Matrix scoreMaxOver(const Matrix& queries, const Matrix& centroids, const Matrix
 }
 
 Matrix centroidScores(const Matrix& queries, const Matrix& centroids) {
-    return scoreMaxOver(queries, centroids, centroids,
-                        {centroids.rows, std::vector<std::uint32_t>{}}, 0);
+    // One empty extra list per cluster: the centroid is the only vector scored.
+    const std::vector<std::vector<std::uint32_t>> noExtras(centroids.rows);
+    return scoreMaxOver(queries, centroids, centroids, noExtras, 0);
 }
 
 Matrix selectRows(const Matrix& source, std::size_t parity) {
@@ -1204,6 +1205,10 @@ int main(int argc, char** argv) {
 
     if (!options.out.empty()) {
         std::ofstream out(options.out, std::ios::app);
+        if (!out) {
+            std::cerr << "cannot write results to " << options.out << "\n";
+            return 1;
+        }
         for (const auto& c : curves) {
             json row;
             row["dataset"] = options.dataset.filename().string();
@@ -1229,6 +1234,11 @@ int main(int argc, char** argv) {
                 row["recall_at_scan_budget"][std::to_string(kBudgets[i])] = c.recallAtBudget[i];
             }
             out << row.dump() << "\n";
+        }
+        out.flush();
+        if (!out) {
+            std::cerr << "failed while writing results to " << options.out << "\n";
+            return 1;
         }
     }
     return 0;
