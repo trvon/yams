@@ -256,7 +256,8 @@ TEST_CASE("isRouteFitTrainingQuery keeps questions and drops lookups",
     CHECK(isRouteFitTrainingQuery("how does the topology router score clusters"));
     CHECK(isRouteFitTrainingQuery("  resource governor  "));
     CHECK(isRouteFitTrainingQuery("governor"));
-    CHECK(isRouteFitTrainingQuery("decade")); // hex letters, but too short to be a hash
+    CHECK(isRouteFitTrainingQuery("governor?")); // a one-word question, not a pattern
+    CHECK(isRouteFitTrainingQuery("decade"));    // hex letters, but too short to be a hash
     CHECK(isRouteFitTrainingQuery("why does src/daemon/main.cpp exit early"));
     CHECK(isRouteFitTrainingQuery("r\xc3\xa9sum\xc3\xa9 parsing"));
 
@@ -267,6 +268,8 @@ TEST_CASE("isRouteFitTrainingQuery keeps questions and drops lookups",
     CHECK_FALSE(isRouteFitTrainingQuery("deadbeef"));
     CHECK_FALSE(isRouteFitTrainingQuery("src/daemon/daemon_main.cpp"));
     CHECK_FALSE(isRouteFitTrainingQuery("*.md"));
+    CHECK_FALSE(isRouteFitTrainingQuery("README?.md"));
+    CHECK_FALSE(isRouteFitTrainingQuery("  note?.txt  "));
     CHECK_FALSE(isRouteFitTrainingQuery("C:\\Users\\notes.txt"));
 }
 

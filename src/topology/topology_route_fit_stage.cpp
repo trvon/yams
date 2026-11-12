@@ -58,7 +58,8 @@ bool isRouteFitTrainingQuery(std::string_view query) {
     bool hasLetter = false;
     bool allHex = true;
     bool hasPathOrGlob = false;
-    for (const char c : query) {
+    for (std::size_t i = 0; i < query.size(); ++i) {
+        const char c = query[i];
         const bool digit = c >= '0' && c <= '9';
         const bool lower = c >= 'a' && c <= 'z';
         const bool upper = c >= 'A' && c <= 'Z';
@@ -66,7 +67,9 @@ bool isRouteFitTrainingQuery(std::string_view query) {
         hasLetter = hasLetter || lower || upper || nonAscii;
         hasSpace = hasSpace || c == ' ' || c == '\t';
         allHex = allHex && (digit || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'));
-        hasPathOrGlob = hasPathOrGlob || c == '/' || c == '\\' || c == '*';
+        // `?` is a glob wildcard except where it ends the token as punctuation.
+        const bool wildcardMark = c == '?' && i + 1 < query.size();
+        hasPathOrGlob = hasPathOrGlob || c == '/' || c == '\\' || c == '*' || wildcardMark;
     }
     if (!hasLetter) {
         return false; // numbers and punctuation only
