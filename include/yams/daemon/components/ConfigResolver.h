@@ -102,6 +102,21 @@ public:
         EmbeddingChunkingPolicy chunking{};
     };
 
+    /// `[search.query_log]`: a local record of search queries, kept in the metadata store, that
+    /// query-aware components (for example fitted topology routing) can learn from. Nothing
+    /// leaves the machine.
+    struct QueryLogPolicy {
+        bool enabled{true};
+        /// Largest accepted `max_entries`.
+        static constexpr std::size_t kMaxEntriesLimit = 10'000'000;
+        /// Newest queries retained; older rows are deleted as new ones arrive.
+        std::size_t maxEntries{20000};
+        /// Rows SearchService should keep: zero when disabled.
+        [[nodiscard]] std::size_t effectiveMaxEntries() const noexcept {
+            return enabled ? maxEntries : 0;
+        }
+    };
+
     struct TopologyRoutingPolicy {
         std::optional<std::string> mode;
         // augment | narrow | shadow | route_only
@@ -568,6 +583,8 @@ public:
      * - search.topology.rrf_k = float
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
+    /// Reads `search.query_log.enabled` and `search.query_log.max_entries`.
+    static QueryLogPolicy resolveQueryLogPolicy();
 
     /**
      * @brief Resolve topology cluster-engine selection from config file.

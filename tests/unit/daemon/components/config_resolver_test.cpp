@@ -1398,6 +1398,45 @@ max_generated_queries = 0
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveQueryLogPolicy defaults on and reads the TOML block",
+                 "[daemon][components][config][query_log][catch2]") {
+    SECTION("no query_log block keeps the log on with the default cap") {
+        auto configPath = writeToml("config.toml", "[search]\nautomatic_rebuilds = true\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveQueryLogPolicy();
+        CHECK(policy.enabled);
+        CHECK(policy.maxEntries == 20000u);
+        CHECK(policy.effectiveMaxEntries() == 20000u);
+    }
+    SECTION("disabled records nothing whatever the cap") {
+        auto configPath =
+            writeToml("config.toml", "[search.query_log]\nenabled = false\nmax_entries = 50\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveQueryLogPolicy();
+        CHECK_FALSE(policy.enabled);
+        CHECK(policy.maxEntries == 50u);
+        CHECK(policy.effectiveMaxEntries() == 0u);
+    }
+    SECTION("a negative, partly numeric or oversized cap keeps the default") {
+        for (const char* value : {"-1", "20000junk", "99999999999999999999", "10000001"}) {
+            auto configPath = writeToml(
+                "config.toml", std::string("[search.query_log]\nmax_entries = ") + value + "\n");
+            EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+            const auto policy = ConfigResolver::resolveQueryLogPolicy();
+            INFO("max_entries = " << value);
+            CHECK(policy.maxEntries == 20000u);
+        }
+    }
+    SECTION("a cap that is not a number keeps the default") {
+        auto configPath = writeToml("config.toml", "[search.query_log]\nmax_entries = many\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveQueryLogPolicy();
+        CHECK(policy.enabled);
+        CHECK(policy.maxEntries == 20000u);
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
                  "ConfigResolver::resolveTopologyRoutingPolicy reads populated TOML block",
                  "[daemon][components][config][topology_routing][catch2]") {
     auto configPath = writeToml("config.toml", R"TOML(
