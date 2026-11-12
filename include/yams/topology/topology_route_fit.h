@@ -40,6 +40,12 @@ struct RouteFitOptions {
     /// that document, so cosine to it already equals the support function; a correction could
     /// only add noise, and storing one would cost a vector per document.
     std::size_t minClusterDocuments{3};
+    /// Upper bound on queries x documents, the term the labelling cost scales with. The stage
+    /// drops queries (generated ones first, sampled evenly) to stay under it, and skips the fit
+    /// when too few would remain. About ten million pairs took nine seconds at 1024 dimensions.
+    std::size_t maxQueryDocumentPairs{40'000'000};
+    /// Queries embedded per embedder call; `cancelled` is polled between calls.
+    std::size_t embedBatchSize{256};
     /// Polled between queries and between strengths; returning true abandons the fit.
     std::function<bool()> cancelled{};
 };

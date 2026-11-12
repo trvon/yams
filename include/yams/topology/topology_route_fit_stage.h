@@ -7,6 +7,7 @@
 #include <functional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <yams/core/types.h>
@@ -43,13 +44,19 @@ struct RouteFitStageStats {
     std::string skipReason;
 };
 
+/// Whether a logged query is worth learning routing from. Lookups by content hash, by path or
+/// by file pattern are common from agents and scripts; they say nothing about which cluster a
+/// natural-language query belongs to, so the stage leaves them out.
+[[nodiscard]] bool isRouteFitTrainingQuery(std::string_view query);
+
 /// Fit route vectors for `batch` and attach them to its clusters.
 ///
 /// Every cluster's fitted vector and the batch's route-fit provenance are cleared first, so the
 /// batch never keeps vectors from an earlier fit. They are set again only when the fit beats
 /// centroid routing on held-out queries; see fitRouteVectors. Skips, with a reason, when there
 /// is no embedder, too few distinct queries, no usable documents, or an embedding of the wrong
-/// dimension. Errors are reserved for cancellation and embedder failures.
+/// dimension, or a corpus too large for `maxQueryDocumentPairs`. Errors are reserved for
+/// cancellation and embedder failures.
 [[nodiscard]] Result<RouteFitStageStats> runRouteFitStage(TopologyArtifactBatch& batch,
                                                           const RouteFitStageInput& input,
                                                           const RouteFitOptions& options = {});

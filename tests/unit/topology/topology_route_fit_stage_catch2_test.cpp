@@ -251,6 +251,70 @@ TEST_CASE("runRouteFitStage skips with a reason and leaves the batch unfitted",
     }
 }
 
+TEST_CASE("isRouteFitTrainingQuery keeps questions and drops lookups",
+          "[topology][route-fit][stage][catch2]") {
+    CHECK(isRouteFitTrainingQuery("how does the topology router score clusters"));
+    CHECK(isRouteFitTrainingQuery("  resource governor  "));
+    CHECK(isRouteFitTrainingQuery("governor"));
+    CHECK(isRouteFitTrainingQuery("decade")); // hex letters, but too short to be a hash
+    CHECK(isRouteFitTrainingQuery("why does src/daemon/main.cpp exit early"));
+    CHECK(isRouteFitTrainingQuery("r\xc3\xa9sum\xc3\xa9 parsing"));
+
+    CHECK_FALSE(isRouteFitTrainingQuery(""));
+    CHECK_FALSE(isRouteFitTrainingQuery("ab"));
+    CHECK_FALSE(isRouteFitTrainingQuery("12345"));
+    CHECK_FALSE(isRouteFitTrainingQuery("40e64c1b432276614226886c1912904fc9e693eb"));
+    CHECK_FALSE(isRouteFitTrainingQuery("deadbeef"));
+    CHECK_FALSE(isRouteFitTrainingQuery("src/daemon/daemon_main.cpp"));
+    CHECK_FALSE(isRouteFitTrainingQuery("*.md"));
+    CHECK_FALSE(isRouteFitTrainingQuery("C:\\Users\\notes.txt"));
+}
+
+TEST_CASE("runRouteFitStage filters logged lookups and bounds its work",
+          "[topology][route-fit][stage][catch2]") {
+    auto world = makeWorld(200, 280);
+    SECTION("hash and path lookups in the log are not embedded") {
+        world.logged.insert(world.logged.begin(), "40e64c1b432276614226886c1912904fc9e693eb");
+        world.logged.insert(world.logged.begin(), "src/topology/topology_baseline.cpp");
+        auto stage = runRouteFitStage(world.batch, inputOf(world)); // embed throws on unknowns
+        REQUIRE(stage.has_value());
+        CHECK(stage.value().queriesUsed == 480u);
+        CHECK(world.batch.routeFit.loggedQueries == 200u);
+    }
+    SECTION("queries are embedded in batches") {
+        auto input = inputOf(world);
+        std::vector<std::size_t> batches;
+        input.embed = [&, inner = input.embed](std::span<const std::string> texts) {
+            batches.push_back(texts.size());
+            return inner(texts);
+        };
+        RouteFitOptions options;
+        options.embedBatchSize = 100;
+        auto stage = runRouteFitStage(world.batch, input, options);
+        REQUIRE(stage.has_value());
+        CHECK(stage.value().adopted);
+        CHECK(batches == std::vector<std::size_t>{100, 100, 100, 100, 80});
+    }
+    SECTION("a pair budget drops generated queries first") {
+        RouteFitOptions options;
+        options.maxQueryDocumentPairs = 300 * kClusters * 11; // room for 300 of the 480
+        auto stage = runRouteFitStage(world.batch, inputOf(world), options);
+        REQUIRE(stage.has_value());
+        CHECK(stage.value().queriesUsed == 300u);
+        REQUIRE(stage.value().adopted);
+        CHECK(world.batch.routeFit.loggedQueries == 200u);
+        CHECK(world.batch.routeFit.generatedQueries == 100u);
+    }
+    SECTION("a corpus too large for the budget is skipped, not fitted badly") {
+        RouteFitOptions options;
+        options.maxQueryDocumentPairs = 50 * kClusters * 11; // 50 queries: under the minimum
+        auto stage = runRouteFitStage(world.batch, inputOf(world), options);
+        REQUIRE(stage.has_value());
+        CHECK_FALSE(stage.value().adopted);
+        CHECK(stage.value().skipReason == "corpus_too_large_for_budget");
+    }
+}
+
 TEST_CASE("runRouteFitStage propagates embedder failures and cancellation",
           "[topology][route-fit][stage][catch2]") {
     auto world = makeWorld(200, 280);
