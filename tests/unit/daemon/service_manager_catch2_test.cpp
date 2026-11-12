@@ -50,6 +50,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/shutdown_budget.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/writer_auth.h>
@@ -2012,6 +2013,11 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     sm->startAsyncInit();
     const auto readySnap = sm->waitForServiceManagerTerminalState(30);
     REQUIRE((readySnap.state == ServiceManagerState::Ready));
+
+    // Repair gives up at once without an embedding provider. Install one so the repair
+    // reaches the full embed queue, which is the wait this test cancels.
+    sm->testing_setModelProvider(
+        std::shared_ptr<IModelProvider>(createModelProvider(std::string{}, true)));
 
     auto meta = sm->getMetadataRepo();
     REQUIRE((meta != nullptr));
