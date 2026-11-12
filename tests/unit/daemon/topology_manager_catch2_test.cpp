@@ -635,6 +635,7 @@ struct RouteFitCorpus {
     std::unordered_map<std::string, std::vector<float>> queryEmbeddings;
     std::size_t titles{0};
     std::size_t logged{0};
+    std::vector<std::string> documentHashes;
 
     static std::vector<float> unit(std::vector<float> v) {
         float norm = 0.0F;
@@ -685,6 +686,7 @@ struct RouteFitCorpus {
                 queryEmbeddings.emplace(title, queryVector(group));
                 ++titles;
                 hashes.push_back(hash);
+                documentHashes.push_back(hash);
             }
             // Explicit neighbour links make each group one connected component, outliers
             // included, whatever their embeddings say.
@@ -777,6 +779,18 @@ TEST_CASE("TopologyManager fits route vectors on a full rebuild and stores them 
         CHECK(stored.routeFit.generatedQueries == corpus.titles);
         CHECK(stored.routeFit.fittedHoldoutRecall > stored.routeFit.centroidHoldoutRecall);
         CHECK(stored.routeFitUnavailableReason.empty());
+    }
+
+    SECTION("the first snapshot is fitted even when it is requested by document hash") {
+        // This is how ingest asks for it: no snapshot yet, a list of changed documents.
+        TopologyManager manager(corpus.dependencies(fixture));
+        manager.setRouteFitPolicy(true, 4000, 2000);
+        auto rebuilt = manager.rebuildArtifacts("embedding_batch_complete", false,
+                                                corpus.documentHashes, "connected");
+        REQUIRE(rebuilt.has_value());
+        REQUIRE(rebuilt.value().stored);
+        CHECK(rebuilt.value().routeFitAdopted);
+        CHECK(fittedClusterCount(fixture.latest()) > 0u);
     }
 
     SECTION("enabled with the title budget at zero: only logged queries are used") {

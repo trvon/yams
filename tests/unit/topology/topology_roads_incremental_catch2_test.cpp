@@ -676,3 +676,41 @@ TEST_CASE("Louvain and k-means updates rebuild the supplied input, so their road
         check(engine, cfg);
     }
 }
+
+TEST_CASE("Incremental update keeps fitted route vectors on untouched clusters only",
+          "[unit][topology][route-fit][incremental][catch2]") {
+    ConnectedComponentTopologyEngine engine;
+    auto docs = fourClusters();
+    auto existing = engine.buildArtifacts(docs, graphConfig(0));
+    REQUIRE(existing.has_value());
+    auto batch = existing.value();
+    for (auto& cluster : batch.clusters) {
+        cluster.fittedRouteVector = {1.0F, 2.0F};
+    }
+    batch.routeFit.fitQueries = 100;
+    batch.routeFit.fittedAtEpoch = batch.topologyEpoch;
+
+    auto merged = engine.updateArtifacts(batch, select(docs, kRegionAB), graphConfig(0));
+    REQUIRE(merged.has_value());
+    std::size_t kept = 0;
+    std::size_t refreshed = 0;
+    for (const auto& cluster : merged.value().clusters) {
+        const bool touched =
+            std::any_of(cluster.memberDocumentHashes.begin(), cluster.memberDocumentHashes.end(),
+                        [](const std::string& hash) { return kRegionAB.contains(hash); });
+        if (touched) {
+            // Its membership was recomputed, so the old correction no longer describes it; it
+            // routes by centroid until the next full rebuild refits.
+            CHECK(cluster.fittedRouteVector.empty());
+            ++refreshed;
+        } else {
+            CHECK(cluster.fittedRouteVector == std::vector<float>{1.0F, 2.0F});
+            ++kept;
+        }
+    }
+    CHECK(kept > 0);
+    CHECK(refreshed > 0);
+    // The provenance still describes the vectors that remain.
+    CHECK(merged.value().routeFit.fitQueries == 100u);
+    CHECK(merged.value().routeFit.fittedAtEpoch == batch.topologyEpoch);
+}

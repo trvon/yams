@@ -49,6 +49,40 @@ RouteFitStageStats skipped(std::string reason) {
 
 } // namespace
 
+bool isRouteFitTrainingQuery(std::string_view query) {
+    query = trimmed(query);
+    if (query.size() < 3) {
+        return false;
+    }
+    bool hasSpace = false;
+    bool hasLetter = false;
+    bool allHex = true;
+    bool hasPathOrGlob = false;
+    for (std::size_t i = 0; i < query.size(); ++i) {
+        const char c = query[i];
+        const bool digit = c >= '0' && c <= '9';
+        const bool lower = c >= 'a' && c <= 'z';
+        const bool upper = c >= 'A' && c <= 'Z';
+        const bool nonAscii = static_cast<unsigned char>(c) >= 0x80;
+        hasLetter = hasLetter || lower || upper || nonAscii;
+        hasSpace = hasSpace || c == ' ' || c == '\t';
+        allHex = allHex && (digit || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'));
+        // `?` is a glob wildcard except where it ends the token as punctuation.
+        const bool wildcardMark = c == '?' && i + 1 < query.size();
+        hasPathOrGlob = hasPathOrGlob || c == '/' || c == '\\' || c == '*' || wildcardMark;
+    }
+    if (!hasLetter) {
+        return false; // numbers and punctuation only
+    }
+    if (hasSpace) {
+        return true; // several words: a real question, even if it mentions a path
+    }
+    if (allHex && query.size() >= 8) {
+        return false; // a content hash or a prefix of one
+    }
+    return !hasPathOrGlob; // a single token that is a path or a file pattern
+}
+
 Result<RouteFitStageStats> runRouteFitStage(TopologyArtifactBatch& batch,
                                             const RouteFitStageInput& input,
                                             const RouteFitOptions& options) {
@@ -77,10 +111,11 @@ Result<RouteFitStageStats> runRouteFitStage(TopologyArtifactBatch& batch,
     std::unordered_set<std::string_view> seen;
     std::size_t logged = 0;
     std::size_t generated = 0;
-    const auto take = [&](std::span<const std::string> source, std::size_t& counter) {
+    const auto take = [&](std::span<const std::string> source, std::size_t& counter, bool filter) {
         for (const auto& text : source) {
             const auto query = trimmed(text);
-            if (query.empty() || !seen.insert(query).second) {
+            if (query.empty() || (filter && !isRouteFitTrainingQuery(query)) ||
+                !seen.insert(query).second) {
                 continue;
             }
             queries.emplace_back(query);
@@ -88,8 +123,8 @@ Result<RouteFitStageStats> runRouteFitStage(TopologyArtifactBatch& batch,
         }
     };
     // `seen` views the callers' strings, which outlive this function body.
-    take(input.loggedQueries, logged);
-    take(input.generatedQueries, generated);
+    take(input.loggedQueries, logged, /*filter=*/true);
+    take(input.generatedQueries, generated, /*filter=*/false);
     const std::size_t holdoutEvery = std::max<std::size_t>(2, options.holdoutEvery);
     if (queries.size() - queries.size() / holdoutEvery < options.minFitQueries) {
         return skipped("too_few_queries");
@@ -136,17 +171,54 @@ Result<RouteFitStageStats> runRouteFitStage(TopologyArtifactBatch& batch,
         return skipped("no_usable_documents");
     }
 
-    auto embedded = input.embed(queries);
-    if (!embedded) {
-        return embedded.error();
-    }
-    std::vector<float> queryRows;
-    queryRows.reserve(embedded.value().size() * dim);
-    for (const auto& vector : embedded.value()) {
-        if (vector.size() != dim) {
-            return skipped("query_embedding_dimension_mismatch");
+    // Labelling costs queries x documents; stay under the budget by dropping queries. Logged
+    // queries are kept first, and the generated ones that still fit are taken evenly so they
+    // keep covering the whole corpus.
+    if (const std::size_t allowed = options.maxQueryDocumentPairs / clusterOfKey.size();
+        queries.size() > allowed) {
+        if (allowed - allowed / holdoutEvery < options.minFitQueries) {
+            return skipped("corpus_too_large_for_budget");
         }
-        appendUnitRow(queryRows, vector);
+        std::vector<std::string> kept;
+        kept.reserve(allowed);
+        const std::size_t keptLogged = std::min(logged, allowed);
+        for (std::size_t i = 0; i < keptLogged; ++i) {
+            kept.push_back(std::move(queries[i]));
+        }
+        const std::size_t slots = allowed - keptLogged;
+        for (std::size_t i = 0; i < slots; ++i) {
+            kept.push_back(std::move(queries[logged + i * generated / slots]));
+        }
+        logged = keptLogged;
+        generated = slots;
+        queries = std::move(kept);
+    }
+
+    // Embedded in batches so a long embedding pass yields to pressure between calls.
+    std::vector<float> queryRows;
+    queryRows.reserve(queries.size() * dim);
+    const std::size_t embedBatch = std::max<std::size_t>(1, options.embedBatchSize);
+    for (std::size_t begin = 0; begin < queries.size(); begin += embedBatch) {
+        if (options.cancelled && options.cancelled()) {
+            return Error{ErrorCode::OperationCancelled, "route fit cancelled"};
+        }
+        const std::size_t count = std::min(embedBatch, queries.size() - begin);
+        auto embedded = input.embed(std::span<const std::string>(queries).subspan(begin, count));
+        if (!embedded) {
+            return embedded.error();
+        }
+        if (embedded.value().size() != count) {
+            return skipped("query_embedding_count_mismatch");
+        }
+        for (const auto& vector : embedded.value()) {
+            if (vector.size() != dim) {
+                return skipped("query_embedding_dimension_mismatch");
+            }
+            // A query with no direction gets a zero row so rows stay aligned with queries.
+            if (!appendUnitRow(queryRows, vector)) {
+                queryRows.resize(queryRows.size() + dim, 0.0F);
+            }
+        }
     }
 
     const RouteFitInput fitInput{.dim = dim,

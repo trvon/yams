@@ -207,6 +207,10 @@ struct BEIRCorpusLoader {
     BEIRDataset dataset;
     std::filesystem::path corpusDir;
     std::map<std::string, std::string> docIdToHash;
+    /// Distinct file contents written by `writeDocumentsAsFiles`. The store is content
+    /// addressed, so this is how many documents an ingest of `corpusDir` can produce; corpora
+    /// such as nfcorpus repeat a text under several ids.
+    std::size_t uniqueContentDocuments{0};
 
     BEIRCorpusLoader(const BEIRDataset& ds, const std::filesystem::path& dir);
 

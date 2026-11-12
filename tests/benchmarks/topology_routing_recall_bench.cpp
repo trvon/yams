@@ -122,6 +122,12 @@ struct Options {
     // "kmeans", or "connected" for the production connected-components engine over an exact
     // 32-nearest-neighbour graph with the daemon's construction settings.
     std::string engine{"kmeans"};
+    // Connected engine only. The defaults are the bench's dense graph; the daemon's neighbour
+    // graph keeps 8 neighbours per document, which gives a much finer partition.
+    std::size_t neighbors{32};
+    std::size_t maxComponentDocs{64};
+    double minEdgeScore{0.25};
+    bool reciprocalOnly{true};
 };
 
 bool parseArgs(int argc, char** argv, Options& options) {
@@ -151,6 +157,22 @@ bool parseArgs(int argc, char** argv, Options& options) {
         } else if (arg == "--engine") {
             if (const char* v = value()) {
                 options.engine = v;
+            }
+        } else if (arg == "--neighbors") {
+            if (const char* v = value()) {
+                options.neighbors = std::max<std::size_t>(1, std::stoull(v));
+            }
+        } else if (arg == "--max-component-docs") {
+            if (const char* v = value()) {
+                options.maxComponentDocs = std::stoull(v);
+            }
+        } else if (arg == "--min-edge-score") {
+            if (const char* v = value()) {
+                options.minEdgeScore = std::stod(v);
+            }
+        } else if (arg == "--reciprocal") {
+            if (const char* v = value()) {
+                options.reciprocalOnly = std::string_view{v} != "0";
             }
         } else if (arg == "--max-doc-chars") {
             if (const char* v = value()) {
@@ -854,12 +876,12 @@ int main(int argc, char** argv) {
     buildConfig.emitOutliers = false;
     const bool connected = options.engine == "connected";
     if (connected) {
-        // The daemon's construction: reciprocal semantic-neighbour edges at or above 0.25,
-        // 32 neighbours per document, components capped at 64 documents.
-        constexpr std::size_t kNeighbors = 32;
-        buildConfig.minEdgeScore = 0.25;
-        buildConfig.maxComponentDocs = 64;
-        buildConfig.reciprocalOnly = true;
+        // The connected-components engine over an exact nearest-neighbour graph. Defaults:
+        // reciprocal edges at or above 0.25, 32 neighbours, components capped at 64 documents.
+        const std::size_t kNeighbors = options.neighbors;
+        buildConfig.minEdgeScore = options.minEdgeScore;
+        buildConfig.maxComponentDocs = options.maxComponentDocs;
+        buildConfig.reciprocalOnly = options.reciprocalOnly;
         buildConfig.maxNeighborsPerDocument = kNeighbors;
         std::vector<std::vector<std::pair<float, std::uint32_t>>> nearest(docs.size());
         std::vector<std::pair<float, std::uint32_t>> scored(docs.size());

@@ -600,8 +600,12 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         return skipped;
     }
 
+    // True when the snapshot is built from the extracted documents alone, with nothing carried
+    // over: an explicit full rebuild, or the first snapshot of a corpus even though that one is
+    // requested by document hash.
+    const bool builtFromExtractedOnly = !(latestBatch.has_value() && !rebuildHashes.empty());
     Result<topology::TopologyArtifactBatch> artifactResult = [&]() {
-        if (latestBatch.has_value() && !rebuildHashes.empty()) {
+        if (!builtFromExtractedOnly) {
             return engine->updateArtifacts(*latestBatch, extracted.value(), buildConfig,
                                            &updateStats);
         }
@@ -789,9 +793,10 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     }
 
     // Query-aware routing vectors, fitted before the snapshot is stored so they persist with
-    // it. Full rebuilds only: an incremental one extracts just the changed documents, and the
-    // clusters it leaves alone keep the vectors loaded with the previous snapshot.
-    if (!dryRun && stats.fullRebuild && routeFitEnabled() && deps_.embedTexts) {
+    // it. Only when the snapshot was built from the extracted documents alone, because the fit
+    // needs every clustered document: an incremental update extracts just the changed ones, and
+    // the clusters it leaves alone keep the vectors loaded with the previous snapshot.
+    if (!dryRun && builtFromExtractedOnly && routeFitEnabled() && deps_.embedTexts) {
         const auto fitStart = std::chrono::steady_clock::now();
         std::vector<std::string> logged;
         if (const auto maxLogged = routeFitMaxLoggedQueries_.load(std::memory_order_acquire);
