@@ -1445,18 +1445,20 @@ BEIRCorpusLoader::BEIRCorpusLoader(const BEIRDataset& ds, const fs::path& dir)
 
 void BEIRCorpusLoader::writeDocumentsAsFiles() {
     yams::common::ensureDirectories(corpusDir);
+    std::unordered_set<std::string> contents;
+    contents.reserve(dataset.documents.size());
     for (const auto& [id, doc] : dataset.documents) {
         fs::path filePath = corpusDir / (id + ".txt");
+        std::string content = doc.title.empty() ? doc.text : doc.title + "\n\n" + doc.text;
         std::ofstream outFile(filePath);
-        if (doc.title.empty()) {
-            outFile << doc.text;
-        } else {
-            outFile << doc.title << "\n\n" << doc.text;
-        }
+        outFile << content;
         outFile.close();
         docIdToHash[id] = filePath.string();
+        contents.insert(std::move(content));
     }
-    spdlog::info("Wrote {} documents to {}", dataset.documents.size(), corpusDir.string());
+    uniqueContentDocuments = contents.size();
+    spdlog::info("Wrote {} documents ({} distinct contents) to {}", dataset.documents.size(),
+                 uniqueContentDocuments, corpusDir.string());
 }
 
 std::vector<TestQuery> BEIRCorpusLoader::generateTestQueries() {

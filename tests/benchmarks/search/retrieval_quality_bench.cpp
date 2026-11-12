@@ -6893,7 +6893,7 @@ struct BenchFixture {
             beirCorpus = std::make_unique<BEIRCorpusLoader>(dataset, corpusDir);
             beirCorpus->writeDocumentsAsFiles();
             benchCorpusDir = corpusDir;
-            corpusSize = static_cast<int>(dataset.documents.size());
+            corpusSize = static_cast<int>(beirCorpus->uniqueContentDocuments);
             numQueries = static_cast<int>(dataset.queries.size());
             expectedCacheMetadata.expectedDocs = corpusSize;
             expectedCacheMetadata.expectedQueries = numQueries;
