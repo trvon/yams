@@ -2648,6 +2648,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'topology_route_fit_sidecar',
+    'sources': files('unit/topology/topology_route_fit_sidecar_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'topology_road_sidecar',
     'sources': files('unit/topology/topology_road_sidecar_catch2_test.cpp'),
     'deps': test_deps,

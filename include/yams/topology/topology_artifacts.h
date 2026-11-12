@@ -368,6 +368,22 @@ struct ClusterRoad {
     friend bool operator==(const ClusterRoad&, const ClusterRoad&) = default;
 };
 
+/// How the fitted route vectors of a batch were produced (see topology_route_fit.h).
+struct RouteFitProvenance {
+    double chosenStrength{0.0};
+    /// Held-out routing recall under centroids and under the adopted vectors.
+    double centroidHoldoutRecall{0.0};
+    double fittedHoldoutRecall{0.0};
+    uint32_t fitQueries{0};
+    uint32_t holdoutQueries{0};
+    /// Training queries by source: the local query log, and queries generated from documents.
+    uint32_t loggedQueries{0};
+    uint32_t generatedQueries{0};
+    /// `TopologyArtifactBatch::topologyEpoch` of the batch the fit ran on.
+    uint64_t fittedAtEpoch{0};
+    friend bool operator==(const RouteFitProvenance&, const RouteFitProvenance&) = default;
+};
+
 struct TopologyArtifactBatch {
     std::string snapshotId;
     std::string algorithm;
@@ -416,6 +432,13 @@ struct TopologyArtifactBatch {
     /// dropped (see attachTopologyMemberOrders). Only the offending cluster loses its order; the
     /// roads and the other orders stay.
     std::string orderUnavailableReason;
+    /// Provenance of the clusters' `fittedRouteVector`s; default when none are attached. The
+    /// vectors and this record persist in the route-fit sidecar node, never in the main
+    /// snapshot payload or any fingerprint.
+    RouteFitProvenance routeFit{};
+    /// Why a stored route-fit sidecar was not attached (stable reason token), else empty.
+    /// Routing then uses centroids; a bad sidecar never makes the snapshot unusable.
+    std::string routeFitUnavailableReason;
 };
 
 struct TopologyUpdateStats {

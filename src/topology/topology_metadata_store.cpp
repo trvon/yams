@@ -52,6 +52,27 @@ std::string roadSidecarNodeKey(std::string_view snapshotId) {
            std::string(snapshotId);
 }
 
+std::string routeFitSidecarNodeKey(std::string_view snapshotId) {
+    return std::string(MetadataKgTopologyArtifactStore::kRouteFitSidecarNodePrefix) +
+           std::string(snapshotId);
+}
+
+/// Delete the node stored under `nodeKey` if one exists.
+Result<void> deleteNodeByKey(metadata::KnowledgeGraphStore& kgStore, const std::string& nodeKey) {
+    auto node = kgStore.getNodeByKey(nodeKey);
+    if (!node) {
+        return node.error();
+    }
+    if (!node.value().has_value()) {
+        return {};
+    }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+    if (auto removed = kgStore.deleteNodeById(node.value()->id); !removed) {
+        return removed.error();
+    }
+    return {};
+}
+
 /// Delete the road sidecar of `snapshotId` if one exists. Used when a snapshot is pruned and
 /// when a snapshot id is re-stored without roads.
 Result<void> deleteRoadSidecar(metadata::KnowledgeGraphStore& kgStore,
@@ -242,6 +263,11 @@ Result<void> pruneSnapshotNodes(metadata::KnowledgeGraphStore& kgStore, std::siz
                 !removed) {
                 return removed.error();
             }
+            if (auto removed = deleteNodeByKey(
+                    kgStore, routeFitSidecarNodeKey(key.substr(kSnapshotNodePrefix.size())));
+                !removed) {
+                return removed.error();
+            }
         }
     }
     return {};
@@ -355,6 +381,33 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
             roadNode.properties = std::move(sidecarPayload.value());
             if (auto roadResult = kgStore_->upsertNode(roadNode); !roadResult) {
                 return roadResult.error();
+            }
+        }
+
+        // Fitted route vectors follow the same rule: their own node, written before the
+        // pointer, shed when a snapshot id is re-stored without them.
+        auto routeFit = collectTopologyRouteFit(batch);
+        if (routeFit.vectors.empty()) {
+            if (auto removed = deleteNodeByKey(*kgStore_, routeFitSidecarNodeKey(batch.snapshotId));
+                !removed) {
+                return removed.error();
+            }
+        } else {
+            auto routeFitPayload = serializeTopologyRouteFitSidecarCompressed(routeFit);
+            if (!routeFitPayload) {
+                return routeFitPayload.error();
+            }
+            YAMS_PLOT("topology::route_fit_sidecar_payload_bytes",
+                      static_cast<int64_t>(routeFitPayload.value().size()));
+            metadata::KGNode routeFitNode;
+            routeFitNode.nodeKey = routeFitSidecarNodeKey(batch.snapshotId);
+            routeFitNode.label = batch.snapshotId;
+            routeFitNode.type = std::string{kRouteFitSidecarNodeType};
+            routeFitNode.createdTime = nowSecs;
+            routeFitNode.updatedTime = nowSecs;
+            routeFitNode.properties = std::move(routeFitPayload.value());
+            if (auto stored = kgStore_->upsertNode(routeFitNode); !stored) {
+                return stored.error();
             }
         }
     }
@@ -495,7 +548,49 @@ MetadataKgTopologyArtifactStore::loadSnapshotById(std::string_view snapshotId) c
     if (auto roads = attachRoadSidecar(batchResult.value()); !roads) {
         return roads.error();
     }
+    if (auto routeFit = attachRouteFitSidecar(batchResult.value()); !routeFit) {
+        return routeFit.error();
+    }
     return std::optional<TopologyArtifactBatch>{std::move(batchResult.value())};
+}
+
+Result<void>
+MetadataKgTopologyArtifactStore::attachRouteFitSidecar(TopologyArtifactBatch& batch) const {
+    YAMS_ZONE_SCOPED_N("topology::store::attachRouteFitSidecar");
+    for (auto& cluster : batch.clusters) {
+        cluster.fittedRouteVector.clear();
+    }
+    batch.routeFit = RouteFitProvenance{};
+    batch.routeFitUnavailableReason.clear();
+    if (!kgStore_) {
+        return {};
+    }
+    auto node = kgStore_->getNodeByKey(routeFitSidecarNodeKey(batch.snapshotId));
+    if (!node) {
+        return node.error();
+    }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+    if (!node.value().has_value() || !node.value()->properties.has_value()) {
+        return {}; // this snapshot was never fitted
+    }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+    auto sidecar = deserializeTopologyRouteFitSidecarCompressed(*node.value()->properties);
+    if (!sidecar) {
+        batch.routeFitUnavailableReason =
+            "route_fit_sidecar_undecodable:" + sidecar.error().message;
+        spdlog::warn("[TopologyStore] route-fit sidecar for snapshot {} is undecodable ({}); "
+                     "routing continues on centroids",
+                     batch.snapshotId, sidecar.error().message);
+        return {};
+    }
+    const auto attached = attachTopologyRouteFit(batch, sidecar.value());
+    if (!batch.routeFitUnavailableReason.empty()) {
+        spdlog::warn("[TopologyStore] route-fit sidecar for snapshot {} attached {} of {} "
+                     "vectors: {}",
+                     batch.snapshotId, attached, sidecar.value().vectors.size(),
+                     batch.routeFitUnavailableReason);
+    }
+    return {};
 }
 
 Result<void>
