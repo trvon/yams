@@ -869,6 +869,35 @@ ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePo
     return policy;
 }
 
+ConfigResolver::QueryLogPolicy ConfigResolver::resolveQueryLogPolicy() {
+    QueryLogPolicy policy;
+    try {
+        namespace fs = std::filesystem;
+        const fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            const auto kv = yams::config::parse_simple_toml(cfgPath);
+            if (auto it = kv.find("search.query_log.enabled"); it != kv.end()) {
+                policy.enabled = parseBoolValue(it->second).value_or(policy.enabled);
+            }
+            if (auto it = kv.find("search.query_log.max_entries"); it != kv.end()) {
+                // The whole value must be an unsigned number no larger than the hard cap;
+                // anything else keeps the default instead of silently changing retention.
+                const auto parsed = parseSize(trimView(it->second));
+                if (parsed && *parsed <= QueryLogPolicy::kMaxEntriesLimit) {
+                    policy.maxEntries = *parsed;
+                } else {
+                    spdlog::warn("[search.query_log] max_entries must be a number up to {}; "
+                                 "keeping {}",
+                                 QueryLogPolicy::kMaxEntriesLimit, policy.maxEntries);
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("[search.query_log] config read failed: {}", e.what());
+    }
+    return policy;
+}
+
 ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPolicy() {
     TopologyRoutingPolicy policy;
 
@@ -1095,6 +1124,15 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         }
         if (auto it = kv.find("topology.routing_representatives"); it != kv.end()) {
             policy.routingRepresentativeCount = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.route_fit.enabled"); it != kv.end()) {
+            policy.routeFitEnabled = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("topology.route_fit.max_logged_queries"); it != kv.end()) {
+            policy.routeFitMaxLoggedQueries = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.route_fit.max_generated_queries"); it != kv.end()) {
+            policy.routeFitMaxGeneratedQueries = parseSize(it->second);
         }
         if (auto it = kv.find("topology.representative_rule"); it != kv.end()) {
             policy.representativeRule =
@@ -1896,6 +1934,51 @@ void ConfigResolver::applySearchMaintenance(const ConfigSections& sections, Daem
     }
     config.searchMaintenance.automaticRebuildsEnabled = parsed;
     config.searchMaintenance.automaticRebuildsSource = "config:search.automatic_rebuilds";
+}
+
+void ConfigResolver::applyEmbeddingProviderPolicy(const ConfigSections& sections,
+                                                  bool pluginsDisabledByFlag,
+                                                  DaemonConfig& config) {
+    bool enableProvider = true;
+    bool autoLoad = true;
+
+    const auto readBool = [&sections](const char* sectionName, const char* key, bool& out) -> bool {
+        const auto section = sections.find(sectionName);
+        if (section == sections.end()) {
+            return false;
+        }
+        const auto value = section->second.find(key);
+        if (value == section->second.end()) {
+            return false;
+        }
+        const auto parsed = parseBoolValue(value->second);
+        if (!parsed.has_value()) {
+            spdlog::warn("Config: failed to parse {}.{} as boolean; keeping {}", sectionName, key,
+                         out);
+            return false;
+        }
+        out = *parsed;
+        return true;
+    };
+
+    readBool("daemon", "enable", enableProvider);
+    readBool("daemon", "auto_load_plugins", autoLoad);
+
+    bool embeddingsEnabled = true;
+    if (readBool("embeddings", "enable", embeddingsEnabled) && !embeddingsEnabled) {
+        // Embeddings are off: no provider, and no plugin scan to slow startup.
+        spdlog::info("Embeddings disabled in config ([embeddings].enable=false); disabling model "
+                     "provider and plugin auto-loading");
+        enableProvider = false;
+        autoLoad = false;
+    }
+
+    if (pluginsDisabledByFlag) {
+        autoLoad = false;
+    }
+
+    config.enableModelProvider = enableProvider;
+    config.autoLoadPlugins = autoLoad;
 }
 
 bool ConfigResolver::applyStorageDiskPressure(const ConfigSections& sections,

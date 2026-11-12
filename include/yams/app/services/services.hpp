@@ -137,6 +137,11 @@ struct AppContext {
     // Optional: externally-provided content extractors (plugins)
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors;
 
+    // Local query log (`[search.query_log]`): how many recent queries SearchService keeps in
+    // the metadata store. Zero, the default for embedded and test contexts, records nothing;
+    // the daemon sets it from config.
+    std::size_t queryLogMaxEntries{0};
+
     // Degraded search / repair status (allows services to fallback during repairs)
     bool searchRepairInProgress{false};
     std::string searchRepairDetails{};

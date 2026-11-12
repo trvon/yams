@@ -3552,6 +3552,33 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
     return result;
 }
 
+namespace {
+// Without an adopted provider every queued job is marked failed by the embedding service and no
+// vector is written. Returns the message to report instead of queueing; a host that supplies no
+// provider getter has no provider either.
+std::optional<std::string> embeddingProviderUnavailable(const RepairServiceContext& ctx,
+                                                        std::size_t documents) {
+    std::shared_ptr<IModelProvider> provider;
+    if (ctx.getModelProvider) {
+        try {
+            provider = ctx.getModelProvider();
+        } catch (const std::exception& e) {
+            spdlog::debug("RepairService: getModelProvider failed: {}", e.what());
+        } catch (...) {
+            spdlog::debug("RepairService: getModelProvider failed");
+        }
+    }
+    if (provider && provider->isAvailable()) {
+        return std::nullopt;
+    }
+    std::string message = "No embedding provider is available; " + std::to_string(documents) +
+                          " documents were not embedded. Check [embeddings] backend/enable and "
+                          "[daemon] enable/auto_load_plugins, then `yams daemon status -d`.";
+    spdlog::warn("RepairService: {}", message);
+    return message;
+}
+} // namespace
+
 boost::asio::awaitable<RepairOperationResult>
 RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const ProgressFn& progress,
                                               std::atomic<bool>* cancelRequested) {
@@ -3634,6 +3661,11 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
         } catch (...) {
             spdlog::debug("RepairService: getEmbeddingModelName failed");
         }
+    }
+    if (auto unavailable = embeddingProviderUnavailable(ctx_, hashes.size())) {
+        result.failed = hashes.size();
+        result.message = std::move(*unavailable);
+        co_return result;
     }
     if (isCanceled()) {
         result.failed = hashes.size();
@@ -3811,6 +3843,11 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
     if (req.foreground && modelName.empty()) {
         result.failed = hashes.size();
         result.message = "No embedding model configured";
+        return result;
+    }
+    if (auto unavailable = embeddingProviderUnavailable(ctx_, hashes.size())) {
+        result.failed = hashes.size();
+        result.message = std::move(*unavailable);
         return result;
     }
     if (isCanceled()) {

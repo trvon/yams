@@ -2,12 +2,16 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
+#include <random>
+#include <span>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <yams/daemon/components/TopologyManager.h>
@@ -183,7 +187,7 @@ struct RebuildFixture {
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg;
     std::shared_ptr<yams::vector::VectorDatabase> vectors;
 
-    RebuildFixture() {
+    explicit RebuildFixture(std::size_t embeddingDim = 4) {
         yams::metadata::ConnectionPoolConfig poolConfig;
         poolConfig.minConnections = 1;
         poolConfig.maxConnections = 2;
@@ -198,7 +202,7 @@ struct RebuildFixture {
 
         yams::vector::VectorDatabaseConfig vectorConfig;
         vectorConfig.database_path = ":memory:";
-        vectorConfig.embedding_dim = 4;
+        vectorConfig.embedding_dim = embeddingDim;
         vectorConfig.create_if_missing = true;
         vectorConfig.use_in_memory = true;
         vectors = std::make_shared<yams::vector::VectorDatabase>(vectorConfig);
@@ -618,4 +622,181 @@ TEST_CASE("TopologyManager connected engine keeps its incremental rebuild path",
     const auto current = fixture.latest();
     CHECK(current.memberships.size() == ids.size());
     CHECK(clusterMembers(current) == previousMembers);
+}
+
+namespace {
+
+// Sixteen-dimensional corpus where centroids mislead: eight linked groups, each a tight core on
+// its own axis plus a few outliers on a second axis. Titles and logged queries aim at the outliers
+// while leaning toward other groups' cores.
+struct RouteFitCorpus {
+    static constexpr std::size_t kDim = 16;
+    static constexpr std::size_t kGroups = 8;
+    std::unordered_map<std::string, std::vector<float>> queryEmbeddings;
+    std::size_t titles{0};
+    std::size_t logged{0};
+
+    static std::vector<float> unit(std::vector<float> v) {
+        float norm = 0.0F;
+        for (const float x : v) {
+            norm += x * x;
+        }
+        norm = std::sqrt(norm);
+        for (auto& x : v) {
+            x /= norm;
+        }
+        return v;
+    }
+
+    explicit RouteFitCorpus(RebuildFixture& fixture) {
+        std::mt19937_64 rng(23);
+        std::normal_distribution<float> noise(0.0F, 0.02F);
+        const auto noisy = [&] {
+            std::vector<float> v(kDim);
+            for (auto& x : v) {
+                x = noise(rng);
+            }
+            return v;
+        };
+        const auto queryVector = [&](std::size_t target) {
+            auto v = noisy();
+            v[kGroups + target] += 1.0F;
+            for (std::size_t offset = 1; offset <= 5; ++offset) {
+                v[(target + offset) % kGroups] += 0.5F;
+            }
+            return unit(std::move(v));
+        };
+        for (std::size_t group = 0; group < kGroups; ++group) {
+            std::vector<std::string> hashes;
+            for (int member = 0; member < 40; ++member) {
+                auto v = noisy();
+                if (member < 36) {
+                    v[group] += 1.0F;
+                } else {
+                    v[kGroups + group] += 1.0F;
+                    v[group] += 0.1F;
+                }
+                const auto hash = "g" + std::to_string(group) + "m" + std::to_string(member);
+                const auto id = fixture.addDocument(hash, unit(std::move(v)));
+                const auto title = "title of document " + hash;
+                REQUIRE(fixture.repository
+                            ->setMetadata(id, "title", yams::metadata::MetadataValue(title))
+                            .has_value());
+                queryEmbeddings.emplace(title, queryVector(group));
+                ++titles;
+                hashes.push_back(hash);
+            }
+            // Explicit neighbour links make each group one connected component, outliers
+            // included, whatever their embeddings say.
+            for (std::size_t i = 0; i + 1 < hashes.size(); ++i) {
+                fixture.linkNeighbors(hashes[i], hashes[i + 1]);
+                if (i + 2 < hashes.size()) {
+                    fixture.linkNeighbors(hashes[i], hashes[i + 2]);
+                }
+            }
+        }
+        for (std::size_t i = 0; i < 120; ++i) {
+            const auto text = "logged query " + std::to_string(i);
+            yams::metadata::SearchHistoryEntry entry;
+            entry.query = text;
+            entry.queryTime =
+                std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+            REQUIRE(fixture.repository->insertSearchHistory(entry).has_value());
+            queryEmbeddings.emplace(text, queryVector(i % kGroups));
+            ++logged;
+        }
+    }
+
+    TopologyManager::Dependencies dependencies(RebuildFixture& fixture) {
+        auto deps = fixture.dependencies();
+        deps.embedTexts = [this](std::span<const std::string> texts)
+            -> yams::Result<std::vector<std::vector<float>>> {
+            std::vector<std::vector<float>> out;
+            out.reserve(texts.size());
+            for (const auto& text : texts) {
+                const auto it = queryEmbeddings.find(text);
+                if (it == queryEmbeddings.end()) {
+                    return yams::Error{yams::ErrorCode::NotFound, "no embedding for " + text};
+                }
+                out.push_back(it->second);
+            }
+            return out;
+        };
+        return deps;
+    }
+};
+
+std::size_t fittedClusterCount(const yams::topology::TopologyArtifactBatch& batch) {
+    return static_cast<std::size_t>(std::ranges::count_if(
+        batch.clusters, [](const auto& cluster) { return !cluster.fittedRouteVector.empty(); }));
+}
+
+} // namespace
+
+TEST_CASE("TopologyManager fits route vectors on a full rebuild and stores them with the snapshot",
+          "[daemon][topology-manager][route-fit]") {
+    RebuildFixture fixture(RouteFitCorpus::kDim);
+    RouteFitCorpus corpus(fixture);
+
+    SECTION("off by default: nothing is fitted or stored") {
+        TopologyManager manager(corpus.dependencies(fixture));
+        auto rebuilt = manager.rebuildArtifacts("initial", false, {}, "connected");
+        REQUIRE(rebuilt.has_value());
+        REQUIRE(rebuilt.value().stored);
+        CHECK_FALSE(rebuilt.value().routeFitAdopted);
+        CHECK(rebuilt.value().routeFitQueries == 0u);
+        CHECK(rebuilt.value().routeFitSkipReason.empty());
+        CHECK(fittedClusterCount(fixture.latest()) == 0u);
+    }
+
+    SECTION("enabled without an embedder: the fit does not run") {
+        TopologyManager manager(fixture.dependencies());
+        manager.setRouteFitPolicy(true, 4000, 2000);
+        auto rebuilt = manager.rebuildArtifacts("initial", false, {}, "connected");
+        REQUIRE(rebuilt.has_value());
+        CHECK_FALSE(rebuilt.value().routeFitAdopted);
+        CHECK(rebuilt.value().routeFitQueries == 0u);
+        CHECK(fittedClusterCount(fixture.latest()) == 0u);
+    }
+
+    SECTION("enabled: logged queries and titles train the fit, and it persists") {
+        TopologyManager manager(corpus.dependencies(fixture));
+        manager.setRouteFitPolicy(true, 4000, 2000);
+        auto rebuilt = manager.rebuildArtifacts("initial", false, {}, "connected");
+        INFO((rebuilt ? "skip reason: " + rebuilt.value().routeFitSkipReason
+                      : rebuilt.error().message));
+        REQUIRE(rebuilt.has_value());
+        REQUIRE(rebuilt.value().stored);
+        CHECK(rebuilt.value().routeFitQueries == corpus.logged + corpus.titles);
+        REQUIRE(rebuilt.value().routeFitAdopted);
+        CHECK(rebuilt.value().routeFitClusters > 0u);
+
+        const auto stored = fixture.latest();
+        CHECK(fittedClusterCount(stored) == rebuilt.value().routeFitClusters);
+        CHECK(stored.routeFit.loggedQueries == corpus.logged);
+        CHECK(stored.routeFit.generatedQueries == corpus.titles);
+        CHECK(stored.routeFit.fittedHoldoutRecall > stored.routeFit.centroidHoldoutRecall);
+        CHECK(stored.routeFitUnavailableReason.empty());
+    }
+
+    SECTION("enabled with the title budget at zero: only logged queries are used") {
+        TopologyManager manager(corpus.dependencies(fixture));
+        manager.setRouteFitPolicy(true, 4000, 0);
+        auto rebuilt = manager.rebuildArtifacts("initial", false, {}, "connected");
+        REQUIRE(rebuilt.has_value());
+        CHECK(rebuilt.value().routeFitQueries == corpus.logged);
+    }
+
+    SECTION("pressure during the fit leaves the snapshot on centroids") {
+        auto deps = corpus.dependencies(fixture);
+        deps.underPressure = [] { return true; };
+        TopologyManager manager(std::move(deps));
+        manager.setRouteFitPolicy(true, 4000, 2000);
+        auto rebuilt = manager.rebuildArtifacts("initial", false, {}, "connected");
+        REQUIRE(rebuilt.has_value());
+        REQUIRE(rebuilt.value().stored);
+        CHECK_FALSE(rebuilt.value().routeFitAdopted);
+        CHECK(rebuilt.value().routeFitSkipReason == "cancelled_under_pressure");
+        CHECK(fittedClusterCount(fixture.latest()) == 0u);
+    }
 }

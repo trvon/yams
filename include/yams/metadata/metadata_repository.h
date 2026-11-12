@@ -722,6 +722,10 @@ public:
 
     // Search history operations
     Result<int64_t> insertSearchHistory(const SearchHistoryEntry& entry) override;
+    /// Append one query to the local query log and keep only the newest `maxEntries` rows.
+    /// Best effort: under write contention the entry is dropped rather than delaying the search
+    /// that produced it. `maxEntries` of zero records nothing.
+    Result<void> recordSearchQuery(const SearchHistoryEntry& entry, std::size_t maxEntries);
     Result<std::vector<SearchHistoryEntry>> getRecentSearches(int limit = 50) override;
     Result<int64_t> insertFeedbackEvent(const FeedbackEvent& event);
     Result<std::vector<FeedbackEvent>> getFeedbackEventsByTrace(const std::string& traceId,

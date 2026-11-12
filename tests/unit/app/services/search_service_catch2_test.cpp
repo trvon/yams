@@ -6,6 +6,8 @@
 
 #include "src/app/services/glob_matcher.h"
 #include <catch2/catch_test_macros.hpp>
+
+#include <limits>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <yams/app/services/extract_scope.h>
 
@@ -386,6 +388,76 @@ TEST_CASE("SearchService: basic text search", "[unit][services][search]") {
     for (const auto& doc : resp.results) {
         CHECK_FALSE(doc.hash.empty());
         CHECK(doc.score >= 0.0);
+    }
+}
+
+TEST_CASE("SearchService: the query log records queries only when enabled",
+          "[unit][services][search][query-log]") {
+    SearchServiceFixture f;
+
+    SECTION("disabled by default for embedded contexts") {
+        REQUIRE(runAwait(f.searchService->search(f.createBasicSearchRequest("programming"))));
+        auto recent = f.metadataRepo->getRecentSearches(10);
+        REQUIRE(recent);
+        CHECK(recent.value().empty());
+    }
+
+    SECTION("enabled: text queries are kept newest first, hash lookups are not") {
+        f.appContext.queryLogMaxEntries = 100;
+        auto service = makeSearchService(f.appContext);
+        REQUIRE(runAwait(service->search(f.createBasicSearchRequest("programming"))));
+        REQUIRE(runAwait(service->search(f.createBasicSearchRequest("database design"))));
+
+        auto hashRequest = f.createBasicSearchRequest("");
+        hashRequest.type = "hash";
+        hashRequest.hash = "abcdef0123456789";
+        (void)runAwait(service->search(hashRequest));
+
+        auto recent = f.metadataRepo->getRecentSearches(10);
+        REQUIRE(recent);
+        REQUIRE(recent.value().size() == 2u);
+        CHECK(recent.value()[0].query == "database design");
+        CHECK(recent.value()[1].query == "programming");
+        CHECK(recent.value()[0].executionTimeMs >= 0);
+    }
+
+    SECTION("enabled: a paths-only search records how many paths it returned") {
+        f.appContext.queryLogMaxEntries = 100;
+        auto service = makeSearchService(f.appContext);
+        auto request = f.createBasicSearchRequest("programming");
+        request.pathsOnly = true;
+        auto result = runAwait(service->search(request));
+        REQUIRE(result);
+        auto recent = f.metadataRepo->getRecentSearches(10);
+        REQUIRE(recent);
+        REQUIRE(recent.value().size() == 1u);
+        CHECK(recent.value()[0].resultsCount ==
+              static_cast<int64_t>(std::max(result.value().results.size(), result.value().total)));
+    }
+
+    SECTION("enabled: a cap larger than any id keeps every entry") {
+        f.appContext.queryLogMaxEntries = std::numeric_limits<std::size_t>::max();
+        auto service = makeSearchService(f.appContext);
+        for (const char* query : {"alpha", "beta", "gamma"}) {
+            REQUIRE(runAwait(service->search(f.createBasicSearchRequest(query))));
+        }
+        auto recent = f.metadataRepo->getRecentSearches(10);
+        REQUIRE(recent);
+        REQUIRE(recent.value().size() == 3u);
+        CHECK(recent.value()[0].query == "gamma");
+    }
+
+    SECTION("enabled: only the newest entries up to the cap are retained") {
+        f.appContext.queryLogMaxEntries = 3;
+        auto service = makeSearchService(f.appContext);
+        for (const char* query : {"alpha", "beta", "gamma", "delta", "epsilon"}) {
+            REQUIRE(runAwait(service->search(f.createBasicSearchRequest(query))));
+        }
+        auto recent = f.metadataRepo->getRecentSearches(10);
+        REQUIRE(recent);
+        REQUIRE(recent.value().size() == 3u);
+        CHECK(recent.value()[0].query == "epsilon");
+        CHECK(recent.value()[2].query == "gamma");
     }
 }
 

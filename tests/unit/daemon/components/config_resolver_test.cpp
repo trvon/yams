@@ -563,6 +563,40 @@ batch_size = 8
     CHECK((*resolved.runtime.batchSize == 8));
 }
 
+TEST_CASE("ConfigResolver enables the model provider and plugin loading unless told otherwise",
+          "[daemon][components][config][embeddings][catch2]") {
+    using Sections = ConfigResolver::ConfigSections;
+    const auto resolve = [](const Sections& sections, bool noPluginsFlag = false) {
+        DaemonConfig config;
+        ConfigResolver::applyEmbeddingProviderPolicy(sections, noPluginsFlag, config);
+        return std::pair{config.enableModelProvider, config.autoLoadPlugins};
+    };
+
+    SECTION("no config, or a [daemon] section that omits the keys, gets embeddings") {
+        CHECK((resolve({}) == std::pair{true, true}));
+        CHECK((resolve({{"daemon", {{"socket_path", "/tmp/x.sock"}}},
+                        {"embeddings", {{"backend", "simeon"}, {"enable", "true"}}}}) ==
+               std::pair{true, true}));
+    }
+    SECTION("explicit keys win over the defaults") {
+        CHECK((resolve({{"daemon", {{"enable", "false"}}}}) == std::pair{false, true}));
+        CHECK((resolve({{"daemon", {{"auto_load_plugins", "false"}}}}) == std::pair{true, false}));
+        CHECK((resolve({{"daemon", {{"enable", "true"}, {"auto_load_plugins", "true"}}}}) ==
+               std::pair{true, true}));
+    }
+    SECTION("an unparseable value keeps the default") {
+        CHECK((resolve({{"daemon", {{"auto_load_plugins", "maybe"}}}}) == std::pair{true, true}));
+    }
+    SECTION("[embeddings] enable = false turns both off") {
+        CHECK((resolve({{"daemon", {{"enable", "true"}, {"auto_load_plugins", "true"}}},
+                        {"embeddings", {{"enable", "false"}}}}) == std::pair{false, false}));
+    }
+    SECTION("--no-plugins beats the config but keeps in-process providers") {
+        CHECK((resolve({{"daemon", {{"auto_load_plugins", "true"}}}}, true) ==
+               std::pair{true, false}));
+    }
+}
+
 TEST_CASE("ConfigResolver applies typed search maintenance policy with provenance",
           "[daemon][components][config][search][catch2]") {
     ConfigResolver::ConfigSections sections;
@@ -1365,6 +1399,74 @@ road_order = "alphabetical"
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
         auto policy = ConfigResolver::resolveTopologyEnginePolicy();
         CHECK_FALSE(policy.roadOrder.has_value());
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyEnginePolicy reads the route fit block",
+                 "[daemon][components][config][topology][route_fit][catch2]") {
+    SECTION("absent: every field unset, so the fit stays off") {
+        auto configPath = writeToml("config.toml", "[topology]\nengine = \"connected\"\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        CHECK_FALSE(policy.routeFitEnabled.has_value());
+        CHECK_FALSE(policy.routeFitMaxLoggedQueries.has_value());
+        CHECK_FALSE(policy.routeFitMaxGeneratedQueries.has_value());
+    }
+    SECTION("present") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology.route_fit]
+enabled = true
+max_logged_queries = 500
+max_generated_queries = 0
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        REQUIRE(policy.routeFitEnabled.has_value());
+        CHECK(*policy.routeFitEnabled);
+        REQUIRE(policy.routeFitMaxLoggedQueries.has_value());
+        CHECK(*policy.routeFitMaxLoggedQueries == 500u);
+        REQUIRE(policy.routeFitMaxGeneratedQueries.has_value());
+        CHECK(*policy.routeFitMaxGeneratedQueries == 0u);
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveQueryLogPolicy defaults on and reads the TOML block",
+                 "[daemon][components][config][query_log][catch2]") {
+    SECTION("no query_log block keeps the log on with the default cap") {
+        auto configPath = writeToml("config.toml", "[search]\nautomatic_rebuilds = true\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveQueryLogPolicy();
+        CHECK(policy.enabled);
+        CHECK(policy.maxEntries == 20000u);
+        CHECK(policy.effectiveMaxEntries() == 20000u);
+    }
+    SECTION("disabled records nothing whatever the cap") {
+        auto configPath =
+            writeToml("config.toml", "[search.query_log]\nenabled = false\nmax_entries = 50\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveQueryLogPolicy();
+        CHECK_FALSE(policy.enabled);
+        CHECK(policy.maxEntries == 50u);
+        CHECK(policy.effectiveMaxEntries() == 0u);
+    }
+    SECTION("a negative, partly numeric or oversized cap keeps the default") {
+        for (const char* value : {"-1", "20000junk", "99999999999999999999", "10000001"}) {
+            auto configPath = writeToml(
+                "config.toml", std::string("[search.query_log]\nmax_entries = ") + value + "\n");
+            EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+            const auto policy = ConfigResolver::resolveQueryLogPolicy();
+            INFO("max_entries = " << value);
+            CHECK(policy.maxEntries == 20000u);
+        }
+    }
+    SECTION("a cap that is not a number keeps the default") {
+        auto configPath = writeToml("config.toml", "[search.query_log]\nmax_entries = many\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveQueryLogPolicy();
+        CHECK(policy.enabled);
+        CHECK(policy.maxEntries == 20000u);
     }
 }
 

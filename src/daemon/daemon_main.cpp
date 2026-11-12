@@ -245,10 +245,9 @@ int main(int argc, char* argv[]) {
         config.logLevel = "info";
 #endif
 
-    // Apply the no-plugins flag
-    if (noPlugins) {
-        config.autoLoadPlugins = false;
-    }
+    // Provider and plugin defaults for a daemon started without a config file. A config file, when
+    // present, is applied through the same resolver below.
+    yams::daemon::ConfigResolver::applyEmbeddingProviderPolicy({}, noPlugins, config);
 
     // Load configuration from TOML file
     namespace fs = std::filesystem;
@@ -282,10 +281,6 @@ int main(int argc, char* argv[]) {
                     config.logLevel = daemonSection.at("log_level");
                 }
 
-                // Enable model provider based on config
-                if (daemonSection.find("enable") != daemonSection.end()) {
-                    config.enableModelProvider = (daemonSection.at("enable") == "true");
-                }
                 if (daemonSection.find("model_provider_required") != daemonSection.end()) {
                     std::string v = daemonSection.at("model_provider_required");
                     for (auto& c : v) {
@@ -299,10 +294,6 @@ int main(int argc, char* argv[]) {
                 if (config.pluginDir.empty() &&
                     daemonSection.find("plugin_dir") != daemonSection.end()) {
                     config.pluginDir = fs::path(daemonSection.at("plugin_dir"));
-                }
-
-                if (daemonSection.find("auto_load_plugins") != daemonSection.end()) {
-                    config.autoLoadPlugins = (daemonSection.at("auto_load_plugins") == "true");
                 }
 
                 // Auto repair (RepairService)
@@ -360,8 +351,6 @@ int main(int argc, char* argv[]) {
                 // Daemon section missing (probably old config) - use safe defaults
                 spdlog::info(
                     "Daemon configuration section not found in config file, using defaults");
-                // Enable model provider by default if plugins will be loaded
-                config.enableModelProvider = config.autoLoadPlugins;
             }
 
             // [daemon.graph_prune] section: graph version pruning policy
@@ -501,32 +490,9 @@ int main(int argc, char* argv[]) {
                 yams::daemon::ConfigResolver::applyRuntimeTuning(tomlConfig, config.tuning);
             yams::daemon::ConfigResolver::applySearchMaintenance(tomlConfig, config);
 
-            // Honor [embeddings].enable=false: hard-disable model provider regardless of [daemon]
-            // This prevents startup from waiting on embedding services when embeddings are
-            // disabled.
-            if (tomlConfig.find("embeddings") != tomlConfig.end()) {
-                const auto& embSection = tomlConfig.at("embeddings");
-                auto it = embSection.find("enable");
-                if (it != embSection.end()) {
-                    std::string v = it->second;
-                    // normalize value to lowercase for comparison
-                    for (auto& c : v)
-                        c = static_cast<char>(std::tolower(c));
-                    if (v == "false" || v == "0" || v == "no" || v == "off") {
-                        if (config.enableModelProvider) {
-                            spdlog::info("Embeddings disabled in config "
-                                         "([embeddings].enable=false); disabling model provider");
-                        }
-                        config.enableModelProvider = false;
-                        // Also short-circuit plugin auto-loading to avoid unnecessary startup work
-                        if (config.autoLoadPlugins) {
-                            spdlog::info("Embeddings disabled; skipping plugin auto-loading to "
-                                         "speed up startup");
-                        }
-                        config.autoLoadPlugins = false;
-                    }
-                }
-            }
+            // [daemon] enable / auto_load_plugins, [embeddings] enable and --no-plugins.
+            yams::daemon::ConfigResolver::applyEmbeddingProviderPolicy(tomlConfig, noPlugins,
+                                                                       config);
 
             // Load daemon.models configuration if present
             if (config.enableModelProvider &&
