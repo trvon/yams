@@ -163,6 +163,8 @@ Result<RouteFitStageStats> runRouteFitStage(TopologyArtifactBatch& batch,
     RouteFitStageStats stats;
     stats.queriesUsed = queryRows.size() / dim;
     stats.documentsUsed = clusterOfKey.size();
+    stats.centroidHoldoutRecall = report.centroidHoldoutRecall;
+    stats.fittedHoldoutRecall = report.fittedHoldoutRecall;
     if (!report.adopted) {
         stats.skipReason = report.fitQueries < options.minFitQueries ? "too_few_queries"
                                                                      : "no_gain_over_centroids";

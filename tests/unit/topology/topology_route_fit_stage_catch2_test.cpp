@@ -243,6 +243,11 @@ TEST_CASE("runRouteFitStage skips with a reason and leaves the batch unfitted",
             world.logged.push_back(text);
         }
         expectSkipped(world, inputOf(world), "no_gain_over_centroids");
+        // The report still says how well centroids already did.
+        auto again = runRouteFitStage(world.batch, inputOf(world));
+        REQUIRE(again.has_value());
+        CHECK(again.value().centroidHoldoutRecall == 1.0);
+        CHECK(again.value().fittedHoldoutRecall == 1.0);
     }
 }
 

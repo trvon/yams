@@ -35,6 +35,10 @@ struct RouteFitStageStats {
     std::size_t fittedClusters{0};
     std::size_t queriesUsed{0};
     std::size_t documentsUsed{0};
+    /// Held-out routing recall under centroids and under the best fit tried, whenever the fit
+    /// ran, adopted or not. Equal when no fit beat the centroids.
+    double centroidHoldoutRecall{0.0};
+    double fittedHoldoutRecall{0.0};
     /// Why nothing was attached, as a stable token; empty when adopted.
     std::string skipReason;
 };

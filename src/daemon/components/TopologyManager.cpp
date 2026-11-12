@@ -836,6 +836,12 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
             static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - fitStart)
                                            .count());
+        double centroidRecall = 0.0;
+        double fittedRecall = 0.0;
+        if (fitted) {
+            centroidRecall = fitted.value().centroidHoldoutRecall;
+            fittedRecall = fitted.value().fittedHoldoutRecall;
+        }
         if (!fitted) {
             // The fit is optional: a failed or cancelled one leaves the snapshot on centroids.
             stats.routeFitSkipReason = fitted.error().code == ErrorCode::OperationCancelled
@@ -850,8 +856,8 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         spdlog::info("[TopologyManager] route fit: adopted={} clusters={} queries={} logged={} "
                      "titles={} holdout_recall {:.3f} -> {:.3f} in {} ms{}{}",
                      stats.routeFitAdopted, stats.routeFitClusters, stats.routeFitQueries,
-                     logged.size(), titles.size(), artifacts.routeFit.centroidHoldoutRecall,
-                     artifacts.routeFit.fittedHoldoutRecall, stats.routeFitMillis,
+                     logged.size(), titles.size(), centroidRecall, fittedRecall,
+                     stats.routeFitMillis,
                      stats.routeFitSkipReason.empty() ? "" : " skipped=", stats.routeFitSkipReason);
     }
 
