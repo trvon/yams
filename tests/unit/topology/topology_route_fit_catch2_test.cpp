@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <random>
@@ -175,6 +176,18 @@ TEST_CASE("fitRouteVectors moves the right cluster to the top for fresh queries"
     CHECK(report.fittedHoldoutRecall > 0.9);
     CHECK(report.adopted);
     CHECK(report.chosenStrength > 0.0);
+
+    // The same fit is turned down when the bar is higher than its gain; the measured recall is
+    // still reported, and the vectors handed back are the centroids.
+    RouteFitOptions strict;
+    strict.minHoldoutGain = 1.5; // unreachable: recall is at most 1
+    auto declined = fitRouteVectors(inputOf(scenario), strict);
+    REQUIRE(declined.has_value());
+    CHECK_FALSE(declined.value().adopted);
+    CHECK(declined.value().fittedHoldoutRecall == report.fittedHoldoutRecall);
+    CHECK(declined.value().routeVectors == scenario.centroids);
+    CHECK(std::ranges::count(declined.value().clusterFitted, std::uint8_t{0}) ==
+          static_cast<std::ptrdiff_t>(declined.value().clusterFitted.size()));
 }
 
 TEST_CASE("fitRouteVectors keeps the centroids when it cannot do better",

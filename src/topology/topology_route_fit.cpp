@@ -248,6 +248,14 @@ Result<RouteFitReport> fitRouteVectors(const RouteFitInput& input, const RouteFi
             report.adopted = true;
         }
     }
+    if (report.adopted &&
+        report.fittedHoldoutRecall - report.centroidHoldoutRecall < options.minHoldoutGain) {
+        // Better, but not by enough to trust: keep the centroids and report what was measured.
+        report.adopted = false;
+        report.chosenStrength = 0.0;
+        report.routeVectors.assign(input.centroids.begin(), input.centroids.end());
+        std::fill(report.clusterFitted.begin(), report.clusterFitted.end(), std::uint8_t{0});
+    }
     return report;
 }
 
