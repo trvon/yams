@@ -15,12 +15,14 @@
 
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <iostream>
 #include <yams/compat/unistd.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
+#include <yams/daemon/startup_handshake.h>
 
 // POSIX headers for daemonization
 #ifndef _WIN32
@@ -810,20 +812,34 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+#ifndef _WIN32
+    // Carries the detached daemon's start result back to the process that launched it.
+    std::optional<yams::daemon::StartupHandshake> startupHandshake;
+#endif
+
     // Daemonize if not running in foreground
     if (!foreground) {
 #ifdef _WIN32
         spdlog::warn("Daemon mode not supported on Windows; running in foreground.");
 #else
+        startupHandshake = yams::daemon::StartupHandshake::open();
         pid_t pid = fork();
         if (pid < 0) {
             std::cerr << "Failed to fork daemon process\n";
             return 1;
         }
         if (pid > 0) {
-            // Parent process exits
-            std::cout << "Daemon started with PID: " << pid << '\n';
-            return 0;
+            // The launcher exits with the daemon's start result, not with "fork succeeded".
+            const int started = startupHandshake ? startupHandshake->await() : 0;
+            if (started == 0) {
+                std::cout << "Daemon started with PID: " << pid << '\n';
+            } else {
+                std::cerr << "Daemon failed to start; see the daemon log\n";
+            }
+            return started;
+        }
+        if (startupHandshake) {
+            startupHandshake->closeReader();
         }
 
         // Child process continues as daemon
@@ -855,6 +871,12 @@ int main(int argc, char* argv[]) {
         yams::daemon::YamsDaemon daemon(config);
 
         auto result = daemon.start();
+#ifndef _WIN32
+        if (startupHandshake) {
+            startupHandshake->report(result.has_value());
+            startupHandshake.reset();
+        }
+#endif
         if (!result) {
             spdlog::error("Failed to start daemon: {}", result.error().message);
             return 1;

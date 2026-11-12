@@ -2318,7 +2318,40 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         ::_exit(127);
     }
 
-    // Parent process: we don't wait for the daemon to exit.
+    // The launched process detaches the daemon and exits with the daemon's start result
+    // (0 once it holds its locks and socket). Wait for that verdict so a daemon that never
+    // came up is an error here, not a later "connection refused".
+    const auto verdictDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    int status = 0;
+    bool exited = false;
+    while (std::chrono::steady_clock::now() < verdictDeadline) {
+        const pid_t reaped = ::waitpid(pid, &status, WNOHANG);
+        if (reaped == pid) {
+            exited = true;
+            break;
+        }
+        if (reaped < 0 && errno != EINTR) {
+            break; // not ours to reap (e.g. SIGCHLD ignored): outcome unknown
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (exited) {
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+            return Error{ErrorCode::NotFound, "Daemon binary could not be executed: " + exePath};
+        }
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            return Error{ErrorCode::InternalError, "Daemon exited during start-up (status " +
+                                                       std::to_string(WEXITSTATUS(status)) +
+                                                       "); see the daemon log"};
+        }
+        if (WIFSIGNALED(status)) {
+            return Error{ErrorCode::InternalError, "Daemon exited during start-up (signal " +
+                                                       std::to_string(WTERMSIG(status)) +
+                                                       "); see the daemon log"};
+        }
+    } else {
+        spdlog::warn("Daemon launcher has not reported a start result yet; continuing");
+    }
 
     spdlog::info("Daemon process spawned, client will now poll for readiness");
     return Result<void>();
