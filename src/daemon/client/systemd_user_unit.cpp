@@ -21,6 +21,18 @@ bool userUnitMatchesPaths(const yams::config::ResolvedRuntimePaths& paths) {
            paths.configFile.source == RuntimePathSource::PlatformDefault;
 }
 
+LifecycleScope lifecycleScope(bool socketFlag, bool pidFileFlag,
+                              const yams::config::ResolvedRuntimePaths& paths) {
+    using yams::config::RuntimePathSource;
+    const bool defaultDaemon = !socketFlag && userUnitMatchesPaths(paths);
+    LifecycleScope scope;
+    scope.userUnit = defaultDaemon;
+    scope.anyLiveDaemon = defaultDaemon;
+    scope.pidFile =
+        defaultDaemon || pidFileFlag || paths.pidFile.source != RuntimePathSource::PlatformDefault;
+    return scope;
+}
+
 #if defined(__linux__)
 namespace {
 

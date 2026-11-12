@@ -770,6 +770,26 @@ private:
         return pidFile_.empty() ? YamsCLI::resolveConfiguredDaemonPidFilePath().string() : pidFile_;
     }
 
+    // Which daemon stop/restart may act on, from the flags given and the resolved paths.
+    yams::daemon::client::LifecycleScope lifecycleScope() const {
+        yams::config::RuntimePathOverrides overrides;
+        if (!dataDir_.empty()) {
+            overrides.dataDir = dataDir_;
+        }
+        if (!startConfigPath_.empty()) {
+            overrides.configFile = startConfigPath_;
+        }
+        const auto paths = yams::config::resolve_runtime_paths(overrides);
+        if (!paths) {
+            // Unknown target: act only on what was named explicitly.
+            yams::daemon::client::LifecycleScope narrow;
+            narrow.pidFile = !pidFile_.empty();
+            return narrow;
+        }
+        return yams::daemon::client::lifecycleScope(!socketPath_.empty(), !pidFile_.empty(),
+                                                    paths.value());
+    }
+
     // The packaged systemd user unit runs the default daemon (default paths, default binary).
     bool customDaemonOptions() const {
         return !socketPath_.empty() || !dataDir_.empty() || !startConfigPath_.empty() ||
@@ -786,7 +806,7 @@ private:
         namespace fs = std::filesystem;
 
         // A daemon managed by the systemd user unit is started (and restarted) by systemd.
-        if (!customDaemonOptions() && !startForeground_) {
+        if (!customDaemonOptions() && !startForeground_ && lifecycleScope().userUnit) {
             namespace dc = yams::daemon::client;
             const auto unit = dc::queryUserUnit();
             if (unit == dc::UserUnitState::Active && !startRestart_) {
@@ -807,8 +827,8 @@ private:
         // Use a local effective path for pre-checks only; the daemon will resolve from config.
         pidFile_ = resolveConfiguredPidFilePath();
         const std::string configuredSocket = resolveConfiguredSocketPath();
-        const std::string effectiveSocket =
-            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
+        const std::string effectiveSocket = resolveSocketPathForLiveDaemon(
+            configuredSocket, pidFile_, lifecycleScope().anyLiveDaemon);
 
         spdlog::debug("Using socket (effective): {}", effectiveSocket);
         spdlog::debug("Using PID file: {}", pidFile_);
@@ -1034,7 +1054,8 @@ private:
 
     bool stopDaemon() {
         // Stop a unit-managed daemon through systemd so the unit state stays truthful.
-        if (socketPath_.empty() &&
+        const auto scope = lifecycleScope();
+        if (scope.userUnit &&
             yams::daemon::client::queryUserUnit() == yams::daemon::client::UserUnitState::Active) {
             if (yams::daemon::client::runUserUnit("stop")) {
                 std::cout << "[OK] Stopped the yams-daemon.service systemd user unit\n";
@@ -1042,11 +1063,13 @@ private:
             }
             spdlog::warn("systemctl --user stop yams-daemon.service failed; stopping over IPC");
         }
-        pidFile_ = resolveConfiguredPidFilePath();
+        // A command aimed at another socket must not signal, or clean up after, the daemon
+        // that the shared PID file names.
+        pidFile_ = scope.pidFile ? resolveConfiguredPidFilePath() : std::string{};
         // Resolve paths if not explicitly provided (do not persist into socketPath_)
         const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
-            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
+            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, scope.anyLiveDaemon);
 
         std::optional<yams::cli::ui::SpinnerRunner> spinner;
         if (yams::cli::ui::stdout_is_tty()) {
@@ -1961,7 +1984,8 @@ private:
     }
 
     void restartDaemon() {
-        if (socketPath_.empty() &&
+        const auto scope = lifecycleScope();
+        if (scope.userUnit &&
             yams::daemon::client::queryUserUnit() == yams::daemon::client::UserUnitState::Active) {
             if (yams::daemon::client::runUserUnit("restart")) {
                 std::cout << "[OK] Restarted the yams-daemon.service systemd user unit\n";
@@ -1970,11 +1994,11 @@ private:
             spdlog::warn(
                 "systemctl --user restart yams-daemon.service failed; restarting over IPC");
         }
-        pidFile_ = resolveConfiguredPidFilePath();
+        pidFile_ = scope.pidFile ? resolveConfiguredPidFilePath() : std::string{};
 
         const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
-            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
+            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, scope.anyLiveDaemon);
 
         pid_t pidBeforeStop = readPidFromFile(pidFile_);
         if (!yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFile_, pidBeforeStop)) {
