@@ -6,6 +6,8 @@
 
 #include "src/app/services/glob_matcher.h"
 #include <catch2/catch_test_macros.hpp>
+
+#include <limits>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <yams/app/services/extract_scope.h>
 
@@ -417,6 +419,32 @@ TEST_CASE("SearchService: the query log records queries only when enabled",
         CHECK(recent.value()[0].query == "database design");
         CHECK(recent.value()[1].query == "programming");
         CHECK(recent.value()[0].executionTimeMs >= 0);
+    }
+
+    SECTION("enabled: a paths-only search records how many paths it returned") {
+        f.appContext.queryLogMaxEntries = 100;
+        auto service = makeSearchService(f.appContext);
+        auto request = f.createBasicSearchRequest("programming");
+        request.pathsOnly = true;
+        auto result = runAwait(service->search(request));
+        REQUIRE(result);
+        auto recent = f.metadataRepo->getRecentSearches(10);
+        REQUIRE(recent);
+        REQUIRE(recent.value().size() == 1u);
+        CHECK(recent.value()[0].resultsCount ==
+              static_cast<int64_t>(std::max(result.value().results.size(), result.value().total)));
+    }
+
+    SECTION("enabled: a cap larger than any id keeps every entry") {
+        f.appContext.queryLogMaxEntries = std::numeric_limits<std::size_t>::max();
+        auto service = makeSearchService(f.appContext);
+        for (const char* query : {"alpha", "beta", "gamma"}) {
+            REQUIRE(runAwait(service->search(f.createBasicSearchRequest(query))));
+        }
+        auto recent = f.metadataRepo->getRecentSearches(10);
+        REQUIRE(recent);
+        REQUIRE(recent.value().size() == 3u);
+        CHECK(recent.value()[0].query == "gamma");
     }
 
     SECTION("enabled: only the newest entries up to the cap are retained") {

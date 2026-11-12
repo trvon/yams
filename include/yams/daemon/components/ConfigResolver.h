@@ -107,6 +107,8 @@ public:
     /// leaves the machine.
     struct QueryLogPolicy {
         bool enabled{true};
+        /// Largest accepted `max_entries`.
+        static constexpr std::size_t kMaxEntriesLimit = 10'000'000;
         /// Newest queries retained; older rows are deleted as new ones arrive.
         std::size_t maxEntries{20000};
         /// Rows SearchService should keep: zero when disabled.

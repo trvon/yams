@@ -1388,6 +1388,16 @@ TEST_CASE_METHOD(ConfigResolverFixture,
         CHECK(policy.maxEntries == 50u);
         CHECK(policy.effectiveMaxEntries() == 0u);
     }
+    SECTION("a negative, partly numeric or oversized cap keeps the default") {
+        for (const char* value : {"-1", "20000junk", "99999999999999999999", "10000001"}) {
+            auto configPath = writeToml(
+                "config.toml", std::string("[search.query_log]\nmax_entries = ") + value + "\n");
+            EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+            const auto policy = ConfigResolver::resolveQueryLogPolicy();
+            INFO("max_entries = " << value);
+            CHECK(policy.maxEntries == 20000u);
+        }
+    }
     SECTION("a cap that is not a number keeps the default") {
         auto configPath = writeToml("config.toml", "[search.query_log]\nmax_entries = many\n");
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());

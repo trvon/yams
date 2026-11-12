@@ -980,7 +980,8 @@ public:
         entry.query = req.query;
         entry.queryTime =
             std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-        entry.resultsCount = static_cast<int64_t>(resp.results.size());
+        // A paths-only response moves its hits out of `results` and reports them in `total`.
+        entry.resultsCount = static_cast<int64_t>(std::max(resp.results.size(), resp.total));
         entry.executionTimeMs = resp.executionTimeMs;
         if (auto recorded = ctx_.metadataRepo->recordSearchQuery(entry, ctx_.queryLogMaxEntries);
             !recorded) {
