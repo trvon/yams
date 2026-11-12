@@ -294,6 +294,15 @@ public:
     /// is resolved later only when this typed value remains absent.
     static void applySearchMaintenance(const ConfigSections& sections, DaemonConfig& config);
 
+    /// Resolve whether the daemon binary enables a model provider and loads plugins.
+    ///
+    /// Both default to on, matching the config that `yams init` and config migration write, so a
+    /// hand-written config that omits the keys still gets embeddings. `[daemon] enable` and
+    /// `[daemon] auto_load_plugins` override the defaults, `[embeddings] enable = false` turns
+    /// both off, and @p pluginsDisabledByFlag (--no-plugins) always turns plugin loading off.
+    static void applyEmbeddingProviderPolicy(const ConfigSections& sections,
+                                             bool pluginsDisabledByFlag, DaemonConfig& config);
+
     /// Apply [storage.disk_pressure] without environment overlays. Returns false when an
     /// explicitly supplied policy is invalid; config remains unchanged on failure.
     static bool applyStorageDiskPressure(const ConfigSections& sections, DaemonConfig& config);

@@ -192,9 +192,13 @@ elsewhere with `--socket`, `--data-dir`, `YAMS_DAEMON_SOCKET`, `YAMS_DATA_DIR`
 or `YAMS_CONFIG`. To keep the daemon running without a login session (for
 example on a server), enable lingering once: `sudo loginctl enable-linger "$USER"`.
 
-Plugins (ONNX embeddings, the glint entity extractor) load when your config
-enables them; `yams init` writes `auto_load_plugins = true` under `[daemon]`.
-Restart the unit after changing the config.
+Plugins (ONNX embeddings, the glint entity extractor) load by default. `yams
+init` writes `enable = true` and `auto_load_plugins = true` under `[daemon]`,
+and a config that omits either key gets the same behavior. Set
+`auto_load_plugins = false` (or start the daemon with `--no-plugins`) to skip
+external plugins; built-in embedding backends such as Simeon still work. Set
+`[embeddings] enable = false` to turn embeddings off altogether. Restart the
+unit after changing the config.
 
 The ONNX and glint plugins load the first ONNX Runtime 1.23 or newer from:
 

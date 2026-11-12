@@ -3813,6 +3813,27 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         result.message = "No embedding model configured";
         return result;
     }
+    // Without an adopted provider every queued job is marked failed by the embedding service and
+    // no vector is written; say so here instead of reporting the documents as queued or done.
+    if (ctx_.getModelProvider) {
+        std::shared_ptr<IModelProvider> provider;
+        try {
+            provider = ctx_.getModelProvider();
+        } catch (const std::exception& e) {
+            spdlog::debug("RepairService: getModelProvider failed: {}", e.what());
+        } catch (...) {
+            spdlog::debug("RepairService: getModelProvider failed");
+        }
+        if (!provider || !provider->isAvailable()) {
+            result.failed = hashes.size();
+            result.message = "No embedding provider is available; " +
+                             std::to_string(hashes.size()) +
+                             " documents were not embedded. Check [embeddings] backend/enable and "
+                             "[daemon] enable/auto_load_plugins, then `yams daemon status -d`.";
+            spdlog::warn("RepairService: {}", result.message);
+            return result;
+        }
+    }
     if (isCanceled()) {
         result.failed = hashes.size();
         result.message = "Repair canceled";

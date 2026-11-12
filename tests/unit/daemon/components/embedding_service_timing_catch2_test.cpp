@@ -1497,6 +1497,28 @@ TEST_CASE_METHOD(ServiceDerivationFixture,
         REQUIRE(filled.has_value());
         CHECK(filled.value() == nodes.size());
     }
+    SECTION("backfill reports the documents it linked once, after the backlog drains") {
+        std::vector<std::vector<std::string>> reports;
+        service->setSemanticNeighborsBackfilledCallback(
+            [&reports](const std::vector<std::string>& hashes) { reports.push_back(hashes); });
+
+        // First pass writes the edges; the report waits for a pass that finds nothing to add.
+        auto filled = service->backfillSemanticNeighborGraph("test-model", nodes.size());
+        REQUIRE(filled.has_value());
+        CHECK(filled.value() == nodes.size());
+        CHECK(reports.empty());
+        REQUIRE(writer->flush(5s).has_value());
+
+        auto drained = service->backfillSemanticNeighborGraph("test-model", nodes.size());
+        REQUIRE(drained.has_value());
+        CHECK(drained.value() == 0);
+        REQUIRE(reports.size() == 1);
+        CHECK(reports.front().size() == nodes.size());
+
+        // A settled graph stays quiet: no report, so no rebuild request, on later idle passes.
+        REQUIRE(service->backfillSemanticNeighborGraph("test-model", nodes.size()).has_value());
+        CHECK(reports.size() == 1);
+    }
     SECTION("explicit corpus rebuild uses the same scoring boundary") {
         auto rebuilt = service->rebuildSemanticNeighborGraphForCorpus("test-model");
         REQUIRE(rebuilt.has_value());

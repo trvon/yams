@@ -2394,6 +2394,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                             self->requestTopologyRebuild("embedding_batch_complete", hashes);
                         }
                     });
+                embeddingService->setSemanticNeighborsBackfilledCallback(
+                    [weakSelf](const std::vector<std::string>& hashes) {
+                        // A snapshot built before these edges existed sees those documents as
+                        // singletons; mark them dirty so the governed rebuild picks them up.
+                        if (auto self = weakSelf.lock()) {
+                            self->requestTopologyRebuild("semantic_neighbor_backfill", hashes);
+                        }
+                    });
                 embeddingService->start();
                 std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
                                            std::memory_order_release);

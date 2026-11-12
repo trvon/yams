@@ -563,6 +563,40 @@ batch_size = 8
     CHECK((*resolved.runtime.batchSize == 8));
 }
 
+TEST_CASE("ConfigResolver enables the model provider and plugin loading unless told otherwise",
+          "[daemon][components][config][embeddings][catch2]") {
+    using Sections = ConfigResolver::ConfigSections;
+    const auto resolve = [](const Sections& sections, bool noPluginsFlag = false) {
+        DaemonConfig config;
+        ConfigResolver::applyEmbeddingProviderPolicy(sections, noPluginsFlag, config);
+        return std::pair{config.enableModelProvider, config.autoLoadPlugins};
+    };
+
+    SECTION("no config, or a [daemon] section that omits the keys, gets embeddings") {
+        CHECK((resolve({}) == std::pair{true, true}));
+        CHECK((resolve({{"daemon", {{"socket_path", "/tmp/x.sock"}}},
+                        {"embeddings", {{"backend", "simeon"}, {"enable", "true"}}}}) ==
+               std::pair{true, true}));
+    }
+    SECTION("explicit keys win over the defaults") {
+        CHECK((resolve({{"daemon", {{"enable", "false"}}}}) == std::pair{false, true}));
+        CHECK((resolve({{"daemon", {{"auto_load_plugins", "false"}}}}) == std::pair{true, false}));
+        CHECK((resolve({{"daemon", {{"enable", "true"}, {"auto_load_plugins", "true"}}}}) ==
+               std::pair{true, true}));
+    }
+    SECTION("an unparseable value keeps the default") {
+        CHECK((resolve({{"daemon", {{"auto_load_plugins", "maybe"}}}}) == std::pair{true, true}));
+    }
+    SECTION("[embeddings] enable = false turns both off") {
+        CHECK((resolve({{"daemon", {{"enable", "true"}, {"auto_load_plugins", "true"}}},
+                        {"embeddings", {{"enable", "false"}}}}) == std::pair{false, false}));
+    }
+    SECTION("--no-plugins beats the config but keeps in-process providers") {
+        CHECK((resolve({{"daemon", {{"auto_load_plugins", "true"}}}}, true) ==
+               std::pair{true, false}));
+    }
+}
+
 TEST_CASE("ConfigResolver applies typed search maintenance policy with provenance",
           "[daemon][components][config][search][catch2]") {
     ConfigResolver::ConfigSections sections;

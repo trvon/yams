@@ -714,6 +714,10 @@ TEST_CASE_METHOD(
 
     RequestDispatcher dispatcher(nullptr, sm.get(), &state_);
 
+    // Queued repair only reports documents as queued when a provider can embed them.
+    sm->testing_setModelProvider(
+        std::make_shared<SelectiveFailingModelProvider>(64, "never-poison"));
+
     RepairService::Config repairCfg;
     repairCfg.enable = true;
     repairCfg.dataDir = config_.dataDir;
@@ -788,6 +792,73 @@ TEST_CASE_METHOD(
 
     repair.stop();
     drainQueue(embedChannel);
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: embedding repair fails loudly when no provider is available",
+                 "[daemon][repair][embeddings][no-provider]") {
+    TuneAdvisorRepairGuard tuneGuard;
+    auto embedChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>("embed_jobs",
+                                                                                       256);
+    REQUIRE((embedChannel != nullptr));
+    drainQueue(embedChannel);
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto repoPath = testDir_ / "repair_no_provider.db";
+    metadata::ConnectionPoolConfig poolCfg{};
+    auto pool = std::make_shared<metadata::ConnectionPool>(repoPath.string(), poolCfg);
+    REQUIRE((pool->initialize().has_value()));
+    auto repo = std::make_shared<metadata::MetadataRepository>(*pool);
+    sm->__test_setMetadataRepo(repo);
+    state_.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    metadata::DocumentInfo doc{};
+    doc.fileName = "no-provider.txt";
+    doc.filePath = (config_.dataDir / "no-provider.txt").string();
+    doc.fileExtension = "txt";
+    doc.fileSize = 24;
+    doc.sha256Hash = std::string(64, 'c');
+    doc.mimeType = "text/plain";
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+    auto idRes = repo->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+    metadata::DocumentContent content{};
+    content.documentId = idRes.value();
+    content.contentText = "content with nothing to embed it";
+    content.contentLength = static_cast<int64_t>(content.contentText.size());
+    content.extractionMethod = "test";
+    content.language = "en";
+    REQUIRE((repo->insertContent(content).has_value()));
+    REQUIRE(repo->updateDocumentExtractionStatus(idRes.value(), true,
+                                                 metadata::ExtractionStatus::Success)
+                .has_value());
+
+    RepairService::Config repairCfg;
+    repairCfg.enable = true;
+    repairCfg.dataDir = config_.dataDir;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, repairCfg);
+
+    for (const bool foreground : {false, true}) {
+        RepairRequest req;
+        req.repairEmbeddings = true;
+        req.foreground = foreground;
+        req.embeddingModel = "test-model";
+        const auto response = repair.executeRepair(req, nullptr);
+        const auto op = findOperationResult(response, "embeddings");
+        REQUIRE(op.has_value());
+        CHECK((op->succeeded == 0));
+        CHECK((op->failed == 1));
+        CHECK((op->message.find("No embedding provider is available") != std::string::npos));
+        // Nothing was queued: the embedding service would only have marked it failed.
+        InternalEventBus::EmbedJob job;
+        CHECK_FALSE(embedChannel->try_pop(job));
+    }
+
     sm->shutdown();
 }
 

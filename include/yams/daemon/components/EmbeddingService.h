@@ -114,6 +114,11 @@ public:
     /// Called with the hashes of the documents a job committed vectors for (new or re-embedded),
     /// after the vector insert and before readiness is published.
     void setEmbeddingsCommittedCallback(std::function<void(const std::vector<std::string>&)> cb);
+    /// Called with the hashes of documents whose semantic_neighbor edges the idle backfill wrote,
+    /// once the backlog is drained (or enough has accumulated). A topology snapshot built before
+    /// those edges existed is stale; this is the signal to rebuild it. Set before start.
+    void
+    setSemanticNeighborsBackfilledCallback(std::function<void(const std::vector<std::string>&)> cb);
     /// Counter that documents embedded for EmbedJob::fromRepair jobs are added to (the status
     /// field repair_embeddings_generated). Set before start; the counter must outlive the service.
     void setRepairEmbeddedCounter(std::atomic<std::uint64_t>* counter) {
@@ -182,6 +187,11 @@ private:
                                       std::function<void(const ModelLoadEvent&)>)>
         ensureModelReady_;
     std::function<void(const std::vector<std::string>&)> embeddingsCommittedCallback_;
+    std::function<void(const std::vector<std::string>&)> semanticNeighborsBackfilledCallback_;
+    // Documents the backfill wrote edges for and has not reported yet. Guarded by
+    // semanticGraphMutationMutex_.
+    std::vector<std::string> semanticBackfillUnreported_;
+    static constexpr std::size_t kSemanticBackfillReportThreshold{4096};
 
     std::atomic<bool> stop_{false};
     std::mutex stageActivityMutex_;

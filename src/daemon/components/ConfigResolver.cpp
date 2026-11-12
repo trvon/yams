@@ -1898,6 +1898,51 @@ void ConfigResolver::applySearchMaintenance(const ConfigSections& sections, Daem
     config.searchMaintenance.automaticRebuildsSource = "config:search.automatic_rebuilds";
 }
 
+void ConfigResolver::applyEmbeddingProviderPolicy(const ConfigSections& sections,
+                                                  bool pluginsDisabledByFlag,
+                                                  DaemonConfig& config) {
+    bool enableProvider = true;
+    bool autoLoad = true;
+
+    const auto readBool = [&sections](const char* sectionName, const char* key, bool& out) -> bool {
+        const auto section = sections.find(sectionName);
+        if (section == sections.end()) {
+            return false;
+        }
+        const auto value = section->second.find(key);
+        if (value == section->second.end()) {
+            return false;
+        }
+        const auto parsed = parseBoolValue(value->second);
+        if (!parsed.has_value()) {
+            spdlog::warn("Config: failed to parse {}.{} as boolean; keeping {}", sectionName, key,
+                         out);
+            return false;
+        }
+        out = *parsed;
+        return true;
+    };
+
+    readBool("daemon", "enable", enableProvider);
+    readBool("daemon", "auto_load_plugins", autoLoad);
+
+    bool embeddingsEnabled = true;
+    if (readBool("embeddings", "enable", embeddingsEnabled) && !embeddingsEnabled) {
+        // Embeddings are off: no provider, and no plugin scan to slow startup.
+        spdlog::info("Embeddings disabled in config ([embeddings].enable=false); disabling model "
+                     "provider and plugin auto-loading");
+        enableProvider = false;
+        autoLoad = false;
+    }
+
+    if (pluginsDisabledByFlag) {
+        autoLoad = false;
+    }
+
+    config.enableModelProvider = enableProvider;
+    config.autoLoadPlugins = autoLoad;
+}
+
 bool ConfigResolver::applyStorageDiskPressure(const ConfigSections& sections,
                                               DaemonConfig& config) {
     const auto section = sections.find("storage.disk_pressure");
