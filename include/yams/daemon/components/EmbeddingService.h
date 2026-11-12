@@ -164,7 +164,7 @@ private:
         const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
         const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
         const std::vector<std::pair<std::string, std::string>>& sourceDocuments,
-        bool sourceAllCorpus);
+        bool sourceAllCorpus, std::vector<std::string>* linkedSources = nullptr);
     void recordPhaseTiming(std::string_view phase, std::chrono::steady_clock::time_point start);
     void enqueueRepairStatusUpdate(std::vector<std::string> hashes, metadata::RepairStatus status,
                                    std::string source,

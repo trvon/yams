@@ -413,7 +413,8 @@ void EmbeddingService::updateSemanticNeighborGraph(
 void EmbeddingService::updateSemanticNeighborGraphUnlocked(
     const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
     const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
-    const std::vector<std::pair<std::string, std::string>>& sourceDocuments, bool sourceAllCorpus) {
+    const std::vector<std::pair<std::string, std::string>>& sourceDocuments, bool sourceAllCorpus,
+    std::vector<std::string>* linkedSources) {
     if (!kgStore || !vdb || (!sourceAllCorpus && sourceDocuments.empty())) {
         return;
     }
@@ -800,6 +801,9 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
                     continue;
                 }
 
+                if (linkedSources && kept == 0) {
+                    linkedSources->push_back(source.hash);
+                }
                 metadata::KGEdge edge;
                 edge.srcNodeId = *srcNodeId;
                 edge.dstNodeId = *dstNodeId;
@@ -1045,6 +1049,9 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
                 continue;
             }
 
+            if (linkedSources && kept == 0) {
+                linkedSources->push_back(*source.hash);
+            }
             metadata::KGEdge edge;
             edge.srcNodeId = *srcNodeId;
             edge.dstNodeId = *dstNodeId;
@@ -1203,14 +1210,17 @@ Result<std::size_t> EmbeddingService::backfillSemanticNeighborGraph(const std::s
         return std::size_t{0};
     }
 
+    // Only documents that gained an edge are reported; the counter guards the case where the
+    // edges were built but could not be handed to the write coordinator.
     const auto edgesBefore = semanticEdgesCreated_.load(std::memory_order_relaxed);
+    std::vector<std::string> linked;
     updateSemanticNeighborGraphUnlocked(kgStore, vdb, modelName, sources,
-                                        /*sourceAllCorpus=*/false);
+                                        /*sourceAllCorpus=*/false, &linked);
     const bool addedEdges = semanticEdgesCreated_.load(std::memory_order_relaxed) != edgesBefore;
     if (addedEdges && semanticNeighborsBackfilledCallback_) {
-        for (const auto& source : sources) {
-            semanticBackfillUnreported_.push_back(source.first);
-        }
+        semanticBackfillUnreported_.insert(semanticBackfillUnreported_.end(),
+                                           std::make_move_iterator(linked.begin()),
+                                           std::make_move_iterator(linked.end()));
     }
     reportBackfilled(/*backlogDrained=*/!addedEdges);
     return sources.size();

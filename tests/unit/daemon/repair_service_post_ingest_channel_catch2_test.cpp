@@ -859,6 +859,22 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         CHECK_FALSE(embedChannel->try_pop(job));
     }
 
+    // The coroutine path used for queued repairs applies the same check.
+    RepairRequest asyncReq;
+    asyncReq.repairEmbeddings = true;
+    asyncReq.foreground = false;
+    auto asyncFuture =
+        boost::asio::co_spawn(sm->getWorkerExecutor(), repair.executeRepairAsync(asyncReq, nullptr),
+                              boost::asio::use_future);
+    REQUIRE((asyncFuture.wait_for(std::chrono::seconds(5)) == std::future_status::ready));
+    const auto asyncOp = findOperationResult(asyncFuture.get(), "embeddings");
+    REQUIRE(asyncOp.has_value());
+    CHECK((asyncOp->succeeded == 0));
+    CHECK((asyncOp->failed == 1));
+    CHECK((asyncOp->message.find("No embedding provider is available") != std::string::npos));
+    InternalEventBus::EmbedJob asyncJob;
+    CHECK_FALSE(embedChannel->try_pop(asyncJob));
+
     sm->shutdown();
 }
 
