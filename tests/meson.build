@@ -689,6 +689,7 @@ if catch2_dep.found()
     'sources': files(
       'unit/daemon/daemon_components_test.cpp',
       'unit/daemon/systemd_user_unit_catch2_test.cpp',
+      'unit/daemon/daemon_client_start_catch2_test.cpp',
     ),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'components', 'concurrency'],
