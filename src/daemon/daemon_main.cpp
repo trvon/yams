@@ -823,6 +823,11 @@ int main(int argc, char* argv[]) {
         spdlog::warn("Daemon mode not supported on Windows; running in foreground.");
 #else
         startupHandshake = yams::daemon::StartupHandshake::open();
+        if (!startupHandshake) {
+            // Without it the launcher could only report "fork succeeded".
+            std::cerr << "Failed to create the daemon start-up pipe\n";
+            return 1;
+        }
         pid_t pid = fork();
         if (pid < 0) {
             std::cerr << "Failed to fork daemon process\n";
@@ -830,7 +835,7 @@ int main(int argc, char* argv[]) {
         }
         if (pid > 0) {
             // The launcher exits with the daemon's start result, not with "fork succeeded".
-            const int started = startupHandshake ? startupHandshake->await() : 0;
+            const int started = startupHandshake->await();
             if (started == 0) {
                 std::cout << "Daemon started with PID: " << pid << '\n';
             } else {
@@ -838,9 +843,7 @@ int main(int argc, char* argv[]) {
             }
             return started;
         }
-        if (startupHandshake) {
-            startupHandshake->closeReader();
-        }
+        startupHandshake->closeReader();
 
         // Child process continues as daemon
         // Create new session

@@ -111,3 +111,12 @@ TEST_CASE("lifecycle scope: --socket does not make the shared PID file authorita
     CHECK(scope.pidFile); // named by the private config
     CHECK_FALSE(scope.userUnit);
 }
+
+TEST_CASE("lifecycle scope: --pid-file alone names another daemon",
+          "[daemon][systemd-user-unit][lifecycle-scope]") {
+    // `yams daemon stop --pid-file /tmp/other.pid` must not stop the user unit.
+    const auto scope = yams::daemon::client::lifecycleScope(false, true, defaultPaths());
+    CHECK_FALSE(scope.userUnit);
+    CHECK_FALSE(scope.anyLiveDaemon);
+    CHECK(scope.pidFile);
+}

@@ -2216,9 +2216,19 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
                      "Failed to start daemon: CreateProcess error " + std::to_string(err)};
     }
 
-    // Close handles - we don't need to wait for the daemon
+    // The daemon does not detach on Windows, so there is no launcher status to wait for.
+    // Its start-up checks (locks, socket) run in the first moments; a process that has
+    // already exited by then never came up.
+    DWORD exitCode = STILL_ACTIVE;
+    const bool exitedEarly = WaitForSingleObject(pi.hProcess, 750) == WAIT_OBJECT_0 &&
+                             GetExitCodeProcess(pi.hProcess, &exitCode) != 0;
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+    if (exitedEarly) {
+        return Error{ErrorCode::InternalError, "Daemon exited during start-up (status " +
+                                                   std::to_string(exitCode) +
+                                                   "); see the daemon log"};
+    }
 
     spdlog::info("Daemon process spawned (PID: {}), client will now poll for readiness",
                  pi.dwProcessId);
@@ -2321,19 +2331,24 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     // The launched process detaches the daemon and exits with the daemon's start result
     // (0 once it holds its locks and socket). Wait for that verdict so a daemon that never
     // came up is an error here, not a later "connection refused".
-    const auto verdictDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    const auto verdictDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     int status = 0;
     bool exited = false;
-    while (std::chrono::steady_clock::now() < verdictDeadline) {
+    bool unreapable = false;
+    while (!exited && !unreapable) {
         const pid_t reaped = ::waitpid(pid, &status, WNOHANG);
         if (reaped == pid) {
             exited = true;
-            break;
+        } else if (reaped < 0 && errno != EINTR) {
+            // The host process ignores SIGCHLD, so the kernel reaped the launcher and its
+            // status is gone. The caller's readiness poll is then the only evidence.
+            unreapable = true;
+        } else if (std::chrono::steady_clock::now() >= verdictDeadline) {
+            return Error{ErrorCode::Timeout,
+                         "Daemon did not report a start result within 30s; see the daemon log"};
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        if (reaped < 0 && errno != EINTR) {
-            break; // not ours to reap (e.g. SIGCHLD ignored): outcome unknown
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     if (exited) {
         if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
@@ -2350,7 +2365,8 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
                                                        "); see the daemon log"};
         }
     } else {
-        spdlog::warn("Daemon launcher has not reported a start result yet; continuing");
+        spdlog::warn("Daemon launcher status is unavailable (SIGCHLD ignored); start result "
+                     "unknown");
     }
 
     spdlog::info("Daemon process spawned, client will now poll for readiness");
