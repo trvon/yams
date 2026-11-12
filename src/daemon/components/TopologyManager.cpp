@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <yams/config/config_helpers.h>
@@ -19,6 +20,7 @@
 #include <yams/topology/topology_factory.h>
 #include <yams/topology/topology_input_extractor.h>
 #include <yams/topology/topology_metadata_store.h>
+#include <yams/topology/topology_route_fit_stage.h>
 
 namespace yams::daemon {
 
@@ -784,6 +786,73 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         stats.issues.push_back(
             "topology rebuild produced no memberships; graph nodes or embeddings may be missing");
         return stats;
+    }
+
+    // Query-aware routing vectors, fitted before the snapshot is stored so they persist with
+    // it. Full rebuilds only: an incremental one extracts just the changed documents, and the
+    // clusters it leaves alone keep the vectors loaded with the previous snapshot.
+    if (!dryRun && stats.fullRebuild && routeFitEnabled() && deps_.embedTexts) {
+        const auto fitStart = std::chrono::steady_clock::now();
+        std::vector<std::string> logged;
+        if (const auto maxLogged = routeFitMaxLoggedQueries_.load(std::memory_order_acquire);
+            maxLogged > 0) {
+            auto recent = metadataRepo->getRecentSearches(static_cast<int>(
+                std::min<std::size_t>(maxLogged, std::numeric_limits<int>::max())));
+            if (recent) {
+                logged.reserve(recent.value().size());
+                for (auto& entry : recent.value()) {
+                    logged.push_back(std::move(entry.query));
+                }
+            }
+        }
+        // Cold start: document titles, sampled evenly across the corpus.
+        std::vector<std::string> titles;
+        const auto maxGenerated = routeFitMaxGeneratedQueries_.load(std::memory_order_acquire);
+        if (maxGenerated > 0) {
+            for (const auto& document : extracted.value()) {
+                if (const auto it = document.metadata.find("title");
+                    it != document.metadata.end() && it->second.size() >= 8) {
+                    titles.push_back(it->second);
+                }
+            }
+            if (titles.size() > maxGenerated) {
+                std::vector<std::string> sampled;
+                sampled.reserve(maxGenerated);
+                for (std::size_t i = 0; i < maxGenerated; ++i) {
+                    sampled.push_back(std::move(titles[i * titles.size() / maxGenerated]));
+                }
+                titles = std::move(sampled);
+            }
+        }
+        topology::RouteFitStageInput fitInput;
+        fitInput.documents = extracted.value();
+        fitInput.loggedQueries = logged;
+        fitInput.generatedQueries = titles;
+        fitInput.embed = deps_.embedTexts;
+        topology::RouteFitOptions fitOptions;
+        fitOptions.cancelled = [this] { return deps_.underPressure && deps_.underPressure(); };
+        auto fitted = topology::runRouteFitStage(artifacts, fitInput, fitOptions);
+        stats.routeFitMillis =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - fitStart)
+                                           .count());
+        if (!fitted) {
+            // The fit is optional: a failed or cancelled one leaves the snapshot on centroids.
+            stats.routeFitSkipReason = fitted.error().code == ErrorCode::OperationCancelled
+                                           ? "cancelled_under_pressure"
+                                           : "error:" + fitted.error().message;
+        } else {
+            stats.routeFitAdopted = fitted.value().adopted;
+            stats.routeFitClusters = fitted.value().fittedClusters;
+            stats.routeFitQueries = fitted.value().queriesUsed;
+            stats.routeFitSkipReason = fitted.value().skipReason;
+        }
+        spdlog::info("[TopologyManager] route fit: adopted={} clusters={} queries={} logged={} "
+                     "titles={} holdout_recall {:.3f} -> {:.3f} in {} ms{}{}",
+                     stats.routeFitAdopted, stats.routeFitClusters, stats.routeFitQueries,
+                     logged.size(), titles.size(), artifacts.routeFit.centroidHoldoutRecall,
+                     artifacts.routeFit.fittedHoldoutRecall, stats.routeFitMillis,
+                     stats.routeFitSkipReason.empty() ? "" : " skipped=", stats.routeFitSkipReason);
     }
 
     if (!dryRun) {

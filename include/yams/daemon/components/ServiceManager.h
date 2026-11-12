@@ -956,6 +956,10 @@ private:
     void stopWorkCoordinatorForShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void clearCachedServiceState();
     void configureTopologyRuntime();
+    /// Embeds query texts with the active embedding model for the topology route fit. Fails
+    /// when no model is available or it returns fewer vectors than texts.
+    Result<std::vector<std::vector<float>>>
+    embedTextsForTopology(std::span<const std::string> texts);
     void snapshotRuntimeTuningSources(TuningConfig& tuning, const TuningConfig* previous) const;
     void refreshRuntimeTuningStatus();
     void seedBuiltinContentExtractors();

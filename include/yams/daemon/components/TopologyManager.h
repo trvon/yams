@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -67,6 +68,14 @@ public:
         std::size_t clusterCentroidCount{0};
         std::string cellIdentity;
         std::vector<std::string> issues;
+        /// Route fit (`topology.route_fit`): whether fitted vectors were attached to the
+        /// snapshot, how many clusters got one, and otherwise why not (empty when the fit is
+        /// off or did not apply to this rebuild).
+        bool routeFitAdopted{false};
+        std::uint64_t routeFitClusters{0};
+        std::uint64_t routeFitQueries{0};
+        std::uint64_t routeFitMillis{0};
+        std::string routeFitSkipReason;
     };
 
     struct TelemetrySnapshot {
@@ -115,6 +124,13 @@ public:
         std::function<std::shared_ptr<metadata::MetadataRepository>()> getMetadataRepo;
         std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore;
         std::function<std::shared_ptr<vector::VectorDatabase>()> getVectorDatabase;
+        /// Embeds query texts in the documents' embedding space. Optional: without it the
+        /// route fit never runs.
+        std::function<Result<std::vector<std::vector<float>>>(std::span<const std::string>)>
+            embedTexts{};
+        /// True while the host is under enough pressure that optional work should stop.
+        /// Optional: without it the route fit runs to completion once started.
+        std::function<bool()> underPressure{};
     };
 
     explicit TopologyManager(Dependencies deps);
@@ -147,6 +163,17 @@ public:
     // succeeds. Default 0 = no throttle (current behavior).
     void setRebuildMinIntervalMs(std::int64_t millis) noexcept {
         rebuildMinIntervalMs_.store(millis, std::memory_order_release);
+    }
+    /// `topology.route_fit`: fit query-aware routing vectors on full rebuilds, from at most
+    /// this many logged queries and this many document titles. Off by default.
+    void setRouteFitPolicy(bool enabled, std::size_t maxLoggedQueries,
+                           std::size_t maxGeneratedQueries) noexcept {
+        routeFitEnabled_.store(enabled, std::memory_order_release);
+        routeFitMaxLoggedQueries_.store(maxLoggedQueries, std::memory_order_release);
+        routeFitMaxGeneratedQueries_.store(maxGeneratedQueries, std::memory_order_release);
+    }
+    [[nodiscard]] bool routeFitEnabled() const noexcept {
+        return routeFitEnabled_.load(std::memory_order_acquire);
     }
     void setRoutingRepresentativeCount(std::size_t count) noexcept {
         routingRepresentativeCount_.store(std::max<std::size_t>(1, count),
@@ -245,6 +272,9 @@ private:
     std::atomic<std::int64_t> lastRebuildEndSteadyMillis_{0};
     std::atomic<std::int64_t> rebuildMinIntervalMs_{0};
     std::atomic<std::size_t> routingRepresentativeCount_{1};
+    std::atomic<bool> routeFitEnabled_{false};
+    std::atomic<std::size_t> routeFitMaxLoggedQueries_{4000};
+    std::atomic<std::size_t> routeFitMaxGeneratedQueries_{2000};
     std::atomic<topology::RepresentativeRule> representativeRule_{
         topology::TopologyBuildConfig{}.representativeRule};
     std::atomic<std::size_t> sgcHops_{0};

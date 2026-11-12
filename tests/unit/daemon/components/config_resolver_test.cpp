@@ -1369,6 +1369,35 @@ road_order = "alphabetical"
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyEnginePolicy reads the route fit block",
+                 "[daemon][components][config][topology][route_fit][catch2]") {
+    SECTION("absent: every field unset, so the fit stays off") {
+        auto configPath = writeToml("config.toml", "[topology]\nengine = \"connected\"\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        CHECK_FALSE(policy.routeFitEnabled.has_value());
+        CHECK_FALSE(policy.routeFitMaxLoggedQueries.has_value());
+        CHECK_FALSE(policy.routeFitMaxGeneratedQueries.has_value());
+    }
+    SECTION("present") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology.route_fit]
+enabled = true
+max_logged_queries = 500
+max_generated_queries = 0
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        REQUIRE(policy.routeFitEnabled.has_value());
+        CHECK(*policy.routeFitEnabled);
+        REQUIRE(policy.routeFitMaxLoggedQueries.has_value());
+        CHECK(*policy.routeFitMaxLoggedQueries == 500u);
+        REQUIRE(policy.routeFitMaxGeneratedQueries.has_value());
+        CHECK(*policy.routeFitMaxGeneratedQueries == 0u);
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
                  "ConfigResolver::resolveTopologyRoutingPolicy reads populated TOML block",
                  "[daemon][components][config][topology_routing][catch2]") {
     auto configPath = writeToml("config.toml", R"TOML(

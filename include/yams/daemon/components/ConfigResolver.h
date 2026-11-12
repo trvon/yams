@@ -162,6 +162,13 @@ public:
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
         std::optional<std::size_t> routingRepresentativeCount;
+        /// `topology.route_fit.enabled`: fit query-aware routing vectors on full rebuilds.
+        /// Unset keeps it off.
+        std::optional<bool> routeFitEnabled;
+        /// `topology.route_fit.max_logged_queries` / `max_generated_queries`: training set
+        /// bounds. Unset keeps the manager's defaults.
+        std::optional<std::size_t> routeFitMaxLoggedQueries;
+        std::optional<std::size_t> routeFitMaxGeneratedQueries;
         /// `topology.representative_rule` = degree|medoid. Unset keeps Degree.
         std::optional<topology::RepresentativeRule> representativeRule;
         /// SGC feature-smoothing hops before clustering (0 disables).

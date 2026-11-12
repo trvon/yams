@@ -1096,6 +1096,15 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         if (auto it = kv.find("topology.routing_representatives"); it != kv.end()) {
             policy.routingRepresentativeCount = parseSize(it->second);
         }
+        if (auto it = kv.find("topology.route_fit.enabled"); it != kv.end()) {
+            policy.routeFitEnabled = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("topology.route_fit.max_logged_queries"); it != kv.end()) {
+            policy.routeFitMaxLoggedQueries = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.route_fit.max_generated_queries"); it != kv.end()) {
+            policy.routeFitMaxGeneratedQueries = parseSize(it->second);
+        }
         if (auto it = kv.find("topology.representative_rule"); it != kv.end()) {
             policy.representativeRule =
                 topology::parseRepresentativeRule(std::string(trimView(it->second)));
