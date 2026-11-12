@@ -36,6 +36,10 @@ struct RouteFitOptions {
     std::size_t holdoutEvery{5};
     /// Fewer fitted queries than this and the fit is not attempted.
     std::size_t minFitQueries{64};
+    /// Clusters with fewer documents keep their centroid. A one-document cluster's centroid is
+    /// that document, so cosine to it already equals the support function; a correction could
+    /// only add noise, and storing one would cost a vector per document.
+    std::size_t minClusterDocuments{3};
     /// Polled between queries and between strengths; returning true abandons the fit.
     std::function<bool()> cancelled{};
 };
@@ -43,6 +47,9 @@ struct RouteFitOptions {
 struct RouteFitReport {
     /// One row per cluster. Equal to the centroids when `adopted` is false.
     std::vector<float> routeVectors;
+    /// One entry per cluster: nonzero where the row differs from the centroid. All zero when
+    /// `adopted` is false.
+    std::vector<std::uint8_t> clusterFitted;
     /// True when the fitted vectors beat the centroids on the held-out queries.
     bool adopted{false};
     double chosenStrength{0.0};

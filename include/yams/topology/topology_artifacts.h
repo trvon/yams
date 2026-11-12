@@ -341,10 +341,12 @@ struct ClusterArtifact {
     std::vector<float> centroidEmbedding{};
     // Additional bounded representatives; centroidEmbedding is always the implicit first one.
     std::vector<ClusterRoutingRepresentative> routingRepresentatives{};
-    /// Query-fitted routing vector (see topology_route_fit.h). When every cluster that has a
-    /// centroid also carries one of the query's dimension, the dense route scores each cluster
-    /// by the dot product of the unit query with this vector, in place of cosine to the
-    /// centroid and representatives. Its length is meaningful, so it is never normalized.
+    /// Query-fitted routing vector (see topology_route_fit.h). A cluster that carries one of
+    /// the query's dimension is scored on the dense route by the dot product of the unit query
+    /// with it, in place of cosine to its centroid and representatives. Its length is
+    /// meaningful, so it is never normalized. Both scores estimate the same quantity (the best
+    /// member's cosine to the query), so fitted and unfitted clusters rank on one scale; small
+    /// clusters are left unfitted because their centroid is already that estimate.
     /// In-memory only: no codec or fingerprint reads it, and a decoded snapshot has none.
     std::vector<float> fittedRouteVector{};
     /// Walk order over the hash-sorted `memberDocumentHashes`: `orderedMembers[i]` is the index

@@ -224,7 +224,48 @@ TEST_CASE("fitRouteVectors rejects inconsistent input and honours cancellation",
     }
 }
 
-TEST_CASE("SparseGuidedClusterRouter scores by fitted vectors only when every cluster has one",
+TEST_CASE("fitRouteVectors leaves clusters below the size threshold on their centroid",
+          "[topology][route-fit][catch2]") {
+    const auto scenario = makeScenario(400, 11);
+
+    SECTION("every cluster too small: nothing changes") {
+        RouteFitOptions options;
+        options.minClusterDocuments = 14; // generated clusters hold 13 documents
+        auto fitted = fitRouteVectors(inputOf(scenario), options);
+        REQUIRE(fitted.has_value());
+        CHECK_FALSE(fitted.value().adopted);
+        CHECK(fitted.value().routeVectors == scenario.centroids);
+        for (const auto flag : fitted.value().clusterFitted) {
+            CHECK(flag == 0);
+        }
+    }
+
+    SECTION("one cluster too small: only it keeps its centroid") {
+        // Leave two documents in cluster 0 and move the rest to cluster 1.
+        auto mixed = scenario;
+        std::size_t kept = 0;
+        for (auto& cluster : mixed.clusterOfKey) {
+            if (cluster == 0 && kept++ >= 2) {
+                cluster = 1;
+            }
+        }
+        auto fitted = fitRouteVectors(inputOf(mixed));
+        REQUIRE(fitted.has_value());
+        const auto& report = fitted.value();
+        REQUIRE(report.clusterFitted.size() == mixed.clusters);
+        if (report.adopted) {
+            CHECK(report.clusterFitted[0] == 0);
+            CHECK(report.clusterFitted[1] == 1);
+            for (std::size_t i = 0; i < kDim; ++i) {
+                CHECK(report.routeVectors[i] == mixed.centroids[i]);
+            }
+        } else {
+            CHECK(report.routeVectors == mixed.centroids);
+        }
+    }
+}
+
+TEST_CASE("SparseGuidedClusterRouter scores a cluster by its fitted vector when it has one",
           "[topology][route-fit][catch2]") {
     TopologyArtifactBatch artifacts;
     const auto addCluster = [&](std::string id, std::vector<float> centroid) {
@@ -251,18 +292,24 @@ TEST_CASE("SparseGuidedClusterRouter scores by fitted vectors only when every cl
         return routes.value().front().clusterId;
     };
 
-    // Centroid routing: the query points along cluster a.
+    // Centroid routing: the query points along cluster a (cosine about 0.99).
     CHECK(top() == "a");
 
-    // Only one cluster fitted: scales would not be comparable, so centroids still decide.
-    artifacts.clusters[1].fittedRouteVector = {5.0F, 0.0F};
+    // b fitted with a vector that estimates less than a's cosine: a still leads.
+    artifacts.clusters[1].fittedRouteVector = {0.5F, 0.0F};
     CHECK(top() == "a");
 
-    // Both fitted: the dot product decides, and length matters.
+    // b fitted to estimate more than a's cosine: it outranks the unfitted a. Fitted and
+    // unfitted clusters rank on one scale.
+    artifacts.clusters[1].fittedRouteVector = {1.05F, 0.0F};
+    CHECK(top() == "b");
+
+    // a fitted low as well: the dot products decide, and length matters.
     artifacts.clusters[0].fittedRouteVector = {0.1F, 0.0F};
     CHECK(top() == "b");
 
-    // A fitted vector of the wrong dimension disables fitted scoring again.
-    artifacts.clusters[0].fittedRouteVector = {0.1F, 0.0F, 0.0F};
+    // A fitted vector of the wrong dimension is ignored for that cluster only.
+    artifacts.clusters[1].fittedRouteVector = {1.05F, 0.0F, 0.0F};
+    artifacts.clusters[0].fittedRouteVector.clear();
     CHECK(top() == "a");
 }

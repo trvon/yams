@@ -1028,36 +1028,20 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
         }
     }
 
-    // Fitted and cosine scores are on different scales, so fitted vectors are used only when
-    // the whole partition has them.
-    const bool useFittedRouteVectors =
-        queryNorm > 0.0F && !artifacts.clusters.empty() &&
-        std::ranges::all_of(artifacts.clusters,
-                            [&](const ClusterArtifact& cluster) {
-                                return cluster.centroidEmbedding.empty()
-                                           ? cluster.fittedRouteVector.empty()
-                                           : cluster.fittedRouteVector.size() ==
-                                                 request.queryEmbedding.size();
-                            }) &&
-        std::ranges::any_of(artifacts.clusters, [](const ClusterArtifact& cluster) {
-            return !cluster.fittedRouteVector.empty();
-        });
-
     for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size(); ++clusterIndex) {
         if (!routeCandidates[clusterIndex] || alpha >= 1.0F) {
             continue;
         }
         const auto& cluster = artifacts.clusters[clusterIndex];
-        if (useFittedRouteVectors) {
-            if (!cluster.fittedRouteVector.empty()) {
-                const auto fitted =
-                    dotProduct(request.queryEmbedding, cluster.fittedRouteVector) / queryNorm;
-                signals[clusterIndex].dense = std::clamp((fitted + 1.0F) * 0.5F, 0.0F, 1.0F);
-                signals[clusterIndex].denseObserved = true;
-                if (work != nullptr) {
-                    ++work->representativeDistanceEvaluations;
-                    ++work->exactRepresentativeDistanceEvaluations;
-                }
+        if (queryNorm > 0.0F && !cluster.fittedRouteVector.empty() &&
+            cluster.fittedRouteVector.size() == request.queryEmbedding.size()) {
+            const auto fitted =
+                dotProduct(request.queryEmbedding, cluster.fittedRouteVector) / queryNorm;
+            signals[clusterIndex].dense = std::clamp((fitted + 1.0F) * 0.5F, 0.0F, 1.0F);
+            signals[clusterIndex].denseObserved = true;
+            if (work != nullptr) {
+                ++work->representativeDistanceEvaluations;
+                ++work->exactRepresentativeDistanceEvaluations;
             }
             continue;
         }

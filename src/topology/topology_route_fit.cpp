@@ -125,6 +125,15 @@ Result<RouteFitReport> fitRouteVectors(const RouteFitInput& input, const RouteFi
 
     RouteFitReport report;
     report.routeVectors.assign(input.centroids.begin(), input.centroids.end());
+    report.clusterFitted.assign(clusters, 0);
+    std::vector<std::size_t> clusterDocuments(clusters, 0);
+    for (const auto cluster : input.clusterOfKey) {
+        ++clusterDocuments[cluster];
+    }
+    std::vector<std::uint8_t> eligible(clusters, 0);
+    for (std::size_t c = 0; c < clusters; ++c) {
+        eligible[c] = clusterDocuments[c] >= options.minClusterDocuments ? 1 : 0;
+    }
     report.recallDepth = std::min(kRecallDepth, clusters);
 
     const std::size_t holdoutEvery = std::max<std::size_t>(2, options.holdoutEvery);
@@ -175,11 +184,12 @@ Result<RouteFitReport> fitRouteVectors(const RouteFitInput& input, const RouteFi
         const float* query = input.queries.data() + q * d;
         for (std::size_t c = 0; c < clusters; ++c) {
             const float h = support[q * clusters + c];
-            // An empty cluster has no support value; leave its centroid alone.
+            // Small and empty clusters keep their centroid: a zero residual fits no correction.
             residual[c] =
-                h < -1.5F ? 0.0
-                          : static_cast<double>(h) -
-                                static_cast<double>(dot(query, input.centroids.data() + c * d, d));
+                (eligible[c] == 0 || h < -1.5F)
+                    ? 0.0
+                    : static_cast<double>(h) -
+                          static_cast<double>(dot(query, input.centroids.data() + c * d, d));
         }
         for (std::size_t i = 0; i < d; ++i) {
             const double qi = query[i];
@@ -216,6 +226,10 @@ Result<RouteFitReport> fitRouteVectors(const RouteFitInput& input, const RouteFi
             continue;
         }
         for (std::size_t c = 0; c < clusters; ++c) {
+            if (eligible[c] == 0) {
+                std::copy_n(input.centroids.data() + c * d, d, candidate.data() + c * d);
+                continue;
+            }
             for (std::size_t i = 0; i < d; ++i) {
                 rhs[i] = moments[i * clusters + c];
             }
@@ -230,6 +244,7 @@ Result<RouteFitReport> fitRouteVectors(const RouteFitInput& input, const RouteFi
             report.fittedHoldoutRecall = recall;
             report.chosenStrength = strength;
             report.routeVectors = candidate;
+            report.clusterFitted = eligible;
             report.adopted = true;
         }
     }
