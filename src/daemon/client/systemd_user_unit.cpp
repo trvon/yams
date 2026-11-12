@@ -24,7 +24,7 @@ bool userUnitMatchesPaths(const yams::config::ResolvedRuntimePaths& paths) {
 LifecycleScope lifecycleScope(bool socketFlag, bool pidFileFlag,
                               const yams::config::ResolvedRuntimePaths& paths) {
     using yams::config::RuntimePathSource;
-    const bool defaultDaemon = !socketFlag && userUnitMatchesPaths(paths);
+    const bool defaultDaemon = !socketFlag && !pidFileFlag && userUnitMatchesPaths(paths);
     LifecycleScope scope;
     scope.userUnit = defaultDaemon;
     scope.anyLiveDaemon = defaultDaemon;

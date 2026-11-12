@@ -153,7 +153,7 @@ public:
         auto* start = daemon->add_subcommand("start", "Start the YAMS daemon");
         start->add_option("--socket", socketPath_, "Socket path for daemon communication");
         start->add_option("--data-dir,--storage", dataDir_, "Data directory for daemon storage");
-        start->add_option("--pid-file", pidFile_, "PID file path");
+        start->add_option("--pid-file", pidFileOption_, "PID file path");
         start
             ->add_option("--log-level", startLogLevel_,
                          "Daemon log level (trace, debug, info, warn, error)")
@@ -169,7 +169,7 @@ public:
         // Stop command
         auto* stop = daemon->add_subcommand("stop", "Stop the YAMS daemon");
         stop->add_option("--socket", socketPath_, "Socket path for daemon communication");
-        stop->add_option("--pid-file", pidFile_, "PID file path");
+        stop->add_option("--pid-file", pidFileOption_, "PID file path");
         stop->add_flag("--force", force_, "Force stop (kill -9)");
 
         stop->callback([this]() {
@@ -189,7 +189,7 @@ public:
         // Restart command
         auto* restart = daemon->add_subcommand("restart", "Restart the YAMS daemon");
         restart->add_option("--socket", socketPath_, "Socket path for daemon communication");
-        restart->add_option("--pid-file", pidFile_, "PID file path");
+        restart->add_option("--pid-file", pidFileOption_, "PID file path");
         restart->add_flag("--force", force_, "Force stop (kill -9)");
 
         restart->callback([this]() { restartDaemon(); });
@@ -198,7 +198,7 @@ public:
         auto* doctor =
             daemon->add_subcommand("doctor", "Diagnose daemon IPC and environment issues");
         doctor->add_option("--socket", socketPath_, "Socket path for daemon communication");
-        doctor->add_option("--pid-file", pidFile_, "PID file path");
+        doctor->add_option("--pid-file", pidFileOption_, "PID file path");
         doctor->callback([this]() { doctorDaemon(); });
 
         // Log subcommand
@@ -767,7 +767,8 @@ private:
     }
 
     std::string resolveConfiguredPidFilePath() const {
-        return pidFile_.empty() ? YamsCLI::resolveConfiguredDaemonPidFilePath().string() : pidFile_;
+        return pidFileOption_.empty() ? YamsCLI::resolveConfiguredDaemonPidFilePath().string()
+                                      : pidFileOption_;
     }
 
     // Which daemon stop/restart may act on, from the flags given and the resolved paths.
@@ -775,6 +776,8 @@ private:
         yams::config::RuntimePathOverrides overrides;
         if (!dataDir_.empty()) {
             overrides.dataDir = dataDir_;
+        } else if (cli_ && cli_->hasExplicitDataDir()) {
+            overrides.dataDir = cli_->getDataPath(); // `yams --data-dir X daemon stop`
         }
         if (!startConfigPath_.empty()) {
             overrides.configFile = startConfigPath_;
@@ -783,17 +786,17 @@ private:
         if (!paths) {
             // Unknown target: act only on what was named explicitly.
             yams::daemon::client::LifecycleScope narrow;
-            narrow.pidFile = !pidFile_.empty();
+            narrow.pidFile = !pidFileOption_.empty();
             return narrow;
         }
-        return yams::daemon::client::lifecycleScope(!socketPath_.empty(), !pidFile_.empty(),
+        return yams::daemon::client::lifecycleScope(!socketPath_.empty(), !pidFileOption_.empty(),
                                                     paths.value());
     }
 
     // The packaged systemd user unit runs the default daemon (default paths, default binary).
     bool customDaemonOptions() const {
         return !socketPath_.empty() || !dataDir_.empty() || !startConfigPath_.empty() ||
-               !startDaemonBinary_.empty() || !pidFile_.empty();
+               !startDaemonBinary_.empty() || !pidFileOption_.empty();
     }
 
     static bool packagedUserUnitInstalled() {
@@ -2486,7 +2489,8 @@ private:
 
     // Options (empty = auto-resolve based on environment)
     std::string socketPath_;
-    std::string pidFile_;
+    std::string pidFileOption_; // --pid-file as given; never a resolved default
+    std::string pidFile_;       // PID file the current operation works with
     bool foreground_ = false;
     bool force_ = false;
     bool detailed_ = false;
