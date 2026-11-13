@@ -241,7 +241,14 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
     }
 
     const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    // Keep AF_UNIX paths below macOS's sockaddr_un limit (104) even when TMPDIR is long. Under
+    // the runner's TMPDIR this socket path was 114 characters, the daemon never started, and
+    // `daemon start` exiting 0 regardless hid it.
+#ifdef _WIN32
     const fs::path root = fs::temp_directory_path() / ("yams_cli_status_regression_" + unique);
+#else
+    const fs::path root = fs::path("/tmp") / ("yams_start_" + unique);
+#endif
     const fs::path dataDir = root / "data";
     const fs::path runtimeDir = root / "runtime";
     const fs::path socketPath = runtimeDir / "yams-daemon.sock";
