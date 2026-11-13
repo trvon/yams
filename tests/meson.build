@@ -1178,6 +1178,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'session_watcher',
+    'sources': files('unit/daemon/session_watcher_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'session-watch'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'service_manager',
     'sources': files('unit/daemon/service_manager_catch2_test.cpp'),
     'deps': test_deps,
@@ -2160,6 +2168,7 @@ if catch2_dep.found()
       'unit/cli/error_format_contract_catch2_test.cpp',
       'unit/cli/exit_code_contract_catch2_test.cpp',
       'unit/cli/grep_output_contract_catch2_test.cpp',
+      'unit/cli/watch_command_catch2_test.cpp',
       # init_command_catch2_test.cpp runs in its own cli_init_command target (serial).
       'unit/cli/name_resolution_contract_catch2_test.cpp',
       'unit/cli/search_no_match_contract_catch2_test.cpp',

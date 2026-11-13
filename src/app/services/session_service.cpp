@@ -78,7 +78,8 @@ public:
     std::vector<std::string> listSessions() const override {
         std::vector<std::string> out;
         for (auto& e : std::filesystem::directory_iterator(sessions_dir())) {
-            if (e.is_regular_file() && e.path().extension() == ".json")
+            // index.json records which session is current; it is not a session.
+            if (e.is_regular_file() && e.path().extension() == ".json" && e.path() != index_path())
                 out.push_back(e.path().stem().string());
         }
         return out;
@@ -485,6 +486,14 @@ public:
         }
         save_json(p, j);
         use(name);
+    }
+
+    void clearCurrent() override {
+        json idx = load_json(index_path());
+        if (idx.contains("current")) {
+            idx.erase("current");
+            save_json(index_path(), idx);
+        }
     }
 
     void close() override {

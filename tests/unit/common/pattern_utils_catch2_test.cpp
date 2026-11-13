@@ -178,3 +178,49 @@ TEST_CASE("common::gitignore patterns prune ignored working-tree paths",
     CHECK_FALSE(matchesGitignore("nested/config/generated/cache.bin", patterns));
     CHECK_FALSE(matchesGitignore("src/search.cpp", patterns));
 }
+
+TEST_CASE("PathPatternSet answers like matching each pattern in turn", "[common][pattern]") {
+    using yams::common::glob_match_path;
+    using yams::common::PathPatternSet;
+
+    std::istringstream gitignore("build/\n*.o\n/dist\ndocs/**/*.tmp\n# note\n!keep.o\n"
+                                 "third_party/{a,b}/gen\n.cache\n");
+    const auto patterns = yams::common::parseGitignorePatterns(gitignore);
+    const PathPatternSet prepared(patterns);
+    REQUIRE_FALSE(prepared.empty());
+
+    const std::vector<std::string> paths{
+        "build",
+        "build/x/y.cpp",
+        "src/build/x",
+        "main.o",
+        "src/deep/a.o",
+        "dist",
+        "src/dist",
+        "docs/a/b/c.tmp",
+        "docs/c.tmp",
+        "third_party/a/gen",
+        "third_party/c/gen",
+        ".cache",
+        "x/.cache/y",
+        "src/main.cpp",
+        "",
+        "a\\b\\main.o",
+        "./build/x",
+        "dist/file",
+    };
+    for (const auto& path : paths) {
+        bool anyPattern = false;
+        for (const auto& pattern : patterns) {
+            anyPattern = anyPattern || glob_match_path(path, pattern);
+        }
+        INFO("path: '" << path << "'");
+        CHECK(prepared.matches(path) == anyPattern);
+        CHECK(yams::common::matchesGitignore(path, prepared) ==
+              yams::common::matchesGitignore(path, patterns));
+    }
+    CHECK(prepared.matches("build/x/y.cpp"));
+    CHECK(prepared.matches("src/deep/a.o"));
+    CHECK_FALSE(prepared.matches("src/main.cpp"));
+    CHECK_FALSE(PathPatternSet{}.matches("anything"));
+}

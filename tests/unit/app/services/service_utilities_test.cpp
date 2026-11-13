@@ -6,6 +6,8 @@
 #include "../../../common/env_compat.h"
 #include "../../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
+
+#include <algorithm>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/list_input_resolver.hpp>
 #include <yams/app/services/path_projection.hpp>
@@ -54,6 +56,26 @@ TEST_CASE("SessionService - Configuration and State", "[session][service][config
 
         CHECK(svc->watchEnabled());
         CHECK((svc->watchIntervalMs() >= 1000u));
+    }
+
+    SECTION("Listing sessions leaves out the index file") {
+        auto root = createTempStateRoot();
+        yams::test::ScopedEnvVar stateHome{"XDG_STATE_HOME", root.string()};
+
+        AppContext ctx;
+        auto svc = makeSessionService(&ctx);
+        svc->init("alpha", "");
+        svc->init("beta", "");
+
+        // sessions/index.json records the current session; it is not a session.
+        // The state root may hold sessions from other sections.
+        const auto names = svc->listSessions();
+        const auto has = [&](const char* name) {
+            return std::find(names.begin(), names.end(), name) != names.end();
+        };
+        CHECK(has("alpha"));
+        CHECK(has("beta"));
+        CHECK_FALSE(has("index"));
     }
 
     SECTION("Session initialization and selectors") {

@@ -9,6 +9,7 @@
 #include <boost/system/error_code.hpp>
 
 #include "common/test_data_generator.h"
+#include "common/test_helpers_catch2.h"
 
 #include <array>
 #include <chrono>
@@ -24,9 +25,11 @@
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
@@ -838,6 +841,65 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
         }
         CHECK(counts == std::map<std::string, std::size_t>{{"one.txt", 1}, {"two.txt", 2}});
     }
+}
+
+TEST_CASE_METHOD(GrepServiceExpectationsFixture,
+                 "Session watcher indexes a watched directory in a running daemon",
+                 "[integration][services][session_watch]") {
+    // The only case that runs the watcher loop for real: every other suite disables it.
+    yams::test::ScopedEnvVar enableWatcher{"YAMS_DISABLE_SESSION_WATCHER", std::string("0")};
+    // A busy CI host must not postpone the pass this case waits for.
+    yams::daemon::TuneAdvisor::setBackgroundMaxDeferralMs(0);
+    struct RestoreDeferral {
+        ~RestoreDeferral() { yams::daemon::TuneAdvisor::resetBackgroundMaxDeferralMs(); }
+    } restoreDeferral;
+
+    const auto watched = yams::test::make_temp_dir("yams_watch_live_");
+    std::ofstream(watched / "first.txt") << "watchneedlealpha in the first file\n";
+
+    // No current session: watching belongs to the session, not to "current".
+    auto sessions = yams::app::services::makeSessionService(nullptr);
+    REQUIRE(sessions);
+    sessions->init("watched-project", "");
+    sessions->addPathSelector(watched.string(), {}, {});
+    sessions->enableWatch(true, "watched-project");
+    sessions->setWatchIntervalMs(200, "watched-project");
+    sessions->clearCurrent();
+
+    start();
+
+    yams::app::services::RetrievalService retrievalSvc;
+    yams::app::services::RetrievalOptions retrievalOpts;
+    retrievalOpts.socketPath = socketPath();
+    retrievalOpts.explicitDataDir = storageDir();
+    const auto grepFinds = [&](const std::string& pattern, const std::string& fileName) {
+        yams::app::services::GrepOptions request;
+        request.pattern = pattern;
+        request.regexOnly = true;
+        for (int attempt = 0; attempt < 300; ++attempt) {
+            if (auto found = retrievalSvc.grep(request, retrievalOpts)) {
+                for (const auto& match : found.value().matches) {
+                    if (fs::path(match.file).filename() == fileName) {
+                        return true;
+                    }
+                }
+            }
+            std::this_thread::sleep_for(100ms);
+        }
+        return false;
+    };
+
+    CHECK(grepFinds("watchneedlealpha", "first.txt"));
+
+    // A file created while the daemon runs is picked up by a later pass.
+    std::ofstream(watched / "second.txt") << "watchneedlebeta in the second file\n";
+    CHECK(grepFinds("watchneedlebeta", "second.txt"));
+
+    // What the watcher has seen is persisted next to the store it describes.
+    std::error_code ec;
+    CHECK(fs::exists(storageDir() / "watch", ec));
+
+    fs::remove_all(watched, ec);
 }
 
 TEST_CASE_METHOD(GrepServiceExpectationsFixture,

@@ -78,6 +78,8 @@ public:
     virtual void create(const std::string& name, const std::string& desc) = 0;
     virtual void open(const std::string& name) = 0;
     virtual void close() = 0;
+    /// Forget which session is current without closing it or changing its state.
+    virtual void clearCurrent() {}
     virtual SessionState getState(const std::string& name) const = 0;
     virtual std::optional<SessionInfo> getSessionInfo(const std::string& name) const = 0;
     virtual std::vector<SessionInfo> listAllSessions() const = 0;
