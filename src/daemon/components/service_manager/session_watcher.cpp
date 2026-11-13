@@ -102,9 +102,20 @@ std::chrono::milliseconds ServiceManager::runSessionWatcherIteration() {
 boost::asio::awaitable<void>
 ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
     auto executor = co_await boost::asio::this_coro::executor;
-    boost::asio::steady_timer timer(executor);
+    // Shared with stopSessionWatcherForShutdown(), which cancels it: a wait can be minutes
+    // long, and shutdown must not leave this coroutine asleep and holding `this`.
+    const auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+    {
+        std::lock_guard lock(sessionWatcherTimerMutex_);
+        sessionWatcherTimer_ = timer;
+    }
+    // The stop token's fallback never reports a stop, so the flag decides.
+    const auto stopping = [&] {
+        return token.stop_requested() ||
+               sessionWatcherStopRequested_.load(std::memory_order_acquire);
+    };
 
-    while (!token.stop_requested()) {
+    while (!stopping()) {
         auto waitDuration = sessionWatcherDelay(false, 0);
         try {
             waitDuration = runSessionWatcherIteration();
@@ -126,14 +137,23 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
                 "[ServiceManager] retrieval-session cleanup failed with unknown exception");
         }
 
+        if (stopping()) {
+            break; // requested during the pass, before the timer was armed
+        }
         boost::system::error_code error;
-        timer.expires_after(waitDuration);
-        co_await timer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, error));
-        if (token.stop_requested() || error == boost::asio::error::operation_aborted) {
+        timer->expires_after(waitDuration);
+        sessionWatcherWaiting_.store(true, std::memory_order_release);
+        co_await timer->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, error));
+        sessionWatcherWaiting_.store(false, std::memory_order_release);
+        if (stopping() || error == boost::asio::error::operation_aborted) {
             break;
         }
     }
 
+    {
+        std::lock_guard lock(sessionWatcherTimerMutex_);
+        sessionWatcherTimer_.reset();
+    }
     co_return;
 }
 

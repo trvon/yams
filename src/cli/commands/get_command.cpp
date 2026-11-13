@@ -1,4 +1,5 @@
 #include <nlohmann/json.hpp>
+
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cstring>
@@ -9,6 +10,7 @@
 #include <optional>
 #include <sstream>
 #include <vector>
+#include "get_response_json.h"
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
@@ -47,7 +49,7 @@ public:
     std::string getDescription() const override {
         return "Retrieve a document from the content store (usage: yams get <path|hash> or yams "
                "get --name <path>). When multiple instances exist, returns the most recent by "
-               "default.";
+               "default. Use --json for original UTF-8 content and provenance.";
     }
 
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
@@ -57,12 +59,15 @@ public:
         if (cli_)
             cli_->registerReadOptions(*cmd);
 
-        // Create option group for retrieval methods (only one can be used at a time)
+        // Choose one selector or discovery filter. Compound selection belongs in list.
         auto* group = cmd->add_option_group("retrieval_method");
         auto* positional = group->add_option("target", target_, "Document hash or path");
         positional->type_name("HASH|PATH");
-        group->add_option("--name", name_, "Name of the document to retrieve (explicit flag form)");
-        group->add_option("--hash", hash_, "Hash of the document to retrieve (explicit flag form)");
+        group->add_option("--name", name_, "Name of the document to retrieve (explicit flag form)")
+            ->excludes(positional);
+        group->add_option("--hash", hash_, "Hash of the document to retrieve (explicit flag form)")
+            ->excludes(positional)
+            ->excludes("--name");
 
         // File type filters
         group->add_option("--type", fileType_,
@@ -72,7 +77,7 @@ public:
                           "Filter by MIME type (e.g., image/jpeg, application/pdf)");
         group->add_option("--extension", extension_, "Filter by file extension (e.g., .jpg, .pdf)");
         group->add_flag("--binary", binaryOnly_, "Get only binary files");
-        group->add_flag("--text", textOnly_, "Get only text files");
+        group->add_flag("--text", textOnly_, "Get only text files")->excludes("--binary");
 
         // Time filters
         group->add_option("--created-after", createdAfter_, "Get files created after this time");
@@ -83,7 +88,7 @@ public:
         group->add_option("--indexed-after", indexedAfter_, "Get files indexed after this time");
         group->add_option("--indexed-before", indexedBefore_, "Get files indexed before this time");
 
-        // Require at least one filter/selector
+        // Preserve the single-selector contract; rendering controls are independent.
         group->require_option(1);
 
         cmd->add_option("-o,--output", outputPath_, "Output file path (default: stdout)");
@@ -92,16 +97,19 @@ public:
         cmd->add_option("--max-bytes", maxBytes_, "Maximum bytes to transfer (0 = unlimited)")
             ->default_val(0);
         cmd->add_option("--chunk-size", chunkSize_, "Streaming chunk size in bytes")
-            ->default_val(262144);
+            ->default_val(262144)
+            ->check(CLI::PositiveNumber);
         cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
         cmd->add_flag("--latest", getLatest_,
                       "Get the most recently indexed matching document (default when multiple "
                       "matches exist)");
-        cmd->add_flag("--oldest", getOldest_, "Get the oldest indexed matching document");
+        cmd->add_flag("--oldest", getOldest_, "Get the oldest indexed matching document")
+            ->excludes("--latest");
 
         // Text extraction options
         cmd->add_flag("--raw", raw_, "Output raw content without text extraction");
-        cmd->add_flag("--extract", extract_, "Force text extraction even when piping to file");
+        cmd->add_flag("--extract", extract_, "Force text extraction even when piping to file")
+            ->excludes("--raw");
 
         // Knowledge graph options
         cmd->add_flag("--graph", showGraph_, "Show related documents from knowledge graph");
@@ -117,7 +125,10 @@ public:
     }
 
     Result<void> execute() override {
-        OutputBudget outputBudget(std::cout, cli_ ? cli_->outputBudgetChars() : 0);
+        // A JSON document cut at the budget, with a marker appended, is not JSON. JSON mode
+        // writes the whole document or fails.
+        const bool jsonDocument = cli_ && cli_->getJsonOutput();
+        OutputBudget outputBudget(std::cout, cli_ && !jsonDocument ? cli_->outputBudgetChars() : 0);
         YAMS_ZONE_SCOPED_N("GetCommand::execute");
 
         try {
@@ -209,6 +220,20 @@ public:
                 }
             }
 
+            const bool jsonOutput = cli_->getJsonOutput();
+            if (jsonOutput && !metadataOnly_ && (maxBytes_ != 0 || slice_.active())) {
+                // Schema v1 promises the complete original bytes; emitting the whole
+                // document while a limit was asked for would ignore the request silently.
+                return Error{ErrorCode::InvalidArgument,
+                             "JSON get returns the complete document; omit --max-bytes, --lines "
+                             "and --around, or use --metadata-only"};
+            }
+            if (jsonOutput && extract_) {
+                return Error{ErrorCode::InvalidArgument,
+                             "JSON get currently supports original UTF-8 content only; "
+                             "omit --extract or use non-JSON get for extracted text"};
+            }
+
             // Create enhanced daemon request with ALL CLI options mapped
             yams::app::services::GetOptions dreq;
 
@@ -241,10 +266,11 @@ public:
             dreq.oldest = getOldest_;
 
             // Output options
-            dreq.outputPath = outputPath_.string();
+            // JSON output is written by the renderer, not as raw bytes by the service.
+            dreq.outputPath = jsonOutput ? std::string{} : outputPath_.string();
             dreq.metadataOnly = metadataOnly_;
             dreq.maxBytes = slice_.active() ? 0 : maxBytes_;
-            dreq.chunkSize = static_cast<uint32_t>(chunkSize_);
+            dreq.chunkSize = chunkSize_;
 
             // Content options
             dreq.raw = raw_;
@@ -267,6 +293,28 @@ public:
                 spdlog::debug("GetCommand: Processing daemon response (hash='{}', hasContent={}, "
                               "graphRelated={})",
                               resp.hash, resp.hasContent, resp.related.size());
+
+                if (jsonOutput) {
+                    auto serialized = serializeGetResponse(resp, metadataOnly_);
+                    if (!serialized) {
+                        return serialized.error();
+                    }
+                    if (outputPath_.empty() || outputPath_ == "-") {
+                        std::cout << serialized.value();
+                        if (!std::cout) {
+                            return Error{ErrorCode::WriteError, "Cannot write JSON to stdout"};
+                        }
+                    } else {
+                        std::ofstream file(outputPath_, std::ios::binary);
+                        file << serialized.value();
+                        file.close();
+                        if (!file) {
+                            return Error{ErrorCode::WriteError,
+                                         "Cannot write JSON output: " + outputPath_.string()};
+                        }
+                    }
+                    return Result<void>();
+                }
 
                 if (metadataOnly_) {
                     // Metadata-only display
@@ -1089,8 +1137,8 @@ private:
     // Daemon streaming options
     bool metadataOnly_ = false;
     ContentSliceOptions slice_;
-    uint64_t maxBytes_ = 0;     // 0 = unlimited
-    size_t chunkSize_ = 262144; // 256KB default
+    uint64_t maxBytes_ = 0;       // 0 = unlimited
+    uint32_t chunkSize_ = 262144; // IPC field width; CLI11 rejects overflow
 };
 
 // Factory function

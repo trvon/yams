@@ -1261,6 +1261,36 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager shutdown wakes a session watcher that is waiting",
+                 "[daemon][service_manager][session_watch]") {
+    // The watcher sleeps between passes, up to minutes for a tree it refused. Shutdown set
+    // a stop flag nothing was looking at, waited three seconds, and left the coroutine
+    // asleep with a pointer to the ServiceManager.
+    ServiceManager serviceManager(config_, state_, lifecycleFsm_);
+    boost::asio::io_context io;
+    auto work = boost::asio::make_work_guard(io);
+    std::thread runner([&io] { io.run(); });
+
+    serviceManager.__test_startSessionWatcherOn(io.get_executor());
+    // Nothing is watched here, so after its first pass the watcher waits two seconds.
+    // Shutdown is requested once it is actually asleep, so the wake-up is what is tested.
+    REQUIRE(
+        yams::test::wait_for_condition(std::chrono::seconds(10), std::chrono::milliseconds(5), [&] {
+            return serviceManager.__test_sessionWatcherWaiting();
+        }));
+
+    const auto started = std::chrono::steady_clock::now();
+    const bool finished = serviceManager.__test_stopSessionWatcher();
+    const auto took = std::chrono::steady_clock::now() - started;
+
+    work.reset();
+    io.stop();
+    runner.join();
+    CHECK(finished);
+    CHECK(took < std::chrono::milliseconds(1000));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager session watcher keeps progressing past a failing path",
                  "[daemon][service_manager][session_watch]") {
     ServiceManager serviceManager(config_, state_, lifecycleFsm_);

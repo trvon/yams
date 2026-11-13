@@ -10,6 +10,10 @@
 #include <string>
 #include <string_view>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/daemon/components/SessionWatcher.h>
@@ -198,6 +202,46 @@ TEST_CASE("Session watcher applies every .gitignore in the tree", "[daemon][sess
     }
 }
 
+#ifndef _WIN32
+TEST_CASE("Session watcher does not walk past a .gitignore it cannot read",
+          "[daemon][session_watch]") {
+    if (::geteuid() == 0) {
+        SKIP("permissions do not bind root");
+    }
+    Tree tree;
+    writeFile(tree.root / ".gitignore", "secret.txt\n");
+    writeFile(tree.root / "a.cpp", "a");
+    writeFile(tree.root / "secret.txt", "s");
+    const auto unreadable = [&] { fs::permissions(tree.root / ".gitignore", fs::perms::none); };
+    const auto readable = [&] {
+        fs::permissions(tree.root / ".gitignore", fs::perms::owner_read | fs::perms::owner_write);
+    };
+    SessionWatcher watcher(tree.options());
+    SessionWatchIndexingService indexing;
+    SessionWatchDocumentService documents;
+
+    SECTION("with no earlier rules the pass is retried, not run without them") {
+        unreadable();
+        CHECK(watcher.scan(indexing, &documents, tree.target(), tree.now) == Outcome::Incomplete);
+        CHECK(indexing.requests.empty());
+        readable();
+        CHECK(watcher.scan(indexing, &documents, tree.target(), tree.now + 5s) == Outcome::Clean);
+        CHECK(lastSubmitted(indexing) == std::set<std::string>{".gitignore", "a.cpp"});
+    }
+    SECTION("rules from an earlier pass stay in force") {
+        REQUIRE(watcher.scan(indexing, &documents, tree.target(), tree.now) == Outcome::Clean);
+        readable();
+        writeFile(tree.root / ".gitignore", "secret.txt\n# edited, so its stamp differs\n");
+        unreadable();
+        writeFile(tree.root / "b.cpp", "b");
+        CHECK(watcher.scan(indexing, &documents, tree.target(), tree.now + 5s) == Outcome::Clean);
+        CHECK_FALSE(lastSubmitted(indexing).contains("secret.txt"));
+        CHECK(lastSubmitted(indexing).contains("b.cpp"));
+        readable();
+    }
+}
+#endif
+
 TEST_CASE("Session watcher slows down while nothing changes", "[daemon][session_watch]") {
     Tree tree;
     writeFile(tree.root / "a.cpp", "a");
@@ -269,6 +313,17 @@ TEST_CASE("Session watcher gives up a pass when stopped or refused", "[daemon][s
         // Under the limit again (a .gitignore for the bulk), it is watched normally.
         writeFile(tree.root / ".gitignore", "bulk/\n");
         CHECK(watcher.scan(indexing, &documents, tree.target(), tree.now + 1s) == Outcome::Clean);
+        CHECK(lastSubmitted(indexing) == std::set<std::string>{".gitignore", "a.cpp"});
+    }
+    SECTION("ignored files do not count toward the limit") {
+        writeFile(tree.root / ".gitignore", "*.tmp\n");
+        for (int i = 0; i < 30; ++i) {
+            writeFile(tree.root / ("scratch" + std::to_string(i) + ".tmp"), "x");
+        }
+        auto options = tree.options();
+        options.maxFilesPerTarget = 10;
+        SessionWatcher watcher(options);
+        CHECK(watcher.scan(indexing, &documents, tree.target(), tree.now) == Outcome::Clean);
         CHECK(lastSubmitted(indexing) == std::set<std::string>{".gitignore", "a.cpp"});
     }
     SECTION("a selector that is not a directory is reported, not scanned") {

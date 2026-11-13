@@ -54,6 +54,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
@@ -1091,12 +1092,39 @@ void ServiceManager::stopBackgroundTaskManagerForShutdown() {
     }
 }
 
+void ServiceManager::startSessionWatcherOn(const boost::asio::any_io_executor& executor) {
+    sessionWatchStopSource_ = yams::compat::stop_source{};
+    sessionWatcherStopRequested_.store(false, std::memory_order_release);
+    auto watcherToken = sessionWatchStopSource_.get_token();
+    // On a strand, so the cancel posted by shutdown cannot run alongside the coroutine's
+    // own use of the timer, or slip in between its stop check and the wait being armed.
+    sessionWatcherFuture_ = boost::asio::co_spawn(
+        boost::asio::make_strand(executor),
+        [this, watcherToken]() -> boost::asio::awaitable<void> {
+            co_await co_runSessionWatcher(std::move(watcherToken));
+        },
+        boost::asio::use_future);
+}
+
 void ServiceManager::stopSessionWatcherForShutdown() {
     spdlog::info("[ServiceManager] Phase 2: Signaling session watcher stop");
     try {
         sessionWatcherStopRequested_.store(true, std::memory_order_release);
         if (sessionWatchStopSource_.stop_possible()) {
             sessionWatchStopSource_.request_stop();
+        }
+        // Wake the watcher if it is waiting for its next pass. The cancel runs on the
+        // watcher's strand: a timer is not safe to cancel from another thread. If the pool
+        // is too busy to run it within the wait below, the coroutine stays suspended and is
+        // never resumed: the worker threads are stopped and joined later in shutdown, while
+        // this object is still alive.
+        std::shared_ptr<boost::asio::steady_timer> timer;
+        {
+            std::lock_guard lock(sessionWatcherTimerMutex_);
+            timer = sessionWatcherTimer_;
+        }
+        if (timer) {
+            boost::asio::post(timer->get_executor(), [timer] { timer->cancel(); });
         }
         spdlog::info("[ServiceManager] Phase 2: Session watcher stop requested");
     } catch (const std::exception& e) {
@@ -2183,16 +2211,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::info("[ServiceManager] Session watcher disabled by test override");
     } else {
         try {
-            auto exec = getWorkerExecutor();
-            sessionWatchStopSource_ = yams::compat::stop_source{};
-            sessionWatcherStopRequested_.store(false, std::memory_order_release);
-            auto watcherToken = sessionWatchStopSource_.get_token();
-            sessionWatcherFuture_ = boost::asio::co_spawn(
-                exec,
-                [this, watcherToken]() -> boost::asio::awaitable<void> {
-                    co_await co_runSessionWatcher(std::move(watcherToken));
-                },
-                boost::asio::use_future);
+            startSessionWatcherOn(getWorkerExecutor());
         } catch (const std::exception& e) {
             spdlog::debug("[ServiceManager] session watcher start failed: {}", e.what());
         } catch (...) {

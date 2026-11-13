@@ -93,6 +93,22 @@ tracy_zone_policy_tests = files('scripts/test_check_tracy_zones.py')
 repository_metadata_policy_script = files('scripts/check_repository_metadata.py')
 forgejo_mirror_policy_script = files('scripts/check_forgejo_mirror_workflow.py')
 experimental_release_source_policy_script = files('scripts/check_experimental_release_source.py')
+if is_variable('yams_cli_exe') and host_machine.system() != 'windows'
+  test('cli_completion_runtime',
+    python_exe,
+    args: [files('scripts/test_cli_completion.py'), '--cli', yams_cli_exe.full_path()],
+    depends: [yams_cli_exe],
+    suite: ['unit', 'cli', 'completion'],
+    timeout: 60,
+  )
+endif
+
+test('research_note_unit',
+  python_exe,
+  args: [files('scripts/test_research_note.py')],
+  suite: ['unit', 'cli'],
+  timeout: 30,
+)
 release_manifest_unit_tests = files('scripts/test_generate_release_manifest.py')
 repository_publication_unit_tests = files('scripts/test_publish_repository.py')
 test('release_manifest_unit',
