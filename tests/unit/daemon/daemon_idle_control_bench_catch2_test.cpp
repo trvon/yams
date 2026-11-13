@@ -78,11 +78,19 @@ TEST_CASE("DaemonBench: idle control wakeup remains responsive", "[daemon][.benc
         FAIL("Failed to start daemon: " + start.error().message);
     }
 
+    // Service initialization is deferred to the run loop, which this bench does not run.
+    if (auto init = daemon->testingStartAsyncInitWithoutRunLoopChecked(); !init) {
+        daemon->stop();
+        FAIL("Failed to start service initialization: " + init.error().message);
+    }
+
+    // A daemon that never becomes ready or idle is a failure, not a skip: a skipped bench
+    // reads as "nothing to measure" and hid a bench that had stopped running at all.
     const bool metadataReady =
         waitFor([&]() { return daemon->getState().readiness.metadataRepoReady.load(); }, 20s, 50ms);
     if (!metadataReady) {
         daemon->stop();
-        SKIP("Daemon did not reach metadata-ready state within benchmark window");
+        FAIL("Daemon did not reach metadata-ready state within benchmark window");
     }
 
     const bool reachedIdle = waitFor(
@@ -93,7 +101,7 @@ TEST_CASE("DaemonBench: idle control wakeup remains responsive", "[daemon][.benc
         20s, 50ms);
     if (!reachedIdle) {
         daemon->stop();
-        SKIP("Daemon did not reach idle state within benchmark window");
+        FAIL("Daemon did not reach idle state within benchmark window");
     }
 
     auto channel =

@@ -247,6 +247,7 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
             co_return dispatch::makeErrorResponse(ErrorCode::NotFound,
                                                   "Node not found: " + req.nodeKey);
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         originNodeId = nodeResult.value()->id;
     }
 
@@ -424,25 +425,6 @@ RequestDispatcher::handleGraphTraceRequest(const GraphTraceRequest& req) {
         co_return dispatch::makeErrorResponse(result.error().code, result.error().message);
     }
     co_return mapGraphTraceResponse(result.value());
-}
-
-boost::asio::awaitable<Response>
-RequestDispatcher::handleGraphImpactRequest(const GraphImpactRequest& req) {
-    // Impact analysis walked code-symbol edges removed in v0.20. Keep answering the message so
-    // older clients get an explanation instead of an unknown-request error.
-    GraphImpactResponse resp;
-    resp.symbol = req.symbol;
-    resp.warnings.emplace_back(app::services::kImpactNeedsSymbolGraphWarning);
-    co_return resp;
-}
-
-boost::asio::awaitable<Response>
-RequestDispatcher::handleGraphAffectedTestsRequest(const GraphAffectedTestsRequest& req) {
-    // Affected-test analysis walked code-symbol edges removed in v0.20; see handleGraphImpact.
-    GraphAffectedTestsResponse resp;
-    resp.changedFiles = req.changedFiles;
-    resp.warnings.emplace_back(app::services::kAffectedTestsNeedSymbolGraphWarning);
-    co_return resp;
 }
 
 // PBI-093: Helper for listByType mode - list KG nodes by type without traversal
@@ -672,60 +654,6 @@ RequestDispatcher::handleGraphQuerySearchMode(const GraphQueryRequest& req,
 
     spdlog::debug("GraphQuery searchMode: found {} nodes matching pattern '{}'",
                   resp.connectedNodes.size(), req.searchPattern);
-    co_return resp;
-}
-
-boost::asio::awaitable<Response>
-RequestDispatcher::handleGraphPathHistoryRequest(const GraphPathHistoryRequest& req) {
-    spdlog::debug("GraphPathHistory request: path='{}'", req.path);
-
-    auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
-    if (!metaRepo) {
-        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
-                                              "Metadata repository unavailable");
-    }
-
-    if (req.path.empty()) {
-        co_return dispatch::makeErrorResponse(ErrorCode::InvalidArgument,
-                                              "Path is required for path history query");
-    }
-
-    // Access KnowledgeGraphStore
-    auto kgStore = metaRepo->getKnowledgeGraphStore();
-    if (!kgStore) {
-        GraphPathHistoryResponse resp;
-        resp.queryPath = req.path;
-        // Empty history when KG not available
-        spdlog::warn("GraphPathHistory: KG store not available");
-        co_return resp;
-    }
-
-    // Query path history using the KG store's tree diff functionality
-    auto historyResult = kgStore->fetchPathHistory(req.path, req.limit);
-    if (!historyResult) {
-        co_return dispatch::makeErrorResponse(historyResult.error().code,
-                                              historyResult.error().message);
-    }
-
-    // Build response
-    GraphPathHistoryResponse resp;
-    resp.queryPath = req.path;
-    resp.history.reserve(historyResult.value().size());
-
-    for (const auto& record : historyResult.value()) {
-        PathHistoryEntry entry;
-        entry.path = record.path;
-        entry.snapshotId = record.snapshotId;
-        entry.blobHash = record.blobHash;
-        entry.changeType = record.changeType.value_or("unknown");
-
-        resp.history.push_back(std::move(entry));
-    }
-
-    resp.hasMore = (resp.history.size() >= req.limit);
-
-    spdlog::debug("GraphPathHistory: returning {} history entries for path '{}'",
-                  resp.history.size(), req.path);
     co_return resp;
 }
 

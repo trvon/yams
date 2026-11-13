@@ -1,4 +1,3 @@
-#define _CRT_SECURE_NO_WARNINGS
 // pi-lens-ignore: fatal error
 #include <yams/api/content_store_builder.h>
 #include <yams/api/content_store_error.h>
@@ -153,14 +152,14 @@ struct ContentStoreBuilder::Impl {
 
         // Create chunker if not provided
         if (!chunker) {
+            // Gear-hash CDC: the average chunk size follows targetChunkSize. The min stays well
+            // below the target and the max well above it: a target at the min leaves no room for
+            // a content-defined cut (fixed-size blocks), and one near the max forces most cuts
+            // at the max.
             chunking::ChunkingConfig chunkerConfig{
-                .windowSize = 48,
-                .minChunkSize = MIN_CHUNK_SIZE,
+                .minChunkSize = std::min(MIN_CHUNK_SIZE, config.chunkSize / 4),
                 .targetChunkSize = config.chunkSize,
-                .maxChunkSize = MAX_CHUNK_SIZE,
-                .polynomial = 0x3DA3358B4DC173LL,
-                .chunkMask = 0x1FFF // For 64KB average chunks
-            };
+                .maxChunkSize = std::max(MAX_CHUNK_SIZE, config.chunkSize * 4)};
             // Use streaming chunker to avoid loading entire files in memory
             chunker = chunking::createStreamingChunker(chunkerConfig);
             spdlog::debug("Using StreamingChunker for memory-efficient file processing");
@@ -320,19 +319,8 @@ ContentStoreBuilder& ContentStoreBuilder::withDeduplication(bool enable) {
     return *this;
 }
 
-ContentStoreBuilder& ContentStoreBuilder::withMaxConcurrentOperations(size_t max) {
-    pImpl->config.maxConcurrentOps = max;
-    return *this;
-}
-
 ContentStoreBuilder& ContentStoreBuilder::withIntegrityChecks(bool enable) {
     pImpl->config.enableIntegrityChecks = enable;
-    return *this;
-}
-
-ContentStoreBuilder&
-ContentStoreBuilder::withGarbageCollectionInterval(std::chrono::seconds interval) {
-    pImpl->config.gcInterval = interval;
     return *this;
 }
 
@@ -354,17 +342,6 @@ ContentStoreBuilder::withStorageEngine(std::shared_ptr<storage::IStorageEngine> 
 
 ContentStoreBuilder& ContentStoreBuilder::withChunker(std::shared_ptr<chunking::IChunker> chunker) {
     pImpl->chunker = std::move(chunker);
-    return *this;
-}
-
-ContentStoreBuilder& ContentStoreBuilder::withHasher(std::shared_ptr<crypto::IHasher> hasher) {
-    pImpl->hasher = std::move(hasher);
-    return *this;
-}
-
-ContentStoreBuilder&
-ContentStoreBuilder::withManifestManager(std::shared_ptr<manifest::IManifestManager> manager) {
-    pImpl->manifestManager = std::move(manager);
     return *this;
 }
 
@@ -414,24 +391,6 @@ Result<std::unique_ptr<IContentStore>> ContentStoreBuilder::build() {
     return Result<std::unique_ptr<IContentStore>>(std::move(store));
 }
 
-Result<std::unique_ptr<IContentStore>> ContentStoreBuilder::buildAndValidate() {
-    auto result = build();
-    if (!result) {
-        return result;
-    }
-
-    // Perform additional validation
-    auto& store = result.value();
-    auto health = store->checkHealth();
-
-    if (!health.isHealthy) {
-        spdlog::error("Content store health check failed: {}", health.status);
-        return Result<std::unique_ptr<IContentStore>>(ErrorCode::Unknown);
-    }
-
-    return result;
-}
-
 // Static factory methods
 Result<std::unique_ptr<IContentStore>>
 ContentStoreBuilder::createDefault(const std::filesystem::path& storagePath) {
@@ -441,16 +400,6 @@ ContentStoreBuilder::createDefault(const std::filesystem::path& storagePath) {
 Result<std::unique_ptr<IContentStore>>
 ContentStoreBuilder::createFromConfig(const ContentStoreConfig& config) {
     return ContentStoreBuilder().withConfig(config).build();
-}
-
-Result<std::unique_ptr<IContentStore>> ContentStoreBuilder::createInMemory() {
-    // TODO: Implement in-memory storage engine
-    // For now, use a temporary directory
-    auto tempPath =
-        std::filesystem::temp_directory_path() /
-        ("yams_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-
-    return ContentStoreBuilder().withStoragePath(tempPath).build();
 }
 
 // Convenience factory functions

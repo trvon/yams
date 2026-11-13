@@ -15,12 +15,14 @@
 
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <iostream>
 #include <yams/compat/unistd.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
+#include <yams/daemon/startup_handshake.h>
 
 // POSIX headers for daemonization
 #ifndef _WIN32
@@ -155,6 +157,8 @@ extractExplicitPathFromArgv(int argc, char* argv[],
 }
 } // namespace
 
+// An escaping exception reaches the fatal handlers installed below.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 int main(int argc, char* argv[]) {
     // Install fatal handlers as early as possible
     setup_fatal_handlers();
@@ -243,10 +247,9 @@ int main(int argc, char* argv[]) {
         config.logLevel = "info";
 #endif
 
-    // Apply the no-plugins flag
-    if (noPlugins) {
-        config.autoLoadPlugins = false;
-    }
+    // Provider and plugin defaults for a daemon started without a config file. A config file, when
+    // present, is applied through the same resolver below.
+    yams::daemon::ConfigResolver::applyEmbeddingProviderPolicy({}, noPlugins, config);
 
     // Load configuration from TOML file
     namespace fs = std::filesystem;
@@ -280,10 +283,6 @@ int main(int argc, char* argv[]) {
                     config.logLevel = daemonSection.at("log_level");
                 }
 
-                // Enable model provider based on config
-                if (daemonSection.find("enable") != daemonSection.end()) {
-                    config.enableModelProvider = (daemonSection.at("enable") == "true");
-                }
                 if (daemonSection.find("model_provider_required") != daemonSection.end()) {
                     std::string v = daemonSection.at("model_provider_required");
                     for (auto& c : v) {
@@ -297,10 +296,6 @@ int main(int argc, char* argv[]) {
                 if (config.pluginDir.empty() &&
                     daemonSection.find("plugin_dir") != daemonSection.end()) {
                     config.pluginDir = fs::path(daemonSection.at("plugin_dir"));
-                }
-
-                if (daemonSection.find("auto_load_plugins") != daemonSection.end()) {
-                    config.autoLoadPlugins = (daemonSection.at("auto_load_plugins") == "true");
                 }
 
                 // Auto repair (RepairService)
@@ -338,6 +333,14 @@ int main(int argc, char* argv[]) {
                                      e.what());
                     }
                 }
+                if (daemonSection.find("auto_migrate_embeddings") != daemonSection.end()) {
+                    std::string v = daemonSection.at("auto_migrate_embeddings");
+                    for (auto& c : v) {
+                        c = static_cast<char>(std::tolower(c));
+                    }
+                    config.autoMigrateEmbeddings =
+                        !(v == "0" || v == "false" || v == "off" || v == "no");
+                }
                 if (daemonSection.find("auto_rebuild_on_dim_mismatch") != daemonSection.end()) {
                     std::string v = daemonSection.at("auto_rebuild_on_dim_mismatch");
                     for (auto& c : v) {
@@ -350,8 +353,6 @@ int main(int argc, char* argv[]) {
                 // Daemon section missing (probably old config) - use safe defaults
                 spdlog::info(
                     "Daemon configuration section not found in config file, using defaults");
-                // Enable model provider by default if plugins will be loaded
-                config.enableModelProvider = config.autoLoadPlugins;
             }
 
             // [daemon.graph_prune] section: graph version pruning policy
@@ -491,32 +492,9 @@ int main(int argc, char* argv[]) {
                 yams::daemon::ConfigResolver::applyRuntimeTuning(tomlConfig, config.tuning);
             yams::daemon::ConfigResolver::applySearchMaintenance(tomlConfig, config);
 
-            // Honor [embeddings].enable=false: hard-disable model provider regardless of [daemon]
-            // This prevents startup from waiting on embedding services when embeddings are
-            // disabled.
-            if (tomlConfig.find("embeddings") != tomlConfig.end()) {
-                const auto& embSection = tomlConfig.at("embeddings");
-                auto it = embSection.find("enable");
-                if (it != embSection.end()) {
-                    std::string v = it->second;
-                    // normalize value to lowercase for comparison
-                    for (auto& c : v)
-                        c = static_cast<char>(std::tolower(c));
-                    if (v == "false" || v == "0" || v == "no" || v == "off") {
-                        if (config.enableModelProvider) {
-                            spdlog::info("Embeddings disabled in config "
-                                         "([embeddings].enable=false); disabling model provider");
-                        }
-                        config.enableModelProvider = false;
-                        // Also short-circuit plugin auto-loading to avoid unnecessary startup work
-                        if (config.autoLoadPlugins) {
-                            spdlog::info("Embeddings disabled; skipping plugin auto-loading to "
-                                         "speed up startup");
-                        }
-                        config.autoLoadPlugins = false;
-                    }
-                }
-            }
+            // [daemon] enable / auto_load_plugins, [embeddings] enable and --no-plugins.
+            yams::daemon::ConfigResolver::applyEmbeddingProviderPolicy(tomlConfig, noPlugins,
+                                                                       config);
 
             // Load daemon.models configuration if present
             if (config.enableModelProvider &&
@@ -803,15 +781,11 @@ int main(int argc, char* argv[]) {
                      config.instrumentation.mslStackLogWarnBytes / (1024ULL * 1024ULL));
     }
 
-    // Configure FSM metrics based on log level
-    // Enable FSM metrics only for debug or trace levels to avoid introducing new tags
-    {
-        bool enableFsmMetrics = (config.logLevel == "debug" || config.logLevel == "trace");
-        yams::daemon::FsmMetricsRegistry::instance().setEnabled(enableFsmMetrics);
-        if (enableFsmMetrics) {
-            spdlog::debug("FSM metrics collection enabled");
-        }
-    }
+    // Connection FSM counters stay on at every log level. They are sharded relaxed atomics, and
+    // status reports them unconditionally: gating them on debug logging made status show zero
+    // transitions and bytes for a daemon that was serving requests. Tracy plots have their own
+    // switch (ConnectionFsm::enable_metrics) and are no-ops without a profiling build.
+    yams::daemon::FsmMetricsRegistry::instance().setEnabled(true);
 
     clear_session_index_on_start();
 
@@ -838,21 +812,38 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+#ifndef _WIN32
+    // Carries the detached daemon's start result back to the process that launched it.
+    std::optional<yams::daemon::StartupHandshake> startupHandshake;
+#endif
+
     // Daemonize if not running in foreground
     if (!foreground) {
 #ifdef _WIN32
         spdlog::warn("Daemon mode not supported on Windows; running in foreground.");
 #else
+        startupHandshake = yams::daemon::StartupHandshake::open();
+        if (!startupHandshake) {
+            // Without it the launcher could only report "fork succeeded".
+            std::cerr << "Failed to create the daemon start-up pipe\n";
+            return 1;
+        }
         pid_t pid = fork();
         if (pid < 0) {
             std::cerr << "Failed to fork daemon process\n";
             return 1;
         }
         if (pid > 0) {
-            // Parent process exits
-            std::cout << "Daemon started with PID: " << pid << '\n';
-            return 0;
+            // The launcher exits with the daemon's start result, not with "fork succeeded".
+            const int started = startupHandshake->await();
+            if (started == 0) {
+                std::cout << "Daemon started with PID: " << pid << '\n';
+            } else {
+                std::cerr << "Daemon failed to start; see the daemon log\n";
+            }
+            return started;
         }
+        startupHandshake->closeReader();
 
         // Child process continues as daemon
         // Create new session
@@ -883,6 +874,12 @@ int main(int argc, char* argv[]) {
         yams::daemon::YamsDaemon daemon(config);
 
         auto result = daemon.start();
+#ifndef _WIN32
+        if (startupHandshake) {
+            startupHandshake->report(result.has_value());
+            startupHandshake.reset();
+        }
+#endif
         if (!result) {
             spdlog::error("Failed to start daemon: {}", result.error().message);
             return 1;
@@ -928,17 +925,24 @@ int main(int argc, char* argv[]) {
 
         // Run the main daemon loop on this thread (handles FSM ticks, metrics refresh, etc.)
         // The loop exits when stopRequested is set (via signal handler or daemon.stop())
-        spdlog::info("Calling daemon.runLoop()...");
-        daemon.runLoop();
-        spdlog::info("daemon.runLoop() returned");
+        spdlog::info("Calling daemon.runLoopChecked()...");
+        auto entry = daemon.runLoopChecked();
+        if (!entry) {
+            spdlog::error("Daemon main-loop entry failed: {}", entry.error().message);
+        }
+        spdlog::info("daemon.runLoopChecked() returned");
 
         // Log reason for exit
         spdlog::info("Main loop exiting: isRunning={}, isStopRequested={}, g_shutdown_requested={}",
                      daemon.isRunning(), daemon.isStopRequested(), g_shutdown_requested.load());
-        // Ensure proper cleanup
-        daemon.stop();
-
-        return 0;
+        // A remote shutdown caller may already own the close: wait for its checked completion
+        // (not merely running=false), and retry the close if that caller failed.
+        auto stopped = daemon.stopOrAwaitClose(std::chrono::seconds{30});
+        if (!stopped) {
+            spdlog::error("Daemon stop did not complete: {}", stopped.error().message);
+            return 1;
+        }
+        return entry ? 0 : 1;
 
     } catch (const std::exception& e) {
         spdlog::error("Daemon error: {}", e.what());

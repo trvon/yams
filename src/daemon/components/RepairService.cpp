@@ -3,7 +3,12 @@
 #include <yams/daemon/components/db_salvage.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
 #include <yams/daemon/components/RepairService.h>
+#include <yams/daemon/components/thread_pool_naming.h>
 #include <yams/daemon/components/WriteCoordinator.h>
+#include <yams/daemon/resource/plugin_content_extractor_adapter.h>
+#include <yams/extraction/external_plugin_extractor.hpp>
+#include <yams/manifest/manifest_manager.h>
+#include <yams/metadata/document_metadata.h>
 
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/config/config_helpers.h>
@@ -21,11 +26,12 @@
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/extraction/extraction_util.h>
-#include <yams/integrity/repair_manager.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_tree_repair.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/repair/embedding_repair_util.h>
+#include <yams/storage/block_reference_repair.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
@@ -48,11 +54,13 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <set>
 #include <span>
 #include <string>
 #include <thread>
+#include <typeinfo>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -205,6 +213,7 @@ struct RepairThreadPool {
                 threads = 1;
             threads = std::max(threads + 1, 2u);
             pool_ = std::make_unique<boost::asio::thread_pool>(threads);
+            nameThreadPoolWorkers(*pool_, threads, "yams-repair-");
             spdlog::debug("[RepairThreadPool] Initialized with {} threads", threads);
         });
         return pool_->get_executor();
@@ -258,6 +267,8 @@ queueWithBackoff(std::shared_ptr<SpscQueue<JobT>> queue, JobT&& job,
     const auto queueStart = std::chrono::steady_clock::now();
     uint64_t totalWaitMs = 0;
     int retries = 0;
+    // try_push moves `job` only when it returns true.
+    // NOLINTNEXTLINE(bugprone-use-after-move)
     while (!queue->try_push(std::forward<JobT>(job))) {
         if (!running.load(std::memory_order_relaxed) || (shouldStop && shouldStop()))
             co_return false;
@@ -302,7 +313,6 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
     ctx.getKgStore = [services] { return services->getKgStore(); };
     ctx.getGraphComponent = [services] { return services->getGraphComponent(); };
     ctx.getPostIngestQueue = [services] { return services->getPostIngestQueue(); };
-    ctx.getRepairManager = [services] { return services->getRepairManager(); };
     ctx.getModelProvider = [services] { return services->getModelProvider(); };
     ctx.getEmbeddingQueuedJobs = [services] { return services->getEmbeddingQueuedJobs(); };
     ctx.getEmbeddingInFlightJobs = [services] { return services->getEmbeddingInFlightJobs(); };
@@ -385,13 +395,6 @@ void RepairService::start() {
         });
 
     spdlog::debug("RepairService started (enable={}, batch={})", cfg_.enable, cfg_.maxBatch);
-
-    // Enqueue initial PathTreeRepair job
-    static auto pathTreeQueue =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PathTreeJob>(
-            "path_tree_repair_jobs", 32);
-    InternalEventBus::PathTreeJob initialJob{1, true};
-    (void)pathTreeQueue->try_push(initialJob);
 }
 
 void RepairService::stop() {
@@ -413,6 +416,14 @@ void RepairService::stop() {
         std::unique_lock<std::mutex> lk(activeRepairMutex_);
         activeRepairCv_.wait_for(lk, std::chrono::milliseconds(5000),
                                  [this] { return activeRepairExecutions_ == 0; });
+    }
+    {
+        // A path-tree batch checks the stop flags before every document, so this wait is
+        // short; it is bounded anyway.
+        std::unique_lock<std::timed_mutex> lk(pathTreeRepairMutex_, std::defer_lock);
+        if (!lk.try_lock_for(std::chrono::milliseconds(5000))) {
+            spdlog::warn("RepairService: path-tree repair still running at shutdown");
+        }
     }
     spdlog::debug("RepairService stopped");
 }
@@ -445,15 +456,8 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
     std::uint32_t deferTicks = 0;
     const std::uint32_t minDeferTicks = shutdownState->config.initialScanDeferTicks;
 
-    static auto pruneQueue =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PruneJob>("prune_jobs",
-                                                                                       128);
-    static auto pathTreeQueue =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PathTreeJob>(
-            "path_tree_repair_jobs", 32);
-
-    bool pathTreeRepairDone = false;
     auto nextVectorVacuum = std::chrono::steady_clock::now() + cfg_.maintenanceDelay;
+    nextPathTreeRepair_ = std::chrono::steady_clock::now() + cfg_.maintenanceDelay;
     auto nextSessionExpiry = std::chrono::steady_clock::now() + cfg_.maintenanceDelay;
 
     while (running_.load(std::memory_order_relaxed) &&
@@ -467,34 +471,14 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         if (fsm.hints().closing)
             break;
 
-        bool didWork = false;
-
-        // Process prune jobs
-        InternalEventBus::PruneJob pruneJob;
-        if (pruneQueue->try_pop(pruneJob)) {
-            didWork = true;
-            InternalEventBus::instance().incPostConsumed();
-            spdlog::debug("RepairService: prune job {} needs storage engine refactor",
-                          pruneJob.requestId);
-        }
-
-        // Process PathTreeRepair jobs
-        if (!pathTreeRepairDone) {
-            InternalEventBus::PathTreeJob pathTreeJob;
-            if (pathTreeQueue->try_pop(pathTreeJob)) {
-                didWork = true;
-                InternalEventBus::instance().incPostConsumed();
-                co_await processPathTreeRepair();
-                pathTreeRepairDone = true;
-            }
-        }
-
-        // Idle backoff
-        if (!didWork) {
+        // Idle backoff: every tick waits one poll interval (longer while the daemon is idle).
+        bool sleptIdleTick = false;
+        { // scoped so snap/pollMs stay local to the backoff
             auto snap = TuningSnapshotRegistry::instance().get();
             uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
             if (snap && snap->daemonIdle) {
                 pollMs = std::max<uint32_t>(TuneAdvisor::idleTickMs(), pollMs);
+                sleptIdleTick = true;
             }
             timer.expires_after(std::chrono::milliseconds(std::max<uint32_t>(10, pollMs)));
             co_await timer.async_wait(boost::asio::use_awaitable);
@@ -507,12 +491,24 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 
         // Legacy snapshot history backfill (migration 42): small batches, paused between,
         // and only while the daemon is not under resource pressure.
+        // RepairScan-class work (backfill, path-tree repair, VACUUM, startup scan) runs at most
+        // one job per tick, so their DB writes never stack up in one iteration.
+        bool repairScanWorkThisTick = false;
         if (!snapshotBackfillDone && std::chrono::steady_clock::now() >= nextSnapshotBackfill &&
             maintenanceAllowed() &&
             ResourceGovernor::instance().getPressureLevel() < ResourcePressureLevel::Warning &&
             ResourceGovernor::instance().admitDeferrable(DeferrableWork::RepairScan)) {
             snapshotBackfillDone = backfillLegacySnapshotKeysBatch();
             nextSnapshotBackfill = std::chrono::steady_clock::now() + 200ms;
+            repairScanWorkThisTick = true;
+        }
+
+        // Path-tree repair: documents whose path-tree upsert was lost get their nodes back.
+        // One bounded batch per tick, resumed from a cursor; idle until the next interval once
+        // a pass completes. runPathTreeRepairBatch checks admission and reschedules itself.
+        if (!repairScanWorkThisTick && cfg_.pathTreeRepairInterval.count() > 0 &&
+            std::chrono::steady_clock::now() >= nextPathTreeRepair_) {
+            repairScanWorkThisTick = runPathTreeRepairBatch().has_value();
         }
 
         // Retention cleanup of crash-recovery leftovers (corrupt DB copies, ...): owned here
@@ -525,7 +521,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         }
 
         // vectors.db VACUUM: rare, idle-only, and yields to any writer that shows up.
-        if (cfg_.vectorVacuumInterval.count() > 0 &&
+        if (!repairScanWorkThisTick && cfg_.vectorVacuumInterval.count() > 0 &&
             std::chrono::steady_clock::now() >= nextVectorVacuum &&
             vectorVacuumAdmitted(collectVectorVacuumSignals())) {
             const auto outcome = runVectorVacuumMaintenance();
@@ -550,15 +546,40 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             std::lock_guard<std::mutex> lk(queueMutex_);
             queueEmpty = pendingDocuments_.empty();
         }
-        if (queueEmpty && !initialScanEnqueued) {
-            if (deferTicks < minDeferTicks) {
+        // The startup scan runs once, and again each time the queue drains after a capped scan
+        // (a full re-embed after an embedding-space migration can exceed maxPendingRepairs).
+        // A retry sweep waits until the embedding consumer is idle, so it sees final outcomes
+        // instead of re-queueing work still in flight.
+        const bool embedIdle =
+            (!ctx_.getEmbeddingQueuedJobs || ctx_.getEmbeddingQueuedJobs() == 0) &&
+            (!ctx_.getEmbeddingInFlightJobs || ctx_.getEmbeddingInFlightJobs() == 0);
+        // A job whose cleanup could not be scheduled leaves a Processing row with an unfinished
+        // derivation. Recover it only while the consumer is idle, so no live job owns the row,
+        // and only after the configured stall threshold has elapsed.
+        if (queueEmpty && embedIdle && maintenanceAllowed()) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastStalledRecovery_ >= std::chrono::seconds{60}) {
+                lastStalledRecovery_ = now;
+                const auto cutoff = std::chrono::duration_cast<std::chrono::seconds>(
+                                        (std::chrono::system_clock::now() - cfg_.stalledThreshold)
+                                            .time_since_epoch())
+                                        .count();
+                recoverStalledProcessing(cutoff);
+            }
+        }
+        if (queueEmpty && scanCursor_.shouldStart() && (embedIdle || !scanCursor_.retryDue())) {
+            if (!initialScanEnqueued && deferTicks < minDeferTicks) {
                 ++deferTicks;
-            } else if (maintenanceAllowed() &&
+            } else if (!repairScanWorkThisTick && maintenanceAllowed() &&
                        ResourceGovernor::instance().admitDeferrable(DeferrableWork::RepairScan)) {
+                recoverOrphanedProcessingOnce();
                 auto scanExec = RepairThreadPool::instance().get_executor();
+                const std::int64_t startAfterId = scanCursor_.begin();
                 boost::asio::co_spawn(
                     scanExec,
-                    [this]() -> boost::asio::awaitable<void> { co_await spawnInitialScan(); },
+                    [this, startAfterId]() -> boost::asio::awaitable<void> {
+                        co_await spawnInitialScan(startAfterId);
+                    },
                     boost::asio::detached);
                 initialScanEnqueued = true;
             }
@@ -581,8 +602,12 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         if (batch.empty()) {
             if (state_)
                 state_->stats.repairIdleTicks++;
-            timer.expires_after(100ms);
-            co_await timer.async_wait(boost::asio::use_awaitable);
+            // On an idle daemon this iteration already slept a full idle tick above; a second
+            // wait here only doubled the loop's wakeups. A busy daemon keeps both waits.
+            if (!sleptIdleTick) {
+                timer.expires_after(100ms);
+                co_await timer.async_wait(boost::asio::use_awaitable);
+            }
             continue;
         }
 
@@ -624,9 +649,11 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 
         // Under Warning pressure, reduce batch sizes so repair cooperates with
         // the ingestion pipeline instead of competing for channel capacity.
+        std::size_t requeued = 0; // pushed back under Warning: not handled yet
         if (pressureLevel >= ResourcePressureLevel::Warning) {
             const size_t reducedCap = std::max<size_t>(1, missingEmbeddings.size() / 2);
             if (missingEmbeddings.size() > reducedCap) {
+                requeued = missingEmbeddings.size() - reducedCap;
                 // Put excess back into the pending queue for the next iteration.
                 std::lock_guard<std::mutex> lk(queueMutex_);
                 for (size_t i = reducedCap; i < missingEmbeddings.size(); ++i) {
@@ -642,6 +669,10 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             }
         }
 
+        // Every document taken off the queue is handled from here on: dispatched, or found to
+        // need nothing.
+        noteRepairResolved(batch.size() - std::min(requeued, batch.size()));
+
         // Queue embedding repair jobs
         if (!missingEmbeddings.empty()) {
             if (state_)
@@ -654,9 +685,10 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
                 missingEmbeddings, static_cast<uint32_t>(shutdownState->config.maxBatch), true,
                 std::string{},     std::vector<InternalEventBus::EmbedPreparedDoc>{},     nullptr};
             job.updateSemanticGraph = false;
+            job.fromRepair = true; // counted into repair_embeddings_generated as it commits
             static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                    "embed_jobs", TuneAdvisor::embedChannelCapacity());
+                    "embed_jobs", TuneAdvisor::embedJobChannelCapacity());
             bool queued = co_await queueWithBackoff(embedQ, std::move(job), timer, running_,
                                                     "embed", missingEmbeddings.size(), 50, 1000);
             if (queued) {
@@ -701,16 +733,83 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
     co_return;
 }
 
-boost::asio::awaitable<void> RepairService::spawnInitialScan() {
+void RepairService::recoverOrphanedProcessingOnce() {
+    if (orphansRecovered_.exchange(true))
+        return;
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
+    if (!meta)
+        return;
+    // Only RepairService marks documents Processing, and this run has queued nothing yet, so any
+    // Processing row belongs to a previous run that died with the work queued.
+    metadata::DocumentQueryOptions opts;
+    opts.repairStatuses = {metadata::RepairStatus::Processing};
+    auto docs = meta->queryDocuments(opts);
+    if (!docs || docs.value().empty())
+        return;
+    std::vector<std::string> hashes;
+    hashes.reserve(docs.value().size());
+    for (const auto& d : docs.value())
+        hashes.push_back(d.sha256Hash);
+    if (auto r = meta->batchUpdateDocumentRepairStatuses(hashes, metadata::RepairStatus::Pending);
+        r) {
+        spdlog::info("RepairService: reset {} documents a previous run left Processing",
+                     hashes.size());
+    } else {
+        spdlog::warn("RepairService: could not reset Processing documents: {}", r.error().message);
+    }
+}
+
+std::size_t RepairService::recoverStalledProcessing(std::int64_t cutoffEpoch) {
+    auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
+    if (!meta) {
+        return 0;
+    }
+    // One transaction resolves completed derivations and requeues unfinished stale attempts,
+    // conditionally at execution time so a concurrent fresh attempt is never overwritten.
+    auto reset = meta->resetStalledEmbeddingRepairs(cutoffEpoch);
+    if (!reset) {
+        spdlog::warn("RepairService: could not reset stalled Processing documents: {}",
+                     reset.error().message);
+        return 0;
+    }
+    if (reset.value() > 0) {
+        spdlog::info("RepairService: returned {} stalled Processing documents to Pending",
+                     reset.value());
+    }
+    return reset.value();
+}
+
+boost::asio::awaitable<void> RepairService::spawnInitialScan(std::int64_t startAfterId) {
+    // How this pass ended, reported to scanCursor_ on every exit path.
+    enum class End { Aborted, Finished, Stopped };
+    End end = End::Aborted;
+    std::int64_t lastId = startAfterId; // last document id fully scanned
+    size_t totalEnqueued = 0;
+    struct Report {
+        RepairScanCursor& cursor;
+        const End& end;
+        const std::int64_t& lastId;
+        const size_t& enqueued;
+        ~Report() {
+            if (end == End::Finished)
+                cursor.finished(enqueued > 0);
+            else if (end == End::Stopped)
+                cursor.stoppedAt(lastId, enqueued > 0);
+            else
+                cursor.aborted();
+        }
+    } report{scanCursor_, end, lastId, totalEnqueued};
+
     try {
         auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
-        if (!meta)
+        if (!meta) {
+            // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores): read by ~Report via reference
+            end = End::Finished;
             co_return;
+        }
 
         const bool vectorsDisabled = vectorsDisabledByEnv();
         const size_t batchSize = TuneAdvisor::repairStartupBatchSize();
-        size_t offset = 0;
-        size_t totalEnqueued = 0;
         bool queueAtCapacity = false;
 
         // Preload all FTS5-indexed rowids once for O(1) lookups in the scan loop.
@@ -727,55 +826,107 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
             if (vectorDb) {
                 embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
                 haveEmbeddedSnapshot = true;
+                // Vector rows of a document whose derivation is open describe superseded text:
+                // it still needs embedding, as hasDocumentEmbeddingByHash() reports.
+                if (auto open = meta->getOpenEmbeddingDerivationHashes(); open) {
+                    for (const auto& hash : open.value()) {
+                        embeddedHashes.erase(hash);
+                    }
+                } else {
+                    haveEmbeddedSnapshot = false; // fall back to the per-document check
+                    embeddedHashes.clear();
+                }
             }
         }
 
+        // The same extractors and content store the per-batch check uses, so the scan queues
+        // exactly the documents that check would act on.
+        const auto extractors = ctx_.getContentExtractors
+                                    ? ctx_.getContentExtractors()
+                                    : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
+        const auto contentStore = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
+        if (startAfterId == 0) {
+            beginSweepExtractorCheck(extractors);
+            // A sweep starts the progress count over once it queues its first batch. A retry
+            // sweep that finds nothing keeps the last sweep's numbers rather than showing 0/0.
+            std::lock_guard<std::mutex> ql(queueMutex_);
+            progressResetPending_ = true;
+        }
+        const bool extractorsChanged = sweepExtractorsChanged_;
+
         while (running_.load(std::memory_order_relaxed) && !queueAtCapacity) {
             if (!maintenanceAllowed()) {
+                end = End::Stopped; // resume here once maintenance is allowed again
                 break;
             }
+            // Keyset paging by id: deletes and inserts behind the cursor never shift it.
             metadata::DocumentQueryOptions opts;
             opts.limit = static_cast<int>(batchSize);
-            opts.offset = static_cast<int>(offset);
+            opts.orderByIdAsc = true;
+            if (lastId > 0)
+                opts.idGreaterThan = lastId;
             auto batchDocs = meta->queryDocuments(opts);
-            if (!batchDocs || batchDocs.value().empty())
+            if (!batchDocs || batchDocs.value().empty()) {
+                end = batchDocs ? End::Finished : End::Aborted;
                 break;
+            }
+
+            // Decide per document before taking the queue lock: the extractability check can
+            // read a blob prefix.
+            std::vector<bool> needsWork(batchDocs.value().size(), false);
+            for (std::size_t i = 0; i < batchDocs.value().size(); ++i) {
+                const auto& d = batchDocs.value()[i];
+                // Processing rows from a previous run were reset at startup; these are this
+                // run's in-flight jobs.
+                if (d.repairStatus == yams::metadata::RepairStatus::Processing) {
+                    continue;
+                }
+                // Extraction ran and produced nothing (a binary blob), or never completed and an
+                // embedding attempt already failed for it: there is no content to embed or
+                // index, and queuing it again only fails the same way. One failure is
+                // conclusive while there is no text (repair_attempts counts status writes, not
+                // attempts, so it is not a usable budget here); once extraction produces content
+                // the document is retried as usual. Terminal until the extractor set changes, or
+                // an explicit repair asks for it.
+                const bool embeddingFailedWithoutText =
+                    d.repairStatus == yams::metadata::RepairStatus::Failed;
+                if (!extractorsChanged && !d.contentExtracted &&
+                    (d.extractionStatus == yams::metadata::ExtractionStatus::Failed ||
+                     embeddingFailedWithoutText)) {
+                    continue;
+                }
+                bool missingEmb = false;
+                if (!vectorsDisabled) {
+                    if (haveEmbeddedSnapshot) {
+                        missingEmb = embeddedHashes.find(d.sha256Hash) == embeddedHashes.end();
+                    } else {
+                        auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(d.sha256Hash);
+                        missingEmb = !hasEmbedRes || !hasEmbedRes.value();
+                    }
+                }
+                needsWork[i] = missingEmb || ftsRepairNeeded(
+                                                 d, [&] { return ftsRowIds.count(d.id) != 0; },
+                                                 [&] {
+                                                     return canExtractDocument(
+                                                         d.mimeType, d.fileExtension, extractors,
+                                                         contentStore, d.sha256Hash);
+                                                 });
+            }
 
             size_t batchEnqueued = 0;
+            bool interrupted = false;
             {
                 std::lock_guard<std::mutex> ql(queueMutex_);
-                for (const auto& d : batchDocs.value()) {
-                    if (!running_.load(std::memory_order_relaxed))
+                for (std::size_t i = 0; i < batchDocs.value().size(); ++i) {
+                    const auto& d = batchDocs.value()[i];
+                    if (!running_.load(std::memory_order_relaxed)) {
+                        interrupted = true;
                         break;
-                    if (d.repairStatus == yams::metadata::RepairStatus::Processing)
-                        continue;
-
-                    // NEW: recover stalled Processing on startup
-                    // (handled by detectStuckDocuments during on-demand repair)
-
-                    bool missingEmb = false;
-                    if (!vectorsDisabled) {
-                        if (haveEmbeddedSnapshot) {
-                            missingEmb = embeddedHashes.find(d.sha256Hash) == embeddedHashes.end();
-                        } else {
-                            auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(d.sha256Hash);
-                            missingEmb = !hasEmbedRes || !hasEmbedRes.value();
-                        }
                     }
-                    bool missingFts =
-                        (!d.contentExtracted) &&
-                        (d.extractionStatus != yams::metadata::ExtractionStatus::Skipped) &&
-                        (d.extractionStatus != yams::metadata::ExtractionStatus::Success);
-                    // Also detect successful extraction with missing FTS5 entry.
-                    if (!missingFts &&
-                        d.extractionStatus == yams::metadata::ExtractionStatus::Success &&
-                        ftsRowIds.count(d.id) == 0) {
-                        missingFts = true;
-                    }
-
-                    if (missingEmb || missingFts) {
+                    if (needsWork[i]) {
                         if (pendingDocuments_.size() >= cfg_.maxPendingRepairs) {
                             queueAtCapacity = true;
+                            end = End::Stopped; // resume at this document after the drain
                             break;
                         }
                         if (pendingSet_.find(d.sha256Hash) == pendingSet_.end()) {
@@ -784,80 +935,43 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
                             ++batchEnqueued;
                         }
                     }
+                    lastId = d.id;
+                }
+                // Still under the queue lock: the drain loop cannot resolve these documents
+                // before they are counted in the backlog.
+                if (batchEnqueued > 0) {
+                    if (progressResetPending_) {
+                        progressResetPending_ = false;
+                        processed_.store(0, std::memory_order_relaxed);
+                        totalBacklog_.store(batchEnqueued, std::memory_order_relaxed);
+                    } else {
+                        totalBacklog_.fetch_add(batchEnqueued, std::memory_order_relaxed);
+                    }
+                    publishRepairProgress();
                 }
             }
 
             totalEnqueued += batchEnqueued;
-            offset += batchDocs.value().size();
+            if (queueAtCapacity || interrupted)
+                break;
             co_await boost::asio::post(co_await boost::asio::this_coro::executor,
                                        boost::asio::use_awaitable);
-            if (batchDocs.value().size() < batchSize)
+            if (batchDocs.value().size() < batchSize) {
+                end = End::Finished;
                 break;
+            }
         }
 
+        if (end == End::Finished) {
+            finishSweepExtractorCheck();
+        }
         if (totalEnqueued > 0) {
-            totalBacklog_.store(totalEnqueued, std::memory_order_relaxed);
-            processed_.store(0, std::memory_order_relaxed);
-            if (state_) {
-                state_->stats.repairTotalBacklog.store(totalEnqueued, std::memory_order_relaxed);
-                state_->stats.repairProcessed.store(0, std::memory_order_relaxed);
-            }
             spdlog::debug("RepairService: initial scan queued {} documents", totalEnqueued);
         }
     } catch (const std::exception& e) {
         spdlog::warn("RepairService: initial scan exception: {}", e.what());
     }
     co_return;
-}
-
-boost::asio::awaitable<void> RepairService::processPathTreeRepair() {
-    using namespace std::chrono_literals;
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-
-    auto repairMgr = ctx_.getRepairManager ? ctx_.getRepairManager() : nullptr;
-    auto metaRepo = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
-    if (!repairMgr || !metaRepo)
-        co_return;
-
-    try {
-        auto docsResult = metaRepo->queryDocuments(metadata::DocumentQueryOptions{});
-        if (!docsResult || docsResult.value().empty())
-            co_return;
-
-        uint64_t created = 0, errors = 0;
-        const size_t batchSz = TuneAdvisor::repairStartupBatchSize();
-
-        for (size_t i = 0; i < docsResult.value().size(); i += batchSz) {
-            if (!running_.load(std::memory_order_relaxed))
-                break;
-            size_t batchEnd = std::min(i + batchSz, docsResult.value().size());
-            for (size_t j = i; j < batchEnd; ++j) {
-                const auto& doc = docsResult.value()[j];
-                if (doc.filePath.empty())
-                    continue;
-                auto existingNode = metaRepo->findPathTreeNodeByFullPath(doc.filePath);
-                if (existingNode && existingNode.value().has_value())
-                    continue;
-                try {
-                    auto treeRes = metaRepo->upsertPathTreeForDocument(doc, doc.id, true,
-                                                                       std::span<const float>());
-                    if (treeRes)
-                        ++created;
-                    else
-                        ++errors;
-                } catch (...) {
-                    ++errors;
-                }
-            }
-            timer.expires_after(10ms);
-            co_await timer.async_wait(boost::asio::use_awaitable);
-        }
-
-        spdlog::debug("RepairService: PathTreeRepair complete (created={}, errors={})", created,
-                      errors);
-    } catch (const std::exception& e) {
-        spdlog::debug("RepairService: PathTreeRepair exception: {}", e.what());
-    }
 }
 
 bool RepairService::backfillLegacySnapshotKeysBatch() {
@@ -1052,6 +1166,139 @@ std::optional<app::services::SessionExpiryResult> RepairService::runSessionExpir
     }
 }
 
+bool RepairService::pathTreeRepairAdmitted(const PathTreeRepairSignals& signals) noexcept {
+    return !signals.shuttingDown && signals.maintenanceAllowed &&
+           signals.pressure < ResourcePressureLevel::Warning && !signals.repairInProgress &&
+           !signals.startupScanInFlight && !signals.hostDeferred;
+}
+
+RepairService::PathTreeRepairSignals RepairService::collectPathTreeRepairSignals() const {
+    PathTreeRepairSignals signals;
+    signals.shuttingDown =
+        shutdownState_ && !shutdownState_->running.load(std::memory_order_acquire);
+    signals.maintenanceAllowed = maintenanceAllowed();
+    signals.pressure = ResourceGovernor::instance().getPressureLevel();
+    signals.repairInProgress = repairInProgress_.load(std::memory_order_acquire);
+    signals.startupScanInFlight = scanCursor_.inFlight();
+    // Ask the host-pressure gate last, and only when nothing else blocks the batch, so the
+    // deferral clock measures time spent waiting on other processes.
+    if (pathTreeRepairAdmitted(signals)) {
+        signals.hostDeferred =
+            !ResourceGovernor::instance().admitDeferrable(DeferrableWork::RepairScan);
+    }
+    return signals;
+}
+
+bool RepairService::claimRepairGateForMaintenance() noexcept {
+    bool expected = false;
+    maintenanceHoldsRepairGate_.store(true, std::memory_order_release);
+    if (!repairInProgress_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        maintenanceHoldsRepairGate_.store(false, std::memory_order_release);
+        return false;
+    }
+    return true;
+}
+
+void RepairService::releaseRepairGateForMaintenance() noexcept {
+    repairInProgress_.store(false, std::memory_order_release);
+    maintenanceHoldsRepairGate_.store(false, std::memory_order_release);
+}
+
+std::string RepairService::repairBusyMessage() const {
+    if (maintenanceHoldsRepairGate_.load(std::memory_order_acquire)) {
+        return "Background repair maintenance (path-tree repair) is running. Retry in a few "
+               "seconds.";
+    }
+    return "Repair is already in progress. Please wait for the current run to finish.";
+}
+
+std::optional<metadata::PathTreeRepairStats> RepairService::runPathTreeRepairBatch() {
+    YAMS_ZONE_SCOPED_N("RepairSvc::runPathTreeRepairBatch");
+    using namespace std::chrono_literals;
+    // A refused admission backs off instead of asking the governor again every tick.
+    const auto refusedBackoff = std::max<std::chrono::steady_clock::duration>(
+        1s, std::chrono::duration_cast<std::chrono::seconds>(cfg_.maintenanceDelay) / 30);
+    if (!pathTreeRepairAdmitted(collectPathTreeRepairSignals())) {
+        nextPathTreeRepair_ = std::chrono::steady_clock::now() + refusedBackoff;
+        return std::nullopt;
+    }
+    // Reserve the on-demand repair gate for the batch, so no `yams repair` starts while it
+    // writes; such a request is rejected with a retry hint (the batch is one bounded window).
+    if (!claimRepairGateForMaintenance()) {
+        nextPathTreeRepair_ = std::chrono::steady_clock::now() + refusedBackoff;
+        return std::nullopt;
+    }
+    struct GateRelease {
+        RepairService* self;
+        ~GateRelease() { self->releaseRepairGateForMaintenance(); }
+    } gateRelease{this};
+    std::unique_lock<std::timed_mutex> exclusive(pathTreeRepairMutex_, std::try_to_lock);
+    if (!exclusive.owns_lock()) {
+        nextPathTreeRepair_ = std::chrono::steady_clock::now() + refusedBackoff;
+        return std::nullopt;
+    }
+    auto repo = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
+    if (!repo) {
+        nextPathTreeRepair_ = std::chrono::steady_clock::now() + refusedBackoff;
+        return std::nullopt;
+    }
+
+    metadata::PathTreeRepairOptions options;
+    options.batchSize = std::max<std::size_t>(1, cfg_.pathTreeRepairBatch);
+    options.startAfterId = pathTreeRepairCursor_;
+    options.maxBatches = 1; // yield to the loop between batches
+    // Stop mid-window on shutdown; what is done commits and the cursor resumes after it.
+    // stop() clears shutdownState_->running; running_ only says the loop was started, so it is not
+    // a stop signal (it is false whenever the batch runs outside the loop).
+    options.shouldAbort = [this] {
+        return shutdownState_ && !shutdownState_->running.load(std::memory_order_acquire);
+    };
+    const auto step = metadata::repairMissingPathTree(*repo, options);
+    const auto now = std::chrono::steady_clock::now();
+    if (step.error) {
+        // Keep the cursor; a busy or failing DB is retried after the maintenance delay.
+        spdlog::debug("RepairService: path-tree repair batch after document {} failed: {}",
+                      pathTreeRepairCursor_, step.error->message);
+        nextPathTreeRepair_ = now + cfg_.maintenanceDelay;
+        return std::nullopt;
+    }
+
+    pathTreeRepairCursor_ = step.lastDocumentId;
+    pathTreeRepairPass_.documentsScanned += step.documentsScanned;
+    pathTreeRepairPass_.documentsMissing += step.documentsMissing;
+    pathTreeRepairPass_.nodesCreated += step.nodesCreated;
+    pathTreeRepairPass_.errors += step.errors;
+    pathTreeRepairPass_.batches += step.batches;
+    pathTreeRepairPass_.lastDocumentId = step.lastDocumentId;
+    pathTreeRepairPass_.finished = step.finished;
+    if (state_ && step.nodesCreated > 0) {
+        state_->stats.repairPathTreeRepaired.fetch_add(step.nodesCreated,
+                                                       std::memory_order_relaxed);
+    }
+
+    auto pass = pathTreeRepairPass_;
+    if (!step.finished) {
+        nextPathTreeRepair_ = now + 200ms;
+        return pass;
+    }
+
+    if (pass.documentsMissing > 0) {
+        spdlog::info("RepairService: path-tree repair pass complete: {} documents scanned, {} "
+                     "missing, {} restored, {} failed",
+                     pass.documentsScanned, pass.documentsMissing, pass.nodesCreated, pass.errors);
+    } else {
+        spdlog::debug("RepairService: path-tree repair pass complete: {} documents scanned, "
+                      "none missing",
+                      pass.documentsScanned);
+    }
+    pathTreeRepairCursor_ = 0;
+    pathTreeRepairPass_ = {};
+    // The resolver caps the interval at a year; clamp again so a directly built Config cannot
+    // overflow steady_clock.
+    nextPathTreeRepair_ = now + std::min(cfg_.pathTreeRepairInterval, kMaxPathTreeRepairInterval);
+    return pass;
+}
+
 void RepairService::performVectorCleanup() {
     YAMS_ZONE_SCOPED_N("RepairSvc::performVectorCleanup");
     if (vectorsDisabledByEnv())
@@ -1090,20 +1337,121 @@ RepairService::MissingWorkFlags RepairService::analyzeMissingWorkForHash(
         return flags;
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     const auto& d = docRes.value().value();
     if (d.repairStatus == yams::metadata::RepairStatus::Processing) {
         return flags;
     }
 
-    if (!d.contentExtracted || d.extractionStatus != yams::metadata::ExtractionStatus::Success) {
-        flags.missingFts5 =
-            canExtractDocument(d.mimeType, d.fileExtension, customExtractors, contentStore, hash);
-        return flags;
-    }
-
-    auto ftsRes = metaRepo->hasFtsEntry(d.id);
-    flags.missingFts5 = ftsRes && !ftsRes.value();
+    flags.missingFts5 = ftsRepairNeeded(
+        d,
+        [&] {
+            auto ftsRes = metaRepo->hasFtsEntry(d.id);
+            return !(ftsRes && !ftsRes.value());
+        },
+        [&] {
+            return canExtractDocument(d.mimeType, d.fileExtension, customExtractors, contentStore,
+                                      hash);
+        });
     return flags;
+}
+
+bool RepairService::ftsRepairNeeded(const metadata::DocumentInfo& d,
+                                    const std::function<bool()>& ftsIndexed,
+                                    const std::function<bool()>& canExtract) {
+    if (d.extractionStatus == yams::metadata::ExtractionStatus::Skipped) {
+        return false;
+    }
+    if (d.contentExtracted && d.extractionStatus == yams::metadata::ExtractionStatus::Success) {
+        return !ftsIndexed();
+    }
+    return canExtract();
+}
+
+std::string RepairService::extractorFingerprint(
+    const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors) {
+    std::vector<std::string> names;
+    names.reserve(extractors.size());
+    for (const auto& extractor : extractors) {
+        if (!extractor) {
+            continue;
+        }
+        if (const auto* plugin =
+                dynamic_cast<const PluginContentExtractorAdapter*>(extractor.get());
+            plugin && !plugin->name().empty()) {
+            names.push_back("plugin:" + plugin->name());
+        } else if (const auto* external =
+                       dynamic_cast<const extraction::ExternalPluginExtractor*>(extractor.get())) {
+            names.push_back("external:" + external->name());
+        } else {
+            const auto& self = *extractor;
+            names.emplace_back(typeid(self).name());
+        }
+    }
+    std::sort(names.begin(), names.end());
+    std::string out = "policy:" + std::string(kExtractionPolicyVersion) + "\n";
+    for (const auto& name : names) {
+        out += name;
+        out += '\n';
+    }
+    return out;
+}
+
+void RepairService::beginSweepExtractorCheck(
+    const std::vector<std::shared_ptr<extraction::IContentExtractor>>& extractors) {
+    sweepExtractorFingerprint_ = extractorFingerprint(extractors);
+    sweepExtractorsChanged_ = false;
+    if (cfg_.dataDir.empty()) {
+        return;
+    }
+    const auto path = cfg_.dataDir / "repair-extractor-set";
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) {
+        // No record yet (first run with this file, or a data dir from before it existed):
+        // terminal documents get one retry, since the rules they failed under are unknown. The
+        // set is recorded only when this sweep finishes, so an interrupted sweep retries again.
+        sweepExtractorsChanged_ = true;
+        return;
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        return; // unreadable: treat as unchanged rather than retry every sweep
+    }
+    const std::string stored((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+    sweepExtractorsChanged_ = stored != sweepExtractorFingerprint_;
+}
+
+void RepairService::finishSweepExtractorCheck() {
+    if (cfg_.dataDir.empty()) {
+        return;
+    }
+    const auto path = cfg_.dataDir / "repair-extractor-set";
+    const auto temp = cfg_.dataDir / "repair-extractor-set.tmp";
+    {
+        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return;
+        }
+        out << sweepExtractorFingerprint_;
+        if (!out) {
+            return;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, path, ec);
+#if defined(_WIN32)
+    if (ec) {
+        // Windows rename does not replace an existing file.
+        std::error_code removeEc;
+        std::filesystem::remove(path, removeEc);
+        ec.clear();
+        std::filesystem::rename(temp, path, ec);
+    }
+#endif
+    if (ec) {
+        spdlog::debug("RepairService: cannot record extractor set: {}", ec.message());
+    }
 }
 
 RepairService::MissingWorkResult
@@ -1185,18 +1533,30 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
     return result;
 }
 
-void RepairService::updateProgressPct() {
-    YAMS_ZONE_SCOPED_N("RepairSvc::updateProgressPct");
+void RepairService::noteRepairResolved(std::uint64_t documents) {
+    if (documents == 0)
+        return;
+    // Documents also arrive from ingest and explicit requests, which the scan backlog does not
+    // count. Saturate the counter itself at the backlog, so such documents never pre-fill
+    // progress for scan documents queued later.
+    auto done = processed_.load(std::memory_order_relaxed);
+    for (;;) {
+        const auto backlog = totalBacklog_.load(std::memory_order_relaxed);
+        const auto next = std::min(done + documents, std::max(done, backlog));
+        if (processed_.compare_exchange_weak(done, next, std::memory_order_relaxed)) {
+            break;
+        }
+    }
+    publishRepairProgress();
+}
+
+void RepairService::publishRepairProgress() {
     if (!state_)
         return;
-    auto tot = totalBacklog_.load(std::memory_order_relaxed);
-    state_->stats.repairTotalBacklog.store(tot, std::memory_order_relaxed);
-    if (tot == 0)
-        return;
-    auto done = processed_.load(std::memory_order_relaxed);
-    state_->stats.repairProcessed.store(done, std::memory_order_relaxed);
-    int pct = static_cast<int>(std::min<std::uint64_t>(100, (done * 100) / tot));
-    state_->readiness.vectorIndexProgress.store(pct, std::memory_order_relaxed);
+    const auto backlog = totalBacklog_.load(std::memory_order_relaxed);
+    state_->stats.repairTotalBacklog.store(backlog, std::memory_order_relaxed);
+    state_->stats.repairProcessed.store(
+        std::min(processed_.load(std::memory_order_relaxed), backlog), std::memory_order_relaxed);
 }
 
 void RepairService::beginRepairOperation(std::string_view operation) {
@@ -1403,13 +1763,14 @@ RepairOperationResult RepairService::runRepairOperation(OnDemandRepairOperation 
         case OnDemandRepairOperation::Downloads:
             return repairDownloads(request.dryRun, request.verbose, progress);
         case OnDemandRepairOperation::PathTree:
-            return rebuildPathTree(request.dryRun, request.verbose, progress);
+            return rebuildPathTree(request.dryRun, progress, cancelRequested);
         case OnDemandRepairOperation::Dedupe:
             return applySemanticDedupe(request, progress);
         case OnDemandRepairOperation::Chunks:
             return cleanOrphanedChunks(request.dryRun, request.verbose, progress);
         case OnDemandRepairOperation::BlockReferences:
-            return repairBlockReferences(request.dryRun, request.verbose, progress);
+            return repairBlockReferences(request.dryRun, request.verbose, progress,
+                                         cancelRequested);
         case OnDemandRepairOperation::Graph:
             return repairKnowledgeGraph(request, progress, cancelRequested);
         case OnDemandRepairOperation::Fts5:
@@ -1434,8 +1795,7 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
     if (!executionGuard) {
         RepairResponse busy;
         busy.success = false;
-        busy.errors.push_back(
-            "Repair is already in progress. Please wait for the current run to finish.");
+        busy.errors.push_back(repairBusyMessage());
         spdlog::info("[RepairService] executeRepair rejected: repair already in progress");
         return busy;
     }
@@ -1461,8 +1821,7 @@ RepairService::executeRepairAsync(const RepairRequest& request, ProgressFn progr
     if (!executionGuard) {
         RepairResponse busy;
         busy.success = false;
-        busy.errors.push_back(
-            "Repair is already in progress. Please wait for the current run to finish.");
+        busy.errors.push_back(repairBusyMessage());
         spdlog::info("[RepairService] executeRepairAsync rejected: repair already in progress");
         co_return busy;
     }
@@ -1650,6 +2009,7 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
             TuningManager::notifyWakeup();
             auto docRes = meta->getDocument(s.docId);
             if (docRes && docRes.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 auto doc = docRes.value().value();
                 doc.repairAttempts = s.repairAttempts + 1;
                 doc.repairAttemptedAt = std::chrono::time_point_cast<std::chrono::seconds>(
@@ -1761,6 +2121,7 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
             // Increment repair attempts
             auto docRes = meta->getDocument(s.docId);
             if (docRes && docRes.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 auto doc = docRes.value().value();
                 doc.repairAttempts = s.repairAttempts + 1;
                 doc.repairAttemptedAt = std::chrono::time_point_cast<std::chrono::seconds>(
@@ -1873,11 +2234,20 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
     }
 
     std::vector<int64_t> orphanedIds;
+    std::size_t uncheckable = 0;
     for (const auto& doc : docsResult.value()) {
         auto existsResult = store->exists(doc.sha256Hash);
-        if (!existsResult || !existsResult.value())
+        if (!existsResult) {
+            // A failed check is not evidence the blob is gone; never delete on it.
+            ++uncheckable;
+            spdlog::warn("[RepairService] Orphan check skipped {}: {}", doc.sha256Hash,
+                         existsResult.error().message);
+            continue;
+        }
+        if (!existsResult.value())
             orphanedIds.push_back(doc.id);
     }
+    result.failed += uncheckable;
 
     result.processed = docsResult.value().size();
 
@@ -1903,6 +2273,10 @@ RepairOperationResult RepairService::cleanOrphanedMetadata(bool dryRun, bool ver
         result.message = "Cleaned " + std::to_string(result.succeeded) + " orphans";
     }
 
+    if (uncheckable > 0) {
+        result.message +=
+            ", " + std::to_string(uncheckable) + " kept because their content could not be checked";
+    }
     if (salvagedCount > 0) {
         result.message +=
             ", salvaged " + std::to_string(salvagedCount) + " documents from corrupt DBs";
@@ -1946,6 +2320,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
     MetadataWriteFacade metaFacade(wc, meta.get());
 
     auto store = ctx_.getContentStore ? ctx_.getContentStore() : nullptr;
+    auto vectorDb = ctx_.getVectorDatabase ? ctx_.getVectorDatabase() : nullptr;
     (void)detection::FileTypeDetector::initializeWithMagicNumbers();
     auto& detector = detection::FileTypeDetector::instance();
 
@@ -2007,6 +2382,7 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
                     continue;
                 }
 
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 auto doc = *docResult.value();
                 const bool oldWasText = detector.isTextMimeType(doc.mimeType);
                 const bool newIsText = detector.isTextMimeType(mimeType);
@@ -2017,6 +2393,13 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
                     if (oldWasText && !newIsText) {
                         (void)meta->deleteContent(id);
                         (void)meta->removeFromIndex(id);
+                        // The vectors embed the text just cleared; left behind, vector search
+                        // keeps returning a document that has no text.
+                        if (vectorDb && !vectorDb->deleteVectorsByDocument(doc.sha256Hash)) {
+                            spdlog::warn("RepairService: MIME repair could not delete vectors "
+                                         "of {}",
+                                         doc.sha256Hash);
+                        }
                         metaFacade.updateExtractionStatus(
                             id, false, metadata::ExtractionStatus::Pending,
                             "MIME repaired; stale text content cleared");
@@ -2102,6 +2485,9 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
             sourceUrl = doc.filePath;
         if (sourceUrl.empty())
             continue;
+        // Already repaired: the URL stays the path, so source_url marks a finished document.
+        if (auto prior = meta->getMetadata(doc.id, "source_url"); prior && prior.value())
+            continue;
 
         result.processed++;
         if (dryRun) {
@@ -2114,35 +2500,63 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
         auto dotPos = filename.rfind('.');
         if (dotPos != std::string::npos)
             ext = filename.substr(dotPos);
-        doc.fileName = filename;
-        doc.filePath = std::move(filename);
+        // Keep the URL as the path: it is unique and its path-derived columns stay valid.
+        // A bare file name would collide across URLs (two report.pdf downloads).
+        doc.fileName = std::move(filename);
         doc.fileExtension = std::move(ext);
 
         {
             metadata::MetadataOpScope opScope("repair_download_url_update");
-            if (auto up = meta->updateDocument(doc); up) {
-                result.succeeded++;
-            } else {
+            if (auto up = meta->updateDocument(doc); !up) {
                 result.failed++;
+                continue;
             }
         }
+        // Path-aware listings read the name from the live location, not the documents row.
+        if (auto named =
+                meta->setDocumentPathName(doc.id, doc.filePath, doc.fileName, doc.fileExtension);
+            !named) {
+            spdlog::debug("RepairService: failed to rename download location {}: {}", sourceUrl,
+                          named.error().message);
+            result.failed++;
+            continue;
+        }
 
+        // Path-aware tag filters read location metadata, so the tags go there too.
+        const auto host = extract_host(sourceUrl);
+        const auto scheme = extract_scheme(sourceUrl);
+        std::vector<std::pair<std::string, std::optional<std::string>>> pathChanges{
+            {"source_url", sourceUrl}, {"tag:downloaded", std::string("downloaded")}};
+        if (!host.empty())
+            pathChanges.emplace_back("tag:host:" + host, "host:" + host);
+        if (!scheme.empty())
+            pathChanges.emplace_back("tag:scheme:" + scheme, "scheme:" + scheme);
+        if (auto mirrored = meta->applyDocumentPathMetadata(doc.id, pathChanges); !mirrored) {
+            spdlog::debug("RepairService: failed to mirror download tags for {}: {}", sourceUrl,
+                          mirrored.error().message);
+            result.failed++;
+            continue;
+        }
+
+        // source_url marks the document repaired, so it is written only after the updates above
+        // succeeded, and last; a failed document is retried by the next run.
         try {
-            metaFacade.setMetadata(doc.id, "source_url", metadata::MetadataValue(sourceUrl));
             metaFacade.setMetadata(doc.id, "tag:downloaded", metadata::MetadataValue("downloaded"));
-            auto host = extract_host(sourceUrl);
-            auto scheme = extract_scheme(sourceUrl);
             if (!host.empty())
                 metaFacade.setMetadata(doc.id, "tag:host:" + host,
                                        metadata::MetadataValue("host:" + host));
             if (!scheme.empty())
                 metaFacade.setMetadata(doc.id, "tag:scheme:" + scheme,
                                        metadata::MetadataValue("scheme:" + scheme));
+            metaFacade.setMetadata(doc.id, "source_url", metadata::MetadataValue(sourceUrl));
+            result.succeeded++;
         } catch (const std::exception& e) {
             spdlog::debug("RepairService: failed to persist download metadata for {}: {}",
                           sourceUrl, e.what());
+            result.failed++;
         } catch (...) {
             spdlog::debug("RepairService: failed to persist download metadata for {}", sourceUrl);
+            result.failed++;
         }
     }
 
@@ -2271,8 +2685,8 @@ RepairOperationResult RepairService::applySemanticDedupe(const RepairRequest& re
     return result;
 }
 
-RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
-                                                     ProgressFn progress) {
+RepairOperationResult RepairService::rebuildPathTree(bool dryRun, const ProgressFn& progress,
+                                                     std::atomic<bool>* cancelRequested) {
     RepairOperationResult result;
     result.operation = "path_tree";
 
@@ -2282,7 +2696,6 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
         return result;
     }
 
-    // Use RepairManager for path tree repair
     auto concreteRepo = std::dynamic_pointer_cast<metadata::MetadataRepository>(meta);
     if (!concreteRepo) {
         result.message = "Could not get concrete MetadataRepository";
@@ -2302,19 +2715,53 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
         return result;
     }
 
-    integrity::RepairManager repairMgr(*concreteRepo);
-    auto repairResult = repairMgr.repairPathTree([](uint64_t, uint64_t) {});
-    if (!repairResult) {
-        result.message = "Path tree repair failed: " + repairResult.error().message;
-        result.failed = 1;
-        return result;
-    }
+    // The background batch cannot start while this request holds the repair gate; the lock
+    // lets stop() wait for this pass.
+    std::lock_guard<std::timed_mutex> exclusive(pathTreeRepairMutex_);
 
-    const auto& stats = repairResult.value();
-    result.processed = stats.documentsScanned;
+    // The on-demand repair runs a full pass; only the background pass works in slices.
+    metadata::PathTreeRepairOptions options;
+    options.shouldContinue = [cancelRequested] {
+        return !(cancelRequested && cancelRequested->load(std::memory_order_relaxed));
+    };
+    options.shouldAbort = [this, cancelRequested] {
+        return (cancelRequested && cancelRequested->load(std::memory_order_relaxed)) ||
+               (shutdownState_ && !shutdownState_->running.load(std::memory_order_acquire));
+    };
+    const auto stats = metadata::repairMissingPathTree(
+        *concreteRepo, options, [&progress](const metadata::PathTreeRepairStats& running) {
+            if (!progress)
+                return;
+            RepairEvent ev;
+            ev.phase = "repairing";
+            ev.operation = "path_tree";
+            ev.processed = running.documentsScanned;
+            ev.succeeded = running.nodesCreated;
+            ev.failed = running.errors;
+            ev.message = "Rebuilding path tree";
+            progress(ev);
+        });
+    if (state_ && stats.nodesCreated > 0) {
+        state_->stats.repairPathTreeRepaired.fetch_add(stats.nodesCreated,
+                                                       std::memory_order_relaxed);
+    }
+    spdlog::info("Path tree repair: scanned={} missing={} created={} errors={} finished={}",
+                 stats.documentsScanned, stats.documentsMissing, stats.nodesCreated, stats.errors,
+                 stats.finished);
+
+    result.processed = stats.documentsMissing;
     result.succeeded = stats.nodesCreated;
     result.failed = stats.errors;
-    result.message = "Created " + std::to_string(stats.nodesCreated) + " path tree entries";
+    std::string message = "Created " + std::to_string(stats.nodesCreated) + " path tree entries";
+    if (stats.error) {
+        // Committed batches stay committed; report them alongside the failure.
+        result.failed += 1;
+        message += "; path tree repair failed after " + std::to_string(stats.documentsScanned) +
+                   " documents: " + stats.error->message;
+    } else if (!stats.finished) {
+        message += "; canceled after " + std::to_string(stats.documentsScanned) + " documents";
+    }
+    result.message = std::move(message);
     return result;
 }
 
@@ -2556,7 +3003,10 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
             if (nodes.size() < kBatchSize)
                 break;
 
-            if (!dryRun && deletedNodesInBatch > 0) {
+            // Rewind only when the deletes already happened. Batched deletes are applied after the
+            // scan, so the rows are still there; rewinding would re-read a page of orphans
+            // forever, appending the same deletes without bound.
+            if (!dryRun && deletedNodesInBatch > 0 && !orphanDeleteBatch) {
                 if (offset >= deletedNodesInBatch) {
                     offset -= deletedNodesInBatch;
                 } else {
@@ -2670,17 +3120,28 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
                      zeroRefCount);
     }
 
-    // Get referenced hashes
+    // Get referenced hashes. A failed query leaves the set incomplete, and everything outside it
+    // would look orphaned: refuse to delete anything.
     std::set<std::string> referencedHashes;
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT block_hash FROM block_references WHERE ref_count > 0";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            if (hash)
-                referencedHashes.insert(hash);
+    {
+        sqlite3_stmt* stmt = nullptr;
+        const char* sql = "SELECT block_hash FROM block_references WHERE ref_count > 0";
+        int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+        if (rc == SQLITE_OK) {
+            while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+                const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                if (hash)
+                    referencedHashes.insert(hash);
+            }
+            sqlite3_finalize(stmt);
         }
-        sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) {
+            sqlite3_close(db);
+            result.failed = 1;
+            result.message = "Refused: could not read block references from refs.db; no chunks "
+                             "deleted";
+            return result;
+        }
     }
 
     if (progress) {
@@ -2688,67 +3149,54 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
         ev.phase = "repairing";
         ev.operation = "chunks";
         ev.message = "Loaded " + std::to_string(referencedHashes.size()) +
-                     " referenced hashes, scanning filesystem...";
+                     " referenced hashes, scanning manifests...";
         progress(ev);
     }
 
-    // Scan manifests for additional references
-    size_t manifestDirsScanned = 0;
-    if (fs::exists(objectsPath)) {
-        for (const auto& dirEntry : fs::directory_iterator(objectsPath)) {
-            if (!fs::is_directory(dirEntry))
-                continue;
-            ++manifestDirsScanned;
-            if (progress && manifestDirsScanned % 64 == 0) {
-                RepairEvent ev;
-                ev.phase = "repairing";
-                ev.operation = "chunks";
-                ev.message =
-                    "Scanning manifests (" + std::to_string(manifestDirsScanned) + " dirs)...";
-                progress(ev);
-            }
-            for (const auto& fileEntry : fs::directory_iterator(dirEntry.path())) {
-                if (!fs::is_regular_file(fileEntry))
+    // Every manifest is a reference to its chunks (and to the whole-file object), even when
+    // refs.db has drifted. Manifests live under storage/manifests; older stores kept some next to
+    // the objects. Parse them with the real deserializer; if any cannot be read, the referenced
+    // set is unknown and nothing may be deleted.
+    std::size_t manifestsRead = 0;
+    std::size_t manifestFailures = 0;
+    {
+        manifest::ManifestManager manifests(manifest::ManifestManager::Config{});
+        const auto collect = [&](const fs::path& root) {
+            std::error_code ec;
+            if (!fs::exists(root, ec))
+                return;
+            for (fs::recursive_directory_iterator it(root, ec), endIt; !ec && it != endIt;
+                 it.increment(ec)) {
+                if (!it->is_regular_file(ec) || it->path().extension() != ".manifest")
                     continue;
-                std::string filename = fileEntry.path().filename().string();
-                if (filename.size() > 9 && filename.substr(filename.size() - 9) == ".manifest") {
-                    try {
-                        std::ifstream mf(fileEntry.path(), std::ios::binary);
-                        if (!mf)
-                            continue;
-                        std::vector<char> data((std::istreambuf_iterator<char>(mf)),
-                                               std::istreambuf_iterator<char>());
-                        if (data.size() >= 28 && data[0] == 'Y' && data[1] == 'M' &&
-                            data[2] == 'N' && data[3] == 'F') {
-                            size_t pos = 24;
-                            uint32_t numChunks = 0;
-                            if (pos + 4 <= data.size()) {
-                                std::memcpy(&numChunks, data.data() + pos, 4);
-                                pos += 4;
-                            }
-                            for (uint32_t i = 0; i < numChunks && pos + 4 <= data.size(); ++i) {
-                                uint32_t hashLen = 0;
-                                std::memcpy(&hashLen, data.data() + pos, 4);
-                                pos += 4;
-                                if (hashLen > 0 && hashLen < 256 && pos + hashLen <= data.size()) {
-                                    referencedHashes.insert(
-                                        std::string(data.data() + pos, hashLen));
-                                    pos += hashLen + 16;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::debug("RepairService: failed to parse block references for {}: {}",
-                                      fileEntry.path().string(), e.what());
-                    } catch (...) {
-                        spdlog::debug("RepairService: failed to parse block references for {}",
-                                      fileEntry.path().string());
-                    }
+                std::ifstream in(it->path(), std::ios::binary);
+                std::vector<char> raw((std::istreambuf_iterator<char>(in)),
+                                      std::istreambuf_iterator<char>());
+                auto parsed = in.bad() ? Result<manifest::Manifest>(ErrorCode::IOError)
+                                       : manifests.deserialize(std::as_bytes(std::span(raw)));
+                if (!parsed) {
+                    ++manifestFailures;
+                    spdlog::warn("[RepairService] chunks: cannot read manifest {}: {}",
+                                 it->path().string(), parsed.error().message);
+                    continue;
                 }
+                ++manifestsRead;
+                referencedHashes.insert(parsed.value().fileHash);
+                for (const auto& chunk : parsed.value().chunks)
+                    referencedHashes.insert(chunk.hash);
             }
-        }
+            if (ec)
+                ++manifestFailures;
+        };
+        collect(cfg_.dataDir / "storage" / "manifests");
+        collect(objectsPath);
+    }
+    if (manifestFailures > 0) {
+        sqlite3_close(db);
+        result.failed = manifestFailures;
+        result.message = "Refused: " + std::to_string(manifestFailures) +
+                         " manifest(s) could not be read; no chunks deleted";
+        return result;
     }
 
     // Find orphaned chunks
@@ -2815,7 +3263,8 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
 }
 
 RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool verbose,
-                                                           const ProgressFn& progress) {
+                                                           const ProgressFn& progress,
+                                                           std::atomic<bool>* cancelRequested) {
     RepairOperationResult result;
     result.operation = "block_refs";
 
@@ -2828,8 +3277,9 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
         return result;
     }
 
-    auto repairResult = integrity::RepairManager::repairBlockReferences(
-        objectsPath, refsDbPath, dryRun, [&progress](uint64_t processed, uint64_t total) {
+    auto repairResult = yams::storage::repairBlockReferences(
+        objectsPath, refsDbPath, dryRun,
+        [&progress](uint64_t processed, uint64_t total) {
             if (!progress)
                 return;
             RepairEvent ev;
@@ -2839,7 +3289,14 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
             ev.total = total;
             ev.message = "Scanning block references";
             progress(ev);
+        },
+        [cancelRequested]() {
+            return !(cancelRequested && cancelRequested->load(std::memory_order_relaxed));
         });
+    if (!repairResult && repairResult.error().code == ErrorCode::OperationCancelled) {
+        result.message = repairResult.error().message;
+        return result;
+    }
     if (!repairResult) {
         result.message = "Block refs repair failed: " + repairResult.error().message;
         result.failed = 1;
@@ -3095,6 +3552,33 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
     return result;
 }
 
+namespace {
+// Without an adopted provider every queued job is marked failed by the embedding service and no
+// vector is written. Returns the message to report instead of queueing; a host that supplies no
+// provider getter has no provider either.
+std::optional<std::string> embeddingProviderUnavailable(const RepairServiceContext& ctx,
+                                                        std::size_t documents) {
+    std::shared_ptr<IModelProvider> provider;
+    if (ctx.getModelProvider) {
+        try {
+            provider = ctx.getModelProvider();
+        } catch (const std::exception& e) {
+            spdlog::debug("RepairService: getModelProvider failed: {}", e.what());
+        } catch (...) {
+            spdlog::debug("RepairService: getModelProvider failed");
+        }
+    }
+    if (provider && provider->isAvailable()) {
+        return std::nullopt;
+    }
+    std::string message = "No embedding provider is available; " + std::to_string(documents) +
+                          " documents were not embedded. Check [embeddings] backend/enable and "
+                          "[daemon] enable/auto_load_plugins, then `yams daemon status -d`.";
+    spdlog::warn("RepairService: {}", message);
+    return message;
+}
+} // namespace
+
 boost::asio::awaitable<RepairOperationResult>
 RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const ProgressFn& progress,
                                               std::atomic<bool>* cancelRequested) {
@@ -3178,13 +3662,18 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
             spdlog::debug("RepairService: getEmbeddingModelName failed");
         }
     }
+    if (auto unavailable = embeddingProviderUnavailable(ctx_, hashes.size())) {
+        result.failed = hashes.size();
+        result.message = std::move(*unavailable);
+        co_return result;
+    }
     if (isCanceled()) {
         result.failed = hashes.size();
         result.message = "Repair canceled";
         co_return result;
     }
 
-    const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
+    const uint32_t embedCap = TuneAdvisor::embedJobChannelCapacity();
     auto embedQ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", embedCap);
     const std::size_t batchSize = std::max<std::size_t>(1u, cfg_.maxBatch);
@@ -3356,13 +3845,18 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         result.message = "No embedding model configured";
         return result;
     }
+    if (auto unavailable = embeddingProviderUnavailable(ctx_, hashes.size())) {
+        result.failed = hashes.size();
+        result.message = std::move(*unavailable);
+        return result;
+    }
     if (isCanceled()) {
         result.failed = hashes.size();
         result.message = "Repair canceled";
         return result;
     }
 
-    const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
+    const uint32_t embedCap = TuneAdvisor::embedJobChannelCapacity();
     auto embedQ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", embedCap);
 
@@ -3381,7 +3875,8 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         }
 
         const std::size_t end = std::min(i + batchSize, hashes.size());
-        std::vector<std::string> batch(hashes.begin() + i, hashes.begin() + end);
+        std::vector<std::string> batch(hashes.begin() + static_cast<std::ptrdiff_t>(i),
+                                       hashes.begin() + static_cast<std::ptrdiff_t>(end));
         const std::size_t batchIndex = i / batchSize;
 
         submitRepairStatusUpdate(ctx_, meta, batch, metadata::RepairStatus::Processing,
@@ -3544,8 +4039,9 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
                               ", failed=" + std::to_string(result.failed);
         }
         if (state_) {
-            state_->stats.repairEmbeddingsGenerated.store(result.succeeded,
-                                                          std::memory_order_relaxed);
+            // Add, not overwrite: background repair counts into the same field.
+            state_->stats.repairEmbeddingsGenerated.fetch_add(result.succeeded,
+                                                              std::memory_order_relaxed);
             state_->stats.repairEmbeddingsSkipped.store(result.skipped, std::memory_order_relaxed);
             state_->stats.repairFailedOperations.store(result.failed, std::memory_order_relaxed);
         }

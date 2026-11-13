@@ -93,8 +93,6 @@ public:
     bool hasReusablePersistedSearchIndex() const;
     bool optimizeIndex();
     bool persistIndex();
-    void compactDatabase();
-    bool rebuildIndex();
     bool beginBulkLoad();
     bool finalizeBulkLoad();
 
@@ -123,11 +121,6 @@ public:
     Result<std::vector<VectorRecord>> getEmbeddingsByVersion(const std::string& model_version,
                                                              size_t limit = 1000);
     Result<void> markAsStale(const std::string& chunk_id);
-    // Soft-delete lifecycle is not yet modeled in the current vectors schema; this API returns
-    // NotSupported until deleted-state columns are introduced.
-    Result<void> markAsDeleted(const std::string& chunk_id);
-    // Companion to markAsDeleted(); currently returns NotSupported for the same reason.
-    Result<size_t> purgeDeleted(std::chrono::hours age_threshold);
 
     Result<void> insertEntityVector(const EntityVectorRecord& record);
     Result<void> insertEntityVectorsBatch(const std::vector<EntityVectorRecord>& records);
@@ -166,15 +159,11 @@ private:
     std::unique_ptr<Impl> pImpl;
 };
 
-std::unique_ptr<VectorDatabase> createVectorDatabase(const VectorDatabaseConfig& config = {});
-
 namespace utils {
 
 std::vector<float> normalizeVector(const std::vector<float>& vec);
 std::string generateChunkId(const std::string& document_hash, size_t chunk_index);
 bool validateVectorRecord(const VectorRecord& record, size_t expected_dim);
-double similarityToDistance(double similarity);
-double distanceToSimilarity(double distance);
 
 } // namespace utils
 

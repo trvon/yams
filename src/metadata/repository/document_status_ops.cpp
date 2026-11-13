@@ -920,6 +920,7 @@ Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
                 JOIN temp_embedding_reconcile_hashes th ON th.sha256_hash = d.sha256_hash
                 LEFT JOIN document_embedding_derivations ded ON ded.document_id = d.id
                 WHERE ded.completed IS NOT 0
+                  AND EXISTS (SELECT 1 FROM document_content c WHERE c.document_id = d.id)
             )");
             if (!countStmt) {
                 return countStmt.error();
@@ -936,14 +937,20 @@ Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
                 )
                 SELECT d.id,
                        CASE WHEN th.sha256_hash IS NOT NULL AND ded.completed IS NOT 0
+                                 AND dc.document_id IS NOT NULL
                             THEN 1 ELSE 0 END,
                        CASE WHEN th.sha256_hash IS NOT NULL AND ded.completed IS NOT 0
+                                 AND dc.document_id IS NOT NULL
                             THEN ? ELSE NULL END,
                        CASE WHEN th.sha256_hash IS NOT NULL AND ded.completed IS NOT 0
+                                 AND dc.document_id IS NOT NULL
                             THEN 1 ELSE 0 END,
                        unixepoch()
                 FROM documents d
                 LEFT JOIN temp_embedding_reconcile_hashes th ON th.sha256_hash = d.sha256_hash
+                -- Vectors without text are not an embedding of anything current: an old build's
+                -- vectors can outlive content that MIME repair or re-extraction removed.
+                LEFT JOIN document_content dc ON dc.document_id = d.id
                 -- A document whose derivation is open (content changed under an in-flight
                 -- embed) keeps has_embedding = 0 even though vector rows exist for it: the
                 -- rows describe superseded text and the next embed pass replaces them.
@@ -1037,6 +1044,31 @@ Result<bool> MetadataRepository::hasDocumentEmbeddingByHash(const std::string& h
 
         return stmt.getInt(0) != 0;
     });
+}
+
+Result<std::unordered_set<std::string>> MetadataRepository::getOpenEmbeddingDerivationHashes() {
+    return executeReadQuery<std::unordered_set<std::string>>(
+        [&](Database& db) -> Result<std::unordered_set<std::string>> {
+            auto stmtResult = db.prepare(R"(
+            SELECT d.sha256_hash
+            FROM documents d
+            JOIN document_embedding_derivations ded ON ded.document_id = d.id
+            WHERE ded.completed = 0
+        )");
+            if (!stmtResult)
+                return stmtResult.error();
+            auto& stmt = stmtResult.value();
+            std::unordered_set<std::string> hashes;
+            while (true) {
+                auto step = stmt.step();
+                if (!step)
+                    return step.error();
+                if (!step.value())
+                    break;
+                hashes.insert(stmt.getString(0));
+            }
+            return hashes;
+        });
 }
 
 Result<void> MetadataRepository::updateDocumentExtractionStatus(int64_t documentId,
@@ -1395,6 +1427,57 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
         reportDbLockError();
     }
     return result;
+}
+
+Result<std::size_t>
+MetadataRepository::resetStalledEmbeddingRepairs(std::int64_t staleBeforeEpoch) {
+    return executeWriteQuery<std::size_t>([&](Database& db) -> Result<std::size_t> {
+        YAMS_TRY(beginTransaction(db));
+        auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
+
+        // Reconcile a stale Processing row whose current derivation already completed.
+        YAMS_TRY_UNWRAP(reconcile, db.prepareCached(R"(
+            UPDATE documents SET repair_status = 'completed'
+            WHERE repair_status = 'processing' AND repair_attempted_at < ?
+              AND EXISTS (
+                  SELECT 1 FROM document_embedding_derivations a
+                  WHERE a.document_id = documents.id AND a.completed = 1
+              )
+        )"));
+        YAMS_TRY(reconcile->bind(1, staleBeforeEpoch));
+        YAMS_TRY(reconcile->execute());
+
+        // Invalidate old tokens for the still-unfinished stale attempts before requeueing them.
+        YAMS_TRY_UNWRAP(rotate, db.prepareCached(R"(
+            UPDATE document_embedding_derivations
+            SET generation = lower(hex(randomblob(16))), completed = 0
+            WHERE completed = 0 AND document_id IN (
+                SELECT id FROM documents
+                WHERE repair_status = 'processing' AND repair_attempted_at < ?
+            )
+        )"));
+        YAMS_TRY(rotate->bind(1, staleBeforeEpoch));
+        YAMS_TRY(rotate->execute());
+
+        // Preserve repair_attempts and repair_attempted_at: no attempt was consumed.
+        // A row whose job died before minting a derivation has no row at all and must be
+        // requeued too; only a completed derivation disqualifies it (handled above).
+        YAMS_TRY_UNWRAP(requeue, db.prepareCached(R"(
+            UPDATE documents SET repair_status = 'pending'
+            WHERE repair_status = 'processing' AND repair_attempted_at < ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM document_embedding_derivations a
+                  WHERE a.document_id = documents.id AND a.completed = 1
+              )
+        )"));
+        YAMS_TRY(requeue->bind(1, staleBeforeEpoch));
+        YAMS_TRY(requeue->execute());
+        const auto reset = static_cast<std::size_t>(db.changes());
+
+        YAMS_TRY(commitOrRollback(db));
+        rollback.dismiss();
+        return reset;
+    });
 }
 
 } // namespace yams::metadata

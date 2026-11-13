@@ -62,11 +62,6 @@ public:
 
     // Optional runtime configuration (kept simple to avoid heavy headers)
     // Milliseconds-based timeouts to avoid std::chrono in the public header.
-    void set_header_timeout_ms(uint32_t ms) noexcept;
-    void set_payload_timeout_ms(uint32_t ms) noexcept;
-    void set_idle_timeout_ms(uint32_t ms) noexcept;
-    void set_write_cap_bytes(std::size_t bytes) noexcept;
-    void set_backpressure_watermarks(uint32_t low_percent, uint32_t high_percent) noexcept;
     void set_max_retries(std::size_t n) noexcept;
     void enable_metrics(bool on) noexcept;
 
@@ -74,7 +69,6 @@ public:
     void on_accept(uint64_t fd);
     void on_connect(uint64_t fd);
     void on_readable(std::size_t n);
-    void on_writable(std::size_t n);
     void on_header_parsed(const FrameInfo& info);
     void on_body_parsed();
     void on_stream_next(bool done);
@@ -91,7 +85,6 @@ public:
     void on_write_queued(std::size_t bytes) noexcept;
     void on_write_flushed(std::size_t bytes) noexcept;
     bool backpressured() const noexcept;
-    std::size_t write_capacity_remaining() const noexcept;
 
     // State validation helpers
     bool can_read() const noexcept {
@@ -101,20 +94,6 @@ public:
     bool can_write() const noexcept {
         return state_ == State::Connected || state_ == State::WritingHeader ||
                state_ == State::StreamingChunks;
-    }
-    void validate_operation(Operation op) const {
-        switch (op) {
-            case Operation::Read:
-                if (!can_read())
-                    throw std::runtime_error("Invalid read in state");
-                break;
-            case Operation::Write:
-                if (!can_write())
-                    throw std::runtime_error("Invalid write in state");
-                break;
-            default:
-                break;
-        }
     }
 
     // Debugging helper

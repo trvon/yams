@@ -1136,6 +1136,13 @@ jobs:
           fi
           meson --version
           meson compile -C build/release
+          # Ship the static-embedding table: fetch it (sha256-pinned in src/cli/static_tables.cpp),
+          # point the install rule at it, and let meson regenerate the install plan (no
+          # recompilation). Not via the built CLI: it failed TLS verification on macOS x86_64.
+          python3 scripts/ci/fetch-static-table.py yams-static-bge-c4-256 "$PWD/build/static-embedding"
+          meson configure build/release \
+            -Dstatic-embedding-table="$PWD/build/static-embedding/yams-static-bge-c4-256.smstat"
+          meson compile -C build/release
           echo "BUILD_DIR=build/release" >> "$GITHUB_ENV"
 
       - name: Upload build logs (artifacts)
@@ -1342,6 +1349,17 @@ jobs:
                   meson setup $buildDir --buildtype=release
               }
           }
+
+          # Ship the static-embedding table (sha256-pinned in src/cli/static_tables.cpp): fetch it,
+          # point the install rule at it, regenerate the install plan. Not via the built CLI: it
+          # cannot load its DLLs from the build tree.
+          $tableDir = Join-Path (Resolve-Path "build").Path "static-embedding"
+          python scripts/ci/fetch-static-table.py yams-static-bge-c4-256 $tableDir
+          if ($LASTEXITCODE -ne 0) { Write-Error "static table download failed"; exit 1 }
+          meson configure $buildDir "-Dstatic-embedding-table=$(Join-Path $tableDir 'yams-static-bge-c4-256.smstat')"
+          if ($LASTEXITCODE -ne 0) { Write-Error "meson configure failed"; exit 1 }
+          meson compile -C $buildDir
+          if ($LASTEXITCODE -ne 0) { Write-Error "meson regenerate failed"; exit 1 }
 
           # Install to stage directory.
           # --no-rebuild: setup.ps1's release build already compiled; this

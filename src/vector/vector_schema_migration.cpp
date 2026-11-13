@@ -828,65 +828,6 @@ Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db,
     return Result<void>{};
 }
 
-Result<void> VectorSchemaMigration::rollbackV2ToV1(sqlite3* db) {
-    if (!db) {
-        return Error{ErrorCode::InvalidArgument, "Database handle is null"};
-    }
-
-    if (!hasBackupTables(db)) {
-        return Error{ErrorCode::InvalidState, "Cannot rollback: backup tables not found"};
-    }
-
-    spdlog::info("Rolling back V2 to V1 schema...");
-
-    auto result = beginTransaction(db);
-    if (!result) {
-        return result;
-    }
-
-    // Drop V2 tables
-    result = executeSQL(db, "DROP TABLE IF EXISTS vectors");
-    if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return result;
-    }
-
-    result = executeSQL(db, "DROP TABLE IF EXISTS vectors_hnsw_meta");
-    if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return result;
-    }
-
-    result = executeSQL(db, "DROP TABLE IF EXISTS vectors_hnsw_nodes");
-    if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return result;
-    }
-
-    // Restore V1 tables
-    result = executeSQL(db, "ALTER TABLE doc_embeddings_v1_backup RENAME TO doc_embeddings");
-    if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return result;
-    }
-
-    result = executeSQL(db, "ALTER TABLE doc_metadata_v1_backup RENAME TO doc_metadata");
-    if (!result) {
-        // Try to restore doc_embeddings backup name
-        executeSQL(db, "ALTER TABLE doc_embeddings RENAME TO doc_embeddings_v1_backup");
-        executeSQL(db, "ROLLBACK");
-        return result;
-    }
-
-    result = executeSQL(db, "COMMIT");
-    if (!result) {
-        return result;
-    }
-
-    spdlog::info("Rollback to V1 schema completed");
-    return Result<void>{};
-}
-
 bool VectorSchemaMigration::hasBackupTables(sqlite3* db) {
     if (!db) {
         return false;

@@ -993,8 +993,6 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     config.textMaxResults = 83;
     config.graphExpansionMaxTerms = 13;
     config.graphExpansionQueryNeighborK = 19;
-    config.enableLexicalExpansion = true;
-    config.lexicalExpansionMinHits = 6;
     config.conceptMaxCount = 7;
     config.fusionCandidateLimit = 211;
     config.enableMultiVectorQuery = true;
@@ -1038,8 +1036,6 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     CHECK((roundTrip.textMaxResults == config.textMaxResults));
     CHECK((roundTrip.graphExpansionMaxTerms == config.graphExpansionMaxTerms));
     CHECK((roundTrip.graphExpansionQueryNeighborK == config.graphExpansionQueryNeighborK));
-    CHECK((roundTrip.enableLexicalExpansion == config.enableLexicalExpansion));
-    CHECK((roundTrip.lexicalExpansionMinHits == config.lexicalExpansionMinHits));
     CHECK((roundTrip.conceptMaxCount == config.conceptMaxCount));
     CHECK((roundTrip.fusionCandidateLimit == config.fusionCandidateLimit));
     CHECK((roundTrip.enableMultiVectorQuery == config.enableMultiVectorQuery));

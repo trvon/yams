@@ -30,14 +30,6 @@ void TreeNode::addEntry(TreeEntry entry) {
     sorted_ = false;
 }
 
-void TreeNode::addEntries(std::vector<TreeEntry> entries) {
-    entries_.reserve(entries_.size() + entries.size());
-    for (auto& e : entries)
-        entries_.push_back(std::move(e));
-    cachedHash_.reset();
-    sorted_ = false;
-}
-
 void TreeNode::ensureSorted() const {
     if (!sorted_) {
         std::sort(entries_.begin(), entries_.end());
@@ -61,7 +53,7 @@ std::string TreeNode::computeHash() const {
 
     // Convert to hex string
     std::string hexHash;
-    hexHash.reserve(SHA256_DIGEST_LENGTH * 2);
+    hexHash.reserve(std::size_t{SHA256_DIGEST_LENGTH} * 2);
     for (unsigned char byte : hash) {
         char buf[3]{};
         snprintf(buf, sizeof(buf), "%02x", byte);
@@ -270,7 +262,7 @@ Result<std::string> TreeBuilder::buildTreeRecursive(const std::string& dirPath,
 
                 // Convert to hex
                 std::string hexHash;
-                hexHash.reserve(SHA256_DIGEST_LENGTH * 2);
+                hexHash.reserve(std::size_t{SHA256_DIGEST_LENGTH} * 2);
                 for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
                     char buf[3]{};
                     snprintf(buf, sizeof(buf), "%02x", hash[i]);

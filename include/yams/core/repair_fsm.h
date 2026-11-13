@@ -51,24 +51,8 @@ public:
 
     // Stage transitions (no-ops for now; enforce basic order with minimal checks)
     bool start() noexcept { return transition(State::Idle, State::Scan); }
-    bool on_scan_done() noexcept { return transition(State::Scan, State::Detect); }
-    bool on_detect_done() noexcept { return transition(State::Detect, State::Classify); }
-    bool on_classify_done() noexcept { return transition(State::Classify, State::Isolate); }
-    bool on_isolate_done() noexcept { return transition(State::Isolate, State::Fix); }
-    bool on_fix_done(bool ok) noexcept {
-        return ok ? transition(State::Fix, State::Verify) : fail();
-    }
-    bool on_verify_done(bool ok) noexcept {
-        return ok ? transition(State::Verify, State::Reindex) : fail();
-    }
-    bool on_reindex_done(bool ok) noexcept {
-        return ok ? transition(State::Reindex, State::Complete) : fail();
-    }
 
     // Retry/backoff hooks (placeholders; actual timing handled by caller)
-    void set_on_backoff(std::function<void(std::uint32_t /*ms*/, std::uint32_t /*attempt*/)> cb) {
-        on_backoff_ = std::move(cb);
-    }
     void set_on_state_change(Callback cb) { on_state_change_ = std::move(cb); }
 
     static const char* to_string(State s) noexcept {

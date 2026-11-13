@@ -228,16 +228,4 @@ bool CompressedBlock::validate() const {
     return calculatedCRC == header_.compressedCRC32;
 }
 
-bool CompressedBlock::isCompressedBlock(std::span<const std::byte> data) {
-    if (data.size() < CompressionHeader::SIZE) {
-        return false;
-    }
-
-    // Check magic number at the beginning
-    uint32_t magic{};
-    std::memcpy(&magic, data.data(), sizeof(magic));
-
-    return magic == CompressionHeader::MAGIC;
-}
-
 } // namespace yams::compression

@@ -186,6 +186,7 @@ public:
             auto daemonRes = tryDaemonDownload();
             if (daemonRes) {
                 if (daemonRes.value().has_value()) {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     return printDaemonResult(daemonRes.value().value());
                 }
             } else {
@@ -507,6 +508,7 @@ private:
         if (!resp) {
             return resp.error();
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         return resp.value().value();
     }
 
@@ -519,6 +521,7 @@ private:
         if (!resp) {
             return resp.error();
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         return resp.value().value();
     }
 
@@ -565,6 +568,7 @@ private:
         auto& client = **leaseHandle;
 
         DownloadRequest req;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         req.url = *url_;
         req.checksum = checksum_.value_or(std::string{});
         req.tags = tags_;

@@ -621,6 +621,7 @@ public:
                     if (!node.value()) {
                         continue;
                     }
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     auto symbol = makeContextSymbol(*node.value(), req.query, 95.0);
                     if (std::filesystem::path(symbol.filePath).lexically_normal() != target ||
                         (!req.includeTests && symbol.testFile && !queryMentionsTests(req.query))) {
@@ -822,6 +823,7 @@ public:
                 return id.error();
             }
             if (id.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 fromIds.push_back(*id.value());
             }
         }
@@ -832,6 +834,7 @@ public:
                 return id.error();
             }
             if (id.value().has_value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 targets.insert(*id.value());
             }
         }
@@ -1209,6 +1212,7 @@ private:
         if (!node.value().has_value()) {
             return std::optional<std::int64_t>{};
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         return std::optional<std::int64_t>{node.value()->id};
     }
 

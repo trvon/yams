@@ -70,6 +70,7 @@ uint32_t calculate_crc32_impl(const uint8_t* data, size_t size) noexcept {
         uint32_t lo;
         uint32_t hi;
         std::memcpy(&lo, data, sizeof(lo));
+        // nosemgrep: yams.cpp.suspicious-add-sizeof -- byte offset of the high word
         std::memcpy(&hi, data + sizeof(lo), sizeof(hi));
         lo ^= crc;
 
@@ -201,6 +202,7 @@ Result<Message> MessageFramer::parse_frame(std::span<const uint8_t> frame) {
         return Error{ErrorCode::InvalidData, "Message size exceeds maximum"};
     }
 
+    // nosemgrep: yams.cpp.suspicious-add-sizeof -- frame length is header bytes plus payload
     if (frame.size() != sizeof(FrameHeader) + header.payload_size) {
         return Error{ErrorCode::InvalidData, "Frame size mismatch"};
     }
@@ -218,15 +220,6 @@ Result<Message> MessageFramer::parse_frame(std::span<const uint8_t> frame) {
 
     // Deserialize message
     return deserialize_message(message_data);
-}
-
-Result<std::vector<uint8_t>> MessageFramer::serialize_message(const Message& message) {
-    try {
-        return ProtoSerializer::encode_payload(message);
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::SerializationError,
-                     std::string("Failed to serialize message: ") + e.what()};
-    }
 }
 
 Result<Message> MessageFramer::deserialize_message(std::span<const uint8_t> data) {

@@ -116,7 +116,7 @@ std::string HtmlTextExtractor::extractTextFromHtml(const std::string& html) {
 
     // Safety limit: Skip regex processing on very large HTML to avoid stack overflow
     // Regex backtracking can cause exponential time complexity on large strings
-    constexpr size_t MAX_REGEX_SIZE = 5 * 1024 * 1024; // 5MB limit for regex operations
+    constexpr size_t MAX_REGEX_SIZE = 5ULL * 1024 * 1024; // 5MB limit for regex operations
     if (html.size() > MAX_REGEX_SIZE) {
         spdlog::warn(
             "HTML file too large for regex processing ({} bytes), using simple tag stripping",
@@ -152,9 +152,10 @@ std::string HtmlTextExtractor::extractTextFromHtml(const std::string& html) {
 namespace {
 // Helper for case-insensitive find
 size_t find_caseless(const std::string& haystack, const std::string& needle, size_t offset = 0) {
-    auto it = std::search(
-        haystack.begin() + offset, haystack.end(), needle.begin(), needle.end(),
-        [](unsigned char c1, unsigned char c2) { return std::tolower(c1) == std::tolower(c2); });
+    auto it = std::search(haystack.begin() + static_cast<std::ptrdiff_t>(offset), haystack.end(),
+                          needle.begin(), needle.end(), [](unsigned char c1, unsigned char c2) {
+                              return std::tolower(c1) == std::tolower(c2);
+                          });
     if (it == haystack.end()) {
         return std::string::npos;
     }
@@ -351,7 +352,7 @@ std::string HtmlTextExtractor::decodeHtmlEntities(const std::string& text) {
                         pos = end + 1;
                         continue;
                     }
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Invalid number, keep as-is
                 }
             }
@@ -370,7 +371,7 @@ std::string HtmlTextExtractor::decodeHtmlEntities(const std::string& text) {
                         pos = end + 1;
                         continue;
                     }
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Invalid hex, keep as-is
                 }
             }

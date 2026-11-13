@@ -234,14 +234,20 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
     // Allow candidate limit overrides for recall benchmarking
     // YAMS_CANDIDATE_MULTIPLIER scales all maxResults values (e.g., 2.0 = 2x candidates)
     if (auto multiplier = getEnvFloat("YAMS_CANDIDATE_MULTIPLIER")) {
-        config.textMaxResults = static_cast<size_t>(config.textMaxResults * *multiplier);
-        config.vectorMaxResults = static_cast<size_t>(config.vectorMaxResults * *multiplier);
+        config.textMaxResults =
+            static_cast<size_t>(static_cast<float>(config.textMaxResults) * *multiplier);
+        config.vectorMaxResults =
+            static_cast<size_t>(static_cast<float>(config.vectorMaxResults) * *multiplier);
         config.entityVectorMaxResults =
-            static_cast<size_t>(config.entityVectorMaxResults * *multiplier);
-        config.pathTreeMaxResults = static_cast<size_t>(config.pathTreeMaxResults * *multiplier);
-        config.kgMaxResults = static_cast<size_t>(config.kgMaxResults * *multiplier);
-        config.tagMaxResults = static_cast<size_t>(config.tagMaxResults * *multiplier);
-        config.metadataMaxResults = static_cast<size_t>(config.metadataMaxResults * *multiplier);
+            static_cast<size_t>(static_cast<float>(config.entityVectorMaxResults) * *multiplier);
+        config.pathTreeMaxResults =
+            static_cast<size_t>(static_cast<float>(config.pathTreeMaxResults) * *multiplier);
+        config.kgMaxResults =
+            static_cast<size_t>(static_cast<float>(config.kgMaxResults) * *multiplier);
+        config.tagMaxResults =
+            static_cast<size_t>(static_cast<float>(config.tagMaxResults) * *multiplier);
+        config.metadataMaxResults =
+            static_cast<size_t>(static_cast<float>(config.metadataMaxResults) * *multiplier);
         spdlog::info("SearchEngine candidate limits scaled by {:.2f}x via env (text={}, vec={})",
                      *multiplier, config.textMaxResults, config.vectorMaxResults);
     }

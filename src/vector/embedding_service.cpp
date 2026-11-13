@@ -34,11 +34,11 @@
 #ifndef _WIN32
 #include <sys/resource.h>
 #endif
+#include <yams/common/log_rate_limiter.h>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/gpu_info.h>
-#include <yams/integrity/repair_utils.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/vector/dim_resolver.h>
 #include <yams/vector/dynamic_batcher.h>
@@ -46,6 +46,7 @@
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/embedding_service_test_hooks.h>
 #include <yams/vector/vector_database.h>
+#include <yams/vector/vector_schema_repair.h>
 
 namespace yams::vector {
 
@@ -68,8 +69,12 @@ std::vector<std::vector<float>> generateEmbeddingsAdaptiveSplit(
         }
 
         const size_t mid = batch.size() / 2;
-        auto left = run(std::vector<std::string>(batch.begin(), batch.begin() + mid), depth - 1);
-        auto right = run(std::vector<std::string>(batch.begin() + mid, batch.end()), depth - 1);
+        auto left = run(std::vector<std::string>(batch.begin(),
+                                                 batch.begin() + static_cast<std::ptrdiff_t>(mid)),
+                        depth - 1);
+        auto right = run(
+            std::vector<std::string>(batch.begin() + static_cast<std::ptrdiff_t>(mid), batch.end()),
+            depth - 1);
 
         if (left.empty() && right.empty()) {
             return {};
@@ -222,10 +227,6 @@ std::vector<std::string> EmbeddingService::getAvailableModels() const {
     return availableModels;
 }
 
-Result<void> EmbeddingService::generateEmbeddingForDocument(const std::string& documentHash) {
-    return generateEmbeddingsForDocuments({documentHash});
-}
-
 bool EmbeddingService::startRepairAsync() {
     std::lock_guard<std::mutex> lock(workerMutex_);
     if (repairRunning_) {
@@ -303,11 +304,6 @@ void EmbeddingService::stopRepair() {
     if (local.joinable()) {
         local.join();
     }
-}
-
-bool EmbeddingService::isRepairRunning() const {
-    std::lock_guard<std::mutex> lock(workerMutex_);
-    return repairRunning_;
 }
 
 void EmbeddingService::triggerRepairIfNeeded() {
@@ -397,8 +393,8 @@ void EmbeddingService::triggerRepairIfNeeded() {
 
         // Extrapolate missing count if we only checked a sample
         if (checkedCount < totalDocs && missingCount > 0) {
-            float missingRate = static_cast<float>(missingCount) / checkedCount;
-            missingCount = static_cast<size_t>(missingRate * totalDocs);
+            float missingRate = static_cast<float>(missingCount) / static_cast<float>(checkedCount);
+            missingCount = static_cast<size_t>(missingRate * static_cast<float>(totalDocs));
         }
 
         if (missingCount == 0) {
@@ -478,10 +474,14 @@ void EmbeddingService::runRepair(const yams::compat::stop_token& stopToken) {
         }
         vdbConfig.embedding_dim = repairDim;
         // Align schema only when missing; avoid dropping existing tables during repair
-        try {
-            (void)yams::integrity::ensureVectorSchemaAligned(dataPath_, repairDim, false);
-        } catch (...) {
-            spdlog::debug("Repair thread: vector schema alignment failed");
+        if (auto aligned = yams::vector::ensureVectorSchemaAligned(dataPath_, repairDim, false);
+            !aligned) {
+            static yams::common::LogRateLimiter alignFailureLog{std::chrono::minutes(10)};
+            if (auto held = alignFailureLog.admit()) {
+                spdlog::warn("Repair thread: vector schema alignment failed: {}{}",
+                             aligned.error().message,
+                             yams::common::LogRateLimiter::suppressedSuffix(*held));
+            }
         }
         vdbConfig.create_if_missing = true;
 
@@ -536,8 +536,9 @@ void EmbeddingService::runRepair(const yams::compat::stop_token& stopToken) {
             }
 
             size_t end = std::min(i + batchSize, missingEmbeddings.size());
-            std::vector<std::string> batch(missingEmbeddings.begin() + i,
-                                           missingEmbeddings.begin() + end);
+            std::vector<std::string> batch(
+                missingEmbeddings.begin() + static_cast<std::ptrdiff_t>(i),
+                missingEmbeddings.begin() + static_cast<std::ptrdiff_t>(end));
 
             auto result = generateEmbeddingsInternal(batch, false);
             if (!result) {
@@ -745,12 +746,14 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                 cfgDim = actualDim;
             }
             if (cfgDim != vdbConfig.embedding_dim) {
-                spdlog::warn("EmbeddingService: vector DB dim={} != target dim={}, attempting "
-                             "non-destructive align",
-                             cfgDim, vdbConfig.embedding_dim);
-                (void)yams::integrity::ensureVectorSchemaAligned(dataPath_, vdbConfig.embedding_dim,
-                                                                 false);
-                // Recreate DB handle after alignment
+                // Rows at another dimension are never rewritten here; that takes an explicit,
+                // destructive recreate.
+                spdlog::warn("EmbeddingService: vector DB dim={} != target dim={}; recreate the "
+                             "vector tables at dim={} (`yams model` after switching models, or "
+                             "`yams doctor --recreate-vectors --dim {}`), then re-embed",
+                             cfgDim, vdbConfig.embedding_dim, vdbConfig.embedding_dim,
+                             vdbConfig.embedding_dim);
+                // Reopen the DB handle, as before.
                 vector::VectorDatabaseConfig alignedCfg = vdbConfig;
                 vectorDb = std::make_unique<vector::VectorDatabase>(alignedCfg);
                 if (auto reinit = vectorDb->initializeChecked(); !reinit) {

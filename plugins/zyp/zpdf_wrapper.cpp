@@ -123,27 +123,18 @@ std::optional<Document> Document::openMemory(std::span<const uint8_t> data) {
     return Document(handle);
 }
 
+void Document::setPageDecompressLimit(size_t limit) {
+    if (handle_) {
+        zpdf_set_page_decompress_limit(static_cast<ZpdfDocument*>(handle_), limit);
+    }
+}
+
 int Document::pageCount() const {
     if (!handle_) {
         return 0;
     }
     int count = zpdf_page_count(static_cast<ZpdfDocument*>(handle_));
     return count >= 0 ? count : 0;
-}
-
-std::optional<PageInfo> Document::pageInfo(int pageNum) const {
-    if (!handle_) {
-        return std::nullopt;
-    }
-
-    PageInfo info{};
-    int result = zpdf_get_page_info(static_cast<ZpdfDocument*>(handle_), pageNum, &info.width,
-                                    &info.height, &info.rotation);
-
-    if (result != 0) {
-        return std::nullopt;
-    }
-    return info;
 }
 
 TextBuffer Document::extractPage(int pageNum) const {
@@ -168,34 +159,12 @@ TextBuffer Document::extractAll() const {
     return TextBuffer(data, len);
 }
 
-TextBuffer Document::extractAllParallel() const {
-    if (!handle_) {
-        return {};
-    }
-
-    size_t len = 0;
-    uint8_t* data = zpdf_extract_all_parallel(static_cast<ZpdfDocument*>(handle_), &len);
-
-    return TextBuffer(data, len);
-}
-
-TextBuffer Document::extractAllReadingOrder() const {
-    if (!handle_) {
-        return {};
-    }
-
-    size_t len = 0;
-    uint8_t* data =
-        zpdf_extract_all_reading_order_parallel(static_cast<ZpdfDocument*>(handle_), &len);
-
-    return TextBuffer(data, len);
-}
-
 bool Document::valid() const {
     return handle_ != nullptr;
 }
 
-TextBuffer Document::extractAllParallelized(std::span<const uint8_t> data, int numThreads) {
+TextBuffer Document::extractAllParallelized(std::span<const uint8_t> data, int numThreads,
+                                            size_t pageDecompressLimit) {
     if (data.empty())
         return {};
 
@@ -214,14 +183,36 @@ TextBuffer Document::extractAllParallelized(std::span<const uint8_t> data, int n
 
     if (numThreads > totalPages)
         numThreads = totalPages;
-    if (numThreads <= 1) {
+    // Single-page documents use the reading-order path, as before. The path
+    // depends on the page count only, never on the thread grant, so a smaller
+    // grant under memory pressure yields the same text.
+    if (totalPages <= 1) {
         auto doc = Document::openMemory(data);
         if (!doc)
             return {};
+        doc->setPageDecompressLimit(pageDecompressLimit);
         return doc->extractAll();
     }
 
-    // Open per-thread documents and distribute pages.
+    // Each worker opens its own document and extracts a contiguous page range.
+    auto extractRange = [data, pageDecompressLimit](int startPage,
+                                                    int endPage) -> std::pair<int, std::string> {
+        auto doc = Document::openMemory(data);
+        if (!doc)
+            return {startPage, {}};
+        doc->setPageDecompressLimit(pageDecompressLimit);
+
+        std::ostringstream oss;
+        for (int p = startPage; p < endPage; ++p) {
+            auto pageText = doc->extractPage(p);
+            auto view = pageText.text();
+            if (!view.empty())
+                oss.write(view.data(), static_cast<std::streamsize>(view.size()));
+            oss << '\n';
+        }
+        return {startPage, oss.str()};
+    };
+
     const auto totalPages64 = static_cast<std::int64_t>(totalPages);
     const auto numThreads64 = static_cast<std::int64_t>(numThreads);
     const auto pagesPerThread64 = (totalPages64 + numThreads64 - 1) / numThreads64;
@@ -237,23 +228,9 @@ TextBuffer Document::extractAllParallelized(std::span<const uint8_t> data, int n
             break;
         const int startPage = static_cast<int>(startPage64);
         const int endPage = static_cast<int>(endPage64);
-
-        futures.push_back(std::async(
-            std::launch::async, [data, startPage, endPage]() -> std::pair<int, std::string> {
-                auto doc = Document::openMemory(data);
-                if (!doc)
-                    return {startPage, {}};
-
-                std::ostringstream oss;
-                for (int p = startPage; p < endPage; ++p) {
-                    auto pageText = doc->extractPage(p);
-                    auto view = pageText.text();
-                    if (!view.empty())
-                        oss.write(view.data(), static_cast<std::streamsize>(view.size()));
-                    oss << '\n';
-                }
-                return {startPage, oss.str()};
-            }));
+        // One thread: run on the caller instead of spawning.
+        const auto policy = numThreads == 1 ? std::launch::deferred : std::launch::async;
+        futures.push_back(std::async(policy, extractRange, startPage, endPage));
     }
 
     // Collect results in page order

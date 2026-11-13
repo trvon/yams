@@ -108,13 +108,13 @@ DaemonCheckResult checkDaemon(YamsCLI* cli, std::optional<daemon::StatusResponse
 ModelsCheckResult checkInstalledModels(YamsCLI* cli) {
     ModelsCheckResult result;
 
-    const char* home = std::getenv("HOME");
+    const auto home = yams::config::getenv_optional("HOME");
     if (!home) {
         return result;
     }
 
     // Deprecated location
-    result.deprecatedPath = fs::path(home) / ".yams" / "models";
+    result.deprecatedPath = fs::path(*home) / ".yams" / "models";
 
     // Current location
     result.currentPath = cli ? cli->getDataPath() / "models" : fs::path();
@@ -209,11 +209,9 @@ VectorDbCheckResult checkVectorDb(YamsCLI* cli) {
     }
 
     // Determine schema type
-    if (!result.exists) {
-        result.schemaType = "none";
-    } else if (result.usesVec0) {
+    if (result.exists && result.usesVec0) {
         result.schemaType = "vec0";
-    } else if (result.schemaValid) {
+    } else if (result.exists && result.schemaValid) {
         result.schemaType = "legacy";
         result.issues.push_back("doc_embeddings table not using vec0 virtual table");
     } else {
@@ -339,64 +337,5 @@ KnowledgeGraphCheckResult checkKnowledgeGraph(YamsCLI* cli) {
 // ============================================================================
 // Database Migration Check
 // ============================================================================
-
-MigrationCheckResult checkMigrations(YamsCLI* cli) {
-    MigrationCheckResult result;
-
-    if (!cli) {
-        return result;
-    }
-
-    fs::path dbPath = cli->getDataPath() / "yams.db";
-    if (!fs::exists(dbPath)) {
-        return result;
-    }
-
-    sqlite3* db = nullptr;
-    if (sqlite3_open(dbPath.string().c_str(), &db) != SQLITE_OK) {
-        if (db) {
-            sqlite3_close(db);
-        }
-        return result;
-    }
-
-    // Check for failed migrations
-    const char* failedSql = "SELECT version, name, error FROM migration_history "
-                            "WHERE success=0 ORDER BY applied_at DESC LIMIT 5";
-    sqlite3_stmt* stmt = nullptr;
-
-    if (sqlite3_prepare_v2(db, failedSql, -1, &stmt, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            result.hasFailures = true;
-            int ver = sqlite3_column_int(stmt, 0);
-            const unsigned char* name = sqlite3_column_text(stmt, 1);
-            const unsigned char* error = sqlite3_column_text(stmt, 2);
-
-            std::string msg = "version=" + std::to_string(ver);
-            if (name) {
-                msg += ", name='" + std::string(reinterpret_cast<const char*>(name)) + "'";
-            }
-            if (error && *error) {
-                msg += ", error=\"" + std::string(reinterpret_cast<const char*>(error)) + "\"";
-            }
-            result.failedMigrations.push_back(msg);
-        }
-        sqlite3_finalize(stmt);
-    }
-
-    // Check for leftover temp tables from failed migrations
-    const char* leftoverSql =
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='documents_fts_new'";
-    if (sqlite3_prepare_v2(db, leftoverSql, -1, &stmt, nullptr) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            result.hasLeftoverTables = true;
-            result.leftoverTables.push_back("documents_fts_new");
-        }
-        sqlite3_finalize(stmt);
-    }
-
-    sqlite3_close(db);
-    return result;
-}
 
 } // namespace yams::cli::doctor

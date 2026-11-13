@@ -1,3 +1,4 @@
+#include <set>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/services.hpp>
@@ -333,6 +334,59 @@ TEST_CASE("IndexingService submits directory content through the batch boundary"
     REQUIRE(timings.contains("batch_ref_commit"));
     CHECK(timings.at("batch_ref_commit").calls == 2);
     CHECK(timings.at("ref_commit").calls == 0);
+}
+
+TEST_CASE("IndexingService indexes exactly the files it is given", "[indexing][service][files]") {
+    // As include patterns, a relative path with a separator hid the bare names beside it,
+    // and a bare name matched every nested file of that name.
+    IndexingFixture fixture;
+    fixture.createFile("exact/a.cpp", "top level a");
+    fixture.createFile("exact/src/a.cpp", "nested a, not asked for");
+    fixture.createFile("exact/src/b.cpp", "nested b");
+    fixture.createFile("exact/other.cpp", "not asked for");
+
+    AddDirectoryRequest request;
+    request.directoryPath = (fixture.testDir_ / "exact").string();
+    request.explicitFiles = {"a.cpp", "src/b.cpp", "gone.cpp"};
+    request.noGitignore = true;
+
+    auto result = fixture.indexingService_->addDirectory(request);
+
+    REQUIRE(result);
+    std::set<std::string> indexed;
+    for (const auto& file : result.value().results) {
+        if (file.success) {
+            indexed.insert(
+                std::filesystem::relative(file.path, fixture.testDir_ / "exact").generic_string());
+        }
+    }
+    CHECK(indexed == std::set<std::string>{"a.cpp", "src/b.cpp"});
+    CHECK(result.value().filesFailed == 0);
+}
+
+TEST_CASE("IndexingService refuses explicit files outside the directory",
+          "[indexing][service][files]") {
+    IndexingFixture fixture;
+    fixture.createFile("inside/ok.cpp", "inside");
+    fixture.createFile("outside.cpp", "outside the requested directory");
+
+    AddDirectoryRequest request;
+    request.directoryPath = (fixture.testDir_ / "inside").string();
+    request.explicitFiles = {"ok.cpp", "../outside.cpp", "sub/../../outside.cpp",
+                             (fixture.testDir_ / "outside.cpp").string()};
+    request.noGitignore = true;
+
+    auto result = fixture.indexingService_->addDirectory(request);
+
+    REQUIRE(result);
+    std::set<std::string> indexed;
+    for (const auto& file : result.value().results) {
+        if (file.success) {
+            indexed.insert(std::filesystem::path(file.path).filename().string());
+        }
+    }
+    CHECK(indexed == std::set<std::string>{"ok.cpp"});
+    CHECK(result.value().filesFailed == 3);
 }
 
 TEST_CASE("IndexingService - File Handling", "[indexing][service][files]") {

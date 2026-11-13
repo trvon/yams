@@ -21,7 +21,9 @@
 #include <malloc/malloc.h>
 #elif defined(__GLIBC__)
 #include <malloc.h>
-#include <sys/resource.h>
+#endif
+#if defined(__linux__)
+#include <unistd.h>
 #endif
 
 #include <algorithm>
@@ -30,6 +32,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -45,6 +48,9 @@
 namespace yams::search {
 
 namespace {
+
+// How often a running build re-reads the index memory grant.
+constexpr std::size_t kIndexBudgetPollDocs = 256;
 
 std::unique_ptr<simeon::Encoder> makeFixedHashFragmentEncoder() {
     return std::make_unique<simeon::Encoder>(simeon::simeon_v1_384_config());
@@ -93,10 +99,17 @@ std::uint64_t rssBytesCurrent() noexcept {
         return info.resident_size;
     }
     return 0;
-#elif defined(__GLIBC__)
-    struct rusage ru{};
-    if (getrusage(RUSAGE_SELF, &ru) == 0) {
-        return static_cast<std::uint64_t>(ru.ru_maxrss) * 1024ull;
+#elif defined(__linux__)
+    // ru_maxrss is the peak, which never falls; resident pages come from statm.
+    if (std::FILE* statm = std::fopen("/proc/self/statm", "r")) {
+        unsigned long long totalPages = 0;
+        unsigned long long residentPages = 0;
+        const int read = std::fscanf(statm, "%llu %llu", &totalPages, &residentPages);
+        std::fclose(statm);
+        const long pageSize = sysconf(_SC_PAGESIZE);
+        if (read == 2 && pageSize > 0) {
+            return static_cast<std::uint64_t>(residentPages) * static_cast<std::uint64_t>(pageSize);
+        }
     }
     return 0;
 #else
@@ -393,22 +406,46 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             return;
         }
 
-        // Primary index: matches cfg_.variant (used by score()).
-        simeon::Bm25Config bcfg;
-        bcfg.variant = toSimeonVariant(cfg_.variant);
-        bcfg.subword_gamma = cfg_.subword_gamma;
-        auto primary = std::make_unique<simeon::Bm25Index>(bcfg);
-        primary->reserve_docs(ids.size());
+        // Index memory grant. It can only shrink during a build: each index's
+        // simeon reservations are sized from the starting grant.
+        const auto pollIndexCap = [this](std::size_t current) {
+            if (!cfg_.index_budget_provider) {
+                return current;
+            }
+            const std::size_t granted = cfg_.index_budget_provider();
+            return granted == 0 ? current : std::min(current, granted);
+        };
+        std::size_t indexCap = std::max<std::size_t>(1, cfg_.max_index_bytes);
+        if (cfg_.index_budget_provider) {
+            const std::size_t granted = cfg_.index_budget_provider();
+            if (granted > 0) {
+                indexCap = granted;
+            }
+        }
 
         // Secondary index: Atire, only when routing is enabled AND the
         // primary isn't already Atire. Router dispatches between
         // {Atire, SabSmooth}, so the pair is always (Atire, SabSmooth).
-        std::unique_ptr<simeon::Bm25Index> atire;
         const bool build_atire = (cfg_.router_enabled || cfg_.bm25_variants_rrf) &&
                                  cfg_.variant != SimeonLexicalBackend::Variant::Atire;
+        // The grant covers both indexes together; each index's own simeon cap
+        // (and the reservations sized from it) gets its share.
+        const std::size_t perIndexCap =
+            build_atire ? std::max<std::size_t>(1, indexCap / 2) : indexCap;
+
+        // Primary index: matches cfg_.variant (used by score()).
+        simeon::Bm25Config bcfg;
+        bcfg.variant = toSimeonVariant(cfg_.variant);
+        bcfg.subword_gamma = cfg_.subword_gamma;
+        bcfg.max_memory_bytes = perIndexCap;
+        auto primary = std::make_unique<simeon::Bm25Index>(bcfg);
+        primary->reserve_docs(ids.size());
+
+        std::unique_ptr<simeon::Bm25Index> atire;
         if (build_atire) {
             simeon::Bm25Config acfg;
             acfg.variant = simeon::Bm25Variant::Atire;
+            acfg.max_memory_bytes = perIndexCap;
             atire = std::make_unique<simeon::Bm25Index>(acfg);
             atire->reserve_docs(ids.size());
         }
@@ -438,6 +475,29 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                     ? ids.size()
                     : std::min<std::size_t>(ids.size(), cfg_.fragment_geometry_pmi_sample_docs);
             pmi_sample_texts.reserve(reserveDocs);
+        }
+
+        // Concept mining reads the text BM25 indexed, kept from this pass. Its PMI divides
+        // bigram counts by the index's unigram counts, so both must come from the same text;
+        // and holding the reduced text is bounded by max_corpus_bytes, where re-reading every
+        // raw document was not (a few very large documents can be most of a corpus).
+        bool mineConcepts = cfg_.concept_mining_enabled && ids.size() >= 100;
+        std::vector<std::string> conceptTexts;
+        // Keeping the text is optional: if it cannot be allocated, the build goes on and
+        // publishes the BM25 index without concepts. Nothing may throw out of this thread.
+        const auto abandonConcepts = [&](const std::exception& e) {
+            spdlog::warn("[simeon-lexical] concept mining skipped: could not retain indexed "
+                         "text ({})",
+                         e.what());
+            mineConcepts = false;
+            std::vector<std::string>().swap(conceptTexts);
+        };
+        if (mineConcepts) {
+            try {
+                conceptTexts.reserve(ids.size());
+            } catch (const std::exception& e) {
+                abandonConcepts(e);
+            }
         }
 
         std::uint32_t dense = 0;
@@ -479,9 +539,32 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             if (cfg_.strategy_router_enabled) {
                 leadText = simeon::extract_lead_tokens(buildText.view, 64);
             }
-            primary->add_doc(buildText.view, leadText);
-            if (atire) {
-                atire->add_doc(buildText.view, leadText);
+            if (dense > 0 && dense % kIndexBudgetPollDocs == 0) {
+                indexCap = pollIndexCap(indexCap);
+            }
+            // Checked before and after the document, so a built index never
+            // holds more than the grant (it can pass it only while one
+            // document is being added).
+            const auto combinedBytes = [&] {
+                return primary->memory_bytes() + (atire ? atire->memory_bytes() : 0);
+            };
+            std::size_t indexBytes = combinedBytes();
+            bool withinGrant = indexBytes < indexCap &&
+                               primary->try_add_doc(buildText.view, leadText) &&
+                               (!atire || atire->try_add_doc(buildText.view, leadText));
+            if (withinGrant) {
+                indexBytes = combinedBytes();
+                withinGrant = indexBytes <= indexCap;
+            }
+            if (!withinGrant) {
+                spdlog::warn("[simeon-lexical] index memory budget reached (docs={} of {} "
+                             "index_bytes={} cap={}) - staying on FTS5 only",
+                             dense, ids.size(), indexBytes, indexCap);
+                primary.reset();
+                atire.reset();
+                releaseTransientPages("index-budget-abort");
+                building_.store(false, std::memory_order_release);
+                return;
             }
             if (considerFragmentGeometry && useCorpusPmi) {
                 const bool sampleDocsOk =
@@ -492,6 +575,15 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 if (sampleDocsOk && sampleBytesOk) {
                     pmi_sample_texts.emplace_back(buildText.view);
                     pmiSampleBytes += buildDocBytes;
+                }
+            }
+            if (mineConcepts) {
+                // Last use of buildText: one entry per indexed document, in dense-id order.
+                try {
+                    conceptTexts.emplace_back(buildText.chunked ? std::move(buildText.owned)
+                                                                : std::string(buildText.view));
+                } catch (const std::exception& e) {
+                    abandonConcepts(e);
                 }
             }
             mapping.emplace(docId, dense++);
@@ -510,67 +602,34 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         if (atire) {
             atire->finalize();
         }
+        const std::size_t finalIndexBytes =
+            primary->memory_bytes() + (atire ? atire->memory_bytes() : 0);
         releaseTransientPages("post-bm25-finalize");
 
-        // Concept mining: second pass over the corpus to discover word-bigram
-        // concepts via PMI and blend them into BM25 scores at query time.
+        // Concept mining: discover word-bigram concepts via PMI and blend them into BM25
+        // scores at query time. Document i here is dense id i in the index.
         std::unique_ptr<simeon::ConceptIndex> conceptIdx;
-        if (cfg_.concept_mining_enabled && ids.size() >= 100) {
+        if (mineConcepts && !stopRequested()) {
             try {
+                YAMS_ZONE_SCOPED_N("simeon::mine_concepts");
                 const auto cmt0 = std::chrono::steady_clock::now();
-                // Bound retained raw text, not total process memory: getContent still
-                // materializes the next document before this check, and mining has its own
-                // allocations. Exceeding this budget disables the entire concept-scoring
-                // layer for this build; it is not sampling or a quality-neutral shortcut.
-                std::vector<std::string> conceptTexts;
-                conceptTexts.reserve(ids.size());
-                std::size_t conceptCorpusBytes = 0;
-                bool conceptBudgetExceeded = false;
-                for (auto docId : ids) {
-                    if (stopRequested())
-                        break;
-                    auto contentResult = repo->getContent(docId);
-                    if (contentResult && contentResult.value()) {
-                        auto& text = contentResult.value()->contentText;
-                        if (exceedsBudget(conceptCorpusBytes, text.size(), cfg_.max_corpus_bytes)) {
-                            conceptBudgetExceeded = true;
-                            break;
-                        }
-                        conceptCorpusBytes += text.size();
-                        conceptTexts.emplace_back(std::move(text));
-                    } else {
-                        conceptTexts.emplace_back();
-                    }
-                }
-                if (conceptBudgetExceeded) {
-                    spdlog::warn("[simeon-lexical] concept mining skipped: raw corpus exceeds "
-                                 "max_corpus_bytes (docs_loaded={} bytes={} cap={})",
-                                 conceptTexts.size(), conceptCorpusBytes, cfg_.max_corpus_bytes);
-                    conceptTexts.clear();
-                    conceptTexts.shrink_to_fit();
-                }
-                if (!conceptBudgetExceeded && !stopRequested() &&
-                    conceptTexts.size() == ids.size()) {
-                    YAMS_ZONE_SCOPED_N("simeon::mine_concepts");
-                    std::vector<std::string_view> docViews;
-                    docViews.reserve(conceptTexts.size());
-                    for (const auto& t : conceptTexts)
-                        docViews.emplace_back(t);
-                    simeon::ConceptConfig conceptConfig;
-                    conceptConfig.concept_weight = cfg_.concept_weight;
-                    conceptIdx = std::make_unique<simeon::ConceptIndex>(simeon::mine_concepts(
-                        *primary, std::span<const std::string_view>(docViews), conceptConfig));
-                    const auto cmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                          std::chrono::steady_clock::now() - cmt0)
-                                          .count();
-                    spdlog::info("[simeon-lexical] concept mining: {} concepts in {} ms",
-                                 conceptIdx->size(), cmMs);
-                }
+                const std::vector<std::string_view> docViews(conceptTexts.begin(),
+                                                             conceptTexts.end());
+                simeon::ConceptConfig conceptConfig;
+                conceptConfig.concept_weight = cfg_.concept_weight;
+                conceptIdx = std::make_unique<simeon::ConceptIndex>(simeon::mine_concepts(
+                    *primary, std::span<const std::string_view>(docViews), conceptConfig));
+                const auto cmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now() - cmt0)
+                                      .count();
+                spdlog::info("[simeon-lexical] concept mining: {} concepts in {} ms",
+                             conceptIdx->size(), cmMs);
             } catch (const std::exception& e) {
                 spdlog::warn("[simeon-lexical] concept mining failed: {}", e.what());
                 conceptIdx.reset();
             }
         }
+        std::vector<std::string>().swap(conceptTexts);
 
         // Router uses the Atire index when available (matches simeon bench
         // convention — df/idf values are BM25-variant-independent, so the
@@ -746,10 +805,11 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         building_.store(false, std::memory_order_release);
 
         spdlog::info("[simeon-lexical] ready: variant={} router={} fragment_geometry={} docs={} "
-                     "missing={} raw_bytes={} processed_bytes={} chunked_docs={} build_ms={}",
+                     "missing={} raw_bytes={} processed_bytes={} chunked_docs={} "
+                     "index_bytes={} index_cap={} build_ms={}",
                      variantLabel(cfg_.variant), cfg_.router_enabled ? "on" : "off",
                      fragment_encoder_ ? "on" : "off", dense, missing, rawCorpusBytes,
-                     processedCorpusBytes, chunkedDocs, buildMs);
+                     processedCorpusBytes, chunkedDocs, finalIndexBytes, indexCap, buildMs);
         releaseTransientPages("post-build");
     });
 
@@ -1033,7 +1093,6 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
     }
 
     std::vector<float> full(doc_count_, 0.0f);
-    const char* recipe_label = "Bm25SabSmooth";
 
     // Build query profile from the primary index for routing decisions.
     simeon::QueryProfile profile;
@@ -1085,7 +1144,7 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
     strategy_router_->route(query, profile, evidence,
                             std::span<simeon::RetrievalStrategy* const>(pool),
                             std::span<float>{full});
-    recipe_label = "StrategyRouted";
+    const char* recipe_label = "StrategyRouted";
 
     // Blend concept scores when available.
     if (concept_index_ && cfg_.concept_weight > 0.0f) {
@@ -1169,7 +1228,6 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
     } else {
         // Unrecognized or unavailable arm: fall back to plain SAB.
         index_->score(query, std::span<float>{full});
-        recipe_label = "Bm25SabSmooth";
     }
 
     // Blend concept scores when available.
@@ -1241,13 +1299,16 @@ SimeonLexicalBackend::QuerySession::score(std::span<const std::int64_t> document
         return scored.error();
     }
     RescoreDecision result;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     result.recipe_name = scores_->value().recipe_name;
     result.scores.reserve(documentIds.size());
     for (const auto id : documentIds) {
         const auto found = backend_.doc_id_to_index_.find(id);
-        result.scores.push_back(found == backend_.doc_id_to_index_.end()
-                                    ? 0.0F
-                                    : scores_->value().scores[found->second]);
+        result.scores.push_back(
+            found == backend_.doc_id_to_index_.end()
+                ? 0.0F
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                : scores_->value().scores[found->second]);
     }
     return result;
 }
@@ -1269,7 +1330,9 @@ SimeonLexicalBackend::QuerySession::searchTop(std::size_t limit) {
         return scored.error();
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     out.recipe_name = scores_->value().recipe_name;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     const auto& scores = scores_->value().scores;
     if (scores.size() != index_to_doc_id_.size()) {
         return Error{ErrorCode::InternalError, "SimeonLexicalBackend: direct score size mismatch"};

@@ -21,24 +21,17 @@ constexpr std::size_t kMaxIndexedDownloadTextBytes = std::size_t{16} * 1024 * 10
 
 class DownloadServiceImpl : public IDownloadService {
 public:
-    DownloadServiceImpl(const AppContext& ctx, const DownloadServiceOptions& opts)
-        : DownloadServiceImpl(ctx) {
-        if (opts.maxFileBytes > 0 && manager_) {
-            dlCfg_.maxFileBytes = opts.maxFileBytes;
-            manager_ = downloader::makeDownloadManager(storageCfg_, dlCfg_);
-            if (!manager_) {
-                spdlog::error("DownloadService: Failed to rebuild download manager with cap");
-                throw std::runtime_error("Failed to initialize download manager with cap");
-            }
-        }
-    }
+    explicit DownloadServiceImpl(const AppContext& ctx)
+        : DownloadServiceImpl(ctx, DownloadServiceOptions{}) {}
 
-    explicit DownloadServiceImpl(const AppContext& ctx) : ctx_(ctx) {
-        // Initialize download manager once with proper config
-        // Get storage path from content store or environment
+    DownloadServiceImpl(const AppContext& ctx, const DownloadServiceOptions& opts) : ctx_(ctx) {
+        // Initialize download manager once with proper config.
+        // An explicit root from the host wins; otherwise fall back to the environment.
         fs::path storagePath;
-        if (const std::string storageEnv = yams::config::getenv_copy("YAMS_STORAGE");
-            !storageEnv.empty()) {
+        if (!opts.storageRoot.empty()) {
+            storagePath = opts.storageRoot;
+        } else if (const std::string storageEnv = yams::config::getenv_copy("YAMS_STORAGE");
+                   !storageEnv.empty()) {
             storagePath = fs::path(storageEnv);
         } else if (const std::string homeEnv = yams::config::getenv_copy("HOME");
                    !homeEnv.empty()) {
@@ -65,6 +58,9 @@ public:
         dlCfg_.followRedirects = true;
         dlCfg_.resume = true;
         dlCfg_.storeOnly = true;
+        if (opts.maxFileBytes > 0) {
+            dlCfg_.maxFileBytes = opts.maxFileBytes;
+        }
 
         // Create and cache the manager
         manager_ = downloader::makeDownloadManager(storageCfg_, dlCfg_);

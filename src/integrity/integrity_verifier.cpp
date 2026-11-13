@@ -1,5 +1,5 @@
 #include <yams/crypto/hasher.h>
-#include <yams/integrity/repair_manager.h>
+#include <yams/integrity/block_repairer.h>
 #include <yams/integrity/verifier.h>
 
 #include <spdlog/spdlog.h>
@@ -139,6 +139,10 @@ struct IntegrityVerifier::Impl {
     std::atomic<bool> running{false};
     std::atomic<bool> paused{false};
     std::atomic<bool> shouldStop{false};
+    // Serializes start, stop, pause and resume so a transition cannot act on a newer run: a stop
+    // that had already published running=false could otherwise set shouldStop on a run a
+    // concurrent start had just begun. running/paused stay atomic for lock-free status reads.
+    std::mutex lifecycleMutex;
 
     // Rate limiting
     std::unique_ptr<RateLimiter> rateLimiter;
@@ -148,7 +152,7 @@ struct IntegrityVerifier::Impl {
 
     // Monitoring
     std::unique_ptr<VerificationMonitor> monitor;
-    std::shared_ptr<RepairManager> repairManager;
+    std::shared_ptr<BlockRepairer> blockRepairer;
 
     // Statistics
     mutable IntegrityVerifier::Statistics stats;
@@ -194,9 +198,9 @@ struct IntegrityVerifier::Impl {
             }
 
             if (!existsResult.value()) {
-                if (config.enableAutoRepair && repairManager && repairManager->canRepair(hash)) {
+                if (config.enableAutoRepair && blockRepairer && blockRepairer->hasRepairSources()) {
                     stats.repairsAttemptedTotal++;
-                    if (repairManager->attemptRepair(hash)) {
+                    if (blockRepairer->attemptRepair(hash)) {
                         auto repairedData = storage.retrieve(hash);
                         if (repairedData.has_value()) {
                             hasher->init();
@@ -247,12 +251,12 @@ struct IntegrityVerifier::Impl {
                 result.errorDetails = "Hash mismatch: expected " + hash + ", got " + computedHash;
                 stats.verificationErrorsTotal++;
 
-                if (config.enableAutoRepair && repairManager && repairManager->canRepair(hash)) {
+                if (config.enableAutoRepair && blockRepairer && blockRepairer->hasRepairSources()) {
                     bool repaired = false;
                     for (size_t attempt = 0; attempt < config.maxRepairAttempts && !repaired;
                          ++attempt) {
                         stats.repairsAttemptedTotal++;
-                        if (!repairManager->attemptRepair(hash)) {
+                        if (!blockRepairer->attemptRepair(hash)) {
                             continue;
                         }
 
@@ -387,6 +391,7 @@ IntegrityVerifier::IntegrityVerifier(IntegrityVerifier&&) noexcept = default;
 IntegrityVerifier& IntegrityVerifier::operator=(IntegrityVerifier&&) noexcept = default;
 
 Result<void> IntegrityVerifier::startBackgroundVerification() {
+    std::lock_guard<std::mutex> lifecycle(pImpl->lifecycleMutex);
     if (pImpl->running) {
         return Result<void>(ErrorCode::OperationInProgress);
     }
@@ -408,6 +413,7 @@ Result<void> IntegrityVerifier::startBackgroundVerification() {
 }
 
 Result<void> IntegrityVerifier::stopBackgroundVerification() {
+    std::lock_guard<std::mutex> lifecycle(pImpl->lifecycleMutex);
     if (!pImpl->running) {
         return {};
     }
@@ -425,6 +431,7 @@ Result<void> IntegrityVerifier::stopBackgroundVerification() {
 }
 
 Result<void> IntegrityVerifier::pauseVerification() {
+    std::lock_guard<std::mutex> lifecycle(pImpl->lifecycleMutex);
     if (!pImpl->running) {
         return Result<void>(ErrorCode::InvalidOperation);
     }
@@ -435,6 +442,7 @@ Result<void> IntegrityVerifier::pauseVerification() {
 }
 
 Result<void> IntegrityVerifier::resumeVerification() {
+    std::lock_guard<std::mutex> lifecycle(pImpl->lifecycleMutex);
     if (!pImpl->running) {
         return Result<void>(ErrorCode::InvalidOperation);
     }
@@ -509,8 +517,8 @@ void IntegrityVerifier::updateConfig(const VerificationConfig& newConfig) {
     spdlog::info("Updated verification configuration");
 }
 
-void IntegrityVerifier::setRepairManager(std::shared_ptr<RepairManager> manager) {
-    pImpl->repairManager = std::move(manager);
+void IntegrityVerifier::setBlockRepairer(std::shared_ptr<BlockRepairer> repairer) {
+    pImpl->blockRepairer = std::move(repairer);
 }
 
 bool IntegrityVerifier::isRunning() const {

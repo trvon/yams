@@ -249,6 +249,89 @@ TEST_CASE_METHOD(DocumentChunkerFixture, "ParagraphBasedChunker single paragraph
     CHECK(chunks[0].content == singlePara);
 }
 
+TEST_CASE("Paragraph chunker bounds deterministic prose tails without losing coverage",
+          "[vector][chunker][bounded-tail][catch2]") {
+    ChunkingConfig config;
+    config.strategy = ChunkingStrategy::PARAGRAPH_BASED;
+    config.target_chunk_size = 512;
+    config.min_chunk_size = 100;
+    config.max_chunk_size = 1024;
+    config.overlap_size = 50;
+    config.overlap_percentage = 0.1;
+    config.preserve_sentences = false;
+    config.use_token_count = false;
+    auto chunker = createChunker(config.strategy, config);
+    REQUIRE(chunker != nullptr);
+
+    // Exact prose/log pattern and fixed-width identifier from static-dense-run.py.
+    const std::string pattern = "2026-11-01 INFO document retrieval returns ranked evidence. The "
+                                "local corpus is durable.\n";
+    for (const size_t size : {size_t(8192), size_t(262144), size_t(16 * 1024 * 1024)}) {
+        DYNAMIC_SECTION("input bytes " << size) {
+            std::string text = "T0D00000S0";
+            if (size == 262144) {
+                text[1] = '1';
+            } else if (size == size_t(16) * 1024 * 1024) {
+                text[1] = '3';
+            }
+            text.reserve(size);
+            while (text.size() < size) {
+                text.append(pattern, 0, std::min(pattern.size(), size - text.size()));
+            }
+            auto chunks = chunker->chunkDocument(text, "bounded-prose");
+            INFO(chunker->getLastError());
+            REQUIRE_FALSE(chunker->hasError());
+            REQUIRE_FALSE(chunks.empty());
+            REQUIRE(chunker->validateChunks(chunks));
+            // A bounded split must make progress rather than emit repeated tiny chunks.
+            CHECK(chunks.size() <= 2 * (size / config.max_chunk_size + 1));
+            size_t coveredEnd = 0;
+            for (const auto& chunk : chunks) {
+                REQUIRE_FALSE(chunk.content.empty());
+                REQUIRE(chunk.content.size() >= config.min_chunk_size);
+                REQUIRE(chunk.content.size() <= config.max_chunk_size);
+                REQUIRE(chunk.start_offset < chunk.end_offset);
+                REQUIRE(chunk.end_offset <= text.size());
+                REQUIRE(chunk.end_offset > coveredEnd);
+                REQUIRE(chunk.content ==
+                        text.substr(chunk.start_offset, chunk.end_offset - chunk.start_offset));
+                // Trimming whitespace is allowed; dropping source words is not.
+                const auto gapEnd = std::max(coveredEnd, chunk.start_offset);
+                REQUIRE(std::all_of(text.begin() + coveredEnd, text.begin() + gapEnd,
+                                    [](unsigned char c) { return std::isspace(c); }));
+                coveredEnd = chunk.end_offset;
+            }
+            CHECK(std::all_of(text.begin() + coveredEnd, text.end(),
+                              [](unsigned char c) { return std::isspace(c); }));
+        }
+    }
+}
+
+TEST_CASE("Large chunk splitting keeps short final tails valid",
+          "[vector][chunker][bounded-tail][catch2]") {
+    ChunkingConfig config;
+    config.preserve_words = false;
+    config.overlap_size = 0;
+    config.overlap_percentage = 0;
+    FixedSizeChunker chunker(config);
+    for (size_t tail = 1; tail <= config.min_chunk_size; ++tail) {
+        CAPTURE(tail);
+        const std::string text(config.max_chunk_size * 2 + tail, 'x');
+        auto chunks = chunker.splitLargeChunks({DocumentChunk("source", "doc", text)});
+        REQUIRE(chunker.validateChunks(chunks));
+        REQUIRE(chunks.size() == 3);
+        size_t coveredEnd = 0;
+        for (const auto& chunk : chunks) {
+            REQUIRE(chunk.start_offset <= coveredEnd);
+            REQUIRE(chunk.end_offset > coveredEnd);
+            REQUIRE(chunk.content ==
+                    text.substr(chunk.start_offset, chunk.end_offset - chunk.start_offset));
+            coveredEnd = chunk.end_offset;
+        }
+        CHECK(coveredEnd == text.size());
+    }
+}
+
 // =============================================================================
 // Recursive Text Splitter Tests
 // =============================================================================
@@ -386,27 +469,6 @@ TEST_CASE_METHOD(DocumentChunkerFixture, "MarkdownChunker basic chunking",
 
     MarkdownChunker chunker(config);
     auto chunks = chunker.chunkDocument(markdownText, "doc_hash");
-
-    REQUIRE_FALSE(chunks.empty());
-}
-
-// =============================================================================
-// Semantic Chunker Tests
-// =============================================================================
-
-TEST_CASE_METHOD(DocumentChunkerFixture, "SemanticChunker basic chunking",
-                 "[vector][chunker][semantic][catch2]") {
-    ChunkingConfig config = defaultConfig;
-    config.strategy = ChunkingStrategy::SEMANTIC;
-    config.target_chunk_size = 100;
-    config.semantic_threshold = 0.7f;
-
-    EmbeddingConfig embedConfig;
-    embedConfig.backend_is_resolved = true;
-    auto embedder = std::make_shared<EmbeddingGenerator>(embedConfig);
-
-    SemanticChunker chunker(config, embedder);
-    auto chunks = chunker.chunkDocument(sentenceText, "doc_hash");
 
     REQUIRE_FALSE(chunks.empty());
 }

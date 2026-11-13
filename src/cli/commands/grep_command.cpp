@@ -20,6 +20,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/content_reference.h>
 #include <yams/cli/graph_helpers.h>
+#include <yams/cli/live_grep.h>
 #include <yams/cli/session_store.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -32,7 +33,6 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/this_coro.hpp>
 // Timers for streaming guard
-#include <future>
 #include <boost/asio/steady_timer.hpp>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -121,6 +121,12 @@ private:
     std::string extension_;
     std::string language_;
     bool liveFallback_{false};
+    bool noLive_{false};
+    bool staleIndex_{false};
+    std::string worktree_;
+    bool compact_{false};
+    bool includeEphemeral_{false};
+    std::optional<std::size_t> maxResults_;
 
     using RelationSummaryMap = std::unordered_map<std::string, std::string>;
     using SemanticScoreMap = std::map<std::string, double>;
@@ -163,7 +169,8 @@ private:
 
     bool shouldShowSpinner() const {
         bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
-        return !jsonMode && !pathsOnly_ && !filesOnly_ && !countOnly_;
+        return !jsonMode && !pathsOnly_ && !filesOnly_ && !countOnly_ && !compact_ &&
+               !(cli_ && cli_->getQuiet());
     }
 
 public:
@@ -177,6 +184,8 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("grep", getDescription());
+        if (cli_)
+            cli_->registerReadOptions(*cmd);
 
         // Positional pattern: make optional and provide friendly alternatives (-e/--pattern or --)
         cmd->add_option("pattern", pattern_,
@@ -257,6 +266,13 @@ public:
         // Output format control
         cmd->add_flag("--minimal", minimalMode_,
                       "Use minimal grep-style output (default: LLM-friendly rich context)");
+        cmd->add_flag("--compact", compact_, "One bounded path:line: snippet per hit; no banners");
+        cmd->add_flag("--include-ephemeral", includeEphemeral_,
+                      "Include scratch paths excluded by search.exclude_paths");
+        cmd->add_option("--max-results", maxResults_,
+                        "Global result cap across files (paths-only default: 50; 0: unlimited); "
+                        "-m remains per file")
+            ->check(CLI::NonNegativeNumber);
 
         // Session scoping controls
         cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
@@ -271,15 +287,19 @@ public:
                         "Filter by file extension (e.g., .cpp or cpp)");
         cmd->add_option("--lang", language_,
                         "Language preset for extensions (currently: cpp => .cpp,.cc,.cxx,.h,.hpp)");
+        cmd->add_option("--worktree", worktree_, "Scope to a registered Git worktree name or path");
         cmd->add_flag("--live", liveFallback_,
-                      "Use live working-tree fallback when indexed grep returns no results");
+                      "Grep the live filesystem directly, without a daemon/index query (uses rg "
+                      "when available)");
         cmd->add_flag(
             "--no-live",
             [this](bool v) {
-                if (v)
+                if (v) {
                     liveFallback_ = false;
+                    noLive_ = true;
+                }
             },
-            "Disable live working-tree fallback for indexed no-hit results");
+            "Disable automatic live fallback when a scoped repo index is stale");
 
         cmd->callback([this, cmd]() {
             if (pattern_.empty() && !paths_.empty()) {
@@ -361,7 +381,8 @@ public:
                         pcmd << " -i";
                     if (pathsOnly_)
                         pcmd << " --paths-only";
-                    std::cerr << pcmd.str() << std::endl;
+                    if (!compact_ && !(cli_ && cli_->getQuiet()))
+                        std::cerr << pcmd.str() << std::endl;
                 }
             }
             if (!noSession_) {
@@ -384,8 +405,14 @@ public:
     }
 
     Result<void> execute() override {
+        OutputBudget outputBudget(std::cout, cli_ ? cli_->outputBudgetChars() : 0);
         try {
             invocationCwd_ = invocationCwdForCli();
+            if (!worktree_.empty()) {
+                cwdOverride_ = resolveWorktree(invocationCwd_, worktree_).string();
+                scopeToCwd_ = true;
+                sessionPatterns_.clear();
+            }
             // Attempt daemon-first grep with complete protocol mapping
             {
                 std::string cwdScope;
@@ -477,12 +504,45 @@ public:
 
                 auto render =
                     [&, jsonMode](const yams::daemon::GrepResponse& rawResp) -> Result<void> {
-                    auto liveResp = buildLiveFallbackResponse(rawResp);
-                    const auto& resp = liveResp.has_value() ? *liveResp : rawResp;
-                    if (liveResp.has_value() && !jsonMode && !pathsOnly_ && !filesOnly_ &&
-                        !countOnly_) {
-                        std::cerr << ui::colorize("Indexed grep returned no results; using live "
-                                                  "working-tree fallback.",
+                    auto resp = rawResp;
+                    if (!includeEphemeral_ && cli_ && filterTags_.empty()) {
+                        std::erase_if(resp.matches, [&](const auto& match) {
+                            return excludeRetrievalPath(match.file, cli_->retrievalOutputConfig());
+                        });
+                    }
+                    capGrepResults(resp.matches, maxResults_.value_or(pathsOnly_ ? 50 : 0),
+                                   pathsOnly_ || filesOnly_);
+                    if (resp.matches.empty() && !jsonMode &&
+                        (compact_ || pathsOnly_ || (cli_ && cli_->getQuiet()))) {
+                        std::cout << "(no results)\n";
+                        if (staleIndex_)
+                            std::cout << "(index stale; refresh with yams add --changed)\n";
+                        return Result<void>();
+                    }
+                    if (pathsOnly_ && !jsonMode) {
+                        if (resp.matches.empty())
+                            std::cout << "(no results)\n";
+                        for (const auto& match : resp.matches) {
+                            std::cout << sanitizeForDisplay(match.file) << '\n';
+                            noteOutputResult(std::cout);
+                        }
+                        return Result<void>();
+                    }
+                    if (compact_ && !jsonMode && !pathsOnly_ && !filesOnly_ && !countOnly_) {
+                        if (resp.matches.empty())
+                            std::cout << "(no results)\n";
+                        for (const auto& match : resp.matches) {
+                            const auto path =
+                                describeFileForCli(match.file, {}, invocationCwd_).displayPath;
+                            std::cout << compactHit(path, match.lineNumber, match.line);
+                            noteOutputResult(std::cout);
+                        }
+                        return Result<void>();
+                    }
+                    if (staleIndex_ && resp.queryInfo == "live-working-tree-fallback" &&
+                        !jsonMode && !pathsOnly_ && !filesOnly_ && !countOnly_ && !compact_ &&
+                        !(cli_ && cli_->getQuiet())) {
+                        std::cerr << ui::colorize("Index stale; using live working-tree results.",
                                                   ui::Ansi::DIM)
                                   << std::endl;
                     }
@@ -492,12 +552,34 @@ public:
                             relationFiles.insert(match.file);
                         }
                     }
-                    const auto relationSummaries = buildRelationSummaryMap(relationFiles);
+                    const auto relationSummaries =
+                        (compact_ || pathsOnly_ || (cli_ && cli_->getQuiet()))
+                            ? RelationSummaryMap{}
+                            : buildRelationSummaryMap(relationFiles);
+
+                    // The scan stops at a time budget on large stores. Say so on stderr in
+                    // every output mode, JSON included: a partial answer must not read as a
+                    // complete one. `budget_exhausted` is set only by the clock, unlike
+                    // `timeout_triggered`, which the result cap and cancellation also set.
+                    const auto budgetStop = resp.searchStats.find("budget_exhausted");
+                    const bool budgetExhausted =
+                        budgetStop != resp.searchStats.end() && budgetStop->second == "1";
+                    if (budgetExhausted) {
+                        const auto budget = resp.searchStats.find("budget_ms");
+                        std::cerr << "note: grep stopped at its "
+                                  << (budget != resp.searchStats.end() ? budget->second + " ms "
+                                                                       : std::string{})
+                                  << "time budget; results are incomplete. Narrow the scope "
+                                     "(--cwd, --include or a path) to search it fully.\n";
+                    }
 
                     // JSON output mode
                     if (jsonMode) {
                         nlohmann::json j;
                         j["pattern"] = pattern_;
+                        if (budgetExhausted) {
+                            j["incomplete"] = true;
+                        }
                         j["total_matches"] = resp.matches.size();
                         j["matches"] = nlohmann::json::array();
                         for (const auto& match : resp.matches) {
@@ -567,7 +649,8 @@ public:
                         if (minimalMode_) {
                             renderDaemonMinimalMatches(resp.matches, relationSummaries);
                         } else {
-                            renderDaemonRichMatches(resp.matches, relationSummaries);
+                            renderDaemonRichMatches(resp.matches, relationSummaries,
+                                                    resp.searchStats, resp.totalMatches);
                         }
                     }
 
@@ -577,6 +660,66 @@ public:
                     }
                     return Result<void>();
                 };
+
+                // Explicit live reads never pay the daemon or freshness-scan cost. Automatic
+                // fallback is limited to repo-scoped reads so global memory queries keep their
+                // scope.
+                if (!liveFallback_ && !noLive_ && filterTags_.empty() &&
+                    (scopeToCwd_ || !cwdOverride_.empty() || !paths_.empty())) {
+                    try {
+                        const auto files = readRepoFiles(liveFallbackRoot());
+                        auto freshness = cli_->repoFreshness(files);
+                        staleIndex_ = freshness && freshness.value().stale();
+                    } catch (const std::exception& error) {
+                        spdlog::debug("grep: repo freshness unavailable: {}", error.what());
+                    }
+                }
+                if (liveFallback_ || (staleIndex_ && !noLive_)) {
+                    if (!filterTags_.empty())
+                        return Error{
+                            ErrorCode::InvalidArgument,
+                            "--live reads files without metadata; use --no-live with --tags"};
+                    LiveGrepOptions options;
+                    options.pattern = pattern_;
+                    options.root = liveFallbackRoot();
+                    options.literal = literalText_;
+                    options.ignoreCase = ignoreCase_;
+                    options.wholeWord = wholeWord_;
+                    options.invert = invertMatch_;
+                    options.pathsOnly = pathsOnly_ || filesOnly_ || filesWithoutMatch_;
+                    options.filesWithoutMatch = filesWithoutMatch_;
+                    options.beforeContext = context_ > 0 ? context_ : beforeContext_;
+                    options.afterContext = context_ > 0 ? context_ : afterContext_;
+                    options.perFileLimit = maxCount_;
+                    options.resultLimit = maxResults_.value_or(pathsOnly_ ? 50 : 0);
+                    options.globs = dreq.includePatterns;
+                    options.acceptPath = [&](std::string_view path) {
+                        return pathMatchesLiveFilters(std::filesystem::path(path)) &&
+                               (includeEphemeral_ || !cli_ || !filterTags_.empty() ||
+                                !excludeRetrievalPath(path, cli_->retrievalOutputConfig()));
+                    };
+                    auto live = liveGrep(options);
+                    if (live.available) {
+                        yams::daemon::GrepResponse response;
+                        response.queryInfo = "live-working-tree-fallback";
+                        for (auto& hit : live.hits) {
+                            yams::daemon::GrepMatch match;
+                            match.file = std::move(hit.path);
+                            match.line = std::move(hit.line);
+                            match.lineNumber = hit.lineNumber;
+                            match.contextBefore = std::move(hit.contextBefore);
+                            match.contextAfter = std::move(hit.contextAfter);
+                            match.matchType = "live";
+                            match.confidence = 1.0;
+                            response.matches.push_back(std::move(match));
+                        }
+                        response.totalMatches = response.matches.size();
+                        return render(response);
+                    }
+                    if (auto fallback = buildLiveFallbackResponse({}))
+                        return render(*fallback);
+                    return render({});
+                }
 
                 const auto explicitDataDir = (cli_ && cli_->hasExplicitDataDir())
                                                  ? cli_->getDataPath()
@@ -623,8 +766,9 @@ public:
                     std::string errMsg = gres.error().message;
                     if (errMsg.find("regex") != std::string::npos ||
                         errMsg.find("Mismatched") != std::string::npos) {
-                        std::cerr << "\nError: " << errMsg << "\n";
-                        printLiteralTextHint();
+                        if (cli_)
+                            cli_->setErrorHint(literalRetryHint(pattern_));
+                        return Error{ErrorCode::InvalidArgument, errMsg};
                     }
                     return gres.error();
                 }
@@ -661,11 +805,6 @@ private:
         }
     }
 
-    // Helper to count lines in file
-    size_t countLines(const std::string& content) const {
-        return std::count(content.begin(), content.end(), '\n') + 1;
-    }
-
     bool patternLooksIntentionallyRegex() const {
         return pattern_.find('|') != std::string::npos ||
                pattern_.find(".*") != std::string::npos ||
@@ -676,8 +815,30 @@ private:
                (!pattern_.empty() && (pattern_.front() == '^' || pattern_.back() == '$'));
     }
 
+    // "retry with -F" hint with the pattern single-quoted for a POSIX shell.
+    // A pattern with control bytes is left out rather than echoed raw.
+    static std::string literalRetryHint(const std::string& pattern) {
+        const bool printable = std::none_of(pattern.begin(), pattern.end(), [](char c) {
+            const auto u = static_cast<unsigned char>(c);
+            return u < 0x20 || u == 0x7f;
+        });
+        if (!printable)
+            return "for literal text, retry with -F";
+        std::string quoted = "'";
+        for (const char c : pattern) {
+            if (c == '\'')
+                quoted += "'\\''";
+            else
+                quoted += c;
+        }
+        quoted += "'";
+        return "for literal text, retry with -F: yams grep -F " + quoted;
+    }
+
     // Helper to explain regex/literal mode without over-claiming that the user made a mistake.
     void printLiteralTextHint() const {
+        if (compact_ || (cli_ && cli_->getQuiet()))
+            return;
         if (!literalText_ && !pattern_.empty()) {
             const std::string regexSpecialChars = "()[]{}.*+?\\^$|";
             bool hasSpecialChars = false;
@@ -706,29 +867,8 @@ private:
     }
 
     void printNoResultsDiagnostics(std::optional<uint64_t> filesSearched = std::nullopt) const {
-        yams::daemon::GrepResponse empty;
-        if (auto live = buildLiveFallbackResponse(empty); live && !live->matches.empty()) {
-            std::cerr << ui::colorize(
-                             "Indexed grep returned no results; live working-tree fallback found:",
-                             ui::Ansi::DIM)
-                      << "\n";
-            std::size_t shown = 0;
-            for (const auto& match : live->matches) {
-                if (shown++ >= 20) {
-                    std::cerr << ui::colorize("  ... live results truncated", ui::Ansi::DIM)
-                              << "\n";
-                    break;
-                }
-                std::cout << ui::colorize(describeFile({}, match.file).displayPath,
-                                          ui::Ansi::MAGENTA);
-                if (showLineNumbers_) {
-                    std::cout << ":"
-                              << ui::colorize(std::to_string(match.lineNumber), ui::Ansi::CYAN);
-                }
-                std::cout << ": " << formatSnippet(sanitizeForDisplay(match.line)) << "\n";
-            }
+        if (compact_ || (cli_ && cli_->getQuiet()))
             return;
-        }
         printLiteralTextHint();
         if (jsonOutput_ || pathsOnly_ || filesOnly_ || countOnly_) {
             return;
@@ -865,6 +1005,7 @@ private:
             std::cout << " " << ui::colorize("[rel: " + file.relationSummary + "]", ui::Ansi::DIM);
         }
         std::cout << std::endl;
+        noteOutputResult(std::cout);
     }
 
     FileMatchAggregates
@@ -1002,9 +1143,12 @@ private:
                 std::cout << ui::colorize("  ...", ui::Ansi::DIM) << std::endl;
             }
 
-            std::cout << "  "
-                      << ui::colorize(std::to_string(match.lineNumber) + ":", ui::Ansi::CYAN)
-                      << " ";
+            std::cout << "  ";
+            // Semantic hits have no line; never print a placeholder number.
+            if (match.lineNumber > 0) {
+                std::cout << ui::colorize(std::to_string(match.lineNumber) + ":", ui::Ansi::CYAN)
+                          << " ";
+            }
             if (!match.prefixText.empty()) {
                 std::cout << ui::colorize(match.prefixText, match.prefixColor) << " ";
             }
@@ -1101,7 +1245,9 @@ private:
     }
 
     void renderDaemonRichMatches(const std::vector<daemon::GrepMatch>& matches,
-                                 const RelationSummaryMap& relationSummaries) const {
+                                 const RelationSummaryMap& relationSummaries,
+                                 const std::map<std::string, std::string>& searchStats = {},
+                                 uint64_t totalMatches = 0) const {
         const auto groups = buildDaemonRichFileMatches(matches, relationSummaries);
 
         size_t regexCount = 0;
@@ -1118,6 +1264,33 @@ private:
         if (regexCount > 0 && semanticCount > 0) {
             summary += " (" + std::to_string(regexCount) + " regex, " +
                        std::to_string(semanticCount) + " semantic)";
+        }
+        // The daemon returns at most result_window_limit match lines in total,
+        // after the per-file -m cap; say so when it cut the output.
+        std::size_t windowTruncated = 0;
+        if (auto it = searchStats.find("result_window_truncated"); it != searchStats.end()) {
+            try {
+                windowTruncated = std::stoull(it->second);
+            } catch (...) { // NOLINT(bugprone-empty-catch)
+            }
+        }
+        if (windowTruncated > 0) {
+            summary +=
+                "; showing the first " + std::to_string(matches.size()) + " of " +
+                std::to_string(std::max<uint64_t>(totalMatches, matches.size() + windowTruncated)) +
+                " (use -l to list every matching file)";
+        } else {
+            // Every record is present, so a file with -m records hit the cap. Several
+            // matches on one line count once here, so this can miss a cap, never invent one.
+            const auto capped = static_cast<std::size_t>(
+                std::count_if(groups.begin(), groups.end(), [this](const RichFileMatches& g) {
+                    return maxCount_ > 0 && g.regexMatches >= maxCount_;
+                }));
+            if (capped > 0) {
+                summary += "; " + std::to_string(capped) + " file" + (capped != 1 ? "s" : "") +
+                           " stopped at " + std::to_string(maxCount_) +
+                           " matches per file (raise with -m)";
+            }
         }
         renderSummaryLine(summary, !matches.empty());
     }
@@ -1290,10 +1463,7 @@ private:
         if (!indexedResp.matches.empty() || filesWithoutMatch_ || jsonOutput_) {
             return std::nullopt;
         }
-        if (!liveFallback_) {
-            return std::nullopt;
-        }
-        if (!isSimpleExactPattern()) {
+        if (!liveFallback_ && !staleIndex_) {
             return std::nullopt;
         }
 
@@ -1341,6 +1511,7 @@ private:
             std::string line;
             std::size_t lineNo = 0;
             bool fileHadMatch = false;
+            std::size_t fileMatches = 0;
             while (std::getline(in, line)) {
                 ++lineNo;
                 if (!lineMatchesLivePattern(line, regex)) {
@@ -1354,7 +1525,9 @@ private:
                 match.confidence = 1.0;
                 live.matches.push_back(std::move(match));
                 fileHadMatch = true;
-                if (maxCount_ > 0 && live.matches.size() >= kMaxMatches) {
+                ++fileMatches;
+                if (live.matches.size() >= kMaxMatches ||
+                    (maxCount_ > 0 && fileMatches >= maxCount_) || pathsOnly_ || filesOnly_) {
                     break;
                 }
             }

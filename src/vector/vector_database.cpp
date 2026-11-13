@@ -337,7 +337,6 @@ public:
                             if (storedDimOpt && *storedDimOpt > 0 && *storedDimOpt == got) {
                                 // Update expected dimension to match storage schema
                                 config_.embedding_dim = *storedDimOpt;
-                                validated = true;
                                 break; // re-run validation loop below
                             }
                         }
@@ -948,32 +947,6 @@ public:
             clearError();
         }
         return result;
-    }
-
-    Result<void> markAsDeleted(const std::string& chunk_id) const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-
-        if (!initialized_) {
-            return Error{ErrorCode::NotInitialized, "Database not initialized"};
-        }
-
-        (void)chunk_id;
-        return Result<void>(Error{ErrorCode::NotSupported,
-                                  "Soft delete is not supported by the current vectors schema; "
-                                  "use deleteVector/deleteVectorsByDocument instead"});
-    }
-
-    Result<size_t> purgeDeleted(std::chrono::hours age_threshold) const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-
-        if (!initialized_) {
-            return Error{ErrorCode::NotInitialized, "Database not initialized"};
-        }
-
-        (void)age_threshold;
-        return Result<size_t>(Error{ErrorCode::NotSupported,
-                                    "Purging deleted vectors requires soft-delete schema support "
-                                    "that is not present in the current vectors table"});
     }
 
     bool buildIndex() { return buildIndexChecked().has_value(); }
@@ -1587,14 +1560,6 @@ Result<void> VectorDatabase::persistIndexChecked() {
     return pImpl->persistIndexChecked();
 }
 
-void VectorDatabase::compactDatabase() {
-    pImpl->optimizeIndex(); // For now, optimization serves as compaction
-}
-
-bool VectorDatabase::rebuildIndex() {
-    return pImpl->buildIndex();
-}
-
 bool VectorDatabase::beginBulkLoad() {
     return beginBulkLoadChecked().has_value();
 }
@@ -1647,14 +1612,6 @@ VectorDatabase::getEmbeddingsByVersion(const std::string& model_version, size_t 
 
 Result<void> VectorDatabase::markAsStale(const std::string& chunk_id) {
     return pImpl->markAsStale(chunk_id);
-}
-
-Result<void> VectorDatabase::markAsDeleted(const std::string& chunk_id) {
-    return pImpl->markAsDeleted(chunk_id);
-}
-
-Result<size_t> VectorDatabase::purgeDeleted(std::chrono::hours age_threshold) {
-    return pImpl->purgeDeleted(age_threshold);
 }
 
 // =========================================================================
@@ -1794,15 +1751,6 @@ double VectorDatabase::computeCosineSimilarity(const std::vector<float>& a,
     return vector_utils::computeCosineSimilarity(a, b);
 }
 
-// Factory function
-std::unique_ptr<VectorDatabase> createVectorDatabase(const VectorDatabaseConfig& config) {
-    auto db = std::make_unique<VectorDatabase>(config);
-    if (!db->initialize()) {
-        return nullptr;
-    }
-    return db;
-}
-
 // Utility functions
 namespace utils {
 
@@ -1847,16 +1795,6 @@ bool validateVectorRecord(const VectorRecord& record, size_t expected_dim) {
     }
 
     return true;
-}
-
-double similarityToDistance(double similarity) {
-    // Convert cosine similarity [-1, 1] to distance [0, 2]
-    return 1.0 - similarity;
-}
-
-double distanceToSimilarity(double distance) {
-    // Convert distance [0, 2] to cosine similarity [-1, 1]
-    return 1.0 - distance;
 }
 
 } // namespace utils

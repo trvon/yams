@@ -46,7 +46,11 @@ public:
                          "metadata sync requires a SHA-256 content-hash identity"};
         }
         const auto record = toRecord(info, tags);
-        const std::string dump = nlohmann::json(record).dump();
+        auto encoded = memory_sync::encodeRecordJson(record);
+        if (!encoded) {
+            return encoded.error();
+        }
+        const std::string& dump = encoded.value();
         std::vector<std::byte> bytes(dump.size());
         std::memcpy(bytes.data(), dump.data(), dump.size());
         auto published = sync_.publishIfChanged(documentKey(record.contentHash), bytes);
@@ -61,7 +65,8 @@ public:
     static std::size_t
     serializedRecordBytes(const DocumentInfo& info,
                           const std::vector<std::pair<std::string, MetadataValue>>& tags) {
-        return nlohmann::json(toRecord(info, tags)).dump().size();
+        auto encoded = memory_sync::encodeRecordJson(toRecord(info, tags));
+        return encoded ? encoded.value().size() : 0;
     }
 
     Result<void> publishDelete(std::string_view contentHash) {

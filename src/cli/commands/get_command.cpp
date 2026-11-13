@@ -14,10 +14,12 @@
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/content_slice_options.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/time_filters.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/ui_helpers.hpp>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compressor_interface.h>
@@ -54,6 +56,8 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("get", getDescription());
+        if (cli_)
+            cli_->registerReadOptions(*cmd);
 
         // Choose one selector or discovery filter. Compound selection belongs in list.
         auto* group = cmd->add_option_group("retrieval_method");
@@ -89,6 +93,7 @@ public:
 
         cmd->add_option("-o,--output", outputPath_, "Output file path (default: stdout)");
         cmd->add_flag("--metadata-only", metadataOnly_, "Return only metadata (no bytes)");
+        registerContentSliceOptions(*cmd, slice_);
         cmd->add_option("--max-bytes", maxBytes_, "Maximum bytes to transfer (0 = unlimited)")
             ->default_val(0);
         cmd->add_option("--chunk-size", chunkSize_, "Streaming chunk size in bytes")
@@ -114,14 +119,13 @@ public:
 
         cmd->callback([this]() {
             auto result = execute();
-            if (!result) {
-                spdlog::error("Command failed: {}", result.error().message);
-                throw CLI::RuntimeError(1);
-            }
+            if (!result)
+                failCommand(result.error());
         });
     }
 
     Result<void> execute() override {
+        OutputBudget outputBudget(std::cout, cli_ ? cli_->outputBudgetChars() : 0);
         YAMS_ZONE_SCOPED_N("GetCommand::execute");
 
         try {
@@ -133,9 +137,8 @@ public:
                     if (!name_.empty() && name_[0] != '/' && !isValidHashPrefix(name_)) {
                         try {
                             name_ = std::filesystem::weakly_canonical(name_).string();
-                        } catch (const std::filesystem::filesystem_error& error) {
-                            spdlog::debug("get: treating '{}' as a name after path resolution: {}",
-                                          name_, error.what());
+                        } catch (const std::filesystem::filesystem_error& e) {
+                            spdlog::debug("get: treating selector as a name: {}", e.what());
                         }
                     }
                 }
@@ -256,7 +259,7 @@ public:
             // JSON output is written by the renderer, not as raw bytes by the service.
             dreq.outputPath = jsonOutput ? std::string{} : outputPath_.string();
             dreq.metadataOnly = metadataOnly_;
-            dreq.maxBytes = maxBytes_;
+            dreq.maxBytes = slice_.active() ? 0 : maxBytes_;
             dreq.chunkSize = chunkSize_;
 
             // Content options
@@ -332,10 +335,12 @@ public:
                 } else if (resp.hasContent) {
                     // Content retrieval. DaemonClient decodes compressed transfers, so this is
                     // always the document itself.
-                    const std::string* content = &resp.content;
+                    const auto selectedContent = sliceContent(resp.content, slice_, maxBytes_);
+                    const std::string* content = &selectedContent;
                     if (outputPath_.empty() || outputPath_ == "-") {
                         // Output to stdout
                         std::cout << *content;
+                        noteOutputResult(std::cout);
                     } else {
                         // Write to file
                         std::ofstream outFile(outputPath_, std::ios::binary);
@@ -388,10 +393,13 @@ public:
                 if (smart) {
                     return render(smart.value());
                 }
-                // If smart fails, fall back to the generic get request with the name
-                spdlog::debug(
-                    "get --name: smart resolution failed ({}); continuing with generic get",
-                    smart.error().message);
+                // A name that matched nothing or several documents is final; the
+                // generic by-name get would pick the newest of several matches.
+                if (!yams::cli::is_transport_failure(smart.error())) {
+                    return smart.error();
+                }
+                spdlog::debug("get --name: transport failure ({}); retrying generic get",
+                              smart.error().message);
             }
 
             auto gres = rsvc.get(dreq, ropts);
@@ -407,133 +415,11 @@ public:
     }
 
 private:
-    Result<void> displayKnowledgeGraph(const std::string& hash) {
-        auto metadataRepo = cli_->getMetadataRepository();
-        if (!metadataRepo) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
-        }
-
-        // Find document by hash
-        auto docResult = metadataRepo->getDocumentByHash(hash);
-        if (!docResult || !docResult.value().has_value()) {
-            return Error{ErrorCode::NotFound, "Document not found in metadata"};
-        }
-
-        auto& doc = docResult.value().value();
-
-        std::cerr << "\n=== Knowledge Graph for " << doc.fileName << " ===\n";
-        std::cerr << "Hash: " << hash.substr(0, 12) << "...\n";
-        std::cerr << "Path: " << doc.filePath << "\n";
-
-        // Display related documents (simulated - would need actual graph implementation)
-        std::cerr << "\nRelated Documents (depth " << graphDepth_ << "):\n";
-
-        // Find documents in same directory
-        std::filesystem::path dirPath = std::filesystem::path(doc.filePath).parent_path();
-        auto relatedResult =
-            metadata::queryDocumentsByPattern(*metadataRepo, dirPath.string() + "/%");
-
-        if (relatedResult && !relatedResult.value().empty()) {
-            int count = 0;
-            for (const auto& related : relatedResult.value()) {
-                if (related.sha256Hash != hash && count < 10) {
-                    std::cerr << "  - " << related.fileName << " ("
-                              << related.sha256Hash.substr(0, 8) << "...)\n";
-                    count++;
-                }
-            }
-        }
-
-        // Find documents with similar extension
-        std::cerr << "\nSimilar documents by extension:\n";
-        auto extResult = metadata::queryDocumentsByPattern(*metadataRepo, "%." + doc.fileExtension);
-        if (extResult && !extResult.value().empty()) {
-            int count = 0;
-            for (const auto& similar : extResult.value()) {
-                if (similar.sha256Hash != hash && count < 5) {
-                    std::cerr << "  - " << similar.fileName << " (" << similar.fileExtension
-                              << ")\n";
-                    count++;
-                }
-            }
-        }
-
-        std::cerr << "\n";
-        return Result<void>();
-    }
-
     bool hasFilters() const {
         return !fileType_.empty() || !mimeType_.empty() || !extension_.empty() || binaryOnly_ ||
                textOnly_ || !createdAfter_.empty() || !createdBefore_.empty() ||
                !modifiedAfter_.empty() || !modifiedBefore_.empty() || !indexedAfter_.empty() ||
                !indexedBefore_.empty();
-    }
-
-    Result<std::string> resolveByFilters() {
-        auto metadataRepo = cli_->getMetadataRepository();
-        if (!metadataRepo) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
-        }
-
-        // Get all documents
-        auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
-        if (!documentsResult) {
-            return Error{ErrorCode::DatabaseError,
-                         "Failed to query documents: " + documentsResult.error().message};
-        }
-
-        auto documents = documentsResult.value();
-
-        // Initialize file type detector if needed
-        bool needFileTypeDetection = !fileType_.empty() || !mimeType_.empty() ||
-                                     !extension_.empty() || binaryOnly_ || textOnly_;
-        if (needFileTypeDetection) {
-            detection::FileTypeDetectorConfig config;
-            config.patternsFile = YamsCLI::findMagicNumbersFile();
-            config.useCustomPatterns = !config.patternsFile.empty();
-            detection::FileTypeDetector::instance().initialize(config);
-        }
-
-        // Apply filters
-        std::vector<metadata::DocumentInfo> filtered;
-        for (const auto& doc : documents) {
-            if (applyTimeFilters(doc) && applyFileTypeFilters(doc)) {
-                filtered.push_back(doc);
-            }
-        }
-
-        if (filtered.empty()) {
-            return Error{ErrorCode::NotFound, "No documents match the specified filters"};
-        }
-
-        // Sort by indexed time if needed
-        if (getLatest_ || getOldest_) {
-            std::sort(filtered.begin(), filtered.end(),
-                      [this](const metadata::DocumentInfo& a, const metadata::DocumentInfo& b) {
-                          return getLatest_ ? (a.indexedTime > b.indexedTime)
-                                            : (a.indexedTime < b.indexedTime);
-                      });
-        }
-
-        if (filtered.size() > 1 && !getLatest_ && !getOldest_) {
-            std::cerr << "Multiple documents match the filters (" << filtered.size()
-                      << " found):" << std::endl;
-            for (size_t i = 0; i < std::min(size_t(5), filtered.size()); ++i) {
-                const auto& doc = filtered[i];
-                std::cerr << "  " << doc.sha256Hash.substr(0, 12) << "... - " << doc.fileName
-                          << " (" << doc.fileSize << " bytes)" << std::endl;
-            }
-            if (filtered.size() > 5) {
-                std::cerr << "  ... and " << (filtered.size() - 5) << " more" << std::endl;
-            }
-            std::cerr << "Use --latest or --oldest to select one, or refine your filters."
-                      << std::endl;
-            return Error{
-                ErrorCode::InvalidOperation,
-                "Multiple documents match. Please refine filters or use --latest/--oldest."};
-        }
-
-        return filtered[0].sha256Hash;
     }
 
     bool applyTimeFilters(const metadata::DocumentInfo& doc) {
@@ -1240,6 +1126,7 @@ private:
 
     // Daemon streaming options
     bool metadataOnly_ = false;
+    ContentSliceOptions slice_;
     uint64_t maxBytes_ = 0;       // 0 = unlimited
     uint32_t chunkSize_ = 262144; // IPC field width; CLI11 rejects overflow
 };

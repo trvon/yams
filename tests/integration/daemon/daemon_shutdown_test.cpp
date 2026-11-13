@@ -9,6 +9,7 @@
 #include <latch>
 #include <thread>
 #include <vector>
+#include "require_daemon_started.h"
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include <boost/asio/post.hpp>
@@ -58,12 +59,6 @@ bool connectWithRetry(DaemonClient& client, int maxRetries = 3,
     return false;
 }
 
-void startHarnessWithRetry(DaemonHarness& harness, std::size_t maxRetries = 3) {
-    if (!harness.startWithRetry(30s, maxRetries)) {
-        SKIP("Skipping shutdown integration section due to daemon startup instability");
-    }
-}
-
 bool waitForLifecycleState(const YamsDaemon& daemon, LifecycleState state,
                            std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -109,7 +104,7 @@ TEST_CASE("Daemon shutdown timing", "[daemon][shutdown][timing]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -225,7 +220,7 @@ TEST_CASE("Daemon shutdown with in-flight operations", "[daemon][shutdown][opera
     opts.enableModelProvider = false;
     opts.useMockModelProvider = false;
     DaemonHarness harness(opts);
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -302,7 +297,7 @@ TEST_CASE("Daemon shutdown idempotency", "[daemon][shutdown][idempotent]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -341,7 +336,7 @@ TEST_CASE("Daemon shutdown after operations", "[daemon][shutdown][lifecycle]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -356,11 +351,19 @@ TEST_CASE("Daemon shutdown after operations", "[daemon][shutdown][lifecycle]") {
             REQUIRE(result.has_value());
         }
 
+        // Adds are accepted for asynchronous ingest; wait until all five are listed.
         ListRequest listReq;
         listReq.limit = 10;
-        auto listResult = yams::cli::run_sync(client.list(listReq), 5s);
-        REQUIRE(listResult.has_value());
-        REQUIRE((listResult.value().items.size() >= 5));
+        std::size_t listed = 0;
+        for (auto deadline = std::chrono::steady_clock::now() + 10s;
+             std::chrono::steady_clock::now() < deadline; std::this_thread::sleep_for(50ms)) {
+            auto listResult = yams::cli::run_sync(client.list(listReq), 5s);
+            REQUIRE(listResult.has_value());
+            listed = listResult.value().items.size();
+            if (listed >= 5)
+                break;
+        }
+        REQUIRE((listed >= 5));
 
         auto shutdownResult = yams::cli::run_sync(client.shutdown(true), 5s);
         REQUIRE(shutdownResult.has_value());
@@ -382,7 +385,7 @@ TEST_CASE("Daemon shutdown under load", "[daemon][shutdown][stress]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -412,7 +415,12 @@ TEST_CASE("Daemon shutdown under load", "[daemon][shutdown][stress]") {
             });
         }
 
-        std::this_thread::sleep_for(200ms);
+        // Shut down once load is actually flowing. A fixed 200 ms raced slow (TSAN, coverage)
+        // builds, where no add had completed yet and the test saw zero successful operations.
+        for (auto deadline = std::chrono::steady_clock::now() + 10s;
+             successfulOps.load() == 0 && std::chrono::steady_clock::now() < deadline;) {
+            std::this_thread::sleep_for(10ms);
+        }
 
         auto shutdownResult = yams::cli::run_sync(client.shutdown(true), 5s);
         REQUIRE(shutdownResult.has_value());
@@ -531,7 +539,7 @@ int connectRawUnixSocket(const std::filesystem::path& socketPath) {
 TEST_CASE("Daemon stop outlives connections still draining on the IO threads",
           "[daemon][shutdown][socket]") {
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto* daemon = harness.daemon();
     REQUIRE(daemon != nullptr);

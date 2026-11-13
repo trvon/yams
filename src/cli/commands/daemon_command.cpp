@@ -43,6 +43,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <system_error>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -152,7 +153,7 @@ public:
         auto* start = daemon->add_subcommand("start", "Start the YAMS daemon");
         start->add_option("--socket", socketPath_, "Socket path for daemon communication");
         start->add_option("--data-dir,--storage", dataDir_, "Data directory for daemon storage");
-        start->add_option("--pid-file", pidFile_, "PID file path");
+        start->add_option("--pid-file", pidFileOption_, "PID file path");
         start
             ->add_option("--log-level", startLogLevel_,
                          "Daemon log level (trace, debug, info, warn, error)")
@@ -168,10 +169,12 @@ public:
         // Stop command
         auto* stop = daemon->add_subcommand("stop", "Stop the YAMS daemon");
         stop->add_option("--socket", socketPath_, "Socket path for daemon communication");
+        stop->add_option("--pid-file", pidFileOption_, "PID file path");
         stop->add_flag("--force", force_, "Force stop (kill -9)");
 
         stop->callback([this]() {
             if (!stopDaemon()) {
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
         });
@@ -186,6 +189,7 @@ public:
         // Restart command
         auto* restart = daemon->add_subcommand("restart", "Restart the YAMS daemon");
         restart->add_option("--socket", socketPath_, "Socket path for daemon communication");
+        restart->add_option("--pid-file", pidFileOption_, "PID file path");
         restart->add_flag("--force", force_, "Force stop (kill -9)");
 
         restart->callback([this]() { restartDaemon(); });
@@ -193,6 +197,8 @@ public:
         // Doctor subcommand
         auto* doctor =
             daemon->add_subcommand("doctor", "Diagnose daemon IPC and environment issues");
+        doctor->add_option("--socket", socketPath_, "Socket path for daemon communication");
+        doctor->add_option("--pid-file", pidFileOption_, "PID file path");
         doctor->callback([this]() { doctorDaemon(); });
 
         // Log subcommand
@@ -238,7 +244,7 @@ private:
                 auto cliDataDir = cli_->getDataPath();
                 if (!cliDataDir.empty())
                     return cliDataDir;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
         return yams::config::resolve_data_dir_from_config();
@@ -316,7 +322,8 @@ private:
             if (errno == ESRCH) {
                 return true; // Already gone
             }
-            spdlog::error("Failed to query daemon PID {}: {}", pid, strerror(errno));
+            spdlog::error("Failed to query daemon PID {}: {}", pid,
+                          std::generic_category().message(errno));
             return false; // Process doesn't exist or not permitted
         }
 
@@ -332,7 +339,8 @@ private:
             if (errno == ESRCH) {
                 return true; // Process exited before signal
             }
-            spdlog::error("Failed to send signal to daemon (PID {}): {}", pid, strerror(errno));
+            spdlog::error("Failed to send signal to daemon (PID {}): {}", pid,
+                          std::generic_category().message(errno));
             auto desc = describeProcess(pid);
             if (!desc.empty()) {
                 spdlog::error("Daemon PID {} state: {}", pid, desc);
@@ -656,9 +664,6 @@ private:
         return collectDaemonPidsForPattern(pattern);
     }
 
-    static bool isAnyDaemonProcessRunning() {
-        return !collectDaemonPidsForPattern("yams-daemon").empty();
-    }
 #else
     std::string resolveSocketPathForLiveDaemon(const std::string& preferredSocket,
                                                const std::string& pidFilePath,
@@ -762,13 +767,36 @@ private:
     }
 
     std::string resolveConfiguredPidFilePath() const {
-        return pidFile_.empty() ? YamsCLI::resolveConfiguredDaemonPidFilePath().string() : pidFile_;
+        return pidFileOption_.empty() ? YamsCLI::resolveConfiguredDaemonPidFilePath().string()
+                                      : pidFileOption_;
+    }
+
+    // Which daemon stop/restart may act on, from the flags given and the resolved paths.
+    yams::daemon::client::LifecycleScope lifecycleScope() const {
+        yams::config::RuntimePathOverrides overrides;
+        if (!dataDir_.empty()) {
+            overrides.dataDir = dataDir_;
+        } else if (cli_ && cli_->hasExplicitDataDir()) {
+            overrides.dataDir = cli_->getDataPath(); // `yams --data-dir X daemon stop`
+        }
+        if (!startConfigPath_.empty()) {
+            overrides.configFile = startConfigPath_;
+        }
+        const auto paths = yams::config::resolve_runtime_paths(overrides);
+        if (!paths) {
+            // Unknown target: act only on what was named explicitly.
+            yams::daemon::client::LifecycleScope narrow;
+            narrow.pidFile = !pidFileOption_.empty();
+            return narrow;
+        }
+        return yams::daemon::client::lifecycleScope(!socketPath_.empty(), !pidFileOption_.empty(),
+                                                    paths.value());
     }
 
     // The packaged systemd user unit runs the default daemon (default paths, default binary).
     bool customDaemonOptions() const {
         return !socketPath_.empty() || !dataDir_.empty() || !startConfigPath_.empty() ||
-               !startDaemonBinary_.empty() || !pidFile_.empty();
+               !startDaemonBinary_.empty() || !pidFileOption_.empty();
     }
 
     static bool packagedUserUnitInstalled() {
@@ -781,7 +809,7 @@ private:
         namespace fs = std::filesystem;
 
         // A daemon managed by the systemd user unit is started (and restarted) by systemd.
-        if (!customDaemonOptions() && !startForeground_) {
+        if (!customDaemonOptions() && !startForeground_ && lifecycleScope().userUnit) {
             namespace dc = yams::daemon::client;
             const auto unit = dc::queryUserUnit();
             if (unit == dc::UserUnitState::Active && !startRestart_) {
@@ -802,8 +830,8 @@ private:
         // Use a local effective path for pre-checks only; the daemon will resolve from config.
         pidFile_ = resolveConfiguredPidFilePath();
         const std::string configuredSocket = resolveConfiguredSocketPath();
-        const std::string effectiveSocket =
-            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
+        const std::string effectiveSocket = resolveSocketPathForLiveDaemon(
+            configuredSocket, pidFile_, lifecycleScope().anyLiveDaemon);
 
         spdlog::debug("Using socket (effective): {}", effectiveSocket);
         spdlog::debug("Using PID file: {}", pidFile_);
@@ -846,12 +874,14 @@ private:
             }
             if (!stopDaemon()) {
                 std::cerr << "Failed to stop running daemon; not starting a new one.\n";
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
 
             if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5),
                                    pidBeforeStop)) {
                 std::cerr << "Failed to stop running daemon; not starting a new one.\n";
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
         }
@@ -974,9 +1004,11 @@ private:
 
             // Exec and never return on success
             ::execvp(exePath.c_str(), argv.data());
-            spdlog::error("Failed to exec yams-daemon ({}): {}", exePath, strerror(errno));
-            std::cerr << "[FAIL] Failed to exec yams-daemon: " << exePath << ": " << strerror(errno)
-                      << "\n";
+            spdlog::error("Failed to exec yams-daemon ({}): {}", exePath,
+                          std::generic_category().message(errno));
+            std::cerr << "[FAIL] Failed to exec yams-daemon: " << exePath << ": "
+                      << std::generic_category().message(errno) << "\n";
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(1);
         } else {
             // Start daemon in background
@@ -1013,6 +1045,7 @@ private:
                           << "\n";
                 std::cerr << "  💡 Hint: Check if another daemon is already running\n";
                 std::cerr << "  📋 Try: yams daemon stop && yams daemon start\n";
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
 
@@ -1024,7 +1057,8 @@ private:
 
     bool stopDaemon() {
         // Stop a unit-managed daemon through systemd so the unit state stays truthful.
-        if (socketPath_.empty() &&
+        const auto scope = lifecycleScope();
+        if (scope.userUnit &&
             yams::daemon::client::queryUserUnit() == yams::daemon::client::UserUnitState::Active) {
             if (yams::daemon::client::runUserUnit("stop")) {
                 std::cout << "[OK] Stopped the yams-daemon.service systemd user unit\n";
@@ -1032,11 +1066,13 @@ private:
             }
             spdlog::warn("systemctl --user stop yams-daemon.service failed; stopping over IPC");
         }
-        pidFile_ = resolveConfiguredPidFilePath();
+        // A command aimed at another socket must not signal, or clean up after, the daemon
+        // that the shared PID file names.
+        pidFile_ = scope.pidFile ? resolveConfiguredPidFilePath() : std::string{};
         // Resolve paths if not explicitly provided (do not persist into socketPath_)
         const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
-            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
+            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, scope.anyLiveDaemon);
 
         std::optional<yams::cli::ui::SpinnerRunner> spinner;
         if (yams::cli::ui::stdout_is_tty()) {
@@ -1397,7 +1433,7 @@ private:
                             if (itDeg != s.readinessStates.end() && itDeg->second) {
                                 std::cout << "  Search:      degraded (repairing)\n";
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                         }
                         // Show vector scoring availability
                         try {
@@ -1416,7 +1452,7 @@ private:
                             } else {
                                 std::cout << "  Vector:      enabled\n";
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                         }
                         // Worker pool (from requestCounts)
                         try {
@@ -1429,15 +1465,16 @@ private:
                                     itT != s.requestCounts.end() ? itT->second : 0;
                                 std::size_t active = itA != s.requestCounts.end() ? itA->second : 0;
                                 std::size_t queued = itQ != s.requestCounts.end() ? itQ->second : 0;
-                                std::size_t util =
-                                    (threads > 0)
-                                        ? static_cast<std::size_t>((100.0 * active) / threads)
-                                        : 0;
+                                std::size_t util = (threads > 0)
+                                                       ? static_cast<std::size_t>(
+                                                             (100.0 * static_cast<double>(active)) /
+                                                             static_cast<double>(threads))
+                                                       : 0;
                                 std::cout << "  Worker Pool:  threads=" << threads
                                           << ", active=" << active << ", queued=" << queued
                                           << ", util=" << util << "%\n";
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                         }
 
                         // Version mismatch check
@@ -1446,7 +1483,7 @@ private:
                             if (!s.version.empty() && s.version != current) {
                                 hints.push_back("Version mismatch - run: yams daemon restart");
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                         }
                         // Show any components not ready yet
                         bool has_waiting = false;
@@ -1496,7 +1533,7 @@ private:
                                     }
                                 }
                             }
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                         }
 
                         // Check resource usage
@@ -1511,7 +1548,7 @@ private:
                                             " MB) - reduce cache/model size");
                         }
                     }
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
             } else {
                 std::cout << "  Socket: "
@@ -1595,7 +1632,7 @@ private:
                 if (found) {
                     std::cout << "  Process found: INITIALIZING\n";
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // ignore errors from /proc scanning
             }
         }
@@ -1736,7 +1773,7 @@ private:
                                         j["progress"].contains(it.key())) {
                                         try {
                                             w << " (" << j["progress"][it.key()].get<int>() << "%)";
-                                        } catch (...) {
+                                        } catch (...) { // NOLINT(bugprone-empty-catch)
                                         }
                                     }
                                     waiting.push_back(w.str());
@@ -1827,7 +1864,7 @@ private:
                                      "or tail the daemon log.\n";
                         return;
                     }
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
                 // No bootstrap file either — the daemon is not running or has not
                 // yet written any status. Match the "not running" message emitted
@@ -1883,6 +1920,7 @@ private:
         }
         if (lastErr.code == ErrorCode::ResourceBusy) {
             std::cout << lastErr.message << "\n";
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(2);
         }
         // All retries exhausted — fall back to bootstrap status file before giving up
@@ -1906,7 +1944,7 @@ private:
                             try {
                                 pct = " (" + std::to_string(j["progress"][it.key()].get<int>()) +
                                       "%)";
-                            } catch (...) {
+                            } catch (...) { // NOLINT(bugprone-empty-catch)
                             }
                         }
                         std::cout << "  " << it.key() << ": " << state << pct << "\n";
@@ -1915,14 +1953,15 @@ private:
                 if (j.contains("uptime_seconds")) {
                     try {
                         std::cout << "  Uptime: ~" << j["uptime_seconds"].get<long>() << "s\n";
-                    } catch (...) {
+                    } catch (...) { // NOLINT(bugprone-empty-catch)
                     }
                 }
                 return;
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         spdlog::error("Failed to get daemon status: {}", lastErr.message);
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
         std::exit(1);
     }
 
@@ -1948,7 +1987,8 @@ private:
     }
 
     void restartDaemon() {
-        if (socketPath_.empty() &&
+        const auto scope = lifecycleScope();
+        if (scope.userUnit &&
             yams::daemon::client::queryUserUnit() == yams::daemon::client::UserUnitState::Active) {
             if (yams::daemon::client::runUserUnit("restart")) {
                 std::cout << "[OK] Restarted the yams-daemon.service systemd user unit\n";
@@ -1957,11 +1997,11 @@ private:
             spdlog::warn(
                 "systemctl --user restart yams-daemon.service failed; restarting over IPC");
         }
-        pidFile_ = resolveConfiguredPidFilePath();
+        pidFile_ = scope.pidFile ? resolveConfiguredPidFilePath() : std::string{};
 
         const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
-            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
+            resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, scope.anyLiveDaemon);
 
         pid_t pidBeforeStop = readPidFromFile(pidFile_);
         if (!yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFile_, pidBeforeStop)) {
@@ -1969,11 +2009,13 @@ private:
         }
         if (!stopDaemon()) {
             spdlog::error("Failed to stop daemon for restart");
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(1);
         }
 
         if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5), pidBeforeStop)) {
             spdlog::error("Failed to stop daemon for restart");
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(1);
         }
 
@@ -2026,7 +2068,7 @@ private:
                     logPath = reported;
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Best effort: fall back to the default candidate paths below.
         }
 
@@ -2284,6 +2326,7 @@ private:
         // With the Linux packages the user unit already exists in /usr/lib/systemd/user: enable
         // it rather than writing a copy (a file in ~/.config/systemd/user would shadow it).
         if (userScope && !customDaemonOptions() && packagedUserUnitInstalled()) {
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
             (void)std::system("systemctl --user daemon-reload >/dev/null 2>&1");
             if (yams::daemon::client::runUserUnit("enable --now")) {
                 std::cout << "[OK] Enabled and started the packaged yams-daemon.service user "
@@ -2353,6 +2396,7 @@ private:
         if (ec) {
             std::cerr << "[FAIL] Cannot create unit directory " << unitDir.string() << ": "
                       << ec.message() << "\n";
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(1);
         }
         // The unit's WorkingDirectory= is the data directory: systemd fails the start with
@@ -2361,12 +2405,14 @@ private:
         if (ec) {
             std::cerr << "[FAIL] Cannot create data directory " << dataDir << ": " << ec.message()
                       << "\n";
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
             std::exit(1);
         }
         {
             std::ofstream out(unitPath, std::ios::trunc);
             if (!out) {
                 std::cerr << "[FAIL] Cannot write " << unitPath.string() << "\n";
+                // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
                 std::exit(1);
             }
             out << unit.str();
@@ -2385,8 +2431,11 @@ private:
         std::cout << "[INFO] Running: " << reloadCmd << "\n";
         std::cout << "[INFO] Running: " << enableCmd << "\n";
         std::cout << "[INFO] Running: " << startCmd << "\n";
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         (void)std::system((reloadCmd + " 2>&1").c_str());
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         (void)std::system((enableCmd + " 2>&1").c_str());
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         const int startRc = std::system((startCmd + " 2>&1").c_str());
         if (startRc == 0) {
             std::cout << "[OK] yams-daemon.service " << (userScope ? "(user)" : "(system)")
@@ -2414,14 +2463,18 @@ private:
 
         const std::string ctl = systemctlPath();
         const std::string scope = userScope ? " --user" : "";
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         (void)std::system((ctl + scope + " stop yams-daemon.service 2>&1").c_str());
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         (void)std::system((ctl + scope + " disable yams-daemon.service 2>&1").c_str());
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
         (void)std::system((ctl + scope + " daemon-reload 2>&1").c_str());
         std::error_code ec;
         if (fs::exists(unitPath, ec)) {
             fs::remove(unitPath, ec);
             std::cout << (fs::exists(unitPath, ec) ? "[WARN] Could not remove " : "[OK] Removed ")
                       << unitPath.string() << "\n";
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): fixed systemctl command
             (void)std::system((ctl + scope + " daemon-reload 2>&1").c_str());
         } else {
             std::cout << "[OK] Disabled yams-daemon.service" << (userScope ? " (user)" : "")
@@ -2436,7 +2489,8 @@ private:
 
     // Options (empty = auto-resolve based on environment)
     std::string socketPath_;
-    std::string pidFile_;
+    std::string pidFileOption_; // --pid-file as given; never a resolved default
+    std::string pidFile_;       // PID file the current operation works with
     bool foreground_ = false;
     bool force_ = false;
     bool detailed_ = false;

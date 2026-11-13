@@ -440,16 +440,6 @@ private:
      * @brief Return a statement to the cache after use
      */
     void returnToCache(const std::string& sql, Statement&& stmt);
-
-    /**
-     * @brief Convert SQLite error code to our error type
-     */
-    static DatabaseError translateError(int sqliteError);
-
-    /**
-     * @brief Get error message from SQLite
-     */
-    std::string getErrorMessage() const;
 };
 
 /**
@@ -464,9 +454,7 @@ public:
     QueryBuilder& from(const std::string& table);
     QueryBuilder& where(const std::string& condition);
     QueryBuilder& andWhere(const std::string& condition);
-    QueryBuilder& orWhere(const std::string& condition);
     QueryBuilder& join(const std::string& table, const std::string& on);
-    QueryBuilder& leftJoin(const std::string& table, const std::string& on);
     QueryBuilder& orderBy(const std::string& column, bool ascending = true);
     QueryBuilder& limit(int limit);
     QueryBuilder& offset(int offset);
@@ -480,9 +468,6 @@ public:
     // UPDATE
     QueryBuilder& update(const std::string& table);
     QueryBuilder& set(const std::string& column, const std::string& placeholder = "?");
-
-    // DELETE
-    QueryBuilder& deleteFrom(const std::string& table);
 
     // Build final SQL
     [[nodiscard]] std::string build() const;

@@ -94,10 +94,12 @@ std::string topologySignalKindName(BenchmarkTopologySignalKind kind) {
 
 namespace {
 
+// Linear gain, as in trec_eval ndcg_cut (and so pytrec_eval/BEIR): "Gain values are the
+// relevance values in the qrels file." Not the 2^rel - 1 gain of Burges et al.
 double computeDCG(const std::vector<int>& grades, int k) {
     double dcg = 0.0;
     for (int i = 0; i < std::min(k, static_cast<int>(grades.size())); ++i) {
-        dcg += (std::pow(2.0, grades[i]) - 1.0) / std::log2(i + 2.0);
+        dcg += static_cast<double>(grades[i]) / std::log2(i + 2.0);
     }
     return dcg;
 }
@@ -107,11 +109,17 @@ double computeIDCG(std::vector<int> grades, int k) {
     return computeDCG(grades, k);
 }
 
+const std::set<std::string>& relevantSet(const TestQuery& query) {
+    return query.useDocIds ? query.relevantDocIds : query.relevantFiles;
+}
+
+// Grades of every relevant document, for the ideal DCG.
 std::vector<int> collectAllGrades(const TestQuery& query) {
     std::vector<int> allGrades;
-    allGrades.reserve(query.relevanceGrades.size());
-    for (const auto& [_, grade] : query.relevanceGrades) {
-        allGrades.push_back(grade);
+    for (const auto& docId : relevantSet(query)) {
+        if (const int grade = relevanceGradeForQuery(query, docId); grade > 0) {
+            allGrades.push_back(grade);
+        }
     }
     return allGrades;
 }
@@ -1437,18 +1445,20 @@ BEIRCorpusLoader::BEIRCorpusLoader(const BEIRDataset& ds, const fs::path& dir)
 
 void BEIRCorpusLoader::writeDocumentsAsFiles() {
     yams::common::ensureDirectories(corpusDir);
+    std::unordered_set<std::string> contents;
+    contents.reserve(dataset.documents.size());
     for (const auto& [id, doc] : dataset.documents) {
         fs::path filePath = corpusDir / (id + ".txt");
+        std::string content = doc.title.empty() ? doc.text : doc.title + "\n\n" + doc.text;
         std::ofstream outFile(filePath);
-        if (doc.title.empty()) {
-            outFile << doc.text;
-        } else {
-            outFile << doc.title << "\n\n" << doc.text;
-        }
+        outFile << content;
         outFile.close();
         docIdToHash[id] = filePath.string();
+        contents.insert(std::move(content));
     }
-    spdlog::info("Wrote {} documents to {}", dataset.documents.size(), corpusDir.string());
+    uniqueContentDocuments = contents.size();
+    spdlog::info("Wrote {} documents ({} distinct contents) to {}", dataset.documents.size(),
+                 uniqueContentDocuments, corpusDir.string());
 }
 
 std::vector<TestQuery> BEIRCorpusLoader::generateTestQueries() {
@@ -1460,6 +1470,9 @@ std::vector<TestQuery> BEIRCorpusLoader::generateTestQueries() {
 
         auto range = dataset.qrels.equal_range(queryId);
         for (auto it = range.first; it != range.second; ++it) {
+            if (it->second.score <= 0) {
+                continue; // judged non-relevant
+            }
             query.relevantDocIds.insert(it->second.docId);
             query.relevanceGrades[it->second.docId] = it->second.score;
         }
@@ -1651,6 +1664,126 @@ Result<BEIRDataset> loadBenchmarkManifestDataset(const std::string& datasetName,
     return dataset;
 }
 
+namespace {
+
+// Fisher-Yates over mt19937_64 output. std::shuffle and the std
+// distributions differ between standard libraries; this does not.
+void seededShuffle(std::vector<std::string>& items, std::mt19937_64& rng) {
+    for (std::size_t i = items.size(); i > 1; --i) {
+        std::swap(items[i - 1], items[rng() % i]);
+    }
+}
+
+} // namespace
+
+std::string benchmarkSubsetLabel(const BenchmarkSubsetSpec& spec) {
+    if (!spec.maxDocs && !spec.maxQueries) {
+        return "full";
+    }
+    return "seeded:" + std::to_string(spec.seed);
+}
+
+Result<BEIRDataset> selectBenchmarkSubset(const BEIRDataset& full, const BenchmarkSubsetSpec& spec,
+                                          BenchmarkSubsetStats* stats) {
+    BenchmarkSubsetStats local;
+    BenchmarkSubsetStats& st = stats ? *stats : local;
+    st = {};
+
+    // Positive judgments per query, limited to documents that exist.
+    std::map<std::string, std::set<std::string>> relevantByQuery;
+    for (const auto& [qid, qrel] : full.qrels) {
+        if (qrel.score > 0 && full.queries.count(qid) > 0 && full.documents.count(qrel.docId) > 0) {
+            relevantByQuery[qid].insert(qrel.docId);
+        }
+    }
+
+    BEIRDataset out;
+    out.name = full.name;
+    out.basePath = full.basePath;
+
+    if (!spec.maxDocs && !spec.maxQueries) {
+        out = full;
+        st.sampledQueries = relevantByQuery.size();
+        for (const auto& [_, docs] : relevantByQuery) {
+            st.relevantDocs += docs.size();
+        }
+        return out;
+    }
+
+    std::mt19937_64 rng(spec.seed);
+    const std::size_t docBudget =
+        spec.maxDocs ? static_cast<std::size_t>(*spec.maxDocs) : full.documents.size();
+    const std::size_t queryBudget =
+        spec.maxQueries ? static_cast<std::size_t>(*spec.maxQueries) : relevantByQuery.size();
+
+    std::vector<std::string> queryOrder;
+    queryOrder.reserve(relevantByQuery.size());
+    for (const auto& [qid, _] : relevantByQuery) {
+        queryOrder.push_back(qid);
+    }
+    seededShuffle(queryOrder, rng);
+
+    std::set<std::string> included;
+    std::set<std::string> sampled;
+    for (const auto& qid : queryOrder) {
+        if (sampled.size() >= queryBudget) {
+            break;
+        }
+        const auto& docs = relevantByQuery.at(qid);
+        std::size_t added = 0;
+        for (const auto& d : docs) {
+            added += included.count(d) == 0 ? 1 : 0;
+        }
+        if (included.size() + added > docBudget) {
+            ++st.skippedQueries; // never truncate a relevant set
+            continue;
+        }
+        included.insert(docs.begin(), docs.end());
+        sampled.insert(qid);
+    }
+    if (sampled.empty()) {
+        return Error{ErrorCode::InvalidArgument,
+                     "benchmark subset: no query's relevant set fits the document budget"};
+    }
+    st.sampledQueries = sampled.size();
+    st.relevantDocs = included.size();
+
+    std::vector<std::string> fillerOrder;
+    fillerOrder.reserve(full.documents.size());
+    for (const auto& [id, _] : full.documents) {
+        if (included.count(id) == 0) {
+            fillerOrder.push_back(id);
+        }
+    }
+    seededShuffle(fillerOrder, rng);
+    for (const auto& id : fillerOrder) {
+        if (included.size() >= docBudget) {
+            break;
+        }
+        included.insert(id);
+        ++st.fillerDocs;
+    }
+
+    for (const auto& id : included) {
+        out.documents.emplace(id, full.documents.at(id));
+    }
+    for (const auto& qid : sampled) {
+        out.queries.emplace(qid, full.queries.at(qid));
+        auto range = full.qrels.equal_range(qid);
+        for (auto it = range.first; it != range.second; ++it) {
+            if (included.count(it->second.docId) > 0) {
+                out.qrels.emplace(qid, it->second);
+            }
+        }
+    }
+    for (const auto& entity : full.kgEntities) {
+        if (included.count(entity.docId) > 0) {
+            out.kgEntities.push_back(entity);
+        }
+    }
+    return out;
+}
+
 std::string canonicalResultDocId(const TestQuery& query, const std::string& fileName) {
     if (!query.useDocIds) {
         return fileName;
@@ -1663,16 +1796,24 @@ std::string canonicalResultDocId(const TestQuery& query, const std::string& file
     return docId;
 }
 
-bool isRelevantDocForQuery(const TestQuery& query, const std::string& docId) {
-    if (docId.empty()) {
-        return false;
-    }
+namespace {
+
+bool inRelevantSet(const TestQuery& query, const std::string& docId) {
     if (query.useDocIds) {
         return query.relevantDocIds.count(docId) > 0;
     }
     return query.relevantFiles.count(docId) > 0 || query.relevantFiles.count(docId + ".txt") > 0;
 }
 
+} // namespace
+
+// trec_eval semantics: a document is relevant when its grade is above 0.
+bool isRelevantDocForQuery(const TestQuery& query, const std::string& docId) {
+    return !docId.empty() && relevanceGradeForQuery(query, docId) > 0;
+}
+
+// Grade from the qrels; a document in the relevant set without a grade is
+// grade 1, anything else is 0.
 int relevanceGradeForQuery(const TestQuery& query, const std::string& docId) {
     if (auto it = query.relevanceGrades.find(docId); it != query.relevanceGrades.end()) {
         return it->second;
@@ -1683,7 +1824,7 @@ int relevanceGradeForQuery(const TestQuery& query, const std::string& docId) {
             return it->second;
         }
     }
-    return 0;
+    return inRelevantSet(query, docId) ? 1 : 0;
 }
 
 QueryScoreSample scoreRankedDocIds(const TestQuery& query,
@@ -1721,21 +1862,20 @@ QueryScoreSample scoreRankedDocIds(const TestQuery& query,
         sample.reciprocalRank = 1.0 / static_cast<double>(sample.firstRelevantRank);
     }
 
-    const auto relevantTotal =
-        query.useDocIds ? query.relevantDocIds.size() : query.relevantFiles.size();
+    // Denominators follow trec_eval: R (all relevant documents) for recall and
+    // AP, k for precision, whatever the ranking returned.
+    const auto allGrades = collectAllGrades(query);
+    const auto relevantTotal = allGrades.size();
     if (relevantTotal > 0) {
         sample.recallAtK =
             static_cast<double>(sample.numRelevantInTopK) / static_cast<double>(relevantTotal);
+        sample.averagePrecision = averagePrecision / static_cast<double>(relevantTotal);
     }
-    if (topK > 0) {
+    if (metricK > 0) {
         sample.precisionAtK =
-            static_cast<double>(sample.numRelevantInTopK) / static_cast<double>(topK);
-    }
-    if (sample.numRelevantSeen > 0) {
-        sample.averagePrecision = averagePrecision / static_cast<double>(sample.numRelevantSeen);
+            static_cast<double>(sample.numRelevantInTopK) / static_cast<double>(metricK);
     }
 
-    const auto allGrades = collectAllGrades(query);
     const double dcg = computeDCG(sample.retrievedGrades, k);
     const double idcg = computeIDCG(allGrades, k);
     sample.ndcgAtK = (idcg > 0.0) ? dcg / idcg : 0.0;

@@ -16,6 +16,8 @@
 
 namespace yams::daemon {
 
+struct DaemonStats;
+
 /**
  * @brief Manages background task consumers (FTS5 indexing, orphan scanning, etc.).
  *
@@ -43,6 +45,11 @@ namespace yams::daemon {
  */
 class BackgroundTaskManager {
 public:
+    /// Whether scheduled auto-repair may run now: no executing non-health request, an empty
+    /// repair queue, and no repair in progress. Open connections do not count; agents keep them
+    /// open while idle.
+    static bool autoRepairMayRun(const DaemonStats& stats, bool repairInProgress) noexcept;
+
     /**
      * @brief Dependency injection structure for BackgroundTaskManager.
      *
@@ -85,7 +92,6 @@ public:
      * Launches several coroutines:
      * - Fts5Job consumer (handles full-text indexing)
      * - OrphanScan task (periodic maintenance)
-     * - PathTreeRepair task
      * - Checkpoint task
      * - StorageGc task
      * - AutoRepair task

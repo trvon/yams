@@ -18,6 +18,7 @@
 
 #include <spdlog/spdlog.h>
 #include <yams/core/assert.hpp>
+#include <yams/core/thread_name.h>
 
 #include <algorithm>
 #include <chrono>
@@ -140,7 +141,7 @@ struct WorkCoordinator::ProgressProbeState {
 };
 
 WorkCoordinator::WorkCoordinator()
-    : ioContext_(std::make_shared<boost::asio::io_context>()), started_(false),
+    : ioContext_(std::make_shared<boost::asio::io_context>()),
       progressProbeState_(std::make_shared<ProgressProbeState>()),
       highPriorityStrand_(ioContext_->get_executor()),
       normalPriorityStrand_(ioContext_->get_executor()),
@@ -153,10 +154,17 @@ WorkCoordinator::~WorkCoordinator() {
     if (started_) {
         try {
             spdlog::debug("[WorkCoordinator] Destructor called with active threads, stopping...");
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
-        stop();
+        try {
+            stop();
+        } catch (...) {
+            // A destructor must not throw. stop() may have thrown before releasing the work
+            // guard, so stop the context here or the join below would wait forever.
+            ioContext_->stop();
+            workGuard_.reset();
+        }
 
         // Ensure all worker threads are joined before destruction.
         // The destructor is never executed on a worker thread (the ServiceManager owns the
@@ -165,17 +173,17 @@ WorkCoordinator::~WorkCoordinator() {
             if (worker.joinable()) {
                 try {
                     worker.join();
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
         }
+        markStoppedBeforeClearingWorkers();
         workers_.clear();
-        started_ = false;
     }
     try {
         spdlog::debug("[WorkCoordinator] Destroyed");
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
@@ -208,6 +216,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
     try {
         for (std::size_t i = 0; i < workerCount; ++i) {
             workers_.emplace_back([this, i, jobSlots]() {
+                yams::setCurrentThreadName("yams-work-" + std::to_string(i));
                 tlsWorkerJobSlot = &jobSlots->slots[i];
                 {
                     std::lock_guard<std::mutex> stateLock(workerStateMutex_);
@@ -224,7 +233,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                 activeWorkers_.fetch_add(1, std::memory_order_release);
                 try {
                     spdlog::trace("[WorkCoordinator] Worker {} starting io_context.run()", i);
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Intentional best-effort path; keep the primary operation unaffected.
                 }
                 for (;;) {
@@ -234,13 +243,13 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                     } catch (const std::exception& e) {
                         try {
                             spdlog::error("[WorkCoordinator] Worker {} exception: {}", i, e.what());
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                             // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     } catch (...) {
                         try {
                             spdlog::error("[WorkCoordinator] Worker {} unknown exception", i);
-                        } catch (...) {
+                        } catch (...) { // NOLINT(bugprone-empty-catch)
                             // Intentional best-effort path; keep the primary operation unaffected.
                         }
                     }
@@ -251,13 +260,13 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
 
                     try {
                         spdlog::debug("[WorkCoordinator] Worker {} restarting after exception", i);
-                    } catch (...) {
+                    } catch (...) { // NOLINT(bugprone-empty-catch)
                         // Intentional best-effort path; keep the primary operation unaffected.
                     }
                 }
                 try {
                     spdlog::trace("[WorkCoordinator] Worker {} exited io_context.run()", i);
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Intentional best-effort path; keep the primary operation unaffected.
                 }
                 {
@@ -274,7 +283,8 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                 joinCV_.notify_all();
             });
         }
-        started_ = true;
+        workerCount_.store(workers_.size(), std::memory_order_release);
+        started_.store(true, std::memory_order_release);
         requestProgressProbe();
         spdlog::info("[WorkCoordinator] Started with {} worker threads", workerCount);
     } catch (const std::exception& e) {
@@ -287,7 +297,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
             if (worker.joinable()) {
                 try {
                     worker.join();
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Ignore join failures during cleanup
                 }
             }
@@ -302,7 +312,7 @@ void WorkCoordinator::stop(std::chrono::milliseconds cancelDrainBudget) {
     if (!started_) {
         try {
             spdlog::debug("[WorkCoordinator] stop() called but not started (no-op)");
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
         return;
@@ -310,7 +320,7 @@ void WorkCoordinator::stop(std::chrono::milliseconds cancelDrainBudget) {
 
     try {
         spdlog::debug("[WorkCoordinator] Stopping...");
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // Intentional best-effort path; keep the primary operation unaffected.
     }
     {
@@ -349,7 +359,7 @@ void WorkCoordinator::stop(std::chrono::milliseconds cancelDrainBudget) {
     workGuard_.reset();
     try {
         spdlog::info("[WorkCoordinator] Cancellation requested and work guard reset");
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
@@ -365,7 +375,7 @@ void WorkCoordinator::logBusyDetachedStrands(std::size_t pending, std::size_t po
             spdlog::warn("[WorkCoordinator] stop(): busy worker={} job={} job_age={}ms",
                          job.workerIndex, job.name, job.age.count());
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
@@ -374,7 +384,7 @@ void WorkCoordinator::join() {
     if (workers_.empty()) {
         try {
             spdlog::debug("[WorkCoordinator] join() called with no workers (no-op)");
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
         return;
@@ -382,7 +392,7 @@ void WorkCoordinator::join() {
 
     try {
         spdlog::debug("[WorkCoordinator] Joining {} worker threads...", workers_.size());
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // Intentional best-effort path; keep the primary operation unaffected.
     }
     for (auto& worker : workers_) {
@@ -401,22 +411,22 @@ void WorkCoordinator::join() {
         } catch (const std::exception& e) {
             try {
                 spdlog::warn("[WorkCoordinator] join exception: {}", e.what());
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
         } catch (...) {
             try {
                 spdlog::warn("[WorkCoordinator] join unknown exception");
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
         }
     }
+    markStoppedBeforeClearingWorkers();
     workers_.clear();
-    started_ = false;
     try {
         spdlog::info("[WorkCoordinator] All workers joined");
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // Intentional best-effort path; keep the primary operation unaffected.
     }
 }
@@ -426,7 +436,7 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout,
     if (workers_.empty()) {
         try {
             spdlog::debug("[WorkCoordinator] joinWithTimeout() called with no workers (no-op)");
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
         return true;
@@ -435,7 +445,7 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout,
     try {
         spdlog::debug("[WorkCoordinator] joinWithTimeout({}ms) waiting for {} workers",
                       timeout.count(), activeWorkers_.load());
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // Intentional best-effort path; keep the primary operation unaffected.
     }
 
@@ -463,7 +473,7 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout,
             lock.unlock();
             try {
                 whileWaiting();
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Intentional best-effort path; a failing hook must not break the join.
             }
             lock.lock();
@@ -561,7 +571,7 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout,
                                   snap.index, snap.tidHash, snap.exited, snap.runMs);
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
         lock.unlock();
@@ -573,18 +583,18 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout,
             if (worker.joinable()) {
                 try {
                     worker.join();
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                     // Intentional best-effort path; keep the primary operation unaffected.
                 }
             }
         }
     }
 
+    markStoppedBeforeClearingWorkers();
     workers_.clear();
-    started_ = false;
     try {
         spdlog::info("[WorkCoordinator] joinWithTimeout complete (success={})", completed);
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // Intentional best-effort path; keep the primary operation unaffected.
     }
     return completed;
@@ -646,8 +656,8 @@ void WorkCoordinator::abandonWorkersForShutdown() {
             }
         }
     }
+    markStoppedBeforeClearingWorkers();
     workers_.clear();
-    started_ = false;
 }
 
 void WorkCoordinator::requestProgressProbe() noexcept {
@@ -710,11 +720,17 @@ boost::asio::strand<boost::asio::io_context::executor_type> WorkCoordinator::mak
 }
 
 bool WorkCoordinator::isRunning() const noexcept {
-    return started_ && !workers_.empty();
+    return started_.load(std::memory_order_acquire) &&
+           workerCount_.load(std::memory_order_acquire) > 0;
+}
+
+void WorkCoordinator::markStoppedBeforeClearingWorkers() noexcept {
+    started_.store(false, std::memory_order_release);
+    workerCount_.store(0, std::memory_order_release);
 }
 
 std::size_t WorkCoordinator::getWorkerCount() const noexcept {
-    return workers_.size();
+    return workerCount_.load(std::memory_order_acquire);
 }
 
 } // namespace yams::daemon

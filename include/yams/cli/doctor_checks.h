@@ -142,9 +142,4 @@ struct MigrationCheckResult {
     std::vector<std::string> leftoverTables;
 };
 
-/// Check database migration health
-/// @param cli CLI context
-/// @return MigrationCheckResult
-MigrationCheckResult checkMigrations(YamsCLI* cli);
-
 } // namespace yams::cli::doctor

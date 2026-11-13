@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include "sanitizer_build.h"
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include "test_helpers_catch2.h"
@@ -613,7 +614,7 @@ TEST_CASE("Client timeout recovery: Tag filtering matrix for list and search",
     REQUIRE(listImpossibleResult.has_value());
     REQUIRE(listImpossibleResult.value().items.empty());
 
-    if (std::getenv("TSAN_OPTIONS") != nullptr) {
+    if (yams::test::kThreadSanitizerBuild) {
         SUCCEED("Skipping strict search tag assertions under TSAN (eventual indexing instability)");
         return;
     }

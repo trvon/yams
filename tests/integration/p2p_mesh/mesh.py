@@ -296,7 +296,7 @@ class Mesh:
     def bootstrap_node(self, n: dict) -> None:
         """Keys + config for one node: writer key, manifest listing every writer, config.toml."""
         self.exec(n, "sh", "-c", "mkdir -p /node/keys /node/xdg/config/yams && chmod 700 /node/keys")
-        init = self.yams(n, "init", "--auto", "--no-keygen", timeout=120)
+        init = self.yams(n, "init", "--auto", "--no-keygen", "--no-static-table", timeout=120)
         if init.returncode != 0:
             die(f"yams init failed on {n['name']}: {init.stdout}{init.stderr}")
         self.exec(n, "openssl", "genpkey", "-algorithm", "ED25519", "-out", "/node/keys/writer-private.pem")

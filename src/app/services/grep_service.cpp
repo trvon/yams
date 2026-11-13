@@ -355,14 +355,6 @@ public:
         // Alias for the compiled regex (used by worker lambdas).
         const auto& re = *grepRe;
 
-        // Resolve context windows
-        int beforeContext = req.context > 0 ? req.context : req.beforeContext;
-        int afterContext = req.context > 0 ? req.context : req.afterContext;
-        if (beforeContext < 0)
-            beforeContext = 0;
-        if (afterContext < 0)
-            afterContext = 0;
-
         // Stage caps and timeouts (env-overridable)
         auto getenv_int = [](const char* key, int defaultValue) -> int {
             if (const auto value = yams::config::read_env_int(key).value) {
@@ -373,20 +365,17 @@ public:
         // PERFORMANCE: Lower default limits to prevent timeouts on large repos
         // Users can override with environment variables if needed
         int max_docs_hot = getenv_int("YAMS_GREP_MAX_DOCS_HOT", 500);
-        int max_docs_cold = getenv_int("YAMS_GREP_MAX_DOCS_COLD", 50);
         int budget_ms = getenv_int("YAMS_GREP_TIME_BUDGET_MS", 10000);
         const int max_total_results = getenv_int("YAMS_GREP_MAX_RESULTS", 1000);
 
         if (!req.useSession) {
             max_docs_hot = std::min(max_docs_hot, 128);
-            max_docs_cold = std::min(max_docs_cold, 20);
             budget_ms = std::min(budget_ms, 3000);
         }
 
         const int activeRequests = std::clamp(activeGuard.active(), 1, 4);
         if (activeRequests > 1) {
             max_docs_hot = std::max(64, max_docs_hot / activeRequests);
-            max_docs_cold = std::max(16, max_docs_cold / activeRequests);
             budget_ms = std::max(2000, budget_ms / activeRequests);
         }
         MetadataTelemetry metadataTelemetry;
@@ -394,30 +383,61 @@ public:
 
         // --- Candidate Document Discovery ---
         std::vector<metadata::GrepCandidateProjection> docs;
-        std::unordered_set<int64_t> seenDocIds;
+        std::unordered_set<std::string> seenPaths;
 
-        auto addDocs = [&](std::vector<metadata::GrepCandidateProjection>&& newDocs) {
+        auto addDocs = [&](std::vector<metadata::GrepCandidateProjection> newDocs) {
             for (auto& d : newDocs) {
-                if (seenDocIds.insert(d.id).second) {
+                if (seenPaths.insert(normalizePathForCompare(d.filePath)).second) {
                     docs.push_back(std::move(d));
                 }
             }
         };
 
-        // Helper to convert DocumentInfo results (from FTS/tags) to GrepCandidateProjection
-        auto convertToGrepCandidates = [](std::vector<metadata::DocumentInfo>&& infos)
-            -> std::vector<metadata::GrepCandidateProjection> {
+        // Project content matches through current locations. Empty references are
+        // authoritative and must never resurrect a retired canonical path.
+        std::unordered_map<int64_t, std::vector<metadata::DocumentInfo>> locationCache;
+        const auto currentLocations = [&](const metadata::DocumentInfo& document)
+            -> Result<std::vector<metadata::DocumentInfo>> {
+            if (!ctx_.metadataRepo->supportsDocumentPaths()) {
+                return std::vector<metadata::DocumentInfo>{document};
+            }
+            if (const auto found = locationCache.find(document.id); found != locationCache.end()) {
+                return found->second;
+            }
+            auto locations = retryMetadataOp(
+                [&]() { return ctx_.metadataRepo->getDocumentPathReferences(document.id); }, 4,
+                std::chrono::milliseconds(25), &metadataTelemetry);
+            if (!locations) {
+                return locations.error();
+            }
+            locationCache.emplace(document.id, locations.value());
+            return locations;
+        };
+        auto convertToGrepCandidates =
+            [&](std::vector<metadata::DocumentInfo> infos,
+                bool expandLocations =
+                    false) -> Result<std::vector<metadata::GrepCandidateProjection>> {
             std::vector<metadata::GrepCandidateProjection> out;
-            out.reserve(infos.size());
-            for (auto& d : infos) {
-                metadata::GrepCandidateProjection p;
-                p.id = d.id;
-                p.filePath = std::move(d.filePath);
-                p.fileSize = d.fileSize;
-                p.sha256Hash = std::move(d.sha256Hash);
-                p.mimeType = std::move(d.mimeType);
-                p.contentExtracted = d.contentExtracted;
-                out.push_back(std::move(p));
+            for (const auto& document : infos) {
+                auto locations = currentLocations(document);
+                if (!locations) {
+                    return locations.error();
+                }
+                for (auto& location : locations.value()) {
+                    // Legacy hash-wide tags belong to the canonical location only.
+                    if (!expandLocations && normalizePathForCompare(location.filePath) !=
+                                                normalizePathForCompare(document.filePath)) {
+                        continue;
+                    }
+                    metadata::GrepCandidateProjection p;
+                    p.id = location.id;
+                    p.filePath = std::move(location.filePath);
+                    p.fileSize = location.fileSize;
+                    p.sha256Hash = std::move(location.sha256Hash);
+                    p.mimeType = std::move(location.mimeType);
+                    p.contentExtracted = location.contentExtracted;
+                    out.push_back(std::move(p));
+                }
             }
             return out;
         };
@@ -435,7 +455,49 @@ public:
                 if (!tRes) {
                     return tRes.error();
                 }
-                addDocs(convertToGrepCandidates(std::move(tRes.value())));
+                auto canonical = convertToGrepCandidates(std::move(tRes.value()));
+                if (!canonical) {
+                    return canonical.error();
+                }
+                addDocs(std::move(canonical.value()));
+                if (ctx_.metadataRepo->supportsDocumentPaths()) {
+                    const auto addTaggedLocations =
+                        [&](std::vector<std::string> tags) -> Result<void> {
+                        metadata::DocumentQueryOptions options;
+                        options.usePathLocations = true;
+                        options.currentPathsOnly = true;
+                        options.excludeBinaryMimeTypes = true;
+                        options.tags = std::move(tags);
+                        if (!req.scopePathPrefix.empty()) {
+                            options.pathPrefix = req.scopePathPrefix;
+                            options.prefixIsDirectory = true;
+                            options.includeSubdirectories = true;
+                        }
+                        auto matches = retryMetadataOp(
+                            [&]() {
+                                return ctx_.metadataRepo->queryDocumentsForGrepCandidates(options);
+                            },
+                            4, std::chrono::milliseconds(25), &metadataTelemetry);
+                        if (!matches) {
+                            return matches.error();
+                        }
+                        addDocs(std::move(matches.value()));
+                        return {};
+                    };
+                    if (req.matchAllTags) {
+                        auto matched = addTaggedLocations(req.tags);
+                        if (!matched) {
+                            return matched.error();
+                        }
+                    } else {
+                        for (const auto& tag : req.tags) {
+                            auto matched = addTaggedLocations({tag});
+                            if (!matched) {
+                                return matched.error();
+                            }
+                        }
+                    }
+                }
             } else if (!req.pattern.empty() && isLikelyFtsPattern(req.pattern) &&
                        retrievalMode != search::QueryRetrievalMode::Literal &&
                        retrievalMode != search::QueryRetrievalMode::Path &&
@@ -449,7 +511,11 @@ public:
                     for (const auto& r : sRes.value().results) {
                         ftsHits.push_back(r.document);
                     }
-                    addDocs(convertToGrepCandidates(std::move(ftsHits)));
+                    auto locations = convertToGrepCandidates(std::move(ftsHits), true);
+                    if (!locations) {
+                        return locations.error();
+                    }
+                    addDocs(std::move(locations.value()));
                     usedFtsForInitialCandidates = true;
                 } else if (!req.includePatterns.empty()) {
                     auto patternDocsRes = retryMetadataOp(
@@ -495,6 +561,8 @@ public:
                 }
             }
         }
+        const auto tagAllowedPaths =
+            req.tags.empty() ? std::unordered_set<std::string>{} : seenPaths;
         recordPhaseMetric(phaseTimings, "phase_candidate_discovery_ms",
                           "grep::phase::candidate_discovery_ms", candidateDiscoveryStart);
 
@@ -731,6 +799,9 @@ public:
         std::atomic<std::uint64_t> matchesRendered{0};
         std::atomic<std::uint64_t> contentRetrievalMs{0};
         std::atomic<bool> stop{false};
+        // Set only when the time budget ended the scan; `stop` also covers the result cap and
+        // cancellation.
+        std::atomic<bool> budgetExpired{false};
         std::mutex errorMutex;
         std::vector<Error> workerErrors;
         workerErrors.reserve(workers);
@@ -776,6 +847,7 @@ public:
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                         GrepClock::now() - start_time);
                     if (elapsed.count() >= budget_ms) {
+                        budgetExpired.store(true, std::memory_order_relaxed);
                         stop.store(true, std::memory_order_relaxed);
                         break;
                     }
@@ -894,6 +966,7 @@ public:
                             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 GrepClock::now() - start_time);
                             if (elapsed.count() >= budget_ms) {
+                                budgetExpired.store(true, std::memory_order_relaxed);
                                 stop.store(true, std::memory_order_relaxed);
                                 return;
                             }
@@ -929,6 +1002,7 @@ public:
                         }
 
                         fileResult.matchCount += n;
+                        ++fileResult.matchedLines;
                         if (req.count)
                             return;
                         const auto renderFieldsStart = GrepClock::now();
@@ -936,8 +1010,8 @@ public:
                         gm.matchType =
                             req.literalText ? std::string("literal") : std::string("regex");
                         gm.confidence = 1.0;
-                        if (req.lineNumbers)
-                            gm.lineNumber = ln_counter;
+                        // Always report the real line; lineNumbers only controls display.
+                        gm.lineNumber = ln_counter;
                         gm.line = yams::common::sanitizeUtf8(line);
                         localMatchRenderNs += static_cast<std::uint64_t>(
                             std::chrono::duration_cast<std::chrono::nanoseconds>(GrepClock::now() -
@@ -977,6 +1051,7 @@ public:
                         auto e3 = std::chrono::duration_cast<std::chrono::milliseconds>(
                             GrepClock::now() - start_time);
                         if (e3.count() >= budget_ms) {
+                            budgetExpired.store(true, std::memory_order_relaxed);
                             stop.store(true, std::memory_order_relaxed);
                             break;
                         }
@@ -1052,6 +1127,7 @@ public:
                                 auto e2 = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     GrepClock::now() - start_time);
                                 if (e2.count() >= budget_ms) {
+                                    budgetExpired.store(true, std::memory_order_relaxed);
                                     stop.store(true, std::memory_order_relaxed);
                                     break;
                                 }
@@ -1291,16 +1367,39 @@ public:
                         auto hres = eng->search(req.pattern, params);
                         if (hres) {
                             std::set<std::string> regexFiles;
-                            for (const auto& fr : response.results)
+                            for (const auto& fr : response.results) {
                                 regexFiles.insert(fr.file);
-                            std::vector<yams::metadata::SearchResult> sem = hres.value();
+                            }
+                            std::vector<yams::metadata::SearchResult> sem;
+                            for (const auto& hit : hres.value()) {
+                                auto locations = currentLocations(hit.document);
+                                if (!locations) {
+                                    return locations.error();
+                                }
+                                for (auto& location : locations.value()) {
+                                    auto projected = hit;
+                                    projected.document = std::move(location);
+                                    sem.push_back(std::move(projected));
+                                }
+                            }
                             int taken = 0;
                             for (const auto& r : sem) {
                                 const std::string& path = r.document.filePath;
-                                if (path.empty())
+                                if (path.empty()) {
                                     continue;
-                                if (!pathFilterMatch(path, req.paths))
+                                }
+                                if (!req.scopePathPrefix.empty() &&
+                                    (!utils::isPathWithinScope(path, req.scopePathPrefix) ||
+                                     utils::isGeneratedWorkspacePath(path))) {
                                     continue;
+                                }
+                                if (!req.tags.empty() &&
+                                    !tagAllowedPaths.contains(normalizePathForCompare(path))) {
+                                    continue;
+                                }
+                                if (!pathFilterMatch(path, req.paths)) {
+                                    continue;
+                                }
                                 if (!req.includePatterns.empty()) {
                                     bool ok = false;
                                     const std::string pathGlob = normalizeForGlobMatch(path);
@@ -1460,6 +1559,8 @@ public:
             response.searchStats["budget_ms"] = std::to_string(budget_ms);
             response.searchStats["timeout_triggered"] =
                 stop.load(std::memory_order_relaxed) ? "1" : "0";
+            response.searchStats["budget_exhausted"] =
+                budgetExpired.load(std::memory_order_relaxed) ? "1" : "0";
         }
 
         auto total_grep_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1518,6 +1619,8 @@ private:
                 return;
             }
             metadata::DocumentQueryOptions opts;
+            opts.usePathLocations = true;
+            opts.currentPathsOnly = true;
             opts.pathPrefix = prefix;
             opts.prefixIsDirectory = true;
             opts.includeSubdirectories = true;

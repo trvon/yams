@@ -174,7 +174,7 @@ inline ErrorHint getErrorHint(ErrorCode code, std::string_view message,
             break;
 
         case ErrorCode::InvalidArgument:
-            hint.hint = "Check command syntax";
+            // The message already says what was wrong; point at the usage only.
             hint.command = command.empty()
                                ? "yams --help"
                                : std::string("yams ") + std::string(command) + " --help";
@@ -229,18 +229,18 @@ inline std::string formatErrorWithHint(ErrorCode code, std::string_view message,
                                        std::string_view command = "") {
     auto hint = getErrorHint(code, message, command);
 
-    std::string result(message);
-
+    // One format for every command: "error: <message>", then optional lines
+    // "hint: <advice> (`<command>`)" and "see: <link>".
+    std::string result = "error: " + std::string(message);
     if (!hint.hint.empty()) {
-        result += "\n  💡 Hint: " + hint.hint;
-        if (!hint.command.empty()) {
-            result += "\n  📋 Try: " + hint.command;
-        }
-        if (!hint.docLink.empty()) {
-            result += "\n  📖 Docs: " + hint.docLink;
-        }
+        result += "\nhint: " + hint.hint;
+        if (!hint.command.empty())
+            result += " (`" + hint.command + "`)";
+    } else if (!hint.command.empty()) {
+        result += "\nhint: run `" + hint.command + "`";
     }
-
+    if (!hint.docLink.empty())
+        result += "\nsee: " + hint.docLink;
     return result;
 }
 

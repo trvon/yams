@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -28,7 +29,6 @@ template <typename... Args> inline void error(const char*, Args&&...) {}
 #endif
 #include <yams/daemon/components/knowledge_graph_completion.h>
 #include <yams/daemon/ipc/ipc_protocol_requests.h>
-#include <yams/integrity/repair_manager.h>
 
 namespace yams::daemon {
 
@@ -226,11 +226,6 @@ public:
         return *b;
     }
 
-    template <typename T>
-    std::shared_ptr<SpscQueue<T>> make_channel(const std::string& name, std::size_t capacity) {
-        return get_or_create_channel<T>(name, capacity);
-    }
-
     /// A channel name was requested at a capacity other than the one it already has.
     ///
     /// get_or_create_channel() returns the existing channel and ignores the requested capacity, so
@@ -373,6 +368,8 @@ public:
         std::vector<EmbedPreparedDoc> preparedDocs;
         std::shared_ptr<EmbedJobMonitor> monitor;
         bool updateSemanticGraph{true};
+        /// Submitted by RepairService; committed embeddings count toward repair progress.
+        bool fromRepair{false};
     };
 
     enum class Fts5Operation {
@@ -438,18 +435,6 @@ public:
     struct ModelLoadFailedEvent {
         std::string modelId;
         std::string error;
-    };
-
-    // PBI-062: Prune job
-    struct PruneJob {
-        uint64_t requestId; // To match response
-        yams::integrity::PruneConfig config;
-    };
-
-    // PathTreeRepair job - creates missing path tree entries for documents
-    struct PathTreeJob {
-        uint64_t requestId{0}; // To match response
-        bool runOnce{true};    // Run once at startup vs periodic
     };
 
     // Storage garbage collection job (routed through bus for centralized dispatch)
@@ -574,20 +559,7 @@ public:
     void setLastOrphanScanTime(uint64_t epochMs) {
         lastOrphanScanEpochMs_.store(epochMs, std::memory_order_relaxed);
     }
-    void incFts5FailNoDoc(uint64_t count = 1) {
-        fts5FailNoDoc_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incFts5FailExtraction(uint64_t count = 1) {
-        fts5FailExtraction_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incFts5FailIndex(uint64_t count = 1) {
-        fts5FailIndex_.fetch_add(count, std::memory_order_relaxed);
-    }
-    void incFts5FailException(uint64_t count = 1) {
-        fts5FailException_.fetch_add(count, std::memory_order_relaxed);
-    }
     void incPostQueued() { postQueued_.fetch_add(1, std::memory_order_relaxed); }
-    void incPostDropped() { postDropped_.fetch_add(1, std::memory_order_relaxed); }
     void incPostConsumed() { postConsumed_.fetch_add(1, std::memory_order_relaxed); }
     void incKgQueued() { kgQueued_.fetch_add(1, std::memory_order_relaxed); }
     void incKgDropped() { kgDropped_.fetch_add(1, std::memory_order_relaxed); }

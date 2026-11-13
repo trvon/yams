@@ -36,10 +36,6 @@ bool GradientLimiter::tryAcquire() {
     return false;
 }
 
-void GradientLimiter::onJobStart() {
-    // Already counted in tryAcquire
-}
-
 void GradientLimiter::onJobEnd() {
     // Decrement in-flight when job ends
     inFlight_.fetch_sub(1, std::memory_order_relaxed);
@@ -151,8 +147,6 @@ void GradientLimiter::updateLimit(double rttNanos, uint32_t inFlightSnapshot) {
             break;
         }
         case 2:
-            newLimit = std::min(newLimit, config_.minLimit);
-            break;
         case 3:
             newLimit = std::min(newLimit, config_.minLimit);
             break;
@@ -213,9 +207,6 @@ void GradientLimiter::applyPressure(uint8_t level) {
             }
             break;
         }
-        case 2:
-            limit_.store(config_.minLimit, std::memory_order_relaxed);
-            break;
         default:
             limit_.store(config_.minLimit, std::memory_order_relaxed);
             break;

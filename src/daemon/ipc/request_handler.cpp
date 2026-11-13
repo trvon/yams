@@ -53,6 +53,8 @@ void log_request_handler_debug(const char* message) noexcept {
     try {
         spdlog::debug("{}", message);
     } catch (...) {
+        // Diagnostics must not interrupt connection cleanup or error delivery.
+        return;
     }
 }
 
@@ -60,6 +62,7 @@ void log_request_handler_debug(const char* message, const std::exception& e) noe
     try {
         spdlog::debug("{}: {}", message, e.what());
     } catch (...) {
+        return;
     }
 }
 
@@ -67,7 +70,16 @@ void log_request_handler_error(const char* message) noexcept {
     try {
         spdlog::error("{}", message);
     } catch (...) {
+        return;
     }
+}
+
+void closeSocketNoexcept(boost::asio::local::stream_protocol::socket& socket) noexcept {
+    boost::system::error_code error;
+    // Asio exposes the same error through the output parameter on supported versions.
+    error = socket.close(error);
+    if (error)
+        log_request_handler_error("IPC socket close failed during connection cleanup");
 }
 
 bool is_client_disconnect(const std::string& msg) {
@@ -351,8 +363,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::warn("Closing connection immediately due to FSM={} (context={}): {}",
                                  ConnectionFsm::to_string(st), "before_async_read", guard_err);
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     break;
                 }
@@ -388,8 +399,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                  "(count={}, state={})",
                                  fsm_guard_fail_count, ConnectionFsm::to_string(st));
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     break;
                 }
@@ -408,19 +418,15 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 active_work_snapshot();
             const auto completed_request_count =
                 completed_requests->load(std::memory_order_acquire);
-            const bool new_session_probe = !active_work_before_read &&
-                                           completed_request_count == 0 &&
-                                           config_.new_session_probe_grace.count() > 0;
             const bool single_use_reuse_probe = !active_work_before_read &&
                                                 completed_request_count == 1 &&
                                                 config_.post_response_reuse_grace.count() > 0;
             const auto read_timeout =
-                new_session_probe ? config_.new_session_probe_grace
-                : single_use_reuse_probe
+                single_use_reuse_probe
                     ? config_.post_response_reuse_grace
                     : std::chrono::duration_cast<std::chrono::milliseconds>(config_.read_timeout);
             const std::uint32_t idle_timeout_budget =
-                (new_session_probe || single_use_reuse_probe) ? 1u : kMaxIdleTimeouts;
+                single_use_reuse_probe ? 1u : kMaxIdleTimeouts;
 
             auto executor = co_await boost::asio::this_coro::executor;
             using ReadResult = std::tuple<boost::system::error_code, std::size_t>;
@@ -502,8 +508,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         "Closing idle connection after {} consecutive read timeouts (fd={})",
                         consecutive_idle_timeouts, sock_fd);
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     break;
                 }
@@ -515,8 +520,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::debug("Closing connection: read error {} ({})", read_ec.message(),
                                   read_ec.value());
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     break;
                 }
@@ -550,8 +554,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
             } else {
                 spdlog::debug("Closing connection: FSM not alive during read");
                 if (sock->is_open()) {
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    closeSocketNoexcept(*sock);
                 }
                 break;
             }
@@ -577,8 +580,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                               "Invalid frame format");
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     feed_error = true;
                     break;
@@ -589,8 +591,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                               "Frame exceeds maximum size");
                     if (sock->is_open()) {
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        closeSocketNoexcept(*sock);
                     }
                     feed_error = true;
                     break;
@@ -610,8 +611,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         (void)co_await send_error(*sock, ErrorCode::SerializationError,
                                                   "Failed to get frame");
                         if (sock->is_open()) {
-                            boost::system::error_code ignore_ec;
-                            sock->close(ignore_ec);
+                            closeSocketNoexcept(*sock);
                         }
                         should_exit = true;
                         break;
@@ -642,8 +642,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         (void)co_await send_error(*sock, message_result.error().code,
                                                   message_result.error().message, correlated_id);
                         if (sock->is_open()) {
-                            boost::system::error_code ignore_ec;
-                            sock->close(ignore_ec);
+                            closeSocketNoexcept(*sock);
                         }
                         should_exit = true;
                         break;
@@ -658,8 +657,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                                   "Expected request message", message.requestId);
                         if (sock->is_open()) {
-                            boost::system::error_code ignore_ec;
-                            sock->close(ignore_ec);
+                            closeSocketNoexcept(*sock);
                         }
                         should_exit = true;
                         break;
@@ -835,16 +833,14 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     // Defensive: ensure FSM is ready to read the next request on persistent
                     // connections. If the processor didn't drive on_response_complete() for any
                     // reason, normalize state back to Connected.
-                    if (!config_.close_after_response) {
-                        auto s = fsm.state();
-                        if (s != ConnectionFsm::State::Connected &&
-                            s != ConnectionFsm::State::ReadingHeader) {
-                            spdlog::debug("Post-response FSM state was {} — forcing Connected for "
-                                          "persistence",
-                                          ConnectionFsm::to_string(s));
-                            if (fsm.alive()) {
-                                fsm.on_response_complete(false);
-                            }
+                    auto s = fsm.state();
+                    if (s != ConnectionFsm::State::Connected &&
+                        s != ConnectionFsm::State::ReadingHeader) {
+                        spdlog::debug("Post-response FSM state was {} — forcing Connected for "
+                                      "persistence",
+                                      ConnectionFsm::to_string(s));
+                        if (fsm.alive()) {
+                            fsm.on_response_complete(false);
                         }
                     }
                 } // end while (reader.has_frame())
@@ -1002,28 +998,6 @@ boost::asio::awaitable<Response> RequestHandler::process_request(const Request& 
                                                         "Request processor not set");
 }
 
-boost::asio::awaitable<std::optional<Response>>
-RequestHandler::process_streaming_request(const Request& request) {
-    if (!processor_) {
-        co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotImplemented,
-                                                            "Request processor not set");
-    }
-
-    // Check if we should use streaming for this request: initialize via processor
-    if (can_stream_request(request)) {
-        // Initialize streaming; processor may return std::nullopt to indicate chunked mode
-        co_return co_await processor_->process_streaming(request);
-    }
-
-    // Fall back to regular processing (unary)
-    if (processor_) {
-        auto r = co_await processor_->process(request);
-        co_return std::optional<Response>{std::move(r)};
-    }
-    co_return std::optional<Response>{yams::daemon::dispatch::makeErrorResponse(
-        ErrorCode::NotImplemented, "Request processor not set")};
-}
-
 bool RequestHandler::can_stream_request(const Request& request) const {
     if (!processor_) {
         return false;
@@ -1117,7 +1091,6 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         // NOTE: Streaming is enabled by default. We only force unary for control requests or
         // specific response types (Get/Cat) that must remain single-frame.
         bool force_unary = false;
-        bool prefer_stub_stream = false;
         // Skip preflight - let RequestDispatcher handle readiness gating
         // This eliminates the blocking co_await proc->process(StatusRequest) that
         // tied up all worker threads waiting for status responses.
@@ -1177,16 +1150,8 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                                         std::string{"Invalid state for streaming: "} + ex.what()};
                     }
                 }
-                // If we prefer a stub stream (early startup), avoid invoking the processor and
-                // emit a header + empty final chunk for streaming-capable types.
-                Result<void> stream_result;
-                if (prefer_stub_stream && (std::holds_alternative<SearchRequest>(request) ||
-                                           std::holds_alternative<ListRequest>(request) ||
-                                           std::holds_alternative<GrepRequest>(request))) {
-                    stream_result = co_await stream_chunks_stub(socket, request, request_id, fsm);
-                } else {
-                    stream_result = co_await stream_chunks(socket, request, request_id, proc, fsm);
-                }
+                Result<void> stream_result =
+                    co_await stream_chunks(socket, request, request_id, proc, fsm);
 
                 auto duration = std::chrono::steady_clock::now() - start_time;
                 stats_.requests_processed++;
@@ -1347,77 +1312,11 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
 
         // Signal FSM that response has completed
         if (fsm) {
-            fsm->on_response_complete(config_.close_after_response);
-            spdlog::debug(
-                "one-shot streaming complete: close_after_response={} fsm_state={} request_id={}",
-                config_.close_after_response, ConnectionFsm::to_string(fsm->state()), request_id);
+            fsm->on_response_complete(false);
+            spdlog::debug("one-shot streaming complete: fsm_state={} request_id={}",
+                          ConnectionFsm::to_string(fsm->state()), request_id);
         }
-        if (config_.close_after_response) {
-            // Get socket fd BEFORE closing to avoid use-after-free
-            const uint64_t sock_fd = socket.is_open()
-                                         ? static_cast<uint64_t>(socket.native_handle())
-                                         : static_cast<uint64_t>(-1);
-
-            // Optional graceful half-close: shutdown send side then briefly drain peer
-            if (config_.graceful_half_close) {
-                boost::system::error_code ig;
-                socket.shutdown(boost::asio::socket_base::shutdown_send, ig);
-                // Race drain read against timeout using async_initiate (no experimental APIs)
-                auto executor = co_await boost::asio::this_coro::executor;
-                std::array<uint8_t, 256> tmp{};
-                co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
-                                                     void(std::exception_ptr, bool)>(
-                    [&socket, &tmp, executor,
-                     timeout = config_.graceful_drain_timeout](auto handler) mutable {
-                        auto completed = std::make_shared<std::atomic<bool>>(false);
-                        auto timer = std::make_shared<boost::asio::steady_timer>(executor);
-                        timer->expires_after(timeout);
-
-                        using HandlerT = std::decay_t<decltype(handler)>;
-                        auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
-                        auto completion_exec =
-                            boost::asio::get_associated_executor(*handlerPtr, executor);
-
-                        timer->async_wait([completed, handlerPtr, completion_exec](
-                                              const boost::system::error_code& ec) mutable {
-                            if (ec == boost::asio::error::operation_aborted)
-                                return;
-                            if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                                boost::asio::post(completion_exec,
-                                                  [h = std::move(*handlerPtr)]() mutable {
-                                                      std::move(h)(std::exception_ptr{}, true);
-                                                  });
-                            }
-                        });
-
-                        boost::asio::async_read(
-                            socket, boost::asio::buffer(tmp), boost::asio::transfer_at_least(1),
-                            [timer, completed, handlerPtr, completion_exec](
-                                const boost::system::error_code&, std::size_t) mutable {
-                                if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                                    timer->cancel();
-                                    boost::asio::post(completion_exec,
-                                                      [h = std::move(*handlerPtr)]() mutable {
-                                                          std::move(h)(std::exception_ptr{}, false);
-                                                      });
-                                }
-                            });
-                    },
-                    boost::asio::use_awaitable);
-                // Close regardless after drain/timeout
-                connection_closing_.store(true, std::memory_order_release);
-                socket.close();
-                spdlog::debug("graceful half-close complete (request_id={} fd={})", request_id,
-                              sock_fd);
-            } else {
-                spdlog::debug("closing socket after response (request_id={} fd={})", request_id,
-                              sock_fd);
-                connection_closing_.store(true, std::memory_order_release);
-                socket.close();
-            }
-        } else {
-            spdlog::debug("keeping socket open after response (request_id={})", request_id);
-        }
+        spdlog::debug("keeping socket open after response (request_id={})", request_id);
 
         auto duration = std::chrono::steady_clock::now() - start_time;
         stats_.requests_processed++;
@@ -1439,64 +1338,6 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         stats_.requests_failed++;
         spdlog::error("Exception handling streaming request: {}", e.what());
         co_return Error{ErrorCode::InternalError, e.what()};
-    }
-}
-
-boost::asio::awaitable<Result<void>>
-RequestHandler::stream_chunks_stub(boost::asio::local::stream_protocol::socket& socket,
-                                   const Request& request, uint64_t request_id,
-                                   ConnectionFsm* fsm) {
-    try {
-        // Build a header-only response matching request type
-        Response headerResponse;
-        if (std::holds_alternative<SearchRequest>(request)) {
-            SearchResponse r;
-            r.totalCount = 0;
-            r.elapsed = std::chrono::milliseconds(0);
-            headerResponse = r;
-        } else if (std::holds_alternative<ListRequest>(request)) {
-            ListResponse r;
-            r.totalCount = 0;
-            headerResponse = r;
-        } else if (std::holds_alternative<GrepRequest>(request)) {
-            GrepResponse r;
-            r.totalMatches = 0;
-            r.filesSearched = 0;
-            headerResponse = r;
-        } else {
-            headerResponse = SuccessResponse{"Streaming response"};
-        }
-
-        // Guard and write header
-        if (fsm) {
-            try {
-                fsm_helpers::require_can_write(*fsm, "stream_chunks_stub:write_header");
-            } catch (const std::exception& ex) {
-                spdlog::error("FSM write guard failed before stub header (request_id={}): {}",
-                              request_id, ex.what());
-                co_return Error{ErrorCode::InternalError,
-                                std::string{"Invalid state before stub header: "} + ex.what()};
-            }
-        }
-        auto header_result = co_await write_header(socket, headerResponse, request_id, true, fsm);
-        if (!header_result)
-            co_return header_result.error();
-
-        if (fsm)
-            fsm->on_stream_next(false);
-
-        // Emit a single final empty chunk
-        auto chunk_result =
-            co_await write_chunk(socket, std::move(headerResponse), request_id, true, true, fsm);
-        if (!chunk_result)
-            co_return chunk_result.error();
-
-        if (fsm)
-            fsm->on_response_complete(config_.close_after_response);
-        co_return Result<void>();
-    } catch (const std::exception& e) {
-        co_return Error{ErrorCode::InternalError,
-                        std::string{"Stub streaming failed: "} + e.what()};
     }
 }
 
@@ -1923,10 +1764,10 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
                                              TuneAdvisor::writerScaleActiveHigh2Mul());
             const double halfFrac = TuneAdvisor::writerQueuedHalfThresholdFraction();
             const double threeQFrac = TuneAdvisor::writerQueuedThreeQuarterThresholdFraction();
-            if (queued_bytes > static_cast<size_t>(queued_cap * threeQFrac))
+            if (queued_bytes > static_cast<size_t>(static_cast<double>(queued_cap) * threeQFrac))
                 budget = static_cast<size_t>(static_cast<double>(budget) *
                                              TuneAdvisor::writerScaleQueuedThreeQuarterMul());
-            else if (queued_bytes > static_cast<size_t>(queued_cap * halfFrac))
+            else if (queued_bytes > static_cast<size_t>(static_cast<double>(queued_cap) * halfFrac))
                 budget = static_cast<size_t>(static_cast<double>(budget) *
                                              TuneAdvisor::writerScaleQueuedHalfMul());
 
@@ -2165,6 +2006,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                         return;
                     }
                 } catch (...) {
+                    log_request_handler_debug("Could not read embedding-provider state");
                 }
 
                 if (!modelProvider || !modelProvider->isAvailable()) {
@@ -2185,12 +2027,14 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     try {
                         modelName = sm->resolvePreferredModel();
                     } catch (...) {
+                        log_request_handler_debug("Preferred model lookup failed; trying fallback");
                     }
                 }
                 if (modelName.empty()) {
                     try {
                         modelName = sm->getEmbeddingModelName();
                     } catch (...) {
+                        log_request_handler_debug("Configured embedding model lookup failed");
                     }
                 }
                 if (modelName.empty()) {
@@ -2605,9 +2449,6 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         }
 
         spdlog::debug("Sent {} repair chunks (request_id={})", chunk_count, request_id);
-        if (config_.close_after_response) {
-            // Let the generic close logic below run
-        }
         // fallthrough to generic close/metrics tail
         last_chunk_received = true;
     }
@@ -2784,11 +2625,10 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         if (fsm) {
             // Notify FSM; continue streaming or complete response
             if (last_chunk_received) {
-                fsm->on_response_complete(config_.close_after_response);
-                spdlog::info("streaming complete: close_after_response={} fsm_state={} chunks={} "
+                fsm->on_response_complete(false);
+                spdlog::info("streaming complete: fsm_state={} chunks={} "
                              "request_id={}",
-                             config_.close_after_response, ConnectionFsm::to_string(fsm->state()),
-                             chunk_count + 1, request_id);
+                             ConnectionFsm::to_string(fsm->state()), chunk_count + 1, request_id);
             } else {
                 fsm->on_stream_next(false);
             }
@@ -2803,75 +2643,10 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
     // response boundary on persistent connections, resulting in header timeouts.
 
     spdlog::debug("Sent {} chunks for streaming response (request_id={})", chunk_count, request_id);
-    if (config_.close_after_response) {
-        // Get socket fd BEFORE closing to avoid use-after-free
-        const uint64_t sock_fd = socket.is_open() ? static_cast<uint64_t>(socket.native_handle())
-                                                  : static_cast<uint64_t>(-1);
-
-        if (config_.graceful_half_close) {
-            boost::system::error_code ig;
-            socket.shutdown(boost::asio::socket_base::shutdown_send, ig);
-            // Race drain read against timeout using async_initiate (no experimental APIs)
-            auto executor = co_await boost::asio::this_coro::executor;
-            std::array<uint8_t, 256> tmp{};
-            co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
-                                                 void(std::exception_ptr, bool)>(
-                [&socket, &tmp, executor,
-                 timeout = config_.graceful_drain_timeout](auto handler) mutable {
-                    auto completed = std::make_shared<std::atomic<bool>>(false);
-                    auto timer = std::make_shared<boost::asio::steady_timer>(executor);
-                    timer->expires_after(timeout);
-
-                    using HandlerT = std::decay_t<decltype(handler)>;
-                    auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
-                    auto completion_exec =
-                        boost::asio::get_associated_executor(*handlerPtr, executor);
-
-                    timer->async_wait([completed, handlerPtr, completion_exec](
-                                          const boost::system::error_code& ec) mutable {
-                        if (ec == boost::asio::error::operation_aborted)
-                            return;
-                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                            boost::asio::post(completion_exec,
-                                              [h = std::move(*handlerPtr)]() mutable {
-                                                  std::move(h)(std::exception_ptr{}, true);
-                                              });
-                        }
-                    });
-
-                    boost::asio::async_read(
-                        socket, boost::asio::buffer(tmp), boost::asio::transfer_at_least(1),
-                        [timer, completed, handlerPtr,
-                         completion_exec](const boost::system::error_code&, std::size_t) mutable {
-                            if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                                timer->cancel();
-                                boost::asio::post(completion_exec,
-                                                  [h = std::move(*handlerPtr)]() mutable {
-                                                      std::move(h)(std::exception_ptr{}, false);
-                                                  });
-                            }
-                        });
-                },
-                boost::asio::use_awaitable);
-            connection_closing_.store(true, std::memory_order_release);
-            socket.close();
-            spdlog::debug("graceful half-close complete (streaming) (request_id={} fd={})",
-                          request_id, sock_fd);
-        } else {
-            spdlog::debug("closing socket after streaming response (request_id={} fd={})",
-                          request_id, sock_fd);
-            connection_closing_.store(true, std::memory_order_release);
-            socket.close();
-        }
-        if (fsm) {
-            fsm->on_close_request();
-        }
-    } else {
-        const uint64_t sock_fd = socket.is_open() ? static_cast<uint64_t>(socket.native_handle())
-                                                  : static_cast<uint64_t>(-1);
-        spdlog::debug("keeping socket open after streaming response (request_id={} fd={})",
-                      request_id, sock_fd);
-    }
+    const uint64_t sock_fd = socket.is_open() ? static_cast<uint64_t>(socket.native_handle())
+                                              : static_cast<uint64_t>(-1);
+    spdlog::debug("keeping socket open after streaming response (request_id={} fd={})", request_id,
+                  sock_fd);
     co_return Result<void>();
 }
 
@@ -2932,16 +2707,7 @@ boost::asio::awaitable<Result<void>> RequestHandler::send_error_response(
     }
 
     if (fsm) {
-        fsm->on_response_complete(config_.close_after_response);
-    }
-
-    if (config_.close_after_response) {
-        connection_closing_.store(true, std::memory_order_release);
-        boost::system::error_code ignore_ec;
-        socket.close(ignore_ec);
-        if (fsm) {
-            fsm->on_close_request();
-        }
+        fsm->on_response_complete(false);
     }
 
     co_return Result<void>{};

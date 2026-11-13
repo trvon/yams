@@ -197,10 +197,6 @@ std::size_t KGWriteBuffer::docCount() const noexcept {
     return docCount_;
 }
 
-void KGWriteBuffer::resetDocCount() {
-    docCount_ = 0;
-}
-
 void KGWriteBuffer::resetCounters() {
     totalEdgesAdded_ = 0;
     totalEdgesFlushed_ = 0;
@@ -218,14 +214,6 @@ void KGWriteBuffer::mergeEdge(KGEdge& existing, const KGEdge& incoming) {
     // Coalesce properties: prefer incoming if its weight >= existing weight.
     if (incoming.weight >= existing.weight && incoming.properties.has_value()) {
         existing.properties = incoming.properties;
-    }
-}
-
-void KGWriteBuffer::mergeDocEntity(DocEntity& existing, const DocEntity& incoming) {
-    if (incoming.confidence.has_value() &&
-        (!existing.confidence.has_value() ||
-         incoming.confidence.value() > existing.confidence.value())) {
-        existing.confidence = incoming.confidence;
     }
 }
 

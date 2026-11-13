@@ -53,7 +53,6 @@ public:
 
     // Metadata
     const std::string& getId() const { return id_; }
-    size_t getUseCount() const { return useCount_; }
 
     void markUsed() {
         lastUsed_ = std::chrono::steady_clock::now();
@@ -64,9 +63,6 @@ public:
         auto now = std::chrono::steady_clock::now();
         return (now - lastUsed_) > timeout;
     }
-
-    std::chrono::steady_clock::time_point getLastUsed() const { return lastUsed_; }
-    std::chrono::steady_clock::time_point getCreatedAt() const { return createdAt_; }
 
 private:
     ResourcePtr resource_;

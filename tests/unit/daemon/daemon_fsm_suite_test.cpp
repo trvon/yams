@@ -797,3 +797,62 @@ TEST_CASE("SearchEngineFSM: Snapshot fields", "[daemon][fsm][search-engine][snap
         REQUIRE(snapshot.hasEngine == false);
     }
 }
+
+// Each wrapper must own its state. tinyfsm keeps machine state in static members, so every
+// instance of a tinyfsm-backed wrapper shared one state: a second daemon host, PluginManager or
+// SearchEngineManager in the same process (tests, embedded hosts, restart) reset or advanced the
+// state the first one read. See ServiceManagerFsm for the same fix.
+TEST_CASE("Daemon FSM wrappers keep per-instance state", "[daemon][fsm][per-instance]") {
+    SECTION("EmbeddingProviderFsm") {
+        EmbeddingProviderFsm fsm;
+        fsm.dispatch(ProviderAdoptedEvent{"onnx"});
+        fsm.dispatch(ModelLoadedEvent{"model-a", 384});
+        REQUIRE(fsm.isReady());
+
+        EmbeddingProviderFsm other; // construction must not reset `fsm`
+        CHECK_FALSE(other.isReady());
+        CHECK(fsm.isReady());
+        CHECK(fsm.dimension() == 384);
+
+        other.dispatch(ProviderDegradedEvent{"load failed"});
+        CHECK(other.isDegraded());
+        CHECK(fsm.isReady());
+    }
+    SECTION("DaemonLifecycleFsm") {
+        DaemonLifecycleFsm fsm;
+        fsm.dispatch(BootstrappedEvent{});
+        fsm.dispatch(HealthyEvent{});
+        REQUIRE(fsm.snapshot().state == LifecycleState::Ready);
+
+        DaemonLifecycleFsm other;
+        CHECK(other.snapshot().state == LifecycleState::Unknown);
+        other.dispatch(ShutdownRequestedEvent{});
+        other.dispatch(StoppedEvent{});
+        other.reset();
+        CHECK(fsm.snapshot().state == LifecycleState::Ready);
+    }
+    SECTION("PluginHostFsm") {
+        PluginHostFsm fsm;
+        fsm.dispatch(PluginScanStartedEvent{1});
+        fsm.dispatch(PluginLoadFailedEvent{"dlopen error"});
+        REQUIRE(fsm.snapshot().state == PluginHostState::Failed);
+
+        PluginHostFsm other;
+        CHECK(other.snapshot().state != PluginHostState::Failed);
+        CHECK(fsm.snapshot().state == PluginHostState::Failed);
+        CHECK(fsm.snapshot().lastError == "dlopen error");
+    }
+    SECTION("SearchEngineFsm") {
+        SearchEngineFsm fsm;
+        fsm.dispatch(SearchEngineRebuildStartedEvent{"initial", false});
+        REQUIRE(fsm.snapshot().state == SearchEngineState::Building);
+
+        SearchEngineFsm other;
+        CHECK(other.snapshot().state == SearchEngineState::NotBuilt);
+        other.dispatch(SearchEngineRebuildStartedEvent{"other", false});
+        other.dispatch(SearchEngineRebuildFailedEvent{"boom"});
+        CHECK(other.snapshot().state == SearchEngineState::Failed);
+        CHECK(fsm.snapshot().state == SearchEngineState::Building);
+        CHECK(fsm.snapshot().lastError.empty());
+    }
+}

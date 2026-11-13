@@ -6,21 +6,27 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
-#include <regex>
+#include <random>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include <yams/cli/doctor/checks/dim_consistency.h>
 #include <yams/cli/doctor/doctor_context.h>
+#include <yams/cli/init_assets.hpp>
+#include <yams/cli/static_tables.h>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/config/static_embedding_table.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/daemon.h>
+#include <yams/vector/simeon_embedding_backend.h>
 
 #include "../../common/test_helpers_catch2.h"
 
@@ -33,30 +39,6 @@ size_t resolveModelDimension(std::string_view modelName);
 
 namespace fs = std::filesystem;
 
-// =============================================================================
-// Test the EMBEDDING_MODELS definition used by init command.
-// These tests verify that the model list is valid and consistent.
-// =============================================================================
-
-// Model info structure matching init_command.cpp
-struct EmbeddingModelInfo {
-    std::string name;
-    std::string url;
-    std::string description;
-    size_t size_mb;
-    int dimensions;
-};
-
-// Expected models (mirrors the static list in init_command.cpp)
-static const std::vector<EmbeddingModelInfo> EXPECTED_MODELS = {
-    {"all-MiniLM-L6-v2",
-     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
-     "Lightweight model for semantic search", 90, 384},
-    {"multi-qa-MiniLM-L6-cos-v1",
-     "https://huggingface.co/sentence-transformers/multi-qa-MiniLM-L6-cos-v1/resolve/main/onnx/"
-     "model.onnx",
-     "Optimized for semantic search on QA pairs (215M training samples)", 90, 384}};
-
 namespace {
 
 struct CliTestHelper {
@@ -64,6 +46,7 @@ struct CliTestHelper {
     fs::path configPath;
     fs::path dataDir;
     std::optional<yams::test::ScopedEnvVar> configEnv;
+    std::optional<yams::test::ScopedEnvVar> compatibilityConfigEnv;
     std::optional<yams::test::ScopedEnvVar> dataEnv;
     std::optional<yams::test::ScopedEnvVar> nonInteractiveEnv;
     std::optional<yams::test::ScopedEnvVar> disableDaemonEnv;
@@ -79,6 +62,7 @@ struct CliTestHelper {
         fs::create_directories(configPath.parent_path());
 
         configEnv.emplace("YAMS_CONFIG", configPath.string());
+        compatibilityConfigEnv.emplace("YAMS_CONFIG_PATH", std::nullopt);
         dataEnv.emplace("YAMS_DATA_DIR", dataDir.string());
         nonInteractiveEnv.emplace(std::string("YAMS_NON_INTERACTIVE"),
                                   std::optional<std::string>("1"));
@@ -90,6 +74,7 @@ struct CliTestHelper {
 
     ~CliTestHelper() {
         configEnv.reset();
+        compatibilityConfigEnv.reset();
         dataEnv.reset();
         nonInteractiveEnv.reset();
         disableDaemonEnv.reset();
@@ -162,56 +147,40 @@ private:
 
 } // namespace
 
-TEST_CASE("InitCommand: All models have valid HuggingFace URLs", "[cli][init][models]") {
-    const std::regex hfUrlPattern(
-        R"(^https://huggingface\.co/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+/resolve/main/.+\.onnx$)");
+TEST_CASE("InitCommand: offered model tables are well-formed", "[cli][init][models]") {
+    namespace assets = yams::cli::init_assets;
 
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model: " << model.name);
-        INFO("URL: " << model.url);
-        REQUIRE(std::regex_match(model.url, hfUrlPattern));
+    std::set<std::string> names; // unique within each table
+    const auto checkCommon = [&names](const auto& model) {
+        INFO("model: " << model.name);
+        CHECK_FALSE(model.name.empty());
+        CHECK_FALSE(model.description.empty());
+        CHECK(model.size_mb > 0);
+        CHECK(names.insert(model.name).second);
+    };
+
+    REQUIRE_FALSE(assets::embeddingModels().empty());
+    for (const auto& model : assets::embeddingModels()) {
+        checkCommon(model);
+        CHECK(model.url.starts_with("https://"));
+        CHECK(model.dimensions > 0);
     }
-}
 
-TEST_CASE("InitCommand: All models have consistent 384 dimensions", "[cli][init][models]") {
-    // All models should have dim=384 for consistency with default vector DB setup
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model: " << model.name);
-        REQUIRE(model.dimensions == 384);
+    names.clear();
+    REQUIRE_FALSE(assets::glinerModels().empty());
+    for (const auto& model : assets::glinerModels()) {
+        checkCommon(model);
+        CHECK_FALSE(model.repo.empty());
+        CHECK_FALSE(model.model_file.empty());
     }
-}
 
-TEST_CASE("InitCommand: All models have valid names", "[cli][init][models]") {
-    // Model names should follow naming convention
-    const std::regex namePattern(R"(^[a-zA-Z0-9][a-zA-Z0-9_-]*[a-zA-Z0-9]$)");
-
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model name: " << model.name);
-        REQUIRE(std::regex_match(model.name, namePattern));
-    }
-}
-
-TEST_CASE("InitCommand: All models have reasonable sizes", "[cli][init][models]") {
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model: " << model.name);
-        // Models should be between 10MB and 1GB
-        REQUIRE(model.size_mb >= 10);
-        REQUIRE(model.size_mb <= 1024);
-    }
-}
-
-TEST_CASE("InitCommand: All models have descriptions", "[cli][init][models]") {
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model: " << model.name);
-        REQUIRE_FALSE(model.description.empty());
-        REQUIRE(model.description.length() >= 10);
-    }
-}
-
-TEST_CASE("InitCommand: Models are from sentence-transformers", "[cli][init][models]") {
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model: " << model.name);
-        REQUIRE(model.url.find("sentence-transformers") != std::string::npos);
+    names.clear();
+    REQUIRE_FALSE(assets::rerankerModels().empty());
+    for (const auto& model : assets::rerankerModels()) {
+        checkCommon(model);
+        CHECK_FALSE(model.repo.empty());
+        CHECK_FALSE(model.model_file.empty());
+        CHECK(model.max_tokens > 0);
     }
 }
 
@@ -228,6 +197,7 @@ TEST_CASE("InitCommand - help shows non-interactive setup options", "[cli][init]
     CHECK(output.find("headless environments") != std::string::npos);
     CHECK(output.find("--non-interactive") != std::string::npos);
     CHECK(output.find("--no-keygen") != std::string::npos);
+    CHECK(output.find("--no-static-table") != std::string::npos);
     CHECK(output.find("--print") != std::string::npos);
 }
 
@@ -271,8 +241,109 @@ TEST_CASE("InitCommand - post-setup guidance is formatted per branch", "[cli][in
     }
 }
 
+namespace {
+
+// Scratch data dir + config so Simeon dimension resolution does not see the developer's tables.
+struct ScratchDataDir {
+    std::filesystem::path dir;
+    std::optional<yams::test::ScopedEnvVar> cfg, compat, data;
+    ScratchDataDir() {
+        dir = std::filesystem::temp_directory_path() /
+              ("yams_init_dim_" + std::to_string(std::random_device{}()));
+        std::filesystem::create_directories(dir);
+        std::ofstream(dir / "config.toml") << "[core]\ndata_dir = \"" << dir.string() << "\"\n";
+        cfg.emplace("YAMS_CONFIG", (dir / "config.toml").string());
+        compat.emplace("YAMS_CONFIG_PATH", std::nullopt);
+        data.emplace("YAMS_DATA_DIR", dir.string());
+        yams::vector::setStaticEmbeddingDataDirHint(dir);
+    }
+    ~ScratchDataDir() {
+        yams::vector::setStaticEmbeddingDataDirHint({});
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+};
+
+// Minimal SMSTAT01 table, dim 4, two tokens.
+std::string tinyStaticTableBytes() {
+    std::string bytes = "SMSTAT01";
+    auto u32 = [&](std::uint32_t v) {
+        for (int k = 0; k < 4; ++k)
+            bytes.push_back(static_cast<char>((v >> (8 * k)) & 0xFF));
+    };
+    u32(1);
+    u32(4);
+    u32(2);
+    u32(3);
+    u32(0);
+    u32(100);
+    for (const std::string t : {"[UNK]", "alpha"}) {
+        bytes.push_back(static_cast<char>(t.size()));
+        bytes.push_back(0);
+        bytes += t;
+    }
+    u32(0x3F800000u);
+    u32(0x3F800000u);
+    bytes.append(8, '\x01');
+    return bytes;
+}
+
+void writeFile(const fs::path& path, const std::string& bytes) {
+    fs::create_directories(path.parent_path());
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << bytes;
+}
+
+std::string readFile(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+std::string fileUrl(const fs::path& path) {
+    return "file://" + path.string();
+}
+
+// Every HTTPS download fails at once: curl honours these and nothing listens on port 1.
+struct OfflineNetwork {
+    yams::test::ScopedEnvVar https{"https_proxy", std::string{"http://127.0.0.1:1"}};
+    yams::test::ScopedEnvVar httpsUpper{"HTTPS_PROXY", std::string{"http://127.0.0.1:1"}};
+    yams::test::ScopedEnvVar http{"http_proxy", std::string{"http://127.0.0.1:1"}};
+    yams::test::ScopedEnvVar all{"ALL_PROXY", std::string{"http://127.0.0.1:1"}};
+    yams::test::ScopedEnvVar noProxy{"NO_PROXY", std::nullopt};
+    yams::test::ScopedEnvVar noProxyLower{"no_proxy", std::nullopt};
+};
+
+// --auto installs plugins dirs and agent skills under $HOME and bootstraps a session for the
+// cwd; keep all of it inside the test's temp dir.
+struct IsolatedHome {
+    yams::test::ScopedEnvVar home;
+    yams::test::ScopedEnvVar userProfile;
+    yams::test::ScopedEnvVar session{"YAMS_SESSION_CURRENT", std::string{"init-test"}};
+    explicit IsolatedHome(const fs::path& dir)
+        : home("HOME", dir.string()), userProfile("USERPROFILE", dir.string()) {
+        fs::create_directories(dir);
+    }
+};
+
+} // namespace
+
+TEST_CASE("InitCommand: dimensions follow explicit selection rather than table presence",
+          "[cli][init][models]") {
+    ScratchDataDir scratch;
+    std::filesystem::create_directories(scratch.dir / "models" / "static");
+    const std::string bytes = tinyStaticTableBytes();
+    std::ofstream(scratch.dir / "models" / "static" / "t.smstat", std::ios::binary) << bytes;
+
+    CHECK(yams::cli::resolveModelDimension("simeon-default") == 1024);
+    REQUIRE(yams::cli::selectStaticTable(scratch.dir / "models" / "static" / "t.smstat",
+                                         scratch.dir / "config.toml"));
+    CHECK(yams::cli::resolveModelDimension("simeon-default") == 4);
+    CHECK(yams::cli::resolveModelDimension("") == 4);
+    CHECK(yams::cli::resolveModelDimension("all-MiniLM-L6-v2") == 384);
+}
+
 TEST_CASE("InitCommand: resolveModelDimension maps model names to expected dimensions",
           "[cli][init][models]") {
+    ScratchDataDir scratch;
     CHECK(yams::cli::resolveModelDimension("simeon-default") == 1024);
     CHECK(yams::cli::resolveModelDimension("simeon") == 1024);
     CHECK(yams::cli::resolveModelDimension("") == 1024);
@@ -555,4 +626,363 @@ TEST_CASE("InitCommand: declining semantic search disables both sections and wri
         CHECK(*dims.embeddings == *dims.vectorDb);
         CHECK(*dims.embeddings == *dims.index);
     }
+}
+
+// --non-interactive is the scripted path (CI, test harnesses): it must not reach the network.
+TEST_CASE("InitCommand: non-interactive init does not download the static table",
+          "[cli][init][catch2]") {
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    CliTestHelper helper;
+    CaptureStdout capture;
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+    const auto staticDir = helper.dataDir / "models" / "static";
+    std::error_code ec;
+    CHECK_FALSE(fs::exists(staticDir / "yams-static-bge-c4-256.smstat", ec));
+    CHECK(capture.str().find("yams model download yams-static-bge-c4-256") != std::string::npos);
+}
+
+TEST_CASE("Static embedding selection requires an explicit model opt-in",
+          "[cli][init][static][static-opt-in]") {
+    ScratchDataDir scratch;
+    const auto installed = yams::cli::staticTablesDir(scratch.dir) / "unselected.smstat";
+    fs::create_directories(installed.parent_path());
+    {
+        std::ofstream output(installed, std::ios::binary);
+        output << tinyStaticTableBytes();
+        REQUIRE(output.good());
+    }
+
+    SECTION("an installed file alone does not establish consent") {
+        CHECK_FALSE(yams::config::findStaticEmbeddingTable(std::nullopt, scratch.dir).has_value());
+    }
+    SECTION("an explicit existing selection is honored") {
+        const auto selected = yams::config::findStaticEmbeddingTable(installed, scratch.dir);
+        REQUIRE(selected.has_value());
+        CHECK(*selected == installed);
+    }
+    SECTION("a missing explicit selection does not activate a different installed table") {
+        const auto missing = scratch.dir / "missing.smstat";
+        CHECK_FALSE(yams::config::findStaticEmbeddingTable(missing, scratch.dir).has_value());
+    }
+}
+
+TEST_CASE("Static table initialization requires affirmative interactive consent",
+          "[cli][init][static][static-init-consent]") {
+    for (const bool nonInteractive : {false, true}) {
+        const auto automatic = yams::cli::staticTableInitDecision(true, nonInteractive);
+        CHECK_FALSE(automatic.download);
+        CHECK_FALSE(automatic.prompt);
+    }
+    const auto nonInteractive = yams::cli::staticTableInitDecision(false, true);
+    CHECK_FALSE(nonInteractive.download);
+    CHECK_FALSE(nonInteractive.prompt);
+    const auto interactive = yams::cli::staticTableInitDecision(false, false);
+    CHECK_FALSE(interactive.download);
+    CHECK(interactive.prompt);
+    CHECK_FALSE(interactive.defaultYes);
+}
+
+TEST_CASE("Explicit model download records the validated local table selection",
+          "[cli][init][static][static-download-consent]") {
+    CliTestHelper helper;
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+    const auto installed = yams::cli::staticTablesDir(helper.dataDir) / "chosen.smstat";
+    writeFile(installed, tinyStaticTableBytes());
+    REQUIRE(yams::vector::loadSharedStaticEmbeddingTable(installed) != nullptr);
+    // Both the existing-file fast path and the URL are local. No remote request
+    // is needed to expose missing persistence after an explicit download.
+    REQUIRE(helper.runCommand(
+                {"yams", "model", "download", "chosen", "--url", fileUrl(installed)}) == 0);
+    const auto selected =
+        yams::config::parse_config_value(helper.configPath, "embeddings.simeon", "static_table");
+    REQUIRE_FALSE(selected.empty());
+    CHECK(fs::path(selected) == installed);
+    CHECK(yams::config::findStaticEmbeddingTable(fs::path(selected), helper.dataDir) == installed);
+}
+
+TEST_CASE("Explicit model selection honors the existing compatibility config override",
+          "[cli][init][static][static-download-consent]") {
+    CliTestHelper helper;
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+    const auto original = readFile(helper.configPath);
+    const auto overridePath = helper.tempDir / "override.toml";
+    writeFile(overridePath, original);
+    const yams::test::ScopedEnvVar overrideConfig{"YAMS_CONFIG_PATH", overridePath.string()};
+    const auto installed = yams::cli::staticTablesDir(helper.dataDir) / "chosen.smstat";
+    writeFile(installed, tinyStaticTableBytes());
+    REQUIRE(yams::vector::loadSharedStaticEmbeddingTable(installed) != nullptr);
+    REQUIRE(helper.runCommand(
+                {"yams", "model", "download", "chosen", "--url", fileUrl(installed)}) == 0);
+    CHECK(yams::config::parse_config_value(overridePath, "embeddings.simeon", "static_table") ==
+          installed.generic_string());
+    CHECK(readFile(helper.configPath).compare(original) == 0);
+}
+
+TEST_CASE("Rejected selection never reports a validated local table as selected",
+          "[cli][init][static][static-download-consent]") {
+    CliTestHelper helper;
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+    const auto installed = yams::cli::staticTablesDir(helper.dataDir) / "chosen.smstat";
+    const auto tableBytes = tinyStaticTableBytes();
+    writeFile(installed, tableBytes);
+    REQUIRE(yams::vector::loadSharedStaticEmbeddingTable(installed) != nullptr);
+    const std::string original =
+        readFile(helper.configPath) + "\n[unrelated]\nvalue = \"\"\"first\nsecond\"\"\"\n";
+    writeFile(helper.configPath, original);
+    CaptureStdout capture;
+    CHECK(helper.runCommand({"yams", "model", "download", "chosen", "--url", fileUrl(installed)}) !=
+          0);
+    CHECK(capture.str().find("Static table selected:") == std::string::npos);
+    CHECK(readFile(helper.configPath) == original);
+    CHECK(readFile(installed) == tableBytes);
+}
+
+TEST_CASE("Static selection preserves unrelated config representation and semantic values",
+          "[cli][init][static][selection-persistence]") {
+    ScratchDataDir scratch;
+    const auto installed = scratch.dir / "selected.smstat";
+    writeFile(installed, tinyStaticTableBytes());
+    const auto configPath = scratch.dir / "config.toml";
+    std::string original;
+    SECTION("parent table with typed values") {
+        original = "# keep this comment\n[embeddings]\nenable = false\n"
+                   "backend = \"simeon\"\n[other]\ncount = 42\nlist = [1, 2]\n";
+    }
+    SECTION("nested table with a previous choice") {
+        original = "[embeddings.simeon]\nstatic_table = \"missing\"\n"
+                   "encoder_profile = \"configurable\"\n[other]\ncount = 42\n";
+    }
+    SECTION("root dotted keys") {
+        original = "embeddings.simeon.encoder_profile = \"configurable\"\n"
+                   "[other]\ncount = 42\n";
+    }
+    SECTION("no embeddings table") {
+        original = "# keep this comment\n[other]\ncount = 42\n";
+    }
+    writeFile(configPath, original);
+    auto expected = yams::config::parse_simple_toml(configPath);
+    expected["embeddings.simeon.static_table"] = installed.generic_string();
+    const auto permissions = fs::status(configPath).permissions();
+    REQUIRE(yams::cli::selectStaticTable(installed, configPath));
+    CHECK(yams::config::parse_simple_toml(configPath) == expected);
+    CHECK(readFile(configPath).find("count = 42\n") != std::string::npos);
+    CHECK(fs::status(configPath).permissions() == permissions);
+    if (original.find("enable = false") != std::string::npos) {
+        CHECK(readFile(configPath).find("enable = false\n") != std::string::npos);
+        CHECK(readFile(configPath).find("list = [1, 2]\n") != std::string::npos);
+    }
+    for (const auto& entry : fs::directory_iterator(scratch.dir)) {
+        CHECK_FALSE(entry.path().filename().string().starts_with(".yams-model-selection-"));
+    }
+}
+
+TEST_CASE("Failed static selection leaves the config and validated table intact",
+          "[cli][init][static][selection-persistence]") {
+    ScratchDataDir scratch;
+    const auto installed = scratch.dir / "selected.smstat";
+    const auto tableBytes = tinyStaticTableBytes();
+    writeFile(installed, tableBytes);
+    const auto configPath = scratch.dir / "config.toml";
+    SECTION("multiline config is rejected without a partial rewrite") {
+        const std::string original = "[other]\nmessage = \"\"\"\n"
+                                     "[embeddings.simeon]\nhello\n\"\"\"\n";
+        writeFile(configPath, original);
+        CHECK_FALSE(yams::cli::selectStaticTable(installed, configPath));
+        CHECK(readFile(configPath) == original);
+    }
+    SECTION("inline embedding tables are not partially redefined") {
+        const std::string original =
+            "[embeddings]\nsimeon = { encoder_profile = \"configurable\" }\n";
+        writeFile(configPath, original);
+        CHECK_FALSE(yams::cli::selectStaticTable(installed, configPath));
+        CHECK(readFile(configPath) == original);
+    }
+    SECTION("quoted embedding tables require a manual edit") {
+        const std::string original =
+            "[\"embeddings\".\"simeon\"]\nencoder_profile = \"configurable\"\n";
+        writeFile(configPath, original);
+        CHECK_FALSE(yams::cli::selectStaticTable(installed, configPath));
+        CHECK(readFile(configPath) == original);
+    }
+    SECTION("quoted selection keys are not duplicated") {
+        const std::string original = "[embeddings.simeon]\n\"static_table\" = \"missing\"\n";
+        writeFile(configPath, original);
+        CHECK_FALSE(yams::cli::selectStaticTable(installed, configPath));
+        CHECK(readFile(configPath) == original);
+    }
+    SECTION("a directory is not overwritten as config") {
+        const auto directory = scratch.dir / "config-directory";
+        fs::create_directories(directory);
+        writeFile(directory / "keep", "unchanged");
+        CHECK_FALSE(yams::cli::selectStaticTable(installed, directory));
+        CHECK(readFile(directory / "keep") == "unchanged");
+    }
+    SECTION("a non-directory config parent fails closed") {
+        const auto parent = scratch.dir / "parent-file";
+        writeFile(parent, "unchanged");
+        CHECK_FALSE(yams::cli::selectStaticTable(installed, parent / "config.toml"));
+        CHECK(readFile(parent) == "unchanged");
+    }
+    CHECK(readFile(installed) == tableBytes);
+    for (const auto& entry : fs::directory_iterator(scratch.dir)) {
+        CHECK_FALSE(entry.path().filename().string().starts_with(".yams-model-selection-"));
+    }
+}
+
+TEST_CASE("Static selection creates a minimal explicit config and preserves operator symlinks",
+          "[cli][init][static][selection-persistence]") {
+    ScratchDataDir scratch;
+    const auto installed = scratch.dir / "selected.smstat";
+    writeFile(installed, tinyStaticTableBytes());
+    SECTION("an absent config is created without enabling or switching a backend") {
+        const auto destination = scratch.dir / "new" / "config.toml";
+        REQUIRE(yams::cli::selectStaticTable(installed, destination));
+        const auto values = yams::config::parse_simple_toml(destination);
+        REQUIRE(values.size() == 1);
+        CHECK(values.at("embeddings.simeon.static_table") == installed.generic_string());
+    }
+    SECTION("an existing config symlink is preserved") {
+        const auto destination = scratch.dir / "config.toml";
+        const auto alias = scratch.dir / "config-link";
+        std::error_code error;
+        fs::create_symlink(destination, alias, error);
+        if (error) {
+            SKIP("Platform cannot create config symlinks: " << error.message());
+        }
+        REQUIRE(yams::cli::selectStaticTable(installed, alias));
+        CHECK(fs::is_symlink(alias));
+        CHECK(yams::config::parse_config_value(destination, "embeddings.simeon", "static_table") ==
+              installed.generic_string());
+    }
+    SECTION("a dangling operator symlink is not replaced") {
+        const auto alias = scratch.dir / "dangling-config-link";
+        std::error_code error;
+        fs::create_symlink(scratch.dir / "missing-config.toml", alias, error);
+        if (error) {
+            SKIP("Platform cannot create config symlinks: " << error.message());
+        }
+        CHECK_FALSE(yams::cli::selectStaticTable(installed, alias));
+        CHECK(fs::is_symlink(alias));
+        CHECK_FALSE(fs::exists(scratch.dir / "missing-config.toml"));
+    }
+}
+
+// ---- Download failures -------------------------------------------------------------------------
+
+TEST_CASE("downloadStaticTable: a missing source leaves no table behind",
+          "[cli][init][static][download]") {
+    ScratchDataDir scratch;
+    auto out = yams::cli::downloadStaticTable("t", fileUrl(scratch.dir / "nope.smstat"), "",
+                                              scratch.dir, {}, false);
+    REQUIRE_FALSE(out);
+    CHECK(out.error().code == yams::ErrorCode::NetworkError);
+    CHECK_FALSE(fs::exists(yams::cli::staticTablesDir(scratch.dir) / "t.smstat"));
+    CHECK_FALSE(fs::exists(yams::cli::staticTablesDir(scratch.dir) / "t.smstat.part"));
+}
+
+TEST_CASE("downloadStaticTable: a checksum mismatch leaves no table behind",
+          "[cli][init][static][download]") {
+    ScratchDataDir scratch;
+    const auto src = scratch.dir / "src" / "t.smstat";
+    writeFile(src, tinyStaticTableBytes());
+    auto out = yams::cli::downloadStaticTable("t", fileUrl(src), std::string(64, '0'), scratch.dir,
+                                              {}, false);
+    CHECK_FALSE(out);
+    CHECK_FALSE(fs::exists(yams::cli::staticTablesDir(scratch.dir) / "t.smstat"));
+}
+
+TEST_CASE("downloadStaticTable: content that is not a table is rejected and removed",
+          "[cli][init][static][download]") {
+    ScratchDataDir scratch;
+    const auto src = scratch.dir / "src" / "t.smstat";
+    writeFile(src, "<html>rate limited</html>");
+    auto out = yams::cli::downloadStaticTable("t", fileUrl(src), "", scratch.dir, {}, false);
+    CHECK_FALSE(out);
+    CHECK_FALSE(fs::exists(yams::cli::staticTablesDir(scratch.dir) / "t.smstat"));
+}
+
+// A truncated or corrupt file from an earlier failed download must not count as installed.
+TEST_CASE("downloadStaticTable: replaces a corrupt existing table without --force",
+          "[cli][init][static][download]") {
+    ScratchDataDir scratch;
+    const auto dest = yams::cli::staticTablesDir(scratch.dir) / "t.smstat";
+    writeFile(dest, "SMSTAT01-truncated");
+    const auto src = scratch.dir / "src" / "t.smstat";
+    writeFile(src, tinyStaticTableBytes());
+    auto out = yams::cli::downloadStaticTable("t", fileUrl(src), "", scratch.dir, {}, false);
+    REQUIRE(out);
+    CHECK(readFile(dest) == tinyStaticTableBytes());
+    CHECK(yams::vector::loadSharedStaticEmbeddingTable(dest) != nullptr);
+}
+
+// --force with a bad source (wrong URL, an HTML error page) must not destroy a working table.
+TEST_CASE("downloadStaticTable: a failed forced re-download keeps the working table",
+          "[cli][init][static][download]") {
+    ScratchDataDir scratch;
+    const auto dest = yams::cli::staticTablesDir(scratch.dir) / "t.smstat";
+    writeFile(dest, tinyStaticTableBytes());
+    const auto bad = scratch.dir / "src" / "bad.smstat";
+    writeFile(bad, "<html>not found</html>");
+
+    SECTION("source is not a table") {
+        auto out = yams::cli::downloadStaticTable("t", fileUrl(bad), "", scratch.dir, {}, true);
+        CHECK_FALSE(out);
+    }
+    SECTION("source is missing") {
+        auto out = yams::cli::downloadStaticTable("t", fileUrl(scratch.dir / "nope"), "",
+                                                  scratch.dir, {}, true);
+        CHECK_FALSE(out);
+    }
+    CHECK(readFile(dest) == tinyStaticTableBytes());
+}
+
+TEST_CASE("InitCommand: automatic setup stays offline on the built-in encoder",
+          "[cli][init][static][download]") {
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    OfflineNetwork offline;
+    CliTestHelper helper;
+    IsolatedHome home(helper.tempDir / "home");
+    CaptureStdout capture;
+    // The pure policy regression was red before changing --auto. It is now safe
+    // to exercise the command; retain the offline proxy guard as defense in depth.
+    REQUIRE(helper.runCommand({"yams", "init", "--auto", "--no-keygen"}) == 0);
+    CHECK(capture.str().find("Downloading static table") == std::string::npos);
+    CHECK(yams::config::parse_config_value(helper.configPath, "embeddings.simeon", "static_table")
+              .empty());
+    CHECK_FALSE(fs::exists(helper.dataDir / "models" / "static" / "yams-static-bge-c4-256.smstat"));
+    CHECK(yams::daemon::ConfigResolver::readVectorSentinelDim(helper.dataDir) ==
+          std::optional<size_t>{1024U});
+    CHECK(capture.str().find("yams model download yams-static-bge-c4-256") != std::string::npos);
+}
+
+TEST_CASE("InitCommand: a corrupt static table in the data dir does not count as installed",
+          "[cli][init][static][download]") {
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    CliTestHelper helper;
+    writeFile(helper.dataDir / "models" / "static" / "yams-static-bge-c4-256.smstat",
+              "SMSTAT01-truncated");
+    CaptureStdout capture;
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+    CHECK(capture.str().find("yams model download yams-static-bge-c4-256") != std::string::npos);
+    CHECK(yams::daemon::ConfigResolver::readVectorSentinelDim(helper.dataDir) ==
+          std::optional<size_t>{1024U});
+}
+
+// Headless setup stays offline. Static, GLiNER and reranker models all require
+// an explicit choice; init does not write configuration for an absent model.
+TEST_CASE("InitCommand: --auto installs no ONNX models and writes no config for them",
+          "[cli][init][auto][download]") {
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    OfflineNetwork offline;
+    CliTestHelper helper;
+    IsolatedHome home(helper.tempDir / "home");
+    CaptureStdout capture;
+    REQUIRE(helper.runCommand({"yams", "init", "--auto", "--no-keygen", "--no-static-table"}) == 0);
+    const std::string config = readFile(helper.configPath);
+    CHECK(config.find("reranker_backend = \"onnx\"") == std::string::npos);
+    CHECK(config.find("[plugins.glint]") == std::string::npos);
+    CHECK_FALSE(fs::exists(helper.dataDir / "models" / "gliner"));
+    CHECK_FALSE(fs::exists(helper.dataDir / "models" / "reranker"));
+    const std::string out = capture.str();
+    CHECK(out.find("yams model download --gliner") != std::string::npos);
 }

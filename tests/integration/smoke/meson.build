@@ -49,14 +49,26 @@ if (get_option('enable-integration-tests') or dbg) and integration_smoke_srcs.le
     install: false,
   )
 
+  # The CLI/daemon subprocess cases locate the built binaries through MESON_BUILD_ROOT and SKIP
+  # without it, so the env must carry it and the binaries must be built before the test runs.
+  smoke_test_depends = []
+  if is_variable('yams_cli_exe')
+    smoke_test_depends += [yams_cli_exe]
+  endif
+  if is_variable('yams_daemon_exe')
+    smoke_test_depends += [yams_daemon_exe]
+  endif
+
   test('integration_smoke', integ_exe,
-    suite: ['integration', 'isolated', 'concurrency'],
+    suite: ['catch2', 'integration', 'isolated', 'concurrency'],
     args: smoke_test_args,
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'YAMS_DISABLE_VECTORS': '1',
       'TSAN_OPTIONS': _test_tsan_options,
+      'MESON_BUILD_ROOT': meson.project_build_root(),
     },
+    depends: smoke_test_depends,
     is_parallel: false,
     timeout: smoke_test_timeout,
   )

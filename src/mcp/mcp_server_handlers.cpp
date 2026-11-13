@@ -990,6 +990,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     try {
         auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::BestEffort);
         if (sres && sres.value()) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             const auto& s = *sres.value();
             if (!s.contentStoreRoot.empty()) {
                 namespace fs = std::filesystem;
@@ -1116,6 +1117,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             try {
                 auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::BestEffort);
                 if (sres && sres.value()) {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     const auto& s = *sres.value();
                     if (!s.contentStoreRoot.empty()) {
                         baseDir = std::filesystem::path(s.contentStoreRoot).parent_path();
@@ -1742,8 +1744,10 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
             if (resolved.isLocalFile && !item.path.empty()) {
                 // If item.path ends with local abs path's filename, annotate
                 try {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     std::string base = std::filesystem::path(*resolved.absPath).filename().string();
                     if (std::filesystem::path(item.path).filename().string() == base) {
+                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                         docJson["local_input_file"] = *resolved.absPath;
                     }
                 } catch (...) {
@@ -1881,6 +1885,7 @@ MCPServer::handleGetStatus(const MCPStatusRequest& req) {
     auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::Required);
     if (!sres)
         co_return sres.error();
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     const auto& s = *sres.value();
     MCPStatusResponse out;
     out.running = s.running;
@@ -2015,9 +2020,11 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
         boost::asio::local::stream_protocol::socket probe(exec);
         if (!sock.empty()) {
             boost::system::error_code bec;
+            // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
             (void)probe.connect(boost::asio::local::stream_protocol::endpoint(sock.string()), bec);
             connectable = !bec;
             boost::system::error_code closeError;
+            // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
             (void)probe.close(closeError);
         }
     } catch (...) {
@@ -2029,6 +2036,7 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     bool haveStatus = false;
     if (auto sres = co_await fetchDaemonStatus(DaemonStatusFetchMode::BestEffort);
         sres && sres.value()) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         s = std::move(*sres.value());
         haveStatus = true;
     }
@@ -2213,114 +2221,10 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
             grr = rsvc.getByNameSmart(normName, pickOldest, /*allowFuzzy*/ true,
                                       /*useSession*/ false, std::string{}, ropts, resolver);
         }
+        // getByNameSmart is the only resolver: an unknown or ambiguous name
+        // must not update the closest-looking document.
         if (!grr) {
-            // Fall back to simple basename-list matching similar to handleGet
-            auto tryList =
-                [&](const std::string& pat) -> std::optional<yams::daemon::ListResponse> {
-                yams::app::services::ListOptions lreq;
-                lreq.namePattern = pat;
-                lreq.limit = 500;
-                lreq.pathsOnly = false;
-                auto lres = rsvc.list(lreq, ropts);
-                if (lres && !lres.value().items.empty())
-                    return lres.value();
-                return std::nullopt;
-            };
-            auto bestMatch = [&](const std::vector<yams::daemon::ListEntry>& items)
-                -> std::optional<yams::daemon::ListEntry> {
-                if (items.empty())
-                    return std::nullopt;
-                if (req.latest || req.oldest) {
-                    const yams::daemon::ListEntry* chosen = nullptr;
-                    for (const auto& it : items) {
-                        if (!chosen) {
-                            chosen = &it;
-                        } else if (req.oldest) {
-                            if (it.indexed < chosen->indexed)
-                                chosen = &it;
-                        } else {
-                            if (it.indexed > chosen->indexed)
-                                chosen = &it;
-                        }
-                    }
-                    return chosen ? std::optional<yams::daemon::ListEntry>(*chosen) : std::nullopt;
-                }
-                auto scoreName = [&](const std::string& base) -> int {
-                    if (base == normName)
-                        return 1000;
-                    if (base.size() >= normName.size() && base.rfind(normName, 0) == 0)
-                        return 800;
-                    if (base.find(normName) != std::string::npos)
-                        return 600;
-                    int dl = static_cast<int>(std::abs((long)(base.size() - normName.size())));
-                    return 400 - std::min(200, dl * 10);
-                };
-                int bestScore = -1;
-                const yams::daemon::ListEntry* chosen = nullptr;
-                for (const auto& it : items) {
-                    std::string b;
-                    try {
-                        b = std::filesystem::path(it.path).filename().string();
-                    } catch (...) {
-                        b = it.name;
-                    }
-                    int sc = scoreName(b);
-                    if (sc > bestScore) {
-                        bestScore = sc;
-                        chosen = &it;
-                    }
-                }
-                return chosen ? std::optional<yams::daemon::ListEntry>(*chosen) : std::nullopt;
-            };
-
-            std::optional<yams::daemon::ListResponse> lr;
-            lr = tryList(std::string("%/") + normName);
-            if (!lr) {
-                std::string stem = normName;
-                try {
-                    stem = std::filesystem::path(normName).stem().string();
-                } catch (...) {
-                    spdlog::debug("Unable to derive update target stem from '{}'", normName);
-                }
-                lr = tryList(std::string("%/") + stem + "%");
-            }
-            if (!lr)
-                lr = tryList(std::string("%") + normName + "%");
-            if (!lr || lr->items.empty()) {
-                co_return Error{ErrorCode::NotFound, "No matching documents"};
-            }
-            auto cand = bestMatch(lr->items);
-            if (!cand)
-                co_return Error{ErrorCode::NotFound, "No matching documents"};
-            // Build a synthetic GetResponse equivalent
-            yams::app::services::GetOptions greq;
-            greq.hash = cand->hash;
-            greq.metadataOnly = true;
-            auto grres = rsvc.get(greq, ropts);
-            if (!grres)
-                co_return grres.error();
-            // Use resolved hash for daemon fast update
-            daemon::UpdateDocumentRequest daemon_req;
-            daemon_req.hash = std::move(cand->hash);
-            daemon_req.addTags = req.tags;
-            daemon_req.removeTags = req.removeTags;
-            for (const auto& [key, value] : req.metadata.items()) {
-                if (value.is_string())
-                    daemon_req.metadata[key] = value.get<std::string>();
-                else
-                    daemon_req.metadata[key] = value.dump();
-            }
-            auto clientRes = requireDaemonClient();
-            if (!clientRes)
-                co_return clientRes.error();
-            auto dres = co_await clientRes.value()->updateDocument(daemon_req);
-            if (!dres)
-                co_return dres.error();
-            auto out = makeUpdateMetadataResponse(dres.value());
-            if (out.success) {
-                co_await waitForTagVisibility(dres.value().hash);
-            }
-            co_return out;
+            co_return grr.error();
         }
 
         const auto& gr = grr.value();

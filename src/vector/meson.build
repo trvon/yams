@@ -120,6 +120,7 @@ srcs = [
   'vector_utils.cpp',
   'binary_quantization.cpp',
   'vector_schema_migration.cpp',
+  'vector_schema_repair.cpp',
   'mock_embedding_provider.cpp',
   'embedding_provider_registry.cpp',
   'dim_resolver.cpp',
@@ -182,6 +183,7 @@ simeon_retrieval_srcs = [
   join_paths(simeon_dir, 'src', 'query_router.cpp'),
   join_paths(simeon_dir, 'src', 'retrieval_strategy.cpp'),
   join_paths(simeon_dir, 'src', 'corpus_adapter.cpp'),
+  join_paths(simeon_dir, 'src', 'static_embedding.cpp'),
 ]
 
 #SIMD tier defines — must be visible to every TU that includes

@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <limits>
+#include <thread>
 #include <yams/core/assert.hpp>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -49,44 +50,39 @@ static inline std::uint64_t now_ns() {
 }
 
 /// Read current process RSS in bytes (cross-platform)
-std::uint64_t readRssBytes() {
+ProcessMemory readProcessMemory() {
+    ProcessMemory mem;
 #if defined(_WIN32)
-    PROCESS_MEMORY_COUNTERS pmc{};
-    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
-        return pmc.WorkingSetSize;
+    PROCESS_MEMORY_COUNTERS_EX pmc{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                             sizeof(pmc))) {
+        mem.rssBytes = pmc.WorkingSetSize;
     }
-    return 0;
-
 #elif defined(__APPLE__)
-    mach_task_basic_info info{};
-    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info),
-                  &count) == KERN_SUCCESS) {
-        return info.resident_size;
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
+        mem.rssBytes = info.resident_size;
     }
-    return 0;
-
 #else
-    // Linux: read /proc/self/status for VmRSS
+    // Linux: VmRSS / RssAnon / RssFile from /proc/self/status (O(1); no VMA walk)
     std::FILE* file = std::fopen("/proc/self/status", "r");
     if (!file) {
-        return 0;
+        return mem;
     }
-
-    std::uint64_t rssKb = 0;
-    char line[256];
-    while (std::fgets(line, sizeof(line), file)) {
-        if (std::strncmp(line, "VmRSS:", 6) == 0) {
-            unsigned long kb = 0;
-            if (std::sscanf(line + 6, " %lu", &kb) == 1) {
-                rssKb = kb;
-            }
-            break;
+    std::string text;
+    char buf[4096];
+    size_t n = 0;
+    while ((n = std::fread(buf, 1, sizeof(buf), file)) > 0) {
+        text.append(buf, n);
+        if (n < sizeof(buf)) {
+            break; // EOF or error; another read would be undefined for the stream
         }
     }
     std::fclose(file);
-    return rssKb * 1024;
+    mem = parseProcStatusMemory(text);
 #endif
+    return mem;
 }
 
 /// Read CPU usage percent for the current process using delta-based calculation.
@@ -241,6 +237,49 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
 // Singleton
 // ============================================================================
 
+ProcessMemory parseProcStatusMemory(std::string_view text) noexcept {
+    ProcessMemory mem;
+    auto value = [&](std::string_view key) -> std::uint64_t {
+        std::size_t pos = 0;
+        while (pos < text.size()) {
+            const std::size_t eol = text.find('\n', pos);
+            const std::string_view line = text.substr(
+                pos, eol == std::string_view::npos ? std::string_view::npos : eol - pos);
+            if (line.substr(0, key.size()) == key) {
+                std::uint64_t kb = 0;
+                bool digits = false;
+                for (char ch : line.substr(key.size())) {
+                    if (ch >= '0' && ch <= '9') {
+                        kb = kb * 10 + static_cast<std::uint64_t>(ch - '0');
+                        digits = true;
+                    } else if (digits) {
+                        break;
+                    }
+                }
+                return kb * 1024ull;
+            }
+            if (eol == std::string_view::npos) {
+                break;
+            }
+            pos = eol + 1;
+        }
+        return 0;
+    };
+    mem.rssBytes = value("VmRSS:");
+    mem.anonBytes = value("RssAnon:");
+    mem.fileBytes = value("RssFile:") + value("RssShmem:");
+    return mem;
+}
+
+double memoryPressureRatio(std::uint64_t rssBytes, std::uint64_t anonBytes,
+                           std::uint64_t budgetBytes) noexcept {
+    if (budgetBytes == 0) {
+        return 0.0;
+    }
+    const std::uint64_t used = anonBytes > 0 ? anonBytes : rssBytes;
+    return static_cast<double>(used) / static_cast<double>(budgetBytes);
+}
+
 ResourceGovernor& ResourceGovernor::instance() noexcept {
     static ResourceGovernor inst;
     return inst;
@@ -389,19 +428,21 @@ void ResourceGovernor::collectMetrics(ServiceManager* sm, ResourceSnapshot& snap
     constexpr auto kMinProcInterval = std::chrono::milliseconds(100);
 
     if (now - lastProcReadTime_ >= kMinProcInterval) {
-        cachedRssBytes_ = readRssBytes();
+        const auto mem = readProcessMemory();
+        cachedRssBytes_ = mem.rssBytes;
+        cachedAnonBytes_ = mem.anonBytes;
         cachedCpuPercent_ = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
         lastProcReadTime_ = now;
     }
 
     snap.rssBytes = cachedRssBytes_;
+    snap.anonBytes = cachedAnonBytes_;
     snap.memoryBudgetBytes = TuneAdvisor::memoryBudgetBytes();
     snap.cpuUsagePercent = cachedCpuPercent_;
 
-    if (snap.memoryBudgetBytes > 0) {
-        snap.memoryPressure =
-            static_cast<double>(snap.rssBytes) / static_cast<double>(snap.memoryBudgetBytes);
-    }
+    // Pressure is judged on anonymous memory: file-backed RSS is reclaimable page cache.
+    snap.memoryPressure =
+        memoryPressureRatio(snap.rssBytes, snap.anonBytes, snap.memoryBudgetBytes);
 
     // Compute scaling headroom (inverse of pressure, clamped 0-1)
     snap.scalingHeadroom = std::clamp(1.0 - snap.memoryPressure, 0.0, 1.0);
@@ -985,6 +1026,30 @@ std::uint32_t ResourceGovernor::recommendRetryAfterMs(
     return std::min<std::uint32_t>(retry, 5000u);
 }
 
+std::size_t ResourceGovernor::capEmbedJobDocuments(std::size_t requested) const noexcept {
+    if (requested == 0) {
+        return 0;
+    }
+    // Pressure already incorporates RSS relative to the daemon memory budget.
+    // Use raw pressure, not startup grace: sizing work must not enlarge a job
+    // while Emergency admission caps are still in force.
+    switch (currentLevel_.load(std::memory_order_acquire)) {
+        case ResourcePressureLevel::Normal:
+            return requested;
+        case ResourcePressureLevel::Warning: {
+            const auto percent =
+                std::min<std::size_t>(100, TuneAdvisor::governorWarningScalePercent());
+            // Ceiling division without overflowing for a maximum-sized request.
+            const auto scaled = requested / 100 * percent + (requested % 100 * percent + 99) / 100;
+            return std::min(requested, std::max<std::size_t>(1, scaled));
+        }
+        case ResourcePressureLevel::Critical:
+        case ResourcePressureLevel::Emergency:
+            return 1;
+    }
+    return 1;
+}
+
 std::uint64_t ResourceGovernor::recommendLexicalCorpusBytes() const noexcept {
     // The simeon lexical enhancement holds the entire corpus text in RAM during
     // its build. Allocate ~6.25% of the daemon's memory budget to it, with a
@@ -1000,20 +1065,75 @@ std::uint64_t ResourceGovernor::recommendLexicalCorpusBytes() const noexcept {
     std::uint64_t cap = budget / 16ULL;                                    // 6.25%
     cap = std::clamp<std::uint64_t>(cap, kFloor, kCeiling);
 
+    return scaleBudgetForPressure(cap, kFloor);
+}
+
+std::uint64_t ResourceGovernor::scaleBudgetForPressure(std::uint64_t cap,
+                                                       std::uint64_t floor) const noexcept {
     switch (getPressureLevel()) {
         case ResourcePressureLevel::Warning:
-            cap = std::max<std::uint64_t>(kFloor, cap * 3 / 4);
-            break;
+            return std::max<std::uint64_t>(floor, cap * 3 / 4);
         case ResourcePressureLevel::Critical:
-            cap = std::max<std::uint64_t>(kFloor, cap / 2);
-            break;
+            return std::max<std::uint64_t>(floor, cap / 2);
         case ResourcePressureLevel::Emergency:
-            cap = kFloor;
-            break;
+            return floor;
         case ResourcePressureLevel::Normal:
             break;
     }
     return cap;
+}
+
+std::uint64_t ResourceGovernor::recommendLexicalIndexBytes() const noexcept {
+    // Live heap for the BM25 indexes the lexical build holds. 6.25% of the
+    // daemon memory budget (peak RSS during the build runs up to 2x that),
+    // floor 256 MiB, ceiling 4 GiB. A corpus whose index would not fit stays
+    // on FTS5 only.
+    const std::uint64_t budget = TuneAdvisor::memoryBudgetBytes();
+    constexpr std::uint64_t kFloor = 256ULL * 1024ULL * 1024ULL;           // 256 MiB
+    constexpr std::uint64_t kCeiling = 4ULL * 1024ULL * 1024ULL * 1024ULL; // 4 GiB
+    if (budget == 0) {
+        return kFloor;
+    }
+    const std::uint64_t cap = std::clamp<std::uint64_t>(budget / 16ULL, kFloor, kCeiling);
+    return scaleBudgetForPressure(cap, kFloor);
+}
+
+ResourceGovernor::ExtractionBudget ResourceGovernor::recommendExtractionBudget() const noexcept {
+    constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
+    constexpr std::uint64_t kPoolFloor = 256 * kMiB;
+    constexpr std::uint64_t kPoolCeiling = 8ULL * 1024 * kMiB;
+    // Small enough that the floor rarely lifts the total past the pool:
+    // that happens only when workers * 8 MiB > pool (33+ workers on the
+    // 256 MiB minimum pool).
+    constexpr std::uint64_t kPerDocFloor = 8 * kMiB;
+    constexpr std::uint32_t kMaxThreadsPerDoc = 8;
+
+    const std::uint32_t workers =
+        std::max<std::uint32_t>(1, getScalingCaps().extractionConcurrency);
+    const std::uint32_t cores = std::max<std::uint32_t>(1, std::thread::hardware_concurrency());
+
+    ExtractionBudget out;
+    out.maxThreads = std::clamp<std::uint32_t>(cores / workers, 1, kMaxThreadsPerDoc);
+
+    const std::uint64_t budget = TuneAdvisor::memoryBudgetBytes();
+    const std::uint64_t pool =
+        budget == 0 ? kPoolFloor
+                    : std::clamp<std::uint64_t>(budget / 8ULL, kPoolFloor, kPoolCeiling);
+    out.maxDecompressedBytes =
+        scaleBudgetForPressure(std::max<std::uint64_t>(kPerDocFloor, pool / workers), kPerDocFloor);
+
+    switch (getPressureLevel()) {
+        case ResourcePressureLevel::Warning:
+            out.maxThreads = std::max<std::uint32_t>(1, out.maxThreads / 2);
+            break;
+        case ResourcePressureLevel::Critical:
+        case ResourcePressureLevel::Emergency:
+            out.maxThreads = 1;
+            break;
+        case ResourcePressureLevel::Normal:
+            break;
+    }
+    return out;
 }
 
 std::uint64_t ResourceGovernor::recommendVectorRebuildBudgetBytes() const noexcept {
@@ -1035,20 +1155,7 @@ std::uint64_t ResourceGovernor::recommendVectorRebuildBudgetBytes() const noexce
     std::uint64_t cap = budget / 8ULL;                                     // 12.5%
     cap = std::clamp<std::uint64_t>(cap, kFloor, kCeiling);
 
-    switch (getPressureLevel()) {
-        case ResourcePressureLevel::Warning:
-            cap = std::max<std::uint64_t>(kFloor, cap * 3 / 4);
-            break;
-        case ResourcePressureLevel::Critical:
-            cap = std::max<std::uint64_t>(kFloor, cap / 2);
-            break;
-        case ResourcePressureLevel::Emergency:
-            cap = kFloor;
-            break;
-        case ResourcePressureLevel::Normal:
-            break;
-    }
-    return cap;
+    return scaleBudgetForPressure(cap, kFloor);
 }
 
 std::uint32_t

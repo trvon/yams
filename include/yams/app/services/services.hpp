@@ -137,6 +137,11 @@ struct AppContext {
     // Optional: externally-provided content extractors (plugins)
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors;
 
+    // Local query log (`[search.query_log]`): how many recent queries SearchService keeps in
+    // the metadata store. Zero, the default for embedded and test contexts, records nothing;
+    // the daemon sets it from config.
+    std::size_t queryLogMaxEntries{0};
+
     // Degraded search / repair status (allows services to fallback during repairs)
     bool searchRepairInProgress{false};
     std::string searchRepairDetails{};
@@ -425,7 +430,8 @@ struct GrepMatch {
 struct GrepFileResult {
     std::string file;
     std::string fileName;
-    std::size_t matchCount{0};
+    std::size_t matchCount{0};   // matching occurrences; a line can hold several
+    std::size_t matchedLines{0}; // lines with at least one match (what `grep -c` reports)
     std::vector<GrepMatch> matches;
 
     // File metadata for LLM context
@@ -813,6 +819,9 @@ struct DeleteByNameRequest {
 
     // Optional durable-intent seam invoked for the exact resolved hash before destructive work.
     std::function<Result<void>(std::string_view)> beforeDelete;
+    // Retire one exact current name without CAS, corpus, or immutable-history deletion.
+    // Requires name only (not hash/names/pattern); keepRefs retains its separate legacy meaning.
+    bool pathOnly{false};
 };
 
 struct DeleteByNameResult {
@@ -822,6 +831,8 @@ struct DeleteByNameResult {
     bool contentRemoved{false};
     ErrorCode errorCode{ErrorCode::Success};
     std::optional<std::string> error{};
+    // A retired location is not a corpus-wide removal, even when content was retained.
+    bool pathOnly{false};
 };
 
 struct DeleteByNameResponse {
@@ -863,64 +874,6 @@ public:
     virtual Result<std::string> resolveNameToHash(const std::string& name, bool oldest = false) = 0;
     virtual Result<DeleteByNameResponse> deleteByName(const DeleteByNameRequest& req) = 0;
     virtual Result<DeleteByNameResponse> pruneVersions(const PruneVersionsRequest& req) = 0;
-};
-
-// ===========================
-// Restore Service
-// ===========================
-
-struct RestoreSummary {
-    std::size_t documentsFound{0};
-    std::size_t documentsRestored{0};
-    std::size_t documentsFailed{0};
-    std::size_t documentsSkipped{0};
-    bool dryRun{false};
-};
-
-struct RestoreItemResult {
-    std::string documentName;
-    std::string hash;
-    std::string outputPath;
-    std::string status; // "restored" | "failed" | "skipped" | "would_restore"
-    std::optional<std::string> error;
-    std::optional<std::uint64_t> size;
-};
-
-struct RestoreCommonOptions {
-    std::string outputDirectory{"."};
-    std::string layoutTemplate{"{path}"};
-    std::vector<std::string> includePatterns;
-    std::vector<std::string> excludePatterns;
-    bool overwrite{false};
-    bool createDirs{true};
-    bool dryRun{false};
-};
-
-struct RestoreCollectionRequest {
-    std::string collection;
-    RestoreCommonOptions options;
-};
-
-struct RestoreSnapshotRequest {
-    std::string snapshotId;    // Either snapshotId...
-    std::string snapshotLabel; // ...or label (exactly one required)
-    RestoreCommonOptions options;
-};
-
-struct RestoreResponse {
-    RestoreSummary summary;
-    std::string scope; // description string ("collection: X" / "snapshot ID: Y", etc.)
-    std::string outputDirectory;
-    std::string layoutTemplate;
-    std::vector<RestoreItemResult> results;
-};
-
-class IRestoreService {
-public:
-    virtual ~IRestoreService() = default;
-
-    virtual Result<RestoreResponse> restoreCollection(const RestoreCollectionRequest& req) = 0;
-    virtual Result<RestoreResponse> restoreSnapshot(const RestoreSnapshotRequest& req) = 0;
 };
 
 // ===========================
@@ -972,6 +925,11 @@ public:
 
 struct DownloadServiceOptions {
     std::uint64_t maxFileBytes{0}; // 0 = unlimited
+    // Root for the downloader's own object and staging directories
+    // (<storageRoot>/storage/{objects,staging}). Empty keeps the process-wide default:
+    // $YAMS_STORAGE, else ~/yams. Embedded hosts set this so downloads stay inside the
+    // directory they gave the context instead of the user's home.
+    std::filesystem::path storageRoot;
 };
 
 // ===========================
@@ -984,6 +942,12 @@ struct AddDirectoryRequest {
     std::vector<std::string> tags; // tags to apply to each stored document
     std::vector<std::string> includePatterns;
     std::vector<std::string> excludePatterns;
+    /// Exact files to index, relative to directoryPath. When set these are the only
+    /// candidates: the directory is not walked and include, exclude and .gitignore patterns
+    /// are not applied. For callers that already know which files changed. (A relative
+    /// path in includePatterns is a pattern: a bare name also matches every nested file of
+    /// that name, and one with a separator hides the bare names beside it.)
+    std::vector<std::string> explicitFiles;
     std::unordered_map<std::string, std::string> metadata;
     bool recursive{true};
     bool followSymlinks{false};
@@ -1033,31 +997,6 @@ public:
 };
 
 // ===========================
-// Embedding Service
-// ===========================
-
-struct EmbedDocumentsServiceRequest {
-    std::vector<std::string> documentHashes;
-    std::string modelName;
-    uint32_t batchSize{32};
-    bool skipExisting{true};
-};
-
-struct EmbedDocumentsServiceResponse {
-    uint64_t requested{0};
-    uint64_t embedded{0};
-    uint64_t skipped{0};
-    uint64_t failed{0};
-};
-
-class IEmbeddingService {
-public:
-    virtual ~IEmbeddingService() = default;
-    virtual boost::asio::awaitable<Result<EmbedDocumentsServiceResponse>>
-    embedDocuments(const EmbedDocumentsServiceRequest& req) = 0;
-};
-
-// ===========================
 // Stats Service
 // ===========================
 
@@ -1100,7 +1039,6 @@ void resetDocumentStorePhaseTimings();
 std::unordered_map<std::string, DocumentStorePhaseTiming> getDocumentStorePhaseTimingsSnapshot();
 
 std::shared_ptr<ISearchService> makeSearchService(const AppContext& ctx);
-std::shared_ptr<IEmbeddingService> makeEmbeddingService(const AppContext& ctx);
 std::shared_ptr<IGrepService> makeGrepService(const AppContext& ctx);
 std::shared_ptr<IDocumentService> makeDocumentService(const AppContext& ctx);
 std::shared_ptr<IDownloadService> makeDownloadService(const AppContext& ctx);

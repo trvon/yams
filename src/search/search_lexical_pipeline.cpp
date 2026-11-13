@@ -164,11 +164,13 @@ std::optional<yams::metadata::SearchResults> makeDirectSimeonLexicalResults(
         }
 
         yams::metadata::SearchResult row;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         row.document = *docResult.value();
         row.score = -static_cast<double>(candidate.score);
 
         auto contentResult = metadataRepo->getContent(candidate.document_id);
         if (contentResult && contentResult.value()) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             const auto& text = contentResult.value()->contentText;
             constexpr size_t kSnippetChars = 240;
             row.snippet = text.substr(0, std::min(kSnippetChars, text.size()));
@@ -231,51 +233,6 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
         appendSimeonLexicalBatch(query, session, lastSimeonRouteRecipe, queryIntent, config,
                                  fts5Results.value(), 1.0f, simeonSeenHashes, results,
                                  expansionStats);
-    }
-
-    if (config.enableLexicalExpansion && stats.baseFtsHitCount < config.lexicalExpansionMinHits) {
-        std::vector<std::string> tokens = tokenizeLower(query);
-        std::vector<std::string> expansionTerms;
-        expansionTerms.reserve(tokens.size());
-        std::unordered_set<std::string> uniqueTokens;
-        uniqueTokens.reserve(tokens.size());
-
-        for (const auto& token : tokens) {
-            if (token.size() < 3) {
-                continue;
-            }
-            if (uniqueTokens.insert(token).second) {
-                expansionTerms.push_back(token);
-            }
-            if (expansionTerms.size() >= 6) {
-                break;
-            }
-        }
-
-        if (expansionTerms.size() >= 2) {
-            std::string expandedQuery;
-            expandedQuery.reserve(expansionTerms.size() * 8);
-            for (size_t i = 0; i < expansionTerms.size(); ++i) {
-                if (i > 0) {
-                    expandedQuery += " OR ";
-                }
-                expandedQuery += expansionTerms[i];
-            }
-
-            auto expandedResults = metadataRepo->search(expandedQuery, static_cast<int>(limit), 0);
-            if (expandedResults) {
-                const float penalty = std::clamp(config.lexicalExpansionScorePenalty, 0.1f, 1.0f);
-                appendLexicalBatch(query, queryIntent, config, expandedResults.value(), penalty,
-                                   true, &seenHashes, ComponentResult::Source::Text, results,
-                                   expansionStats);
-                appendSimeonLexicalBatch(query, session, lastSimeonRouteRecipe, queryIntent, config,
-                                         expandedResults.value(), penalty, simeonSeenHashes,
-                                         results, expansionStats);
-                spdlog::debug("queryFullText lexical expansion: base_hits={} expanded_hits={} "
-                              "query='{}' expanded='{}'",
-                              stats.baseFtsHitCount, results.size(), query, expandedQuery);
-            }
-        }
     }
 
     if (config.enableSubPhraseExpansion &&

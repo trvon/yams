@@ -255,9 +255,9 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                 setVal(metrics::kTitleExtractorEnabled, titleExtractorReady ? 1 : 0);
                 setVal(metrics::kPluginSkippedCount, skippedPlugins);
 
+                // Entity and title extractors are optional plugins: their counts above say
+                // whether they are loaded, and a daemon without them is not waiting on them.
                 setReady(readiness::kContentExtractorsReady, contentExtractorCount > 0);
-                setReady(readiness::kEntityExtractorsReady, entityExtractorCount > 0);
-                setReady(readiness::kTitleExtractorReady, titleExtractorReady);
             } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
@@ -370,6 +370,7 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         setVal(metrics::kRepairBusyTicks, snap.repairBusyTicks);
         setVal(metrics::kRepairTotalBacklog, snap.repairTotalBacklog);
         setVal(metrics::kRepairProcessed, snap.repairProcessed);
+        setVal(metrics::kRepairPathTreeRepaired, snap.repairPathTreeRepaired);
         setVal(metrics::kRepairRunning, snap.repairRunning ? 1 : 0);
         setVal(metrics::kRepairInProgress, snap.repairInProgress ? 1 : 0);
         setVal(metrics::kRepairCurrentOperationCode, snap.repairCurrentOperationCode);
@@ -615,6 +616,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
     // Minimal and safe status path using centralized DaemonMetrics when available
     const auto requestStart = std::chrono::steady_clock::now();
     StatusResponse res;
+    res.supportsPathUnlink = true;
     const bool includeExtendedStatus = req.detailed;
     auto finalizeStatusResponse = [&]() -> Response {
         const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -674,7 +676,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 // Best effort; leave whatever the snapshot populated.
             }
         }
-        if (!metrics_) {
+        if (!metrics_ && state_) {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
             res.running = true;
             res.version = YAMS_VERSION_STRING;
@@ -692,7 +694,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
-        if (!metrics_) {
+        if (!metrics_ && state_) {
             // Align boolean readiness with lifecycle readiness in non-metrics path
             try {
                 auto lifecycleSnapshot =
@@ -803,10 +805,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
 
                     res.readinessStates[std::string(readiness::kContentExtractorsReady)] =
                         contentExtractorCount > 0;
-                    res.readinessStates[std::string(readiness::kEntityExtractorsReady)] =
-                        entityExtractorCount > 0;
-                    res.readinessStates[std::string(readiness::kTitleExtractorReady)] =
-                        titleExtractorReady;
                 }
             } catch (...) { // NOLINT(bugprone-empty-catch)
             }
@@ -975,6 +973,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
                     res.requestCounts[std::string(metrics::kRepairProcessed)] =
                         state_->stats.repairProcessed.load(std::memory_order_relaxed);
+                    res.requestCounts[std::string(metrics::kRepairPathTreeRepaired)] =
+                        state_->stats.repairPathTreeRepaired.load(std::memory_order_relaxed);
                     const auto opCode =
                         state_->stats.repairCurrentOperationCode.load(std::memory_order_relaxed);
                     res.requestCounts[std::string(metrics::kRepairCurrentOperationCode)] = opCode;

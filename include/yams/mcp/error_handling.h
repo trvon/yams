@@ -68,13 +68,6 @@ struct MCPError {
         : code(c), message(std::move(msg)), context(std::move(ctx)) {}
 
     std::error_code error_code() const { return make_error_code(code); }
-
-    std::string full_message() const {
-        if (context.empty()) {
-            return message;
-        }
-        return message + " (context: " + context + ")";
-    }
 };
 
 // Result types using yams::Result
@@ -156,17 +149,6 @@ auto or_else(const MCPResult<T>& result, F&& func) -> MCPResult<T> {
         return result;
     } else {
         return func(result.error());
-    }
-}
-
-// Transform error types
-template <typename T, typename F>
-auto transform_error(const MCPResult<T>& result, F&& func) -> MCPResult<T> {
-    if (result) {
-        return result;
-    } else {
-        auto newError = func(result.error());
-        return MCPResult<T>{newError};
     }
 }
 

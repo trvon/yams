@@ -1,10 +1,12 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <set>
 #include <sstream>
+#include <string>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_migration.h>
 
@@ -13,6 +15,20 @@ namespace yams::config {
 namespace fs = std::filesystem;
 
 namespace {
+
+// Thread-safe replacement for std::localtime + std::put_time.
+std::string formatLocalTime(std::time_t t, const char* format) {
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&tm, format);
+    return out.str();
+}
+
 constexpr int kLatestConfigVersion = 3;
 
 using ConfigMap = std::map<std::string, std::map<std::string, std::string>>;
@@ -172,7 +188,7 @@ Result<void> ConfigMigrator::migrateToLatest(const fs::path& configPath, bool cr
     auto now = std::chrono::system_clock::now();
     auto t = std::chrono::system_clock::to_time_t(now);
     std::stringstream ss;
-    ss << std::put_time(std::localtime(&t), "%Y-%m-%d");
+    ss << formatLocalTime(t, "%Y-%m-%d");
     mergedConfig["version"]["config_version"] = std::to_string(kLatestConfigVersion);
     mergedConfig["version"]["migration_date"] = ss.str();
     mergedConfig["version"]["migrated_from"] = std::to_string(sourceVersion);
@@ -294,7 +310,7 @@ ConfigMigrator::getLatestConfigDefaults() {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
     std::stringstream ss;
-    ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d");
+    ss << formatLocalTime(time_t, "%Y-%m-%d");
 
     return {{"version",
              {{"config_version", std::to_string(kLatestConfigVersion)},
@@ -663,26 +679,6 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"auto_classify_on_index", "true"},
               {"enable_search_time_classification", "false"}}},
 
-            {"search.hotzones",
-             {{"enable", "false"},
-              {"decay_factor", "0.95"},
-              {"min_frequency", "3"},
-              {"decay_interval_hours", "24"},
-              {"max_boost_factor", "2.0"},
-              {"enable_persistence", "true"},
-              {"data_file", "hotzones.db"},
-              {"decay_processing_interval_minutes", "60"},
-              {"enable_shared_hotzones", "false"}}},
-
-            {"search.enhanced",
-             {{"enable", "false"},
-              {"classification_weight", "0.15"},
-              {"kg_expansion_weight", "0.10"},
-              {"hotzone_weight", "0.05"},
-              {"enable_cross_domain", "true"},
-              {"max_expansion_concepts", "10"},
-              {"enable_concept_reranking", "true"},
-              {"enhanced_search_timeout_ms", "2000"}}},
             {"downloader",
              {{"default_concurrency", "4"},
               {"default_chunk_size_bytes", "8388608"},
@@ -777,7 +773,7 @@ Result<void> ConfigMigrator::writeTomlConfig(
     file << "# Generated on: ";
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
-    file << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << "\n\n";
+    file << formatLocalTime(time_t, "%Y-%m-%d %H:%M:%S") << "\n\n";
 
     // Write sections in a logical order
     std::vector<std::string> sectionOrder = {"version",
@@ -814,8 +810,6 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "cli.pool",
                                              "experimental",
                                              "classification",
-                                             "search.hotzones",
-                                             "search.enhanced",
                                              "repair",
                                              "migrations"};
 
@@ -829,15 +823,12 @@ Result<void> ConfigMigrator::writeTomlConfig(
                 // Handle special formatting for certain values
                 if (value.empty()) {
                     file << "# " << key << " = \"\"\n";
-                } else if (value[0] == '[') {
-                    // Array value
-                    file << key << " = " << value << "\n";
-                } else if (value == "true" || value == "false" ||
+                } else if (value[0] == '[' || value == "true" || value == "false" ||
                            std::ranges::all_of(value, ::isdigit) ||
                            (value.find('.') != std::string::npos &&
                             std::ranges::all_of(value,
                                                 [](char c) { return ::isdigit(c) || c == '.'; }))) {
-                    // Boolean or numeric value
+                    // Array, boolean or numeric value
                     file << key << " = " << value << "\n";
                 } else {
                     // String value
@@ -857,9 +848,7 @@ Result<void> ConfigMigrator::writeTomlConfig(
         for (const auto& [key, value] : kv) {
             if (value.empty()) {
                 file << "# " << key << " = \"\"\n";
-            } else if (!value.empty() && value[0] == '[') {
-                file << key << " = " << value << "\n";
-            } else if (value == "true" || value == "false" ||
+            } else if (value[0] == '[' || value == "true" || value == "false" ||
                        std::ranges::all_of(value, ::isdigit) ||
                        (value.find('.') != std::string::npos &&
                         std::all_of(value.begin(), value.end(),
@@ -881,7 +870,7 @@ Result<fs::path> ConfigMigrator::createBackup(const fs::path& configPath) {
 
     std::stringstream ss;
     ss << configPath.stem().string() << ".backup.";
-    ss << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S");
+    ss << formatLocalTime(time_t, "%Y%m%d_%H%M%S");
     ss << configPath.extension().string();
 
     fs::path backupPath = configPath.parent_path() / ss.str();
@@ -1081,7 +1070,7 @@ ConfigMigrator::updateLatestSchemaAdditive(const fs::path& configPath, bool make
     auto now = std::chrono::system_clock::now();
     auto t = std::chrono::system_clock::to_time_t(now);
     std::stringstream ss;
-    ss << std::put_time(std::localtime(&t), "%Y-%m-%d");
+    ss << formatLocalTime(t, "%Y-%m-%d");
     std::string migratedFrom = config["version"]["config_version"];
     if (migratedFrom.empty()) {
         migratedFrom = std::to_string(kLatestConfigVersion);

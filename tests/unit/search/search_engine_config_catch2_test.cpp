@@ -122,7 +122,6 @@ TEST_CASE("componentSourceToString covers all sources", "[search][config][catch2
     CHECK(std::string(componentSourceToString(S::EntityVector)) == "entity_vector");
     CHECK(std::string(componentSourceToString(S::Tag)) == "tag");
     CHECK(std::string(componentSourceToString(S::Metadata)) == "metadata");
-    CHECK(std::string(componentSourceToString(S::Symbol)) == "symbol");
     CHECK(std::string(componentSourceToString(S::Unknown)) == "unknown");
 }
 
@@ -157,8 +156,6 @@ TEST_CASE("componentSourceWeight matches config fields", "[search][config][catch
     CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::Tag) == Approx(0.02f));
     CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::Metadata) ==
           Approx(0.03f));
-    CHECK(yams::search::componentSourceWeight(cfg, ComponentResult::Source::Symbol) ==
-          Approx(0.0f));
 }
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -175,7 +172,6 @@ TEST_CASE("isVectorComponent is true for Vector and EntityVector", "[search][con
     CHECK(isVectorComponent(S::KnowledgeGraph) == false);
     CHECK(isVectorComponent(S::Tag) == false);
     CHECK(isVectorComponent(S::Metadata) == false);
-    CHECK(isVectorComponent(S::Symbol) == false);
     CHECK(isVectorComponent(S::Unknown) == false);
 }
 
@@ -188,7 +184,6 @@ TEST_CASE("isTextAnchoringComponent identifies non-vector components", "[search]
     CHECK(isTextAnchoringComponent(S::KnowledgeGraph) == true);
     CHECK(isTextAnchoringComponent(S::Tag) == true);
     CHECK(isTextAnchoringComponent(S::Metadata) == true);
-    CHECK(isTextAnchoringComponent(S::Symbol) == true);
 
     CHECK(isTextAnchoringComponent(S::Vector) == false);
     CHECK(isTextAnchoringComponent(S::EntityVector) == false);
@@ -249,13 +244,6 @@ TEST_CASE("accumulateComponentScore routes Metadata to tagScore", "[search][conf
     CHECK(r.tagScore.value() == Approx(0.1));
 }
 
-TEST_CASE("accumulateComponentScore routes Symbol to symbolScore", "[search][config][catch2]") {
-    SearchResult r;
-    accumulateComponentScore(r, ComponentResult::Source::Symbol, 0.25);
-    REQUIRE(r.symbolScore.has_value());
-    CHECK(r.symbolScore.value() == Approx(0.25));
-}
-
 TEST_CASE("accumulateComponentScore accumulates multiple calls", "[search][config][catch2]") {
     SearchResult r;
     accumulateComponentScore(r, ComponentResult::Source::Vector, 0.3);
@@ -272,7 +260,6 @@ TEST_CASE("accumulateComponentScore Unknown source is no-op", "[search][config][
     CHECK(!r.kgScore.has_value());
     CHECK(!r.pathScore.has_value());
     CHECK(!r.tagScore.has_value());
-    CHECK(!r.symbolScore.has_value());
 }
 
 // ────────────────────────────────────────────────────────────────────────────────

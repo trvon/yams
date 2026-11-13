@@ -99,6 +99,21 @@ TEST_CASE("QueryHelpersIntegration: query documents by pattern basic",
         CHECK((r1.value().size() == 3));
     }
 
+    SECTION("Basename pattern ignores parent-directory matches before pagination") {
+        DocumentQueryOptions query;
+        query.fileNamePattern = "%notes%";
+        auto parentOnly = repo.queryDocumentsForListProjection(query);
+        REQUIRE(parentOnly);
+        CHECK(parentOnly.value().empty());
+        query.fileNamePattern = "%todo%";
+        query.orderByNameAsc = true;
+        query.limit = 1;
+        auto names = repo.queryDocumentsForListProjection(query);
+        REQUIRE(names);
+        REQUIRE(names.value().size() == 1);
+        CHECK(names.value().front().fileName == "todo.md");
+    }
+
     SECTION("Pattern: directory prefix limit") {
         auto limited = queryDocumentsByPattern(repo, "/notes/%", 2);
         REQUIRE((limited.has_value()));

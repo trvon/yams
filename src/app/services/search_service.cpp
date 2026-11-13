@@ -4,7 +4,6 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <yams/app/services/enhanced_search_executor.h>
 #include <yams/app/services/extract_scope.h>
 #include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/retrieval_path_policy.hpp>
@@ -57,6 +56,10 @@
 namespace yams::app::services {
 
 namespace {
+
+// Documents whose text matched the query terms. Scores are normalised to the top hit, so this
+// is how a caller tells a real match from a best-of-nothing result list.
+constexpr const char* kLexicalHitsStat = "lexical_hits";
 
 std::unordered_set<std::string> buildRecentLexicalDeltaSet(const AppContext& ctx) {
     std::unordered_set<std::string> recent;
@@ -570,18 +573,6 @@ public:
         if (!ctx_.searchRepairDetails.empty()) {
             repairDetails_ = ctx_.searchRepairDetails;
         }
-
-        // Enhanced search config (best-effort; off by default). Keep lightweight and safe.
-        try {
-            enhancedCfg_ = EnhancedSearchExecutor::loadConfigFromToml();
-            if (enhancedCfg_.enable) {
-                hotzones_ = std::make_shared<yams::search::HotzoneManager>(enhancedCfg_.hotzones);
-                enhanced_.setHotzoneManager(hotzones_);
-            }
-        } catch (...) {
-            // Ignore config errors; keep enhancements disabled.
-            enhancedCfg_ = {};
-        }
     }
 
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) override {
@@ -624,6 +615,7 @@ public:
 
         auto searchExecutionContext =
             buildSearchExecutionContext(ctx_, normalizedReq, normalizedReq.query);
+        // Only trivially copyable fields (counters, flags, freshness) are read after this move.
         search::SearchExecutionContextGuard searchExecutionContextGuard(
             std::move(searchExecutionContext));
         (void)searchExecutionContextGuard;
@@ -851,9 +843,6 @@ public:
         if (result && !normalizedReq.pathsOnly) {
             auto resp = std::move(result).value();
             const bool metadataOnlyResult = resp.type == "metadata";
-            if (enhancedCfg_.enable && !metadataOnlyResult) {
-                enhanced_.apply(ctx_, enhancedCfg_, normalizedReq.query, resp.results);
-            }
             if (!metadataOnlyResult) {
                 co_await hydrateSnippetsAsync_worker(normalizedReq, resp, &metadataTelemetry);
             }
@@ -883,6 +872,7 @@ public:
             auto resp = std::move(result).value();
             const bool metadataOnlyResult = resp.type == "metadata";
             resp.searchStats["search_active_requests"] =
+                // NOLINTNEXTLINE(bugprone-use-after-move): see the guard above
                 std::to_string(searchExecutionContext.activeRequests);
             resp.searchStats["search_queued_requests"] =
                 std::to_string(searchExecutionContext.queuedRequests);
@@ -970,7 +960,33 @@ public:
             result = Result<SearchResponse>(std::move(resp));
         }
 
+        if (result) {
+            recordQuery(req, type, result.value());
+        }
         co_return result;
+    }
+
+    // Local query log. Only queries that state an information need are kept: hash lookups and
+    // empty queries are skipped, and so is anything too long to be a query.
+    void recordQuery(const SearchRequest& req, const std::string& effectiveType,
+                     const SearchResponse& resp) const {
+        constexpr std::size_t kMaxLoggedQueryBytes = 4096;
+        if (ctx_.queryLogMaxEntries == 0 || !ctx_.metadataRepo || req.query.empty() ||
+            req.query.size() > kMaxLoggedQueryBytes || !req.hash.empty() ||
+            effectiveType == "hash") {
+            return;
+        }
+        metadata::SearchHistoryEntry entry;
+        entry.query = req.query;
+        entry.queryTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        // A paths-only response moves its hits out of `results` and reports them in `total`.
+        entry.resultsCount = static_cast<int64_t>(std::max(resp.results.size(), resp.total));
+        entry.executionTimeMs = resp.executionTimeMs;
+        if (auto recorded = ctx_.metadataRepo->recordSearchQuery(entry, ctx_.queryLogMaxEntries);
+            !recorded) {
+            spdlog::debug("SearchService: query log write dropped: {}", recorded.error().message);
+        }
     }
 
     boost::asio::awaitable<Result<void>> lightIndexForHash_impl(const std::string& hash,
@@ -987,6 +1003,7 @@ public:
             if (!di.value().has_value()) {
                 co_return Error{ErrorCode::NotFound, "document not found by hash"};
             }
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             auto info = *di.value();
 
             // If already extracted, nothing to do
@@ -1115,9 +1132,6 @@ private:
     AppContext ctx_;
     bool degraded_{false};
     std::string repairDetails_;
-    EnhancedConfig enhancedCfg_{}; // off by default
-    EnhancedSearchExecutor enhanced_;
-    std::shared_ptr<yams::search::HotzoneManager> hotzones_;
 
     std::string resolveSearchType(const SearchRequest& req,
                                   search::QueryRetrievalMode retrievalMode,
@@ -1989,6 +2003,7 @@ private:
 
             for (size_t i = 0; i < n; ++i) {
                 if (slots[i].has_value()) {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                     resp.results.push_back(std::move(*slots[i]));
                 }
             }
@@ -2352,6 +2367,8 @@ private:
             resp.type = "fuzzy";
             resp.executionTimeMs = res.executionTimeMs;
             resp.usedHybrid = false;
+            // Fuzzy matches are near-misses, not documents containing the query terms.
+            resp.searchStats[kLexicalHitsStat] = "0";
 
             if (searchReq.pathsOnly) {
                 path_projection::assignPathsOnly(
@@ -2384,6 +2401,7 @@ private:
                 resp.total = 0;
                 resp.type = "full-text";
                 resp.usedHybrid = false;
+                resp.searchStats[kLexicalHitsStat] = "0";
                 return resp;
             }
 
@@ -2418,6 +2436,7 @@ private:
                     resp.type = "full-text+overlay";
                     resp.usedHybrid = false;
                     resp.results = std::move(overlayResults);
+                    resp.searchStats[kLexicalHitsStat] = std::to_string(resp.results.size());
                     annotateRecentLexicalDeltaHits(resp, recentLexicalDeltaHashes);
                     if (!searchReq.pathsOnly) {
                         applyExtensionFacets(resp);
@@ -2434,6 +2453,7 @@ private:
             resp.type = "full-text";
             resp.executionTimeMs = res.executionTimeMs;
             resp.usedHybrid = false;
+            resp.searchStats[kLexicalHitsStat] = std::to_string(res.totalCount);
 
             if (searchReq.pathsOnly) {
                 path_projection::assignPathsOnly(
@@ -2452,9 +2472,11 @@ private:
                         seenHashes.insert(item.hash);
                     }
                 }
+                std::size_t overlayAdded = 0;
                 for (auto& item : overlayResults) {
                     if (!item.hash.empty() && seenHashes.insert(item.hash).second) {
                         resp.results.push_back(std::move(item));
+                        ++overlayAdded;
                     }
                 }
                 std::sort(resp.results.begin(), resp.results.end(),
@@ -2468,6 +2490,8 @@ private:
                     resp.results.resize(searchReq.limit);
                 }
                 resp.total = resp.results.size();
+                // Count every full-text match, not the limited page, plus overlay-only matches.
+                resp.searchStats[kLexicalHitsStat] = std::to_string(res.totalCount + overlayAdded);
                 resp.searchStats["lexical_overlay_candidates_added"] =
                     std::to_string(overlayResults.size());
             }

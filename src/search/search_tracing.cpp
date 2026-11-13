@@ -719,7 +719,6 @@ nlohmann::json buildFusionTopSummaryJson(const std::vector<SearchResult>& result
             {"kg_score", res.kgScore.value_or(0.0)},
             {"path_score", res.pathScore.value_or(0.0)},
             {"tag_score", res.tagScore.value_or(0.0)},
-            {"symbol_score", res.symbolScore.value_or(0.0)},
         });
     }
     return out;
@@ -812,6 +811,7 @@ nlohmann::json buildGraphDocProbeJson(const std::shared_ptr<metadata::KnowledgeG
             if (!nodeRes || !nodeRes.value().has_value()) {
                 continue;
             }
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             const auto& node = *nodeRes.value();
             nodeLabelSamples.push_back({
                 {"node_id", nodeIdVal},

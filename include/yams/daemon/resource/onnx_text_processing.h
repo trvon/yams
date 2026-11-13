@@ -36,13 +36,9 @@ public:
 
     std::string normalizeText(const std::string& text);
     std::vector<int32_t> tokenize(const std::string& text);
-    std::vector<std::vector<int32_t>> tokenizeBatch(const std::vector<std::string>& texts);
     std::vector<int32_t> truncateTokens(const std::vector<int32_t>& tokens, size_t max_length);
     std::vector<int32_t> padTokens(const std::vector<int32_t>& tokens, size_t target_length);
     std::vector<int32_t> generateAttentionMask(const std::vector<int32_t>& tokens);
-    size_t getVocabSize() const;
-    bool isValidToken(int32_t token_id) const;
-    std::string decodeToken(int32_t token_id) const;
 
 private:
     void initializeBasicVocab();

@@ -563,6 +563,40 @@ batch_size = 8
     CHECK((*resolved.runtime.batchSize == 8));
 }
 
+TEST_CASE("ConfigResolver enables the model provider and plugin loading unless told otherwise",
+          "[daemon][components][config][embeddings][catch2]") {
+    using Sections = ConfigResolver::ConfigSections;
+    const auto resolve = [](const Sections& sections, bool noPluginsFlag = false) {
+        DaemonConfig config;
+        ConfigResolver::applyEmbeddingProviderPolicy(sections, noPluginsFlag, config);
+        return std::pair{config.enableModelProvider, config.autoLoadPlugins};
+    };
+
+    SECTION("no config, or a [daemon] section that omits the keys, gets embeddings") {
+        CHECK((resolve({}) == std::pair{true, true}));
+        CHECK((resolve({{"daemon", {{"socket_path", "/tmp/x.sock"}}},
+                        {"embeddings", {{"backend", "simeon"}, {"enable", "true"}}}}) ==
+               std::pair{true, true}));
+    }
+    SECTION("explicit keys win over the defaults") {
+        CHECK((resolve({{"daemon", {{"enable", "false"}}}}) == std::pair{false, true}));
+        CHECK((resolve({{"daemon", {{"auto_load_plugins", "false"}}}}) == std::pair{true, false}));
+        CHECK((resolve({{"daemon", {{"enable", "true"}, {"auto_load_plugins", "true"}}}}) ==
+               std::pair{true, true}));
+    }
+    SECTION("an unparseable value keeps the default") {
+        CHECK((resolve({{"daemon", {{"auto_load_plugins", "maybe"}}}}) == std::pair{true, true}));
+    }
+    SECTION("[embeddings] enable = false turns both off") {
+        CHECK((resolve({{"daemon", {{"enable", "true"}, {"auto_load_plugins", "true"}}},
+                        {"embeddings", {{"enable", "false"}}}}) == std::pair{false, false}));
+    }
+    SECTION("--no-plugins beats the config but keeps in-process providers") {
+        CHECK((resolve({{"daemon", {{"auto_load_plugins", "true"}}}}, true) ==
+               std::pair{true, false}));
+    }
+}
+
 TEST_CASE("ConfigResolver applies typed search maintenance policy with provenance",
           "[daemon][components][config][search][catch2]") {
     ConfigResolver::ConfigSections sections;
@@ -632,6 +666,51 @@ TEST_CASE("ConfigResolver applies typed daemon maintenance policy",
     sections["daemon.maintenance"] = {{"session_expiry_days", "soon"}};
     ConfigResolver::applyDaemonMaintenance(sections, config);
     CHECK(config.maintenance.sessionExpiry == std::chrono::days{7});
+}
+
+TEST_CASE("ConfigResolver applies the path-tree repair maintenance keys",
+          "[daemon][components][config][maintenance][catch2]") {
+    DaemonConfig defaults;
+    CHECK(defaults.maintenance.pathTreeRepairInterval == std::chrono::hours{24});
+    CHECK(defaults.maintenance.pathTreeRepairBatch == 256);
+
+    ConfigResolver::ConfigSections sections;
+    sections["daemon.maintenance"] = {{"path_tree_repair_interval_hours", "6"},
+                                      {"path_tree_repair_batch", "1000"}};
+    DaemonConfig config;
+    ConfigResolver::applyDaemonMaintenance(sections, config);
+    CHECK(config.maintenance.pathTreeRepairInterval == std::chrono::hours{6});
+    CHECK(config.maintenance.pathTreeRepairBatch == 1000);
+
+    SECTION("an interval of 0 disables the pass") {
+        sections["daemon.maintenance"] = {{"path_tree_repair_interval_hours", "0"}};
+        ConfigResolver::applyDaemonMaintenance(sections, config);
+        CHECK(config.maintenance.pathTreeRepairInterval.count() == 0);
+    }
+    SECTION("an interval beyond a year is clamped to a year") {
+        sections["daemon.maintenance"] = {{"path_tree_repair_interval_hours", "4000000000"}};
+        ConfigResolver::applyDaemonMaintenance(sections, config);
+        CHECK(config.maintenance.pathTreeRepairInterval == std::chrono::hours{24 * 365});
+        sections["daemon.maintenance"] = {{"path_tree_repair_interval_hours", "8760"}};
+        ConfigResolver::applyDaemonMaintenance(sections, config);
+        CHECK(config.maintenance.pathTreeRepairInterval == std::chrono::hours{8760});
+    }
+    SECTION("an invalid interval keeps the previous value") {
+        sections["daemon.maintenance"] = {{"path_tree_repair_interval_hours", "-1"}};
+        ConfigResolver::applyDaemonMaintenance(sections, config);
+        CHECK(config.maintenance.pathTreeRepairInterval == std::chrono::hours{6});
+    }
+    SECTION("out-of-range or malformed batch sizes keep the previous value") {
+        for (const char* bad : {"0", "10001", "-5", "lots"}) {
+            INFO(bad);
+            sections["daemon.maintenance"] = {{"path_tree_repair_batch", bad}};
+            ConfigResolver::applyDaemonMaintenance(sections, config);
+            CHECK(config.maintenance.pathTreeRepairBatch == 1000);
+        }
+        sections["daemon.maintenance"] = {{"path_tree_repair_batch", "10000"}};
+        ConfigResolver::applyDaemonMaintenance(sections, config);
+        CHECK(config.maintenance.pathTreeRepairBatch == 10000);
+    }
 }
 
 TEST_CASE("ConfigResolver disk pressure policy rejects unsafe values",
@@ -1126,8 +1205,17 @@ preferred_model = "simeon-default"
     CHECK_FALSE(resolved.warnings.empty());
 }
 
-TEST_CASE("EmbeddingGenerator preserves a resolved backend against ambient changes",
-          "[daemon][components][config][embeddings][snapshot][catch2]") {
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "EmbeddingGenerator preserves a resolved backend against ambient changes",
+                 "[daemon][components][config][embeddings][snapshot][catch2]") {
+    const auto configPath = writeToml("configurable-simeon.toml",
+                                      "[embeddings.simeon]\nencoder_profile = \"configurable\"\n");
+    EnvGuard configEnvironment{"YAMS_CONFIG", configPath.string()};
+    EnvGuard compatibilityConfigEnvironment{"YAMS_CONFIG_PATH", std::nullopt};
+    auto encoderEnvironment = unsetEnvironment({"YAMS_SIMEON_NGRAM_MODE", "YAMS_SIMEON_NGRAM_MIN",
+                                                "YAMS_SIMEON_NGRAM_MAX", "YAMS_SIMEON_SKETCH_DIM",
+                                                "YAMS_SIMEON_OUTPUT_DIM", "YAMS_SIMEON_PROJECTION",
+                                                "YAMS_SIMEON_PQ_BYTES"});
     EnvGuard backendEnvironment{"YAMS_EMBED_BACKEND", "daemon"};
 
     yams::vector::EmbeddingConfig config;
@@ -1311,6 +1399,74 @@ road_order = "alphabetical"
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
         auto policy = ConfigResolver::resolveTopologyEnginePolicy();
         CHECK_FALSE(policy.roadOrder.has_value());
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyEnginePolicy reads the route fit block",
+                 "[daemon][components][config][topology][route_fit][catch2]") {
+    SECTION("absent: every field unset, so the fit stays off") {
+        auto configPath = writeToml("config.toml", "[topology]\nengine = \"connected\"\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        CHECK_FALSE(policy.routeFitEnabled.has_value());
+        CHECK_FALSE(policy.routeFitMaxLoggedQueries.has_value());
+        CHECK_FALSE(policy.routeFitMaxGeneratedQueries.has_value());
+    }
+    SECTION("present") {
+        auto configPath = writeToml("config.toml", R"TOML(
+[topology.route_fit]
+enabled = true
+max_logged_queries = 500
+max_generated_queries = 0
+)TOML");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+        REQUIRE(policy.routeFitEnabled.has_value());
+        CHECK(*policy.routeFitEnabled);
+        REQUIRE(policy.routeFitMaxLoggedQueries.has_value());
+        CHECK(*policy.routeFitMaxLoggedQueries == 500u);
+        REQUIRE(policy.routeFitMaxGeneratedQueries.has_value());
+        CHECK(*policy.routeFitMaxGeneratedQueries == 0u);
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveQueryLogPolicy defaults on and reads the TOML block",
+                 "[daemon][components][config][query_log][catch2]") {
+    SECTION("no query_log block keeps the log on with the default cap") {
+        auto configPath = writeToml("config.toml", "[search]\nautomatic_rebuilds = true\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveQueryLogPolicy();
+        CHECK(policy.enabled);
+        CHECK(policy.maxEntries == 20000u);
+        CHECK(policy.effectiveMaxEntries() == 20000u);
+    }
+    SECTION("disabled records nothing whatever the cap") {
+        auto configPath =
+            writeToml("config.toml", "[search.query_log]\nenabled = false\nmax_entries = 50\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveQueryLogPolicy();
+        CHECK_FALSE(policy.enabled);
+        CHECK(policy.maxEntries == 50u);
+        CHECK(policy.effectiveMaxEntries() == 0u);
+    }
+    SECTION("a negative, partly numeric or oversized cap keeps the default") {
+        for (const char* value : {"-1", "20000junk", "99999999999999999999", "10000001"}) {
+            auto configPath = writeToml(
+                "config.toml", std::string("[search.query_log]\nmax_entries = ") + value + "\n");
+            EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+            const auto policy = ConfigResolver::resolveQueryLogPolicy();
+            INFO("max_entries = " << value);
+            CHECK(policy.maxEntries == 20000u);
+        }
+    }
+    SECTION("a cap that is not a number keeps the default") {
+        auto configPath = writeToml("config.toml", "[search.query_log]\nmax_entries = many\n");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+        const auto policy = ConfigResolver::resolveQueryLogPolicy();
+        CHECK(policy.enabled);
+        CHECK(policy.maxEntries == 20000u);
     }
 }
 
@@ -2076,6 +2232,7 @@ TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][m
           {"max_cache_bytes", "8192"},
           {"max_tracked_identities", "31"},
           {"max_scan_bytes", "16384"},
+          {"max_scan_bytes_ceiling", "65536"},
           {"mode", "temporary"},
           {"session_id", "run-123"},
           {"writer_auth_required", "true"},
@@ -2099,6 +2256,7 @@ TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][m
     CHECK(config.memorySync.limits.maxCacheBytes == 8192);
     CHECK(config.memorySync.limits.maxTrackedIdentities == 31);
     CHECK(config.memorySync.limits.maxScanBytes == 16384);
+    CHECK(config.memorySync.limits.maxScanBytesCeiling == 65536);
     CHECK(config.memorySync.mode == "temporary");
     CHECK(config.memorySync.sessionId == "run-123");
     CHECK(config.memorySync.writerAuthRequired);
@@ -2107,14 +2265,16 @@ TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][m
 
 TEST_CASE("ConfigResolver rejects invalid complete-sweep byte budgets",
           "[daemon][config][memory-sync][scan-safety]") {
-    for (const auto* value : {"0", "-1", "1.5", "184467440737095516160"}) {
-        CAPTURE(value);
-        ConfigResolver::ConfigSections sections = {
-            {"memory_sync", {{"enabled", "false"}, {"max_scan_bytes", value}}},
-        };
-        DaemonConfig config;
-        CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
-        CHECK_FALSE(config.memorySync.enabled);
+    for (const auto* key : {"max_scan_bytes", "max_scan_bytes_ceiling"}) {
+        for (const auto* value : {"0", "-1", "1.5", "184467440737095516160"}) {
+            CAPTURE(key, value);
+            ConfigResolver::ConfigSections sections = {
+                {"memory_sync", {{"enabled", "false"}, {key, value}}},
+            };
+            DaemonConfig config;
+            CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+            CHECK_FALSE(config.memorySync.enabled);
+        }
     }
 }
 

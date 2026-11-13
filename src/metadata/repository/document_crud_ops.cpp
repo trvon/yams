@@ -14,11 +14,13 @@
 #include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/profiling.h>
 
 #include "corpus_stats_ops.hpp"
 #include "metadata_write_helpers.hpp"
+#include "path_tree_write.hpp"
 #include "result_helpers.hpp"
 #include "transaction_helpers.hpp"
 
@@ -32,6 +34,7 @@ using repository::ExtensionBucket;
 using repository::MetadataTagDelta;
 using repository::rollbackIgnoringErrors;
 using repository::scope_exit;
+using repository::upsertPathTreeForDocumentInTransaction;
 
 namespace {
 
@@ -326,9 +329,24 @@ Result<bool> hasOtherDocumentAtPath(Database& db, std::string_view filePath, int
     return stmt.step();
 }
 
-Result<MetadataTagDelta> applyDocumentMetadataWrites(
-    Database& db, const std::vector<repository::MetadataWriteEntry>& dedupedWrites, int64_t docId) {
+Result<MetadataTagDelta>
+applyDocumentMetadataWrites(Database& db,
+                            const std::vector<repository::MetadataWriteEntry>& dedupedWrites,
+                            int64_t docId, const std::string& path) {
     if (dedupedWrites.empty()) {
+        return MetadataTagDelta{};
+    }
+    YAMS_TRY_UNWRAP(canonical, db.prepareCached("SELECT file_path FROM documents WHERE id = ?"));
+    YAMS_TRY(canonical->reset());
+    YAMS_TRY(canonical->clearBindings());
+    YAMS_TRY(canonical->bind(1, docId));
+    YAMS_TRY_UNWRAP(found, canonical->step());
+    if (!found)
+        return Error{ErrorCode::NotFound, "Content row disappeared before metadata writes"};
+    if (computePathDerivedValues(canonical->getString(0)).normalizedPath !=
+        computePathDerivedValues(path).normalizedPath) {
+        // Reusing CAS bytes must not overwrite another location's metadata.
+        // Keep dedupedWrites intact for immutable snapshot membership recording.
         return MetadataTagDelta{};
     }
     auto writesForDoc = dedupedWrites;
@@ -338,113 +356,6 @@ Result<MetadataTagDelta> applyDocumentMetadataWrites(
         writeDocId = docId;
     }
     return repository::upsertMetadataWritesWithTagDelta(db, writesForDoc);
-}
-
-std::vector<std::string> splitPathTreeSegments(std::string_view normalizedPath) {
-    std::vector<std::string> segments;
-    std::string segment;
-    for (const char ch : normalizedPath) {
-        if (ch == '/') {
-            if (!segment.empty()) {
-                segments.push_back(segment);
-                segment.clear();
-            }
-        } else {
-            segment.push_back(ch);
-        }
-    }
-    if (!segment.empty()) {
-        segments.push_back(segment);
-    }
-    return segments;
-}
-
-Result<void> bindPathTreeParentId(Statement& stmt, int index, int64_t parentId) {
-    if (parentId == PathTreeNode::kNullParent) {
-        return stmt.bind(index, nullptr);
-    }
-    return stmt.bind(index, parentId);
-}
-
-Result<void> upsertPathTreeForDocumentInTransaction(Database& db, const DocumentInfo& info,
-                                                    int64_t documentId) {
-    if (info.filePath.empty()) {
-        return Result<void>();
-    }
-
-    const auto segments = splitPathTreeSegments(info.filePath);
-    if (segments.empty()) {
-        return Result<void>();
-    }
-
-    YAMS_TRY_UNWRAP(findStmtHolder, db.prepareCached("SELECT node_id FROM path_tree_nodes "
-                                                     "WHERE parent_id IS ? AND path_segment = ?"));
-    auto& findStmt = *findStmtHolder;
-    YAMS_TRY_UNWRAP(insertStmtHolder,
-                    db.prepareCached("INSERT OR IGNORE INTO path_tree_nodes "
-                                     "(parent_id, path_segment, full_path) VALUES (?, ?, ?)"));
-    auto& insertStmt = *insertStmtHolder;
-    YAMS_TRY_UNWRAP(selectStmtHolder,
-                    db.prepareCached("SELECT node_id FROM path_tree_nodes WHERE full_path = ?"));
-    auto& selectStmt = *selectStmtHolder;
-    YAMS_TRY_UNWRAP(assocStmtHolder,
-                    db.prepareCached("INSERT OR IGNORE INTO path_tree_node_documents "
-                                     "(node_id, document_id) VALUES (?, ?)"));
-    auto& assocStmt = *assocStmtHolder;
-    YAMS_TRY_UNWRAP(docCountStmtHolder,
-                    db.prepareCached("UPDATE path_tree_nodes "
-                                     "SET doc_count = doc_count + 1, last_updated = unixepoch() "
-                                     "WHERE node_id = ?"));
-    auto& docCountStmt = *docCountStmtHolder;
-
-    int64_t parentNodeId = PathTreeNode::kNullParent;
-    std::string currentPath =
-        !info.filePath.empty() && info.filePath.front() == '/' ? std::string("/") : std::string{};
-
-    for (const auto& part : segments) {
-        if (!currentPath.empty() && currentPath.back() != '/') {
-            currentPath.push_back('/');
-        }
-        currentPath += part;
-
-        YAMS_TRY(findStmt.reset());
-        YAMS_TRY(bindPathTreeParentId(findStmt, 1, parentNodeId));
-        YAMS_TRY(findStmt.bind(2, part));
-        YAMS_TRY_UNWRAP(foundNode, findStmt.step());
-
-        int64_t nodeId = 0;
-        if (foundNode) {
-            nodeId = findStmt.getInt64(0);
-        } else {
-            YAMS_TRY(insertStmt.reset());
-            YAMS_TRY(bindPathTreeParentId(insertStmt, 1, parentNodeId));
-            YAMS_TRY(insertStmt.bind(2, part));
-            YAMS_TRY(insertStmt.bind(3, currentPath));
-            YAMS_TRY(insertStmt.execute());
-
-            YAMS_TRY(selectStmt.reset());
-            YAMS_TRY(selectStmt.bind(1, currentPath));
-            YAMS_TRY_UNWRAP(selectedNode, selectStmt.step());
-            if (!selectedNode) {
-                return Error{ErrorCode::Unknown, "Failed to fetch inserted path tree node"};
-            }
-            nodeId = selectStmt.getInt64(0);
-        }
-
-        YAMS_TRY(assocStmt.reset());
-        YAMS_TRY(assocStmt.bind(1, nodeId));
-        YAMS_TRY(assocStmt.bind(2, documentId));
-        YAMS_TRY(assocStmt.execute());
-        if (db.changes() > 0) {
-            YAMS_TRY(docCountStmt.reset());
-            YAMS_TRY(docCountStmt.bind(1, nodeId));
-            YAMS_TRY(docCountStmt.execute());
-        }
-
-        parentNodeId = nodeId;
-    }
-
-    return Result<void>();
 }
 
 // Record that docId was stored in snapshot, in the same transaction as the document row.
@@ -461,7 +372,7 @@ Result<void> recordDocumentSnapshotRow(Database& db, int64_t docId,
         if (key == "snapshot_time") {
             try {
                 timeMicros = std::stoll(value.asString());
-            } catch (const std::exception&) {
+            } catch (const std::exception&) { // NOLINT(bugprone-empty-catch)
             }
         }
     }
@@ -702,8 +613,8 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
                 repository::deduplicateMetadataWrites(metadataWrites);
 
             const auto metadataWritesStart = std::chrono::steady_clock::now();
-            YAMS_TRY_UNWRAP(metadataTagDelta,
-                            applyDocumentMetadataWrites(db, dedupedMetadataWrites, docId));
+            YAMS_TRY_UNWRAP(metadataTagDelta, applyDocumentMetadataWrites(db, dedupedMetadataWrites,
+                                                                          docId, info.filePath));
             recordMetadataInsertPhase("apply_metadata_writes", metadataWritesStart);
             const uint64_t metadataWriteCount = dedupedMetadataWrites.size();
 
@@ -846,7 +757,8 @@ MetadataRepository::batchInsertDocumentsWithMetadata(std::vector<BatchDocumentIn
                     repository::deduplicateMetadataWrites(metadataWrites);
 
                 YAMS_TRY_UNWRAP(metadataTagDelta,
-                                applyDocumentMetadataWrites(db, dedupedMetadataWrites, docId));
+                                applyDocumentMetadataWrites(db, dedupedMetadataWrites, docId,
+                                                            item.info.filePath));
                 const uint64_t metadataWriteCount = dedupedMetadataWrites.size();
 
                 if (item.snapshot.has_value()) {

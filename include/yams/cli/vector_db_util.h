@@ -88,11 +88,6 @@ Result<void> initVecModule(sqlite3* db);
 // Database File Operations
 // ============================================================================
 
-/// Ensure vector DB file exists (create if missing)
-/// @param dbPath Path to vectors.db
-/// @return Result with error on failure
-Result<void> ensureDbFile(const std::filesystem::path& dbPath);
-
 /// Write vector sentinel JSON file (metadata about vector schema)
 /// @param dataDir Data directory
 /// @param dim Embedding dimension

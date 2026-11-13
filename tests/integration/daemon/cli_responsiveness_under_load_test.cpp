@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "require_daemon_started.h"
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include <yams/daemon/client/daemon_client.h>
@@ -58,12 +59,6 @@ bool connectWithRetry(DaemonClient& client, int maxRetries = 3) {
     return false;
 }
 
-void startHarnessWithRetry(DaemonHarness& harness, std::size_t maxRetries = 3) {
-    if (!harness.startWithRetry(30s, maxRetries)) {
-        SKIP("Skipping CLI responsiveness section due to daemon startup instability");
-    }
-}
-
 std::string generateLargeContent(size_t sizeBytes) {
     std::string content;
     content.reserve(sizeBytes);
@@ -79,7 +74,7 @@ TEST_CASE("CLI commands remain responsive under heavy ingestion load",
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));

@@ -763,7 +763,7 @@ uint32_t TuneAdvisor::repairTokensBusy() {
     return def;
 }
 
-uint32_t TuneAdvisor::repairBusyConnThreshold() {
+uint32_t TuneAdvisor::repairBusyRequestThreshold() {
     uint32_t def = 1;
     auto envValue = parseBoundedUintEnvNow("YAMS_REPAIR_BUSY_CONN_THRESHOLD", 0u, 1024u);
     if (envValue)
@@ -1001,6 +1001,41 @@ uint32_t TuneAdvisor::workCoordinatorThreads() {
 void TuneAdvisor::setWorkCoordinatorThreads(uint32_t n) {
     workCoordinatorThreadsOverride_.store(std::clamp<uint32_t>(n, 1u, 512u),
                                           std::memory_order_relaxed);
+}
+
+uint32_t TuneAdvisor::requestExecutorThreads() {
+    if (const uint32_t ov = requestExecutorThreadsOverride_.load(std::memory_order_relaxed);
+        ov != 0) {
+        return ov;
+    }
+    if (const char* s = compatibilityEnvironment("YAMS_REQUEST_THREADS")) {
+        try {
+            const auto v = std::stoul(s);
+            if (v >= 1 && v <= 64)
+                return static_cast<uint32_t>(v);
+        } catch (const std::exception&) {
+            ignoreInvalidEnvParseFailure();
+        }
+    }
+    return std::max<uint32_t>(4u, hardwareConcurrency() / 2u);
+}
+
+void TuneAdvisor::setRequestExecutorThreads(uint32_t n) {
+    requestExecutorThreadsOverride_.store(n == 0 ? 0 : std::clamp<uint32_t>(n, 1u, 64u),
+                                          std::memory_order_relaxed);
+}
+
+uint32_t TuneAdvisor::searchRuntimeThreads() {
+    if (const uint32_t ov = searchRuntimeThreadsOverride_.load(std::memory_order_relaxed);
+        ov != 0) {
+        return ov;
+    }
+    return std::clamp<uint32_t>(hardwareConcurrency() / 2u, 2u, 8u);
+}
+
+void TuneAdvisor::setSearchRuntimeThreads(uint32_t n) {
+    searchRuntimeThreadsOverride_.store(n == 0 ? 0 : std::clamp<uint32_t>(n, 1u, 64u),
+                                        std::memory_order_relaxed);
 }
 
 uint32_t TuneAdvisor::recommendedThreads(double backgroundFactor, uint32_t hardMax) {
@@ -1747,21 +1782,6 @@ uint32_t TuneAdvisor::checkpointInsertThreshold() {
     return 1000;
 }
 
-bool TuneAdvisor::enableHotzoneCheckpoint() {
-    int ov = enableHotzoneCheckpointOverride_.load(std::memory_order_relaxed);
-    if (ov >= 0)
-        return ov > 0;
-    if (const char* s = compatibilityEnvironment("YAMS_ENABLE_HOTZONE_PERSISTENCE")) {
-        std::string v{s};
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (v == "1" || v == "true" || v == "on" || v == "yes")
-            return true;
-        return false;
-    }
-    return false;
-}
-
 void TuneAdvisor::setPostIngestStageActive(PostIngestStage stage, bool active) {
     const uint32_t bit = 1u << static_cast<uint8_t>(stage);
     if (active) {
@@ -2033,6 +2053,14 @@ uint32_t TuneAdvisor::embedChannelCapacity() {
         }
     }
     return 8192; // Increased from 2048 to handle bulk ingest
+}
+
+uint32_t TuneAdvisor::embedJobChannelCapacity() {
+    uint32_t capacity = embedChannelCapacity();
+    if (const auto postIngest = postIngestQueueMax(); postIngest > 0) {
+        capacity = std::min(capacity, postIngest);
+    }
+    return std::max<uint32_t>(256u, capacity);
 }
 
 void TuneAdvisor::setEmbedChannelCapacity(uint32_t v) {
@@ -2533,8 +2561,42 @@ void TuneAdvisor::setHostPressureEnabled(bool enabled) {
     hostPressureEnabled_.store(enabled, std::memory_order_relaxed);
 }
 
+std::chrono::minutes TuneAdvisor::memorySyncFullApplyInterval() {
+    switch (tuningProfile()) {
+        case Profile::Efficient:
+            return std::chrono::minutes{30};
+        case Profile::Aggressive:
+            return std::chrono::minutes{5};
+        case Profile::Balanced:
+        default:
+            return std::chrono::minutes{15};
+    }
+}
+
 HostPressureThresholds TuneAdvisor::hostPressureThresholds() {
+    // Defaults follow the tuning profile: Efficient yields to the host earliest, Aggressive
+    // only under heavy contention. IO "some" stays high on desktops where idle io_uring waiters
+    // (terminals, browsers) count as stalled with no disk activity, so its floor is high, and it
+    // only counts while the busiest disk is also busy for ioBusyPct of the time.
     HostPressureThresholds thresholds;
+    switch (tuningProfile()) {
+        case Profile::Efficient:
+            thresholds.ioSomePct = 60.0;
+            thresholds.cpuSomePct = 30.0;
+            thresholds.memorySomePct = 5.0;
+            thresholds.loadPerCpu = 1.0;
+            thresholds.ioBusyPct = 50.0;
+            break;
+        case Profile::Balanced:
+            break; // the struct defaults
+        case Profile::Aggressive:
+            thresholds.ioSomePct = 100.0;
+            thresholds.cpuSomePct = 60.0;
+            thresholds.memorySomePct = 20.0;
+            thresholds.loadPerCpu = 2.0;
+            thresholds.ioBusyPct = 90.0;
+            break;
+    }
     const auto apply = [](const std::atomic<double>& overrideValue, double& field) {
         const double value = overrideValue.load(std::memory_order_relaxed);
         if (value > 0.0) {

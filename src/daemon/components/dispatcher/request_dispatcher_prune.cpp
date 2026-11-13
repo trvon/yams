@@ -2,22 +2,26 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <limits>
 #include <system_error>
 #include <boost/asio/cancellation_state.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/system/system_error.hpp>
+#include <yams/app/services/prune_planner.h>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
+#include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon_lifecycle.h>
-#include <yams/integrity/repair_manager.h>
 
 namespace yams::daemon {
 
@@ -33,8 +37,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
     }
 
     // Build config from request
-    integrity::PruneConfig config;
-    config.dryRun = req.dryRun;
+    app::services::PruneConfig config;
     config.categories = req.categories;
     config.extensions = req.extensions;
 
@@ -57,13 +60,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                         setMinimumAge(24);
                         break;
                     case 'w':
-                        setMinimumAge(24 * 7);
+                        setMinimumAge(24LL * 7);
                         break;
                     case 'm':
-                        setMinimumAge(24 * 30);
+                        setMinimumAge(24LL * 30);
                         break;
                     case 'y':
-                        setMinimumAge(24 * 365);
+                        setMinimumAge(24LL * 365);
                         break;
                     default:
                         spdlog::warn("Unknown age unit '{}', ignoring", unit);
@@ -93,7 +96,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                     return value * 1024 * 1024 * 1024;
                 return value;
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Intentional best-effort path; keep the primary operation unaffected.
         }
         return 0;
@@ -114,8 +117,18 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
     response.totalBytesFreed = 0;
 
     try {
-        auto candidates = integrity::RepairManager::queryCandidatesForPrune(
-            *metaRepo, config, serviceManager_->getContentStore());
+        // The candidate scan walks the whole metadata table on a large corpus; run it on the
+        // worker pool so the dispatcher's strand stays free for other requests.
+        auto candidatesResult = co_await dispatch::offload_to_worker(
+            serviceManager_, "prune.query_candidates",
+            [metaRepo, config, contentStore = serviceManager_->getContentStore()]() {
+                return app::services::queryPruneCandidates(*metaRepo, config, contentStore);
+            });
+        if (!candidatesResult) {
+            spdlog::error("Prune query failed: {}", candidatesResult.error().message);
+            co_return dispatch::makeErrorResponse(candidatesResult);
+        }
+        auto candidates = std::move(candidatesResult).value();
 
         // Aggregate by category for preview
         for (const auto& candidate : candidates) {
@@ -156,10 +169,28 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
                     const auto executor = co_await boost::asio::this_coro::executor;
                     std::size_t processed = 0;
 
+                    // A prune the user asked for must finish, but its storage and metadata writes
+                    // should not compete with the daemon while it is over its memory or CPU
+                    // budget. Between batches, wait on a timer while the governor refuses new
+                    // work; the wait is cancellable, so WorkCoordinator::stop() still ends it.
+                    constexpr auto kPressureBackoff = std::chrono::milliseconds(250);
+                    boost::asio::steady_timer backoffTimer(executor);
+                    bool loggedPressureWait = false;
+
                     for (const auto& candidate : candidates) {
                         if (processed++ % kYieldEveryCandidates == 0) {
                             try {
                                 co_await boost::asio::post(executor, boost::asio::use_awaitable);
+                                while (!ResourceGovernor::instance().canAdmitWork()) {
+                                    if (!loggedPressureWait) {
+                                        spdlog::info("Prune waiting for resource pressure to ease "
+                                                     "after deleted={} failed={}",
+                                                     deleted, failed);
+                                        loggedPressureWait = true;
+                                    }
+                                    backoffTimer.expires_after(kPressureBackoff);
+                                    co_await backoffTimer.async_wait(boost::asio::use_awaitable);
+                                }
                             } catch (const boost::system::system_error&) {
                                 spdlog::info("Prune cancelled after deleted={} failed={}", deleted,
                                              failed);

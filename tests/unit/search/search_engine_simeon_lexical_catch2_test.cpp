@@ -152,6 +152,26 @@ TEST_CASE("SearchEngine returns lexical results without Simeon backend injected"
     }
 }
 
+// Fused scores are normalised to the top hit, so the score alone cannot say whether anything
+// matched. lexical_hits counts the documents a text component matched.
+TEST_CASE("SearchEngine reports how many documents matched the query text",
+          "[search][simeon][integration][catch2]") {
+    auto corpus = makeCorpus(kCorpus);
+    auto engine = makeEngine(corpus, makeLexicalOnlyConfig());
+    SearchParams params;
+    params.limit = 10;
+
+    auto present = engine->searchWithResponse("beta", params);
+    REQUIRE(present.has_value());
+    REQUIRE(present.value().debugStats.count("lexical_hits") == 1);
+    CHECK(present.value().debugStats.at("lexical_hits") == "3");
+
+    auto absent = engine->searchWithResponse("zzqxqzzqxq", params);
+    REQUIRE(absent.has_value());
+    REQUIRE(absent.value().debugStats.count("lexical_hits") == 1);
+    CHECK(absent.value().debugStats.at("lexical_hits") == "0");
+}
+
 TEST_CASE("SearchEngine injected with Simeon backend returns results while still building",
           "[search][simeon][integration][catch2]") {
     auto corpus = makeCorpus(kCorpus);
@@ -239,27 +259,6 @@ TEST_CASE("Simeon backend can generate direct top candidates",
     REQUIRE_FALSE(top.value().candidates.empty());
     CHECK(top.value().candidates.front().document_id == corpus.docIds.front());
     CHECK(top.value().candidates.front().score > 0.0F);
-}
-
-TEST_CASE("Simeon scores an expanded lexical request only once",
-          "[search][simeon][request-scores][catch2]") {
-    auto corpus = makeCorpus(kCorpus);
-    auto config = makeLexicalOnlyConfig();
-    config.enableLexicalExpansion = true;
-    config.lexicalExpansionMinHits = 100;
-    config.weakQueryMinTextHits = 100;
-    auto engine = makeEngine(corpus, config);
-    auto backend = std::make_unique<SimeonLexicalBackend>(SimeonLexicalBackend::Config{});
-    auto* scorer = backend.get();
-    engine->setSimeonLexicalBackend(std::move(backend));
-    REQUIRE(waitReady(*scorer, std::chrono::seconds(5)));
-    const auto before = scorer->scoreCalls();
-    SearchParams params;
-    params.limit = 10;
-    const auto result = engine->search("alpha beta", params);
-    REQUIRE(result.has_value());
-    REQUIRE_FALSE(result.value().empty());
-    CHECK(scorer->scoreCalls() - before == 1U);
 }
 
 TEST_CASE("SearchEngine uses direct Simeon candidates for weak FTS queries",

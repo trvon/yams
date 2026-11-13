@@ -251,11 +251,6 @@ public:
     void pruneIdleConnections();
 
     /**
-     * @brief Refresh next connection (discard stale connection from pool)
-     */
-    void refreshNext();
-
-    /**
      * @brief Refresh all available connections (discard all idle connections)
      */
     void refreshAll();

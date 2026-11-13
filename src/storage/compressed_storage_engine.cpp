@@ -19,6 +19,7 @@
 #include <yams/compression/compression_stats.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
+#include <yams/config/config_helpers.h>
 #include <yams/storage/compressed_storage_engine.h>
 
 namespace yams::storage {
@@ -633,13 +634,10 @@ private:
     void startAsyncWorkers() {
         // Default to half the system cores; allow env override; clamp to [1,64]
         size_t numWorkers = std::max<size_t>(1, std::thread::hardware_concurrency() / 2);
-        if (const char* s = std::getenv("YAMS_COMPRESSION_WORKERS")) {
-            try {
-                long v = std::strtol(s, nullptr, 10);
-                if (v > 0)
-                    numWorkers = static_cast<size_t>(v);
-            } catch (...) {
-            }
+        if (const auto s = yams::config::getenv_optional("YAMS_COMPRESSION_WORKERS")) {
+            const long v = std::strtol(s->c_str(), nullptr, 10);
+            if (v > 0)
+                numWorkers = static_cast<size_t>(v);
         }
         if (numWorkers > 64)
             numWorkers = 64;
@@ -771,14 +769,6 @@ Result<void> CompressedStorageEngine::remove(std::string_view hash) {
 
 Result<uint64_t> CompressedStorageEngine::getBlockSize(std::string_view hash) const {
     return pImpl->getBlockSize(hash);
-}
-
-Result<uint64_t> CompressedStorageEngine::getCompressedSize(std::string_view key) const {
-    return pImpl->getBlockSize(key);
-}
-
-Result<uint64_t> CompressedStorageEngine::getUncompressedSize(std::string_view key) const {
-    return pImpl->size(key);
 }
 
 // Required StorageEngine interface methods

@@ -65,10 +65,6 @@ public:
     listSnapshots(const ListSnapshotsRequest& req) {
         return call<ListSnapshotsRequest>(req);
     }
-    boost::asio::awaitable<Result<RestoreCollectionResponse>>
-    restoreCollection(const RestoreCollectionRequest& req) {
-        return call<RestoreCollectionRequest>(req);
-    }
     boost::asio::awaitable<Result<RestoreSnapshotResponse>>
     restoreSnapshot(const RestoreSnapshotRequest& req) {
         return call<RestoreSnapshotRequest>(req);
@@ -156,15 +152,6 @@ public:
     // Streaming grep helper method
     boost::asio::awaitable<Result<GrepResponse>> streamingGrep(const GrepRequest& req);
 
-    // Streaming get helpers (init/header-only + chunk loop)
-    boost::asio::awaitable<Result<void>> streamingGetToStdout(const GetInitRequest& req) {
-        return getToStdout(req);
-    }
-    boost::asio::awaitable<Result<void>>
-    streamingGetToFile(const GetInitRequest& req, const std::filesystem::path& outputPath) {
-        return getToFile(req, outputPath);
-    }
-
     boost::asio::awaitable<Result<void>> getToFile(const GetInitRequest& req,
                                                    const std::filesystem::path& outputPath) {
         if (auto c = co_await connect(); !c)
@@ -219,6 +206,8 @@ public:
         return call<CatRequest>(req);
     }
     boost::asio::awaitable<Result<DeleteResponse>> remove(const DeleteRequest& req);
+    // Exact location retirement. Never fall back to the legacy hash-delete operation.
+    boost::asio::awaitable<Result<DeleteResponse>> unlinkPath(const UnlinkPathRequest& req);
     // Returns a lightweight snapshot; does not request detailed (no heavy scans)
     boost::asio::awaitable<Result<StatusResponse>> status(bool detailed = false);
     boost::asio::awaitable<Result<void>> shutdown(bool graceful = true);
@@ -372,7 +361,6 @@ public:
     static Result<void> startDaemon(const ClientConfig& config = {});
 
     // Path resolution helper (matches daemon's path resolution)
-    static std::filesystem::path resolveSocketPath();
     // Config-first path resolution: prefer env/config, then fall back to defaults
     static std::filesystem::path resolveSocketPathConfigFirst();
 
@@ -407,21 +395,21 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, SearchRequest>, std::is_same<Req, GetRequest>,
             std::is_same<Req, GetInitRequest>, std::is_same<Req, GetChunkRequest>,
             std::is_same<Req, GetEndRequest>, std::is_same<Req, DeleteRequest>,
-            std::is_same<Req, ListRequest>, std::is_same<Req, ShutdownRequest>,
-            std::is_same<Req, StatusRequest>, std::is_same<Req, PingRequest>,
-            std::is_same<Req, GenerateEmbeddingRequest>, std::is_same<Req, BatchEmbeddingRequest>,
-            std::is_same<Req, LoadModelRequest>, std::is_same<Req, UnloadModelRequest>,
-            std::is_same<Req, ModelStatusRequest>, std::is_same<Req, AddDocumentRequest>,
-            std::is_same<Req, GrepRequest>, std::is_same<Req, FileHistoryRequest>,
-            std::is_same<Req, UpdateDocumentRequest>, std::is_same<Req, DownloadRequest>,
-            std::is_same<Req, DownloadStatusRequest>, std::is_same<Req, CancelDownloadJobRequest>,
-            std::is_same<Req, ListDownloadJobsRequest>, std::is_same<Req, GetStatsRequest>,
-            std::is_same<Req, PrepareSessionRequest>, std::is_same<Req, EmbedDocumentsRequest>,
+            std::is_same<Req, UnlinkPathRequest>, std::is_same<Req, ListRequest>,
+            std::is_same<Req, ShutdownRequest>, std::is_same<Req, StatusRequest>,
+            std::is_same<Req, PingRequest>, std::is_same<Req, GenerateEmbeddingRequest>,
+            std::is_same<Req, BatchEmbeddingRequest>, std::is_same<Req, LoadModelRequest>,
+            std::is_same<Req, UnloadModelRequest>, std::is_same<Req, ModelStatusRequest>,
+            std::is_same<Req, AddDocumentRequest>, std::is_same<Req, GrepRequest>,
+            std::is_same<Req, FileHistoryRequest>, std::is_same<Req, UpdateDocumentRequest>,
+            std::is_same<Req, DownloadRequest>, std::is_same<Req, DownloadStatusRequest>,
+            std::is_same<Req, CancelDownloadJobRequest>, std::is_same<Req, ListDownloadJobsRequest>,
+            std::is_same<Req, GetStatsRequest>, std::is_same<Req, PrepareSessionRequest>,
+            std::is_same<Req, EmbedDocumentsRequest>,
             // Plugin management requests
             std::is_same<Req, PluginScanRequest>, std::is_same<Req, PluginLoadRequest>,
             std::is_same<Req, PluginUnloadRequest>, std::is_same<Req, PluginTrustListRequest>,
             std::is_same<Req, PluginTrustAddRequest>, std::is_same<Req, PluginTrustRemoveRequest>,
-            std::is_same<Req, ListTreeDiffRequest>,
             // Doctor commands
             std::is_same<Req, PruneRequest>,
             // Snapshot operations (PBI-066) - collections use generic metadata query
@@ -433,7 +421,6 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, GraphQueryRequest>, std::is_same<Req, GraphExploreRequest>,
             // Graph navigation operations
             std::is_same<Req, GraphSymbolLookupRequest>, std::is_same<Req, GraphTraceRequest>,
-            std::is_same<Req, GraphImpactRequest>, std::is_same<Req, GraphAffectedTestsRequest>,
             // KG ingest operations
             std::is_same<Req, KgIngestRequest>,
             // Cat operations
@@ -498,9 +485,6 @@ public:
 
     explicit CircuitBreaker(const Config& config = Config{});
 
-    // Check if request should be allowed
-    bool shouldAllow();
-
     // Record result
     void recordSuccess();
     void recordFailure();
@@ -509,7 +493,6 @@ public:
 
 private:
     void transitionTo(State newState);
-    bool shouldTransitionToHalfOpen() const;
 
     State state_ = State::Closed;
     Config config_;

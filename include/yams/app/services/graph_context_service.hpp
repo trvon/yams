@@ -25,15 +25,6 @@ namespace yams::app::services {
  * budgets into read-equivalent context blocks for CLI/MCP/agent surfaces.
  */
 
-// Returned by the daemon for legacy GraphImpact/GraphAffectedTests requests. Both analyses walked
-// the code-symbol edges (calls, references, inherits, implements) that v0.20 stopped producing
-// and migration 40 deleted, so the service no longer implements them; the protocol messages
-// remain only for wire compatibility with older clients.
-inline constexpr std::string_view kImpactNeedsSymbolGraphWarning =
-    "code-symbol graph was removed in v0.20; impact analysis needs symbol edges";
-inline constexpr std::string_view kAffectedTestsNeedSymbolGraphWarning =
-    "code-symbol graph was removed in v0.20; affected-test analysis needs symbol edges";
-
 enum class GraphContextSnippetMode {
     Full,    // Include the selected source span in full, subject to budgets.
     Omitted, // Mention the symbol/file but omit source due to budget or policy.

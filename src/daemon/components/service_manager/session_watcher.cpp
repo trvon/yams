@@ -27,13 +27,10 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 
 namespace yams::daemon {
-
-namespace {
-constexpr auto kSessionWatcherWarnInterval = std::chrono::minutes(10);
-} // namespace
 
 bool ServiceManager::shouldStartSessionWatcher(std::string_view disableValue) {
     const std::string value(disableValue);
@@ -42,264 +39,83 @@ bool ServiceManager::shouldStartSessionWatcher(std::string_view disableValue) {
 
 std::chrono::milliseconds ServiceManager::sessionWatcherDelay(bool watchEnabled,
                                                               std::uint32_t intervalMs) {
-    constexpr auto kIdleDelay = std::chrono::milliseconds(2000);
-    constexpr std::uint32_t kMinimumIntervalMs = 100;
-    if (!watchEnabled) {
-        return kIdleDelay;
-    }
-    return std::chrono::milliseconds(std::max(kMinimumIntervalMs, intervalMs));
+    return SessionWatcher::delay(watchEnabled, intervalMs);
 }
 
 app::services::AddDirectoryRequest
 ServiceManager::makeSessionWatchRequest(std::string_view session,
                                         const std::filesystem::path& directory,
                                         std::vector<std::string> changed) {
-    app::services::AddDirectoryRequest request;
-    request.directoryPath = directory.string();
-    request.includePatterns = std::move(changed);
-    request.recursive = true;
-    request.sessionId = std::string(session);
-    request.noGitignore = false;
-    return request;
+    return SessionWatcher::makeRequest(session, directory, std::move(changed));
+}
+
+void ServiceManager::configureSessionWatcher(bool forDaemonLoop) {
+    auto options = sessionWatcher_.options();
+    if (!options.stopRequested) {
+        options.stopRequested = [this] {
+            return sessionWatcherStopRequested_.load(std::memory_order_acquire);
+        };
+    }
+    if (forDaemonLoop && !sessionWatcherConfigured_) {
+        // The snapshot describes what this store has indexed, so it lives in the data dir.
+        if (const auto dataDir = getResolvedDataDir(); !dataDir.empty()) {
+            options.stateDir = dataDir / "watch";
+            sessionWatcherConfigured_ = true;
+        }
+        // The walk and the indexing it queues are background work: they wait while this
+        // daemon is under memory or CPU pressure, and while the rest of the host is busy.
+        options.admit = [] {
+            auto& governor = ResourceGovernor::instance();
+            return governor.canAdmitWork() &&
+                   governor.admitDeferrable(DeferrableWork::SessionWatch);
+        };
+    }
+    sessionWatcher_.setOptions(std::move(options));
 }
 
 bool ServiceManager::scanSessionWatchDirectory(app::services::IIndexingService& indexingService,
                                                app::services::IDocumentService* documentService,
                                                std::string_view session,
                                                const std::filesystem::path& directory) {
-    using Fingerprint = std::pair<std::uint64_t, std::uint64_t>;
-    std::error_code error;
-    if (directory.empty() || !std::filesystem::is_directory(directory, error)) {
-        return false;
-    }
-
-    // Honor the directory's .gitignore the same way addDirectory does, so ignored build
-    // output is never tracked here: it cannot produce removals, and it is not re-statted
-    // on every pass. Patterns reload when .gitignore changes.
-    const auto dirKey = directory.string();
-    {
-        std::error_code mtimeError;
-        const auto mtime = std::filesystem::last_write_time(directory / ".gitignore", mtimeError);
-        const auto stamp = mtimeError
-                               ? std::uint64_t{0}
-                               : static_cast<std::uint64_t>(mtime.time_since_epoch().count());
-        auto known = sessionWatch_.gitignoreMtime.find(dirKey);
-        if (known == sessionWatch_.gitignoreMtime.end() || known->second != stamp) {
-            sessionWatch_.gitignorePatterns[dirKey] =
-                yams::common::loadGitignorePatterns(directory);
-            sessionWatch_.gitignoreMtime[dirKey] = stamp;
-        }
-    }
-    const auto& ignorePatterns = sessionWatch_.gitignorePatterns[dirKey];
-    const auto relativeTo = [&](const std::filesystem::path& path) {
-        std::error_code relativeError;
-        const auto relative = std::filesystem::relative(path, directory, relativeError);
-        return relativeError ? path.filename().generic_string() : relative.generic_string();
-    };
-
-    auto& previousFiles = sessionWatch_.dirFiles[dirKey];
-    std::unordered_map<std::string, Fingerprint> currentFiles;
-    std::vector<std::string> changed;         // relative, for the indexing request
-    std::vector<std::string> changedAbsolute; // same order, to hold back failures
-    auto it = std::filesystem::recursive_directory_iterator(directory, error);
-    const auto end = std::filesystem::recursive_directory_iterator();
-    for (; !error && it != end; it.increment(error)) {
-        std::error_code metadataError;
-        const auto relative = relativeTo(it->path());
-        if (it->is_directory(metadataError)) {
-            if (relative == ".git" || (!ignorePatterns.empty() &&
-                                       yams::common::matchesGitignore(relative, ignorePatterns))) {
-                it.disable_recursion_pending();
-            }
-            continue;
-        }
-        if (!it->is_regular_file(metadataError)) {
-            if (metadataError) {
-                error = metadataError;
-            }
-            continue;
-        }
-        if (!ignorePatterns.empty() && yams::common::matchesGitignore(relative, ignorePatterns)) {
-            continue;
-        }
-
-        const auto filePath = it->path().string();
-        const auto fileSize = static_cast<std::uint64_t>(it->file_size(metadataError));
-        if (metadataError) {
-            error = metadataError;
-            break;
-        }
-        const auto modifiedTime = it->last_write_time(metadataError);
-        if (metadataError) {
-            error = metadataError;
-            break;
-        }
-        const Fingerprint fingerprint{
-            static_cast<std::uint64_t>(modifiedTime.time_since_epoch().count()), fileSize};
-        currentFiles[filePath] = fingerprint;
-        const auto previous = previousFiles.find(filePath);
-        if ((previous == previousFiles.end() || previous->second != fingerprint) &&
-            !relative.empty()) {
-            changed.push_back(relative);
-            changedAbsolute.push_back(filePath);
-        }
-    }
-    if (error) {
-        // Retried every pass (seconds apart) until the directory is readable again.
-        static yams::common::LogRateLimiter scanFailureLog{kSessionWatcherWarnInterval};
-        if (auto held = scanFailureLog.admit()) {
-            spdlog::warn("[ServiceManager] session watcher scan failed for '{}': {}{}",
-                         directory.string(), error.message(),
-                         yams::common::LogRateLimiter::suppressedSuffix(*held));
-        }
-        return false;
-    }
-
-    // Each path that fails is held back on its own, so one bad path is retried alone and
-    // never blocks the snapshot from advancing for everything else. (A stale snapshot made
-    // every later file look "changed" again and re-indexed it on every pass.)
-    bool allSucceeded = true;
-    const auto noteFailure = [&](const std::string& path, std::string_view what,
-                                 std::string_view detail) {
-        allSucceeded = false;
-        // A directory full of failing files reports each once, but not thousands of lines.
-        static yams::common::LogRateLimiter firstFailureLog{kSessionWatcherWarnInterval};
-        if (sessionWatch_.failingPaths.insert(path).second) {
-            if (auto held = firstFailureLog.admit()) {
-                spdlog::warn("[ServiceManager] session watcher {} failed for '{}': {} (retrying "
-                             "quietly){}",
-                             what, path, detail,
-                             yams::common::LogRateLimiter::suppressedSuffix(*held));
-            } else {
-                spdlog::debug("[ServiceManager] session watcher {} failed for '{}': {}", what, path,
-                              detail);
-            }
-        } else {
-            spdlog::debug("[ServiceManager] session watcher {} still failing for '{}': {}", what,
-                          path, detail);
-        }
-    };
-    std::unordered_set<std::string> heldBack;
-    const auto holdBackChanged = [&](const std::string& filePath) {
-        heldBack.insert(filePath);
-        // Keep the previous fingerprint (or none) so the file is still "changed" next pass
-        // without looking removed now.
-        const auto previous = previousFiles.find(filePath);
-        if (previous != previousFiles.end()) {
-            currentFiles[filePath] = previous->second;
-        } else {
-            currentFiles.erase(filePath);
-        }
-    };
-
-    if (!changed.empty()) {
-        auto request = makeSessionWatchRequest(session, directory, changed);
-        auto indexed = indexingService.addDirectory(request);
-        if (!indexed) {
-            for (const auto& filePath : changedAbsolute) {
-                holdBackChanged(filePath);
-            }
-            allSucceeded = false;
-            static yams::common::LogRateLimiter indexFailureLog{kSessionWatcherWarnInterval};
-            if (auto held = indexFailureLog.admit()) {
-                spdlog::warn("[ServiceManager] session watcher indexing failed for '{}': {}{}",
-                             directory.string(), indexed.error().message,
-                             yams::common::LogRateLimiter::suppressedSuffix(*held));
-            }
-        } else if (indexed.value().filesFailed != 0) {
-            std::unordered_set<std::string> failed;
-            for (const auto& result : indexed.value().results) {
-                if (!result.success) {
-                    failed.insert(result.path);
-                    noteFailure(result.path, "indexing", result.error.value_or("unknown error"));
-                }
-            }
-            // Without per-file results, retry every changed file.
-            for (const auto& filePath : changedAbsolute) {
-                if (failed.empty() || failed.contains(filePath)) {
-                    holdBackChanged(filePath);
-                }
-            }
-            allSucceeded = false;
-        }
-        for (const auto& filePath : changedAbsolute) {
-            if (!heldBack.contains(filePath)) {
-                sessionWatch_.failingPaths.erase(filePath);
-            }
-        }
-    }
-
-    for (const auto& [filePath, fingerprint] : previousFiles) {
-        if (currentFiles.contains(filePath)) {
-            continue;
-        }
-        std::error_code existsError;
-        if (std::filesystem::exists(filePath, existsError)) {
-            continue; // held back above, or now gitignored; nothing to remove
-        }
-        if (documentService == nullptr) {
-            currentFiles[filePath] = fingerprint;
-            noteFailure(filePath, "removal", "document service unavailable");
-            continue;
-        }
-        app::services::DeleteByNameRequest request;
-        request.name = filePath;
-        // The file is gone, so every document stored at this path is stale. Without force,
-        // a path indexed more than once ("Multiple documents match") could never be removed.
-        request.force = true;
-        auto deleted = documentService->deleteByName(request);
-        std::string failure;
-        if (!deleted) {
-            if (deleted.error().code != ErrorCode::NotFound) {
-                failure = deleted.error().message;
-            }
-        } else if (!deleted.value().errors.empty()) {
-            failure = deleted.value().errors.front().error.value_or("unknown error");
-        }
-        if (!failure.empty()) {
-            currentFiles[filePath] = fingerprint; // keep it tracked so the removal is retried
-            noteFailure(filePath, "removal", failure);
-        } else {
-            sessionWatch_.failingPaths.erase(filePath);
-        }
-    }
-
-    previousFiles.swap(currentFiles);
-    return allSucceeded;
+    configureSessionWatcher(false);
+    SessionWatcher::Target target;
+    target.session = std::string(session);
+    target.directory = directory;
+    return sessionWatcher_.scan(indexingService, documentService, target,
+                                SessionWatcher::WallClock::now()) ==
+           SessionWatcher::ScanOutcome::Clean;
 }
 
 std::chrono::milliseconds ServiceManager::runSessionWatcherIteration() {
+    configureSessionWatcher(true);
     yams::app::services::AppContext appCtx = getAppContext();
     auto sessionService = yams::app::services::makeSessionService(&appCtx);
-    const auto current = sessionService->current();
-    if (!current) {
-        return sessionWatcherDelay(false, 0);
-    }
-
-    const bool watchEnabled = sessionService->watchEnabled(current);
-    const auto delay = sessionWatcherDelay(watchEnabled, sessionService->watchIntervalMs(current));
-    if (!watchEnabled) {
-        return delay;
-    }
-
     auto indexingService = yams::app::services::makeIndexingService(appCtx);
-    if (!indexingService) {
-        return delay;
+    if (!sessionService || !indexingService) {
+        return SessionWatcher::delay(false, 0);
     }
     auto documentService = yams::app::services::makeDocumentService(appCtx);
-
-    for (const auto& pattern : sessionService->getPinnedPatterns(current)) {
-        scanSessionWatchDirectory(*indexingService, documentService.get(), *current, pattern);
-    }
-    return delay;
+    return sessionWatcher_.runPass(*sessionService, *indexingService, documentService.get(),
+                                   SessionWatcher::WallClock::now());
 }
 
 boost::asio::awaitable<void>
 ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
     auto executor = co_await boost::asio::this_coro::executor;
-    boost::asio::steady_timer timer(executor);
+    // Shared with stopSessionWatcherForShutdown(), which cancels it: a wait can be minutes
+    // long, and shutdown must not leave this coroutine asleep and holding `this`.
+    const auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+    {
+        std::lock_guard lock(sessionWatcherTimerMutex_);
+        sessionWatcherTimer_ = timer;
+    }
+    // The stop token's fallback never reports a stop, so the flag decides.
+    const auto stopping = [&] {
+        return token.stop_requested() ||
+               sessionWatcherStopRequested_.load(std::memory_order_acquire);
+    };
 
-    while (!token.stop_requested()) {
+    while (!stopping()) {
         auto waitDuration = sessionWatcherDelay(false, 0);
         try {
             waitDuration = runSessionWatcherIteration();
@@ -321,14 +137,21 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
                 "[ServiceManager] retrieval-session cleanup failed with unknown exception");
         }
 
+        if (stopping()) {
+            break; // requested during the pass, before the timer was armed
+        }
         boost::system::error_code error;
-        timer.expires_after(waitDuration);
-        co_await timer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, error));
-        if (token.stop_requested() || error == boost::asio::error::operation_aborted) {
+        timer->expires_after(waitDuration);
+        co_await timer->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, error));
+        if (stopping() || error == boost::asio::error::operation_aborted) {
             break;
         }
     }
 
+    {
+        std::lock_guard lock(sessionWatcherTimerMutex_);
+        sessionWatcherTimer_.reset();
+    }
     co_return;
 }
 

@@ -548,6 +548,21 @@ TEST_CASE("Embedded mobile corpus status reports readiness without warmup contro
     CHECK(parsed.contains("corpusStats"));
     CHECK(parsed.at("corpusStats").at("doc_count").template get<std::int64_t>() >= 1);
 
+    // Embedded contexts build a lexical/KG search engine with vector scoring off, so hybrid
+    // requests do not degrade to metadata FTS. No embeddings exist, so semantic stays off.
+    CHECK(parsed.at("searchEngineReady").template get<bool>());
+    CHECK(parsed.at("hybridAvailable").template get<bool>());
+    CHECK_FALSE(parsed.at("semanticAvailable").template get<bool>());
+    CHECK_FALSE(parsed.at("searchEngineDetail").template get<std::string>().empty());
+    const auto& readiness = parsed.at("readiness");
+    CHECK(readiness.at("search_engine").template get<bool>());
+    CHECK(readiness.at("hybrid_search").template get<bool>());
+    CHECK_FALSE(readiness.at("semantic_search").template get<bool>());
+
+    // The downloader's store lives under the context's working directory, not $HOME.
+    CHECK(std::filesystem::is_directory(std::filesystem::path(workingDir) / "downloads" /
+                                        "storage" / "objects"));
+
     yams_mobile_vector_status_result_destroy(statusResult);
     yams_mobile_context_destroy(ctx);
 }

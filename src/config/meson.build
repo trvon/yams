@@ -3,7 +3,8 @@ json_dep = dependency('nlohmann_json', required: true)
 yams_core = dependency('yams_core', required: false)
 
 yams_config = static_library('yams_config',
-  [ 'config_migration.cpp', 'config_helpers.cpp', 'config_resolver_policies.cpp' ],
+  [ 'config_migration.cpp', 'config_helpers.cpp', 'config_resolver_policies.cpp',
+    'static_embedding_table.cpp' ],
   include_directories: include_directories('../../include'),
   dependencies: [spdlog_dep, json_dep, yams_core] + yams_tracy_deps,
   cpp_args: yams_tracy_args,

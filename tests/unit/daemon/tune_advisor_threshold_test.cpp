@@ -1039,3 +1039,58 @@ TEST_CASE("cpuHighThresholdPercent setter overrides profile and env",
         TuneAdvisor::resetCpuHighThresholdPercentOverride();
     }
 }
+
+// Five call sites created the embed_jobs channel with three different capacity formulas. The
+// channel bus keeps the first one, so the post-ingest queue's 8192 silently won over the
+// embedding service's clamp to the post-ingest queue size, and a warning was logged on every
+// start. One function now sizes the channel for every creator.
+TEST_CASE("Embed job channel capacity is bounded by the post-ingest queue",
+          "[daemon][tune][advisor][catch2]") {
+    struct Restore {
+        uint32_t embed{TuneAdvisor::embedChannelCapacity()};
+        ~Restore() {
+            TuneAdvisor::setEmbedChannelCapacity(embed);
+            TuneAdvisor::setPostIngestQueueMax(0); // 0 clears the override
+        }
+    } restore;
+
+    TuneAdvisor::setEmbedChannelCapacity(8192);
+    TuneAdvisor::setPostIngestQueueMax(1000);
+    CHECK(TuneAdvisor::embedJobChannelCapacity() == 1000);
+
+    TuneAdvisor::setPostIngestQueueMax(20000);
+    CHECK(TuneAdvisor::embedJobChannelCapacity() == 8192);
+
+    // Never below the channel's floor.
+    TuneAdvisor::setEmbedChannelCapacity(256);
+    TuneAdvisor::setPostIngestQueueMax(10);
+    CHECK(TuneAdvisor::embedJobChannelCapacity() == 256);
+}
+
+// RequestExecutor and the search runtime pool sized themselves from hardware_concurrency()
+// directly. They now come from TuneAdvisor, with the same defaults, so the tuning model (and
+// tests) control every daemon pool.
+TEST_CASE("Request and search pool sizes come from TuneAdvisor",
+          "[daemon][tune][advisor][catch2]") {
+    struct Restore {
+        unsigned hw{TuneAdvisor::hardwareConcurrency()};
+        ~Restore() {
+            TuneAdvisor::setHardwareConcurrencyForTests(hw);
+            TuneAdvisor::setRequestExecutorThreads(0);
+            TuneAdvisor::setSearchRuntimeThreads(0);
+        }
+    } restore;
+    yams::test::ScopedEnvVar requestThreads{"YAMS_REQUEST_THREADS", std::nullopt};
+
+    TuneAdvisor::setHardwareConcurrencyForTests(32);
+    CHECK(TuneAdvisor::requestExecutorThreads() == 16);
+    CHECK(TuneAdvisor::searchRuntimeThreads() == 8);
+    TuneAdvisor::setHardwareConcurrencyForTests(4);
+    CHECK(TuneAdvisor::requestExecutorThreads() == 4);
+    CHECK(TuneAdvisor::searchRuntimeThreads() == 2);
+
+    TuneAdvisor::setRequestExecutorThreads(6);
+    TuneAdvisor::setSearchRuntimeThreads(3);
+    CHECK(TuneAdvisor::requestExecutorThreads() == 6);
+    CHECK(TuneAdvisor::searchRuntimeThreads() == 3);
+}

@@ -9,12 +9,15 @@
 #include <boost/system/error_code.hpp>
 
 #include "common/test_data_generator.h"
+#include "common/test_helpers_catch2.h"
 
 #include <array>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <set>
+#include <map>
 #include <thread>
 #include <vector>
 
@@ -22,9 +25,11 @@
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
@@ -766,6 +771,152 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
     auto grepResult = retrievalSvc.grep(grepOpts, retrievalOpts);
     REQUIRE(grepResult);
     static_cast<void>(grepResult.value().filesSearched);
+}
+
+TEST_CASE_METHOD(GrepServiceExpectationsFixture,
+                 "GrepService: files-only and count modes return what the plain mode found",
+                 "[integration][services][grep]") {
+    // `yams grep -l X` and `yams grep -c X` printed "(no results)" for a pattern the plain
+    // mode matched: the daemon answered with file sets and counts the client never read.
+    start();
+
+    fs::create_directories(root() / "modes");
+    std::ofstream(root() / "modes" / "two.txt") << "needleqz one\nfiller\nneedleqz two\n";
+    std::ofstream(root() / "modes" / "one.txt") << "filler\nneedleqz only\n";
+    std::ofstream(root() / "modes" / "none.txt") << "filler only\n";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath();
+    opts.explicitDataDir = storageDir();
+    opts.path = (root() / "modes").string();
+    opts.recursive = true;
+    opts.noEmbeddings = true;
+    REQUIRE(ing.addViaDaemon(opts));
+
+    yams::app::services::RetrievalService retrievalSvc;
+    yams::app::services::RetrievalOptions retrievalOpts;
+    retrievalOpts.socketPath = socketPath();
+    retrievalOpts.explicitDataDir = storageDir();
+
+    yams::app::services::GrepOptions plain;
+    plain.pattern = "needleqz";
+    plain.regexOnly = true;
+
+    const auto filesOf = [](const yams::daemon::GrepResponse& response) {
+        std::set<std::string> names;
+        for (const auto& match : response.matches) {
+            names.insert(fs::path(match.file).filename().string());
+        }
+        return names;
+    };
+
+    // Ingestion is asynchronous: wait until the plain mode sees both files.
+    bool indexed = false;
+    for (int attempt = 0; attempt < 100 && !indexed; ++attempt) {
+        auto found = retrievalSvc.grep(plain, retrievalOpts);
+        indexed = found && filesOf(found.value()).size() == 2;
+        if (!indexed) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    REQUIRE(indexed);
+    const std::set<std::string> expected{"one.txt", "two.txt"};
+
+    SECTION("files-only lists every matching file") {
+        auto request = plain;
+        request.filesOnly = true;
+        auto listed = retrievalSvc.grep(request, retrievalOpts);
+        REQUIRE(listed);
+        CHECK(filesOf(listed.value()) == expected);
+    }
+    SECTION("count reports matching lines per file") {
+        auto request = plain;
+        request.countOnly = true;
+        auto counted = retrievalSvc.grep(request, retrievalOpts);
+        REQUIRE(counted);
+        std::map<std::string, std::size_t> counts;
+        for (const auto& match : counted.value().matches) {
+            ++counts[fs::path(match.file).filename().string()];
+        }
+        CHECK(counts == std::map<std::string, std::size_t>{{"one.txt", 1}, {"two.txt", 2}});
+    }
+}
+
+TEST_CASE_METHOD(GrepServiceExpectationsFixture,
+                 "Session watcher indexes a watched directory in a running daemon",
+                 "[integration][services][session_watch]") {
+    // The only case that runs the watcher loop for real: every other suite disables it.
+    yams::test::ScopedEnvVar enableWatcher{"YAMS_DISABLE_SESSION_WATCHER", std::string("0")};
+    // A busy CI host must not postpone the pass this case waits for.
+    yams::daemon::TuneAdvisor::setBackgroundMaxDeferralMs(0);
+    struct RestoreDeferral {
+        ~RestoreDeferral() { yams::daemon::TuneAdvisor::resetBackgroundMaxDeferralMs(); }
+    } restoreDeferral;
+
+    const auto watched = yams::test::make_temp_dir("yams_watch_live_");
+    std::ofstream(watched / "first.txt") << "watchneedlealpha in the first file\n";
+    // A changed set that mixes top-level and nested files, with a same-named ignored file
+    // below: the indexer must take exactly the files the watcher names.
+    fs::create_directories(watched / "sub" / "skipped");
+    std::ofstream(watched / "sub" / "nested.txt") << "watchneedlegamma in a nested file\n";
+    std::ofstream(watched / ".gitignore") << "skipped/\n";
+    std::ofstream(watched / "sub" / "skipped" / "first.txt") << "watchneedleomega ignored\n";
+
+    // No current session: watching belongs to the session, not to "current".
+    auto sessions = yams::app::services::makeSessionService(nullptr);
+    REQUIRE(sessions);
+    sessions->init("watched-project", "");
+    sessions->addPathSelector(watched.string(), {}, {});
+    sessions->enableWatch(true, "watched-project");
+    sessions->setWatchIntervalMs(200, "watched-project");
+    sessions->clearCurrent();
+
+    start();
+
+    yams::app::services::RetrievalService retrievalSvc;
+    yams::app::services::RetrievalOptions retrievalOpts;
+    retrievalOpts.socketPath = socketPath();
+    retrievalOpts.explicitDataDir = storageDir();
+    const auto grepFinds = [&](const std::string& pattern, const std::string& fileName) {
+        yams::app::services::GrepOptions request;
+        request.pattern = pattern;
+        request.regexOnly = true;
+        for (int attempt = 0; attempt < 150; ++attempt) {
+            if (auto found = retrievalSvc.grep(request, retrievalOpts)) {
+                for (const auto& match : found.value().matches) {
+                    if (fs::path(match.file).filename() == fileName) {
+                        return true;
+                    }
+                }
+            }
+            std::this_thread::sleep_for(100ms);
+        }
+        return false;
+    };
+
+    CHECK(grepFinds("watchneedlegamma", "nested.txt"));
+    CHECK(grepFinds("watchneedlealpha", "first.txt"));
+
+    // A file created while the daemon runs is picked up by a later pass.
+    std::ofstream(watched / "second.txt") << "watchneedlebeta in the second file\n";
+    CHECK(grepFinds("watchneedlebeta", "second.txt"));
+
+    // Everything else is indexed by now, so the ignored file would be too if it leaked.
+    {
+        yams::app::services::GrepOptions ignored;
+        ignored.pattern = "watchneedleomega";
+        ignored.regexOnly = true;
+        auto found = retrievalSvc.grep(ignored, retrievalOpts);
+        REQUIRE(found);
+        CHECK(found.value().matches.empty());
+    }
+
+    // What the watcher has seen is persisted next to the store it describes.
+    std::error_code ec;
+    CHECK(fs::exists(storageDir() / "watch", ec));
+
+    fs::remove_all(watched, ec);
 }
 
 TEST_CASE_METHOD(GrepServiceExpectationsFixture,

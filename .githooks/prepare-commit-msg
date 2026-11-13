@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Append a DCO Signed-off-by trailer for the configured git identity, so every
+# commit passes the dco check (scripts/lint.sh dco, CI dco-check).
+# Adds nothing when the identical trailer is already present (amend, -s, rebase).
+set -euo pipefail
+
+msg_file="$1"
+name="$(git config user.name || true)"
+email="$(git config user.email || true)"
+if [[ -z "$name" || -z "$email" ]]; then
+    exit 0
+fi
+
+git interpret-trailers --in-place --if-exists addIfDifferent \
+    --trailer "Signed-off-by: ${name} <${email}>" "$msg_file"

@@ -1,11 +1,15 @@
 // ProtoSerializer roundtrip tests: encode → decode for top message types
 #include <catch2/catch_test_macros.hpp>
+#include <google/protobuf/descriptor.pb.h>
+#include <google/protobuf/dynamic_message.h>
 
+#include <yams/daemon/components/AdmissionPolicy.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/ipc_protocol_envelope.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 
 #include <chrono>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -31,6 +35,110 @@ TEST_CASE("ProtoSerializer grep preserves immutable content identity",
     REQUIRE(result.matches.size() == 2);
     CHECK(result.matches[0].hash == indexed.hash);
     CHECK(result.matches[1].hash.empty());
+}
+
+TEST_CASE("Path unlink is admitted as a mutation, not a read", "[proto][admission][unlink-path]") {
+    CHECK(AdmissionPolicy::classify(Request{DeleteRequest{}}) == CommandClass::write);
+    CHECK(AdmissionPolicy::classify(Request{UnlinkPathRequest{}}) == CommandClass::write);
+}
+
+TEST_CASE("ProtoSerializer unlink is a distinct exact-path operation",
+          "[proto][serializer][unlink-path]") {
+    for (const bool dryRun : {false, true}) {
+        UnlinkPathRequest operation;
+        operation.path = "/missing/worktree/-path with spaces\nand a newline.txt";
+        operation.dryRun = dryRun;
+        operation.sessionId = "unlink-session";
+        operation.instanceId = "unlink-instance";
+        Request request{operation};
+        CHECK(getMessageType(request) == MessageType::UnlinkPathRequest);
+        CHECK(getMessageType(request) != MessageType::DeleteRequest);
+        CHECK(getRequestName(request) == "UnlinkPath");
+        CHECK(Request{DeleteRequest{}}.index() == 5);
+        CHECK(static_cast<uint8_t>(MessageType::DeleteRequest) == 4);
+        Message message{};
+        message.requestId = 4242;
+        message.payload = request;
+        const auto encoded = ProtoSerializer::encode_payload(message);
+        INFO("Encode failure: " << (encoded ? std::string{} : encoded.error().message));
+        REQUIRE(encoded.has_value());
+        const auto decoded = ProtoSerializer::decode_payload(std::span{encoded.value()});
+        REQUIRE(decoded.has_value());
+        REQUIRE(std::holds_alternative<Request>(decoded.value().payload));
+        const auto& result = std::get<Request>(decoded.value().payload);
+        REQUIRE(std::holds_alternative<UnlinkPathRequest>(result));
+        CHECK_FALSE(std::holds_alternative<DeleteRequest>(result));
+        const auto& unlinked = std::get<UnlinkPathRequest>(result);
+        CHECK(unlinked.path == operation.path);
+        CHECK(unlinked.dryRun == dryRun);
+        CHECK(unlinked.sessionId == operation.sessionId);
+        CHECK(unlinked.instanceId == operation.instanceId);
+    }
+}
+
+TEST_CASE("A legacy delete schema cannot interpret a path unlink as deletion",
+          "[proto][serializer][unlink-path][compat]") {
+    // Minimal legacy schema: recognize the real old delete carrier and skip everything else.
+    google::protobuf::FileDescriptorProto schema;
+    schema.set_name("legacy_unlink_guard.proto");
+    schema.set_syntax("proto3");
+    schema.add_message_type()->set_name("LegacyDelete");
+    auto* envelope = schema.add_message_type();
+    envelope->set_name("LegacyEnvelope");
+    auto* deletion = envelope->add_field();
+    deletion->set_name("delete_request");
+    deletion->set_number(17);
+    deletion->set_label(google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
+    deletion->set_type(google::protobuf::FieldDescriptorProto::TYPE_MESSAGE);
+    deletion->set_type_name(".LegacyDelete");
+    google::protobuf::DescriptorPool pool;
+    const auto* file = pool.BuildFile(schema);
+    REQUIRE(file != nullptr);
+    const auto* descriptor = file->FindMessageTypeByName("LegacyEnvelope");
+    REQUIRE(descriptor != nullptr);
+    const auto* deleteField = descriptor->FindFieldByName("delete_request");
+    REQUIRE(deleteField != nullptr);
+    google::protobuf::DynamicMessageFactory factory(&pool);
+    const auto* prototype = factory.GetPrototype(descriptor);
+    REQUIRE(prototype != nullptr);
+    std::unique_ptr<google::protobuf::Message> legacy{prototype->New()};
+
+    DeleteRequest hashDelete;
+    hashDelete.hash = std::string(64, 'a');
+    Message message{};
+    message.payload = Request{hashDelete};
+    const auto oldWire = ProtoSerializer::encode_payload(message);
+    REQUIRE(oldWire.has_value());
+    REQUIRE(
+        legacy->ParseFromArray(oldWire.value().data(), static_cast<int>(oldWire.value().size())));
+    CHECK(legacy->GetReflection()->HasField(*legacy, deleteField));
+
+    legacy->Clear();
+    UnlinkPathRequest unlink;
+    unlink.path = "/worktree/retired.txt";
+    message.payload = Request{unlink};
+    const auto newWire = ProtoSerializer::encode_payload(message);
+    REQUIRE(newWire.has_value());
+    REQUIRE(
+        legacy->ParseFromArray(newWire.value().data(), static_cast<int>(newWire.value().size())));
+    CHECK_FALSE(legacy->GetReflection()->HasField(*legacy, deleteField));
+}
+
+TEST_CASE("Status explicitly advertises path unlink support and defaults to unsupported",
+          "[proto][serializer][unlink-capability]") {
+    CHECK_FALSE(StatusResponse{}.supportsPathUnlink);
+    for (const bool supported : {false, true}) {
+        StatusResponse response;
+        response.supportsPathUnlink = supported;
+        Message message{};
+        message.payload = Response{response};
+        const auto encoded = ProtoSerializer::encode_payload(message);
+        REQUIRE(encoded.has_value());
+        const auto decoded = ProtoSerializer::decode_payload(std::span{encoded.value()});
+        REQUIRE(decoded.has_value());
+        const auto& status = std::get<StatusResponse>(std::get<Response>(decoded.value().payload));
+        CHECK(status.supportsPathUnlink == supported);
+    }
 }
 
 TEST_CASE("ProtoSerializer PingRequest roundtrip", "[proto][serializer][ping]") {

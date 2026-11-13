@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <optional>
 #include <ostream>
@@ -298,10 +299,18 @@ void renderMemorySyncSection(const yams::daemon::MemorySyncResponse* sync, std::
         {"Sync cycles",
          std::to_string(m.successfulCycles) + " ok · " + std::to_string(m.failedCycles) + " failed",
          severity_text(health(m.failedCycles > 0), "")});
-    rows.push_back({"Last sync",
-                    severity_text(health(m.lastSuccessAgeMs > 60000),
-                                  format_duration(m.lastSuccessAgeMs / 1000) + " ago"),
-                    ""});
+    // UINT64_MAX is the daemon's "no successful cycle yet" sentinel, not an age.
+    const bool neverSynced = m.lastSuccessAgeMs == std::numeric_limits<std::uint64_t>::max();
+    rows.push_back(
+        {"Last sync",
+         severity_text(health(neverSynced || m.lastSuccessAgeMs > 60000),
+                       neverSynced ? std::string{"never"}
+                                   : format_duration(m.lastSuccessAgeMs / 1000) + " ago"),
+         ""});
+    if (!m.lastSyncError.empty()) {
+        rows.push_back({"Last sync error", severity_text(Severity::Warn, m.lastSyncError),
+                        format_duration(m.lastSyncErrorAgeMs / 1000) + " ago"});
+    }
     // A reconciled cycle can still fail to apply; report it apart from transport health.
     const auto applyOk = m.applyCycles - std::min(m.applyCycles, m.applyFailedCycles);
     rows.push_back({"Apply cycles",
@@ -904,8 +913,12 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
 
     std::size_t workingThreads = activeJobs;
     std::size_t sleepingThreads = (threads > workingThreads) ? (threads - workingThreads) : 0;
-    std::size_t util = threads ? static_cast<std::size_t>((100.0 * workingThreads) / threads) : 0;
-    double workerFraction = threads > 0 ? static_cast<double>(workingThreads) / threads : 0.0;
+    std::size_t util =
+        threads ? static_cast<std::size_t>((100.0 * static_cast<double>(workingThreads)) /
+                                           static_cast<double>(threads))
+                : 0;
+    double workerFraction =
+        threads > 0 ? static_cast<double>(workingThreads) / static_cast<double>(threads) : 0.0;
 
     std::ostringstream workerVal;
     workerVal << progress_bar(workerFraction, 12, "#", "░", Ansi::GREEN, Ansi::YELLOW, Ansi::RED,
@@ -934,10 +947,10 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
         Severity pressSev = (lvl == 0)   ? Severity::Good
                             : (lvl == 1) ? Severity::Warn
                                          : Severity::Bad;
-        double memFraction =
-            status.governorBudgetBytes > 0
-                ? static_cast<double>(status.governorRssBytes) / status.governorBudgetBytes
-                : 0.0;
+        double memFraction = status.governorBudgetBytes > 0
+                                 ? static_cast<double>(status.governorRssBytes) /
+                                       static_cast<double>(status.governorBudgetBytes)
+                                 : 0.0;
         uint64_t memMb = status.governorRssBytes / (1024ULL * 1024ULL);
         uint64_t budgetMb = status.governorBudgetBytes / (1024ULL * 1024ULL);
         std::ostringstream memBar;
@@ -1058,14 +1071,18 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
         uint64_t rate = findPostIngestCount("post_ingest_rate_sec_ema");
 
         // Queue progress bar
-        double queueFraction = cap > 0 ? static_cast<double>(queued) / cap : 0.0;
+        double queueFraction =
+            cap > 0 ? static_cast<double>(queued) / static_cast<double>(cap) : 0.0;
         std::ostringstream queueBar;
         queueBar << progress_bar(queueFraction, 12, "#", "░", Ansi::GREEN, Ansi::YELLOW, Ansi::RED,
                                  true)
                  << " " << static_cast<int>(queueFraction * 100) << "% (" << queued << "/" << cap
                  << ")";
-        Severity qSev = queued > cap * 0.8 ? Severity::Bad
-                                           : (queued > cap * 0.5 ? Severity::Warn : Severity::Good);
+        Severity qSev =
+            static_cast<double>(queued) > static_cast<double>(cap) * 0.8
+                ? Severity::Bad
+                : (static_cast<double>(queued) > static_cast<double>(cap) * 0.5 ? Severity::Warn
+                                                                                : Severity::Good);
         postIngestRows.push_back({"Queue", paintStatus(qSev, queueBar.str()), ""});
         if (inflight > 0) {
             postIngestRows.push_back({"  Inflight", std::to_string(inflight) + " active", ""});
@@ -1189,6 +1206,7 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
     const uint64_t repairFailed = findPostIngestCount("repair_failed_operations");
     const uint64_t repairBacklog = findPostIngestCount("repair_total_backlog");
     const uint64_t repairProcessed = findPostIngestCount("repair_processed");
+    const uint64_t repairPathTree = findPostIngestCount("repair_path_tree_repaired");
     const uint64_t repairCurrentOp = findPostIngestCount("repair_current_operation_code");
     const uint64_t repairCurrentElapsedMs =
         findPostIngestCount("repair_current_operation_elapsed_ms");
@@ -1215,7 +1233,8 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
     }
 
     if (repairBacklog > 0) {
-        const double fraction = std::min(1.0, static_cast<double>(repairProcessed) / repairBacklog);
+        const double fraction = std::min(1.0, static_cast<double>(repairProcessed) /
+                                                  static_cast<double>(repairBacklog));
         std::ostringstream progress;
         progress << progress_bar(fraction, 12, "#", "░", Ansi::GREEN, Ansi::YELLOW, Ansi::RED, true)
                  << " " << repairProcessed << "/" << repairBacklog;
@@ -1228,6 +1247,9 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
 
     std::ostringstream repairStats;
     repairStats << repairBatches << " batches · " << repairEmbeddings << " embeddings";
+    if (repairPathTree > 0) {
+        repairStats << " · " << repairPathTree << " path-tree";
+    }
     Severity repairStatsSev = repairFailed > 0 ? Severity::Warn : Severity::Good;
     if (repairFailed > 0) {
         repairStats << " · " << repairFailed << " failed";
@@ -1399,7 +1421,8 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
         // Calculate total overhead (everything except CAS blocks)
         const uint64_t totalOverhead = storageRefsDb + dbBytes + vectorsDbBytes + vectorIndexBytes;
         if (totalOverhead > 0 && storageObjects > 0) {
-            double overheadPct = (static_cast<double>(totalOverhead) / storageObjects) * 100.0;
+            double overheadPct =
+                (static_cast<double>(totalOverhead) / static_cast<double>(storageObjects)) * 100.0;
             std::ostringstream pct;
             pct << std::fixed << std::setprecision(1) << overheadPct << "% of CAS";
             storageRows.push_back({"  Total Overhead", humanBytes(totalOverhead), pct.str()});

@@ -1,8 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/cli/command_catalog.h>
 #include <yams/cli/command_registry.h>
 #include <yams/cli/yams_cli.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -141,5 +143,77 @@ TEST_CASE("YamsCLI - command registration preserves help entrypoints", "[cli][re
     }
     SECTION("full p2p help still works") {
         runHelp("p2p");
+    }
+}
+
+namespace {
+
+// One entry per line under "Subcommands:" in `yams --help`: the primary
+// name first, then its aliases ("delete, rm" yields {"delete", "rm"}).
+std::vector<std::vector<std::string>> helpListedCommandNames(const std::string& help) {
+    std::vector<std::vector<std::string>> lines;
+    std::istringstream in(help);
+    std::string line;
+    bool inSubcommands = false;
+    while (std::getline(in, line)) {
+        if (line.rfind("Subcommands:", 0) == 0) {
+            inSubcommands = true;
+            continue;
+        }
+        if (!inSubcommands || line.size() < 3 || line[0] != ' ' || line[2] == ' ')
+            continue;
+        const auto end = line.find("  ", 2);
+        std::string field = line.substr(2, end == std::string::npos ? end : end - 2);
+        std::vector<std::string> names;
+        std::size_t start = 0;
+        while (start < field.size()) {
+            auto comma = field.find(',', start);
+            auto token = field.substr(start, comma == std::string::npos ? comma : comma - start);
+            token.erase(0, token.find_first_not_of(' '));
+            token.erase(token.find_last_not_of(' ') + 1);
+            if (!token.empty())
+                names.push_back(token);
+            if (comma == std::string::npos)
+                break;
+            start = comma + 1;
+        }
+        if (!names.empty())
+            lines.push_back(std::move(names));
+    }
+    return lines;
+}
+
+} // namespace
+
+TEST_CASE("YamsCLI - every command named in --help dispatches", "[cli][registry][catch2]") {
+    CliTestHelper helper;
+    std::string help;
+    {
+        CaptureStdout capture;
+        REQUIRE(helper.runCommand({"yams", "--help"}) == 0);
+        help = capture.str();
+    }
+    const auto lines = helpListedCommandNames(help);
+    REQUIRE(lines.size() >= 20);
+
+    const auto catalog = yams::cli::topLevelCommandNames();
+    for (const auto& names : lines) {
+        INFO("primary command: " << names.front());
+        CHECK(std::find(catalog.begin(), catalog.end(), names.front()) != catalog.end());
+        for (const auto& name : names) {
+            INFO("command: " << name);
+            CHECK(yams::cli::CommandRegistry::isRegisteredTopLevelCommand(name));
+            CaptureStdout capture;
+            CHECK(helper.runCommand({"yams", name, "--help"}) == 0);
+        }
+    }
+}
+
+TEST_CASE("YamsCLI - every completion candidate dispatches", "[cli][registry][catch2]") {
+    CliTestHelper helper;
+    for (const auto& name : yams::cli::topLevelCommandNames()) {
+        INFO("completion candidate: " << name);
+        CaptureStdout capture;
+        CHECK(helper.runCommand({"yams", name, "--help"}) == 0);
     }
 }

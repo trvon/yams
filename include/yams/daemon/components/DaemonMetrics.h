@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -209,10 +210,8 @@ struct MetricsSnapshot {
 
     // Checkpoint manager stats (PBI-090)
     std::uint64_t checkpointVectorCount{0};
-    std::uint64_t checkpointHotzoneCount{0};
     std::uint64_t checkpointErrorCount{0};
-    std::string lastVectorCheckpointTime;  // ISO8601 timestamp
-    std::string lastHotzoneCheckpointTime; // ISO8601 timestamp
+    std::string lastVectorCheckpointTime; // ISO8601 timestamp
 
     // Content store & compression snapshot (best-effort)
     std::uint64_t storeObjects{0};
@@ -406,6 +405,7 @@ struct MetricsSnapshot {
     std::uint64_t repairBusyTicks{0};
     std::uint64_t repairTotalBacklog{0};
     std::uint64_t repairProcessed{0};
+    std::uint64_t repairPathTreeRepaired{0};
     std::uint64_t repairCurrentOperationCode{0};
     std::uint64_t repairCurrentOperationElapsedMs{0};
 
@@ -491,9 +491,6 @@ public:
     std::shared_ptr<const MetricsSnapshot> getSnapshot() const { return getSnapshot(false); }
     // Optional: force refresh cache now (used by periodic ticker)
     void refresh();
-
-    // Centralized embedding/ONNX provider status for stats/status callers
-    EmbeddingServiceInfo getEmbeddingServiceInfo() const;
 
     // Set SocketServer (called after SocketServer is created, which happens after DaemonMetrics)
     void setSocketServer(const SocketServer* socketServer);
@@ -590,6 +587,17 @@ private:
     mutable std::chrono::steady_clock::time_point lastPhysicalAt_{};
     mutable std::uint64_t lastPhysicalBytes_{0};
     mutable std::uint64_t lastWalkDurationMs_{0};
+    // The last full per-file walk of <data>/storage. While the tree fingerprint is unchanged
+    // the walk reuses these totals instead of statting every object again.
+    struct StorageWalkTotals {
+        std::uint64_t fingerprint{0};
+        std::chrono::steady_clock::time_point at{};
+        std::uint64_t total{0};
+        std::uint64_t casObjects{0};
+        std::uint64_t refsDb{0};
+        std::uint64_t tmp{0};
+    };
+    mutable StorageWalkTotals lastStorageWalk_{};
     mutable std::atomic<bool> physicalWalkInFlight_{false};
     mutable std::atomic<bool> detailedCollectInFlight_{false};
     mutable std::atomic<bool> storeStatsCollectInFlight_{false};
@@ -645,5 +653,15 @@ private:
 };
 
 std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept;
+
+/// Fingerprint of a content-store tree from directory mtimes only: the root, its child
+/// directories and theirs (the object shards). Adding or removing an object changes its shard
+/// directory's mtime, so an unchanged fingerprint means a per-file walk would find the same
+/// objects. Returns 0 when the root does not exist.
+std::uint64_t storageTreeFingerprint(const std::filesystem::path& root) noexcept;
+
+/// How long an unchanged fingerprint may stand in for the full walk. Bounds drift from changes
+/// the fingerprint cannot see, such as a file rewritten in place deeper than two levels.
+inline constexpr std::chrono::minutes kStorageWalkMaxReuse{30};
 
 } // namespace yams::daemon

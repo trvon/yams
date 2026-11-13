@@ -76,7 +76,6 @@ public:
 
     // Statistics
     size_t getRequestCount() const { return info_.requestCount.load(); }
-    size_t getErrorCount() const { return info_.errorCount.load(); }
 
     // Validation
     bool isValid() const;
@@ -202,8 +201,6 @@ public:
     void setResolutionHints(const std::string& modelName, const ResolutionHints& hints);
 
     // Get the configured models root directory
-    const std::string& getModelsRoot() const { return config_.modelsRoot; }
-    bool isAsyncLoadingEnabled() const { return config_.asyncLoading; }
     std::string resolveModelPath(const std::string& modelName) const;
 
 private:
@@ -218,7 +215,6 @@ private:
     };
 
     // Create a new model session
-    Result<ModelSessionPtr> createModelSession(const std::string& modelName);
     Result<void> loadModelSync(const std::string& modelName);
     Result<void> scheduleLoad(const std::string& modelName);
 

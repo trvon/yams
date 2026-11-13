@@ -154,6 +154,7 @@ struct MemorySyncDaemonConfig {
         parseLimit("max_cache_bytes", cfg.limits.maxCacheBytes);
         parseLimit("max_tracked_identities", cfg.limits.maxTrackedIdentities);
         parseLimit("max_scan_bytes", cfg.limits.maxScanBytes);
+        parseLimit("max_scan_bytes_ceiling", cfg.limits.maxScanBytesCeiling);
         return cfg;
     }
 

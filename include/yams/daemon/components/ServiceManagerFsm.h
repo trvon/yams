@@ -68,8 +68,6 @@ public:
     // any state and returns whether it got there.
     [[nodiscard]] bool completeShutdown() noexcept;
 
-    bool canInitializeVectors() const noexcept;
-    bool canBuildSearchEngine() const noexcept;
     bool isReady() const noexcept;
     bool hasShutdown() const noexcept;
     bool isTerminalState() const noexcept;

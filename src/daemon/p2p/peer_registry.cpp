@@ -273,6 +273,7 @@ Result<void> PeerRegistry::enrollOperatorPeer(std::string_view nodeId, std::stri
         return existing.error();
     }
     if (existing.value()) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         if (*existing.value() != normalized.value()) {
             return Error{ErrorCode::Unauthorized,
                          "P2P peer pin replacement requires explicit removal"};

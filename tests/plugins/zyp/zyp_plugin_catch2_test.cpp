@@ -15,6 +15,7 @@
 extern "C" {
 #include <yams/plugins/abi.h>
 #include <yams/plugins/content_extractor_v1.h>
+#include <yams/plugins/host_context_v1.h>
 }
 
 namespace {
@@ -408,6 +409,94 @@ TEST_CASE_METHOD(ZypPluginTest, "ExtractMultiPagePdfRepeatedly", "[plugin][zyp][
 
         extractor_->free_result(result);
     }
+}
+
+// ============================================================================
+// Resource grant tests
+// ============================================================================
+
+namespace grant_probe {
+int calls = 0;
+yams_extraction_budget_v1 answer{};
+int getBudget(void* /*handle*/, yams_extraction_budget_v1* out) {
+    ++calls;
+    *out = answer;
+    return 0;
+}
+} // namespace grant_probe
+
+TEST_CASE_METHOD(ZypPluginTest, "ExtractAsksHostForItsGrant", "[plugin][zyp][memory]") {
+    if (!pluginAvailable()) {
+        SKIP("zyp plugin not available");
+    }
+    auto init =
+        reinterpret_cast<int (*)(const char*, const void*)>(dlsym(handle_, "yams_plugin_init"));
+    REQUIRE(init != nullptr);
+
+    yams_resource_service_v1 service{nullptr, &grant_probe::getBudget};
+    yams_plugin_host_context_v1 ctx{};
+    ctx.resource_service = &service;
+    auto pdf = buildTwoPagePdf();
+
+    auto extractBothPages = [&] {
+        yams_extraction_result_t* result = nullptr;
+        REQUIRE(extractor_->extract(pdf.data(), pdf.size(), &result) == YAMS_PLUGIN_OK);
+        REQUIRE(result != nullptr);
+        REQUIRE(result->text != nullptr);
+        std::string text = result->text;
+        CHECK(text.find("First Page Text") != std::string::npos);
+        CHECK(text.find("Second Page Text") != std::string::npos);
+        extractor_->free_result(result);
+    };
+
+    SECTION("a version 2 host is asked once per document") {
+        ctx.version = 2;
+        grant_probe::calls = 0;
+        grant_probe::answer = {1, 0, 64ULL * 1024 * 1024};
+        REQUIRE(init(nullptr, &ctx) == YAMS_PLUGIN_OK);
+        extractBothPages();
+        CHECK(grant_probe::calls == 1);
+    }
+
+    SECTION("a byte grant smaller than a page drops page text, not the document") {
+        ctx.version = 2;
+        grant_probe::calls = 0;
+        grant_probe::answer = {2, 0, 2}; // 1 byte per thread per page
+        REQUIRE(init(nullptr, &ctx) == YAMS_PLUGIN_OK);
+        yams_extraction_result_t* result = nullptr;
+        REQUIRE(extractor_->extract(pdf.data(), pdf.size(), &result) == YAMS_PLUGIN_OK);
+        REQUIRE(result != nullptr);
+        CHECK(std::string(result->text).find("First Page Text") == std::string::npos);
+        extractor_->free_result(result);
+    }
+
+    SECTION("text does not depend on the thread grant") {
+        ctx.version = 2;
+        auto textWithThreads = [&](uint32_t threads) {
+            grant_probe::answer = {threads, 0, 0};
+            REQUIRE(init(nullptr, &ctx) == YAMS_PLUGIN_OK);
+            yams_extraction_result_t* result = nullptr;
+            REQUIRE(extractor_->extract(pdf.data(), pdf.size(), &result) == YAMS_PLUGIN_OK);
+            REQUIRE(result != nullptr);
+            std::string text = result->text ? result->text : "";
+            extractor_->free_result(result);
+            return text;
+        };
+        const auto one = textWithThreads(1);
+        CHECK(one.find("First Page Text") != std::string::npos);
+        CHECK(one == textWithThreads(2));
+        CHECK(one == textWithThreads(8));
+    }
+
+    SECTION("a version 1 host has no resource service and is never asked") {
+        ctx.version = 1;
+        grant_probe::calls = 0;
+        REQUIRE(init(nullptr, &ctx) == YAMS_PLUGIN_OK);
+        extractBothPages();
+        CHECK(grant_probe::calls == 0);
+    }
+
+    REQUIRE(init(nullptr, nullptr) == YAMS_PLUGIN_OK);
 }
 
 // ============================================================================

@@ -289,12 +289,17 @@ public:
     }
 
     void remove(std::string_view url) noexcept override {
-        auto jr = loadFile();
-        if (!jr.ok())
-            return;
-        auto& root = jr.value();
-        root.erase(std::string(url));
-        (void)writeFile(root);
+        // Best effort, like the ignored writeFile result. json::dump throws on invalid UTF-8
+        // and fs::exists on permission errors.
+        try {
+            auto jr = loadFile();
+            if (!jr.ok())
+                return;
+            auto& root = jr.value();
+            root.erase(std::string(url));
+            (void)writeFile(root);
+        } catch (...) { // NOLINT(bugprone-empty-catch)
+        }
     }
 
 private:
@@ -708,12 +713,32 @@ public:
                         copyOpts |= std::filesystem::copy_options::overwrite_existing;
                     }
                     yams::common::ensureDirectories(exportPath.parent_path());
+                    if (exists) {
+                        // Exports written before this fix may be read-only; let the copy
+                        // replace them.
+                        std::filesystem::permissions(exportPath,
+                                                     std::filesystem::perms::owner_write,
+                                                     std::filesystem::perm_options::add, fec);
+                        fec.clear();
+                    }
                     std::filesystem::copy_file(finalRes.value(), exportPath, copyOpts, fec);
                     if (fec) {
                         disk_->cleanup(stagingFile);
                         return Error{ErrorCode::IoError, "Failed to export file: " + fec.message()};
                     }
-                    writeExportMetadata(exportPath, digest.hex, currentEtag, currentLastModified);
+                    // copy_file carries the CAS object's read-only mode; an exported file is a
+                    // normal user file.
+                    std::filesystem::permissions(exportPath,
+                                                 std::filesystem::perms::owner_read |
+                                                     std::filesystem::perms::owner_write |
+                                                     std::filesystem::perms::group_read |
+                                                     std::filesystem::perms::others_read,
+                                                 std::filesystem::perm_options::replace, fec);
+                    // The sidecar only serves IfDifferentEtag (skip unchanged re-exports).
+                    if (request.overwrite == OverwritePolicy::IfDifferentEtag) {
+                        writeExportMetadata(exportPath, digest.hex, currentEtag,
+                                            currentLastModified);
+                    }
                 }
             }
 

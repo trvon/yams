@@ -27,34 +27,6 @@ constexpr bool is_valid_hash_prefix(std::string_view s) {
     return true;
 }
 
-// Resolve partial or full hash to a full hash using MetadataRepository.
-inline Result<std::string> resolve_hash_prefix(yams::metadata::MetadataRepository& repo,
-                                               const std::string& prefix) {
-    if (!is_valid_hash_prefix(prefix)) {
-        return Error{ErrorCode::InvalidArgument, "Invalid hash prefix (need 8-64 hex chars)"};
-    }
-    // Fallback approach: scan paths (consistent with existing CLI patterns)
-    auto docs = metadata::queryDocumentsByPattern(repo, "%");
-    if (!docs) {
-        return Error{docs.error().code, docs.error().message};
-    }
-    std::string lowerPrefix = prefix;
-    std::transform(lowerPrefix.begin(), lowerPrefix.end(), lowerPrefix.begin(), ::tolower);
-    std::vector<std::string> matches;
-    for (const auto& d : docs.value()) {
-        std::string h = d.sha256Hash;
-        std::transform(h.begin(), h.end(), h.begin(), ::tolower);
-        if (h.rfind(lowerPrefix, 0) == 0) {
-            matches.push_back(d.sha256Hash);
-        }
-    }
-    if (matches.empty())
-        return Error{ErrorCode::NotFound, "No document with given hash prefix"};
-    if (matches.size() > 1)
-        return Error{ErrorCode::InvalidOperation, "Ambiguous hash prefix"};
-    return matches.front();
-}
-
 // Resolve by exact path or name; on tie and flags, choose latest/oldest by indexedTime.
 inline Result<std::string> resolve_name(yams::metadata::MetadataRepository& repo,
                                         const std::string& name, bool latest = false,
@@ -118,21 +90,6 @@ inline Result<std::string> resolve_name(yams::metadata::MetadataRepository& repo
         }
     }
     return Error{ErrorCode::NotFound, "No document found for given name"};
-}
-
-// Resolve either hash(prefix) or name according to flags.
-inline Result<std::string> resolve_hash_or_name(yams::metadata::MetadataRepository& repo,
-                                                const std::string& hash, const std::string& name,
-                                                bool latest = false, bool oldest = false) {
-    if (!hash.empty()) {
-        if (hash.size() == 64 && std::all_of(hash.begin(), hash.end(), is_hex)) {
-            return hash; // full hash
-        }
-        return resolve_hash_prefix(repo, hash);
-    }
-    if (!name.empty())
-        return resolve_name(repo, name, latest, oldest);
-    return Error{ErrorCode::InvalidArgument, "No hash or name provided"};
 }
 
 } // namespace yams::common

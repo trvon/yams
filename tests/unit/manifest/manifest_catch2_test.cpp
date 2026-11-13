@@ -2,6 +2,7 @@
 // Migrated from GTest: manifest_test.cpp
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <yams/chunking/chunker.h>
 #include <yams/crypto/hasher.h>
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -18,29 +20,15 @@
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <vector>
+
+#include "../../common/test_helpers_catch2.h"
 
 using namespace yams;
 using namespace yams::manifest;
 using namespace yams::chunking;
 
 namespace {
-
-std::filesystem::path make_temp_dir(std::string_view prefix = "yams_manifest_test_") {
-    namespace fs = std::filesystem;
-    const auto base = fs::temp_directory_path();
-    std::uniform_int_distribution<int> dist(0, 9999);
-    thread_local std::mt19937_64 rng{std::random_device{}()};
-    for (int attempt = 0; attempt < 512; ++attempt) {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        auto candidate =
-            base / (std::string(prefix) + std::to_string(stamp) + "_" + std::to_string(dist(rng)));
-        std::error_code ec;
-        if (fs::create_directories(candidate, ec)) {
-            return candidate;
-        }
-    }
-    return base;
-}
 
 std::vector<std::byte> generateRandomBytes(std::size_t size) {
     static thread_local std::mt19937_64 engine{std::random_device{}()};
@@ -98,7 +86,7 @@ std::vector<std::byte> makeBinaryManifestFixture(bool legacy64BitFlags,
 
 struct ManifestTestFixture {
     ManifestTestFixture() {
-        testDir = make_temp_dir();
+        testDir = yams::test::make_temp_dir("yams_manifest_test_");
 
         ManifestManager::Config config{.enableCompression = false, // Disable for predictable tests
                                        .enableChecksums = true,
@@ -615,4 +603,110 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager performance benchmark",
 
     double manifestRatio = static_cast<double>(serializeResult.value().size()) / manifest.fileSize;
     CHECK((manifestRatio < 0.1)); // < 10%
+}
+
+// An empty file has no chunks, and older stores wrote a zero-chunk manifest for it. isValid()
+// required a chunk and a non-zero size, so every such manifest deserialized as ManifestInvalid:
+// the empty document could not be read back, and memory-sync backfill skipped it as corrupt.
+TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager accepts the manifest of an empty file",
+                 "[manifest][catch2]") {
+    Manifest empty;
+    empty.fileHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    empty.fileSize = 0;
+    empty.originalName = "README.md";
+    CHECK(empty.isValid());
+
+    auto serialized = manager->serialize(empty);
+    REQUIRE(serialized.has_value());
+    auto restored = manager->deserialize(serialized.value());
+    REQUIRE(restored.has_value());
+    CHECK(restored.value().fileSize == 0);
+    CHECK(restored.value().chunks.empty());
+
+    // A non-empty size with no chunks, or chunks for an empty size, still describe no file.
+    Manifest sizeWithoutChunks = empty;
+    sizeWithoutChunks.fileSize = 10;
+    CHECK_FALSE(sizeWithoutChunks.isValid());
+    Manifest chunksWithoutSize = empty;
+    chunksWithoutSize.chunks.push_back(
+        manifest::ChunkRef{.hash = std::string(64, 'a'), .offset = 0, .size = 4});
+    CHECK_FALSE(chunksWithoutSize.isValid());
+
+    // Chunk sizes that do not add up to the file size describe a different file.
+    Manifest mismatched = empty;
+    mismatched.fileSize = 10;
+    mismatched.chunks.push_back(
+        manifest::ChunkRef{.hash = std::string(64, 'a'), .offset = 0, .size = 4});
+    CHECK_FALSE(mismatched.isValid());
+    mismatched.chunks.push_back(
+        manifest::ChunkRef{.hash = std::string(64, 'b'), .offset = 4, .size = 6});
+    CHECK(mismatched.isValid());
+}
+
+// The cache sits in front of deserialize(). Whatever it holds or evicts, a manifest must come
+// back as the one that was serialized, including with a cache too small for the working set.
+TEST_CASE_METHOD(ManifestTestFixture,
+                 "ManifestManager deserialize is exact at every cache capacity",
+                 "[manifest][catch2]") {
+    std::vector<Manifest> originals;
+    std::vector<std::vector<std::byte>> serialized;
+    for (size_t i = 0; i < 8; ++i) {
+        auto chunks = createTestChunks(i + 1, 64);
+        auto created = manager->createManifest(createTestFileInfo(chunks), chunks);
+        REQUIRE(created.has_value());
+        auto bytes = manager->serialize(created.value());
+        REQUIRE(bytes.has_value());
+        originals.push_back(created.value());
+        serialized.push_back(std::move(bytes.value()));
+    }
+
+    const auto capacity = GENERATE(size_t{0}, size_t{1}, size_t{3}, size_t{100});
+    ManifestManager small(ManifestManager::Config{.enableCompression = false,
+                                                  .enableChecksums = true,
+                                                  .enableCaching = true,
+                                                  .cacheSize = capacity});
+
+    // Every stored field must survive the cache, so compare the bytes a restored manifest
+    // serializes to. Manifest equality would not do: timestamps are not serialized.
+    const auto reserializesTo = [&small](const Manifest& restored,
+                                         const std::vector<std::byte>& expected) {
+        auto bytes = small.serialize(restored);
+        return bytes.has_value() && bytes.value() == expected;
+    };
+
+    // Repeats keep some entries hot while the sweep pushes others out.
+    const std::vector<size_t> order = {0, 1, 0, 2, 3, 0, 4, 1, 5, 6, 0, 7, 7, 2, 1,
+                                       0, 3, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7};
+
+    SECTION("single thread") {
+        for (const size_t index : order) {
+            auto restored = small.deserialize(serialized[index]);
+            REQUIRE(restored.has_value());
+            CHECK(restored.value().fileHash == originals[index].fileHash);
+            CHECK(reserializesTo(restored.value(), serialized[index]));
+        }
+    }
+
+    SECTION("concurrent readers") {
+        std::atomic<int> wrong{0};
+        std::vector<std::thread> readers;
+        for (size_t t = 0; t < 4; ++t) {
+            readers.emplace_back([&, t] {
+                for (int round = 0; round < 20; ++round) {
+                    for (const size_t step : order) {
+                        const size_t index = (step + t) % serialized.size();
+                        auto restored = small.deserialize(serialized[index]);
+                        if (!restored.has_value() ||
+                            !reserializesTo(restored.value(), serialized[index])) {
+                            wrong.fetch_add(1);
+                        }
+                    }
+                }
+            });
+        }
+        for (auto& reader : readers) {
+            reader.join();
+        }
+        CHECK(wrong.load() == 0);
+    }
 }

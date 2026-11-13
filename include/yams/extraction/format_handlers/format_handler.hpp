@@ -179,18 +179,6 @@ public:
         return h->extract(bytes, query);
     }
 
-    // Introspection helper: list capabilities for all registered handlers
-    std::vector<CapabilityDescriptor> listCapabilities() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        std::vector<CapabilityDescriptor> caps;
-        caps.reserve(handlers_.size());
-        for (const auto& h : handlers_) {
-            if (h)
-                caps.push_back(h->capabilities());
-        }
-        return caps;
-    }
-
 private:
     mutable std::mutex mutex_;
     std::vector<std::shared_ptr<IFormatHandler>> handlers_;
@@ -200,12 +188,5 @@ private:
 // Handlers can convert semantics (pages vs lines) as needed.
 // Returns ErrorCode::InvalidArgument on malformed inputs.
 Result<std::vector<std::pair<int, int>>> parseClosedRanges(const std::string& expr);
-
-// Phase 1: register built-in handlers (text, markdown, html-basic, code line-range)
-// Implementations are provided in the extraction module.
-// - Text/Markdown/Code: backed by PlainTextExtractor with optional line-range support
-// - HTML-basic: backed by HtmlTextExtractor
-// - PDF: optional in Phase 1; if available, handler should be registered externally
-void registerBuiltinHandlers(HandlerRegistry& registry);
 
 } // namespace yams::extraction::format

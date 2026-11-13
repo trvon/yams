@@ -327,6 +327,11 @@ vector_vacuum_interval_hours = 24
 # many days are deleted, except the current session, sessions watching a directory that still
 # exists, and sessions that still own documents (0 disables).
 session_expiry_days = 30
+# How often a path-tree repair pass re-scans all documents and restores missing path-tree
+# nodes (0 disables). The pass runs one batch per repair-loop tick and yields between batches.
+path_tree_repair_interval_hours = 24
+# Documents examined per path-tree repair batch (1-10000).
+path_tree_repair_batch = 256
 
 # Host-load awareness. While the machine is busy (Linux PSI "some avg10", else load average
 # per CPU; macOS load average and memory pressure), the daemon defers background work:

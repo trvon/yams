@@ -1,6 +1,7 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/core/thread_name.h>
 #include <yams/daemon/components/IOCoordinator.h>
 
 #include <spdlog/spdlog.h>
@@ -71,6 +72,7 @@ void IOCoordinator::start() {
     try {
         for (size_t i = 0; i < threadCount; ++i) {
             threads_.emplace_back([this, i]() {
+                yams::setCurrentThreadName("yams-io-" + std::to_string(i));
                 spdlog::trace("[IOCoordinator] I/O thread {} starting", i);
                 io_context_->run();
                 spdlog::trace("[IOCoordinator] I/O thread {} exited", i);

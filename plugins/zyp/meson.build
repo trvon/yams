@@ -10,10 +10,10 @@ if host_machine.system() == 'darwin' and get_option('b_coverage')
   subdir_done()
 endif
 
-#Find Zig compiler(requires 0.15.x; zpdf is not Zig 0.16 - compatible yet)
+#Find Zig compiler (zpdf builds with Zig 0.15 through 0.17)
 zig = find_program('zig', required: false)
 if not zig.found()
-  warning('Zig compiler not found, skipping zyp plugin. Install Zig 0.15.x to enable.')
+  warning('Zig compiler not found, skipping zyp plugin. Install Zig 0.15-0.17 to enable.')
   subdir_done()
 endif
 
@@ -24,8 +24,9 @@ if zig_version_result.returncode() != 0
 endif
 
 zig_version = zig_version_result.stdout().strip()
-if not zig_version.version_compare('>=0.15.0')
-  warning('Zig @0@ is unsupported by zyp; zpdf requires Zig 0.15+. Skipping zyp plugin.'.format(zig_version))
+# zpdf CI covers Zig 0.15.2, 0.16 and 0.17.
+if not zig_version.version_compare('>=0.15.0') or not zig_version.version_compare('<0.18.0')
+  warning('Zig @0@ is unsupported by zyp; zpdf supports Zig 0.15 through 0.17. Skipping zyp plugin.'.format(zig_version))
   subdir_done()
 endif
 
@@ -90,6 +91,8 @@ if host_machine.system() == 'windows'
     ],
     output: [zpdf_lib_name, zpdf_import_lib_name],
     build_by_default: true,
+    # zig build tracks the zpdf sources itself; meson does not, so always ask.
+    build_always_stale: true,
     console: true,
   )
 #Extract just the import library for linking
@@ -111,6 +114,8 @@ elif host_machine.system() == 'darwin'
     ],
     output: [zpdf_lib_name],
     build_by_default: true,
+    # zig build tracks the zpdf sources itself; meson does not, so always ask.
+    build_always_stale: true,
     console: true,
   )
 else
@@ -128,6 +133,8 @@ else
     ],
     output: [zpdf_lib_name],
     build_by_default: true,
+    # zig build tracks the zpdf sources itself; meson does not, so always ask.
+    build_always_stale: true,
     console: true,
   )
 endif

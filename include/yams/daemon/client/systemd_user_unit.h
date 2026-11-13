@@ -22,6 +22,20 @@ enum class UserUnitState {
 /// environment override the unit cannot see) and no other config file was named.
 bool userUnitMatchesPaths(const yams::config::ResolvedRuntimePaths& paths);
 
+/// Which daemon a lifecycle command (stop, restart) is allowed to act on.
+struct LifecycleScope {
+    bool userUnit{false};      ///< may be handed to the systemd user unit
+    bool anyLiveDaemon{false}; ///< may fall back to whichever daemon is running
+    bool pidFile{false};       ///< the resolved PID file identifies the target daemon
+};
+
+/// A command aimed at the default daemon may use the user unit, discovery of a live daemon
+/// and the shared PID file. One aimed elsewhere (a socket, data directory or config file from
+/// a flag or the environment) must touch only the daemon on its own socket; its PID file
+/// counts only when it was named by flag, environment or that config.
+LifecycleScope lifecycleScope(bool socketFlag, bool pidFileFlag,
+                              const yams::config::ResolvedRuntimePaths& paths);
+
 /// Queries `systemctl --user` (Linux only; Unavailable elsewhere or without a user manager).
 UserUnitState queryUserUnit();
 

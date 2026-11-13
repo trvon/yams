@@ -63,9 +63,16 @@ Named decisions from the tuning migration:
   drain controls). Their effective values and per-key source are exposed as `runtime_tuning` in
   detailed/JSON status.
 - Host-load scheduling lives in `[tuning.resource]` with no environment counterpart:
-  `host_pressure` (sample host PSI or load average, default on), `host_cpu_pressure_pct` (40),
-  `host_io_pressure_pct` (30), `host_memory_pressure_pct` (10), `host_load_per_cpu` (1.5, used
-  when PSI is unavailable), and `background_max_deferral_s` (300; 0 turns deferral off). While
+  `host_pressure` (sample host PSI or load average, default on), `host_cpu_pressure_pct`,
+  `host_io_pressure_pct`, `host_memory_pressure_pct`, `host_load_per_cpu` (used when PSI is
+  unavailable), and `background_max_deferral_s` (300; 0 turns deferral off). The four
+  thresholds default from `[tuning] profile` (efficient / balanced / aggressive): IO 60 / 85 / 100,
+  CPU 30 / 40 / 60, memory 5 / 10 / 20, load per CPU 1.0 / 1.5 / 2.0. A key set explicitly wins.
+  On Linux, IO pressure also needs the busiest physical disk (from `/proc/diskstats`) busy for
+  50 / 70 / 90 percent of the time, so PSI IO from idle io_uring waiters does not defer work.
+- Memory sync re-applies every replicated record to repair local drift every 30 / 15 / 5 minutes
+  (efficient / balanced / aggressive) when no peer input changed; the pass reads and verifies
+  the whole corpus. While
   the host is busy, deferrable background work (topology rebuilds, repair scans and VACUUM,
   semantic backfill) waits; `yams daemon status` shows the host load and what is deferred.
 - CLI search header/body timeouts are passed in `ClientConfig`; the dead process-wide

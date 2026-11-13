@@ -8,6 +8,7 @@
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/content_slice_options.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -29,6 +30,8 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("cat", getDescription());
+        if (cli_)
+            cli_->registerReadOptions(*cmd);
 
         auto* selector = cmd->add_option_group("Content selector");
         selector->require_option(1, 1);
@@ -52,6 +55,9 @@ public:
 
         // Add flag for raw content output
         cmd->add_flag("--raw", raw_, "Output raw content without text extraction");
+        cmd->add_option("--max-bytes", maxBytes_, "Maximum content bytes to output (0: unlimited)")
+            ->check(CLI::NonNegativeNumber);
+        registerContentSliceOptions(*cmd, slice_);
 
         // No output option - cat always goes to stdout
         // This is intentional for piping and viewing content directly
@@ -66,6 +72,7 @@ public:
     }
 
     Result<void> execute() override {
+        OutputBudget outputBudget(std::cout, cli_ ? cli_->outputBudgetChars() : 0);
         YAMS_ZONE_SCOPED_N("CatCommand::execute");
 
         try {
@@ -102,11 +109,31 @@ public:
             ropts.requestTimeoutMs = 60000;
             yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlan, ropts);
 
+            // An unindexed file on disk: print it as is.
+            auto catLocalFile = [&]() -> Result<void> {
+                std::ifstream file(name_, std::ios::binary);
+                if (!file)
+                    return Error{ErrorCode::IOError, "cannot read " + name_};
+                std::string content;
+                if (maxBytes_ != 0 && !slice_.active()) {
+                    content.resize(static_cast<std::size_t>(
+                        std::min<std::uint64_t>(maxBytes_, std::filesystem::file_size(name_))));
+                    file.read(content.data(), static_cast<std::streamsize>(content.size()));
+                    content.resize(static_cast<std::size_t>(file.gcount()));
+                } else {
+                    content.assign(std::istreambuf_iterator<char>(file), {});
+                }
+                std::cout << sliceContent(content, slice_, maxBytes_);
+                return Result<void>();
+            };
+
             auto renderResponse = [&](const yams::daemon::GetResponse& resp) -> Result<void> {
                 if (!resp.hasContent) {
                     return Error{ErrorCode::NotFound, "Document content not found"};
                 }
-                std::cout.write(resp.content.data(), resp.content.size());
+                const auto content = sliceContent(resp.content, slice_, maxBytes_);
+                std::cout.write(content.data(), static_cast<std::streamsize>(content.size()));
+                noteOutputResult(std::cout);
                 return Result<void>();
             };
 
@@ -115,6 +142,7 @@ public:
             dreq.extract = !raw_;
             dreq.latest = getLatest_;
             dreq.oldest = getOldest_;
+            dreq.maxBytes = slice_.active() ? 0 : maxBytes_;
 
             if (hashCandidate) {
                 std::string candidate = *hashCandidate;
@@ -139,7 +167,16 @@ public:
                 if (smart) {
                     return renderResponse(smart.value());
                 }
-                spdlog::debug("cat: getByNameSmart fallback ({})", smart.error().message);
+                // A name that matched nothing or several documents is final; the
+                // generic by-name get would pick the newest of several matches.
+                if (!yams::cli::is_transport_failure(smart.error())) {
+                    if (smart.error().code == ErrorCode::NotFound &&
+                        std::filesystem::exists(name_)) {
+                        return catLocalFile();
+                    }
+                    return smart.error();
+                }
+                spdlog::debug("cat: getByNameSmart transport failure ({})", smart.error().message);
             } else {
                 return Error{ErrorCode::InvalidArgument, "No document specified"};
             }
@@ -147,11 +184,7 @@ public:
             auto gres = rsvc.get(dreq, ropts);
             if (!gres) {
                 if (!name_.empty() && std::filesystem::exists(name_)) {
-                    std::ifstream file(name_, std::ios::binary);
-                    if (file) {
-                        std::cout << file.rdbuf();
-                        return Result<void>();
-                    }
+                    return catLocalFile();
                 }
                 return gres.error();
             }
@@ -168,6 +201,8 @@ private:
     std::string hash_;
     std::string name_;
     std::string target_;
+    ContentSliceOptions slice_;
+    std::uint64_t maxBytes_{0};
     bool raw_ = false;       // Flag to output raw content without text extraction
     bool getLatest_ = false; // When ambiguous, select newest
     bool getOldest_ = false; // When ambiguous, select oldest

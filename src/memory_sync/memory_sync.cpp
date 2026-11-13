@@ -4,12 +4,21 @@
 #include <yams/profiling.h>
 
 #include <spdlog/spdlog.h>
+#include <yams/memory_sync/sync_failure_reporter.h>
 
 #include <typeinfo>
 
 #include "sweep_store.h"
 
 namespace yams::memory_sync {
+
+void logSyncCycleReport(std::string_view line, bool failure) {
+    if (failure) {
+        spdlog::warn("[MemorySync] {}", line);
+    } else {
+        spdlog::info("[MemorySync] {}", line);
+    }
+}
 
 namespace {
 /// One attempt per window once a sweep proves it cannot satisfy its own bounds.
@@ -46,6 +55,8 @@ void MemorySyncLoop::WriteCountingBackend::clearListingCaches() const noexcept {
     // everything without relying on potentially partial bookkeeping.
     pages_.clear();
     prefixListings_.clear();
+    windows_.clear();
+    declinedSnapshots_.clear();
     retainedKeyCount_ = 0;
     retainedKeyBytes_ = 0;
 }
@@ -153,6 +164,8 @@ void MemorySyncLoop::WriteCountingBackend::updateCompleteListingsAfterRemove(std
 void MemorySyncLoop::WriteCountingBackend::beforeMutation(std::string_view key) {
     incrementWrites();
     clearExactPages();
+    // A window is a partial traversal too: any matching mutation, applied or not, ends it.
+    invalidateWindows(key);
     if (filesystemSnapshotEligible()) {
         // A partial traversal cannot be certified across any matching mutation, including a
         // failed call whose backend may have applied a partial side effect.
@@ -184,6 +197,8 @@ void MemorySyncLoop::WriteCountingBackend::finishRemove(std::string_view key, bo
         }
         if (success) {
             updateCompleteListingsAfterRemove(key);
+            std::erase_if(declinedSnapshots_,
+                          [&](const std::string& prefix) { return key.starts_with(prefix); });
         } else {
             invalidateCompleteListings(key);
         }
@@ -206,6 +221,112 @@ storage::ObjectListPage MemorySyncLoop::WriteCountingBackend::pageFromSnapshot(
         page.nextCursor = page.keys.back();
     }
     return page;
+}
+
+void MemorySyncLoop::WriteCountingBackend::dropWindow(std::string_view prefix) const {
+    if (const auto found = windows_.find(prefix); found != windows_.end()) {
+        unaccountKeys(found->second.keys);
+        windows_.erase(found);
+    }
+}
+
+void MemorySyncLoop::WriteCountingBackend::invalidateWindows(std::string_view key) const {
+    for (auto it = windows_.begin(); it != windows_.end();) {
+        if (key.starts_with(it->first)) {
+            unaccountKeys(it->second.keys);
+            it = windows_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+std::optional<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::pageFromWindow(
+    std::string_view prefix, std::optional<std::string_view> cursor, std::size_t limit) const {
+    const auto found = windows_.find(prefix);
+    if (found == windows_.end() || found->second.keys.empty()) {
+        return std::nullopt;
+    }
+    const auto& window = found->second;
+    // The cursor must fall inside the run this window certifies: at or after its start
+    // and strictly before its last key (a cursor at the last key needs the next window).
+    if (cursor) {
+        if ((window.start && *cursor < std::string_view{*window.start}) ||
+            *cursor >= std::string_view{window.keys.back()}) {
+            return std::nullopt;
+        }
+    } else if (window.start) {
+        return std::nullopt;
+    }
+    const auto begin = cursor ? std::upper_bound(window.keys.begin(), window.keys.end(), *cursor,
+                                                 [](std::string_view value,
+                                                    const std::string& key) { return value < key; })
+                              : window.keys.begin();
+    const auto available = static_cast<std::size_t>(std::distance(begin, window.keys.end()));
+    const auto count = std::min(limit, available);
+    storage::ObjectListPage page;
+    page.keys.assign(begin, std::next(begin, static_cast<std::ptrdiff_t>(count)));
+    if (count < available || window.more) {
+        page.nextCursor = page.keys.back();
+    }
+    return page;
+}
+
+Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPageThroughWindow(
+    std::string_view prefix, std::optional<std::string_view> cursor, std::size_t limit) const {
+    if (auto served = pageFromWindow(prefix, cursor, limit)) {
+        return std::move(*served);
+    }
+    dropWindow(prefix);
+    const auto remainingKeys = maxRetainedKeys_ - std::min(retainedKeyCount_, maxRetainedKeys_);
+    if (remainingKeys <= limit || (!windows_.contains(prefix) && windows_.size() >= kMaxPrefixes)) {
+        return inner_.listPage(prefix, cursor, limit);
+    }
+    auto fetched = inner_.listPage(prefix, cursor, remainingKeys);
+    if (!fetched) {
+        return fetched.error();
+    }
+    auto& run = fetched.value();
+    // Keep the longest prefix of the run that fits the byte budget; the rest is "more".
+    auto remainingBytes = maxRetainedKeyBytes_ - std::min(retainedKeyBytes_, maxRetainedKeyBytes_);
+    std::size_t fits = 0;
+    for (; fits < run.keys.size(); ++fits) {
+        if (run.keys[fits].size() > remainingBytes) {
+            break;
+        }
+        remainingBytes -= run.keys[fits].size();
+    }
+    if (fits < limit && fits < run.keys.size()) {
+        // Not even one page fits the budget: answer this page from the run, retain nothing.
+        storage::ObjectListPage page;
+        const auto count = std::min(limit, run.keys.size());
+        page.keys.assign(run.keys.begin(),
+                         std::next(run.keys.begin(), static_cast<std::ptrdiff_t>(count)));
+        if (count < run.keys.size() || run.nextCursor) {
+            page.nextCursor = page.keys.back();
+        }
+        return page;
+    }
+    ListingWindow window;
+    if (cursor) {
+        window.start = std::string(*cursor);
+    }
+    window.more = fits < run.keys.size() || run.nextCursor.has_value();
+    run.keys.resize(fits);
+    window.keys = std::move(run.keys);
+    if (testing_beforeCacheAllocation) {
+        testing_beforeCacheAllocation("window-insert");
+    }
+    const auto [inserted, retained] = windows_.emplace(std::string(prefix), std::move(window));
+    if (retained) {
+        accountKeys(inserted->second.keys);
+    }
+    if (auto served = pageFromWindow(prefix, cursor, limit)) {
+        return std::move(*served);
+    }
+    // An empty run (nothing after the cursor) is a complete, empty final page.
+    dropWindow(prefix);
+    return storage::ObjectListPage{};
 }
 
 void MemorySyncLoop::WriteCountingBackend::observeFilesystemPage(
@@ -282,8 +403,11 @@ Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPage(
         // Only the built-in filesystem traversal certifies completeness. A backend that
         // merely describes itself as filesystem may return an opaque, short, cursor-less
         // page; the ordinary cursor-gap checks below remain authoritative for those.
+        // A prefix already declined as too large is not re-probed every sweep: the probe walks
+        // most of the tree only to decline again. Removals under it clear the mark (it may fit).
         if (!cursor && typeid(inner_) == typeid(storage::FilesystemBackend) &&
-            !prefixListings_.contains(prefix) && prefixListings_.size() < kMaxPrefixes) {
+            !prefixListings_.contains(prefix) && !declinedSnapshots_.contains(prefix) &&
+            prefixListings_.size() < kMaxPrefixes) {
             const auto remainingKeys =
                 maxRetainedKeys_ - std::min(retainedKeyCount_, maxRetainedKeys_);
             const auto remainingBytes =
@@ -295,9 +419,18 @@ Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPage(
                 if (!snapshot) {
                     return snapshot.error();
                 }
-                if (snapshot.value()) {
+                if (!snapshot.value()) {
+                    // The whole prefix does not fit: page through bounded windows instead.
+                    // Bounded like the other per-prefix caches; past the cap a prefix simply
+                    // keeps ordinary paging.
+                    if (declinedSnapshots_.size() < kMaxPrefixes) {
+                        declinedSnapshots_.insert(std::string(prefix));
+                    }
+                } else {
+                    declinedSnapshots_.erase(std::string(prefix));
                     try {
                         PrefixListing listing;
+                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                         listing.keys = std::move(*snapshot.value());
                         listing.complete = true;
                         if (testing_beforeCacheAllocation) {
@@ -313,6 +446,16 @@ Result<storage::ObjectListPage> MemorySyncLoop::WriteCountingBackend::listPage(
                         clearListingCaches();
                     }
                 }
+            }
+        }
+        // A prefix whose complete snapshot was declined as too large reads budget-sized
+        // windows instead of walking the whole tree for every page.
+        if (declinedSnapshots_.contains(prefix)) {
+            try {
+                return listPageThroughWindow(prefix, cursor, limit);
+            } catch (...) {
+                clearListingCaches();
+                return inner_.listPage(prefix, cursor, limit);
             }
         }
         auto page = inner_.listPage(prefix, cursor, limit);
@@ -548,11 +691,14 @@ Result<void> MemorySyncLoop::stageErase(std::string_view logicalKey, std::string
     }
     EraseIntentState intent;
     if (existing.value()) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         if (existing.value()->tombstonePayload != tombstonePayload ||
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             existing.value()->readinessProbe != readinessProbe) {
             return Error{ErrorCode::InvalidState,
                          "staged erase payload conflicts with retained intent"};
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         intent = std::move(*existing.value());
         if (!ready || intent.ready) {
             return {};
@@ -715,6 +861,7 @@ Result<void> MemorySyncLoop::publishStagedErase(std::string_view logicalKey,
     if (!loaded.value()) {
         return Error{ErrorCode::NotFound, "staged erase intent is missing"};
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     auto intent = std::move(*loaded.value());
     bool readinessValidated = false;
     if (!intent.ready && validator) {
@@ -773,6 +920,7 @@ Result<void> MemorySyncLoop::publishStagedErase(std::string_view logicalKey,
     if (!retained.value()) {
         return {};
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     intent = std::move(*retained.value());
     const auto durable = historyCommitments_.find(nodeId_);
     const bool pointOfNoReturn =
@@ -801,16 +949,21 @@ Result<void> MemorySyncLoop::cancelStagedErase(std::string_view logicalKey) {
     if (!intent.value()) {
         return {};
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     if (intent.value()->ready && !intent.value()->record) {
         return Error{ErrorCode::InvalidState, "ready erase intent lacks prepared envelope"};
     }
     const auto durable = historyCommitments_.find(nodeId_);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     if (intent.value()->record && durable != historyCommitments_.end() &&
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         durable->second == intent.value()->preparedCommitment) {
         // The full-history frontier already includes this exact operation. Cancellation is no
         // longer safe; finish its idempotent index publication instead.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         return commitPreparedErase(*intent.value());
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     if (intent.value()->record) {
         return Error{ErrorCode::ResourceBusy,
                      "prepared erase must commit before it can be removed"};
@@ -858,6 +1011,8 @@ bool MemorySyncLoop::verifiedEnvelope(const std::string& envelopeHash,
 }
 
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
+    lastSyncReusedCompleteScan_ = false;
+    scanBudgetGrew_ = false;
     if (control_.isCancelled && control_.isCancelled()) {
         discardSweep();
         return Error{ErrorCode::OperationCancelled, "memory sync reconciliation cancelled"};
@@ -872,6 +1027,11 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
         // and must retry freely, so they are excluded even though a governor denial
         // also reports ResourceExhausted.
         if (result.error().code == ErrorCode::ResourceExhausted && sweepBoundExhausted_) {
+            // A store that outgrew the scan budget is not stuck: retry with a larger one.
+            if (scanBudgetExhausted_ && growScanBudget()) {
+                scanBudgetGrew_ = true;
+                return result;
+            }
             noteSweepFailure(result.error().code, result.error().message);
         }
         return result;
@@ -967,9 +1127,13 @@ Result<std::shared_ptr<MemorySyncLoop::SweepStore>> MemorySyncLoop::makeSweepSto
     const auto rowBytes = std::max<std::size_t>(
         4096,
         std::min<std::size_t>(limits_.maxEnvelopeBytes, std::numeric_limits<int>::max() / 4) * 4);
-    return SweepStore::create(sweepDirectory_, limits_.maxScanBytes, std::move(verifier),
-                              limits_.maxIndexObjectsPerSync, rowBytes,
-                              [this] { return beforeRemoteWork(); });
+    auto store = SweepStore::create(sweepDirectory_, scanBudget_, std::move(verifier),
+                                    limits_.maxIndexObjectsPerSync, rowBytes,
+                                    [this] { return beforeRemoteWork(); });
+    if (store) {
+        store.value()->setLocalOrigin(nodeId_);
+    }
+    return store;
 }
 
 Result<void> MemorySyncLoop::ensureCommittedStore() {
@@ -1001,6 +1165,7 @@ Result<void> MemorySyncLoop::ensureCommittedStore() {
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
     YAMS_ZONE_SCOPED_N("memory_sync.sync");
     sweepBoundExhausted_ = false;
+    scanBudgetExhausted_ = false;
     // Any failed/throwing page restarts the entire security decision. Keeping a cursor
     // with half-observed identities could miss forks or double-charge a retried page.
     const auto resetScan = [&]() noexcept { discardSweep(); };
@@ -1030,6 +1195,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
         completeScan_->writes == countedBackend_->writes() &&
         completeScan_->quarantineGeneration == durableQuarantineGeneration_) {
         guard.keep = true;
+        lastSyncReusedCompleteScan_ = true;
         return merged_;
     }
     if (!sweepDirectory_.empty() && scanCursor_.empty()) {
@@ -1150,10 +1316,11 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
         // Charge every causally valid observation BEFORE retaining identities, including
         // misplaced envelopes which will not become candidates. Otherwise oversized index
         // keys could fill operations_ without ever being charged to the sweep budget.
-        const auto remaining = limits_.maxScanBytes - std::min(scanBytes_, limits_.maxScanBytes);
+        const auto remaining = scanBudget_ - std::min(scanBytes_, scanBudget_);
         if (key.size() > remaining || envelopeBytes > remaining - key.size() ||
             (!sweepStore_ && scanCandidates_.size() >= limits_.maxTrackedIdentities)) {
             sweepBoundExhausted_ = true;
+            scanBudgetExhausted_ = sweepStore_ != nullptr;
             return Error{ErrorCode::ResourceExhausted,
                          "memory sync complete-sweep candidate budget exhausted"};
         }
@@ -1166,6 +1333,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
                                                      logicalKey, validIdentity);
                 !observed) {
                 sweepBoundExhausted_ = observed.error().code == ErrorCode::ResourceExhausted;
+                scanBudgetExhausted_ = SweepStore::isWorkspaceFull(observed.error());
                 return observed.error();
             }
             if (!validIdentity) {
@@ -1176,6 +1344,7 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
                     ScanCandidate{key, logicalKey, candidateRecordHash, std::move(record.value())});
                 !appended) {
                 sweepBoundExhausted_ = appended.error().code == ErrorCode::ResourceExhausted;
+                scanBudgetExhausted_ = SweepStore::isWorkspaceFull(appended.error());
                 return appended.error();
             }
             continue;
@@ -1291,6 +1460,8 @@ Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncImpl() {
     if (sweepStore_) {
         if (auto finalized = finalizeExclusiveSweep(); !finalized) {
             sweepBoundExhausted_ = finalized.error().code == ErrorCode::ResourceExhausted;
+            // Winner selection and sealing write to the same budget-sized workspace.
+            scanBudgetExhausted_ = SweepStore::isWorkspaceFull(finalized.error());
             return finalized.error();
         }
         guard.keep = true;
@@ -1565,10 +1736,41 @@ Result<void> MemorySyncLoop::finalizeExclusiveSweep() {
 Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncFully() {
     for (;;) {
         auto result = sync();
+        if (!result && scanBudgetGrew_) {
+            continue; // the sweep restarts with the larger budget
+        }
         if (!result || scanCursor_.empty()) {
             return result;
         }
     }
+}
+
+bool MemorySyncLoop::growScanBudget() {
+    if (sweepDirectory_.empty()) {
+        return false; // the in-memory sweep keeps its fixed bound
+    }
+    const auto ceiling = std::max(limits_.maxScanBytes, limits_.maxScanBytesCeiling);
+    if (scanBudget_ >= ceiling) {
+        return false;
+    }
+    const auto next =
+        scanBudget_ > ceiling / 4 ? ceiling : std::max<std::size_t>(scanBudget_ * 4, 1);
+    // The workspace may grow to its page cap (several times the budget), so require free
+    // space for the whole cap rather than for the budget alone.
+    const auto workspaceCap = SweepStore::workspaceCapBytes(next);
+    std::error_code ec;
+    const auto space = std::filesystem::space(sweepDirectory_, ec);
+    if (ec || space.available < workspaceCap) {
+        spdlog::warn("[MemorySync] complete sweep needs more than its {} MiB scan budget, but "
+                     "{} has too little free space for a {} MiB workspace",
+                     scanBudget_ >> 20, sweepDirectory_.string(), workspaceCap >> 20);
+        return false;
+    }
+    spdlog::info("[MemorySync] complete sweep exceeded its {} MiB scan budget; retrying with "
+                 "{} MiB (ceiling {} MiB)",
+                 scanBudget_ >> 20, next >> 20, ceiling >> 20);
+    scanBudget_ = next;
+    return true;
 }
 
 Result<MemoryDeltaBatch> MemorySyncLoop::exportLocalDeltasAfter(const VersionVector& peerVersion,
@@ -1615,10 +1817,12 @@ Result<MemoryDeltaBatch> MemorySyncLoop::exportLocalDeltasAfter(const VersionVec
         if (!delta) {
             return delta.error();
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         if (!delta.value() || delta.value()->record.vv.get(nodeId_) != counter) {
             return Error{ErrorCode::InvalidState,
                          "writer counter index does not resolve a contiguous delta"};
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         deltas.push_back(std::move(*delta.value()));
     }
     return MemoryDeltaBatch{.deltas = std::move(deltas),
@@ -1961,20 +2165,26 @@ Result<WriterHistoryCommitment> MemorySyncLoop::localHistoryWindowAfter(std::uin
             return Error{ErrorCode::InvalidState,
                          "writer counter window does not resolve a durable delta"};
         }
-        const auto control = nlohmann::json{{"type", "delta_record"},
-                                            {"logical_key", delta.value()->logicalKey},
-                                            {"record", delta.value()->record},
-                                            {"payload_size", delta.value()->payload.size()}}
-                                 .dump()
-                                 .size();
+        const auto control =
+            nlohmann::json{{"type", "delta_record"},
+                           // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                           {"logical_key", delta.value()->logicalKey},
+                           // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                           {"record", delta.value()->record},
+                           // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                           {"payload_size", delta.value()->payload.size()}}
+                .dump()
+                .size();
         constexpr std::size_t kFramePrefixBytes = 4;
         constexpr std::size_t kPerRecordBatchHeaderAllowance = 128;
         const auto framing = 2 * kFramePrefixBytes + kPerRecordBatchHeaderAllowance;
         if (control > std::numeric_limits<std::size_t>::max() - framing ||
             control + framing >
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 std::numeric_limits<std::size_t>::max() - delta.value()->payload.size()) {
             return Error{ErrorCode::ResourceExhausted, "writer history wire estimate overflow"};
         }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         const auto estimated = control + framing + delta.value()->payload.size();
         if (admittedBytes > maxWireBytes || estimated > maxWireBytes - admittedBytes) {
             break;

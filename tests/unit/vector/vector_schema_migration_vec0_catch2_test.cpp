@@ -212,6 +212,106 @@ void insertFloatV2_2Row(sqlite3* db, std::int64_t rowid = 41) {
 
 } // namespace
 
+namespace {
+// The unified vectors table as V2 installs created it: no embedding_dim column yet.
+void createV2Schema(sqlite3* db) {
+    exec(db, R"sql(
+        CREATE TABLE vectors (
+            rowid INTEGER PRIMARY KEY,
+            chunk_id TEXT UNIQUE NOT NULL,
+            document_hash TEXT NOT NULL,
+            embedding BLOB,
+            content TEXT,
+            start_offset INTEGER DEFAULT 0,
+            end_offset INTEGER DEFAULT 0,
+            metadata TEXT,
+            model_id TEXT,
+            model_version TEXT,
+            embedding_version INTEGER DEFAULT 1,
+            content_hash TEXT,
+            created_at INTEGER,
+            embedded_at INTEGER,
+            is_stale INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 0,
+            source_chunk_ids TEXT,
+            parent_document_hash TEXT,
+            child_document_hashes TEXT
+        );
+        CREATE INDEX idx_vectors_chunk_id ON vectors(chunk_id);
+        CREATE INDEX idx_vectors_document_hash ON vectors(document_hash);
+    )sql");
+    // A 4-dim and a 3-dim float32 embedding.
+    exec(db, "INSERT INTO vectors(rowid, chunk_id, document_hash, embedding, content) VALUES "
+             "(1, 'chunk_a', 'doc_a', X'0000803F000000400000404000008040', 'alpha'), "
+             "(2, 'chunk_b', 'doc_b', X'0000803F0000004000004040', 'beta')");
+}
+
+std::int64_t scalar(sqlite3* db, const char* sql) {
+    sqlite3_stmt* st = nullptr;
+    REQUIRE(sqlite3_prepare_v2(db, sql, -1, &st, nullptr) == SQLITE_OK);
+    REQUIRE(sqlite3_step(st) == SQLITE_ROW);
+    const auto value = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    return value;
+}
+
+} // namespace
+
+// Every V2 vectors.db goes through this on daemon start; it had no coverage.
+TEST_CASE("VectorSchemaMigration adds and backfills embedding_dim on a V2 database",
+          "[vector][migration][v2][catch2]") {
+    TempDbPath temp;
+    SqliteDbHandle db(temp.path.string());
+    createV2Schema(db.db);
+    REQUIRE(VectorSchemaMigration::detectVersion(db.db) ==
+            VectorSchemaMigration::SchemaVersion::V2);
+
+    REQUIRE(VectorSchemaMigration::migrateV2ToV2_1(db.db).has_value());
+    CHECK(VectorSchemaMigration::hasEmbeddingDimColumn(db.db));
+    CHECK(scalar(db.db, "SELECT embedding_dim FROM vectors WHERE chunk_id = 'chunk_a'") == 4);
+    CHECK(scalar(db.db, "SELECT embedding_dim FROM vectors WHERE chunk_id = 'chunk_b'") == 3);
+    CHECK(scalar(db.db, "SELECT COUNT(*) FROM vectors") == 2);
+    // The embedding bytes and their document survive, not just the row count.
+    CHECK(scalar(db.db, "SELECT HEX(embedding) = '0000803F000000400000404000008040' AND "
+                        "document_hash = 'doc_a' FROM vectors WHERE chunk_id = 'chunk_a'") == 1);
+    CHECK(scalar(db.db, "SELECT HEX(embedding) = '0000803F0000004000004040' AND "
+                        "document_hash = 'doc_b' FROM vectors WHERE chunk_id = 'chunk_b'") == 1);
+    CHECK(VectorSchemaMigration::detectVersion(db.db) ==
+          VectorSchemaMigration::SchemaVersion::V2_3);
+
+    // Re-running is a no-op, and other versions are refused rather than altered.
+    REQUIRE(VectorSchemaMigration::migrateV2ToV2_1(db.db).has_value());
+    CHECK(scalar(db.db, "SELECT COUNT(*) FROM vectors") == 2);
+}
+
+TEST_CASE("VectorSchemaMigration refuses the V2.1 step on a non-V2 database",
+          "[vector][migration][v2][catch2]") {
+    TempDbPath temp;
+    SqliteDbHandle db(temp.path.string());
+    exec(db.db, "CREATE TABLE unrelated(x INTEGER)");
+    auto result = VectorSchemaMigration::migrateV2ToV2_1(db.db);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::InvalidState);
+}
+
+TEST_CASE("SqliteVecBackend upgrades a V2 database on open and keeps its vectors",
+          "[vector][migration][v2][backend][catch2]") {
+    TempDbPath temp;
+    {
+        SqliteDbHandle db(temp.path.string());
+        createV2Schema(db.db);
+    }
+    SqliteVecBackend backend;
+    REQUIRE(backend.initialize(temp.path.string()).has_value());
+    CHECK(VectorSchemaMigration::hasEmbeddingDimColumn(backend.getDbHandle()));
+    auto record = backend.getVector("chunk_a");
+    REQUIRE(record.has_value());
+    REQUIRE(record.value().has_value());
+    CHECK(record.value()->embedding == std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f});
+    CHECK(record.value()->document_hash == "doc_a");
+    CHECK(record.value()->content == "alpha");
+}
+
 TEST_CASE("VectorSchemaMigration retires unused V2.2 quantized schema atomically",
           "[vector][migration][turboquant][catch2]") {
     SqliteDbHandle db(":memory:");

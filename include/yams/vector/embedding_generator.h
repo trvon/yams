@@ -182,6 +182,9 @@ public:
     // Versioned identity of the coordinate system, not merely the provider.
     // Empty means that the backend cannot support construction-bound routing.
     virtual std::string getEmbeddingSpaceIdentity() const { return {}; }
+    // True when the backend runs a fallback space instead of the one configured (for example the
+    // static table is missing). Vectors must not be migrated into a fallback space.
+    virtual bool isFallbackEmbeddingSpace() const { return false; }
     virtual bool isAvailable() const = 0;
     virtual GenerationStats getStats() const = 0;
     virtual void resetStats() = 0;
@@ -235,7 +238,6 @@ public:
     void resetStats();
 
     // Validation and utility
-    bool validateText(const std::string& text) const;
     size_t estimateTokenCount(const std::string& text) const;
     std::string getModelInfo() const;
 
@@ -261,27 +263,6 @@ namespace embedding_utils {
  * Normalize embeddings to unit length
  */
 std::vector<float> normalizeEmbedding(const std::vector<float>& embedding);
-
-/**
- * Normalize batch of embeddings
- */
-std::vector<std::vector<float>>
-normalizeEmbeddings(const std::vector<std::vector<float>>& embeddings);
-
-/**
- * Compute embedding magnitude
- */
-double computeMagnitude(const std::vector<float>& embedding);
-
-/**
- * Validate embedding dimensions and values
- */
-bool validateEmbedding(const std::vector<float>& embedding, size_t expected_dim);
-
-/**
- * Convert embedding to string representation (for debugging)
- */
-std::string embeddingToString(const std::vector<float>& embedding, size_t max_values = 10);
 
 /**
  * Get available models in models directory

@@ -30,11 +30,11 @@ public:
         keygenCmd->callback([this]() {
             spdlog::info("Auth keygen command - Coming in Phase 2");
             spdlog::info("This will generate {} keys in: {}", keyType_, outputPath_);
-            std::cout << "Status: Phase 2 - Not yet implemented\n";
-            std::cout << "Expected usage: yams auth keygen [--type ed25519|rsa] [--output path]\n";
-            std::cout << "\nNote: The 'init' command already generates Ed25519 keys.\n";
-            std::cout << "This command will provide additional key management capabilities.\n";
-            std::exit(0);
+            std::cerr << "error: this auth command is not implemented yet\n";
+            std::cerr << "Expected usage: yams auth keygen [--type ed25519|rsa] [--output path]\n";
+            std::cerr << "\nNote: The 'init' command already generates Ed25519 keys.\n";
+            std::cerr << "This command will provide additional key management capabilities.\n";
+            throw CLI::RuntimeError(1);
         });
 
         // List-keys subcommand
@@ -45,14 +45,14 @@ public:
             ->check(CLI::IsMember({"table", "json"}));
         listKeysCmd->callback([]() {
             spdlog::info("Auth list-keys command - Coming in Phase 2");
-            std::cout << "Status: Phase 2 - Not yet implemented\n";
-            std::cout << "Expected usage: yams auth list-keys [--verbose] [--format table|json]\n";
-            std::cout << "\nThis will list:\n";
-            std::cout << "  - Ed25519 keys\n";
-            std::cout << "  - RSA keys\n";
-            std::cout << "  - API keys\n";
-            std::cout << "  - Key fingerprints and creation dates\n";
-            std::exit(0);
+            std::cerr << "error: this auth command is not implemented yet\n";
+            std::cerr << "Expected usage: yams auth list-keys [--verbose] [--format table|json]\n";
+            std::cerr << "\nThis will list:\n";
+            std::cerr << "  - Ed25519 keys\n";
+            std::cerr << "  - RSA keys\n";
+            std::cerr << "  - API keys\n";
+            std::cerr << "  - Key fingerprints and creation dates\n";
+            throw CLI::RuntimeError(1);
         });
 
         // Revoke subcommand
@@ -62,13 +62,13 @@ public:
         revokeCmd->callback([this]() {
             spdlog::info("Auth revoke command - Coming in Phase 2");
             spdlog::info("This will revoke key: {}", keyId_);
-            std::cout << "Status: Phase 2 - Not yet implemented\n";
-            std::cout << "Expected usage: yams auth revoke <key-id> [--force]\n";
-            std::cout << "\nThis will:\n";
-            std::cout << "  - Mark the key as revoked\n";
-            std::cout << "  - Invalidate associated tokens\n";
-            std::cout << "  - Update revocation list\n";
-            std::exit(0);
+            std::cerr << "error: this auth command is not implemented yet\n";
+            std::cerr << "Expected usage: yams auth revoke <key-id> [--force]\n";
+            std::cerr << "\nThis will:\n";
+            std::cerr << "  - Mark the key as revoked\n";
+            std::cerr << "  - Invalidate associated tokens\n";
+            std::cerr << "  - Update revocation list\n";
+            throw CLI::RuntimeError(1);
         });
 
         // Token subcommand (JWT generation)
@@ -82,11 +82,11 @@ public:
         tokenCmd->callback([this]() {
             spdlog::info("Auth token command - Coming in Phase 2");
             spdlog::info("This will generate JWT with validity: {}", validity_);
-            std::cout << "Status: Phase 2 - Not yet implemented\n";
-            std::cout << "Expected usage: yams auth token [--key path] [--validity duration] "
+            std::cerr << "error: this auth command is not implemented yet\n";
+            std::cerr << "Expected usage: yams auth token [--key path] [--validity duration] "
                          "[--claims json]\n";
-            std::cout << "\nThis will generate a JWT token for API access.\n";
-            std::exit(0);
+            std::cerr << "\nThis will generate a JWT token for API access.\n";
+            throw CLI::RuntimeError(1);
         });
 
         // API key subcommand
@@ -99,14 +99,14 @@ public:
         apiKeyCmd->callback([this]() {
             spdlog::info("Auth api-key command - Coming in Phase 2");
             spdlog::info("This will generate API key: {}", keyName_);
-            std::cout << "Status: Phase 2 - Not yet implemented\n";
-            std::cout << "Expected usage: yams auth api-key --name <name> [--permissions "
+            std::cerr << "error: this auth command is not implemented yet\n";
+            std::cerr << "Expected usage: yams auth api-key --name <name> [--permissions "
                          "read,write] [--expires date]\n";
-            std::cout << "\nThis will:\n";
-            std::cout << "  - Generate a secure random API key\n";
-            std::cout << "  - Store it with metadata\n";
-            std::cout << "  - Return the key (shown only once)\n";
-            std::exit(0);
+            std::cerr << "\nThis will:\n";
+            std::cerr << "  - Generate a secure random API key\n";
+            std::cerr << "  - Store it with metadata\n";
+            std::cerr << "  - Return the key (shown only once)\n";
+            throw CLI::RuntimeError(1);
         });
     }
 

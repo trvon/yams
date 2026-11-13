@@ -150,6 +150,7 @@ std::string GraphTopologySupport::resolveDocumentPathByHash(const std::string& h
         return {};
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     auto filePath = docRes.value()->filePath;
     documentPathByHashCache_.emplace(hash, filePath);
     return filePath;
@@ -244,22 +245,6 @@ std::vector<TopologyClusterMembershipView> GraphTopologySupport::buildClusterMem
     }
 
     return views;
-}
-
-TopologyClusterStats GraphTopologySupport::collectTopologyClusterStats(
-    const yams::topology::TopologyArtifactBatch& snapshot,
-    const yams::topology::ClusterArtifact& cluster,
-    const std::unordered_set<std::string>* scopedPaths, const std::filesystem::path* cwd) const {
-    std::unordered_map<std::string, TopologyClusterStats> statsByClusterId;
-    if (scopedPaths != nullptr && cwd != nullptr) {
-        statsByClusterId = buildClusterStatsById(snapshot, *scopedPaths, *cwd);
-    } else {
-        statsByClusterId = buildClusterStatsById(snapshot);
-    }
-    if (auto it = statsByClusterId.find(cluster.clusterId); it != statsByClusterId.end()) {
-        return it->second;
-    }
-    return {};
 }
 
 } // namespace yams::cli

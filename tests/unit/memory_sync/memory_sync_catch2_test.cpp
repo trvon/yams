@@ -1223,6 +1223,49 @@ TEST_CASE("Sweep byte admission handles zero and maximum size without overflow",
     CHECK(reader.testingScanBytes() == 0);
 }
 
+TEST_CASE("A disk-backed sweep grows its scan budget until the store fits",
+          "[memory-sync][scan-safety][bounds]") {
+    BackendFixture fixture{"scan-budget-growth"};
+    MemorySyncLoop writer{fixture.backend, "writer"};
+    constexpr int kRecords = 24;
+    for (int i = 0; i < kRecords; ++i) {
+        REQUIRE(writer.publish("key-" + std::to_string(i), bytes("value " + std::to_string(i)))
+                    .has_value());
+    }
+    auto keys = fixture.backend.list("index/");
+    REQUIRE(keys.has_value());
+    REQUIRE(keys.value().size() == kRecords);
+    auto envelope = fixture.backend.retrieve(keys.value().front());
+    REQUIRE(envelope.has_value());
+    const auto oneRecord = keys.value().front().size() + envelope.value().size();
+
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 4;
+    limits.maxScanBytes = oneRecord * 2; // far below the store's total
+    MemorySyncControl control;
+    control.exclusiveBackend = true; // disk-backed sweep workspace
+
+    SECTION("the budget grows and the sweep completes") {
+        MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false,
+                              limits,          control};
+        const auto synced = reader.syncFully();
+        REQUIRE(synced.has_value());
+        CHECK(reader.mergedRecordCount() == kRecords);
+        CHECK(reader.scanBudget() > limits.maxScanBytes);
+        CHECK(reader.scanBudget() >= oneRecord * kRecords);
+    }
+    SECTION("a ceiling at the starting budget keeps the old failure") {
+        limits.maxScanBytesCeiling = limits.maxScanBytes;
+        MemorySyncLoop reader{fixture.backend, "reader", "local-test-corpus", 1, false,
+                              limits,          control};
+        const auto failed = reader.syncFully();
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error().code == yams::ErrorCode::ResourceExhausted);
+        CHECK(reader.mergedRecordCount() == 0);
+        CHECK(reader.scanBudget() == limits.maxScanBytes);
+    }
+}
+
 TEST_CASE("Direct writer quarantine cannot exceed the invalidation window",
           "[memory-sync][recovery][review-regression]") {
     BackendFixture fixture{"quarantine-invalidation-window"};
@@ -1484,6 +1527,41 @@ TEST_CASE("Exclusive local recovery serves every winner within resident budgets"
             }
         }
     }
+}
+
+TEST_CASE("Exclusive winner workspaces remove legacy plain-file workspaces",
+          "[memory-sync][exclusive-recovery][disk-backed-lifecycle][legacy-workspace]") {
+    BackendFixture fixture{"legacy-workspace"};
+    {
+        MemorySyncLoop seed{fixture.backend, "writer"};
+        REQUIRE(seed.publish("key", bytes("original")).has_value());
+    }
+    const auto temp = fixture.dir / "temp";
+    std::filesystem::create_directories(temp);
+    const std::vector<std::filesystem::path> legacy{temp / "sync-sweep-138338617696995-0.sqlite",
+                                                    temp /
+                                                        "sync-sweep-138338617696995-0.sqlite-wal"};
+    const auto unrelated = temp / "notes.sqlite";
+    for (const auto& path : std::vector<std::filesystem::path>{legacy[0], legacy[1], unrelated}) {
+        std::ofstream file{path, std::ios::binary};
+        file << "stale";
+        REQUIRE(file);
+    }
+    MemorySyncLimits limits;
+    limits.maxMergedKeys = 1;
+    limits.maxCacheBytes = 16;
+    MemorySyncLoop owner{fixture.backend,
+                         "writer",
+                         "local-test-corpus",
+                         1,
+                         false,
+                         limits,
+                         MemorySyncControl{.exclusiveBackend = true}};
+    REQUIRE(owner.syncFully().has_value());
+    for (const auto& path : legacy) {
+        CHECK_FALSE(std::filesystem::exists(path));
+    }
+    CHECK(std::filesystem::exists(unrelated));
 }
 
 TEST_CASE("Exclusive winner workspaces clean abandoned state without removing pinned generations",
@@ -1885,24 +1963,37 @@ TEST_CASE("Exclusive sweeps retain fork decisions and chained history across chu
     CHECK(scratchGenerations(fixture.dir / "temp").empty());
 }
 
-TEST_CASE("Filesystem listing cooperates while visiting unrelated keys",
+TEST_CASE("Filesystem listing cooperates while walking a namespace",
           "[memory-sync][governor][filesystem]") {
     BackendFixture fixture{"cooperative-listing"};
-    REQUIRE(fixture.backend.store("unrelated/a", bytes("one")).has_value());
-    REQUIRE(fixture.backend.store("unrelated/b", bytes("two")).has_value());
+    REQUIRE(fixture.backend.store("shared/a", bytes("one")).has_value());
+    REQUIRE(fixture.backend.store("shared/b", bytes("two")).has_value());
+    REQUIRE(fixture.backend.store("unrelated/c", bytes("three")).has_value());
     std::size_t checks = 0;
+    fixture.backend.setListingWorkCheck([&]() -> yams::Result<void> {
+        ++checks;
+        return {};
+    });
+    // Other namespaces are separate subtrees: listing one that does not exist costs only the
+    // entry and exit checks.
+    const auto absent = fixture.backend.listPage("absent/", std::nullopt, 1);
+    REQUIRE(absent.has_value());
+    CHECK(absent.value().keys.empty());
+    CHECK(checks == 2);
+
+    checks = 0;
     fixture.backend.setListingWorkCheck([&]() -> yams::Result<void> {
         if (++checks == 3) {
             return yams::Error{yams::ErrorCode::OperationCancelled, "test checkpoint"};
         }
         return {};
     });
-    const auto page = fixture.backend.listPage("absent/", std::nullopt, 1);
+    const auto page = fixture.backend.listPage("shared/", std::nullopt, 1);
     REQUIRE_FALSE(page.has_value());
     CHECK(page.error().code == yams::ErrorCode::OperationCancelled);
     CHECK(checks == 3);
     fixture.backend.setListingWorkCheck({});
-    const auto intact = fixture.backend.list("unrelated/");
+    const auto intact = fixture.backend.list("shared/");
     REQUIRE(intact.has_value());
     CHECK(intact.value().size() == 2);
 }
@@ -2101,6 +2192,47 @@ TEST_CASE("Bounded filesystem snapshots certify only complete traversals",
     fixture.backend.resetCancel();
 }
 
+TEST_CASE("Oversized optional filesystem snapshots stop probing after overflow",
+          "[memory-sync][listing-cache][snapshot-probe-budget]") {
+    BackendFixture fixture{"snapshot-probe-budget"};
+    for (std::size_t i = 0; i < 65; ++i) {
+        REQUIRE(fixture.backend.store("index/" + std::to_string(10'000 + i), bytes("value"))
+                    .has_value());
+    }
+
+    std::size_t maxKeys = 2;
+    std::size_t maxBytes = 4096;
+    std::size_t expectedMatchingVisits = 3;
+    SECTION("key budget overflow") {}
+    SECTION("byte budget overflow") {
+        maxKeys = 65;
+        maxBytes = std::string{"index/10000"}.size();
+        expectedMatchingVisits = 2;
+    }
+
+    {
+        yams::storage::FilesystemListingStats stats;
+        stats.prefix = "index/";
+        struct RestoreObservation {
+            yams::storage::FilesystemListingStats* previous;
+            ~RestoreObservation() { yams::storage::testing_setFilesystemListingStats(previous); }
+        } restore{yams::storage::testing_setFilesystemListingStats(&stats)};
+
+        const auto snapshot = fixture.backend.listBoundedSnapshot("index/", maxKeys, maxBytes);
+        REQUIRE(snapshot.has_value());
+        CHECK_FALSE(snapshot.value().has_value());
+        CHECK(stats.matchingKeys == expectedMatchingVisits);
+    }
+
+    // Rejecting an optional cache snapshot must not truncate the authoritative fallback.
+    const auto page = fixture.backend.listPage("index/", std::nullopt, 65);
+    REQUIRE(page.has_value());
+    REQUIRE(page.value().keys.size() == 65);
+    CHECK(page.value().keys.front() == "index/10000");
+    CHECK(page.value().keys.back() == "index/10064");
+    CHECK_FALSE(page.value().nextCursor.has_value());
+}
+
 TEST_CASE("Exclusive filesystem listing falls back to pages above the snapshot budget",
           "[memory-sync][listing-cache][budget]") {
     BackendFixture fixture{"snapshot-fallback"};
@@ -2121,6 +2253,47 @@ TEST_CASE("Exclusive filesystem listing falls back to pages above the snapshot b
     REQUIRE(keys.size() == 65);
     CHECK(keys.front() == "index/10000");
     CHECK(keys.back() == "index/10064");
+}
+
+// A prefix whose complete snapshot was declined must not pay the snapshot probe (most of a
+// tree walk) again on every later sweep; a removal under it may let it fit, so it re-probes.
+TEST_CASE("Exclusive filesystem listing does not re-probe a declined snapshot",
+          "[memory-sync][listing-cache][budget][declined-probe]") {
+    BackendFixture fixture{"declined-probe"};
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 1; // 64 retained key slots
+    auto cached = MemorySyncLoop::testing_countedBackend(fixture.backend, true, limits);
+    constexpr std::size_t records = 100;
+    for (std::size_t i = 0; i < records; ++i) {
+        REQUIRE(cached->store("index/" + std::to_string(10'000 + i), bytes("value")).has_value());
+    }
+    yams::storage::FilesystemListingStats stats;
+    stats.prefix = "index/";
+    struct RestoreObservation {
+        yams::storage::FilesystemListingStats* previous;
+        ~RestoreObservation() { yams::storage::testing_setFilesystemListingStats(previous); }
+    } restore{yams::storage::testing_setFilesystemListingStats(&stats)};
+    const auto sweep = [&] {
+        std::size_t observed = 0;
+        std::optional<std::string> cursor;
+        do {
+            auto page = cached->listPage("index/", cursor, 1);
+            REQUIRE(page.has_value());
+            observed += page.value().keys.size();
+            cursor = page.value().nextCursor;
+        } while (cursor);
+        return observed;
+    };
+    REQUIRE(sweep() == records);
+    const auto firstWalks = stats.walks; // one declined probe plus one walk per window
+    REQUIRE(sweep() == records);
+    CAPTURE(firstWalks, stats.walks);
+    CHECK(stats.walks - firstWalks == firstWalks - 1);
+
+    REQUIRE(cached->remove("index/10000").has_value());
+    const auto beforeReprobe = stats.walks;
+    REQUIRE(sweep() == records - 1);
+    CHECK(stats.walks - beforeReprobe == firstWalks); // probe runs again after a removal
 }
 
 TEST_CASE("Exclusive filesystem listing snapshots follow committed key mutations",
@@ -2673,6 +2846,56 @@ TEST_CASE("MemorySyncLoop retains complete exclusive listings during active publ
     // Initial traversal stays paged. Subsequent key mutations must keep a completed,
     // bounded listing coherent rather than forcing another whole-store walk per page.
     CHECK(stats.walks == warmWalks);
+    CHECK(loop.quarantinedRecordCount() == 0);
+}
+
+// A store larger than the retained-key cap must not fall back to one whole-store walk per
+// page. Production hit this with 35,946 index keys over a 32,768-key cap: ~71 walks of a
+// 271k-directory tree per sweep, blocking daemon startup for hours.
+TEST_CASE("MemorySyncLoop bounds full-sweep walks when the listing exceeds the retained-key cap",
+          "[memory-sync][sync-loop][bounds][listing-cost-over-cap]") {
+    constexpr std::size_t kPage = 4; // retained-key cap = kPage * 64 = 256 keys
+    constexpr std::size_t kCap = kPage * 64;
+    constexpr std::size_t records = 600;
+    BackendFixture fixture{"over-cap-listing"};
+    const auto payload = bytes("seed payload");
+    const auto payloadHash = digest(payload);
+    REQUIRE(fixture.backend.store("blob/" + payloadHash, payload).has_value());
+    for (std::size_t i = 0; i < records; ++i) {
+        MemoryIndexRecord record;
+        record.entryHash = payloadHash;
+        record.ts = {100, 0};
+        record.origin = "seed";
+        record.vv.observe(record.origin, i + 1);
+        record.corpusId = "local-test-corpus";
+        record.corpusEpoch = 1;
+        record.operationId = makeOperationId(record.origin, i + 1);
+        record.logicalKey = "seed/" + std::to_string(10'000 + i);
+        record.recordKind = std::string(kMemoryValueRecordKind);
+        const auto encoded = jsonBytes(nlohmann::json(record));
+        REQUIRE(fixture.backend.store("index/" + record.logicalKey + "/" + digest(encoded), encoded)
+                    .has_value());
+    }
+    MemorySyncLoop loop{fixture.backend,
+                        "reader",
+                        "local-test-corpus",
+                        1,
+                        false,
+                        MemorySyncLimits{.maxIndexObjectsPerSync = kPage},
+                        MemorySyncControl{.exclusiveBackend = true}};
+    yams::storage::FilesystemListingStats stats;
+    stats.prefix = "index/";
+    struct RestoreObservation {
+        yams::storage::FilesystemListingStats* previous;
+        ~RestoreObservation() { yams::storage::testing_setFilesystemListingStats(previous); }
+    } restore{yams::storage::testing_setFilesystemListingStats(&stats)};
+
+    const auto swept = loop.syncFully();
+    REQUIRE(swept.has_value());
+    CHECK(swept.value().size() == records);
+    CAPTURE(records, kCap, stats.walks, stats.pageCalls, stats.entriesVisited);
+    // One failed complete-snapshot attempt plus one walk per cap-sized window.
+    CHECK(stats.walks <= 1 + (records + kCap - 1) / kCap);
     CHECK(loop.quarantinedRecordCount() == 0);
 }
 
@@ -3980,4 +4203,30 @@ TEST_CASE("Verification cache stays bounded and misses verify again",
     REQUIRE(reader.syncFully().has_value());
     // Capacity 1 cannot hold both, so the second pass verifies again rather than trusting.
     CHECK(reader.testingVerifyAttempts() == firstPass + 2);
+}
+
+// A pre-delete intent is cancelled when the local deletion it guarded did not happen. Only an
+// intent that was never prepared may be dropped; cancelling must not touch the record itself.
+TEST_CASE("cancelStagedErase drops an unprepared intent and keeps the record",
+          "[memory-sync][tombstone][outbox][cancel]") {
+    BackendFixture fixture{"erase-outbox-cancel"};
+    MemorySyncLoop loop{fixture.backend, "writer"};
+    REQUIRE(loop.publish("user/keep", bytes("value")).has_value());
+    REQUIRE(loop.stageErase("user/keep", "keep", false).has_value());
+    REQUIRE(loop.pendingErases().value().size() == 1);
+
+    REQUIRE(loop.cancelStagedErase("user/keep").has_value());
+    CHECK(loop.pendingErases().value().empty());
+    REQUIRE(loop.syncFully().has_value());
+    CHECK(loop.hasMergedRecord("user/keep"));
+
+    // Cancelling again, or cancelling a key with no intent, is a no-op.
+    CHECK(loop.cancelStagedErase("user/keep").has_value());
+    CHECK(loop.cancelStagedErase("user/never-staged").has_value());
+
+    // The cancellation is durable across a restart.
+    MemorySyncLoop restarted{fixture.backend, "writer"};
+    CHECK(restarted.pendingErases().value().empty());
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK(restarted.hasMergedRecord("user/keep"));
 }

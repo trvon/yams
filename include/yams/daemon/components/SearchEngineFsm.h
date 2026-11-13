@@ -70,15 +70,17 @@ public:
     bool isAwaitingDrain() const {
         return state_.load(std::memory_order_acquire) == SearchEngineState::AwaitingDrain;
     }
-    bool hasRebuildPending() const;
 
 private:
+    void enterLocked(SearchEngineState next);
     void syncAtomicState();
-    static std::mutex& sharedMutex() {
-        static std::mutex mutex;
-        return mutex;
-    }
 
+    // Per-instance: each SearchEngineManager owns one. This was a tinyfsm machine with static
+    // state, so every manager in a process shared one build state.
+    mutable std::mutex mutex_;
+    SearchEngineSnapshot snap_{};
+    std::string callbackReason_;
+    bool callbackIncludeVector_{false};
     std::atomic<SearchEngineState> state_{SearchEngineState::NotBuilt};
     RebuildCallback rebuildCallback_;
 };

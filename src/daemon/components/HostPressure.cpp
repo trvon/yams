@@ -5,8 +5,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
+
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 
 #if defined(__APPLE__)
 #include <stdlib.h>
@@ -34,7 +39,7 @@ std::optional<double> parseLeadingDouble(std::string_view text) noexcept {
 
 #if defined(__linux__)
 /// Read a small procfs file into `out`. procfs reports size 0, so read until EOF.
-bool readSmallFile(const char* path, std::string& out) noexcept {
+bool readSmallFile(const char* path, std::string& out, std::size_t maxBytes = 4096) noexcept {
     std::FILE* file = std::fopen(path, "r");
     if (!file) {
         return false;
@@ -44,12 +49,61 @@ bool readSmallFile(const char* path, std::string& out) noexcept {
     std::size_t n = 0;
     while ((n = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
         out.append(buffer, n);
-        if (out.size() > 4096) {
+        if (out.size() > maxBytes || n < sizeof(buffer)) {
             break;
         }
     }
     std::fclose(file);
     return !out.empty();
+}
+
+/// Whole physical disks have a backing device; partitions, dm-crypt/LVM, loop, zram and ZFS
+/// zvols do not. Their IO lands on the physical disk, so counting them would double-count.
+bool isPhysicalDisk(const std::string& name) {
+    if (name.empty() || name.find('/') != std::string::npos) {
+        return false;
+    }
+    const std::string path = "/sys/block/" + name + "/device";
+    return ::access(path.c_str(), F_OK) == 0;
+}
+
+/// Busiest physical disk since the previous call. The first call measures against boot.
+double sampleDiskBusyPct() noexcept {
+    static std::mutex mutex;
+    static std::vector<DiskIoTicks> previous;
+    static std::chrono::steady_clock::time_point previousAt{};
+    try {
+        std::string buffer;
+        if (!readSmallFile("/proc/diskstats", buffer, 256ULL * 1024)) {
+            return -1.0;
+        }
+        auto current = parseDiskstatsIoTicks(buffer);
+        std::erase_if(current, [](const DiskIoTicks& d) { return !isPhysicalDisk(d.name); });
+        const auto now = std::chrono::steady_clock::now();
+
+        std::lock_guard lock(mutex);
+        std::vector<DiskIoTicks> before = previous;
+        std::chrono::milliseconds elapsed{0};
+        if (previousAt == std::chrono::steady_clock::time_point{}) {
+            std::string uptime;
+            if (readSmallFile("/proc/uptime", uptime)) {
+                if (auto seconds = parseLeadingDouble(uptime)) {
+                    elapsed = std::chrono::milliseconds{static_cast<std::int64_t>(*seconds * 1e3)};
+                }
+            }
+            before = current;
+            for (auto& d : before) {
+                d.ioTicksMs = 0;
+            }
+        } else {
+            elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - previousAt);
+        }
+        previous = std::move(current);
+        previousAt = now;
+        return diskBusyPct(before, previous, elapsed);
+    } catch (...) {
+        return -1.0;
+    }
 }
 #endif
 
@@ -88,6 +142,85 @@ std::optional<double> parseLoadAvg1(std::string_view content) noexcept {
     return parseLeadingDouble(content);
 }
 
+std::vector<DiskIoTicks> parseDiskstatsIoTicks(std::string_view content) {
+    // Fields: major minor name reads rmerged rsectors rms writes wmerged wsectors wms
+    //         in_flight io_ticks ... io_ticks is the 13th.
+    constexpr std::size_t kNameField = 2;
+    constexpr std::size_t kIoTicksField = 12;
+    std::vector<DiskIoTicks> devices;
+    std::size_t lineStart = 0;
+    while (lineStart < content.size()) {
+        std::size_t lineEnd = content.find('\n', lineStart);
+        if (lineEnd == std::string_view::npos) {
+            lineEnd = content.size();
+        }
+        const auto line = content.substr(lineStart, lineEnd - lineStart);
+        lineStart = lineEnd + 1;
+
+        std::string_view name;
+        std::optional<std::uint64_t> ticks;
+        std::size_t field = 0;
+        std::size_t pos = 0;
+        bool numeric = true;
+        while (pos < line.size() && field <= kIoTicksField) {
+            while (pos < line.size() && line[pos] == ' ') {
+                ++pos;
+            }
+            const std::size_t start = pos;
+            while (pos < line.size() && line[pos] != ' ') {
+                ++pos;
+            }
+            if (start == pos) {
+                break;
+            }
+            const auto token = line.substr(start, pos - start);
+            if (field == kNameField) {
+                name = token;
+            } else {
+                std::uint64_t value = 0;
+                for (const char c : token) {
+                    if (c < '0' || c > '9') {
+                        numeric = false;
+                        break;
+                    }
+                    value = value * 10 + static_cast<std::uint64_t>(c - '0');
+                }
+                if (!numeric) {
+                    break;
+                }
+                if (field == kIoTicksField) {
+                    ticks = value;
+                }
+            }
+            ++field;
+        }
+        if (numeric && ticks && !name.empty()) {
+            devices.push_back(DiskIoTicks{std::string{name}, *ticks});
+        }
+    }
+    return devices;
+}
+
+double diskBusyPct(const std::vector<DiskIoTicks>& before, const std::vector<DiskIoTicks>& after,
+                   std::chrono::milliseconds elapsed) noexcept {
+    if (elapsed.count() <= 0) {
+        return -1.0;
+    }
+    double busiest = -1.0;
+    for (const auto& now : after) {
+        for (const auto& then : before) {
+            if (then.name != now.name || now.ioTicksMs < then.ioTicksMs) {
+                continue;
+            }
+            const double pct = 100.0 * static_cast<double>(now.ioTicksMs - then.ioTicksMs) /
+                               static_cast<double>(elapsed.count());
+            busiest = std::max(busiest, std::min(pct, 100.0));
+            break;
+        }
+    }
+    return busiest;
+}
+
 bool hostPressureElevated(const HostPressureSample& sample,
                           const HostPressureThresholds& thresholds,
                           bool currentlyElevated) noexcept {
@@ -98,7 +231,8 @@ bool hostPressureElevated(const HostPressureSample& sample,
     switch (sample.source) {
         case HostPressureSource::Psi:
             return above(sample.cpuSomeAvg10, thresholds.cpuSomePct) ||
-                   above(sample.ioSomeAvg10, thresholds.ioSomePct) ||
+                   (above(sample.ioSomeAvg10, thresholds.ioSomePct) &&
+                    (sample.ioBusyPct < 0.0 || above(sample.ioBusyPct, thresholds.ioBusyPct))) ||
                    above(sample.memorySomeAvg10, thresholds.memorySomePct);
         case HostPressureSource::LoadAverage:
             return sample.vmPressureElevated || above(sample.loadPerCpu, thresholds.loadPerCpu);
@@ -136,6 +270,7 @@ HostPressureSample sampleHostPressure() noexcept {
         sample.cpuSomeAvg10 = cpu.value_or(0.0);
         sample.ioSomeAvg10 = io.value_or(0.0);
         sample.memorySomeAvg10 = memory.value_or(0.0);
+        sample.ioBusyPct = sampleDiskBusyPct();
     } else if (loadAvg >= 0.0) {
         sample.source = HostPressureSource::LoadAverage;
     }

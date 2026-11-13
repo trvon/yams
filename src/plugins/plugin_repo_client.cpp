@@ -3,7 +3,10 @@
  * @brief Implementation of the plugin repository client
  */
 
+#include <yams/config/config_helpers.h>
 #include <yams/plugins/plugin_repo_client.hpp>
+
+#include "loopback_url.h"
 
 #include <cstdlib>
 #include <iomanip>
@@ -41,26 +44,14 @@ private:
     CURL* curl_;
 };
 
-bool isLoopbackOrLocalhostUrl(std::string_view url) {
-    constexpr std::string_view kHttpLocalhost = "http://localhost";
-    constexpr std::string_view kHttpsLocalhost = "https://localhost";
-    constexpr std::string_view kHttp127 = "http://127.";
-    constexpr std::string_view kHttps127 = "https://127.";
-    constexpr std::string_view kHttpIpv6Loopback = "http://[::1]";
-    constexpr std::string_view kHttpsIpv6Loopback = "https://[::1]";
-    return url.starts_with(kHttpLocalhost) || url.starts_with(kHttpsLocalhost) ||
-           url.starts_with(kHttp127) || url.starts_with(kHttps127) ||
-           url.starts_with(kHttpIpv6Loopback) || url.starts_with(kHttpsIpv6Loopback);
-}
-
 } // namespace
 
 class PluginRepoClientImpl : public IPluginRepoClient {
 public:
     explicit PluginRepoClientImpl(PluginRepoConfig config) : config_(std::move(config)) {
         // Allow environment variable override
-        if (const char* envUrl = std::getenv("YAMS_PLUGIN_REPO_URL")) {
-            config_.repoUrl = envUrl;
+        if (auto envUrl = yams::config::getenv_optional("YAMS_PLUGIN_REPO_URL")) {
+            config_.repoUrl = std::move(*envUrl);
         }
         // Remove trailing slash
         while (!config_.repoUrl.empty() && config_.repoUrl.back() == '/') {
@@ -186,7 +177,7 @@ private:
         curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
 
         if (!config_.verifyTls) {
-            if (!isLoopbackOrLocalhostUrl(url)) {
+            if (!detail::isLoopbackOrLocalhostUrl(url)) {
                 return Error{ErrorCode::InvalidArgument,
                              "Disabling plugin repository TLS verification is only allowed for "
                              "loopback/localhost test repositories"};
@@ -195,6 +186,9 @@ private:
             curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 0L);
             // nosemgrep: yams.cpp.curl-tls-verification-disabled -- guarded to loopback test repos.
             curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 0L);
+            // The loopback check covers only this URL: a redirect could name a remote host, which
+            // would then be fetched unverified. Do not follow redirects without verification.
+            curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 0L);
         }
 
         if (config_.proxy) {
@@ -228,7 +222,7 @@ private:
                 if (json.contains("error")) {
                     msg << ": " << json["error"].get<std::string>();
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Error bodies are best-effort diagnostics; keep the HTTP status error.
             }
             return Error{ErrorCode::NetworkError, msg.str()};

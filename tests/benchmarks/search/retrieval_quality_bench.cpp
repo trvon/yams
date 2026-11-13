@@ -13,6 +13,10 @@
     YAMS_BENCH_TOPK=N                 - Retrieve top K results (default: 10)
     YAMS_BENCH_DATASET=<name>         - Use synthetic, BEIR, or local-manifest dataset
     YAMS_BENCH_DATASET_PATH=...       - Path to BEIR directory or benchmark_manifest.json root
+    YAMS_BENCH_MIN_EMBED_COVERAGE=P   - Fail setup below P% embedded docs (default: 100)
+    YAMS_BENCH_SUBSET_SEED=N          - Seed for BEIR subsets when CORPUS_SIZE/NUM_QUERIES cap
+                                        them (default: 42). Queries are sampled first; their
+                                        relevant docs are kept whole, filler docs are random.
     YAMS_BENCH_EMBED_BACKEND=simeon|onnx
                                           Embedding backend (default: simeon)
     YAMS_BENCH_ENABLE_GLINT=1         - Opt into Glint/GLiNER entity extraction on simeon runs
@@ -45,6 +49,8 @@
                                           Roads kept per cluster at topology build (0 = none)
     YAMS_BENCH_TOPOLOGY_ROAD_ORDER=none|time|session|similarity_chain
                                           Cluster walk order stored at topology build
+    YAMS_BENCH_TOPOLOGY_ROUTE_FIT=1        Fit query-aware route vectors on full rebuilds
+                                          (topology.route_fit), trained on document titles only
     YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP=N.N
                                           Grow route prefix while scores remain near the best
     YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN=N.N
@@ -714,10 +720,9 @@ static Result<BEIRDataset> loadBEIRDataset(const std::string& datasetName,
     return yams::bench::loadBEIRDataset(datasetName, cacheDir);
 }
 
-static Result<BEIRDataset> selectBenchmarkBEIRDataset(const std::string& datasetName,
-                                                      const fs::path& cacheDir,
-                                                      const std::optional<int>& maxDocsOpt,
-                                                      const std::optional<int>& maxQueriesOpt) {
+static Result<BEIRDataset>
+selectBenchmarkBEIRDataset(const std::string& datasetName, const fs::path& cacheDir,
+                           const yams::bench::BenchmarkSubsetSpec& spec) {
     Result<BEIRDataset> dsResult;
     if (datasetName == "scifact") {
         dsResult = loadSciFactDataset(cacheDir);
@@ -728,84 +733,17 @@ static Result<BEIRDataset> selectBenchmarkBEIRDataset(const std::string& dataset
         return dsResult;
     }
 
-    const BEIRDataset& fullDataset = dsResult.value();
-    BEIRDataset dataset;
-    dataset.name = fullDataset.name;
-    dataset.basePath = fullDataset.basePath;
-
-    const int maxDocs =
-        maxDocsOpt.has_value() ? *maxDocsOpt : static_cast<int>(fullDataset.documents.size());
-    const int maxQueries =
-        maxQueriesOpt.has_value() ? *maxQueriesOpt : static_cast<int>(fullDataset.queries.size());
-
-    std::set<std::string> qrelDocIds;
-    for (const auto& [queryId, docScore] : fullDataset.qrels) {
-        (void)queryId;
-        qrelDocIds.insert(docScore.docId);
+    yams::bench::BenchmarkSubsetStats stats;
+    auto subset = yams::bench::selectBenchmarkSubset(dsResult.value(), spec, &stats);
+    if (!subset) {
+        return subset;
     }
-    spdlog::info("BEIR dataset has {} documents referenced by qrels", qrelDocIds.size());
-
-    std::set<std::string> includedDocIds;
-    for (const auto& docId : qrelDocIds) {
-        if (static_cast<int>(includedDocIds.size()) >= maxDocs) {
-            break;
-        }
-        if (fullDataset.documents.count(docId) > 0) {
-            dataset.documents[docId] = fullDataset.documents.at(docId);
-            includedDocIds.insert(docId);
-        }
-    }
-    spdlog::info("Included {} qrel-referenced documents", includedDocIds.size());
-
-    for (const auto& [id, doc] : fullDataset.documents) {
-        if (static_cast<int>(includedDocIds.size()) >= maxDocs) {
-            break;
-        }
-        if (includedDocIds.count(id) == 0) {
-            dataset.documents[id] = doc;
-            includedDocIds.insert(id);
-        }
-    }
-
-    int queryCount = 0;
-    for (const auto& [qid, query] : fullDataset.queries) {
-        if (queryCount >= maxQueries) {
-            break;
-        }
-        auto range = fullDataset.qrels.equal_range(qid);
-        bool hasRelevantDoc = false;
-        for (auto it = range.first; it != range.second; ++it) {
-            if (includedDocIds.count(it->second.docId) > 0) {
-                hasRelevantDoc = true;
-                break;
-            }
-        }
-        if (!hasRelevantDoc) {
-            continue;
-        }
-
-        dataset.queries[qid] = query;
-        for (auto it = range.first; it != range.second; ++it) {
-            if (includedDocIds.count(it->second.docId) > 0) {
-                dataset.qrels.emplace(qid, it->second);
-            }
-        }
-        queryCount++;
-    }
-
-    for (const auto& entity : fullDataset.kgEntities) {
-        if (includedDocIds.contains(entity.docId)) {
-            dataset.kgEntities.push_back(entity);
-        }
-    }
-
-    spdlog::debug(
-        "Limited BEIR dataset to {} docs, {} queries, {} qrels, {} kg entities (from {} docs, {} "
-        "queries)",
-        dataset.documents.size(), dataset.queries.size(), dataset.qrels.size(),
-        dataset.kgEntities.size(), fullDataset.documents.size(), fullDataset.queries.size());
-
-    return dataset;
+    spdlog::info("BEIR subset {}: {} docs ({} relevant, {} filler), {} queries ({} skipped: "
+                 "relevant set over budget), from {} docs, {} queries",
+                 yams::bench::benchmarkSubsetLabel(spec), subset.value().documents.size(),
+                 stats.relevantDocs, stats.fillerDocs, stats.sampledQueries, stats.skippedQueries,
+                 dsResult.value().documents.size(), dsResult.value().queries.size());
+    return subset;
 }
 
 using yams::test::DaemonHarness;
@@ -1311,6 +1249,7 @@ struct DebugRunContext {
     std::string runId;
     std::string candidate;
     std::string dataset;
+    std::string subset;
     int corpusSize = 0;
     int numQueries = 0;
     int topK = 0;
@@ -2137,6 +2076,7 @@ static void debugLogWriteJsonLine(const DebugLogEntry& e) {
         j["run_id"] = g_debugRunContext->runId;
         j["candidate"] = g_debugRunContext->candidate;
         j["dataset"] = g_debugRunContext->dataset;
+        j["subset"] = g_debugRunContext->subset;
         j["corpus_size"] = g_debugRunContext->corpusSize;
         j["num_queries"] = g_debugRunContext->numQueries;
         j["top_k"] = g_debugRunContext->topK;
@@ -2225,6 +2165,7 @@ struct OptimizationRunResult {
 struct BenchCacheMetadata {
     std::string dataset = "synthetic";
     std::string datasetPath;
+    std::string subset; // benchmarkSubsetLabel(); empty in caches written before it existed
     int corpusSize = 0;
     int numQueries = 0;
     int topK = 0;
@@ -2266,6 +2207,8 @@ struct PersistedHnswState {
 static std::string g_benchmark_search_engine =
     yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::SimeonPqAdc);
 static std::string g_simeonEncoderProfile;
+// encoder_profile = "static": SMSTAT01 table written as embeddings.simeon.static_table.
+static std::string g_simeonStaticTable;
 static std::string g_simeonFragmentEncoderProfile;
 static std::optional<bool> g_simeonFragmentGeometryEnabled;
 static std::optional<bool> g_simeonBm25Enabled;
@@ -2286,6 +2229,10 @@ static void consumeXplanConfigArguments(int& argc, char** argv) {
         const std::string_view argument{argv[inputIndex]};
         if (auto value = takeValue(argument, "--yams-simeon-encoder-profile="); value.has_value()) {
             g_simeonEncoderProfile = std::move(*value);
+            continue;
+        }
+        if (auto value = takeValue(argument, "--yams-simeon-static-table="); value.has_value()) {
+            g_simeonStaticTable = std::move(*value);
             continue;
         }
         if (auto value = takeValue(argument, "--yams-simeon-fragment-encoder-profile=");
@@ -2346,6 +2293,10 @@ static yams::vector::VectorSearchEngine benchmarkVectorSearchEngine() {
 static std::string benchmarkEngineCacheLabel() {
     const auto engine = benchmarkVectorSearchEngine();
     std::string label = yams::vector::vectorSearchEngineName(engine);
+    // Vectors from different encoder spaces must not share a warm cache.
+    if (!g_simeonEncoderProfile.empty()) {
+        label += "-" + g_simeonEncoderProfile;
+    }
     return label;
 }
 
@@ -2404,6 +2355,14 @@ static float parseFloatEnvOrDefault(const char* key, float defaultValue) {
     } catch (...) {
         return defaultValue;
     }
+}
+
+// Required embedded-document coverage in percent (YAMS_BENCH_MIN_EMBED_COVERAGE,
+// default 100). Non-finite or unparsable values fall back to the default.
+static double requiredEmbedCoveragePct() {
+    const double raw =
+        static_cast<double>(parseFloatEnvOrDefault("YAMS_BENCH_MIN_EMBED_COVERAGE", 100.0F));
+    return std::isfinite(raw) ? std::clamp(raw, 0.0, 100.0) : 100.0;
 }
 
 static std::string sanitizeLabelForFilename(const std::string& value) {
@@ -2570,6 +2529,7 @@ static json benchCacheMetadataToJson(const BenchCacheMetadata& metadata) {
     return {
         {"dataset", metadata.dataset},
         {"dataset_path", metadata.datasetPath},
+        {"subset", metadata.subset},
         {"corpus_size", metadata.corpusSize},
         {"num_queries", metadata.numQueries},
         {"top_k", metadata.topK},
@@ -2626,6 +2586,7 @@ static std::optional<BenchCacheMetadata> parseBenchCacheMetadata(const json& j) 
     BenchCacheMetadata metadata;
     metadata.dataset = j.value("dataset", "synthetic");
     metadata.datasetPath = j.value("dataset_path", "");
+    metadata.subset = j.value("subset", "");
     metadata.corpusSize = j.value("corpus_size", 0);
     metadata.numQueries = j.value("num_queries", 0);
     metadata.topK = j.value("top_k", 0);
@@ -2725,6 +2686,8 @@ static bool benchCacheMatches(const BenchCacheMetadata& expected, const BenchCac
         return mismatch("dataset mismatch");
     if (expected.datasetPath != actual.datasetPath)
         return mismatch("dataset path mismatch");
+    if (expected.subset != actual.subset)
+        return mismatch("subset mismatch");
     if (expected.corpusSize != actual.corpusSize)
         return mismatch("corpus size mismatch");
     if (expected.numQueries != actual.numQueries)
@@ -4994,6 +4957,7 @@ struct BenchFixture {
         int64_t vectorIndexPersistMs = 0;
         int64_t vectorIndexReusableProbeMs = 0;
         std::uint64_t vectorIndexReusableProbeCount = 0;
+        double embeddingCoveragePct = -1.0; // -1: not measured (warm cache or vectors off)
         int64_t setupTotalMs = 0;
     };
 
@@ -5013,7 +4977,8 @@ struct BenchFixture {
     bool warmDataDir = false; // True when reusing a pre-ingested data directory
     SetupTimingMetrics setupTimings;
     std::string datasetName = "synthetic";
-    std::string beirDatasetName; // Name of BEIR dataset (scifact, cqadupstack, etc.)
+    std::string beirDatasetName;           // Name of BEIR dataset (scifact, cqadupstack, etc.)
+    std::string subsetLabel = "synthetic"; // benchmarkSubsetLabel() for BEIR runs
 
     bool useSyntheticCommunityCorpus() const {
         return syntheticCorpusMode == SyntheticCorpusMode::CommunityGraph;
@@ -5973,6 +5938,10 @@ struct BenchFixture {
 
         const std::optional<int> corpusLimit = optionalPositiveInt(env_size);
         const std::optional<int> queryLimit = optionalPositiveInt(env_queries);
+        const yams::bench::BenchmarkSubsetSpec subsetSpec{
+            .maxDocs = corpusLimit,
+            .maxQueries = queryLimit,
+            .seed = parseSizeEnvOrDefault("YAMS_BENCH_SUBSET_SEED", 42)};
 
         spdlog::info("Setting up RAG benchmark: {} dataset, {} docs, {} queries, k={}",
                      datasetDisplayName(), corpusSize, numQueries, topK);
@@ -6094,8 +6063,8 @@ struct BenchFixture {
         Result<BEIRDataset> preparedBeirDataset =
             Error{ErrorCode::Unknown, "BEIR dataset not requested"};
         if (useBEIR) {
-            preparedBeirDataset = selectBenchmarkBEIRDataset(
-                beirDatasetName, datasetPathForMetadata, corpusLimit, queryLimit);
+            preparedBeirDataset =
+                selectBenchmarkBEIRDataset(beirDatasetName, datasetPathForMetadata, subsetSpec);
             if (!preparedBeirDataset) {
                 throw std::runtime_error("Failed to load BEIR dataset: " +
                                          preparedBeirDataset.error().message);
@@ -6107,6 +6076,10 @@ struct BenchFixture {
         BenchCacheMetadata expectedCacheMetadata;
         expectedCacheMetadata.dataset = useBEIR ? beirDatasetName : datasetName;
         expectedCacheMetadata.datasetPath = canonicalPathOrEmpty(datasetPathForMetadata);
+        if (useBEIR) {
+            subsetLabel = yams::bench::benchmarkSubsetLabel(subsetSpec);
+        }
+        expectedCacheMetadata.subset = subsetLabel;
         expectedCacheMetadata.corpusSize = corpusSize;
         expectedCacheMetadata.numQueries = numQueries;
         expectedCacheMetadata.topK = topK;
@@ -6265,6 +6238,8 @@ struct BenchFixture {
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_MAX_PER_CLUSTER");
             const auto topologyRoadOrderEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_ORDER");
+            const auto topologyRouteFitEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_FIT");
             const auto topologyBqCandidateLimitEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT");
             const auto topologyBqPrefixDimEnv =
@@ -6561,11 +6536,26 @@ struct BenchFixture {
                     if (embedBackendSimeon) {
                         configOut << "preferred_model = \"simeon-default\"\n";
                         const bool fixedHash384 = g_simeonEncoderProfile == "fixed_hash_384";
-                        configOut << "embedding_dim = " << (fixedHash384 ? 384 : 1024) << "\n\n";
+                        std::size_t dim = fixedHash384 ? 384 : 1024;
+                        if (g_simeonEncoderProfile == "static" && !g_simeonStaticTable.empty()) {
+                            // SMSTAT01 header: magic(8) version(4) dim(4).
+                            std::ifstream table(g_simeonStaticTable, std::ios::binary);
+                            unsigned char header[16]{};
+                            if (table.read(reinterpret_cast<char*>(header), sizeof header)) {
+                                dim = static_cast<std::size_t>(header[12]) |
+                                      (static_cast<std::size_t>(header[13]) << 8) |
+                                      (static_cast<std::size_t>(header[14]) << 16) |
+                                      (static_cast<std::size_t>(header[15]) << 24);
+                            }
+                        }
+                        configOut << "embedding_dim = " << dim << "\n\n";
                         if (!g_simeonEncoderProfile.empty()) {
                             configOut << "[embeddings.simeon]\n";
-                            configOut << "encoder_profile = \"" << g_simeonEncoderProfile
-                                      << "\"\n\n";
+                            configOut << "encoder_profile = \"" << g_simeonEncoderProfile << "\"\n";
+                            if (!g_simeonStaticTable.empty()) {
+                                configOut << "static_table = \"" << g_simeonStaticTable << "\"\n";
+                            }
+                            configOut << "\n";
                         }
                         if (g_simeonBm25Enabled.has_value()) {
                             configOut << "[embeddings.simeon.bm25]\n";
@@ -6624,11 +6614,6 @@ struct BenchFixture {
                         if (const char* policy = std::getenv("YAMS_BENCH_TOPOLOGY_VECTOR_POLICY");
                             policy && *policy) {
                             configOut << "vector_policy = \"" << policy << "\"\n";
-                        }
-                        if (const char* selector =
-                                std::getenv("YAMS_BENCH_TOPOLOGY_RESCUE_SELECTOR");
-                            selector && *selector) {
-                            configOut << "rescue_selector = \"" << selector << "\"\n";
                         }
                         configOut << "min_clusters = "
                                   << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS", 1)
@@ -6874,6 +6859,13 @@ struct BenchFixture {
                                 << "\n";
                         }
                     }
+                    // Fitted route vectors, trained on document titles only: the bench's own
+                    // evaluation queries must never reach the training set.
+                    if (envSet(topologyRouteFitEnv) && *topologyRouteFitEnv != "0") {
+                        configOut << "\n[topology.route_fit]\n";
+                        configOut << "enabled = true\n";
+                        configOut << "max_logged_queries = 0\n";
+                    }
                     configOut.close();
                     harnessOptions.configPath = configPath;
                     spdlog::info("Using isolated benchmark config: {}", configPath.string());
@@ -6901,7 +6893,7 @@ struct BenchFixture {
             beirCorpus = std::make_unique<BEIRCorpusLoader>(dataset, corpusDir);
             beirCorpus->writeDocumentsAsFiles();
             benchCorpusDir = corpusDir;
-            corpusSize = static_cast<int>(dataset.documents.size());
+            corpusSize = static_cast<int>(beirCorpus->uniqueContentDocuments);
             numQueries = static_cast<int>(dataset.queries.size());
             expectedCacheMetadata.expectedDocs = corpusSize;
             expectedCacheMetadata.expectedQueries = numQueries;
@@ -7593,6 +7585,7 @@ struct BenchFixture {
                 bool haveProgressSnapshot = false;
                 int stableCount = 0;
                 bool embeddingDrainSatisfied = false;
+                const double minCoverage = requiredEmbedCoveragePct();
                 auto embedStartTime = std::chrono::steady_clock::now();
                 auto lastEmbedProgressTime = embedStartTime;
 
@@ -7741,10 +7734,12 @@ struct BenchFixture {
                         // IMPORTANT: Require minimum 90% coverage to prevent premature exit from
                         // transient queue drain (e.g., between embedding batches)
                         const double coverage = observedSnapshot.coverageFor(corpusSize);
-                        constexpr double MIN_COVERAGE_THRESHOLD = 90.0;
+                        // A lower configured floor must be able to end the wait; the final gate
+                        // below still rejects anything under the floor.
+                        const double minStableCoverage = std::min(90.0, minCoverage);
                         if (observedSnapshot.hasQueueMetrics && stableCount >= 40 &&
                             observedSnapshot.queueDrained() && observedSnapshot.docsEmbedded > 0 &&
-                            coverage >= MIN_COVERAGE_THRESHOLD) {
+                            coverage >= minStableCoverage) {
                             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::steady_clock::now() - embedStartTime)
                                                .count();
@@ -7895,15 +7890,18 @@ struct BenchFixture {
                         embeddingDrainSatisfied = true;
                     }
 
-                    if (finalDocsEmbedded == 0) {
-                        spdlog::warn("No embedded documents present after embedding wait");
-                    } else if (finalCoverage < 90.0) {
-                        spdlog::error("WARNING: Low document embedding coverage ({:.1f}%) will "
-                                      "degrade retrieval "
-                                      "quality!",
-                                      finalCoverage);
-                        spdlog::error(
-                            "Consider reducing corpus size or increasing embed channel capacity.");
+                    // Hard gate: a partly embedded corpus measures the readiness of the
+                    // index, not retrieval. YAMS_BENCH_MIN_EMBED_COVERAGE (percent) relaxes
+                    // it for corpora with documents that have nothing to embed.
+                    setupTimings.embeddingCoveragePct = finalCoverage;
+                    if (finalCoverage + 1e-9 < minCoverage) {
+                        throw std::runtime_error(
+                            "Embedding coverage " + std::to_string(finalCoverage) +
+                            "% is below the required " + std::to_string(minCoverage) +
+                            "% (docs_embedded=" + std::to_string(finalDocsEmbedded) + " of " +
+                            std::to_string(corpusSize) +
+                            "). Results would not be valid; set "
+                            "YAMS_BENCH_MIN_EMBED_COVERAGE to accept a lower floor.");
                     }
 
                     if (!vectorDbReady) {
@@ -7919,20 +7917,23 @@ struct BenchFixture {
                                 }
                                 if (ready) {
                                     spdlog::info("Vector DB is now ready after guard wait");
+                                    vectorDbReady = true;
                                     break;
                                 }
                             }
                             std::this_thread::sleep_for(500ms);
                         }
+                        if (!vectorDbReady) {
+                            throw std::runtime_error(
+                                "Vector DB not ready 30s after embedding drain; results would "
+                                "not be valid.");
+                        }
                     }
                 } else {
-                    spdlog::warn("Final status check failed after embedding wait: {}",
-                                 finalStatus.error().message);
-                    if (!embeddingDrainSatisfied) {
-                        throw std::runtime_error("Final status check failed after embedding wait; "
-                                                 "cannot verify embedding drain. "
-                                                 "Benchmark results would be unreliable.");
-                    }
+                    // Coverage and vector-DB readiness cannot be verified without it.
+                    throw std::runtime_error("Final status check failed after embedding wait (" +
+                                             finalStatus.error().message +
+                                             "); cannot verify index readiness.");
                 }
             } else {
                 spdlog::info("Vectors disabled - skipping embedding generation wait");
@@ -8914,7 +8915,9 @@ struct BenchFixture {
                   {"reusable_probe_ms", setupTimings.vectorIndexReusableProbeMs},
                   {"reusable_probe_count", setupTimings.vectorIndexReusableProbeCount}}},
                 {"setup_total_ms", setupTimings.setupTotalMs},
+                {"embedding_coverage_pct", setupTimings.embeddingCoveragePct},
                 {"dataset", datasetName},
+                {"subset", subsetLabel},
                 {"corpus_size", corpusSize},
                 {"daemon_graph",
                  {{"required", g_requireDaemonNativeGraph},
@@ -9058,6 +9061,7 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
 
         g_debugRunContext->dataset =
             g_fixture->useBEIR ? g_fixture->beirDatasetName : g_fixture->datasetName;
+        g_debugRunContext->subset = g_fixture->subsetLabel;
         g_debugRunContext->corpusSize = g_fixture->corpusSize;
         g_debugRunContext->numQueries = static_cast<int>(g_fixture->queries.size());
         g_debugRunContext->topK = g_fixture->topK;

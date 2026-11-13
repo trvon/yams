@@ -102,6 +102,21 @@ public:
         EmbeddingChunkingPolicy chunking{};
     };
 
+    /// `[search.query_log]`: a local record of search queries, kept in the metadata store, that
+    /// query-aware components (for example fitted topology routing) can learn from. Nothing
+    /// leaves the machine.
+    struct QueryLogPolicy {
+        bool enabled{true};
+        /// Largest accepted `max_entries`.
+        static constexpr std::size_t kMaxEntriesLimit = 10'000'000;
+        /// Newest queries retained; older rows are deleted as new ones arrive.
+        std::size_t maxEntries{20000};
+        /// Rows SearchService should keep: zero when disabled.
+        [[nodiscard]] std::size_t effectiveMaxEntries() const noexcept {
+            return enabled ? maxEntries : 0;
+        }
+    };
+
     struct TopologyRoutingPolicy {
         std::optional<std::string> mode;
         // augment | narrow | shadow | route_only
@@ -156,14 +171,19 @@ public:
         std::optional<bool> graphWeightedSeedRanking;
         /// GraphNeighbors seed ANN k; 0 disables (Tier-1 seeds only).
         std::optional<std::size_t> graphVectorSeedProbe;
-        /// identity_order | simeon_fragment_geometry
-        std::optional<std::string> rescueSelector;
         std::optional<float> rrfK;
     };
 
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
         std::optional<std::size_t> routingRepresentativeCount;
+        /// `topology.route_fit.enabled`: fit query-aware routing vectors on full rebuilds.
+        /// Unset keeps it off.
+        std::optional<bool> routeFitEnabled;
+        /// `topology.route_fit.max_logged_queries` / `max_generated_queries`: training set
+        /// bounds. Unset keeps the manager's defaults.
+        std::optional<std::size_t> routeFitMaxLoggedQueries;
+        std::optional<std::size_t> routeFitMaxGeneratedQueries;
         /// `topology.representative_rule` = degree|medoid. Unset keeps Degree.
         std::optional<topology::RepresentativeRule> representativeRule;
         /// SGC feature-smoothing hops before clustering (0 disables).
@@ -237,6 +257,8 @@ public:
         std::optional<std::string> projection;
         std::optional<bool> l2Normalize;
         std::optional<std::uint32_t> pqBytes;
+        // encoder_profile = "static": SMSTAT01 table path (embeddings.simeon.static_table).
+        std::optional<std::string> staticTable;
     };
 
     struct SimeonBm25Policy {
@@ -293,6 +315,15 @@ public:
     /// Apply the canonical [search].automatic_rebuilds startup policy. Compatibility environment
     /// is resolved later only when this typed value remains absent.
     static void applySearchMaintenance(const ConfigSections& sections, DaemonConfig& config);
+
+    /// Resolve whether the daemon binary enables a model provider and loads plugins.
+    ///
+    /// Both default to on, matching the config that `yams init` and config migration write, so a
+    /// hand-written config that omits the keys still gets embeddings. `[daemon] enable` and
+    /// `[daemon] auto_load_plugins` override the defaults, `[embeddings] enable = false` turns
+    /// both off, and @p pluginsDisabledByFlag (--no-plugins) always turns plugin loading off.
+    static void applyEmbeddingProviderPolicy(const ConfigSections& sections,
+                                             bool pluginsDisabledByFlag, DaemonConfig& config);
 
     /// Apply [storage.disk_pressure] without environment overlays. Returns false when an
     /// explicitly supplied policy is invalid; config remains unchanged on failure.
@@ -351,6 +382,11 @@ public:
      * @return Dimension if found and > 0, nullopt otherwise
      */
     static std::optional<size_t> readDbEmbeddingDim(const std::filesystem::path& dbPath);
+
+    /// A stored embedding-space identity (vectors.model_id) other than `identity`, if any row has
+    /// one. Two seeks on idx_vectors_model, so it stays cheap on large stores.
+    static std::optional<std::string>
+    readDbForeignEmbeddingSpace(const std::filesystem::path& dbPath, const std::string& identity);
 
     /**
      * @brief Read embedding dimension from sentinel file.
@@ -553,10 +589,11 @@ public:
      * - search.topology.graph_neighbor_reciprocal_only = true|false
      * - search.topology.graph_weighted_seed_ranking = true|false
      * - search.topology.graph_vector_seed_probe = int
-     * - search.topology.rescue_selector = identity_order|simeon_fragment_geometry
      * - search.topology.rrf_k = float
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
+    /// Reads `search.query_log.enabled` and `search.query_log.max_entries`.
+    static QueryLogPolicy resolveQueryLogPolicy();
 
     /**
      * @brief Resolve topology cluster-engine selection from config file.
@@ -681,18 +718,6 @@ public:
      * @return Timeout in milliseconds
      */
     static int readTimeoutMs(const char* envName, int defaultMs, int minMs);
-
-    /**
-     * @brief Read vector index max_elements from config/env.
-     *
-     * Checks in order:
-     * 1. YAMS_VECTOR_MAX_ELEMENTS environment variable
-     * 2. vector_database.max_elements from config file
-     * 3. Default value (100000)
-     *
-     * @return Maximum number of vectors for the index
-     */
-    static size_t readVectorMaxElements();
 };
 
 } // namespace yams::daemon

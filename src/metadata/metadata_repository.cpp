@@ -40,6 +40,7 @@
 // Phase 5: CrudOps for generic CRUD operations (ADR-0004)
 #include "repository/corpus_stats_ops.hpp"
 #include "repository/crud_ops.hpp"
+#include "repository/document_paths.h"
 #include "repository/document_query_filters.hpp"
 #include "repository/metadata_value_count_ops.hpp"
 #include "repository/metadata_write_helpers.hpp"
@@ -501,21 +502,6 @@ std::optional<std::vector<int64_t>> MetadataRepository::getCachedFtsIndexedIds()
     return ids;
 }
 
-std::optional<std::vector<uint8_t>>
-MetadataRepository::getCachedFtsIndexedStates(std::span<const int64_t> docIds) const {
-    if (!ftsIndexedIdsCacheReady_.load(std::memory_order_acquire)) {
-        return std::nullopt;
-    }
-
-    std::shared_lock<std::shared_mutex> lock(ftsIndexedIdsCacheMutex_);
-    std::vector<uint8_t> states;
-    states.reserve(docIds.size());
-    for (const auto docId : docIds) {
-        states.push_back(ftsIndexedIdsCache_.find(docId) != ftsIndexedIdsCache_.end() ? 1u : 0u);
-    }
-    return states;
-}
-
 void MetadataRepository::setCachedFtsIndexedIds(const std::vector<int64_t>& docIds) const {
     std::unique_lock<std::shared_mutex> lock(ftsIndexedIdsCacheMutex_);
     ftsIndexedIdsCache_.clear();
@@ -652,6 +638,8 @@ MetadataRepository::MetadataRepository(ConnectionPool& pool, ConnectionPool* rea
         const bool hasParent = columns.count("parent_hash") > 0;
         const bool hasDepth = columns.count("path_depth") > 0;
         hasPathIndexing_ = hasPrefix && hasReverse && hasHash && hasParent && hasDepth;
+        if (auto paths = db.tableExists("document_path_heads"); paths)
+            hasDocumentPaths_ = paths.value();
 
         auto ftsResult = db.tableExists("documents_path_fts");
         if (ftsResult) {
@@ -771,6 +759,8 @@ MetadataRepository::generateValueCountsCacheKey(const std::vector<std::string>& 
         cacheKey += *options.likePattern;
         cacheKey += ';';
     }
+    if (options.fileNamePattern)
+        cacheKey += "fnp:" + *options.fileNamePattern + ";";
     if (options.prefixIsDirectory)
         cacheKey += "pid;";
     if (!options.includeSubdirectories)
@@ -785,13 +775,13 @@ MetadataRepository::generateValueCountsCacheKey(const std::vector<std::string>& 
 static bool requiresDocumentJoin(const DocumentQueryOptions& options) {
     return options.exactPath.has_value() || options.pathPrefix.has_value() ||
            options.containsFragment.has_value() || options.likePattern.has_value() ||
-           options.fileName.has_value() || options.extension.has_value() ||
-           !options.extensions.empty() || options.mimeType.has_value() || options.textOnly ||
-           options.binaryOnly || options.createdAfter.has_value() ||
-           options.createdBefore.has_value() || options.modifiedAfter.has_value() ||
-           options.modifiedBefore.has_value() || options.indexedAfter.has_value() ||
-           options.indexedBefore.has_value() || options.changedSince.has_value() ||
-           !options.tags.empty();
+           options.fileName.has_value() || options.fileNamePattern.has_value() ||
+           options.extension.has_value() || !options.extensions.empty() ||
+           options.mimeType.has_value() || options.textOnly || options.binaryOnly ||
+           options.createdAfter.has_value() || options.createdBefore.has_value() ||
+           options.modifiedAfter.has_value() || options.modifiedBefore.has_value() ||
+           options.indexedAfter.has_value() || options.indexedBefore.has_value() ||
+           options.changedSince.has_value() || !options.tags.empty();
 }
 
 Result<std::unordered_map<std::string, std::vector<MetadataValueCount>>>
@@ -1308,6 +1298,29 @@ Result<bool> MetadataRepository::hasFtsEntry(int64_t documentId) {
     });
 }
 
+Result<std::unordered_set<std::string>> MetadataRepository::getDocumentHashesWithoutContent() {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::getDocumentHashesWithoutContent");
+    return executeReadQuery<std::unordered_set<std::string>>(
+        [&](Database& db) -> Result<std::unordered_set<std::string>> {
+            auto stmtResult =
+                db.prepare("SELECT d.sha256_hash FROM documents d WHERE NOT EXISTS "
+                           "(SELECT 1 FROM document_content c WHERE c.document_id = d.id)");
+            if (!stmtResult)
+                return stmtResult.error();
+            Statement stmt = std::move(stmtResult).value();
+            std::unordered_set<std::string> hashes;
+            for (;;) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break;
+                hashes.insert(stmt.getString(0));
+            }
+            return hashes;
+        });
+}
+
 Result<std::unordered_set<int64_t>> MetadataRepository::getFts5IndexedRowIdSet() {
     YAMS_ZONE_SCOPED_N("MetadataRepo::getFts5IndexedRowIdSet");
     return executeReadQuery<std::unordered_set<int64_t>>(
@@ -1366,64 +1379,6 @@ Result<void> MetadataRepository::removeFromIndex(int64_t documentId) {
         invalidateQueryCache();
     }
     return result;
-}
-
-Result<void> MetadataRepository::removeFromIndexByHash(const std::string& hash) {
-    auto result =
-        executeQuery<std::optional<int64_t>>([&](Database& db) -> Result<std::optional<int64_t>> {
-            // First check if FTS5 is available
-            auto fts5Result = db.hasFTS5();
-            if (!fts5Result)
-                return fts5Result.error();
-
-            if (!fts5Result.value()) {
-                return std::optional<int64_t>{};
-            }
-
-            // Get document ID from hash first
-            auto stmtResult = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, hash);
-            if (!bindResult)
-                return bindResult.error();
-
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
-
-            if (!stepResult.value()) {
-                // Document not found - treat as success (already removed/doesn't exist)
-                return std::optional<int64_t>{};
-            }
-
-            int64_t docId = stmt.getInt64(0);
-
-            // Now remove from FTS5 index
-            auto delStmtResult = db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
-            if (!delStmtResult)
-                return delStmtResult.error();
-
-            Statement delStmt = std::move(delStmtResult).value();
-            auto delBindResult = delStmt.bind(1, docId);
-            if (!delBindResult)
-                return delBindResult.error();
-
-            YAMS_TRY(delStmt.execute());
-            return std::optional<int64_t>{docId};
-        });
-
-    if (!result) {
-        return result.error();
-    }
-
-    if (result.value().has_value()) {
-        eraseFtsIndexedId(result.value().value());
-    }
-    invalidateQueryCache();
-    return {};
 }
 
 Result<size_t>
@@ -1597,27 +1552,33 @@ Result<std::optional<DocumentInfo>>
 MetadataRepository::findDocumentByExactPath(const std::string& path) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::findDocumentByExactPath");
     auto derived = computePathDerivedValues(path);
-    if (auto cached = lookupPathCache(derived.normalizedPath))
-        return cached;
-
+    // This lookup is authoritative for a path's version head. A cached document
+    // is not a cached head: metadata writes or another process can move the head
+    // to an older content hash without changing that document's path/timestamp.
     return executeReadQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
             using yams::metadata::sql::QuerySpec;
             QuerySpec spec{};
             spec.table = "documents";
             spec.columns = {documentColumnList(false)};
-            spec.conditions = {"path_hash = ?"};
-            spec.orderBy = std::nullopt;
+            spec.conditions = {"path_hash = ?", "file_path = ?"};
+            spec.orderBy = "COALESCE((SELECT value FROM metadata WHERE document_id = documents.id "
+                           "AND key = 'is_latest'), '0') IN ('1', 'true') DESC, "
+                           "COALESCE((SELECT CAST(value AS INTEGER) FROM metadata "
+                           "WHERE document_id = documents.id AND key = 'version'), 0) DESC, "
+                           "indexed_time DESC, id DESC";
             spec.groupBy = std::nullopt;
             spec.having = std::nullopt;
             spec.limit = 1;
             spec.offset = std::nullopt;
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
+            const auto prefix =
+                hasDocumentPaths_ ? repository::documentPathQueryCte(true) : std::string{};
+            auto stmtResult = db.prepare(prefix + yams::metadata::sql::buildSelect(spec));
             if (!stmtResult)
                 return stmtResult.error();
 
             Statement stmt = std::move(stmtResult).value();
-            if (auto bind = stmt.bind(1, derived.pathHash); !bind)
+            if (auto bind = stmt.bindAll(derived.pathHash, derived.normalizedPath); !bind)
                 return bind.error();
 
             auto stepResult = stmt.step();
@@ -1633,8 +1594,11 @@ MetadataRepository::findDocumentByExactPath(const std::string& path) {
 }
 
 Result<std::vector<DocumentInfo>>
-MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
+MetadataRepository::queryDocuments(const DocumentQueryOptions& requested) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocuments");
+    auto options = requested;
+    options.usePathLocations = requested.usePathLocations && hasDocumentPaths_;
+    options.containsUsesFts = requested.containsUsesFts && !options.usePathLocations;
     return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
@@ -1681,6 +1645,8 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
                 addIntParam(params, options.offset);
             }
 
+            if (options.usePathLocations)
+                sql.insert(0, repository::documentPathQueryCte(options.currentPathsOnly));
             auto execResult = executePreparedVectorQuery<DocumentInfo>(
                 db, sql, params, [&](const Statement& stmt) { return mapDocumentRow(stmt); },
                 [&](const DocumentInfo& doc) { storePathCache(doc); });
@@ -2170,8 +2136,11 @@ MetadataRepository::getExistingDocumentHashes(const std::vector<std::string>& ha
 }
 
 Result<std::vector<ListDocumentProjection>>
-MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& options) {
+MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& requested) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocumentsForListProjection");
+    auto options = requested;
+    options.usePathLocations = requested.usePathLocations && hasDocumentPaths_;
+    options.containsUsesFts = requested.containsUsesFts && !options.usePathLocations;
     YAMS_PLOT("metadata_repo::list_limit", static_cast<int64_t>(options.limit));
     YAMS_PLOT("metadata_repo::list_offset", static_cast<int64_t>(options.offset));
     auto result = executeReadQuery<std::vector<ListDocumentProjection>>(
@@ -2216,6 +2185,8 @@ MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& 
                 addIntParam(params, options.offset);
             }
 
+            if (options.usePathLocations)
+                sql.insert(0, repository::documentPathQueryCte(options.currentPathsOnly));
             auto execResult = executePreparedVectorQuery<ListDocumentProjection>(
                 db, sql, params, [&](const Statement& stmt) { return mapListProjectionRow(stmt); });
             if (!execResult) {
@@ -2236,8 +2207,11 @@ MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& 
 }
 
 Result<std::vector<GrepCandidateProjection>>
-MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& options) {
+MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& requested) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocumentsForGrepCandidates");
+    auto options = requested;
+    options.usePathLocations = requested.usePathLocations && hasDocumentPaths_;
+    options.containsUsesFts = requested.containsUsesFts && !options.usePathLocations;
     YAMS_PLOT("metadata_repo::grep_candidates_limit", static_cast<int64_t>(options.limit));
     YAMS_PLOT("metadata_repo::grep_candidates_offset", static_cast<int64_t>(options.offset));
     auto result = executeReadQuery<std::vector<GrepCandidateProjection>>(
@@ -2281,6 +2255,8 @@ MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& 
                 addIntParam(params, options.offset);
             }
 
+            if (options.usePathLocations)
+                sql.insert(0, repository::documentPathQueryCte(options.currentPathsOnly));
             auto execResult = executePreparedVectorQuery<GrepCandidateProjection>(
                 db, sql, params, [&](const Statement& stmt) {
                     GrepCandidateProjection p;
@@ -2962,55 +2938,6 @@ MetadataRepository::tryAddSymSpellTerms(const std::vector<std::pair<std::string,
 // Term Statistics for IDF (Dense-First Retrieval)
 // =============================================================================
 
-Result<float> MetadataRepository::getTermIDF(const std::string& term) {
-    return executeReadQuery<float>([&](Database& db) -> Result<float> {
-        // Get total document count from corpus stats
-        auto corpusStmt = db.prepare("SELECT total_documents FROM corpus_term_stats WHERE id = 1");
-        if (!corpusStmt)
-            return corpusStmt.error();
-
-        auto& cs = corpusStmt.value();
-        auto corpusStep = cs.step();
-        if (!corpusStep)
-            return corpusStep.error();
-
-        int64_t totalDocs = 0;
-        if (corpusStep.value()) {
-            totalDocs = cs.getInt64(0);
-        }
-
-        if (totalDocs <= 0) {
-            return 0.0f; // Empty corpus
-        }
-
-        // Get document frequency for term
-        auto termStmt = db.prepare("SELECT document_frequency FROM term_stats WHERE term = ?");
-        if (!termStmt)
-            return termStmt.error();
-
-        auto& ts = termStmt.value();
-        auto bindResult = ts.bind(1, term);
-        if (!bindResult)
-            return bindResult.error();
-
-        auto termStep = ts.step();
-        if (!termStep)
-            return termStep.error();
-
-        int64_t docFreq = 0;
-        if (termStep.value()) {
-            docFreq = ts.getInt64(0);
-        }
-
-        if (docFreq <= 0) {
-            return 0.0f; // Term not found
-        }
-
-        // IDF = log(N / df)
-        return static_cast<float>(std::log(static_cast<double>(totalDocs) / docFreq));
-    });
-}
-
 Result<std::unordered_map<std::string, float>>
 MetadataRepository::getTermIDFBatch(const std::vector<std::string>& terms) {
     if (terms.empty()) {
@@ -3093,79 +3020,6 @@ MetadataRepository::getTermIDFBatch(const std::vector<std::string>& terms) {
         });
 }
 
-Result<void>
-MetadataRepository::updateTermStats(const std::unordered_map<std::string, int64_t>& terms) {
-    if (terms.empty()) {
-        return {};
-    }
-
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Use UPSERT pattern to update term statistics
-        auto stmt = db.prepare(R"(
-            INSERT INTO term_stats (term, document_frequency, collection_frequency, last_updated)
-            VALUES (?, 1, ?, unixepoch())
-            ON CONFLICT(term) DO UPDATE SET
-                document_frequency = document_frequency + 1,
-                collection_frequency = collection_frequency + excluded.collection_frequency,
-                last_updated = unixepoch()
-        )");
-        if (!stmt)
-            return stmt.error();
-
-        auto& s = stmt.value();
-        for (const auto& [term, count] : terms) {
-            auto b1 = s.bind(1, term);
-            if (!b1)
-                return b1.error();
-            auto b2 = s.bind(2, count);
-            if (!b2)
-                return b2.error();
-            auto execResult = s.execute();
-            if (!execResult)
-                return execResult.error();
-            s.reset();
-        }
-
-        return {};
-    });
-}
-
-Result<void> MetadataRepository::updateCorpusTermStats() {
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Update corpus-level statistics from documents table
-        auto result = db.execute(R"(
-            UPDATE corpus_term_stats SET
-                total_documents = (SELECT COUNT(*) FROM documents WHERE content_extracted = 1),
-                total_terms = (SELECT COUNT(*) FROM term_stats),
-                avg_document_length = COALESCE(
-                    (SELECT AVG(content_length) FROM document_content WHERE content_length > 0),
-                    0.0
-                ),
-                last_updated = unixepoch()
-            WHERE id = 1
-        )");
-        return result;
-    });
-}
-
-Result<int64_t> MetadataRepository::getCorpusDocumentCount() {
-    return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        auto stmt = db.prepare("SELECT total_documents FROM corpus_term_stats WHERE id = 1");
-        if (!stmt)
-            return stmt.error();
-
-        auto& s = stmt.value();
-        auto stepResult = s.step();
-        if (!stepResult)
-            return stepResult.error();
-
-        if (stepResult.value()) {
-            return s.getInt64(0);
-        }
-        return int64_t{0};
-    });
-}
-
 Result<void> MetadataRepository::checkpointWal() {
     return executeQuery<void>([](Database& db) -> Result<void> {
         // Use PASSIVE checkpoint — non-blocking, only checkpoints pages not
@@ -3207,10 +3061,6 @@ Result<void> MetadataRepository::checkpointWalTruncate() {
         }
         return db.execute("PRAGMA optimize");
     });
-}
-
-void MetadataRepository::refreshAllConnections() {
-    pool_.refreshAll();
 }
 
 // -----------------------------------------------------------------------------
@@ -3710,18 +3560,6 @@ MetadataQueryBuilder& MetadataQueryBuilder::withExtension(const std::string& ext
     return *this;
 }
 
-MetadataQueryBuilder& MetadataQueryBuilder::withMimeType(const std::string& mimeType) {
-    conditions_.push_back("mime_type = ?");
-    parameters_.push_back(mimeType);
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::withPathContaining(const std::string& pathFragment) {
-    conditions_.push_back("file_path LIKE ?");
-    parameters_.push_back("%" + pathFragment + "%");
-    return *this;
-}
-
 MetadataQueryBuilder&
 MetadataQueryBuilder::modifiedAfter(std::chrono::system_clock::time_point time) {
     conditions_.push_back("modified_time >= ?");
@@ -3746,92 +3584,8 @@ MetadataQueryBuilder::indexedAfter(std::chrono::system_clock::time_point time) {
     return *this;
 }
 
-MetadataQueryBuilder& MetadataQueryBuilder::withContentExtracted(bool extracted) {
-    conditions_.push_back("content_extracted = ?");
-    parameters_.push_back(extracted ? "1" : "0");
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::withExtractionStatus(ExtractionStatus status) {
-    conditions_.push_back("extraction_status = ?");
-    parameters_.push_back(ExtractionStatusUtils::toString(status));
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::withMetadata(const std::string& key,
-                                                         const std::string& value) {
-    conditions_.push_back(R"(
-        EXISTS (
-            SELECT 1 FROM metadata m 
-            WHERE m.document_id = documents.id 
-            AND m.key = ? AND m.value = ?
-        )
-    )");
-    parameters_.push_back(key);
-    parameters_.push_back(value);
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::withMetadataKey(const std::string& key) {
-    conditions_.push_back(R"(
-        EXISTS (
-            SELECT 1 FROM metadata m 
-            WHERE m.document_id = documents.id 
-            AND m.key = ?
-        )
-    )");
-    parameters_.push_back(key);
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::withContentLanguage(const std::string& language) {
-    conditions_.push_back(R"(
-        EXISTS (
-            SELECT 1 FROM document_content dc 
-            WHERE dc.document_id = documents.id 
-            AND dc.language = ?
-        )
-    )");
-    parameters_.push_back(language);
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::withMinContentLength(int64_t minLength) {
-    conditions_.push_back(R"(
-        EXISTS (
-            SELECT 1 FROM document_content dc 
-            WHERE dc.document_id = documents.id 
-            AND dc.content_length >= ?
-        )
-    )");
-    parameters_.push_back(std::to_string(minLength));
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::withMaxContentLength(int64_t maxLength) {
-    conditions_.push_back(R"(
-        EXISTS (
-            SELECT 1 FROM document_content dc 
-            WHERE dc.document_id = documents.id 
-            AND dc.content_length <= ?
-        )
-    )");
-    parameters_.push_back(std::to_string(maxLength));
-    return *this;
-}
-
 MetadataQueryBuilder& MetadataQueryBuilder::orderByModified(bool ascending) {
     orderBy_ = "ORDER BY modified_time " + std::string(ascending ? "ASC" : "DESC");
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::orderByIndexed(bool ascending) {
-    orderBy_ = "ORDER BY indexed_time " + std::string(ascending ? "ASC" : "DESC");
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::orderBySize(bool ascending) {
-    orderBy_ = "ORDER BY file_size " + std::string(ascending ? "ASC" : "DESC");
     return *this;
 }
 

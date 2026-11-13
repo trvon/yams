@@ -114,6 +114,16 @@ public:
     /// Called with the hashes of the documents a job committed vectors for (new or re-embedded),
     /// after the vector insert and before readiness is published.
     void setEmbeddingsCommittedCallback(std::function<void(const std::vector<std::string>&)> cb);
+    /// Called with the hashes of documents whose semantic_neighbor edges the idle backfill wrote,
+    /// once the backlog is drained (or enough has accumulated). A topology snapshot built before
+    /// those edges existed is stale; this is the signal to rebuild it. Set before start.
+    void
+    setSemanticNeighborsBackfilledCallback(std::function<void(const std::vector<std::string>&)> cb);
+    /// Counter that documents embedded for EmbedJob::fromRepair jobs are added to (the status
+    /// field repair_embeddings_generated). Set before start; the counter must outlive the service.
+    void setRepairEmbeddedCounter(std::atomic<std::uint64_t>* counter) {
+        repairEmbeddedCounter_ = counter;
+    }
 
     // Exposes the immutable effective safeguard and its provenance for status/tests.
     EffectiveEmbeddingServiceConfig effectiveConcurrencyPolicy() const;
@@ -143,8 +153,8 @@ private:
     // Parallel poller that dispatches jobs to work executor
     boost::asio::awaitable<void> channelPoller();
 
-    // Synchronous job processor (runs on work executor threads)
-    void processEmbedJob(InternalEventBus::EmbedJob job);
+    // Runs on work executor threads; suspends at document completion fences.
+    boost::asio::awaitable<void> processEmbedJob(InternalEventBus::EmbedJob job);
     void updateSemanticNeighborGraph(
         const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
         const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
@@ -154,13 +164,11 @@ private:
         const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
         const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
         const std::vector<std::pair<std::string, std::string>>& sourceDocuments,
-        bool sourceAllCorpus);
+        bool sourceAllCorpus, std::vector<std::string>* linkedSources = nullptr);
     void recordPhaseTiming(std::string_view phase, std::chrono::steady_clock::time_point start);
     void enqueueRepairStatusUpdate(std::vector<std::string> hashes, metadata::RepairStatus status,
                                    std::string source,
                                    std::vector<metadata::EmbeddingDerivationToken> tokens);
-    void enqueueEmbeddingCompletion(std::vector<metadata::EmbeddingDerivationToken> tokens,
-                                    std::string modelName);
 
     const EmbeddingServiceConfig config_;
     const EffectiveEmbeddingServiceConfig effectiveConfig_;
@@ -179,12 +187,18 @@ private:
                                       std::function<void(const ModelLoadEvent&)>)>
         ensureModelReady_;
     std::function<void(const std::vector<std::string>&)> embeddingsCommittedCallback_;
+    std::function<void(const std::vector<std::string>&)> semanticNeighborsBackfilledCallback_;
+    // Documents the backfill wrote edges for and has not reported yet. Guarded by
+    // semanticGraphMutationMutex_.
+    std::vector<std::string> semanticBackfillUnreported_;
+    static constexpr std::size_t kSemanticBackfillReportThreshold{4096};
 
     std::atomic<bool> stop_{false};
     std::mutex stageActivityMutex_;
     bool stageActivityPublished_{false};
     std::uint64_t stageActivityToken_{0};
     std::atomic<std::size_t> processed_{0};
+    std::atomic<std::uint64_t>* repairEmbeddedCounter_{nullptr};
     std::atomic<std::size_t> failed_{0};
     std::atomic<std::size_t> inFlight_{0}; // PBI-05b: parallel job tracking
     std::atomic<bool> pollerRunning_{false};

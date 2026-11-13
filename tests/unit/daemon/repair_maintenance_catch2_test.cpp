@@ -2,12 +2,14 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "../../common/metadata_test_db.h"
 #include "../../common/test_helpers_catch2.h"
 
 #include <yams/app/services/session_service.hpp>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/sqlite_vacuum.h>
+#include <yams/daemon/components/StateComponent.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_database.h>
@@ -17,6 +19,7 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -75,6 +78,22 @@ std::uint64_t fileBytes(const fs::path& path) {
 }
 
 using namespace std::chrono_literals;
+
+// Overrides the global governor pressure level and restores Normal on scope exit, so a failed
+// assertion cannot leak the override into later cases.
+class ScopedPressureLevel {
+public:
+    explicit ScopedPressureLevel(ResourcePressureLevel level) {
+        ResourceGovernor::instance().testing_setPressureState(level,
+                                                              std::chrono::steady_clock::now());
+    }
+    ~ScopedPressureLevel() {
+        ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Normal,
+                                                              std::chrono::steady_clock::now());
+    }
+    ScopedPressureLevel(const ScopedPressureLevel&) = delete;
+    ScopedPressureLevel& operator=(const ScopedPressureLevel&) = delete;
+};
 
 std::int64_t epochSeconds(std::chrono::system_clock::time_point when) {
     return std::chrono::duration_cast<std::chrono::seconds>(when.time_since_epoch()).count();
@@ -406,4 +425,174 @@ TEST_CASE("RepairService maintenance expires idle sessions using document owners
 
     repo.reset();
     pool->shutdown();
+}
+
+TEST_CASE("Background path-tree repair is admitted only while the daemon is idle",
+          "[daemon][repair][maintenance][path-tree][catch2]") {
+    RepairService::PathTreeRepairSignals idle;
+    idle.maintenanceAllowed = true;
+    idle.pressure = ResourcePressureLevel::Normal;
+    CHECK(RepairService::pathTreeRepairAdmitted(idle));
+
+    auto busy = idle;
+    busy.shuttingDown = true;
+    CHECK_FALSE(RepairService::pathTreeRepairAdmitted(busy));
+
+    busy = idle;
+    busy.maintenanceAllowed = false; // a client is connected
+    CHECK_FALSE(RepairService::pathTreeRepairAdmitted(busy));
+
+    busy = idle;
+    busy.pressure = ResourcePressureLevel::Warning;
+    CHECK_FALSE(RepairService::pathTreeRepairAdmitted(busy));
+
+    busy = idle;
+    busy.repairInProgress = true; // `yams repair` may be rebuilding the path tree itself
+    CHECK_FALSE(RepairService::pathTreeRepairAdmitted(busy));
+
+    busy = idle;
+    busy.startupScanInFlight = true; // the startup scan is RepairScan work too
+    CHECK_FALSE(RepairService::pathTreeRepairAdmitted(busy));
+
+    busy = idle;
+    busy.hostDeferred = true;
+    CHECK_FALSE(RepairService::pathTreeRepairAdmitted(busy));
+}
+
+TEST_CASE("RepairService maintenance restores missing path-tree nodes in batches",
+          "[daemon][repair][maintenance][path-tree][catch2]") {
+    ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Normal,
+                                                          std::chrono::steady_clock::now());
+    const auto dbPath =
+        yams::test::migrated_metadata_db_template().clone("yams_repair_path_tree_db_");
+    yams::metadata::ConnectionPoolConfig poolConfig;
+    poolConfig.minConnections = 1;
+    poolConfig.maxConnections = 2;
+    auto pool = std::make_unique<yams::metadata::ConnectionPool>(dbPath.string(), poolConfig);
+    REQUIRE(pool->initialize().has_value());
+    auto repo = std::make_shared<yams::metadata::MetadataRepository>(
+        *pool, nullptr, yams::metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
+
+    // insertDocument does not write the path tree: these model documents whose upsert was lost.
+    for (int i = 0; i < 5; ++i) {
+        yams::metadata::DocumentInfo doc;
+        doc.filePath = "/notes/note-" + std::to_string(i) + ".md";
+        doc.fileName = "note-" + std::to_string(i) + ".md";
+        doc.fileExtension = ".md";
+        doc.fileSize = 4;
+        doc.sha256Hash = std::string(63, 'c') + std::to_string(i);
+        doc.mimeType = "text/markdown";
+        REQUIRE(repo->insertDocument(doc).has_value());
+    }
+    auto missing = [&repo] {
+        auto count = repo->countDocsMissingPathTree();
+        REQUIRE(count.has_value());
+        return count.value();
+    };
+    REQUIRE(missing() == 5);
+
+    std::size_t activeConnections = 0;
+    // Set by a section to issue an on-demand repair while the background batch is running.
+    RepairService* probeService = nullptr;
+    std::optional<RepairResponse> probeResponse;
+    RepairServiceContext ctx;
+    ctx.getMetadataRepo = [repo, &probeService, &probeResponse] {
+        if (probeService && !probeResponse) {
+            RepairRequest request;
+            request.repairPathTree = true;
+            probeResponse = probeService->executeRepair(request, {});
+        }
+        return repo;
+    };
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.pathTreeRepairBatch = 2;
+    StateComponent state;
+    RepairService service(ctx, &state, [&activeConnections] { return activeConnections; }, cfg);
+
+    SECTION("an on-demand repair holding the gate defers it") {
+        REQUIRE(service.testing_claimRepairGate());
+        CHECK_FALSE(service.testing_runPathTreeRepairBatch().has_value());
+        CHECK(missing() == 5);
+        service.testing_releaseRepairGate();
+        CHECK(service.testing_runPathTreeRepairBatch().has_value());
+        CHECK(missing() == 3);
+    }
+    SECTION("a running batch holds the gate, so an on-demand repair is told to retry") {
+        probeService = &service;
+        auto batch = service.testing_runPathTreeRepairBatch();
+        REQUIRE(batch.has_value());
+        REQUIRE(probeResponse.has_value());
+        CHECK_FALSE(probeResponse->success);
+        REQUIRE(probeResponse->errors.size() == 1);
+        CHECK(probeResponse->errors.front().find("Retry") != std::string::npos);
+        CHECK(missing() == 3); // only the background batch wrote
+        // The gate is released once the batch returns.
+        CHECK_FALSE(service.isRepairInProgress());
+    }
+
+    SECTION("a connected client defers it") {
+        activeConnections = 1;
+        CHECK_FALSE(service.testing_runPathTreeRepairBatch().has_value());
+        CHECK(missing() == 5);
+    }
+    SECTION("resource pressure defers it") {
+        ScopedPressureLevel warning(ResourcePressureLevel::Warning);
+        CHECK_FALSE(service.testing_runPathTreeRepairBatch().has_value());
+        CHECK(missing() == 5);
+    }
+    SECTION("an idle daemon repairs one batch per call and resumes until the pass completes") {
+        auto first = service.testing_runPathTreeRepairBatch();
+        REQUIRE(first.has_value());
+        CHECK_FALSE(first->finished);
+        CHECK(first->nodesCreated == 2);
+        CHECK(missing() == 3);
+
+        // A client connecting mid-pass pauses it without losing the cursor.
+        activeConnections = 1;
+        CHECK_FALSE(service.testing_runPathTreeRepairBatch().has_value());
+        CHECK(missing() == 3);
+        activeConnections = 0;
+
+        auto second = service.testing_runPathTreeRepairBatch();
+        REQUIRE(second.has_value());
+        CHECK_FALSE(second->finished);
+        CHECK(second->nodesCreated == 4); // running totals of the pass
+
+        auto third = service.testing_runPathTreeRepairBatch();
+        REQUIRE(third.has_value());
+        CHECK(third->finished);
+        CHECK(third->documentsScanned == 5);
+        CHECK(third->nodesCreated == 5);
+        CHECK(third->errors == 0);
+        CHECK(missing() == 0);
+        CHECK(state.stats.repairPathTreeRepaired.load() == 5);
+    }
+    SECTION("on-demand rebuild reports progress, counts, and honors cancellation") {
+        std::atomic<bool> cancel{true};
+        auto canceled = service.testing_rebuildPathTree(false, {}, &cancel);
+        CHECK(canceled.succeeded == 0);
+        CHECK(canceled.message.find("canceled") != std::string::npos);
+        CHECK(missing() == 5);
+
+        auto dry = service.testing_rebuildPathTree(true, {}, nullptr);
+        CHECK(dry.processed == 5);
+        CHECK(missing() == 5);
+
+        cancel = false;
+        std::vector<RepairEvent> events;
+        auto done = service.testing_rebuildPathTree(
+            false, [&events](const RepairEvent& ev) { events.push_back(ev); }, &cancel);
+        CHECK(done.processed == 5);
+        CHECK(done.succeeded == 5);
+        CHECK(done.failed == 0);
+        REQUIRE(events.size() == 1); // one batch at the default batch size
+        CHECK(events.front().operation == "path_tree");
+        CHECK(events.front().succeeded == 5);
+        CHECK(missing() == 0);
+    }
+
+    repo.reset();
+    pool->shutdown();
+    yams::test::remove_sqlite_artifacts(dbPath);
 }

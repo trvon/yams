@@ -3,7 +3,8 @@
 #include <cstdlib>
 #include <filesystem>
 #if !defined(_WIN32) && !defined(__APPLE__)
-#include <fstream> // NOLINT(misc-include-cleaner) -- used by the POSIX /proc probes below.
+#include <fstream>
+#include <iterator> // NOLINT(misc-include-cleaner) -- used by the POSIX /proc probes below.
 #endif
 #include <iomanip>
 #include <sstream>
@@ -32,7 +33,6 @@
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
-#include <yams/daemon/components/MetricsSnapshotRegistry.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
@@ -104,6 +104,70 @@ std::uint64_t computePhysicalWalkTtl(std::uint64_t lastDurationMs) noexcept {
     const std::uint64_t scaled =
         (lastDurationMs > kMaxTtlMs / kAmplifier) ? kMaxTtlMs : lastDurationMs * kAmplifier;
     return std::clamp(scaled, kMinTtlMs, kMaxTtlMs);
+}
+
+std::uint64_t storageTreeFingerprint(const std::filesystem::path& root) noexcept {
+    namespace fs = std::filesystem;
+    std::uint64_t fingerprint = 0;
+    std::error_code ec;
+    const auto mix = [&fingerprint](const fs::path& path, fs::file_time_type mtime) {
+        std::uint64_t h = std::hash<std::string>{}(path.string());
+        h ^= static_cast<std::uint64_t>(mtime.time_since_epoch().count()) + 0x9e3779b97f4a7c15ULL +
+             (h << 6) + (h >> 2);
+        // Order-independent: directory iteration order is unspecified.
+        fingerprint += h * 0xff51afd7ed558ccdULL;
+    };
+    // Any probe error returns 0, which forces the full walk: a partial fingerprint could
+    // repeat and make stale totals look current.
+    try {
+        const auto rootTime = fs::last_write_time(root, ec);
+        if (ec) {
+            return 0;
+        }
+        mix(root, rootTime);
+        fs::directory_iterator children(root, ec);
+        if (ec) {
+            return 0;
+        }
+        for (const auto& child : children) {
+            const bool childIsDir = child.is_directory(ec);
+            if (ec) {
+                return 0;
+            }
+            if (!childIsDir) {
+                continue;
+            }
+            // Ask the directory itself: Windows serves cached directory_entry times from the
+            // parent index, which NTFS updates lazily, so a new object would not change them.
+            const auto childTime = fs::last_write_time(child.path(), ec);
+            if (ec) {
+                return 0;
+            }
+            mix(child.path(), childTime);
+            fs::directory_iterator shards(child.path(), ec);
+            if (ec) {
+                return 0;
+            }
+            for (const auto& shard : shards) {
+                const bool shardIsDir = shard.is_directory(ec);
+                if (ec) {
+                    return 0;
+                }
+                if (!shardIsDir) {
+                    continue;
+                }
+                const auto shardTime = fs::last_write_time(shard.path(), ec);
+                if (ec) {
+                    return 0;
+                }
+                mix(shard.path(), shardTime);
+            }
+        }
+    } catch (...) {
+        return 0; // iteration errors throw from operator++
+    }
+    // 0 means "no fingerprint"; never return it for an existing tree.
+    return fingerprint == 0 ? 1 : fingerprint;
 }
 
 namespace {
@@ -314,6 +378,20 @@ static MemoryUsageSample sampleMemoryUsage(bool includeAllocatorBreakdown, std::
     } else if (rss_kb > 0) {
         sample.memoryUsageMb = static_cast<double>(rss_kb) / 1024.0;
     }
+#if !defined(_WIN32) && !defined(__APPLE__)
+    // Anonymous vs file-backed split (RssAnon / RssFile+RssShmem, O(1) from /proc/self/status):
+    // leaks and allocator retention move anon_bytes; file_bytes is reclaimable mmap/page cache.
+    {
+        std::ifstream status("/proc/self/status");
+        std::string text((std::istreambuf_iterator<char>(status)),
+                         std::istreambuf_iterator<char>());
+        const auto mem = parseProcStatusMemory(text);
+        if (mem.anonBytes > 0) {
+            sample.breakdownBytes["anon_bytes"] = mem.anonBytes;
+            sample.breakdownBytes["file_bytes"] = mem.fileBytes;
+        }
+    }
+#endif
     if (rss_kb > 0) {
         sample.breakdownBytes["rss_bytes"] = rss_kb * 1024ull;
     }
@@ -570,7 +648,7 @@ std::uint64_t DaemonMetrics::cachedPssKb() const {
         if (auto snap = TuningSnapshotRegistry::instance().get()) {
             idle = snap->daemonIdle;
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     std::lock_guard<std::mutex> lock(pssMutex_);
     return sampleProcessPssKb(pssState_, std::chrono::steady_clock::now(), pssSampleTtl(idle),
@@ -629,7 +707,33 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
         } catch (...) {
             spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
         }
-        if (!root.empty() && fs::exists(root, ec)) {
+        const auto fingerprint = root.empty() ? 0 : storageTreeFingerprint(root);
+        StorageWalkTotals previous;
+        {
+            std::shared_lock lock(self->cacheMutex_);
+            previous = self->lastStorageWalk_;
+        }
+        const bool reuseWalk = fingerprint != 0 && fingerprint == previous.fingerprint &&
+                               walkStart - previous.at < kStorageWalkMaxReuse;
+        if (reuseWalk) {
+            // No object was added or removed. refs.db changes in place, so re-read only it.
+            std::uint64_t refsNow = 0;
+#ifdef __unix__
+            struct stat st;
+            if (::stat((root / "refs.db").c_str(), &st) == 0) {
+                refsNow = static_cast<std::uint64_t>(st.st_blocks) * 512ULL;
+            }
+#else
+            refsNow = static_cast<std::uint64_t>(fs::file_size(root / "refs.db", ec));
+#endif
+            casObjectsBytes = previous.casObjects;
+            tmpBytes = previous.tmp;
+            refsDbBytes = refsNow;
+            total = previous.total - std::min(previous.total, previous.refsDb) + refsNow;
+        } else if (!root.empty() && fs::exists(root, ec)) {
+            // Native strings (std::wstring on Windows), so the per-file check allocates nothing.
+            const fs::path::string_type objectsPrefix = (root / "objects").native();
+            const fs::path::string_type tempPrefix = (root / "temp").native();
             for (fs::recursive_directory_iterator
                      it(root, fs::directory_options::skip_permission_denied, ec),
                  end;
@@ -655,12 +759,13 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
                         add = 0;
                     }
                     total += add;
-                    auto p = it->path();
-                    if (p.string().find((root / "objects").string()) == 0) {
+                    const auto& p = it->path();
+                    const auto& native = p.native();
+                    if (native.starts_with(objectsPrefix)) {
                         casObjectsBytes += add;
                     } else if (p.filename() == "refs.db") {
                         refsDbBytes += add;
-                    } else if (p.string().find((root / "temp").string()) == 0) {
+                    } else if (native.starts_with(tempPrefix)) {
                         tmpBytes += add;
                     }
                 }
@@ -706,6 +811,14 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
             std::chrono::duration_cast<std::chrono::milliseconds>(walkEnd - walkStart).count();
 
         std::unique_lock lock(self->cacheMutex_);
+        if (!reuseWalk) {
+            self->lastStorageWalk_ = {.fingerprint = fingerprint,
+                                      .at = walkStart,
+                                      .total = total,
+                                      .casObjects = casObjectsBytes,
+                                      .refsDb = refsDbBytes,
+                                      .tmp = tmpBytes};
+        }
         self->lastPhysicalBytes_ = (totalComputed > 0) ? totalComputed : total;
         self->lastPhysicalAt_ = walkEnd;
         self->lastWalkDurationMs_ =
@@ -770,6 +883,9 @@ void DaemonMetrics::setSocketServer(const SocketServer* socketServer) {
     }
 }
 
+// A failed shutdown must not return while coroutines still use this object;
+// std::terminate is the safe outcome.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 DaemonMetrics::~DaemonMetrics() {
     stopPolling();
 }
@@ -980,7 +1096,6 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                 dispatchDetailedCollect();
             }
             try {
-                MetricsSnapshotRegistry::instance().set(fastSnapshot);
             } catch (...) {
                 spdlog::debug(
                     "[DaemonMetrics] best-effort metric probe failed with unknown exception");
@@ -1085,7 +1200,6 @@ void DaemonMetrics::publishSnapshotPair(const std::shared_ptr<MetricsSnapshot>& 
     }
 
     try {
-        MetricsSnapshotRegistry::instance().set(fastSnapshot);
     } catch (...) {
         spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
@@ -1154,6 +1268,8 @@ MetricsSnapshot DaemonMetrics::buildMinimalSnapshot() const {
         out.repairBusyTicks = state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
         out.repairTotalBacklog = state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
         out.repairProcessed = state_->stats.repairProcessed.load(std::memory_order_relaxed);
+        out.repairPathTreeRepaired =
+            state_->stats.repairPathTreeRepaired.load(std::memory_order_relaxed);
         out.repairCurrentOperationCode =
             state_->stats.repairCurrentOperationCode.load(std::memory_order_relaxed);
         const auto repairStartedMs =
@@ -2020,7 +2136,6 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
             try {
                 if (auto* cm = services_->getCheckpointManager()) {
                     out.checkpointVectorCount = cm->vectorCheckpointCount();
-                    out.checkpointHotzoneCount = cm->hotzoneCheckpointCount();
                     out.checkpointErrorCount = cm->checkpointErrorCount();
 
                     auto epochToIso = [](uint64_t epochMs) -> std::string {
@@ -2041,7 +2156,6 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     };
 
                     out.lastVectorCheckpointTime = epochToIso(cm->lastVectorCheckpointEpoch());
-                    out.lastHotzoneCheckpointTime = epochToIso(cm->lastHotzoneCheckpointEpoch());
                 }
             } catch (...) {
                 spdlog::debug(
@@ -2442,33 +2556,6 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
     } catch (...) {
         spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
     }
-}
-
-EmbeddingServiceInfo DaemonMetrics::getEmbeddingServiceInfo() const {
-    EmbeddingServiceInfo info;
-    try {
-        if (services_) {
-            auto provider = services_->getModelProvider();
-            if (provider && provider->isAvailable()) {
-                info.available = true;
-                try {
-                    auto loaded = provider->getLoadedModels();
-                    info.modelsLoaded = static_cast<int>(loaded.size());
-                } catch (...) {
-                    spdlog::debug(
-                        "[DaemonMetrics] best-effort metric probe failed with unknown exception");
-                }
-            }
-        }
-    } catch (...) {
-        spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
-    }
-#ifdef YAMS_USE_ONNX_RUNTIME
-    info.onnxRuntimeEnabled = true;
-#else
-    info.onnxRuntimeEnabled = false;
-#endif
-    return info;
 }
 
 } // namespace yams::daemon

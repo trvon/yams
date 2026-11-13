@@ -6,7 +6,7 @@
  * Combines rabin_chunker_test.cpp (5 tests) and streaming_chunker_test.cpp (10 tests).
  *
  * Test Coverage:
- * - RabinChunker: Content-defined chunking with rolling hash
+ * - RabinChunker: Content-defined chunking with the gear rolling hash (GearCutter)
  * - StreamingChunker: Stream-based chunking with file and memory support
  * - Chunk size constraints (min/target/max)
  * - Streaming vs batch equivalence
@@ -286,7 +286,10 @@ TEST_CASE("StreamingChunker - File operations", "[chunking][streaming]") {
         size_t totalSize = 0;
         for (const auto& chunk : chunks) {
             totalSize += chunk.size;
-            REQUIRE(chunk.size >= config.minChunkSize);
+            // The final chunk holds the remainder and may be shorter than minChunkSize.
+            if (&chunk != &chunks.back()) {
+                REQUIRE(chunk.size >= config.minChunkSize);
+            }
             REQUIRE(chunk.size <= config.maxChunkSize);
         }
         REQUIRE(totalSize == 1024);

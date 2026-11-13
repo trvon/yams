@@ -75,6 +75,10 @@ struct MemorySyncLimits {
     /// Together with maxTrackedIdentities (also the candidate-count ceiling), bounds
     /// decoded scan state in proportion to input. Not an allocator/RSS ceiling.
     std::size_t maxScanBytes{std::size_t{64} * 1024 * 1024};
+    /// A disk-backed sweep that exhausts maxScanBytes retries with a 4x larger budget, up to
+    /// this ceiling and the free space in its scratch directory, so a store that grows past the
+    /// starting budget still completes. The in-memory sweep keeps maxScanBytes fixed.
+    std::size_t maxScanBytesCeiling{std::size_t{8} * 1024 * 1024 * 1024};
 };
 
 struct MemoryDelta {
@@ -170,6 +174,7 @@ public:
           tombstoneGc_(std::move(tombstoneGc)), writerAuth_(std::move(writerAuth)),
           controlScope_(controlScope.empty() ? corpusId_ + ":" + std::to_string(corpusEpoch_)
                                              : std::move(controlScope)) {
+        scanBudget_ = limits_.maxScanBytes;
         if (control_.exclusiveBackend && !backend.isRemote()) {
             if (auto* filesystem = dynamic_cast<storage::FilesystemBackend*>(&backend)) {
                 sweepDirectory_ = filesystem->scratchDirectory();
@@ -232,6 +237,8 @@ public:
     Result<std::map<std::string, MemoryIndexRecord>> sync();
     /// A successful page is progress, not a complete security/visibility decision.
     [[nodiscard]] bool sweepInProgress() const noexcept { return !scanCursor_.empty(); }
+    /// The complete-sweep scan budget currently in effect.
+    [[nodiscard]] std::size_t scanBudget() const noexcept { return scanBudget_; }
 
     /// Complete the current bounded sweep and return a full committed view.
     /// Direct mode calls this against its local durable op store at startup.
@@ -331,6 +338,10 @@ public:
         struct Identity {
             std::uint64_t instance{0};
             std::int64_t generation{0};
+            /// Advances only when a winner this node did not write changes (or a writer is
+            /// banned). Equal readings in one instance mean every change in between was a local
+            /// write, which local state already holds.
+            std::int64_t foreignGeneration{0};
             bool operator==(const Identity&) const = default;
         };
         virtual ~WinnerView() = default;
@@ -374,6 +385,11 @@ public:
     [[nodiscard]] std::map<std::string, MemoryIndexRecord> adapterState() const;
 
     [[nodiscard]] CommittedState committedState() const;
+    /// True when the last sync() returned the previous complete scan unchanged (an exclusive
+    /// backend with no writes or quarantine changes since): committed state did not change.
+    [[nodiscard]] bool lastSyncReusedCompleteScan() const noexcept {
+        return lastSyncReusedCompleteScan_;
+    }
 
     /// Bounded snapshot of current quarantine reasons (cleared each scan page).
     [[nodiscard]] std::map<std::string, std::string> quarantinedReasons() const;
@@ -425,6 +441,10 @@ private:
     Result<std::vector<std::byte>> fetchPinnedPayload(const MemoryIndexRecord& record) const;
     class SweepStore;
     Result<std::shared_ptr<SweepStore>> makeSweepStore();
+    /// Raises scanBudget_ 4x (bounded by limits_.maxScanBytesCeiling and the scratch
+    /// directory's free space) after a disk-backed sweep exhausted it. Returns false when the
+    /// budget cannot grow, leaving the failure to the degraded-sweep backoff.
+    bool growScanBudget();
     Result<void> ensureCommittedStore();
     Result<MemoryIndexRecord> committedWinner(std::string_view logicalKey) const;
     void cacheWinner(std::string_view logicalKey, const MemoryIndexRecord& record,
@@ -781,6 +801,15 @@ private:
             bool complete{false};
         };
 
+        // One budget-sized, sorted run of keys after `start`, read in a single traversal
+        // when the whole prefix does not fit the retained-key budget. Pages are served from
+        // it, so a sweep costs one walk per window instead of one walk per page.
+        struct ListingWindow {
+            std::optional<std::string> start; // exclusive lower bound; nullopt = first key
+            std::vector<std::string> keys;
+            bool more{false}; // keys exist after keys.back()
+        };
+
         [[nodiscard]] bool filesystemSnapshotEligible() const;
         void incrementWrites();
         void beforeMutation(std::string_view key);
@@ -801,6 +830,14 @@ private:
         [[nodiscard]] storage::ObjectListPage
         pageFromSnapshot(const PrefixListing& listing, std::optional<std::string_view> cursor,
                          std::size_t limit) const;
+        [[nodiscard]] std::optional<storage::ObjectListPage>
+        pageFromWindow(std::string_view prefix, std::optional<std::string_view> cursor,
+                       std::size_t limit) const;
+        [[nodiscard]] Result<storage::ObjectListPage>
+        listPageThroughWindow(std::string_view prefix, std::optional<std::string_view> cursor,
+                              std::size_t limit) const;
+        void dropWindow(std::string_view prefix) const;
+        void invalidateWindows(std::string_view key) const;
 
         storage::IStorageBackend& inner_;
         bool exclusive_{false};
@@ -812,6 +849,8 @@ private:
         mutable std::size_t retainedKeyBytes_{0};
         mutable std::map<std::string, storage::ObjectListPage> pages_;
         mutable std::map<std::string, PrefixListing, std::less<>> prefixListings_;
+        mutable std::map<std::string, ListingWindow, std::less<>> windows_;
+        mutable std::set<std::string, std::less<>> declinedSnapshots_;
     };
 
     /// Mutation count and quarantine generation observed when the last complete scan ended.
@@ -823,6 +862,7 @@ private:
     std::unique_ptr<WriteCountingBackend> countedBackend_;
     storage::IStorageBackend* backend_;
     std::optional<CompleteScanStamp> completeScan_;
+    bool lastSyncReusedCompleteScan_{false};
     NodeId nodeId_;
     std::string corpusId_;
     std::uint64_t corpusEpoch_{0};
@@ -854,6 +894,13 @@ private:
     /// ResourceExhausted too, but it is transient backpressure that must never be
     /// latched as an unsatisfiable sweep.
     bool sweepBoundExhausted_{false};
+    /// The complete-sweep scan budget in effect: starts at limits_.maxScanBytes and grows when
+    /// a disk-backed sweep exhausts it (see growScanBudget).
+    std::size_t scanBudget_{0};
+    /// The last sync failed because the scan budget (or the workspace sized from it) ran out.
+    bool scanBudgetExhausted_{false};
+    /// The last sync failed on the scan budget and the budget was raised for a retry.
+    bool scanBudgetGrew_{false};
     ErrorCode sweepDegradedCode_{ErrorCode::ResourceExhausted};
     std::string sweepDegradedReason_;
     std::size_t sweepDegradedAttempts_{0};

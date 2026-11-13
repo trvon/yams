@@ -1,4 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS
+#include <yams/config/config_helpers.h>
 #include <yams/storage/storage_backend.h>
 
 #include <spdlog/spdlog.h>
@@ -123,12 +123,12 @@ static std::vector<std::string> candidatePluginFileNames(const std::vector<std::
 
 static std::vector<fs::path> defaultPluginDirs() { // unchanged
     std::vector<fs::path> dirs;
-    if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
-        dirs.emplace_back(env);
+    if (const auto env = yams::config::getenv_optional("YAMS_PLUGIN_DIR")) {
+        dirs.emplace_back(*env);
         return dirs;
     }
-    if (const char* home = std::getenv("HOME")) {
-        dirs.emplace_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
+    if (const auto home = yams::config::getenv_optional("HOME")) {
+        dirs.emplace_back(fs::path(*home) / ".local" / "lib" / "yams" / "plugins");
     }
 #if defined(__APPLE__)
     dirs.emplace_back("/opt/homebrew/lib/yams/plugins");
@@ -214,9 +214,13 @@ static std::unique_ptr<IStorageBackend> loadSpecific(const char* createSym, cons
 #else
     void* handle = dlopen(path.string().c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
-        spdlog::warn("Failed to open {}: {}", path.string(), dlerror() ? dlerror() : "");
+        // The first dlerror() call also clears the error.
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
+        const char* openError = dlerror();
+        spdlog::warn("Failed to open {}: {}", path.string(), openError ? openError : "");
         return nullptr;
     }
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): dlerror state is per-thread (glibc, macOS)
     dlerror();
     auto create = reinterpret_cast<CreateFn>(dlsym(handle, createSym));
     auto destroy = reinterpret_cast<DestroyFn>(dlsym(handle, destroySym));

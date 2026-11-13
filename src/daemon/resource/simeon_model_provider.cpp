@@ -314,6 +314,9 @@ public:
     }
     bool isAvailable() const override { return backend_ != nullptr; }
     bool isTrainingFree() const override { return true; }
+    bool isFallbackEmbeddingSpace(const std::string& /*modelName*/) const override {
+        return backend_ && backend_->isFallbackEmbeddingSpace();
+    }
     size_t getMemoryUsage() const override { return 0; }
     void releaseUnusedResources() override {}
 

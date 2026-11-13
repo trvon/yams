@@ -1033,6 +1033,18 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
             continue;
         }
         const auto& cluster = artifacts.clusters[clusterIndex];
+        if (queryNorm > 0.0F && !cluster.fittedRouteVector.empty() &&
+            cluster.fittedRouteVector.size() == request.queryEmbedding.size()) {
+            const auto fitted =
+                dotProduct(request.queryEmbedding, cluster.fittedRouteVector) / queryNorm;
+            signals[clusterIndex].dense = std::clamp((fitted + 1.0F) * 0.5F, 0.0F, 1.0F);
+            signals[clusterIndex].denseObserved = true;
+            if (work != nullptr) {
+                ++work->representativeDistanceEvaluations;
+                ++work->exactRepresentativeDistanceEvaluations;
+            }
+            continue;
+        }
         const float centroidNorm = index.centroidNorms[clusterIndex];
         if (queryNorm > 0.0F && centroidNorm > 0.0F && !cluster.centroidEmbedding.empty()) {
             auto dense = dotProduct(request.queryEmbedding, cluster.centroidEmbedding) /

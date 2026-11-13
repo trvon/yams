@@ -81,7 +81,6 @@ public:
     void setEnabled(bool enabled) noexcept { enabled_.store(enabled, std::memory_order_relaxed); }
 
     // Enable/disable metrics collection (disabled = fast no-op on increments)
-    inline void set_enabled(bool on) noexcept { enabled_.store(on, std::memory_order_relaxed); }
     inline bool enabled() const noexcept { return enabled_.load(std::memory_order_relaxed); }
 
     // Incremental counters (fast-path; relaxed atomics)

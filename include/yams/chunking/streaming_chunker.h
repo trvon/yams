@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/chunking/chunker.h>
+#include <yams/chunking/gear_cutter.h>
 #include <yams/core/types.h>
 #include <yams/crypto/hasher.h>
 
@@ -14,8 +15,9 @@ namespace yams::chunking {
 
 /**
  * Streaming chunker that processes files without loading them entirely into memory.
- * This implementation reads files in small buffers and maintains only the necessary
- * state for Rabin fingerprinting across buffer boundaries.
+ * This implementation reads files in small buffers and carries the GearCutter rolling state
+ * across buffer boundaries, so its boundaries match RabinChunker for the same input and config
+ * regardless of how the input is split into reads.
  */
 class StreamingChunker : public IChunker {
 public:
@@ -121,15 +123,8 @@ public:
     }
 
 private:
-    struct RabinState {
-        std::array<std::byte, 48> window{};
-        size_t windowPos = 0;
-        uint64_t hash = 0;
-        bool initialized = false;
-    };
-
     struct StreamingContext {
-        RabinState rabin;
+        GearCutter::State cut;
         std::vector<std::byte> accumulator;
         size_t fileOffset = 0;
         size_t currentChunkStart = 0;
@@ -137,9 +132,8 @@ private:
         std::unique_ptr<crypto::IContentHasher> hasher;
     };
 
-    struct Impl;
-    std::unique_ptr<Impl> pImpl;
     ChunkingConfig config_;
+    GearCutter cutter_;
     ProgressCallback progressCallback_;
 
     // Process a buffer of data, potentially emitting chunks
@@ -149,32 +143,16 @@ private:
         size_t bufferPos = 0;
 
         while (bufferPos < buffer.size()) {
-            // Add byte to accumulator
-            ctx.accumulator.push_back(buffer[bufferPos]);
+            const auto rest = buffer.subspan(bufferPos);
+            const auto scan = cutter_.scan(ctx.cut, rest);
+            ctx.accumulator.insert(ctx.accumulator.end(), rest.begin(),
+                                   rest.begin() + static_cast<std::ptrdiff_t>(scan.consumed));
+            bufferPos += scan.consumed;
+            ctx.fileOffset += scan.consumed;
 
-            // Update Rabin hash
-            updateRabinHash(ctx.rabin, buffer[bufferPos]);
-
-            // Check if we should emit a chunk
-            size_t chunkSize = ctx.accumulator.size();
-            bool shouldEmit = false;
-
-            if (chunkSize >= config_.minChunkSize) {
-                // Check for natural boundary using Rabin hash
-                if ((ctx.rabin.hash & config_.chunkMask) == config_.chunkMask) {
-                    shouldEmit = true;
-                } else if (chunkSize >= config_.maxChunkSize) {
-                    // Force emit at max size
-                    shouldEmit = true;
-                }
-            }
-
-            if (shouldEmit) {
+            if (scan.cut) {
                 emitChunk(ctx, processor);
             }
-
-            bufferPos++;
-            ctx.fileOffset++;
         }
 
         return Result<void>();
@@ -196,9 +174,8 @@ private:
         // Process chunk
         processor(ref, std::span(ctx.accumulator));
 
-        // Reset accumulator for next chunk. fileOffset currently points to the index
-        // of the last byte processed in this chunk; the next chunk starts at +1.
-        ctx.currentChunkStart = ctx.fileOffset + 1;
+        // fileOffset counts the bytes consumed so far; the next chunk starts there.
+        ctx.currentChunkStart = ctx.fileOffset;
         ctx.accumulator.clear();
         ctx.accumulator.reserve(config_.targetChunkSize);
     }
@@ -209,9 +186,6 @@ private:
             emitChunk(ctx, processor);
         }
     }
-
-    // Update Rabin rolling hash
-    void updateRabinHash(RabinState& state, std::byte newByte);
 };
 
 /**

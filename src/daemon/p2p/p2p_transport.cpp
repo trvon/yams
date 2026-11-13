@@ -2,6 +2,7 @@
 // Copyright 2026 YAMS Contributors
 
 #define YAMS_DAEMON_TEST_HOOKS_IMPL 1
+#include <yams/core/thread_name.h>
 #include <yams/daemon/p2p/p2p_transport.h>
 #include <yams/profiling.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
@@ -497,7 +498,9 @@ public:
             return;
         }
         boost::system::error_code ignored;
+        // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
         stream->next_layer().cancel(ignored);
+        // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
         stream->next_layer().close(ignored);
     }
 
@@ -649,7 +652,7 @@ public:
                 std::lock_guard<std::mutex> stateLock(self->socketStateMutex);
                 self->closeSocketLocked();
             });
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // A failed cancellation enqueue must not escape a noexcept shutdown path. The active
             // operation remains bounded by its operation and aggregate session deadlines.
         }
@@ -690,14 +693,6 @@ std::string P2pConnection::peerNodeId() const {
 }
 std::string P2pConnection::localNodeId() const {
     return impl_ ? impl_->localNodeId : std::string{};
-}
-std::uint16_t P2pConnection::localPort() const {
-    if (!impl_) {
-        return 0;
-    }
-    boost::system::error_code error;
-    const auto endpoint = impl_->stream->next_layer().local_endpoint(error);
-    return error ? 0 : endpoint.port();
 }
 void P2pConnection::close() noexcept {
     if (impl_) {
@@ -895,6 +890,7 @@ public:
         generation.fetch_add(1, std::memory_order_acq_rel);
         running.store(true, std::memory_order_release);
         acceptThread = std::thread([this] {
+            yams::setCurrentThreadName("yams-p2p-accept");
             try {
                 acceptLoop();
             } catch (const std::exception& error) {
@@ -965,6 +961,7 @@ public:
             auto completed = std::make_shared<std::atomic<bool>>(false);
             sessionWorkers.push_back(
                 SessionWorker{.thread = std::thread([this, session, completed] {
+                                  yams::setCurrentThreadName("yams-p2p-session");
                                   gSessionWorkerOwner = this;
                                   handleSession(session, completed);
                                   gSessionWorkerOwner = nullptr;
@@ -1060,10 +1057,12 @@ public:
                         return;
                     }
                     boost::system::error_code ignored;
+                    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                     acceptor->cancel(ignored);
+                    // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
                     acceptor->close(ignored);
                 });
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // The accept loop normally drains this cancellation on its own io_context. If the
                 // enqueue itself fails, its next completion/error path remains exception-contained.
             }
@@ -1088,7 +1087,7 @@ public:
         }
         try {
             invokeAfterAcceptJoinHook();
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Test instrumentation must never escape a noexcept lifecycle boundary.
         }
         // Close sessions accepted between the initial cancellation sweep and accept-loop exit.
@@ -1101,7 +1100,9 @@ public:
         if (acceptor) {
             boost::system::error_code ignored;
             // The accept thread is joined, so direct teardown is now race-free.
+            // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
             acceptor->cancel(ignored);
+            // NOLINTNEXTLINE(bugprone-unused-return-value): result is in ec
             acceptor->close(ignored);
         }
         for (auto& worker : sessionWorkers) {

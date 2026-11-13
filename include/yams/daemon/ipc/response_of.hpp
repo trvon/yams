@@ -30,6 +30,9 @@ template <> struct ResponseOf<ListRequest> {
 template <> struct ResponseOf<DeleteRequest> {
     using type = DeleteResponse;
 };
+template <> struct ResponseOf<UnlinkPathRequest> {
+    using type = DeleteResponse;
+};
 template <> struct ResponseOf<StatusRequest> {
     using type = StatusResponse;
 };
@@ -112,10 +115,6 @@ template <> struct ResponseOf<PruneRequest> {
     using type = PruneResponse;
 };
 
-template <> struct ResponseOf<ListTreeDiffRequest> {
-    using type = ListTreeDiffResponse;
-};
-
 // Snapshot operations (PBI-066) - collections use generic metadata query
 template <> struct ResponseOf<ListSnapshotsRequest> {
     using type = ListSnapshotsResponse;
@@ -147,12 +146,6 @@ template <> struct ResponseOf<GraphSymbolLookupRequest> {
 };
 template <> struct ResponseOf<GraphTraceRequest> {
     using type = GraphTraceResponse;
-};
-template <> struct ResponseOf<GraphImpactRequest> {
-    using type = GraphImpactResponse;
-};
-template <> struct ResponseOf<GraphAffectedTestsRequest> {
-    using type = GraphAffectedTestsResponse;
 };
 
 // KG ingest operations (PBI-093)

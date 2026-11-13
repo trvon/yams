@@ -1,4 +1,5 @@
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/profiling.h>
 
 #include <algorithm>
@@ -269,10 +270,10 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
     std::uint64_t peerCount = 0;
     p2p::P2pInboundStats inbound;
     p2p::P2pOutboundStats outbound;
-    if (p2pManager_) {
-        inbound = p2pManager_->inboundStats();
-        outbound = p2pManager_->outboundStats();
-        auto peers = p2pManager_->peers();
+    if (const auto p2p = p2pManagerSnapshot()) {
+        inbound = p2p->inboundStats();
+        outbound = p2p->outboundStats();
+        auto peers = p2p->peers();
         if (peers) {
             peerCount = peers.value().size();
         } else {
@@ -290,6 +291,13 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
         return unixMs > 0 && nowMs > unixMs ? nowMs - unixMs : 0;
     };
     const auto lastFailureAgeMs = ageMs(inbound.lastFailureUnixMs);
+    auto syncFailure = memorySync_->lastSyncFailure();
+    const std::uint64_t syncFailureAgeMs =
+        syncFailure.lastError.empty()
+            ? 0
+            : static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - syncFailure.lastAt)
+                                             .count());
     return MemorySyncStatus{
         memorySync_->started(),
         memorySync_->mergedRecordCount(),
@@ -318,7 +326,9 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
         outbound.sessions,
         outbound.failures,
         std::move(outbound.lastFailure),
-        ageMs(outbound.lastFailureUnixMs)};
+        ageMs(outbound.lastFailureUnixMs),
+        std::move(syncFailure.lastError),
+        syncFailureAgeMs};
 }
 
 Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view contentHash,
@@ -502,6 +512,7 @@ Result<memory_sync::ApplyStagePass> ServiceManager::applyMemorySyncContentBlobs(
     memory_sync::ApplyStagePass out;
     out.deferredKeys = std::move(pass.value().deferredKeys);
     if (pass.value().failure) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
         out.failure = pass.value().failure->message;
     }
     return out;
@@ -644,6 +655,8 @@ bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
     }
 }
 
+// Only allocation or mutex failures can escape; terminating on those is intended.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 void ServiceManager::applyMemorySyncWinners() noexcept {
     YAMS_ZONE_SCOPED_N("memory_sync.cycle");
     memorySyncApplyAttempts_.fetch_add(1, std::memory_order_acq_rel);
@@ -678,9 +691,17 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
             publishMemorySyncBackfill();
         }
     };
-    // Re-applying unchanged winners re-reads and re-checks every record. When the adapter inputs
-    // match the last complete, clean pass, skip the inbound stages until the next full pass.
-    // Unknown inputs (an unnamed winner view, admission pressure) never skip.
+    // Re-applying unchanged winners re-reads and re-verifies every record. When no peer's input
+    // changed since the last settled pass, and the local graph has not changed since a pass that
+    // deferred topology records, skip the inbound stages until the next full pass. Unknown inputs
+    // (an unnamed winner view, admission pressure) never skip.
+    const auto kgGeneration = [this]() -> std::optional<std::uint64_t> {
+        auto kg = getKgStore();
+        if (!kg) {
+            return std::nullopt;
+        }
+        return kg->changeGeneration();
+    };
     std::optional<memory_sync::MemorySyncService::AdapterInputs> applyInputs;
     bool inputsUnchanged = false;
     try {
@@ -688,13 +709,27 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         if (auto inputs = memorySync_->adapterInputs(); inputs) {
             applyInputs = std::move(inputs.value());
         }
-        inputsUnchanged = applyInputs && lastCleanMemorySyncApplyInputs_ &&
-                          applyInputs->sameAs(*lastCleanMemorySyncApplyInputs_);
+        // Only a peer's change needs an inbound pass: this node's own publishes (the outbound
+        // backfill, local ingest) came from local state and apply back as no-ops.
+        inputsUnchanged = applyInputs && lastSettledMemorySyncApplyInputs_ &&
+                          applyInputs->sameForeignInputsAs(*lastSettledMemorySyncApplyInputs_,
+                                                           memorySync_->localNodeId());
+        // Deferred topology edges wait on their endpoint nodes, which can also appear locally.
+        if (inputsUnchanged && lastSettledTopologyDeferredKgGeneration_) {
+            inputsUnchanged = kgGeneration() == lastSettledTopologyDeferredKgGeneration_;
+        }
     } catch (...) {
         applyInputs.reset();
         inputsUnchanged = false;
     }
     const auto cycleStart = std::chrono::steady_clock::now();
+    // A profile change (config reload) moves the pending deadline instead of waiting out the old
+    // interval.
+    if (const auto interval = TuneAdvisor::memorySyncFullApplyInterval();
+        lastMemorySyncFullApplyStart_ && interval != memorySyncFullApplyInterval_) {
+        memorySyncFullApplyInterval_ = interval;
+        nextMemorySyncFullApply_ = *lastMemorySyncFullApplyStart_ + interval;
+    }
     if (inputsUnchanged && cycleStart < nextMemorySyncFullApply_ &&
         !memorySyncApplySkipDisabled_.load(std::memory_order_acquire)) {
         memorySyncApplySkippedCycles_.fetch_add(1, std::memory_order_acq_rel);
@@ -715,20 +750,30 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     // prerequisite only a peer could publish, every node refused to publish and the
     // prerequisites never arrived. Only a stop request ends the cycle early.
     // A stage that defers records is healthy; only a hard failure marks the cycle failed.
+    // Read before any stage scans: a local endpoint node committed while the topology stage runs
+    // must still look like a change next cycle, not be absorbed into this pass's baseline. The
+    // pass's own graph writes then cost at most one more pass.
+    const auto kgGenerationBeforeStages = kgGeneration();
     bool stageFailed = false;
-    // Clean: every stage scanned completely with nothing deferred and nothing failed. Only a clean
-    // pass may let later cycles skip, since a deferral waits on local prerequisites to arrive.
-    bool cycleClean = true;
-    const auto runStage = [this, &stageFailed, &cycleClean](memory_sync::ApplyStage stage,
-                                                            std::string_view completedStage,
-                                                            auto&& applyStage) {
+    // Settled: every stage scanned completely, nothing failed, and any deferrals are topology
+    // edges. A deferred edge waits on endpoint nodes that either replicate (the adapter inputs
+    // change) or appear locally (the graph store's change generation moves), so re-running a pass
+    // with neither only repeats the same deferrals. With an endpoint no peer will publish, that
+    // re-verified the whole corpus every cycle. Content, metadata and vector deferrals wait on
+    // local document content, which has no change signal, so they keep retrying every cycle, as
+    // do failures.
+    bool cycleSettled = true;
+    bool topologyDeferred = false;
+    const auto runStage = [this, &stageFailed, &cycleSettled,
+                           &topologyDeferred](memory_sync::ApplyStage stage,
+                                              std::string_view completedStage, auto&& applyStage) {
         if (memorySync_->stopRequested()) {
             return false;
         }
         const auto name = memory_sync::applyStageName(stage);
         const auto recordFailure = [&](std::string message) {
             stageFailed = true;
-            cycleClean = false;
+            cycleSettled = false;
             spdlog::warn("[ServiceManager] memory_sync {} apply failed: {}", name, message);
             memorySyncApplyHealth_.recordFailure(stage, std::move(message),
                                                  std::chrono::steady_clock::now());
@@ -739,7 +784,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
             // Complete scans may carry both prerequisite deferrals and independent hard failures.
             auto pass = applyStage();
             if (!pass && pass.error().code == ErrorCode::ResourceBusy) {
-                cycleClean = false;
+                cycleSettled = false;
                 memorySyncApplyHealth_.recordPass(
                     stage, memory_sync::ApplyStagePass{.scanComplete = false},
                     std::chrono::steady_clock::now());
@@ -750,8 +795,15 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
                 const auto& deferred = pass.value().deferredKeys;
                 const auto deferredCount = std::max<std::uint64_t>(
                     deferred.size(), pass.value().deferredCount.value_or(deferred.size()));
-                if (!pass.value().scanComplete || deferredCount != 0 || pass.value().failure) {
-                    cycleClean = false;
+                if (!pass.value().scanComplete || pass.value().failure) {
+                    cycleSettled = false;
+                }
+                if (deferredCount != 0) {
+                    if (stage == memory_sync::ApplyStage::Topology) {
+                        topologyDeferred = true;
+                    } else {
+                        cycleSettled = false;
+                    }
                 }
                 if (!pass.value().scanComplete) {
                     spdlog::debug("[ServiceManager] memory_sync {} scan incomplete; "
@@ -872,14 +924,22 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return;
     }
     memorySyncApplyHealth_.recordCycle(stageFailed);
-    if (applyInputs && cycleClean && !stageFailed) {
+    if (applyInputs && cycleSettled && !stageFailed) {
         if (!inputsUnchanged || cycleStart >= nextMemorySyncFullApply_) {
-            nextMemorySyncFullApply_ = cycleStart + kMemorySyncFullApplyInterval;
+            memorySyncFullApplyInterval_ = TuneAdvisor::memorySyncFullApplyInterval();
+            lastMemorySyncFullApplyStart_ = cycleStart;
+            nextMemorySyncFullApply_ = cycleStart + memorySyncFullApplyInterval_;
         }
         applyInputs->view.reset(); // keep the name only; never hold an old store open
-        lastCleanMemorySyncApplyInputs_ = std::move(applyInputs);
+        lastSettledMemorySyncApplyInputs_ = std::move(applyInputs);
+        lastSettledTopologyDeferredKgGeneration_ =
+            topologyDeferred ? kgGenerationBeforeStages : std::nullopt;
+        if (topologyDeferred && !lastSettledTopologyDeferredKgGeneration_) {
+            lastSettledMemorySyncApplyInputs_.reset(); // no graph store: nothing to compare
+        }
     } else {
-        lastCleanMemorySyncApplyInputs_.reset();
+        lastSettledMemorySyncApplyInputs_.reset();
+        lastSettledTopologyDeferredKgGeneration_.reset();
     }
 
     publishBackfillIfDue();
@@ -943,6 +1003,20 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
 
         memory_sync::ContentBlobSyncAdapter contentAdapter{*contentStore, *memorySync_};
         if (!document.sha256Hash.empty()) {
+            // Content larger than the resident publish limit can never replicate under the
+            // current limits. Skip it before reading: retrying would re-read and re-hash the same
+            // file every cycle while documentIdCursor stays pinned and no later document syncs.
+            const auto publishLimit = memorySync_->maxPublishValueBytes();
+            if (document.fileSize > 0 &&
+                static_cast<std::uint64_t>(document.fileSize) > publishLimit) {
+                spdlog::warn("[ServiceManager] memory_sync backfill skipping document {} "
+                             "(content {} bytes exceeds the {}-byte resident publish limit)",
+                             document.id, document.fileSize, publishLimit);
+                state.documentIdCursor = std::max(state.documentIdCursor, document.id);
+                ++skippedDocuments;
+                notifyMemorySyncStage("backfill.skip_document");
+                return true;
+            }
             auto published = contentAdapter.publishExisting(document.sha256Hash);
             if (!published) {
                 // A poisoned blob (corrupt manifest, digest mismatch, malformed stored bytes)
@@ -1105,6 +1179,24 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
         }
         using Phase = MemorySyncBackfillState::TopologyPhase;
         metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
+        // A record that can never publish (text that is not UTF-8, a record over the typed
+        // resident limit, an invalid key; the adapter reports these as InvalidData) is skipped
+        // so the pass reaches the records behind it, as documents and vectors are. Other
+        // failures, including a backend that rejects the write, throw so the item is retried. A
+        // changed record advances the graph generation and is reached by the next pass.
+        const auto skipUnpublishable = [&](const Error& error, std::string_view kind,
+                                           std::int64_t id) {
+            if (!isUnrecoverableBlobFailure(error.code)) {
+                return false; // includes InvalidArgument from a backend that rejected the write
+            }
+            if (state.topologySweepPasses == 0) {
+                spdlog::warn("[ServiceManager] memory_sync backfill skipping topology {} {} "
+                             "(unpublishable): {}",
+                             kind, id, error.message);
+            }
+            notifyMemorySyncStage("backfill.skip_topology");
+            return true;
+        };
         while (!shouldStop()) {
             switch (state.topologyPhase) {
                 case Phase::Nodes: {
@@ -1118,7 +1210,11 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                     }
                     const auto& node = nodes.value().front();
                     if (auto published = adapter.publishNode(node); !published) {
-                        throw std::runtime_error(published.error().message);
+                        if (!skipUnpublishable(published.error(), "node", node.id)) {
+                            throw std::runtime_error(published.error().message);
+                        }
+                        state.topologyNodeIdCursor = node.id;
+                        return true;
                     }
                     state.topologyNodeIdCursor = node.id;
                     ++nodesPublished;
@@ -1154,7 +1250,11 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                     if (auto published = adapter.publishEdgeWithEndpoints(*source.value(), edge,
                                                                           *target.value());
                         !published) {
-                        throw std::runtime_error(published.error().message);
+                        if (!skipUnpublishable(published.error(), "edge", edge.id)) {
+                            throw std::runtime_error(published.error().message);
+                        }
+                        state.topologyEdgeIdCursor = edge.id;
+                        return true;
                     }
                     state.topologyEdgeIdCursor = edge.id;
                     ++edgesPublished;
@@ -1169,6 +1269,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                         // has changed, so records created, changed, or deleted behind the
                         // cursors are published or retracted by it.
                         state.topologyPhase = Phase::Nodes;
+                        ++state.topologySweepPasses;
                         state.topologyNodeIdCursor = 0;
                         state.topologyEdgeIdCursor = 0;
                         state.topologyRetractionKeyCursor.clear();
@@ -1208,6 +1309,53 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     constexpr std::size_t kDomainCount = 4;
     std::array<bool, kDomainCount> domainDone{};
     bool domainFailed = false;
+    const auto domainName = [](Domain domain) -> std::string_view {
+        switch (domain) {
+            case Domain::Documents:
+                return "documents";
+            case Domain::CommittedVectors:
+                return "committed_vectors";
+            case Domain::Vectors:
+                return "vectors";
+            case Domain::Topology:
+                return "topology";
+        }
+        return "unknown";
+    };
+    const auto cycleStart = std::chrono::steady_clock::now();
+    // Domains still backing off from earlier failures sit out this cycle.
+    for (std::size_t i = 0; i < kDomainCount; ++i) {
+        if (cycleStart < state.domainBackoff[i].notBefore) {
+            domainDone[i] = true;
+        }
+    }
+    const auto recordDomainFailure = [&](Domain domain, std::string message) {
+        domainFailed = true;
+        auto& backoff = state.domainBackoff[static_cast<std::size_t>(domain)];
+        ++backoff.failures;
+        constexpr auto kBase = std::chrono::seconds{5};
+        constexpr auto kCap = std::chrono::seconds{600};
+        const auto shift = std::min<std::uint32_t>(backoff.failures - 1, 7);
+        const auto wait = std::min<std::chrono::seconds>(kBase * (1U << shift), kCap);
+        backoff.notBefore = std::chrono::steady_clock::now() + wait;
+        // Log the first failure, a changed error, and then only as the backoff doubles.
+        const bool powerOfTwo = (backoff.failures & (backoff.failures - 1)) == 0;
+        if (backoff.failures == 1 || message != backoff.lastError || powerOfTwo) {
+            spdlog::warn("[ServiceManager] memory_sync backfill domain {} failed ({} in a row, "
+                         "retrying in {}s): {}",
+                         domainName(domain), backoff.failures, wait.count(), message);
+        }
+        backoff.lastError = std::move(message);
+    };
+    const auto recordDomainProgress = [&](Domain domain) {
+        auto& backoff = state.domainBackoff[static_cast<std::size_t>(domain)];
+        if (backoff.failures > 0) {
+            spdlog::info("[ServiceManager] memory_sync backfill domain {} recovered after {} "
+                         "failure(s)",
+                         domainName(domain), backoff.failures);
+        }
+        backoff = {};
+    };
     while (!shouldStop()) {
         const Domain firstSweep = state.nextSweep;
         const Domain secondSweep =
@@ -1221,6 +1369,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                 continue;
             }
             bool published = false;
+            bool failed = false;
             try {
                 switch (domain) {
                     case Domain::Documents:
@@ -1237,12 +1386,14 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
                         break;
                 }
             } catch (const std::exception& error) {
-                domainFailed = true;
-                spdlog::warn("[ServiceManager] memory_sync backfill domain failed: {}",
-                             error.what());
+                failed = true;
+                recordDomainFailure(domain, error.what());
             } catch (...) {
-                domainFailed = true;
-                spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
+                failed = true;
+                recordDomainFailure(domain, "unknown error");
+            }
+            if (!failed) {
+                recordDomainProgress(domain);
             }
             if (published) {
                 served = domain;
@@ -1274,13 +1425,13 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed: {}", error.what());
     try {
         memorySyncApplyHealth_.recordPublishFailed();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 } catch (...) {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed (unknown)");
     try {
         memorySyncApplyHealth_.recordPublishFailed();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 }
 
@@ -1363,6 +1514,7 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
                 return Error{ErrorCode::InvalidState,
                              "memory_sync S3 resolution returned no backend config"};
             }
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             resolvedS3Config = *storageDecision.value().backendConfig;
         }
 

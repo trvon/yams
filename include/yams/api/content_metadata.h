@@ -45,24 +45,6 @@ struct ContentMetadata {
     }
 
     /**
-     * @brief Calculate age since creation
-     * @return Duration since creation
-     */
-    [[nodiscard]] std::chrono::hours ageSinceCreation() const {
-        auto now = std::chrono::system_clock::now();
-        return std::chrono::duration_cast<std::chrono::hours>(now - createdAt);
-    }
-
-    /**
-     * @brief Calculate time since last access
-     * @return Duration since last access
-     */
-    [[nodiscard]] std::chrono::hours timeSinceAccess() const {
-        auto now = std::chrono::system_clock::now();
-        return std::chrono::duration_cast<std::chrono::hours>(now - accessedAt);
-    }
-
-    /**
      * @brief Deserialize metadata from binary data
      * @param data Binary data to deserialize
      * @return Deserialized metadata or error

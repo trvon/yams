@@ -147,6 +147,10 @@ public:
             install->add_flag("--no-trust", installNoTrust_, "Don't add to trust list");
             install->add_flag("--no-load", installNoLoad_, "Don't load plugin after install");
             install->add_flag("--dry-run", installDryRun_, "Preview only, don't install");
+            install->add_option("--checksum", installChecksum_,
+                                "Expected sha256:<hex> digest of the plugin archive (required "
+                                "for URL installs or when the repository publishes none; must "
+                                "match the repository's when both exist)");
             install->callback([this]() { installPlugin(); });
 
             // plugin repo (remote repository commands)
@@ -179,14 +183,16 @@ public:
             auto* update = plugin->add_subcommand("update", "Update plugins to latest version");
             update->add_option("name", updateName_, "Plugin name (empty = check all)");
             update->add_flag("--all,-a", updateAll_, "Update all installed plugins");
+            update->add_option("--checksum", updateChecksum_,
+                               "Expected sha256:<hex> digest of the new archive (single named "
+                               "plugin only; required when the repository publishes none; must "
+                               "match the repository's when both exist)");
             update->callback([this]() { updatePlugins(); });
         };
 
         auto* plugin = app.add_subcommand(getName(), getDescription());
+        plugin->alias("plugins");
         register_subs(plugin);
-        // Alias: "plugins" behaves the same as "plugin"
-        auto* plugins = app.add_subcommand("plugins", getDescription());
-        register_subs(plugins);
     }
 
     Result<void> execute() override { return Result<void>(); }
@@ -236,6 +242,7 @@ private:
     bool installNoTrust_{false};
     bool installNoLoad_{false};
     bool installDryRun_{false};
+    std::string installChecksum_;
 
     // Repo options
     std::string repoFilter_;
@@ -249,6 +256,7 @@ private:
     // Update options
     std::string updateName_;
     bool updateAll_{false};
+    std::string updateChecksum_;
 };
 
 // Factory
@@ -1142,6 +1150,9 @@ void PluginCommand::installPlugin() {
         options.autoTrust = !installNoTrust_;
         options.autoLoad = !installNoLoad_;
         options.dryRun = installDryRun_;
+        if (!installChecksum_.empty()) {
+            options.checksum = installChecksum_;
+        }
         if (options.autoLoad) {
             options.loadAfterInstall = [this](const InstallResult& installResult) {
                 return autoLoadInstalledPlugin(installResult.installedPath);
@@ -1167,9 +1178,23 @@ void PluginCommand::installPlugin() {
         };
 
         auto result = installer->install(installSrc_, options);
-        returnOnError(result, "Installation");
+        if (!result) {
+            std::cout << "\n" << std::flush;
+            failCommand(result.error(), "Installation");
+        }
 
         const auto& r = result.value();
+        if (installDryRun_) {
+            std::cout << "\nDry run: would install " << r.pluginName << " v" << r.version << "\n";
+            std::cout << "  Path: " << r.installedPath.string() << "\n";
+            if (r.checksumRequired) {
+                std::cout << "  Checksum: none published; the install will be refused unless "
+                             "--checksum sha256:<hex> is supplied\n";
+            } else {
+                std::cout << "  Checksum: " << r.checksum << " (verified on install)\n";
+            }
+            return;
+        }
         std::cout << "\nInstalled: " << r.pluginName << " v" << r.version << "\n";
         std::cout << "  Path: " << r.installedPath.string() << "\n";
         std::cout << "  Size: " << ui::format_bytes(r.sizeBytes) << "\n";
@@ -1187,8 +1212,10 @@ void PluginCommand::installPlugin() {
                 std::cout << "\nTo load the plugin, run: yams plugin load " << r.pluginName << "\n";
             }
         }
+    } catch (const CLI::RuntimeError&) {
+        throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Installation");
     }
 }
 
@@ -1201,16 +1228,24 @@ void PluginCommand::uninstallPlugin() {
             makePluginInstaller(std::shared_ptr<IPluginRepoClient>(repoClient.release()));
 
         auto result = installer->uninstall(uninstallName_, !uninstallKeepTrust_);
-        returnOnError(result, "Uninstall");
+        exitOnError(result, "Uninstall");
 
         std::cout << "Uninstalled: " << uninstallName_ << "\n";
+    } catch (const CLI::RuntimeError&) {
+        throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Uninstall");
     }
 }
 
 void PluginCommand::updatePlugins() {
     using namespace yams::plugins;
+
+    if (!updateChecksum_.empty() && (updateAll_ || updateName_.empty())) {
+        failCommand(Error{ErrorCode::InvalidArgument,
+                          "--checksum applies to one archive; name a single plugin and omit --all"},
+                    "Update");
+    }
 
     try {
         auto repoClient = makePluginRepoClient();
@@ -1219,10 +1254,7 @@ void PluginCommand::updatePlugins() {
 
         // Check for updates
         auto updates = installer->checkUpdates(updateAll_ ? "" : updateName_);
-        if (!updates) {
-            std::cout << "Failed to check for updates: " << updates.error().message << "\n";
-            return;
-        }
+        exitOnError(updates, "Failed to check for updates");
 
         if (updates.value().empty()) {
             std::cout << "All plugins are up to date.\n";
@@ -1233,6 +1265,7 @@ void PluginCommand::updatePlugins() {
         for (const auto& [name, version] : updates.value()) {
             auto currentVer = installer->installedVersion(name);
             std::string current =
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 (currentVer && currentVer.value()) ? *currentVer.value() : "unknown";
             std::cout << "  " << name << ": " << current << " -> " << version << "\n";
         }
@@ -1244,22 +1277,37 @@ void PluginCommand::updatePlugins() {
         }
 
         // Perform updates
+        size_t failed = 0;
+        std::optional<Error> lastError;
         for (const auto& [name, version] : updates.value()) {
             std::cout << "\nUpdating " << name << " to v" << version << "...\n";
 
             InstallOptions options;
             options.force = true;
             options.version = version;
+            if (!updateChecksum_.empty()) {
+                options.checksum = updateChecksum_;
+            }
 
             auto result = installer->install(name, options);
             if (!result) {
                 std::cout << "  Failed: " << result.error().message << "\n";
+                ++failed;
+                lastError = result.error();
             } else {
                 std::cout << "  Updated successfully.\n";
             }
         }
+        if (lastError) {
+            failCommand(Error{lastError->code,
+                              std::to_string(failed) +
+                                  " plugin update(s) failed; last error: " + lastError->message},
+                        "Update");
+        }
+    } catch (const CLI::RuntimeError&) {
+        throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Update");
     }
 }
 
@@ -1269,7 +1317,7 @@ void PluginCommand::repoListPlugins() {
     try {
         auto repoClient = makePluginRepoClient();
         auto result = repoClient->list(repoFilter_);
-        returnOnError(result, "Failed to list plugins");
+        exitOnError(result, "Failed to list plugins");
 
         const auto& plugins = result.value();
         if (plugins.empty()) {
@@ -1299,8 +1347,10 @@ void PluginCommand::repoListPlugins() {
             }
             std::cout << "\n";
         }
+    } catch (const CLI::RuntimeError&) {
+        throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Plugin repository");
     }
 }
 
@@ -1312,7 +1362,7 @@ void PluginCommand::repoShowInfo() {
         std::optional<std::string> version =
             repoVersion_.empty() ? std::nullopt : std::make_optional(repoVersion_);
         auto result = repoClient->get(repoPluginName_, version);
-        returnOnError(result, "Failed to get plugin info");
+        exitOnError(result, "Failed to get plugin info");
 
         const auto& info = result.value();
         std::cout << "Plugin: " << info.name << "\n";
@@ -1347,8 +1397,10 @@ void PluginCommand::repoShowInfo() {
             std::cout << "  Downloads: " << info.downloads << "\n";
         if (!info.publishedAt.empty())
             std::cout << "  Published: " << info.publishedAt << "\n";
+    } catch (const CLI::RuntimeError&) {
+        throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Plugin repository");
     }
 }
 
@@ -1358,7 +1410,7 @@ void PluginCommand::repoShowVersions() {
     try {
         auto repoClient = makePluginRepoClient();
         auto result = repoClient->versions(repoPluginName_);
-        returnOnError(result, "Failed to get versions");
+        exitOnError(result, "Failed to get versions");
 
         const auto& versions = result.value();
         if (versions.empty()) {
@@ -1370,8 +1422,10 @@ void PluginCommand::repoShowVersions() {
         for (const auto& v : versions) {
             std::cout << "  " << v << "\n";
         }
+    } catch (const CLI::RuntimeError&) {
+        throw; // failCommand: propagate the exit code
     } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+        failCommand(Error{ErrorCode::InternalError, e.what()}, "Plugin repository");
     }
 }
 

@@ -1,6 +1,8 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/SearchEngineManager.h>
+#include <yams/daemon/components/thread_pool_naming.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
@@ -33,11 +35,6 @@ std::uint64_t nextLexicalDeltaEpoch(std::atomic<std::uint64_t>& counter) {
 }
 
 constexpr std::size_t kMaxRecentLexicalDeltaDocs = 256;
-
-std::size_t searchRuntimeThreadCount() {
-    const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
-    return std::clamp<std::size_t>(hardwareThreads / 2u, 2u, 8u);
-}
 
 std::string normalizeTopologyToken(std::string raw) {
     raw.erase(std::remove_if(raw.begin(), raw.end(),
@@ -121,7 +118,9 @@ SearchEngineManager::SearchEngineManager()
     : compatibilityEnvironment_(yams::search::snapshotLegacySearchEnvironment()),
       runtimePolicy_(std::make_unique<RuntimePolicy>(
           RuntimePolicy{ConfigResolver::resolveTopologyRoutingPolicy()})),
-      runtimeExecutor_(searchRuntimeThreadCount()) {}
+      runtimeExecutor_(TuneAdvisor::searchRuntimeThreads()) {
+    nameThreadPoolWorkers(runtimeExecutor_, TuneAdvisor::searchRuntimeThreads(), "yams-search-");
+}
 
 SearchEngineManager::~SearchEngineManager() {
     runtimeExecutor_.stop();
@@ -148,26 +147,6 @@ void SearchEngineManager::noteLexicalDeltaQueued(std::size_t documentCount) {
     lexicalDeltaPendingDocs_.fetch_add(static_cast<std::uint64_t>(documentCount),
                                        std::memory_order_relaxed);
     nextLexicalDeltaEpoch(lexicalDeltaQueuedEpoch_);
-}
-
-void SearchEngineManager::noteLexicalDeltaQueuedHash(std::string hash) {
-    if (hash.empty()) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(lexicalDeltaMutex_);
-    pendingLexicalDeltaHashes_.push_back(std::move(hash));
-}
-
-void SearchEngineManager::noteLexicalDeltaQueuedHashes(const std::vector<std::string>& hashes) {
-    if (hashes.empty()) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(lexicalDeltaMutex_);
-    for (const auto& hash : hashes) {
-        if (!hash.empty()) {
-            pendingLexicalDeltaHashes_.push_back(hash);
-        }
-    }
 }
 
 void SearchEngineManager::noteLexicalDeltaPublished(std::size_t documentCount) {
@@ -354,6 +333,14 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                     1024, static_cast<std::size_t>(governorCap) / kAvgDocBytes);
                 lexicalCfg.max_corpus_docs = std::min(lexicalCfg.max_corpus_docs, docsFromBudget);
             }
+            // The index built from that text has its own grant, re-read while
+            // the build runs so a pressure rise stops it.
+            lexicalCfg.max_index_bytes =
+                static_cast<std::size_t>(ResourceGovernor::instance().recommendLexicalIndexBytes());
+            lexicalCfg.index_budget_provider = [] {
+                return static_cast<std::size_t>(
+                    ResourceGovernor::instance().recommendLexicalIndexBytes());
+            };
             if (bm25Policy.variant && *bm25Policy.variant == "atire") {
                 lexicalCfg.variant = yams::search::SimeonLexicalBackend::Variant::Atire;
             }
@@ -656,18 +643,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
         if (tp.graphVectorSeedProbe) {
             opts.config.topologyGraphVectorSeedProbe = *tp.graphVectorSeedProbe;
-        }
-        if (tp.rescueSelector) {
-            if (*tp.rescueSelector == "identity_order") {
-                opts.config.topologyRescueSelector =
-                    yams::search::SearchEngineConfig::TopologyRescueSelector::IdentityOrder;
-            } else if (*tp.rescueSelector == "simeon_fragment_geometry") {
-                opts.config.topologyRescueSelector = yams::search::SearchEngineConfig::
-                    TopologyRescueSelector::SimeonFragmentGeometry;
-            } else {
-                spdlog::warn("Ignoring unknown search.topology.rescue_selector='{}'",
-                             *tp.rescueSelector);
-            }
         }
         if (tp.rrfK) {
             opts.config.rrfK = std::clamp(*tp.rrfK, 1.0f, 10000.0f);

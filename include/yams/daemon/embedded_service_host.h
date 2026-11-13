@@ -53,6 +53,7 @@ public:
     enum class TestingShutdownPhase {
         BeforeThreadJoin,
         AfterThreadJoin,
+        BeforeIoContextRelease,
     };
 
     struct TestingShutdownSnapshot {

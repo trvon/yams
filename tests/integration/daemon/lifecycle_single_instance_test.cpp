@@ -145,6 +145,29 @@ std::vector<HeldConnection> openHeldConnections(const std::filesystem::path& soc
     return sockets;
 }
 
+/// Holds `count` client requests "executing" for the guard's lifetime, as the IPC handler does
+/// while it serves a non-health request.
+class HeldExecutingRequests {
+public:
+    HeldExecutingRequests(YamsDaemon& daemon, std::size_t count)
+        : daemon_(&daemon), count_(static_cast<std::int64_t>(count)) {
+        daemon_->testingAdjustExecutingRequests(count_);
+    }
+    ~HeldExecutingRequests() { release(); }
+    void release() {
+        if (daemon_) {
+            daemon_->testingAdjustExecutingRequests(-count_);
+            daemon_ = nullptr;
+        }
+    }
+    HeldExecutingRequests(const HeldExecutingRequests&) = delete;
+    HeldExecutingRequests& operator=(const HeldExecutingRequests&) = delete;
+
+private:
+    YamsDaemon* daemon_;
+    std::int64_t count_;
+};
+
 std::vector<std::string> makeRepairHashes(std::size_t count) {
     std::vector<std::string> hashes;
     hashes.reserve(count);
@@ -446,7 +469,7 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
     ScopedEnvVar degradeGuard("YAMS_REPAIR_DEGRADE_HOLD_MS", "400");
     ScopedEnvVar readyGuard("YAMS_REPAIR_READY_HOLD_MS", "400");
 
-    const auto busyThreshold = std::max<uint32_t>(1, TuneAdvisor::repairBusyConnThreshold());
+    const auto busyThreshold = std::max<uint32_t>(1, TuneAdvisor::repairBusyRequestThreshold());
     const auto degradeHoldMs = std::chrono::milliseconds(TuneAdvisor::repairDegradeHoldMs());
     const auto earlyWindow = std::max<std::chrono::milliseconds>(100ms, degradeHoldMs / 2);
 
@@ -463,14 +486,12 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
         REQUIRE(waitForLifecycleState(*first.daemon(), LifecycleState::Ready, scaledTimeout(10s)));
         REQUIRE(waitForRepairService(*first.daemon(), scaledTimeout(10s)));
 
-        auto firstConnections = openHeldConnections(first.socketPath(), busyThreshold);
-        REQUIRE((firstConnections.size() == busyThreshold));
-        REQUIRE(waitForActiveConnections(*first.daemon(), busyThreshold, scaledTimeout(5s)));
+        HeldExecutingRequests firstRequests(*first.daemon(), busyThreshold);
         auto firstRepairService = first.daemon()->getServiceManager()->getRepairServiceShared();
         REQUIRE(firstRepairService);
         REQUIRE(awaitDegradedWithPendingRepair(*first.daemon(), firstRepairService, repairHashes));
 
-        firstConnections.clear();
+        firstRequests.release();
         first.stop();
         std::this_thread::sleep_for(150ms);
 
@@ -479,9 +500,7 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
         REQUIRE(waitForLifecycleState(*second.daemon(), LifecycleState::Ready, scaledTimeout(10s)));
         REQUIRE(waitForRepairService(*second.daemon(), scaledTimeout(10s)));
 
-        auto secondConnections = openHeldConnections(second.socketPath(), busyThreshold);
-        REQUIRE((secondConnections.size() == busyThreshold));
-        REQUIRE(waitForActiveConnections(*second.daemon(), busyThreshold, scaledTimeout(5s)));
+        HeldExecutingRequests secondRequests(*second.daemon(), busyThreshold);
         auto secondRepairService = second.daemon()->getServiceManager()->getRepairServiceShared();
         REQUIRE(secondRepairService);
 
@@ -490,7 +509,57 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
         REQUIRE(
             awaitDegradedWithPendingRepair(*second.daemon(), secondRepairService, repairHashes));
 
-        secondConnections.clear();
+        secondRequests.release();
         second.stop();
     }
+}
+
+TEST_CASE("Idle client connections do not degrade the daemon",
+          "[daemon][lifecycle][repair-hysteresis][slow]") {
+    // Agents (MCP clients, local models) hold connections open between requests. An open
+    // connection is not client demand, so it must not hold repair back or flip the daemon to
+    // Degraded while repairs are pending.
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    ScopedEnvVar degradeGuard("YAMS_REPAIR_DEGRADE_HOLD_MS", "400");
+    ScopedEnvVar readyGuard("YAMS_REPAIR_READY_HOLD_MS", "400");
+
+    const auto busyThreshold = std::max<uint32_t>(1, TuneAdvisor::repairBusyRequestThreshold());
+    const auto degradeHoldMs = std::chrono::milliseconds(TuneAdvisor::repairDegradeHoldMs());
+
+    DaemonHarness::Options opts;
+    opts.enableModelProvider = false;
+    opts.useMockModelProvider = false;
+    opts.enableAutoRepair = true;
+
+    DaemonHarness harness(opts);
+    REQUIRE(harness.start(scaledTimeout(45s)));
+    REQUIRE(waitForLifecycleState(*harness.daemon(), LifecycleState::Ready, scaledTimeout(10s)));
+    REQUIRE(waitForRepairService(*harness.daemon(), scaledTimeout(10s)));
+
+    // The old connection-count gate degraded at busyThreshold open connections; holding exactly
+    // that many shows idle connections no longer count. (Waiting for more than the threshold to
+    // register was flaky on macOS runners.)
+    const std::size_t heldCount = busyThreshold;
+    auto connections = openHeldConnections(harness.socketPath(), heldCount);
+    REQUIRE(connections.size() == heldCount);
+    if (!waitForActiveConnections(*harness.daemon(), heldCount, scaledTimeout(5s))) {
+        // The macOS AF_UNIX acceptor does not count a connection that has sent nothing, so the
+        // precondition (idle connections the old gate would have counted) cannot be set up.
+        SKIP("held idle connections are not registered as active on this host");
+    }
+
+    auto repairService = harness.daemon()->getServiceManager()->getRepairServiceShared();
+    REQUIRE(repairService);
+    const auto repairHashes = makeRepairHashes(256);
+    const auto deadline = std::chrono::steady_clock::now() + degradeHoldMs * 4;
+    bool degraded = false;
+    while (!degraded && std::chrono::steady_clock::now() < deadline) {
+        repairService->enqueueEmbeddingRepair(repairHashes);
+        degraded = reachesLifecycleStateWithin(*harness.daemon(), LifecycleState::Degraded, 100ms);
+    }
+    CHECK_FALSE(degraded);
+
+    connections.clear();
+    harness.stop();
 }

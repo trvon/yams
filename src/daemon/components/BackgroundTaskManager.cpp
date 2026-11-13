@@ -14,7 +14,6 @@
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/extraction/extraction_util.h>
-#include <yams/integrity/repair_manager.h>
 #include <yams/metadata/knowledge_graph_store.h>
 
 #include <boost/asio/awaitable.hpp>
@@ -65,6 +64,9 @@ BackgroundTaskManager::BackgroundTaskManager(Dependencies deps)
     }
 }
 
+// A failed shutdown must not return while coroutines still use this object;
+// std::terminate is the safe outcome.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 BackgroundTaskManager::~BackgroundTaskManager() {
     if (running_.load(std::memory_order_acquire)) {
         stop();
@@ -483,8 +485,10 @@ void BackgroundTaskManager::launchOrphanScanTask() {
                                     for (size_t i = 0; i < orphanIds.size(); i += BATCH_SIZE) {
                                         size_t batchEnd =
                                             std::min(i + BATCH_SIZE, orphanIds.size());
-                                        std::vector<int64_t> batch(orphanIds.begin() + i,
-                                                                   orphanIds.begin() + batchEnd);
+                                        std::vector<int64_t> batch(
+                                            orphanIds.begin() + static_cast<std::ptrdiff_t>(i),
+                                            orphanIds.begin() +
+                                                static_cast<std::ptrdiff_t>(batchEnd));
 
                                         Bus::Fts5Job orphanJob;
                                         orphanJob.ids = batch;
@@ -819,6 +823,14 @@ void BackgroundTaskManager::launchDocumentRetentionTask() {
     }
 }
 
+bool BackgroundTaskManager::autoRepairMayRun(const DaemonStats& stats,
+                                             bool repairInProgress) noexcept {
+    // Executing requests, not open connections: an agent holding an idle connection must not
+    // block scheduled repair.
+    return stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 0 &&
+           stats.repairQueueDepth.load(std::memory_order_relaxed) == 0 && !repairInProgress;
+}
+
 void BackgroundTaskManager::launchAutoRepairTask() {
     auto self = deps_.serviceManager.lock();
     if (!self) {
@@ -922,19 +934,8 @@ void BackgroundTaskManager::launchAutoRepairTask() {
                     }
 
                     const auto& state = self->getState();
-                    const bool queueEmpty =
-                        state.stats.repairQueueDepth.load(std::memory_order_relaxed) == 0;
-                    const bool busy =
-                        state.stats.activeConnections.load(std::memory_order_relaxed) > 0;
-
                     auto canRunAuto = [&]() {
-                        if (busy)
-                            return false;
-                        if (!queueEmpty)
-                            return false;
-                        if (rs->isRepairInProgress())
-                            return false;
-                        return true;
+                        return autoRepairMayRun(state.stats, rs->isRepairInProgress());
                     };
 
                     auto runPlan = [&](const std::string& tier,

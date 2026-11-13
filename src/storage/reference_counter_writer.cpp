@@ -1,3 +1,4 @@
+#include <yams/core/thread_name.h>
 #include <yams/storage/reference_counter_writer.h>
 
 #include <spdlog/spdlog.h>
@@ -158,7 +159,10 @@ RefCounterWriter::RefCounterWriter(std::shared_ptr<ReferenceCounter> counter, Op
     if (options_.maxBatchCount == 0) {
         options_.maxBatchCount = 1;
     }
-    worker_ = std::thread([this] { run(); });
+    worker_ = std::thread([this] {
+        yams::setCurrentThreadName("yams-refcount");
+        run();
+    });
 }
 
 RefCounterWriter::~RefCounterWriter() {

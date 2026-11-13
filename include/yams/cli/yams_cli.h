@@ -9,6 +9,8 @@
 #include <yams/api/content_store.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/output_controls.h>
+#include <yams/cli/repo_files.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -94,11 +96,6 @@ public:
     const daemon::ResolvedEmbeddingConfig& getResolvedEmbeddingConfig();
 
     /**
-     * Check if embedding generator already exists (without creating it)
-     */
-    bool hasEmbeddingGenerator() const { return embeddingGenerator_ != nullptr; }
-
-    /**
      * Get the connection pool instance
      */
     std::shared_ptr<metadata::ConnectionPool> getConnectionPool() const { return connectionPool_; }
@@ -140,6 +137,13 @@ public:
      */
     bool getJsonOutput() const { return jsonOutput_; }
 
+    void registerReadOptions(CLI::App& command);
+    std::size_t outputBudgetChars() const { return retrievalOutputConfig_.budgetChars; }
+    bool getQuiet() const { return quiet_; }
+    const RetrievalOutputConfig& retrievalOutputConfig() const { return retrievalOutputConfig_; }
+    Result<RepoIndex> readRepoIndex(const std::filesystem::path& root);
+    Result<RepoDiff> repoFreshness(const RepoFiles& files);
+
     /**
      * Ensure storage is initialized (lazy)
      */
@@ -161,11 +165,6 @@ public:
     fastMetadataValueCounts(const std::vector<std::string>& keys, int limit = 10000);
 
     /**
-     * Whether storage is initialized
-     */
-    bool isStorageInitialized() const { return static_cast<bool>(contentStore_); }
-
-    /**
      * Register a command
      */
     void registerCommand(std::unique_ptr<ICommand> command);
@@ -174,6 +173,12 @@ public:
      * Defer execution of a command until after parsing; runner will execute once via async spawn.
      */
     void setPendingCommand(ICommand* cmd);
+
+    /// A command-specific hint printed under the error when the command fails.
+    void setErrorHint(std::string hint) { errorHint_ = std::move(hint); }
+
+    /// The registered command or alias nearest to `typed`, or empty when none is close.
+    static std::string closestCommandName(std::string_view typed);
 
     /**
      * Find the magic_numbers.json file in standard locations
@@ -233,6 +238,12 @@ private:
     RunParsePlan buildRunParsePlan(int argc, char* argv[],
                                    const std::vector<std::string>& topLevelCommands) const;
     void parseRunPlan(const RunParsePlan& plan);
+    // Arguments no command recognises, found by parsing `plan` with every
+    // callback removed so nothing runs.
+    std::vector<std::string> unrecognizedArguments(const RunParsePlan& plan,
+                                                   std::string_view subcmd) const;
+    int reportUnrecognizedArguments(const std::vector<std::string>& extra,
+                                    std::string_view subcmd) const;
     void applyParsedLogLevel();
     void applyParsedDataDirPrecedence();
     void runConfigMigrationPreflight(std::string_view subcmd);
@@ -264,9 +275,13 @@ private:
     std::string embeddingModelName_;
     bool verbose_ = false;
     bool jsonOutput_ = false;
+    bool quiet_ = false;
+    RetrievalOutputConfig retrievalOutputConfig_;
 
     // Deferred execution: a single command to run post-parse
+    void printCommandError(const Error& error) const;
     ICommand* pendingCommand_ = nullptr;
+    std::string errorHint_;
 };
 
 } // namespace yams::cli

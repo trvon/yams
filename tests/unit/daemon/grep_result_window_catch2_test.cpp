@@ -146,3 +146,51 @@ TEST_CASE("Grep result window rejects binary-like indexed lines", "[daemon][grep
     REQUIRE(selection.matches.size() == 1);
     CHECK(selection.matches.front().file == "source.cpp");
 }
+
+TEST_CASE("Grep summary gives files-only requests one record per matching file",
+          "[daemon][grep][result-window]") {
+    const auto matches =
+        yams::daemon::grep_result_window::summarize({}, {"a.cpp", "b.cpp"}, /*filesOnly=*/true);
+
+    REQUIRE(matches.size() == 2);
+    CHECK(matches[0].file == "a.cpp");
+    CHECK(matches[1].file == "b.cpp");
+    CHECK(matches[0].matchType == "path");
+}
+
+TEST_CASE("Grep summary gives count requests one record per matching line",
+          "[daemon][grep][result-window]") {
+    // Count mode reports counts without building line records. A line holding the pattern
+    // twice is two occurrences and one line.
+    auto two = makeFileResult("a.cpp", {});
+    two.matchCount = 5;
+    two.matchedLines = 2;
+    auto none = makeFileResult("b.cpp", {});
+    auto one = makeFileResult("c.cpp", {});
+    one.matchCount = 1;
+    one.matchedLines = 1;
+
+    const auto matches = yams::daemon::grep_result_window::summarize(
+        {two, none, one}, {"a.cpp", "c.cpp"}, /*filesOnly=*/false);
+
+    REQUIRE(matches.size() == 3);
+    CHECK(matches[0].file == "a.cpp");
+    CHECK(matches[1].file == "a.cpp");
+    CHECK(matches[2].file == "c.cpp");
+    CHECK(matches[0].matchType == "regex");
+}
+
+TEST_CASE("Grep summary keeps semantic suggestions out of the line count",
+          "[daemon][grep][result-window]") {
+    auto semanticMatch = makeMatch(0, "related passage");
+    semanticMatch.matchType = "semantic";
+    semanticMatch.confidence = 0.4;
+    auto suggestion = makeFileResult("related.md", {semanticMatch});
+    suggestion.wasSemanticSearch = true;
+
+    const auto matches = yams::daemon::grep_result_window::summarize({suggestion}, {},
+                                                                     /*filesOnly=*/false);
+
+    REQUIRE(matches.size() == 1);
+    CHECK(matches[0].matchType == "semantic");
+}

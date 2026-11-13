@@ -455,7 +455,7 @@ void DedupeCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
             if (it != parsed.end() && !it->second.empty()) {
                 dbName = it->second;
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
 
         fs::path dbPath = fs::path(dbName).is_absolute() ? fs::path(dbName) : dataDir / dbName;

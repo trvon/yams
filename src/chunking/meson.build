@@ -2,6 +2,7 @@ spdlog_dep = dependency('spdlog', required: true)
 yams_core = dependency('yams_core', required: false)
 
 chunking_src = files(
+  'gear_cutter.cpp',
   'rabin_chunker.cpp',
   'streaming_chunker.cpp',
 )

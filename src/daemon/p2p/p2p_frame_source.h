@@ -94,8 +94,6 @@ public:
     [[nodiscard]] bool closed() const noexcept { return closed_; }
     [[nodiscard]] std::size_t consumedBytes() const noexcept { return offset_; }
     [[nodiscard]] std::size_t remainingBytes() const noexcept { return input_.size() - offset_; }
-    [[nodiscard]] std::size_t framesRead() const noexcept { return framesRead_; }
-    [[nodiscard]] std::size_t framesWritten() const noexcept { return framesWritten_; }
     [[nodiscard]] const std::vector<std::byte>& written() const noexcept { return written_; }
 
 private:

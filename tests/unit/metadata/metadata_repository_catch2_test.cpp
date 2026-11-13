@@ -181,6 +181,15 @@ struct EmbeddingStatusRow {
     int64_t chunkCount = 0;
 };
 
+// Embeddings describe extracted text; give a test document some.
+void insertTestContent(MetadataRepository& repo, int64_t documentId) {
+    DocumentContent text;
+    text.documentId = documentId;
+    text.contentText = "text for document " + std::to_string(documentId);
+    text.contentLength = static_cast<int64_t>(text.contentText.size());
+    REQUIRE(repo.insertContent(text).has_value());
+}
+
 Result<std::optional<EmbeddingStatusRow>> getEmbeddingStatusRow(ConnectionPool& pool,
                                                                 const std::string& hash) {
     auto connResult = pool.acquire();
@@ -841,6 +850,7 @@ TEST_CASE("MetadataRepository: reconcile embedding status from vector-backed has
     auto docBId = fix.repository_->insertDocument(docB);
     REQUIRE((docAId.has_value()));
     REQUIRE((docBId.has_value()));
+    insertTestContent(*fix.repository_, docAId.value());
 
     REQUIRE(fix.repository_
                 ->updateDocumentEmbeddingStatusByHash("reconcile-hash-a", true, "legacy-embed")
@@ -1360,12 +1370,39 @@ TEST_CASE("MetadataRepository: reconcile empty vector-backed hash set clears emb
     CHECK((afterStats.value().embeddingCount == 0));
 }
 
+TEST_CASE("MetadataRepository: reconcile does not mark a document without content as embedded",
+          "[unit][metadata][repository][embeddings]") {
+    // Vectors from an old build outlived their text (MIME repair cleared it). Startup reconcile
+    // saw the vectors and set has_embedding = 1 again on every start, so repair never looked at
+    // those documents and search kept returning embeddings of text that no longer exists.
+    MetadataRepositoryFixture fix;
+    auto doc = makeDocumentWithPath("/tmp/reconcile_orphan.jsonl", "reconcile-orphan-hash");
+    REQUIRE((fix.repository_->insertDocument(doc).has_value()));
+    REQUIRE(fix.repository_
+                ->updateDocumentEmbeddingStatusByHash("reconcile-orphan-hash", true, "legacy")
+                .has_value());
+
+    REQUIRE(fix.repository_->reconcileDocumentEmbeddingStatusByHashes({"reconcile-orphan-hash"}, "")
+                .has_value());
+
+    auto status = getEmbeddingStatusRow(*fix.pool_, "reconcile-orphan-hash");
+    REQUIRE((status.has_value()));
+    REQUIRE((status.value().has_value()));
+    CHECK_FALSE(status.value()->hasEmbedding);
+}
+
 TEST_CASE("MetadataRepository: reconcile preserves chunk count and omitted model ids",
           "[unit][metadata][repository][embeddings]") {
     MetadataRepositoryFixture fix;
 
     auto doc = makeDocumentWithPath("/tmp/reconcile_preserve.txt", "reconcile-preserve-hash");
-    REQUIRE((fix.repository_->insertDocument(doc).has_value()));
+    auto docId = fix.repository_->insertDocument(doc);
+    REQUIRE((docId.has_value()));
+    DocumentContent text;
+    text.documentId = docId.value();
+    text.contentText = "preserved text";
+    text.contentLength = static_cast<int64_t>(text.contentText.size());
+    REQUIRE((fix.repository_->insertContent(text).has_value()));
     REQUIRE(
         fix.repository_
             ->updateDocumentEmbeddingStatusByHash("reconcile-preserve-hash", true, "legacy-model")
@@ -3625,10 +3662,10 @@ TEST_CASE("MetadataRepository: path tree child listing and repair helpers",
     REQUIRE((missingCount.has_value()));
     CHECK((missingCount.value() == 1));
 
-    auto missingDocs = fix.repository_->findDocsMissingPathTree(5);
-    REQUIRE((missingDocs.has_value()));
-    REQUIRE((missingDocs.value().size() == 1));
-    CHECK((missingDocs.value().front().sha256Hash == missingDoc.sha256Hash));
+    auto window = fix.repository_->scanPathTreeWindow(0, 5);
+    REQUIRE((window.has_value()));
+    REQUIRE((window.value().missingIds.size() == 1));
+    CHECK((window.value().missingIds.front() == missingId.value()));
 
     auto rootChildren = fix.repository_->listPathTreeChildren("/", 10);
     REQUIRE((rootChildren.has_value()));
@@ -5770,8 +5807,10 @@ TEST_CASE("MetadataRepository reconcile keeps an open derivation unembedded",
     // startup reconcile must not flip such a document back to embedded.
     MetadataRepositoryFixture fix;
     const std::string hash = "reconcile-open-derivation";
-    REQUIRE(fix.repository_->insertDocument(makeDocumentWithPath("/tmp/reconcile-open.txt", hash))
-                .has_value());
+    auto docId =
+        fix.repository_->insertDocument(makeDocumentWithPath("/tmp/reconcile-open.txt", hash));
+    REQUIRE(docId.has_value());
+    insertTestContent(*fix.repository_, docId.value());
     auto tokens = fix.repository_->batchBeginDocumentEmbeddingDerivations({hash}, "recipe");
     REQUIRE(tokens.has_value());
     REQUIRE(tokens.value().size() == 1);

@@ -7,6 +7,7 @@
 #include "concept_boost_internal.h"
 #include "cross_rerank_internal.h"
 #include "final_result_order_internal.h"
+#include "lexical_rerank_internal.h"
 #include "search_component_fanout_internal.h"
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
@@ -257,6 +258,7 @@ resolveGraphCandidateNodeId(const std::shared_ptr<yams::metadata::KnowledgeGraph
     if (!node || !node.value().has_value()) {
         auto fallbackNode = kgStore->getNodeByKey("doc:" + std::string(candidateId));
         if (fallbackNode && fallbackNode.value().has_value()) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
             return fallbackNode.value()
                 ->id; // NOLINT(bugprone-unchecked-optional-access) — guarded above
         }
@@ -547,17 +549,12 @@ struct SearchTopKLimitOutcome {
     std::vector<std::string> buriedSemanticRescueDisplacedDocIds;
     std::vector<std::string> evidenceRescuePromotedDocIds;
     std::vector<std::string> evidenceRescueDisplacedDocIds;
-    std::vector<std::string> topologyRescuePromotedDocIds;
-    std::vector<std::string> topologyRescueDisplacedDocIds;
-    std::vector<std::string> topologyRescueEligibleWindowDocIds;
-    std::vector<std::string> topologyRescueEligibleTailDocIds;
 };
 
 template <typename ResultLess, typename IsSemanticCandidate, typename SemanticBetter,
           typename IsBuriedSemanticCandidate, typename BuriedSemanticBetter,
           typename IsEvidenceCandidate, typename EvidenceBetter, typename EvidenceScore,
-          typename DocIdForResult, typename IsTopologyRescueCandidate,
-          typename TopologyRescuePriority>
+          typename DocIdForResult>
 SearchTopKLimitOutcome
 applySearchTopKLimit(std::vector<SearchResult>& results, const SearchEngineConfig& config,
                      size_t userLimit, size_t buriedVectorRankThreshold, ResultLess resultLess,
@@ -565,9 +562,7 @@ applySearchTopKLimit(std::vector<SearchResult>& results, const SearchEngineConfi
                      IsBuriedSemanticCandidate isBuriedSemanticCandidate,
                      BuriedSemanticBetter buriedSemanticBetter,
                      IsEvidenceCandidate isEvidenceCandidate, EvidenceBetter evidenceBetter,
-                     EvidenceScore evidenceScore, DocIdForResult docIdForResult,
-                     IsTopologyRescueCandidate isTopologyRescueCandidate,
-                     TopologyRescuePriority topologyRescuePriority) {
+                     EvidenceScore evidenceScore, DocIdForResult docIdForResult) {
     SearchTopKLimitOutcome outcome;
 
     // Enforce user-visible limit after all post-fusion stages have had a chance to reorder/boost.
@@ -746,104 +741,6 @@ applySearchTopKLimit(std::vector<SearchResult>& results, const SearchEngineConfi
                   resultLess);
     }
 
-    // Final-window topology rescue: mirrors the semantic-rescue swap above (positional victim
-    // scan, resultLess for tail-candidate ordering) but is gated on isTopologyRescueCandidate --
-    // the caller-supplied novel-rescue identity set -- rather than a SearchResult::topologyScore
-    // magnitude. Topology evidence is assigned to the whole route-admitted relation (often
-    // hundreds of candidates sharing one route-level confidence), so a raw score threshold cannot
-    // discriminate the actual baseline-miss candidate from ambient route membership; identity can.
-    // This obligation stays independently measurable/toggled from generic lexical/vector/kg
-    // evidence rescue (see fusionEvidenceRescueSlots). Default 0 (disabled/product-unchanged).
-    if (config.topologyFinalRescueSlots > 0 && userLimit > 0) {
-        const size_t finalWindow = std::min(userLimit, results.size());
-        const size_t rescueTarget = std::min(config.topologyFinalRescueSlots, finalWindow);
-
-        const auto topologyRescueBetter = [&](const SearchResult& lhs, const SearchResult& rhs) {
-            const auto lhsPriority = topologyRescuePriority(lhs);
-            const auto rhsPriority = topologyRescuePriority(rhs);
-            const bool lhsScored = lhsPriority.has_value() && std::isfinite(*lhsPriority);
-            const bool rhsScored = rhsPriority.has_value() && std::isfinite(*rhsPriority);
-            if (lhsScored != rhsScored) {
-                return lhsScored;
-            }
-            if (lhsScored && *lhsPriority != *rhsPriority) {
-                return *lhsPriority > *rhsPriority;
-            }
-            return resultLess(lhs, rhs);
-        };
-
-        for (size_t i = 0; i < finalWindow; ++i) {
-            if (isTopologyRescueCandidate(results[i])) {
-                outcome.topologyRescueEligibleWindowDocIds.push_back(docIdForResult(results[i]));
-            }
-        }
-
-        std::vector<size_t> eligibleTailIndices;
-        eligibleTailIndices.reserve(results.size() - finalWindow);
-        for (size_t i = finalWindow; i < results.size(); ++i) {
-            if (isTopologyRescueCandidate(results[i])) {
-                eligibleTailIndices.push_back(i);
-            }
-        }
-        std::ranges::sort(eligibleTailIndices, [&](size_t lhs, size_t rhs) {
-            return topologyRescueBetter(results[lhs], results[rhs]);
-        });
-        outcome.topologyRescueEligibleTailDocIds.reserve(eligibleTailIndices.size());
-        for (const size_t index : eligibleTailIndices) {
-            outcome.topologyRescueEligibleTailDocIds.push_back(docIdForResult(results[index]));
-        }
-
-        size_t rescuePresent = 0;
-        for (size_t i = 0; i < finalWindow; ++i) {
-            if (isTopologyRescueCandidate(results[i])) {
-                rescuePresent++;
-            }
-        }
-
-        while (rescuePresent < rescueTarget) {
-            size_t bestTailIndex = results.size();
-            for (size_t i = finalWindow; i < results.size(); ++i) {
-                if (!isTopologyRescueCandidate(results[i])) {
-                    continue;
-                }
-                if (bestTailIndex >= results.size() ||
-                    topologyRescueBetter(results[i], results[bestTailIndex])) {
-                    bestTailIndex = i;
-                }
-            }
-            if (bestTailIndex >= results.size()) {
-                break;
-            }
-
-            size_t victimIndex = finalWindow;
-            for (size_t i = finalWindow; i > 0; --i) {
-                const size_t idx = i - 1;
-                if (!isTopologyRescueCandidate(results[idx])) {
-                    victimIndex = idx;
-                    break;
-                }
-            }
-            if (victimIndex >= finalWindow) {
-                break;
-            }
-
-            const std::string promotedId = docIdForResult(results[bestTailIndex]);
-            const std::string displacedId = docIdForResult(results[victimIndex]);
-            if (!promotedId.empty()) {
-                outcome.topologyRescuePromotedDocIds.push_back(promotedId);
-            }
-            if (!displacedId.empty()) {
-                outcome.topologyRescueDisplacedDocIds.push_back(displacedId);
-            }
-
-            std::swap(results[victimIndex], results[bestTailIndex]);
-            rescuePresent++;
-        }
-
-        std::sort(results.begin(), results.begin() + static_cast<ptrdiff_t>(finalWindow),
-                  resultLess);
-    }
-
     results.resize(userLimit);
     return outcome;
 }
@@ -889,15 +786,9 @@ collectGraphSeedDocs(const std::vector<ComponentResult>& componentResults, size_
             case ComponentResult::Source::PathTree:
                 sourceBoost = 0.70f;
                 break;
-            case ComponentResult::Source::Symbol:
-                sourceBoost = 0.80f;
-                break;
             case ComponentResult::Source::Tag:
             case ComponentResult::Source::Metadata:
                 sourceBoost = 0.60f;
-                break;
-            case ComponentResult::Source::Anchor:
-                sourceBoost = 0.70f;
                 break;
             case ComponentResult::Source::Unknown:
                 sourceBoost = 0.50f;
@@ -1130,13 +1021,7 @@ std::string_view::size_type ci_find(std::string_view haystack, std::string_view 
 } // namespace
 
 #if YAMS_HAS_RANGES
-namespace ranges_helpers {
-template <typename Range, typename Predicate>
-auto filter_not_empty(const Range& range, Predicate pred) {
-    return range | std::views::filter(pred) |
-           std::views::transform([](const auto& elem) { return elem; });
-}
-} // namespace ranges_helpers
+namespace ranges_helpers {} // namespace ranges_helpers
 #endif
 
 // ============================================================================
@@ -1244,6 +1129,10 @@ public:
                                                                          : std::string("unknown");
     }
 
+    void setStaticEmbedding(std::shared_ptr<const simeon::StaticEmbedding> table) {
+        staticEmbedding_ = std::move(table);
+    }
+
     void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
         simeonLexical_ = std::move(backend);
         if (simeonLexical_ && metadataRepo_) {
@@ -1323,6 +1212,7 @@ private:
     EntityExtractionFunc conceptExtractor_; // GLiNER concept extractor (optional)
     std::shared_ptr<SearchTuner> tuner_;    // Adaptive runtime tuner (optional)
     SearchEngine::CrossRerankScorer crossReranker_;
+    std::shared_ptr<const simeon::StaticEmbedding> staticEmbedding_;
     std::string crossRerankScoringMode_ = "unknown";
     std::unique_ptr<SimeonLexicalBackend> simeonLexical_;
     // Per-profile simeon bandit arms. Each corpus profile learns independently
@@ -1388,8 +1278,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     bool graphRerankApplied = false;
     bool crossRerankApplied = false;
     double rerankGuardScoreGap = 0.0;
-    size_t graphWindowGuardReplacementCount = 0;
-    size_t graphWindowCapReplacementCount = 0;
     size_t graphRerankGuardReplacementCount = 0;
     size_t graphMatchedCandidates = 0;
     size_t graphPositiveSignalCandidates = 0;
@@ -1795,28 +1683,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         traceCollector.markStageSkipped("entity_vector", vectorTierSkipReason);
     };
 
-    auto computeLexicalEvidence = [&](const std::vector<ComponentResult>& componentResults) {
-        size_t lexicalHits = 0;
-        float topTextScore = 0.0f;
-        for (const auto& componentResult : componentResults) {
-            if (componentResult.source == ComponentResult::Source::Text ||
-                componentResult.source == ComponentResult::Source::SimeonText) {
-                ++lexicalHits;
-                topTextScore = std::max(topTextScore, componentResult.score);
-            } else if (componentResult.source == ComponentResult::Source::PathTree) {
-                ++lexicalHits;
-            }
-        }
-        return std::pair<size_t, float>{lexicalHits, topTextScore};
-    };
-
+    // Raw-scale lexical evidence for the semantic-budget KG skip. The fused score is batch
+    // normalized (top is always 1.0), so it cannot judge strength.
     auto recordSemanticBudgetLexicalEvidence =
         [&](const std::vector<ComponentResult>& componentResults) {
-            const auto [lexicalHits, topTextScore] = computeLexicalEvidence(componentResults);
-            response.debugStats["semantic_budget_lexical_hits"] = std::to_string(lexicalHits);
+            const auto signal = detail::classifyTier1TextSignal(
+                componentResults, detail::kSemanticBudgetMinTextHits,
+                detail::kSemanticBudgetMinTopTextScore);
+            response.debugStats["semantic_budget_lexical_hits"] = std::to_string(signal.textHits);
             response.debugStats["semantic_budget_top_text_score"] =
-                fmt::format("{:.4f}", topTextScore);
-            return std::pair<size_t, float>{lexicalHits, topTextScore};
+                fmt::format("{:.4f}", signal.topTextScore);
+            return signal.strong;
         };
 
     auto materializeConcepts = [&](bool waitIfConfigured) {
@@ -2668,11 +2545,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             "metadata", workingConfig.metadataWeight, stats_.metadataQueries,
             stats_.avgMetadataTimeMicros);
 
-        const auto [budgetLexicalHits, budgetTopTextScore] =
-            semanticBudgetActive ? recordSemanticBudgetLexicalEvidence(allComponentResults)
-                                 : std::pair<size_t, float>{0, 0.0f};
         const bool strongBudgetLexical =
-            semanticBudgetActive && (budgetLexicalHits >= 5 || budgetTopTextScore >= 0.20f);
+            semanticBudgetActive && recordSemanticBudgetLexicalEvidence(allComponentResults);
         if (semanticBudgetActive && strongBudgetLexical) {
             semanticTierSkipReason = "budget_guard_strong_lexical";
             response.debugStats["semantic_budget_skip_reason"] = semanticTierSkipReason;
@@ -2954,6 +2828,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     preFusionDocIds = collectUniqueComponentDocIds(allComponentResults);
     preFusionSignals = buildPreFusionSignalMap(allComponentResults);
+    // Fused scores are normalised to the top hit, so a query that matches no indexed term can
+    // still return results scored 1.0. Report how many documents a text component matched.
+    {
+        std::unordered_set<std::string> lexicalDocs;
+        for (const auto& comp : allComponentResults) {
+            if (comp.source == ComponentResult::Source::Text ||
+                comp.source == ComponentResult::Source::SimeonText) {
+                lexicalDocs.insert(comp.documentHash);
+            }
+        }
+        response.debugStats["lexical_hits"] = std::to_string(lexicalDocs.size());
+    }
 
     // Join per-query traces back to the active simeon encoder recipe.
     {
@@ -3029,98 +2915,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
-    // The specific baseline-miss identities a topology route rescued (novel documents absent from
-    // both baseline components and the pre-rescue tier-2 candidate set). This is the primary
-    // eligibility gate for both fusion-window and final-window topology rescue: topology evidence
-    // itself is assigned to the whole route-admitted relation and cannot discriminate the actual
-    // rescued candidate from ambient route membership (see topologyFusionRescueSlots doc comment).
-    const std::unordered_set<std::string> topologyRescueEligibleHashes(
-        vectorStage.rescueNovelHashes.begin(), vectorStage.rescueNovelHashes.end());
-    // Trace IDs are presentation-oriented (usually filename stems). Preserve their mapping for
-    // diagnostics only; backend scoring below resolves metadata primary IDs from the same hashes.
-    std::unordered_map<std::string, std::string> topologyRescueTraceDocIdByHash;
-    const auto topologyRescueTraceCount =
-        std::min(vectorStage.rescueNovelHashes.size(), vectorStage.rescueNovelDocIds.size());
-    topologyRescueTraceDocIdByHash.reserve(topologyRescueTraceCount);
-    for (std::size_t i = 0; i < topologyRescueTraceCount; ++i) {
-        topologyRescueTraceDocIdByHash.emplace(vectorStage.rescueNovelHashes[i],
-                                               vectorStage.rescueNovelDocIds[i]);
-    }
-
-    TopologyRescuePriorityByIdentity topologyRescuePriorities;
-    std::string topologyRescueSelector = "identity_order";
-    std::string topologyRescueSelectorStatus = "baseline";
-    std::string topologyRescueSelectorRecipe;
-    std::size_t topologyRescueSelectorResolvedCandidates = 0;
-    if (workingConfig.topologyRescueSelector ==
-            SearchEngineConfig::TopologyRescueSelector::SimeonFragmentGeometry &&
-        (workingConfig.topologyFusionRescueSlots > 0 ||
-         workingConfig.topologyFinalRescueSlots > 0)) {
-        topologyRescueSelector = "simeon_fragment_geometry";
-        if (!simeonLexical_ || !simeonLexical_->fragmentGeometryReady()) {
-            topologyRescueSelectorStatus = "fragment_geometry_unavailable";
-        } else if (simeonLexical_->fragmentEmbeddingSpaceIdentity().empty()) {
-            // Construction-bound selection needs a stable space identity. Corpus-trained PMI
-            // geometry may be useful elsewhere, but cannot yet support this theorem experiment.
-            topologyRescueSelectorStatus = "fragment_space_identity_unavailable";
-        } else {
-            auto resolved = detail::resolveMetadataDocumentIdsByHash(
-                metadataRepo_, std::span<const std::string>{vectorStage.rescueNovelHashes});
-            if (!resolved) {
-                topologyRescueSelectorStatus = "fragment_geometry_document_resolution_unavailable";
-            } else {
-                topologyRescueSelectorResolvedCandidates = resolved.value().size();
-                std::vector<std::int64_t> documentIds;
-                std::vector<std::string> identities;
-                documentIds.reserve(topologyRescueSelectorResolvedCandidates);
-                identities.reserve(topologyRescueSelectorResolvedCandidates);
-                for (const auto& [hash, documentId] : resolved.value()) {
-                    documentIds.push_back(documentId);
-                    identities.push_back(hash);
-                }
-
-                // A quality-routed lexical score can correctly choose its BM25-only arm. That is
-                // useful for ordinary retrieval, but it does not establish the selector premise:
-                // every topology-eligible candidate must receive a score from the aligned PHSS
-                // geometry.
-                auto decision = simeonLexical_->scoreFragmentGeometry(query, documentIds);
-                if (!decision || decision.value().scores.size() != identities.size()) {
-                    topologyRescueSelectorStatus = "fragment_geometry_score_unavailable";
-                } else {
-                    topologyRescueSelectorRecipe = decision.value().recipe_name;
-                    topologyRescuePriorities.reserve(identities.size());
-                    for (std::size_t i = 0; i < identities.size(); ++i) {
-                        const float score = decision.value().scores[i];
-                        if (std::isfinite(score)) {
-                            topologyRescuePriorities.emplace(identities[i], score);
-                        }
-                    }
-                    topologyRescueSelectorStatus = topologyRescuePriorities.empty()
-                                                       ? "fragment_geometry_no_finite_scores"
-                                                       : "fragment_geometry_scored";
-                }
-            }
-        }
-    }
-    setDebug(response.debugStats, metrics::kTopologyRescueSelector, topologyRescueSelector);
-    setDebug(response.debugStats, metrics::kTopologyRescueSelectorStatus,
-             topologyRescueSelectorStatus);
-    setDebug(response.debugStats, metrics::kTopologyRescueSelectorScoredCandidates,
-             std::to_string(topologyRescuePriorities.size()));
-    setDebug(response.debugStats, metrics::kTopologyRescueSelectorRecipe,
-             topologyRescueSelectorRecipe);
-    setDebug(response.debugStats, metrics::kTopologyRescueSelectorResolvedCandidates,
-             std::to_string(topologyRescueSelectorResolvedCandidates));
-
-    const auto fuseCandidatePool = [&](const std::vector<ComponentResult>& components,
-                                       bool recordEvidenceTrace,
-                                       const std::unordered_set<std::string>& rescueEligibleHashes,
-                                       const TopologyRescuePriorityByIdentity& rescuePriorities)
-        -> Result<std::vector<yams::metadata::SearchResult>> {
+    const auto fuseCandidatePool =
+        [&](const std::vector<ComponentResult>& components,
+            bool recordEvidenceTrace) -> Result<std::vector<yams::metadata::SearchResult>> {
         EvidenceSearchPipeline evidencePipeline;
         auto evidenceResult = evidencePipeline.execute(components, topologyCandidateEvidence,
-                                                       workingConfig, workingConfig.maxResults,
-                                                       rescueEligibleHashes, rescuePriorities);
+                                                       workingConfig, workingConfig.maxResults);
         if (!evidenceResult) {
             return Error{evidenceResult.error().code, evidenceResult.error().message};
         }
@@ -3136,38 +2936,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                      std::to_string(trace.finalCandidates));
             setDebug(response.debugStats, metrics::kCandidatePipelineTopologyAnnotatedCandidates,
                      std::to_string(trace.topologyAnnotatedCandidates));
-            setDebug(response.debugStats,
-                     metrics::kCandidatePipelineTopologyFusionRescuedCandidates,
-                     std::to_string(trace.topologyFusionRescuedCandidates));
-            setDebug(response.debugStats,
-                     metrics::kCandidatePipelineTopologyFusionRescueIdentityMatchesInTail,
-                     std::to_string(trace.topologyFusionRescueIdentityMatchesInTail));
-            setDebug(
-                response.debugStats,
-                metrics::kCandidatePipelineTopologyFusionRescueIdentityMatchesWithEvidenceInTail,
-                std::to_string(trace.topologyFusionRescueIdentityMatchesWithEvidenceInTail));
-            setDebug(response.debugStats,
-                     metrics::kCandidatePipelineTopologyFusionRescueEligibleHashesInTail,
-                     joinWithTab(trace.topologyFusionRescueEligibleIdentitiesInTail));
-            std::vector<std::string> eligibleTailDocIds;
-            eligibleTailDocIds.reserve(trace.topologyFusionRescueEligibleIdentitiesInTail.size());
-            for (const auto& identity : trace.topologyFusionRescueEligibleIdentitiesInTail) {
-                if (const auto it = topologyRescueTraceDocIdByHash.find(identity);
-                    it != topologyRescueTraceDocIdByHash.end()) {
-                    eligibleTailDocIds.push_back(it->second);
-                }
-            }
-            setDebug(response.debugStats,
-                     metrics::kCandidatePipelineTopologyFusionRescueEligibleDocIdsInTail,
-                     joinWithTab(eligibleTailDocIds));
         }
         return std::move(evidenceResult.value().results);
     };
 
     {
         YAMS_ZONE_SCOPED_N("fusion::candidate_pipeline");
-        auto fused = fuseCandidatePool(allComponentResults, true, topologyRescueEligibleHashes,
-                                       topologyRescuePriorities);
+        auto fused = fuseCandidatePool(allComponentResults, true);
         if (!fused) {
             return Error{fused.error().code, fused.error().message};
         }
@@ -3194,12 +2969,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
         response.debugStats["topology_medoid_boosted"] = std::to_string(boostedMedoids);
     }
-    const bool hasGraphSources =
-        std::any_of(allComponentResults.begin(), allComponentResults.end(), [](const auto& comp) {
-            return comp.source == ComponentResult::Source::GraphText ||
-                   comp.source == ComponentResult::Source::GraphVector;
-        });
-    if ((stageTraceEnabled || (workingConfig.enableGraphFusionWindowGuard && hasGraphSources))) {
+    if (stageTraceEnabled) {
         postFusionSnapshot = response.results;
         std::vector<ComponentResult> graphlessComponentResults;
         graphlessComponentResults.reserve(allComponentResults.size());
@@ -3211,142 +2981,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             graphlessComponentResults.push_back(comp);
         }
         if (graphlessComponentResults.size() != allComponentResults.size()) {
-            // Explicit empty set: this ablation pool measures the non-topology baseline and must
-            // never see topology rescue, additive or otherwise.
-            auto graphlessFused = fuseCandidatePool(graphlessComponentResults, false, {}, {});
+            auto graphlessFused = fuseCandidatePool(graphlessComponentResults, false);
             if (!graphlessFused) {
                 return Error{graphlessFused.error().code, graphlessFused.error().message};
             }
             graphlessPostFusionSnapshot = std::move(graphlessFused.value());
         } else {
             graphlessPostFusionSnapshot = postFusionSnapshot;
-        }
-    }
-
-    if (workingConfig.enableGraphFusionWindowGuard && hasGraphSources &&
-        !graphlessPostFusionSnapshot.empty()) {
-        const size_t guardWindow =
-            std::min(response.results.size(),
-                     std::min(graphlessPostFusionSnapshot.size(),
-                              (workingConfig.enableReranking && workingConfig.rerankTopK > 0)
-                                  ? workingConfig.rerankTopK
-                                  : size_t(50)));
-        const size_t guardDepth =
-            std::min(graphlessPostFusionSnapshot.size(),
-                     guardWindow * workingConfig.graphFusionGuardDepthMultiplier);
-        const auto graphlessTopIds =
-            collectRankedResultDocIds(graphlessPostFusionSnapshot, guardWindow);
-        const auto graphlessDepthIds =
-            collectRankedResultDocIds(graphlessPostFusionSnapshot, guardDepth);
-        const auto actualTopIds = collectRankedResultDocIds(response.results, guardWindow);
-        std::unordered_set<std::string> graphlessTopSet(graphlessTopIds.begin(),
-                                                        graphlessTopIds.end());
-        std::unordered_set<std::string> graphlessDepthSet(graphlessDepthIds.begin(),
-                                                          graphlessDepthIds.end());
-        std::unordered_set<std::string> actualTopSet(actualTopIds.begin(), actualTopIds.end());
-        std::unordered_map<std::string, SearchResult> graphlessById;
-        graphlessById.reserve(guardDepth);
-        for (size_t i = 0; i < guardDepth; ++i) {
-            const auto docId =
-                documentIdForTrace(graphlessPostFusionSnapshot[i].document.filePath,
-                                   graphlessPostFusionSnapshot[i].document.sha256Hash);
-            if (!docId.empty()) {
-                graphlessById.emplace(docId, graphlessPostFusionSnapshot[i]);
-            }
-        }
-
-        std::vector<std::string> displacedGraphlessIds;
-        for (const auto& docId : graphlessTopIds) {
-            if (!actualTopSet.contains(docId)) {
-                displacedGraphlessIds.push_back(docId);
-            }
-        }
-
-        size_t displacedCursor = 0;
-        for (size_t i = 0; i < guardWindow && displacedCursor < displacedGraphlessIds.size(); ++i) {
-            const auto actualId = documentIdForTrace(response.results[i].document.filePath,
-                                                     response.results[i].document.sha256Hash);
-            if (graphlessTopSet.contains(actualId)) {
-                continue;
-            }
-            if (graphlessDepthSet.contains(actualId)) {
-                continue; // allow graph to promote graphless near-misses
-            }
-
-            const auto& restoreId = displacedGraphlessIds[displacedCursor++];
-            auto restoreIt = graphlessById.find(restoreId);
-            if (restoreIt == graphlessById.end()) {
-                continue;
-            }
-            response.results[i] = restoreIt->second;
-            ++graphWindowGuardReplacementCount;
-        }
-        if (stageTraceEnabled) {
-            postFusionSnapshot = response.results;
-        }
-    }
-
-    if (workingConfig.graphMaxAddedInFusionWindow > 0 && hasGraphSources &&
-        !graphlessPostFusionSnapshot.empty()) {
-        const size_t guardWindow =
-            std::min(response.results.size(),
-                     std::min(graphlessPostFusionSnapshot.size(),
-                              (workingConfig.enableReranking && workingConfig.rerankTopK > 0)
-                                  ? workingConfig.rerankTopK
-                                  : size_t(50)));
-        const auto graphlessTopIds =
-            collectRankedResultDocIds(graphlessPostFusionSnapshot, guardWindow);
-        const auto actualTopIds = collectRankedResultDocIds(response.results, guardWindow);
-        std::unordered_set<std::string> graphlessTopSet(graphlessTopIds.begin(),
-                                                        graphlessTopIds.end());
-        std::unordered_map<std::string, SearchResult> graphlessById;
-        graphlessById.reserve(guardWindow);
-        for (size_t i = 0; i < guardWindow; ++i) {
-            const auto docId =
-                documentIdForTrace(graphlessPostFusionSnapshot[i].document.filePath,
-                                   graphlessPostFusionSnapshot[i].document.sha256Hash);
-            if (!docId.empty()) {
-                graphlessById.emplace(docId, graphlessPostFusionSnapshot[i]);
-            }
-        }
-
-        std::vector<size_t> graphAddedIndices;
-        graphAddedIndices.reserve(guardWindow);
-        for (size_t i = 0; i < guardWindow; ++i) {
-            const auto actualId = documentIdForTrace(response.results[i].document.filePath,
-                                                     response.results[i].document.sha256Hash);
-            if (!graphlessTopSet.contains(actualId)) {
-                graphAddedIndices.push_back(i);
-            }
-        }
-
-        if (graphAddedIndices.size() > workingConfig.graphMaxAddedInFusionWindow) {
-            std::vector<std::string> restoreIds;
-            restoreIds.reserve(graphAddedIndices.size());
-            for (const auto& docId : graphlessTopIds) {
-                const bool present =
-                    std::any_of(actualTopIds.begin(), actualTopIds.end(),
-                                [&](const auto& actual) { return actual == docId; });
-                if (!present) {
-                    restoreIds.push_back(docId);
-                }
-            }
-
-            const size_t replacements =
-                std::min(restoreIds.size(),
-                         graphAddedIndices.size() - workingConfig.graphMaxAddedInFusionWindow);
-            for (size_t ri = 0; ri < replacements; ++ri) {
-                const size_t replaceIndex = graphAddedIndices[graphAddedIndices.size() - 1 - ri];
-                auto restoreIt = graphlessById.find(restoreIds[ri]);
-                if (restoreIt == graphlessById.end()) {
-                    continue;
-                }
-                response.results[replaceIndex] = restoreIt->second;
-                ++graphWindowCapReplacementCount;
-            }
-            if (stageTraceEnabled) {
-                postFusionSnapshot = response.results;
-            }
         }
     }
 
@@ -3512,11 +3153,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     const float communitySignal = i < communitySupport.size()
                                                       ? std::clamp(communitySupport[i], 0.0f, 1.0f)
                                                       : 0.0f;
-                    const float lexicalAnchor = std::clamp(
-                        static_cast<float>(
-                            result.keywordScore.value_or(0.0) + result.pathScore.value_or(0.0) +
-                            result.tagScore.value_or(0.0) + result.symbolScore.value_or(0.0)),
-                        0.0f, 1.0f);
+                    const float lexicalAnchor =
+                        std::clamp(static_cast<float>(result.keywordScore.value_or(0.0) +
+                                                      result.pathScore.value_or(0.0) +
+                                                      result.tagScore.value_or(0.0)),
+                                   0.0f, 1.0f);
                     lexicalAnchors[i] = lexicalAnchor;
                     maxLexicalAnchor = std::max(maxLexicalAnchor, lexicalAnchor);
                     graphCommunitySignalMass += communitySignal;
@@ -3655,8 +3296,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             if (guardWindow > 0) {
                 const auto lexicalAnchorScore = [](const SearchResult& r) {
                     return r.keywordScore.value_or(0.0) + r.graphTextScore.value_or(0.0) +
-                           r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) +
-                           r.symbolScore.value_or(0.0);
+                           r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0);
                 };
 
                 std::vector<std::string> protectedIds;
@@ -3739,6 +3379,48 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     if (stageTraceEnabled) {
         postGraphSnapshot = response.results;
+    }
+
+    if (workingConfig.lexicalRerankDepth > 0 && metadataRepo_ && !response.results.empty()) {
+        YAMS_ZONE_SCOPED_N("search::lexical_rerank");
+        const auto lexicalStart = std::chrono::steady_clock::now();
+        auto repo = metadataRepo_;
+        detail::SemanticScorerFn semanticScorer;
+        if (auto table = staticEmbedding_) {
+            semanticScorer = [repo, table](const std::string& q,
+                                           const std::vector<std::string>& hashes)
+                -> Result<std::unordered_map<std::string, double>> {
+                return detail::staticEmbeddingScores(*table, *repo, q, hashes);
+            };
+        }
+        auto lexical = detail::applyLexicalDeepRerank(
+            response.results, query, workingConfig,
+            [repo](const std::vector<std::string>& terms, const std::vector<std::string>& hashes) {
+                return repo->bm25ForDocuments(terms, hashes);
+            },
+            semanticScorer);
+        componentTiming["lexical_rerank"] = std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now() - lexicalStart)
+                                                .count();
+        response.debugStats["lexical_rerank_depth"] = std::to_string(lexical.depth);
+        response.debugStats["lexical_rerank_matched"] = std::to_string(lexical.matched);
+        response.debugStats["lexical_rerank_applied"] =
+            lexical.status == detail::LexicalRerankOutcome::Status::Applied ? "1" : "0";
+        response.debugStats["lexical_rerank_us"] =
+            std::to_string(componentTiming["lexical_rerank"]);
+        response.debugStats["static_rerank_applied"] = lexical.semanticApplied ? "1" : "0";
+        response.debugStats["static_rerank_us"] = std::to_string(lexical.semanticMicros);
+        response.debugStats["lexical_rerank_bm25_us"] = std::to_string(lexical.lexicalMicros);
+        if (!lexical.semanticError.empty()) {
+            response.debugStats["static_rerank_error"] = lexical.semanticError;
+        }
+        if (!lexical.skipReason.empty()) {
+            response.debugStats["lexical_rerank_skip_reason"] = lexical.skipReason;
+        }
+        if (lexical.status == detail::LexicalRerankOutcome::Status::Failed) {
+            response.debugStats["lexical_rerank_error"] = lexical.errorMessage;
+            spdlog::debug("[search] lexical rerank failed: {}", lexical.errorMessage);
+        }
     }
 
     if (rerankPlan.crossEnabled) {
@@ -3960,9 +3642,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         const double lexical = lexicalAnchorScore(result);
         const double vector = result.vectorScore.value_or(0.0);
         const double kg = result.kgScore.value_or(0.0);
-        const double bestSignal =
-            std::max({lexical, vector, kg, result.pathScore.value_or(0.0),
-                      result.symbolScore.value_or(0.0), result.tagScore.value_or(0.0)});
+        const double bestSignal = std::max(
+            {lexical, vector, kg, result.pathScore.value_or(0.0), result.tagScore.value_or(0.0)});
         const double componentBonus = (lexical > 0.0 && vector > 0.0) ? 0.01 : 0.0;
         return bestSignal + componentBonus;
     };
@@ -3987,29 +3668,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             return docIdForResult(a) < docIdForResult(b);
         };
 
-    const auto rawResultHash = [](const SearchResult& r) -> const std::string& {
-        return r.document.sha256Hash.empty() ? r.document.filePath : r.document.sha256Hash;
-    };
-    // Gate: membership in the specific novel-rescue identity set (see
-    // topologyRescueEligibleHashes above). Keyed on the raw document hash/path, not
-    // docIdForResult (a different trace-id space).
-    const auto isFinalTopologyRescueCandidate = [&topologyRescueEligibleHashes,
-                                                 rawResultHash](const SearchResult& result) {
-        if (!topologyRescueEligibleHashes.contains(rawResultHash(result))) {
-            return false;
-        }
-        // Identity membership is never a bypass for having actually received topology
-        // evidence; see the matching comment in evidence_search_pipeline.cpp.
-        return result.topologyScore.has_value();
-    };
-    const auto topologyRescuePriorityForResult =
-        [&topologyRescuePriorities,
-         rawResultHash](const SearchResult& result) -> std::optional<float> {
-        const auto it = topologyRescuePriorities.find(rawResultHash(result));
-        return it != topologyRescuePriorities.end() ? std::optional<float>{it->second}
-                                                    : std::nullopt;
-    };
-
     const auto finalLexicalAwareLess = [&workingConfig](const SearchResult& a,
                                                         const SearchResult& b) {
         return detail::finalLexicalAwareLess(a, b, workingConfig.enableLexicalTieBreak,
@@ -4025,12 +3683,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::to_string(beforeScopeFilter - response.results.size());
     }
 
-    const SearchTopKLimitOutcome topKOutcome = applySearchTopKLimit(
-        response.results, workingConfig, userLimit, buriedVectorRankThreshold,
-        finalLexicalAwareLess, isFinalSemanticRescueCandidate, finalSemanticRescueBetter,
-        isBuriedFinalSemanticRescueCandidate, buriedSemanticRescueBetter,
-        isFinalEvidenceRescueCandidate, finalEvidenceRescueBetter, evidenceRescueScore,
-        docIdForResult, isFinalTopologyRescueCandidate, topologyRescuePriorityForResult);
+    const SearchTopKLimitOutcome topKOutcome =
+        applySearchTopKLimit(response.results, workingConfig, userLimit, buriedVectorRankThreshold,
+                             finalLexicalAwareLess, isFinalSemanticRescueCandidate,
+                             finalSemanticRescueBetter, isBuriedFinalSemanticRescueCandidate,
+                             buriedSemanticRescueBetter, isFinalEvidenceRescueCandidate,
+                             finalEvidenceRescueBetter, evidenceRescueScore, docIdForResult);
     const auto& semanticRescuePromotedDocIds = topKOutcome.semanticRescuePromotedDocIds;
     const auto& semanticRescueDisplacedDocIds = topKOutcome.semanticRescueDisplacedDocIds;
     const auto& buriedSemanticRescuePromotedDocIds = topKOutcome.buriedSemanticRescuePromotedDocIds;
@@ -4038,10 +3696,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         topKOutcome.buriedSemanticRescueDisplacedDocIds;
     const auto& evidenceRescuePromotedDocIds = topKOutcome.evidenceRescuePromotedDocIds;
     const auto& evidenceRescueDisplacedDocIds = topKOutcome.evidenceRescueDisplacedDocIds;
-    const auto& topologyRescuePromotedDocIds = topKOutcome.topologyRescuePromotedDocIds;
-    const auto& topologyRescueDisplacedDocIds = topKOutcome.topologyRescueDisplacedDocIds;
-    const auto& topologyRescueEligibleWindowDocIds = topKOutcome.topologyRescueEligibleWindowDocIds;
-    const auto& topologyRescueEligibleTailDocIds = topKOutcome.topologyRescueEligibleTailDocIds;
 
     size_t semanticRescueFinalCount = 0;
     std::vector<std::string> semanticRescueFinalDocIds;
@@ -4088,26 +3742,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         joinWithTab(evidenceRescuePromotedDocIds);
     response.debugStats["evidence_rescue_displaced_doc_ids"] =
         joinWithTab(evidenceRescueDisplacedDocIds);
-    response.debugStats["topology_final_rescue_enabled"] =
-        workingConfig.topologyFinalRescueSlots > 0 ? "1" : "0";
-    response.debugStats["topology_final_rescue_slots"] =
-        std::to_string(workingConfig.topologyFinalRescueSlots);
-    response.debugStats["topology_final_rescue_promoted_doc_ids"] =
-        joinWithTab(topologyRescuePromotedDocIds);
-    response.debugStats["topology_final_rescue_displaced_doc_ids"] =
-        joinWithTab(topologyRescueDisplacedDocIds);
-    response.debugStats["topology_final_rescue_eligible_window_doc_ids"] =
-        joinWithTab(topologyRescueEligibleWindowDocIds);
-    response.debugStats["topology_final_rescue_eligible_tail_doc_ids"] =
-        joinWithTab(topologyRescueEligibleTailDocIds);
-    {
-        const std::size_t eligibleReturnedCount = static_cast<std::size_t>(std::count_if(
-            response.results.begin(), response.results.end(), [&](const auto& result) {
-                return topologyRescueEligibleHashes.contains(rawResultHash(result));
-            }));
-        response.debugStats["topology_final_rescue_eligible_returned_count"] =
-            std::to_string(eligibleReturnedCount);
-    }
     response.debugStats["semantic_rescue_rate"] = fmt::format("{:.3f}", semanticRescueRate);
     response.debugStats["multi_vector_generated_phrases"] =
         std::to_string(multiVectorGeneratedPhrases);
@@ -4287,10 +3921,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats["graph_query_concept_count"] = std::to_string(graphQueryConceptCount);
     response.debugStats["graph_query_neighbor_seed_docs"] =
         std::to_string(graphQueryNeighborSeedDocCount);
-    response.debugStats["graph_window_guard_replacement_count"] =
-        std::to_string(graphWindowGuardReplacementCount);
-    response.debugStats["graph_window_cap_replacement_count"] =
-        std::to_string(graphWindowCapReplacementCount);
     response.debugStats["graph_rerank_guard_replacement_count"] =
         std::to_string(graphRerankGuardReplacementCount);
     response.debugStats["graph_matched_candidates"] = std::to_string(graphMatchedCandidates);
@@ -5331,6 +4961,10 @@ void SearchEngine::setConceptExtractor(EntityExtractionFunc extractor) {
 
 void SearchEngine::setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
     pImpl_->setSimeonLexicalBackend(std::move(backend));
+}
+
+void SearchEngine::setStaticEmbedding(std::shared_ptr<const simeon::StaticEmbedding> table) {
+    pImpl_->setStaticEmbedding(std::move(table));
 }
 
 void SearchEngine::setCrossReranker(CrossRerankScorer scorer, std::string scoringMode) {

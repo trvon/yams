@@ -375,11 +375,9 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
         if (!metadataLoaded) {
             if (auto metadata = extractUsingFFProbe(path)) {
                 audioMeta = *metadata;
-                metadataLoaded = true;
             } else if (path.extension() == ".wav") {
                 if (auto wavMeta = analyzeWAVHeader(path)) {
                     audioMeta = *wavMeta;
-                    metadataLoaded = true;
                 }
             }
 
@@ -387,7 +385,6 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
             if (path.extension() == ".mp3") {
                 if (auto id3v1 = extractID3v1(path)) {
                     audioMeta.tags = *id3v1;
-                    metadataLoaded = true;
                 }
             }
         }
@@ -466,39 +463,6 @@ std::unique_ptr<AudioContentHandler> createAudioHandler(AudioProcessingConfig co
     return std::make_unique<AudioContentHandler>(std::move(config));
 }
 
-bool isAudioFile(const std::filesystem::path& path) {
-    const std::string ext = path.extension().string();
-    return std::ranges::find(audioExtensions, ext) != audioExtensions.end();
-}
-
-AudioFormat getAudioFormatFromExtension(std::string_view extension) {
-    if (extension == ".mp3")
-        return AudioFormat::MP3;
-    if (extension == ".wav")
-        return AudioFormat::WAV;
-    if (extension == ".flac")
-        return AudioFormat::FLAC;
-    if (extension == ".ogg")
-        return AudioFormat::OGG;
-    if (extension == ".aac")
-        return AudioFormat::AAC;
-    if (extension == ".mp4")
-        return AudioFormat::MP4;
-    if (extension == ".m4a")
-        return AudioFormat::M4A;
-    if (extension == ".wma")
-        return AudioFormat::WMA;
-    if (extension == ".aiff")
-        return AudioFormat::AIFF;
-    if (extension == ".ape")
-        return AudioFormat::APE;
-    if (extension == ".opus")
-        return AudioFormat::OPUS;
-    if (extension == ".amr")
-        return AudioFormat::AMR;
-    return AudioFormat::Unknown;
-}
-
 std::vector<std::string> getExtensionsForFormat(AudioFormat format) {
     switch (format) {
         case AudioFormat::MP3:
@@ -528,12 +492,6 @@ std::vector<std::string> getExtensionsForFormat(AudioFormat format) {
         default:
             return {};
     }
-}
-
-std::optional<double> estimateDuration(size_t fileSize, uint32_t bitrate) {
-    if (bitrate == 0)
-        return std::nullopt;
-    return static_cast<double>(fileSize) * 8.0 / static_cast<double>(bitrate);
 }
 
 bool isMetadataComplete(const ExtendedAudioMetadata& metadata) {

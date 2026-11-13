@@ -1,3 +1,4 @@
+#include <yams/config/config_helpers.h>
 #include <yams/mcp/mcp_server.h>
 
 #include <spdlog/spdlog.h>
@@ -43,12 +44,12 @@ StdioTransport::StdioTransport() {
     // the caller's stream buffers and synchronization policy.
 
     // Configure receive timeout from environment, enforce a sane minimum
-    if (const char* env = std::getenv("YAMS_MCP_RECV_TIMEOUT_MS"); env && *env) {
+    if (const auto env = yams::config::getenv_nonempty("YAMS_MCP_RECV_TIMEOUT_MS")) {
         try {
-            recvTimeoutMs_ = std::stoi(env);
+            recvTimeoutMs_ = std::stoi(*env);
             if (recvTimeoutMs_ < 50)
                 recvTimeoutMs_ = 50;
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // ignore and keep default
         }
     }
@@ -63,7 +64,7 @@ StdioTransport::~StdioTransport() {
     if (writerThread_.joinable()) {
         try {
             writerThread_.join();
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // swallow any join exceptions
         }
     }
@@ -235,7 +236,7 @@ MessageResult StdioTransport::receive() {
                     return Error{ErrorCode::NetworkError, "External shutdown requested"};
                 }
                 if (idleIterations++ >= kTestingIdleSpinLimit) {
-                    state_.store(TransportState::Disconnected);
+                    leaveUnlessClosing(TransportState::Disconnected);
                     return Error{ErrorCode::NetworkError, "No stdin data available"};
                 }
                 std::this_thread::yield();
@@ -247,7 +248,7 @@ MessageResult StdioTransport::receive() {
             if (!std::getline(in, line)) {
                 recordError();
                 if (!shouldRetryAfterError()) {
-                    state_.store(TransportState::Disconnected);
+                    leaveUnlessClosing(TransportState::Disconnected);
                     return Error{ErrorCode::NetworkError, "No stdin data available"};
                 }
                 std::this_thread::yield();
@@ -264,7 +265,7 @@ MessageResult StdioTransport::receive() {
 
                 if (std::cin.eof()) {
                     spdlog::info("StdioTransport: EOF on stdin; treating as client disconnect");
-                    state_.store(TransportState::Disconnected);
+                    leaveUnlessClosing(TransportState::Disconnected);
                     return Error{ErrorCode::NetworkError, "EOF on stdin"};
                 }
 
@@ -292,7 +293,7 @@ MessageResult StdioTransport::receive() {
                 spdlog::error("StdioTransport: Failed to parse JSON: {}", line);
                 recordError();
                 if (!shouldRetryAfterError())
-                    state_.store(TransportState::Error);
+                    leaveUnlessClosing(TransportState::Error);
                 return parsed.error();
             }
             resetErrorCount();
@@ -303,11 +304,17 @@ MessageResult StdioTransport::receive() {
         spdlog::error("StdioTransport: Invalid message format (expected NDJSON): {}", line);
         recordError();
         if (!shouldRetryAfterError())
-            state_.store(TransportState::Error);
+            leaveUnlessClosing(TransportState::Error);
         return Error{ErrorCode::InvalidData, "Invalid message format - expected NDJSON"};
     }
 
     return Error{ErrorCode::NetworkError, "Transport closed during receive"};
+}
+
+void StdioTransport::leaveUnlessClosing(TransportState next) noexcept {
+    auto current = state_.load();
+    while (current != TransportState::Closing && !state_.compare_exchange_weak(current, next)) {
+    }
 }
 
 bool StdioTransport::shouldRetryAfterError() const noexcept {

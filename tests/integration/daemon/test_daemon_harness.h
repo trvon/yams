@@ -3,14 +3,17 @@
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
 #include <optional>
 #include <random>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -187,14 +190,27 @@ public:
 
     bool start(std::chrono::milliseconds timeout = std::chrono::seconds(10),
                PreRunLoopCallback preRunLoopCallback = nullptr) {
+        lastStartError_.clear();
+        bool started = false;
         try {
-            return startUnchecked(timeout, std::move(preRunLoopCallback));
+            started = startUnchecked(timeout, std::move(preRunLoopCallback));
         } catch (const std::exception& error) {
             spdlog::error("[DaemonHarness] Startup threw: {}", error.what());
+            lastStartError_ = std::string("startup threw: ") + error.what();
+            rollbackFailedStart();
         } catch (...) {
             spdlog::error("[DaemonHarness] Startup threw an unknown exception");
+            lastStartError_ = "startup threw an unknown exception";
+            rollbackFailedStart();
         }
-        rollbackFailedStart();
+        if (started) {
+            startAttemptErrors_.clear();
+            return true;
+        }
+        startAttemptErrors_.push_back(
+            "attempt " + std::to_string(startAttemptErrors_.size() + 1) + " (" +
+            std::to_string(timeout.count()) +
+            "ms): " + (lastStartError_.empty() ? "(no reason recorded)" : lastStartError_));
         return false;
     }
 
@@ -203,12 +219,14 @@ private:
         ensureDefaultLogger();
         if (daemon_ || runLoopThread_.joinable()) {
             spdlog::error("[DaemonHarness] start called while a prior start is active");
+            lastStartError_ = "start called while a prior start is active";
             return false;
         }
         if (!claimEndpointNamespace()) {
             return false;
         }
         shutdownSucceeded_ = false;
+        backgroundFailed_.store(false, std::memory_order_release);
         startAttempted_ = true;
         // Always create new daemon instance on start()
         // (daemon cannot be restarted after stop() - must create new instance)
@@ -236,6 +254,8 @@ private:
             if (!configFile) {
                 spdlog::error("[DaemonHarness] Failed to create isolated config: {}",
                               effectiveConfigPath->string());
+                lastStartError_ =
+                    "failed to create isolated config " + effectiveConfigPath->string();
                 rollbackFailedStart();
                 return false;
             }
@@ -289,6 +309,7 @@ private:
         auto s = daemon_->start();
         if (!s) {
             spdlog::error("[DaemonHarness] daemon_->start() failed: {}", s.error().message);
+            lastStartError_ = "YamsDaemon::start() failed: " + s.error().message;
             stop();
             return false;
         }
@@ -302,10 +323,12 @@ private:
                 preRunLoopCallback(daemon_.get());
             } catch (const std::exception& error) {
                 spdlog::error("[DaemonHarness] pre-runLoop callback failed: {}", error.what());
+                lastStartError_ = std::string("pre-runLoop callback failed: ") + error.what();
                 stop();
                 return false;
             } catch (...) {
                 spdlog::error("[DaemonHarness] pre-runLoop callback failed");
+                lastStartError_ = "pre-runLoop callback failed";
                 stop();
                 return false;
             }
@@ -313,7 +336,13 @@ private:
 
 #ifdef YAMS_TESTING
         if (!preRunLoopCallback && !options_.enableAutoRepair) {
-            daemon_->testingStartAsyncInitWithoutRunLoop();
+            auto entry = daemon_->testingStartAsyncInitWithoutRunLoopChecked();
+            if (!entry) {
+                spdlog::error("[DaemonHarness] Async init entry failed: {}", entry.error().message);
+                lastStartError_ = "async init entry failed: " + entry.error().message;
+                stop();
+                return false;
+            }
             spdlog::info("[DaemonHarness] Async init triggered without runLoop thread, polling for "
                          "daemon Ready state...");
         } else
@@ -322,11 +351,29 @@ private:
             // Start runLoop in background thread - this triggers async initialization
             // Without runLoop(), ServiceManager::startAsyncInit() is never called
             runLoopThread_ = std::thread([this]() {
-                daemon_->runLoop();
-                auto stopResult = daemon_->stop();
-                if (!stopResult && daemon_->isRunning()) {
-                    spdlog::warn("[DaemonHarness] Background stop after runLoop returned error: {}",
-                                 stopResult.error().message);
+                try {
+                    auto entry = daemon_->runLoopChecked();
+                    if (!entry) {
+                        backgroundFailed_.store(true, std::memory_order_release);
+                        spdlog::error("[DaemonHarness] Background entry failed: {}",
+                                      entry.error().message);
+                        daemon_->requestStop();
+                    }
+                    auto stopResult = daemon_->stopOrAwaitClose(std::chrono::seconds{30});
+                    if (!stopResult) {
+                        backgroundFailed_.store(true, std::memory_order_release);
+                        spdlog::error("[DaemonHarness] Background stop failed: {}",
+                                      stopResult.error().message);
+                    }
+                } catch (const std::exception& error) {
+                    backgroundFailed_.store(true, std::memory_order_release);
+                    spdlog::error("[DaemonHarness] Background lifecycle exception: {}",
+                                  error.what());
+                    daemon_->requestStop();
+                } catch (...) {
+                    backgroundFailed_.store(true, std::memory_order_release);
+                    spdlog::error("[DaemonHarness] Unknown background lifecycle exception");
+                    daemon_->requestStop();
                 }
             });
             spdlog::info(
@@ -356,14 +403,21 @@ private:
         }
         spdlog::error("[DaemonHarness] Daemon Ready but socket connection failed at: {}",
                       sock_.string());
+        lastStartError_ = "daemon reached Ready but the socket did not accept a connection";
         stop();
         return false;
     }
 
 public:
+    // Each failed attempt's reason is kept (see startupDiagnostics()); a sequence starts fresh.
     [[nodiscard]] bool startWithRetry(std::chrono::milliseconds timeout, std::size_t maxAttempts,
-                                      PreRunLoopCallback preRunLoopCallback = nullptr) {
+                                      PreRunLoopCallback preRunLoopCallback = nullptr,
+                                      std::chrono::milliseconds retryDelay = {}) {
+        startAttemptErrors_.clear();
         for (std::size_t attempt = 0; attempt < maxAttempts; ++attempt) {
+            if (attempt > 0 && retryDelay.count() > 0) {
+                std::this_thread::sleep_for(retryDelay);
+            }
             if (start(timeout, preRunLoopCallback)) {
                 return true;
             }
@@ -394,7 +448,7 @@ public:
             // daemon_main by calling stop() after runLoop() returns on remote shutdown.
             if (daemon_->isRunning() ||
                 !daemon_->waitForStopCompletion(std::chrono::milliseconds(0))) {
-                auto stopResult = daemon_->stop();
+                auto stopResult = daemon_->stopOrAwaitClose(std::chrono::seconds{30});
                 stopCallSucceeded = static_cast<bool>(stopResult);
                 if (!stopResult) {
                     spdlog::warn("[DaemonHarness] Daemon stop returned error: {}",
@@ -402,9 +456,20 @@ public:
                 }
             }
 
+            // A failed retained owner is not stopped merely because running has been withdrawn.
+            // Leave dependencies and global IO intact for a later checked retry/destructor drain.
+            if (!stopCallSucceeded) {
+                shutdownSucceeded_ = false;
+                return;
+            }
             const bool stopped =
-                wait_for_condition(std::chrono::seconds(2), std::chrono::milliseconds(10),
-                                   [this] { return !daemon_->isRunning(); });
+                daemon_->waitForStopCompletion(std::chrono::seconds{30}) && !daemon_->isRunning();
+            if (!stopped) {
+                spdlog::error(
+                    "[DaemonHarness] Close completion unconfirmed; retaining dependencies");
+                shutdownSucceeded_ = false;
+                return;
+            }
             spdlog::info("[DaemonHarness] Daemon stopped (running={}), resetting instance...",
                          daemon_->isRunning());
 
@@ -461,6 +526,55 @@ public:
         }
     }
 
+    // Why every failed start() attempt since the last success (or the start of the current
+    // startWithRetry() sequence) was rejected, plus the endpoint paths and the daemon log tail
+    // when one was written. Intended for FAIL() messages so a startup failure is reported as a
+    // failure with evidence rather than skipped.
+    [[nodiscard]] std::string startupDiagnostics(std::size_t logTailLines = 40) const {
+        constexpr std::streamoff kMaxLogBytes = 64 * 1024;
+        constexpr std::size_t kMaxLineChars = 400;
+        std::ostringstream out;
+        out << "start attempts:";
+        if (startAttemptErrors_.empty()) {
+            out << " (none failed)";
+        }
+        for (const auto& attemptError : startAttemptErrors_) {
+            out << "\n  " << attemptError;
+        }
+        out << "\nsocket: " << sock_.string() << "\ndata dir: " << data_.string()
+            << "\nlog file: " << log_.string();
+        std::ifstream log(log_, std::ios::binary);
+        if (!log) {
+            out << " (not written)";
+            return out.str();
+        }
+        // Read only the last kMaxLogBytes; a partial first line is dropped.
+        log.seekg(0, std::ios::end);
+        const std::streamoff size = log.tellg();
+        const bool seeked = size > kMaxLogBytes;
+        log.seekg(seeked ? size - kMaxLogBytes : 0, std::ios::beg);
+        std::deque<std::string> tail;
+        std::string line;
+        if (seeked) {
+            std::getline(log, line);
+        }
+        while (std::getline(log, line)) {
+            if (line.size() > kMaxLineChars) {
+                line.resize(kMaxLineChars);
+                line += "...";
+            }
+            tail.push_back(std::move(line));
+            if (tail.size() > logTailLines) {
+                tail.pop_front();
+            }
+        }
+        out << "\nlog tail (" << tail.size() << " lines):";
+        for (const auto& tailLine : tail) {
+            out << "\n  " << tailLine;
+        }
+        return out.str();
+    }
+
     const std::filesystem::path& socketPath() const { return sock_; }
     const std::filesystem::path& proxySocketPath() const { return proxySock_; }
     const std::filesystem::path& pidPath() const { return pid_; }
@@ -474,12 +588,18 @@ private:
         const bool reachedTerminal =
             wait_for_condition(timeout, std::chrono::milliseconds(20), [this] {
                 const auto state = daemon_->getLifecycle().snapshot().state;
-                return state == yams::daemon::LifecycleState::Ready ||
+                return backgroundFailed_.load(std::memory_order_acquire) ||
+                       state == yams::daemon::LifecycleState::Ready ||
                        (!options_.requireReadyLifecycle &&
                         state == yams::daemon::LifecycleState::Degraded) ||
                        state == yams::daemon::LifecycleState::Failed;
             });
         const auto lifecycle = daemon_->getLifecycle().snapshot();
+        if (backgroundFailed_.load(std::memory_order_acquire)) {
+            spdlog::error("[DaemonHarness] Rejected failed background lifecycle entry/close");
+            lastStartError_ = "background runLoop entry/close failed";
+            return false;
+        }
         const bool usable = lifecycle.state == yams::daemon::LifecycleState::Ready ||
                             (!options_.requireReadyLifecycle &&
                              lifecycle.state == yams::daemon::LifecycleState::Degraded);
@@ -491,12 +611,17 @@ private:
         if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
             spdlog::error("[DaemonHarness] Daemon lifecycle reached Failed state: {}",
                           lifecycle.lastError);
+            lastStartError_ = "lifecycle reached Failed: " + lifecycle.lastError;
             return false;
         }
         spdlog::error("[DaemonHarness] {} waiting for usable lifecycle after {}ms "
                       "(current state: {})",
                       reachedTerminal ? "Rejected lifecycle state while" : "Timeout",
                       timeout.count(), static_cast<int>(lifecycle.state));
+        lastStartError_ = std::string(reachedTerminal ? "rejected lifecycle state "
+                                                      : "timed out waiting for usable lifecycle ") +
+                          std::to_string(static_cast<int>(lifecycle.state)) + " after " +
+                          std::to_string(timeout.count()) + "ms";
         return false;
     }
 
@@ -564,6 +689,7 @@ private:
         if (!std::filesystem::create_directory(ownershipMarker_, ec)) {
             spdlog::error("[DaemonHarness] Socket namespace is already claimed: {} ({})",
                           sock_.string(), ec ? ec.message() : "ownership marker exists");
+            lastStartError_ = "socket namespace already claimed";
             return false;
         }
         endpointClaimed_ = true;
@@ -572,6 +698,7 @@ private:
             spdlog::error("[DaemonHarness] Refusing pre-existing daemon artifacts in claimed "
                           "namespace: {}",
                           sock_.string());
+            lastStartError_ = "pre-existing daemon artifacts in the claimed socket namespace";
             releaseEndpointNamespace();
             return false;
         }
@@ -695,6 +822,7 @@ private:
 
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
     std::thread runLoopThread_; // Background thread for runLoop
+    std::atomic<bool> backgroundFailed_{false};
     std::filesystem::path root_, data_, sock_, proxySock_, pid_, log_;
     std::filesystem::path ownershipMarker_;
     std::filesystem::path originalCwd_;
@@ -702,6 +830,9 @@ private:
     bool endpointClaimed_ = false;
     bool shutdownSucceeded_ = false;
     bool startAttempted_ = false;
+    // mutable: waitForUsableLifecycle() is const but records why startup was rejected.
+    mutable std::string lastStartError_;
+    std::vector<std::string> startAttemptErrors_;
     std::optional<ScopedEnvVar> xdgStateEnvironment_;
     std::optional<ScopedEnvVar> xdgConfigEnvironment_;
     std::optional<ScopedEnvVar> configEnvironment_;

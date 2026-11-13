@@ -139,7 +139,7 @@ const CachedDaemonState& DoctorContext::cachedState() const {
                     state.stats = std::move(gres.value());
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
     }
 
@@ -160,7 +160,7 @@ void DoctorContext::ensureDaemonStopped() {
         auto leaseHandle = std::move(leaseRes.value());
         auto& shut = **leaseHandle;
         (void)run_result(shut.shutdown(true), std::chrono::seconds(6));
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 }
 
@@ -186,27 +186,6 @@ uint64_t DoctorContext::walFileSize(const std::filesystem::path& dataDir,
     std::error_code ec;
     auto sz = std::filesystem::file_size(dataDir / dbName, ec);
     return ec ? 0 : static_cast<uint64_t>(sz);
-}
-
-void DoctorContext::forceWalCheckpointLocal(const std::filesystem::path& dbPath) {
-    sqlite3* db = nullptr;
-    if (sqlite3_open(dbPath.string().c_str(), &db) != SQLITE_OK) {
-        spdlog::warn("[DoctorContext] Failed to open {} for WAL checkpoint: {}", dbPath.string(),
-                     sqlite3_errmsg(db));
-        if (db)
-            sqlite3_close(db);
-        return;
-    }
-    int nLog = 0, nCkpt = 0;
-    int rc = sqlite3_wal_checkpoint_v2(db, nullptr, SQLITE_CHECKPOINT_TRUNCATE, &nLog, &nCkpt);
-    if (rc == SQLITE_OK) {
-        spdlog::info("[DoctorContext] Forced TRUNCATE checkpoint on {}: {}/{} frames",
-                     dbPath.string(), nCkpt, nLog);
-    } else {
-        spdlog::warn("[DoctorContext] WAL checkpoint on {} failed: {}", dbPath.string(),
-                     sqlite3_errmsg(db));
-    }
-    sqlite3_close(db);
 }
 
 R2ConfigStatus DoctorContext::evaluateR2Config() {

@@ -9,21 +9,38 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <fstream>
+#include <iomanip>
 #include <map>
 #include <optional>
 #include <ranges>
 #include <shared_mutex>
 #include <sstream>
+#include <string>
 #include <string_view>
 #include <vector>
 
 #include <yams/common/fs_utils.h>
 #include <yams/compression/compressor_interface.h>
 #include <yams/core/atomic_utils.h>
+#include <yams/core/thread_name.h>
 
 namespace {
+
+// Thread-safe replacement for std::localtime + std::put_time.
+std::string formatLocalTime(std::time_t t, const char* format) {
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&tm, format);
+    return out.str();
+}
 
 bool isCompressedWalLog(const std::filesystem::path& path) {
     return path.extension() == ".zst" && path.stem().extension() == ".log";
@@ -48,7 +65,7 @@ bool isEmptyWalSegment(const std::filesystem::path& path) {
         return true;
     }
     std::ifstream in(path, std::ios::binary);
-    std::array<char, 64 * 1024> buffer{};
+    std::array<char, 64ULL * 1024> buffer{};
     std::uintmax_t remaining = size;
     while (remaining > 0) {
         const auto count =
@@ -76,6 +93,15 @@ compressionAlgorithmForPath(const std::filesystem::path& path) {
 } // namespace
 
 namespace yams::wal {
+
+std::chrono::milliseconds nextSyncWait(std::size_t pendingEntries,
+                                       std::chrono::milliseconds syncTimeout,
+                                       std::chrono::milliseconds idleSyncTimeout) noexcept {
+    if (pendingEntries > 0) {
+        return syncTimeout;
+    }
+    return std::max(syncTimeout, idleSyncTimeout);
+}
 
 // Transaction implementation
 struct Transaction::Impl {
@@ -303,7 +329,7 @@ struct WALManager::Impl {
         auto timeT = std::chrono::system_clock::to_time_t(timestamp);
 
         std::stringstream filename;
-        filename << "wal_" << std::put_time(std::localtime(&timeT), "%Y%m%d_%H%M%S") << "_"
+        filename << "wal_" << formatLocalTime(timeT, "%Y%m%d_%H%M%S") << "_"
                  << sequenceNumber.load() << ".log";
 
         currentLogPath = config.walDirectory / filename.str();
@@ -324,14 +350,19 @@ struct WALManager::Impl {
     }
 
     void backgroundSync() {
+        yams::setCurrentThreadName("yams-wal-sync");
         while (running) {
             auto lockStart = std::chrono::steady_clock::now();
             std::unique_lock lock(stateMutex);
             recordExclusiveLockWait(std::chrono::steady_clock::now() - lockStart, "backgroundSync");
 
-            // Wait for entries or timeout
-            syncCv.wait_for(lock, config.syncTimeout,
-                            [this] { return !pendingEntries.empty() || !running; });
+            // Wait for entries or timeout. With nothing pending there is nothing to sync, so
+            // wait the idle timeout instead of waking every syncTimeout (10 wakes/s at the
+            // default 100 ms); append() and stop() notify the condition variable.
+            syncCv.wait_for(
+                lock,
+                nextSyncWait(pendingEntries.size(), config.syncTimeout, config.idleSyncTimeout),
+                [this] { return !pendingEntries.empty() || !running; });
 
             if (!running)
                 break;
@@ -554,7 +585,7 @@ Result<void> WALManager::initialize() {
         try {
             uint64_t seq = std::stoull(stem.substr(lastUnderscore + 1));
             maxSeq = std::max(maxSeq, seq);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Ignore parsing errors for unexpected filenames
         }
     }
@@ -916,13 +947,6 @@ Result<void> WALManager::sync() {
 
 uint64_t WALManager::getCurrentSequence() const {
     return pImpl->sequenceNumber.load();
-}
-
-size_t WALManager::getPendingEntries() const {
-    auto lockStart = std::chrono::steady_clock::now();
-    std::shared_lock lock(pImpl->stateMutex);
-    pImpl->recordSharedLockWait(std::chrono::steady_clock::now() - lockStart);
-    return pImpl->pendingEntries.size();
 }
 
 std::filesystem::path WALManager::getCurrentLogPath() const {

@@ -1,3 +1,6 @@
+#include <atomic>
+#include <latch>
+#include <thread>
 #include <catch2/catch_test_macros.hpp>
 
 #include "../../common/test_helpers_catch2.h"
@@ -104,6 +107,12 @@ TEST_CASE_METHOD(IntegrityVerifierFixture, "ConstructorAndDestructor", "[integri
     const auto& stats = verifier->getStatistics();
     CHECK(stats.blocksVerifiedTotal.load() == 0);
     CHECK(stats.verificationErrorsTotal.load() == 0);
+
+    const auto report = verifier->generateReport();
+    CHECK(report.blocksVerified == 0u);
+    CHECK(report.blocksPassed == 0u);
+    CHECK(report.blocksFailed == 0u);
+    CHECK(verifier->getRecentFailures().empty());
 }
 
 TEST_CASE_METHOD(IntegrityVerifierFixture, "VerifyValidBlock", "[integrity][verifier]") {
@@ -357,5 +366,27 @@ TEST_CASE_METHOD(IntegrityVerifierFixture, "Verifier shutdown does not lose the 
     for (int i = 0; i < 400; ++i) {
         IntegrityVerifier churn(*storageEngine, *refCounter, config);
         CHECK_FALSE(churn.isRunning());
+    }
+}
+
+// startBackgroundVerification() checked running and set it separately, so concurrent starts
+// could all report success.
+TEST_CASE_METHOD(IntegrityVerifierFixture, "Concurrent background starts admit exactly one",
+                 "[integrity][verifier][lifecycle]") {
+    for (int round = 0; round < 200; ++round) {
+        std::latch go(4);
+        std::atomic<int> ok{0};
+        std::vector<std::thread> workers;
+        for (int i = 0; i < 4; ++i) {
+            workers.emplace_back([&] {
+                go.arrive_and_wait();
+                if (verifier->startBackgroundVerification().has_value())
+                    ok.fetch_add(1);
+            });
+        }
+        for (auto& t : workers)
+            t.join();
+        CHECK(ok.load() == 1);
+        REQUIRE(verifier->stopBackgroundVerification().has_value());
     }
 }

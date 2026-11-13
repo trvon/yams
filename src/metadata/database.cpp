@@ -864,29 +864,6 @@ std::string Database::version() {
     return sqlite3_libversion();
 }
 
-DatabaseError Database::translateError(int sqliteError) {
-    switch (sqliteError) {
-        case SQLITE_BUSY:
-            return DatabaseError::Busy;
-        case SQLITE_LOCKED:
-            return DatabaseError::Locked;
-        case SQLITE_CORRUPT:
-            return DatabaseError::Corrupt;
-        case SQLITE_NOTFOUND:
-            return DatabaseError::NotFound;
-        case SQLITE_CONSTRAINT:
-            return DatabaseError::ConstraintViolation;
-        case SQLITE_MISMATCH:
-            return DatabaseError::TypeMismatch;
-        default:
-            return DatabaseError::Unknown;
-    }
-}
-
-std::string Database::getErrorMessage() const {
-    return db_ ? sqlite3_errmsg(db_) : "No database connection";
-}
-
 // QueryBuilder implementation
 QueryBuilder& QueryBuilder::select(const std::vector<std::string>& columns) {
     type_ = QueryType::Select;
@@ -910,18 +887,8 @@ QueryBuilder& QueryBuilder::andWhere(const std::string& condition) {
     return *this;
 }
 
-QueryBuilder& QueryBuilder::orWhere(const std::string& condition) {
-    whereClauses_.push_back("OR " + condition);
-    return *this;
-}
-
 QueryBuilder& QueryBuilder::join(const std::string& table, const std::string& on) {
     joinClauses_.push_back("JOIN " + table + " ON " + on);
-    return *this;
-}
-
-QueryBuilder& QueryBuilder::leftJoin(const std::string& table, const std::string& on) {
-    joinClauses_.push_back("LEFT JOIN " + table + " ON " + on);
     return *this;
 }
 
@@ -969,12 +936,6 @@ QueryBuilder& QueryBuilder::update(const std::string& table) {
 
 QueryBuilder& QueryBuilder::set(const std::string& column, const std::string& placeholder) {
     setClauses_.push_back({column, placeholder});
-    return *this;
-}
-
-QueryBuilder& QueryBuilder::deleteFrom(const std::string& table) {
-    type_ = QueryType::Delete;
-    table_ = table;
     return *this;
 }
 

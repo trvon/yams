@@ -292,7 +292,7 @@ std::vector<std::string> AbiModelProviderAdapter::getLoadedModels() const {
             if (ids && ids[i])
                 out.emplace_back(ids[i]);
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         // Intentional best-effort path; keep the primary operation unaffected.
     }
     if (table_->free_model_list)
@@ -332,7 +332,7 @@ Result<ModelInfo> AbiModelProviderAdapter::getModelInfo(const std::string& model
                 if (j.contains("runtime_version")) {
                     (void)j["runtime_version"]; // could be surfaced later
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Intentional best-effort path; keep the primary operation unaffected.
             }
         }

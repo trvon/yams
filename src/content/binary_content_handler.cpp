@@ -243,7 +243,7 @@ size_t BinaryContentHandler::calculateEntropy(std::span<const std::byte> data) c
 
     for (size_t freq : frequencies) {
         if (freq > 0) {
-            double probability = freq / dataSize;
+            double probability = static_cast<double>(freq) / dataSize;
             entropy -= probability * std::log2(probability);
         }
     }
@@ -294,23 +294,6 @@ BinaryContentHandler::detectFileCharacteristics(std::span<const std::byte> data)
     }
 
     return {isExecutable, isCompressed, isEncrypted};
-}
-
-std::unordered_map<std::string, std::string>
-BinaryContentHandler::extractHeaderInfo(std::span<const std::byte> data,
-                                        const detection::FileSignature& signature) const {
-    std::unordered_map<std::string, std::string> headerInfo;
-
-    headerInfo["magic_number"] = signature.magicNumber;
-    headerInfo["mime_type"] = signature.mimeType;
-    headerInfo["file_type"] = signature.fileType;
-    headerInfo["confidence"] = std::to_string(signature.confidence);
-
-    if (data.size() >= 16) {
-        headerInfo["header_hex"] = detection::FileTypeDetector::bytesToHex(data.subspan(0, 16));
-    }
-
-    return headerInfo;
 }
 
 ContentResult
@@ -389,30 +372,6 @@ BinaryContentHandler::ProcessingStats BinaryContentHandler::getStats() const noe
                            .failedProcessing = failedProcessing_.load(),
                            .totalProcessingTime = totalProcessingTime_.load(),
                            .totalBytesProcessed = totalBytesProcessed_.load()};
-}
-
-// Factory function implementation
-std::unique_ptr<BinaryContentHandler> createBinaryHandler(BinaryProcessingConfig config) {
-    return std::make_unique<BinaryContentHandler>(std::move(config));
-}
-
-// Helper function implementations
-bool isLikelyBinaryFile(const std::filesystem::path& path) {
-    auto& detector = detection::FileTypeDetector::instance();
-    auto result = detector.detectFromFile(path);
-
-    if (result) {
-        return result.value().isBinary;
-    }
-
-    // Fallback to extension-based detection
-    return getBinaryFileExtensions().contains(path.extension().string());
-}
-
-std::unordered_set<std::string> getBinaryFileExtensions() {
-    return {".exe",    ".dll", ".so",  ".dylib", ".bin", ".dat", ".db",
-            ".sqlite", ".zip", ".tar", ".gz",    ".bz2", ".xz",  ".7z",
-            ".rar",    ".iso", ".img", ".dmg",   ".pkg", ".deb", ".rpm"};
 }
 
 } // namespace yams::content

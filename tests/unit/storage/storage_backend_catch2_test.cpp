@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -71,7 +72,7 @@ inline std::vector<std::byte> generateDeterministicData(size_t size, uint8_t see
     return data;
 }
 
-inline std::vector<std::byte> bytesOf(std::string_view value) {
+inline std::vector<std::byte> fsBytes(std::string_view value) {
     std::vector<std::byte> out;
     out.reserve(value.size());
     for (char ch : value) {
@@ -303,7 +304,7 @@ TEST_CASE("FilesystemBackend - Rejects unsafe object keys",
     const auto storagePath = testDir.subdir("storage");
     auto backend = createFilesystemBackend(storagePath);
     REQUIRE(backend != nullptr);
-    const auto data = bytesOf("must-stay-contained");
+    const auto data = fsBytes("must-stay-contained");
 
     const std::vector<std::string> invalidKeys = {
         "",
@@ -332,13 +333,10 @@ TEST_CASE("FilesystemBackend - Rejects unsafe object keys",
     CHECK(backend->retrieve("valid/nested/key").value() == data);
 
 #ifndef _WIN32
+    // Hierarchical keys live under objects/ns/<directories>.
     const std::string symlinkKey = "pivot/escaped";
-    auto hasher = crypto::createSHA256Hasher();
-    const auto hash = hasher->hash(std::span<const std::byte>(
-        reinterpret_cast<const std::byte*>(symlinkKey.data()), symlinkKey.size()));
-    REQUIRE(hash.size() >= 4);
-    const auto shard = storagePath / "objects" / hash.substr(0, 2) / hash.substr(2, 2);
-    REQUIRE(fs::create_directories(shard));
+    const auto shard = storagePath / "objects" / "ns";
+    REQUIRE(fs::is_directory(shard));
 
     const auto outside = testDir.subdir("outside");
     REQUIRE(fs::create_directories(outside));
@@ -427,7 +425,7 @@ TEST_CASE("FilesystemBackend - long object paths support CRUD and listing",
     REQUIRE(recordHash.size() < 255);
     REQUIRE((storagePath / "objects" / "00" / "00" / key).native().size() > 300);
 
-    const auto original = bytesOf("long-path-original");
+    const auto original = fsBytes("long-path-original");
     REQUIRE(backend->store(key, original));
 
     const auto existsAfterStore = backend->exists(key);
@@ -443,7 +441,7 @@ TEST_CASE("FilesystemBackend - long object paths support CRUD and listing",
     REQUIRE(listed.value().size() == 1);
     CHECK(listed.value().front() == key);
 
-    const auto updated = bytesOf("long-path-updated");
+    const auto updated = fsBytes("long-path-updated");
     REQUIRE(backend->store(key, updated));
     const auto retrievedAfterUpdate = backend->retrieve(key);
     REQUIRE(retrievedAfterUpdate);
@@ -651,7 +649,7 @@ TEST_CASE("FilesystemBackend - Listing cancellation interrupts the directory wal
     REQUIRE(backend != nullptr);
     const std::vector<std::byte> value{std::byte{42}};
     for (int i = 0; i < 16; ++i) {
-        REQUIRE(backend->store("unrelated/" + std::to_string(i), value).has_value());
+        REQUIRE(backend->store("index/" + std::to_string(i), value).has_value());
     }
     const bool paged = GENERATE(false, true);
     const auto list = [&]() -> Result<std::size_t> {
@@ -688,7 +686,7 @@ TEST_CASE("FilesystemBackend - Listing cancellation interrupts the directory wal
     backend->resetCancel();
     const auto restarted = list();
     REQUIRE(restarted.has_value());
-    CHECK(restarted.value() == 0);
+    CHECK(restarted.value() == (paged ? 1U : 16U));
     CHECK(stats.entriesVisited >= 16);
 }
 
@@ -706,7 +704,7 @@ TEST_CASE("FilesystemBackend - Page-boundary traversal and retained keys",
         expected.push_back("index/" + std::to_string(10'000 + i));
         REQUIRE(backend->store(expected.back(), value).has_value());
     }
-    // A prefix filter must not hide unrelated objects from traversal accounting.
+    // Other namespaces live in their own subtrees, so a prefix listing never visits them.
     REQUIRE(backend->store("blob/unrelated", value).has_value());
     REQUIRE(backend->store("history/unrelated", value).has_value());
 
@@ -736,13 +734,236 @@ TEST_CASE("FilesystemBackend - Page-boundary traversal and retained keys",
     const auto pages = (records + kPageSize - 1) / kPageSize;
     CHECK(stats.pageCalls == pages);
     CHECK(stats.walks == pages);
-    CHECK(entriesPerWalk >= records + 2);
+    CHECK(entriesPerWalk == records);
     CHECK(stats.entriesVisited == entriesPerWalk * pages);
     CHECK(stats.matchingKeys == records * pages);
     // One look-ahead key suffices to determine whether a continuation exists;
     // a page must not retain the full matching namespace.
     CHECK(stats.peakRetainedKeys <= kPageSize + 1);
 }
+
+namespace {
+
+std::string fsText(const std::vector<std::byte>& bytes) {
+    return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+// Writes an object where builds before the namespaced layout stored it: objects/HH/HH/<key>,
+// sharded by the SHA-256 of the whole key.
+fs::path writeLegacyObject(const fs::path& storageRoot, std::string_view key,
+                           std::string_view text) {
+    auto hasher = crypto::createSHA256Hasher();
+    const auto hash = hasher->hash(
+        std::span<const std::byte>(reinterpret_cast<const std::byte*>(key.data()), key.size()));
+    const auto path = storageRoot / "objects" / hash.substr(0, 2) / hash.substr(2, 2) / key;
+    fs::create_directories(path.parent_path());
+    std::ofstream(path, std::ios::binary) << text;
+    return path;
+}
+
+std::vector<std::string> listAll(IStorageBackend& backend, std::string_view prefix) {
+    auto page = backend.listPage(prefix, std::nullopt, std::numeric_limits<std::size_t>::max());
+    REQUIRE(page.has_value());
+    return page.value().keys;
+}
+
+} // namespace
+
+TEST_CASE("FilesystemBackend - Prefix listing visits only the prefix namespace",
+          "[storage][backend][filesystem][list][namespace-layout]") {
+    TestDirectory testDir;
+    auto backend = createFilesystemBackend(testDir.subdir("storage"));
+    REQUIRE(backend != nullptr);
+    const auto value = fsBytes("v");
+    for (int i = 0; i < 8; ++i) {
+        REQUIRE(backend->store("index/document/" + std::to_string(i), value).has_value());
+    }
+    for (int i = 0; i < 200; ++i) {
+        REQUIRE(backend->store("index/embedding/cfg/" + std::to_string(i), value).has_value());
+        REQUIRE(backend->store("blob/" + std::to_string(i), value).has_value());
+    }
+    REQUIRE(backend->store("flat-key", value).has_value());
+
+    FilesystemListingStats stats;
+    struct RestoreObservation {
+        FilesystemListingStats* previous;
+        ~RestoreObservation() { testing_setFilesystemListingStats(previous); }
+    } restore{testing_setFilesystemListingStats(&stats)};
+
+    const auto keys = listAll(*backend, "index/document/");
+    CHECK(keys.size() == 8);
+    CAPTURE(stats.entriesVisited);
+    CHECK(stats.entriesVisited == 8);
+
+    stats = {};
+    const auto partial = listAll(*backend, "index/doc");
+    CHECK(partial.size() == 8);
+    CHECK(stats.entriesVisited < 220); // the index subtree, never blob/ or flat keys
+
+    // An unprefixed listing still sees every key, flat ones included.
+    CHECK(listAll(*backend, "").size() == 8 + 200 + 200 + 1);
+}
+
+TEST_CASE("FilesystemBackend - Keys that are path prefixes of other keys coexist",
+          "[storage][backend][filesystem][namespace-layout]") {
+    TestDirectory testDir;
+    auto backend = createFilesystemBackend(testDir.subdir("storage"));
+    REQUIRE(backend != nullptr);
+    const std::vector<std::string> keys{"a/b",   "a/b/c",   "a/b.k",   "a/b.k/x",
+                                        "a/b.d", "a/b.d/y", "a/b.k.d", "a/b.k.d/z"};
+    for (const auto& key : keys) {
+        INFO(key);
+        REQUIRE(backend->store(key, fsBytes(key)).has_value());
+    }
+    for (const auto& key : keys) {
+        INFO(key);
+        auto read = backend->retrieve(key);
+        REQUIRE(read.has_value());
+        CHECK(fsText(read.value()) == key);
+    }
+    auto sorted = keys;
+    std::ranges::sort(sorted);
+    CHECK(listAll(*backend, "a/") == sorted);
+    CHECK(listAll(*backend, "a/b/") == std::vector<std::string>{"a/b/c"});
+
+    REQUIRE(backend->remove("a/b").has_value());
+    CHECK_FALSE(backend->exists("a/b").value());
+    CHECK(backend->exists("a/b/c").value());
+}
+
+TEST_CASE("FilesystemBackend - Legacy hash-sharded objects migrate on first listing",
+          "[storage][backend][filesystem][namespace-layout][migration]") {
+    TestDirectory testDir;
+    const auto root = testDir.subdir("storage");
+    // Flat keys keep their hash-sharded location in both layouts.
+    (void)writeLegacyObject(root, "flat-key", "flat");
+    const auto legacyOld = writeLegacyObject(root, "index/old", "old");
+    const auto legacyBlob = writeLegacyObject(root, "blob/b1", "blob");
+    // A crash between link and unlink leaves both copies; the namespaced one is newer.
+    const auto legacyStale = writeLegacyObject(root, "index/both", "stale");
+    const auto legacyGone = writeLegacyObject(root, "index/gone", "gone");
+
+    auto backend = createFilesystemBackend(root);
+    REQUIRE(backend != nullptr);
+    REQUIRE(backend->store("index/both", fsBytes("new")).has_value());
+    CHECK_FALSE(fs::exists(legacyStale)); // a store retires the legacy copy
+
+    // Reads find legacy objects before any listing has migrated them.
+    REQUIRE(backend->retrieve("index/old").has_value());
+    CHECK(fsText(backend->retrieve("index/old").value()) == "old");
+    CHECK(backend->exists("blob/b1").value());
+
+    // A remove must not leave a legacy copy behind for a later migration to resurrect.
+    REQUIRE(backend->remove("index/gone").has_value());
+    CHECK_FALSE(fs::exists(legacyGone));
+
+    CHECK(listAll(*backend, "index/") == std::vector<std::string>{"index/both", "index/old"});
+    CHECK_FALSE(fs::exists(legacyOld));
+    CHECK_FALSE(fs::exists(legacyBlob));
+    CHECK(fsText(backend->retrieve("index/both").value()) == "new");
+    CHECK(fsText(backend->retrieve("blob/b1").value()) == "blob");
+    CHECK(fsText(backend->retrieve("flat-key").value()) == "flat");
+
+    // The pass that moves objects does not commit the layout: a later pass that finds no
+    // legacy objects does, so an entry the moving pass missed is still found.
+    CHECK_FALSE(fs::exists(root / "layout-namespaced-v1"));
+    CHECK(listAll(*backend, "index/").size() == 2);
+    CHECK(fs::exists(root / "layout-namespaced-v1"));
+
+    // Once migrated, a reopened backend lists a namespace without touching the legacy tree.
+    auto reopened = createFilesystemBackend(root);
+    REQUIRE(reopened != nullptr);
+    FilesystemListingStats stats;
+    struct RestoreObservation {
+        FilesystemListingStats* previous;
+        ~RestoreObservation() { testing_setFilesystemListingStats(previous); }
+    } restore{testing_setFilesystemListingStats(&stats)};
+    CHECK(listAll(*reopened, "blob/") == std::vector<std::string>{"blob/b1"});
+    CHECK(stats.entriesVisited == 1);
+    CHECK(listAll(*reopened, "").size() == 4); // flat-key, blob/b1, index/both, index/old
+}
+
+TEST_CASE("FilesystemBackend - Slashless prefixes skip non-matching namespaces",
+          "[storage][backend][filesystem][list][namespace-layout]") {
+    TestDirectory testDir;
+    auto backend = createFilesystemBackend(testDir.subdir("storage"));
+    REQUIRE(backend != nullptr);
+    for (int i = 0; i < 8; ++i) {
+        REQUIRE(backend->store("index/" + std::to_string(i), fsBytes("v")).has_value());
+    }
+    for (int i = 0; i < 200; ++i) {
+        REQUIRE(backend->store("blob/" + std::to_string(i), fsBytes("v")).has_value());
+    }
+    FilesystemListingStats stats;
+    struct RestoreObservation {
+        FilesystemListingStats* previous;
+        ~RestoreObservation() { testing_setFilesystemListingStats(previous); }
+    } restore{testing_setFilesystemListingStats(&stats)};
+    CHECK(listAll(*backend, "ind").size() == 8);
+    CAPTURE(stats.entriesVisited);
+    CHECK(stats.entriesVisited < 50);
+}
+
+#ifndef _WIN32
+TEST_CASE("FilesystemBackend - Listing and migration stay inside the object root",
+          "[storage][backend][filesystem][namespace-layout][security]") {
+    TestDirectory testDir;
+    const auto root = testDir.subdir("storage");
+    const auto outside = testDir.subdir("outside");
+    fs::create_directories(outside / "inner");
+    std::ofstream(outside / "secret.k") << "x";
+    // A legacy object whose namespaced directory is a planted symlink.
+    (void)writeLegacyObject(root, "pivot/inner/leaf", "legacy");
+    auto backend = createFilesystemBackend(root);
+    REQUIRE(backend != nullptr);
+    fs::create_directories(root / "objects" / "ns");
+    fs::create_directory_symlink(outside, root / "objects" / "ns" / "pivot");
+
+    const auto page = backend->listPage("pivot/", std::nullopt, 100);
+    if (page) {
+        CHECK(std::ranges::find(page.value().keys, "pivot/secret") == page.value().keys.end());
+    }
+    // The migration refused the target and did not create directories outside the root.
+    CHECK_FALSE(fs::exists(outside / "inner" / "leaf.k"));
+    CHECK(fs::is_empty(outside / "inner"));
+    CHECK_FALSE(fs::exists(root / "layout-namespaced-v1"));
+}
+
+TEST_CASE("FilesystemBackend - Migration stays pending when it cannot finish",
+          "[storage][backend][filesystem][namespace-layout][migration]") {
+    if (::geteuid() == 0) {
+        SKIP("permission checks do not apply to root");
+    }
+    TestDirectory testDir;
+    const auto root = testDir.subdir("storage");
+    const auto legacy = writeLegacyObject(root, "index/stuck", "stuck");
+    const auto shard = legacy.parent_path();
+
+    SECTION("an unreadable object root at open keeps the legacy fallback") {
+        fs::permissions(root / "objects", fs::perms::owner_write | fs::perms::owner_exec);
+        auto backend = createFilesystemBackend(root);
+        fs::permissions(root / "objects", fs::perms::owner_all);
+        REQUIRE(backend != nullptr);
+        CHECK_FALSE(fs::exists(root / "layout-namespaced-v1"));
+        CHECK(backend->exists("index/stuck").value());
+    }
+    SECTION("a legacy copy that cannot be removed is retried") {
+        auto backend = createFilesystemBackend(root);
+        REQUIRE(backend != nullptr);
+        fs::permissions(shard, fs::perms::owner_read | fs::perms::owner_exec);
+        CHECK(listAll(*backend, "index/") == std::vector<std::string>{"index/stuck"});
+        CHECK(listAll(*backend, "index/") == std::vector<std::string>{"index/stuck"});
+        fs::permissions(shard, fs::perms::owner_all);
+        CHECK(fs::exists(legacy));
+        CHECK_FALSE(fs::exists(root / "layout-namespaced-v1"));
+
+        CHECK(listAll(*backend, "index/") == std::vector<std::string>{"index/stuck"});
+        CHECK_FALSE(fs::exists(legacy));
+        CHECK(listAll(*backend, "index/") == std::vector<std::string>{"index/stuck"});
+        CHECK(fs::exists(root / "layout-namespaced-v1"));
+    }
+}
+#endif
 
 // =============================================================================
 // FilesystemBackend - Statistics
@@ -1127,7 +1348,7 @@ TEST_CASE("URLBackend - HTTP status taxonomy", "[storage][backend][url][http]") 
 
         auto ok = backend.retrieve("ok");
         REQUIRE(ok.has_value());
-        CHECK(ok.value() == bytesOf("ok"));
+        CHECK(ok.value() == fsBytes("ok"));
 
         auto missing = backend.retrieve("missing");
         REQUIRE_FALSE(missing.has_value());
@@ -1212,7 +1433,7 @@ TEST_CASE("URLBackend - Retry and timeout behavior", "[storage][backend][url][re
 
         auto result = backend.retrieve("eventual");
         REQUIRE(result.has_value());
-        CHECK(result.value() == bytesOf("eventual"));
+        CHECK(result.value() == fsBytes("eventual"));
         CHECK(server.requestCount() == 3);
     }
 
@@ -1345,7 +1566,7 @@ TEST_CASE("URLBackend - Authenticated provider header", "[storage][backend][url]
 
         auto authed = authBackend.retrieve("any-key");
         REQUIRE(authed.has_value());
-        CHECK(authed.value() == bytesOf("authenticated-key"));
+        CHECK(authed.value() == fsBytes("authenticated-key"));
         CHECK(server.requestCount() == 2);
     }
 }
@@ -1366,7 +1587,7 @@ TEST_CASE("URLBackend - PUT and DELETE retry retryable failures",
         config.requestTimeout = 2;
         REQUIRE(backend.initialize(config).has_value());
 
-        auto payload = bytesOf("test-payload");
+        auto payload = fsBytes("test-payload");
         auto result = backend.store("key", payload);
         REQUIRE(result.has_value());
         CHECK(server.requestCount() == 2);

@@ -18,11 +18,32 @@ Result<int64_t> MetadataRepository::insertSearchHistory(const SearchHistoryEntry
     });
 }
 
+Result<void> MetadataRepository::recordSearchQuery(const SearchHistoryEntry& entry,
+                                                   std::size_t maxEntries) {
+    if (maxEntries == 0 || entry.query.empty()) {
+        return Result<void>();
+    }
+    return executeBestEffortWrite<void>([&](Database& db) -> Result<void> {
+        repository::CrudOps<SearchHistoryEntry> ops;
+        YAMS_TRY_UNWRAP(insertedId, ops.insert(db, entry));
+        // Ids only grow, so everything at or below (newest - cap) is beyond the retention cap.
+        // Compare unsigned first: a cap above the id is never converted to a signed value.
+        if (insertedId > 0 && static_cast<std::uint64_t>(insertedId) > maxEntries) {
+            YAMS_TRY_UNWRAP(stmt, db.prepare("DELETE FROM search_history WHERE id <= ?"));
+            YAMS_TRY(stmt.bind(1, insertedId - static_cast<int64_t>(maxEntries)));
+            YAMS_TRY_UNWRAP(done, stmt.step());
+            (void)done;
+        }
+        return Result<void>();
+    });
+}
+
 Result<std::vector<SearchHistoryEntry>> MetadataRepository::getRecentSearches(int limit) {
     return executeReadQuery<std::vector<SearchHistoryEntry>>(
         [&](Database& db) -> Result<std::vector<SearchHistoryEntry>> {
             repository::CrudOps<SearchHistoryEntry> ops;
-            return ops.getAllOrdered(db, "query_time DESC", limit);
+            // Timestamps have one-second precision; the id breaks ties newest first.
+            return ops.getAllOrdered(db, "query_time DESC, id DESC", limit);
         });
 }
 

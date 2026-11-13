@@ -74,35 +74,9 @@ public:
     }
 
     /**
-     * @brief Get capabilities as JSON string.
-     * @return JSON string (caller owns via freeString), or empty on error
-     */
-    std::string getCapabilitiesJson() const {
-        if (!table_ || !table_->get_capabilities_json)
-            return "{}";
-
-        char* json = nullptr;
-        int rc = table_->get_capabilities_json(table_->self, &json);
-        if (rc != 0 || !json)
-            return "{}";
-
-        std::string result(json);
-        if (table_->free_string) {
-            table_->free_string(table_->self, json);
-        }
-        return result;
-    }
-
-    /**
      * @brief Get the underlying ABI table.
      */
     yams_entity_extractor_v2* table() const { return table_; }
-
-    /**
-     * @brief Get extractor ID for versioned state tracking.
-     * @return String like "entity_extractor_glint:v0.1.0" or fallback
-     */
-    std::string getExtractorId() const;
 
 private:
     yams_entity_extractor_v2* table_{};

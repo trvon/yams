@@ -71,17 +71,8 @@ public:
             return 0.0;
         }
 
-        return static_cast<double>(totalCount) * 1000.0 / actualWindow.count(); // per second
-    }
-
-    uint64_t getTotalCount() const {
-        std::lock_guard lock(mutex);
-
-        uint64_t total = 0;
-        for (const auto& event : events) {
-            total += event.count;
-        }
-        return total;
+        return static_cast<double>(totalCount) * 1000.0 /
+               static_cast<double>(actualWindow.count()); // per second
     }
 };
 
@@ -193,8 +184,8 @@ struct VerificationMonitor::Impl {
 
         // Calculate current error rate
         if (metrics.verificationsPerSecond > 0) {
-            metrics.currentErrorRate =
-                static_cast<double>(metrics.errorsPerSecond) / metrics.verificationsPerSecond;
+            metrics.currentErrorRate = static_cast<double>(metrics.errorsPerSecond) /
+                                       static_cast<double>(metrics.verificationsPerSecond);
         } else {
             metrics.currentErrorRate = 0.0;
         }
@@ -224,15 +215,15 @@ struct VerificationMonitor::Impl {
 
         // Derived metrics
         if (metrics.totalVerifications > 0) {
-            double overallErrorRate =
-                static_cast<double>(metrics.totalErrors) / metrics.totalVerifications;
+            double overallErrorRate = static_cast<double>(metrics.totalErrors) /
+                                      static_cast<double>(metrics.totalVerifications);
             out << "kronos_verification_overall_error_rate " << std::fixed << std::setprecision(4)
                 << overallErrorRate << "\n";
         }
 
         if (metrics.repairAttempts > 0) {
-            double repairSuccessRate =
-                static_cast<double>(metrics.successfulRepairs) / metrics.repairAttempts;
+            double repairSuccessRate = static_cast<double>(metrics.successfulRepairs) /
+                                       static_cast<double>(metrics.repairAttempts);
             out << "kronos_verification_repair_success_rate " << std::fixed << std::setprecision(4)
                 << repairSuccessRate << "\n";
         }

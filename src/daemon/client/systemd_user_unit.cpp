@@ -21,6 +21,18 @@ bool userUnitMatchesPaths(const yams::config::ResolvedRuntimePaths& paths) {
            paths.configFile.source == RuntimePathSource::PlatformDefault;
 }
 
+LifecycleScope lifecycleScope(bool socketFlag, bool pidFileFlag,
+                              const yams::config::ResolvedRuntimePaths& paths) {
+    using yams::config::RuntimePathSource;
+    const bool defaultDaemon = !socketFlag && !pidFileFlag && userUnitMatchesPaths(paths);
+    LifecycleScope scope;
+    scope.userUnit = defaultDaemon;
+    scope.anyLiveDaemon = defaultDaemon;
+    scope.pidFile =
+        defaultDaemon || pidFileFlag || paths.pidFile.source != RuntimePathSource::PlatformDefault;
+    return scope;
+}
+
 #if defined(__linux__)
 namespace {
 
@@ -32,7 +44,9 @@ int systemctlUser(std::string_view args) {
     std::string cmd = "systemctl --user --quiet ";
     cmd.append(args);
     cmd.append(" >/dev/null 2>&1");
-    const int rc = std::system(cmd.c_str()); // NOLINT(cert-env33-c): fixed command line
+    // Fixed command line.
+    // NOLINTNEXTLINE(cert-env33-c,concurrency-mt-unsafe)
+    const int rc = std::system(cmd.c_str());
     if (rc == -1) {
         return -1;
     }

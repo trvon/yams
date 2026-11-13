@@ -68,6 +68,17 @@
           </Component>
         </Directory>
         <!-- Plugin directory under lib/yams/plugins -->
+        <Directory Id="ShareDir" Name="share">
+          <Directory Id="ShareYamsDir" Name="yams">
+            <Directory Id="ShareModelsDir" Name="models">
+              <Directory Id="StaticModelsDir" Name="static">
+                <Component Id="StaticEmbeddingTable" Guid="699E806C-4CD2-4AC1-96A6-594567B46AEC">
+                  <File Id="yams_static_bge_c4_256" Source="$(var.StageDir)\share\yams\models\static\yams-static-bge-c4-256.smstat" KeyPath="yes" />
+                </Component>
+              </Directory>
+            </Directory>
+          </Directory>
+        </Directory>
         <Directory Id="LibDir" Name="lib">
           <Directory Id="YamsLibDir" Name="yams">
             <Directory Id="PluginsDir" Name="plugins">
@@ -86,6 +97,7 @@
     <!-- Main feature: YAMS binary and runtime dependencies -->
     <Feature Id="MainFeature" Title="YAMS" Level="1" ConfigurableDirectory="INSTALLFOLDER">
       <ComponentRef Id="YamsExe" />
+      <ComponentRef Id="StaticEmbeddingTable" />
       <ComponentRef Id="YamsDaemonExe" />
       <ComponentRef Id="YamsMcpServerExe" />
       <ComponentRef Id="YamsOnnxResourceDll" />

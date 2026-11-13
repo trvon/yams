@@ -13,6 +13,7 @@
 // pi-lens-ignore: fatal error
 #include <yams/memory_sync/memory_sync_config.h>
 // pi-lens-ignore: fatal error
+#include <yams/core/thread_name.h>
 #include <yams/memory_sync/memory_sync_service.h>
 
 #include "p2p_fuzz.h"
@@ -379,6 +380,7 @@ public:
         stopRequested_ = false;
         started_ = true;
         reconnectThread_ = std::thread([this] {
+            yams::setCurrentThreadName("yams-p2p-recon");
             try {
                 reconnectLoop();
             } catch (const std::exception& error) {

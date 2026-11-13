@@ -330,6 +330,7 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
             if (diagnostics) {
                 mergeVectorSearchDiagnostics(*diagnostics, sample);
             }
+            params.diagnostics = nullptr; // `sample` ends with this call
             return records;
         };
         auto vectorRecords = search();
@@ -501,15 +502,13 @@ mergeAuxiliaryVectorCandidates(std::vector<ComponentResult> components,
                 candidate.source == ComponentResult::Source::PathTree ||
                 candidate.source == ComponentResult::Source::KnowledgeGraph ||
                 candidate.source == ComponentResult::Source::Tag ||
-                candidate.source == ComponentResult::Source::Metadata ||
-                candidate.source == ComponentResult::Source::Symbol) {
+                candidate.source == ComponentResult::Source::Metadata) {
                 textAnchoredHashes.insert(candidate.documentHash);
             }
             if (candidate.source == ComponentResult::Source::Text ||
                 candidate.source == ComponentResult::Source::SimeonText ||
                 candidate.source == ComponentResult::Source::PathTree ||
-                candidate.source == ComponentResult::Source::KnowledgeGraph ||
-                candidate.source == ComponentResult::Source::Symbol) {
+                candidate.source == ComponentResult::Source::KnowledgeGraph) {
                 baselineTextAnchoredHashes.insert(candidate.documentHash);
             }
         }

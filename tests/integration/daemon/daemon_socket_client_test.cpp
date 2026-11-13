@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -22,6 +23,7 @@
 #include <thread>
 
 #include "../../common/test_helpers_catch2.h"
+#include "require_daemon_started.h"
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include <boost/asio.hpp>
@@ -204,19 +206,6 @@ DaemonClient createClient(const std::filesystem::path& socketPath,
     return DaemonClient(config);
 }
 
-void startHarnessWithRetry(DaemonHarness& harness, int maxRetries = 3,
-                           std::chrono::milliseconds retryDelay = 250ms) {
-    for (int attempt = 0; attempt < maxRetries; ++attempt) {
-        if (harness.start(30s)) {
-            return;
-        }
-        harness.stop();
-        std::this_thread::sleep_for(retryDelay);
-    }
-
-    SKIP("Skipping socket integration section due to daemon startup instability");
-}
-
 // Helper to retry get request with delay - handles async post-ingest processing
 // streamingAddDocument returns immediately but document may not be available until
 // post-ingest completes (FTS5 indexing, metadata extraction, etc.)
@@ -270,7 +259,6 @@ std::filesystem::path createMockExternalPlugin(const std::filesystem::path& base
 import json
 import sys
 
-
 def handle_request(req):
     method = req.get("method", "")
     if method == "handshake.manifest":
@@ -292,7 +280,6 @@ def handle_request(req):
     if method == "plugin.shutdown":
         return {"status": "ok"}
     raise ValueError(f"Method not found: {method}")
-
 
 for line in sys.stdin:
     line = line.strip()
@@ -429,7 +416,7 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
 
     SECTION("connects to running daemon") {
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
 
         auto client = createClient(harness.socketPath());
         auto result = yams::cli::run_sync(client.connect(), 5s);
@@ -451,7 +438,7 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
     SECTION("connects after daemon restart") {
         // This test needs its own daemon to restart
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
 
         auto client = createClient(harness.socketPath());
         auto connectResult = yams::cli::run_sync(client.connect(), 5s);
@@ -463,7 +450,7 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
         std::this_thread::sleep_for(500ms);
 
         // Restart daemon
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
 
         // Create NEW client after restart (old client's io_context was reset)
         // Allow extra time for GlobalIOContext threads to fully stabilize after restart
@@ -492,7 +479,7 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
 
     SECTION("handles explicit disconnect") {
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
 
         auto client = createClient(harness.socketPath());
         auto connectResult = yams::cli::run_sync(client.connect(), 5s);
@@ -522,7 +509,7 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
 
         for (int i = 0; i < cycles; ++i) {
             INFO("restart cycle " << i);
-            startHarnessWithRetry(harness);
+            requireStarted(harness);
 
             // Allow time for GlobalIOContext to stabilize after restart
             std::this_thread::sleep_for(200ms);
@@ -554,7 +541,7 @@ TEST_CASE("Daemon client request execution", "[daemon][socket][requests]") {
 
     // Use isolated daemon for tests that modify database state
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     // Allow time for GlobalIOContext to stabilize
     std::this_thread::sleep_for(200ms);
@@ -834,7 +821,7 @@ TEST_CASE("Daemon client download job request execution", "[daemon][socket][down
         cfg.downloadPolicy.timeout = 5s;
     };
     DaemonHarness harness(options);
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -958,7 +945,7 @@ TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][m
     DaemonHarnessOptions options;
     options.useMockModelProvider = false;
     DaemonHarness harness(options);
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1101,7 +1088,7 @@ TEST_CASE("Daemon client plugin request execution", "[daemon][socket][requests][
     options.trustedPluginPaths = {pluginDir};
 
     DaemonHarness harness(options);
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1222,7 +1209,7 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1388,7 +1375,7 @@ TEST_CASE("Daemon client graph maintenance request execution",
     options.isolateConfig = true;
     options.isolateState = true;
     DaemonHarness harness{std::move(options)};
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1454,7 +1441,7 @@ TEST_CASE("Daemon client collection request execution", "[daemon][socket][reques
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1741,7 +1728,7 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness({.isolateState = true});
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1766,21 +1753,9 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
 
     const std::string sessionA = "dispatcher-session-a";
     const std::string sessionB = "dispatcher-session-b";
-    const std::string selectorPath = "src/**/*.cpp";
 
     sessionService->init(sessionA, "dispatcher coverage session A");
     sessionService->create(sessionB, "dispatcher coverage session B");
-
-    auto listResult =
-        yams::cli::run_sync(client.executeRequest(Request{ListSessionsRequest{}}), 10s);
-    REQUIRE(listResult.has_value());
-    REQUIRE(std::holds_alternative<ListSessionsResponse>(listResult.value()));
-    const auto& listResp = std::get<ListSessionsResponse>(listResult.value());
-    std::set<std::string> sessionNames(listResp.session_names.begin(),
-                                       listResp.session_names.end());
-    CHECK(sessionNames.contains(sessionA));
-    CHECK(sessionNames.contains(sessionB));
-    CHECK(listResp.current_session == sessionA);
 
     UseSessionRequest missingReq;
     missingReq.session_name = "dispatcher-session-missing";
@@ -1791,28 +1766,6 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
 
     sessionService->close();
 
-    auto noCurrentListResult =
-        yams::cli::run_sync(client.executeRequest(Request{ListSessionsRequest{}}), 10s);
-    REQUIRE(noCurrentListResult.has_value());
-    REQUIRE(std::holds_alternative<ListSessionsResponse>(noCurrentListResult.value()));
-    CHECK(std::get<ListSessionsResponse>(noCurrentListResult.value()).current_session.empty());
-
-    AddPathSelectorRequest noCurrentReq;
-    noCurrentReq.path = selectorPath;
-    auto noCurrentResult = yams::cli::run_sync(client.executeRequest(Request{noCurrentReq}), 10s);
-    REQUIRE(noCurrentResult.has_value());
-    REQUIRE(std::holds_alternative<ErrorResponse>(noCurrentResult.value()));
-    CHECK(std::get<ErrorResponse>(noCurrentResult.value()).code == yams::ErrorCode::InvalidState);
-
-    RemovePathSelectorRequest noCurrentRemoveReq;
-    noCurrentRemoveReq.path = selectorPath;
-    auto noCurrentRemoveResult =
-        yams::cli::run_sync(client.executeRequest(Request{noCurrentRemoveReq}), 10s);
-    REQUIRE(noCurrentRemoveResult.has_value());
-    REQUIRE(std::holds_alternative<ErrorResponse>(noCurrentRemoveResult.value()));
-    CHECK(std::get<ErrorResponse>(noCurrentRemoveResult.value()).code ==
-          yams::ErrorCode::InvalidState);
-
     UseSessionRequest useReq;
     useReq.session_name = sessionB;
     auto useResult = yams::cli::run_sync(client.executeRequest(Request{useReq}), 10s);
@@ -1821,74 +1774,13 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
     CHECK(std::get<SuccessResponse>(useResult.value()).message == "OK");
     REQUIRE(sessionService->current().has_value());
     CHECK(sessionService->current().value() == sessionB);
-
-    AddPathSelectorRequest missingSessionAddReq;
-    missingSessionAddReq.session_name = "dispatcher-session-missing";
-    missingSessionAddReq.path = "missing/**/*.txt";
-    auto missingSessionAddResult =
-        yams::cli::run_sync(client.executeRequest(Request{missingSessionAddReq}), 10s);
-    REQUIRE(missingSessionAddResult.has_value());
-    REQUIRE(std::holds_alternative<ErrorResponse>(missingSessionAddResult.value()));
-    CHECK(std::get<ErrorResponse>(missingSessionAddResult.value()).code ==
-          yams::ErrorCode::NotFound);
-
-    AddPathSelectorRequest addReq;
-    addReq.path = selectorPath;
-    addReq.tags = {"pinned", "coverage"};
-    addReq.metadata = {{"team", "daemon"}, {"task", "dispatcher-session"}};
-    auto addResult = yams::cli::run_sync(client.executeRequest(Request{addReq}), 10s);
-    REQUIRE(addResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(addResult.value()));
-    CHECK(std::get<SuccessResponse>(addResult.value()).message == "OK");
-    auto selectors = sessionService->listPathSelectors(sessionB);
-    REQUIRE(selectors.size() == 1);
-    CHECK(selectors.front() == selectorPath);
-
-    AddPathSelectorRequest explicitSessionAddReq;
-    explicitSessionAddReq.session_name = sessionB;
-    explicitSessionAddReq.path = "include/**/*.hpp";
-    explicitSessionAddReq.tags = {"explicit"};
-    auto explicitSessionAddResult =
-        yams::cli::run_sync(client.executeRequest(Request{explicitSessionAddReq}), 10s);
-    REQUIRE(explicitSessionAddResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(explicitSessionAddResult.value()));
-
-    selectors = sessionService->listPathSelectors(sessionB);
-    REQUIRE(selectors.size() == 2);
-    CHECK(std::find(selectors.begin(), selectors.end(), "include/**/*.hpp") != selectors.end());
-
-    RemovePathSelectorRequest missingSessionRemoveReq;
-    missingSessionRemoveReq.session_name = "dispatcher-session-missing";
-    missingSessionRemoveReq.path = selectorPath;
-    auto missingSessionRemoveResult =
-        yams::cli::run_sync(client.executeRequest(Request{missingSessionRemoveReq}), 10s);
-    REQUIRE(missingSessionRemoveResult.has_value());
-    REQUIRE(std::holds_alternative<ErrorResponse>(missingSessionRemoveResult.value()));
-    CHECK(std::get<ErrorResponse>(missingSessionRemoveResult.value()).code ==
-          yams::ErrorCode::NotFound);
-
-    RemovePathSelectorRequest explicitRemoveReq;
-    explicitRemoveReq.session_name = sessionB;
-    explicitRemoveReq.path = "include/**/*.hpp";
-    auto explicitRemoveResult =
-        yams::cli::run_sync(client.executeRequest(Request{explicitRemoveReq}), 10s);
-    REQUIRE(explicitRemoveResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(explicitRemoveResult.value()));
-
-    RemovePathSelectorRequest removeReq;
-    removeReq.path = selectorPath;
-    auto removeResult = yams::cli::run_sync(client.executeRequest(Request{removeReq}), 10s);
-    REQUIRE(removeResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(removeResult.value()));
-    CHECK(std::get<SuccessResponse>(removeResult.value()).message == "OK");
-    CHECK(sessionService->listPathSelectors(sessionB).empty());
 }
 
 TEST_CASE("Daemon client repair request execution", "[daemon][socket][requests][repair]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     DaemonHarness harness({.enableModelProvider = false, .useMockModelProvider = false});
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
     std::this_thread::sleep_for(200ms);
 
     auto client = createClient(harness.socketPath());
@@ -1960,233 +1852,12 @@ TEST_CASE("Daemon client repair request execution", "[daemon][socket][requests][
     }));
 }
 
-TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][requests][tree-diff]") {
-    SKIP_DAEMON_TEST_ON_WINDOWS();
-
-    DaemonHarness harness;
-    startHarnessWithRetry(harness);
-    std::this_thread::sleep_for(200ms);
-
-    auto client = createClient(harness.socketPath());
-
-    yams::Result<void> connectResult;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        connectResult = yams::cli::run_sync(client.connect(), 5s);
-        if (connectResult.has_value())
-            break;
-        std::this_thread::sleep_for(200ms);
-    }
-    REQUIRE(connectResult.has_value());
-    const auto* daemon = harness.daemon();
-    REQUIRE(daemon != nullptr);
-    const auto* serviceManager = daemon->getServiceManager();
-    REQUIRE(serviceManager != nullptr);
-    auto metadataRepo = serviceManager->getMetadataRepo();
-    REQUIRE(metadataRepo != nullptr);
-
-    const std::string baseSnapshotId = "dispatcher-coverage-base";
-    const std::string targetSnapshotId = "dispatcher-coverage-target";
-
-    const auto nowMicros = std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::system_clock::now().time_since_epoch())
-                               .count();
-
-    yams::metadata::TreeSnapshotRecord baseSnapshot;
-    baseSnapshot.snapshotId = baseSnapshotId;
-    baseSnapshot.createdTime = nowMicros;
-    baseSnapshot.metadata["directory_path"] = "/tmp/dispatcher-base";
-    REQUIRE(metadataRepo->upsertTreeSnapshot(baseSnapshot).has_value());
-
-    yams::metadata::TreeSnapshotRecord targetSnapshot;
-    targetSnapshot.snapshotId = targetSnapshotId;
-    targetSnapshot.createdTime = nowMicros + 1;
-    targetSnapshot.metadata["directory_path"] = "/tmp/dispatcher-target";
-    REQUIRE(metadataRepo->upsertTreeSnapshot(targetSnapshot).has_value());
-
-    yams::metadata::TreeDiffDescriptor descriptor;
-    descriptor.baseSnapshotId = baseSnapshotId;
-    descriptor.targetSnapshotId = targetSnapshotId;
-    descriptor.computedAt = nowMicros + 2;
-    descriptor.status = "pending";
-
-    auto diffIdResult = metadataRepo->beginTreeDiff(descriptor);
-    REQUIRE(diffIdResult.has_value());
-
-    std::vector<yams::metadata::TreeChangeRecord> changes;
-
-    yams::metadata::TreeChangeRecord added;
-    added.type = yams::metadata::TreeChangeType::Added;
-    added.newPath = "src/new_file.cpp";
-    added.newHash = "hash-added";
-    added.mode = 0644;
-    changes.push_back(added);
-
-    yams::metadata::TreeChangeRecord modified;
-    modified.type = yams::metadata::TreeChangeType::Modified;
-    modified.oldPath = "src/existing.cpp";
-    modified.newPath = "src/existing.cpp";
-    modified.oldHash = "hash-old";
-    modified.newHash = "hash-new";
-    modified.mode = 0644;
-    modified.contentDeltaHash = "delta-existing";
-    changes.push_back(modified);
-
-    yams::metadata::TreeChangeRecord renamed;
-    renamed.type = yams::metadata::TreeChangeType::Renamed;
-    renamed.oldPath = "src/old_name.cpp";
-    renamed.newPath = "src/new_name.cpp";
-    renamed.oldHash = "hash-rename";
-    renamed.newHash = "hash-rename";
-    renamed.mode = 0644;
-    changes.push_back(renamed);
-
-    yams::metadata::TreeChangeRecord deleted;
-    deleted.type = yams::metadata::TreeChangeType::Deleted;
-    deleted.oldPath = "src/removed.cpp";
-    deleted.oldHash = "hash-deleted";
-    deleted.mode = 0644;
-    changes.push_back(deleted);
-
-    yams::metadata::TreeChangeRecord moved;
-    moved.type = yams::metadata::TreeChangeType::Moved;
-    moved.oldPath = "include/old_header.hpp";
-    moved.newPath = "include/new_header.hpp";
-    moved.oldHash = "hash-moved";
-    moved.newHash = "hash-moved";
-    moved.mode = 0644;
-    changes.push_back(moved);
-
-    auto appendResult = metadataRepo->appendTreeChanges(diffIdResult.value(), changes);
-    REQUIRE(appendResult.has_value());
-
-    auto finalizeResult =
-        metadataRepo->finalizeTreeDiff(diffIdResult.value(), changes.size(), "complete");
-    REQUIRE(finalizeResult.has_value());
-
-    yams::metadata::TreeDiffQuery directQuery;
-    directQuery.baseSnapshotId = baseSnapshotId;
-    directQuery.targetSnapshotId = targetSnapshotId;
-    directQuery.limit = 20000;
-    auto directListResult = metadataRepo->listTreeChanges(directQuery);
-    if (!directListResult.has_value()) {
-        INFO("direct listTreeChanges error: " << directListResult.error().message);
-    }
-    REQUIRE(directListResult.has_value());
-    CHECK(directListResult.value().size() == 5);
-
-    ListTreeDiffRequest listReq;
-    listReq.baseSnapshotId = baseSnapshotId;
-    listReq.targetSnapshotId = targetSnapshotId;
-    listReq.limit = 20000;
-    auto listResult = yams::cli::run_sync(client.executeRequest(Request{listReq}), 10s);
-
-    INFO("listTreeDiff has_value=" << listResult.has_value());
-    if (!listResult.has_value()) {
-        INFO("listTreeDiff transport error: " << listResult.error().message);
-    }
-    REQUIRE(listResult.has_value());
-    if (std::holds_alternative<ErrorResponse>(listResult.value())) {
-        INFO("listTreeDiff daemon error: " << std::get<ErrorResponse>(listResult.value()).message);
-    }
-    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(listResult.value()));
-    const auto& listResp = std::get<ListTreeDiffResponse>(listResult.value());
-    CHECK(listResp.totalCount == 5);
-    REQUIRE(listResp.changes.size() == 5);
-    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
-        return entry.changeType == "added" && entry.path == "src/new_file.cpp" &&
-               entry.oldPath.empty();
-    }));
-    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
-        return entry.changeType == "modified" && entry.path == "src/existing.cpp" &&
-               entry.oldPath.empty() && entry.contentDeltaHash == "delta-existing";
-    }));
-    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
-        return entry.changeType == "renamed" && entry.path == "src/new_name.cpp" &&
-               entry.oldPath == "src/old_name.cpp";
-    }));
-    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
-        return entry.changeType == "deleted" && entry.path.empty() &&
-               entry.oldPath == "src/removed.cpp";
-    }));
-    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
-        return entry.changeType == "unknown" && entry.path == "include/new_header.hpp" &&
-               entry.oldPath == "include/old_header.hpp";
-    }));
-
-    ListTreeDiffRequest filteredReq;
-    filteredReq.baseSnapshotId = baseSnapshotId;
-    filteredReq.targetSnapshotId = targetSnapshotId;
-    filteredReq.pathPrefix = "src/new";
-    filteredReq.typeFilter = "renamed";
-    filteredReq.limit = 10;
-    auto filteredResult = yams::cli::run_sync(client.executeRequest(Request{filteredReq}), 10s);
-
-    INFO("filteredTreeDiff has_value=" << filteredResult.has_value());
-    if (!filteredResult.has_value()) {
-        INFO("filteredTreeDiff transport error: " << filteredResult.error().message);
-    }
-    REQUIRE(filteredResult.has_value());
-    if (std::holds_alternative<ErrorResponse>(filteredResult.value())) {
-        INFO("filteredTreeDiff daemon error: "
-             << std::get<ErrorResponse>(filteredResult.value()).message);
-    }
-    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(filteredResult.value()));
-    const auto& filteredResp = std::get<ListTreeDiffResponse>(filteredResult.value());
-    CHECK(filteredResp.totalCount == 1);
-    REQUIRE(filteredResp.changes.size() == 1);
-    CHECK(filteredResp.changes.front().changeType == "renamed");
-    CHECK(filteredResp.changes.front().path == "src/new_name.cpp");
-    CHECK(filteredResp.changes.front().oldPath == "src/old_name.cpp");
-
-    ListTreeDiffRequest unknownFilterReq;
-    unknownFilterReq.baseSnapshotId = baseSnapshotId;
-    unknownFilterReq.targetSnapshotId = targetSnapshotId;
-    unknownFilterReq.pathPrefix = "include/new";
-    unknownFilterReq.typeFilter = "moved";
-    unknownFilterReq.limit = 10;
-    auto unknownFilterResult =
-        yams::cli::run_sync(client.executeRequest(Request{unknownFilterReq}), 10s);
-
-    REQUIRE(unknownFilterResult.has_value());
-    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(unknownFilterResult.value()));
-    const auto& unknownFilterResp = std::get<ListTreeDiffResponse>(unknownFilterResult.value());
-    CHECK(unknownFilterResp.totalCount == 1);
-    REQUIRE(unknownFilterResp.changes.size() == 1);
-    CHECK(unknownFilterResp.changes.front().changeType == "unknown");
-    CHECK(unknownFilterResp.changes.front().path == "include/new_header.hpp");
-    CHECK(unknownFilterResp.changes.front().oldPath == "include/old_header.hpp");
-
-    ListTreeDiffRequest pagedReq;
-    pagedReq.baseSnapshotId = baseSnapshotId;
-    pagedReq.targetSnapshotId = targetSnapshotId;
-    pagedReq.limit = 1;
-    pagedReq.offset = 1;
-    auto pagedResult = yams::cli::run_sync(client.executeRequest(Request{pagedReq}), 10s);
-
-    REQUIRE(pagedResult.has_value());
-    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(pagedResult.value()));
-    const auto& pagedResp = std::get<ListTreeDiffResponse>(pagedResult.value());
-    CHECK(pagedResp.totalCount == 1);
-    REQUIRE(pagedResp.changes.size() == 1);
-    CHECK(pagedResp.changes.front().changeType == "modified");
-    CHECK(pagedResp.changes.front().path == "src/existing.cpp");
-    CHECK(pagedResp.changes.front().contentDeltaHash == "delta-existing");
-
-    ListTreeDiffRequest invalidReq;
-    invalidReq.targetSnapshotId = targetSnapshotId;
-    auto invalidResult = yams::cli::run_sync(client.executeRequest(Request{invalidReq}), 10s);
-
-    REQUIRE(invalidResult.has_value());
-    REQUIRE(std::holds_alternative<ErrorResponse>(invalidResult.value()));
-    CHECK(std::get<ErrorResponse>(invalidResult.value()).code == yams::ErrorCode::InvalidArgument);
-}
-
 TEST_CASE("Daemon client error handling", "[daemon][socket][errors]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     // Use isolated daemon for tests that modify database state
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     // Allow time for GlobalIOContext to stabilize
     std::this_thread::sleep_for(200ms);
@@ -2240,7 +1911,7 @@ TEST_CASE("Daemon client concurrent requests", "[daemon][socket][concurrency]") 
 
     // Use isolated daemon for tests that modify database state
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     // Allow time for GlobalIOContext to stabilize
     std::this_thread::sleep_for(200ms);
@@ -2321,12 +1992,93 @@ TEST_CASE("Daemon client concurrent requests", "[daemon][socket][concurrency]") 
     }
 }
 
+TEST_CASE("Daemon client parallel status from independent clients",
+          "[daemon][socket][concurrency]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    // Fail, don't skip, when the daemon cannot start: this case must actually run.
+    DaemonHarness harness;
+    CAPTURE(harness.socketPath());
+    requireStarted(harness);
+
+    static constexpr int kClients = 4;
+    static constexpr int kRequestsPerClient = 5;
+    // Generous per-call bound for arm64/TSAN runners; a failed status() is still a bug.
+    static constexpr auto kStatusTimeout = 15s;
+
+    // Pooled clients share one AsioConnectionPool per socket path, so disable pooling: each
+    // status() opens its own daemon connection and the daemon serves kClients sessions at once.
+    std::vector<std::unique_ptr<DaemonClient>> clients;
+    clients.reserve(kClients);
+    for (int i = 0; i < kClients; ++i) {
+        ClientConfig config;
+        config.socketPath = harness.socketPath();
+        config.singleUseConnections = true;
+        config.connectTimeout = 5s;
+        config.requestTimeout = kStatusTimeout;
+        config.autoStart = false;
+        clients.push_back(std::make_unique<DaemonClient>(config));
+
+        yams::Result<void> connectResult;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            connectResult = yams::cli::run_sync(clients.back()->connect(), 5s);
+            if (connectResult.has_value())
+                break;
+            std::this_thread::sleep_for(200ms);
+        }
+        INFO("client " << i);
+        REQUIRE(connectResult.has_value());
+    }
+
+    // Declared before the promise so it is destroyed after it: if std::async throws before
+    // set_value(), the promise breaks first, waiting workers bail out, and only then do the
+    // futures' destructors join them.
+    std::vector<std::future<std::string>> workers;
+    workers.reserve(kClients);
+
+    // Release every worker at once so the status() calls overlap.
+    std::promise<void> startSignal;
+    std::shared_future<void> start = startSignal.get_future().share();
+
+    for (int i = 0; i < kClients; ++i) {
+        workers.push_back(std::async(std::launch::async, [&clients, start, i]() -> std::string {
+            try {
+                start.get();
+            } catch (const std::future_error&) {
+                return "client " + std::to_string(i) + ": start signal abandoned";
+            }
+            for (int req = 0; req < kRequestsPerClient; ++req) {
+                auto sres = yams::cli::run_sync(clients[i]->status(), kStatusTimeout);
+                if (!sres.has_value()) {
+                    return "client " + std::to_string(i) + " request " + std::to_string(req) +
+                           ": " + sres.error().message;
+                }
+            }
+            return {};
+        }));
+    }
+    startSignal.set_value();
+
+    // Each worker issues kRequestsPerClient sequential calls bounded by kStatusTimeout each.
+    const auto deadline =
+        std::chrono::steady_clock::now() + kRequestsPerClient * kStatusTimeout + 10s;
+    for (auto& worker : workers) {
+        REQUIRE(worker.wait_until(deadline) == std::future_status::ready);
+        const auto failure = worker.get();
+        INFO(failure);
+        CHECK(failure.empty());
+    }
+
+    REQUIRE(harness.daemon() != nullptr);
+    CHECK(harness.daemon()->isRunning());
+}
+
 TEST_CASE("Daemon client timeout behavior", "[daemon][socket][timeout]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     // Use isolated daemon
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     SECTION("short header timeout") {
         ClientConfig config;
@@ -2387,7 +2139,7 @@ TEST_CASE("Daemon client move semantics", "[daemon][socket][move]") {
 
     // Use isolated daemon
     DaemonHarness harness;
-    startHarnessWithRetry(harness);
+    requireStarted(harness);
 
     SECTION("move construction") {
         // Allow time for GlobalIOContext to stabilize
@@ -2447,7 +2199,7 @@ TEST_CASE("Daemon socket file lifecycle", "[daemon][socket][filesystem]") {
     SECTION("socket file created on start") {
         // Use its own daemon
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
         REQUIRE(std::filesystem::exists(harness.socketPath()));
         harness.stop();
     }
@@ -2455,7 +2207,7 @@ TEST_CASE("Daemon socket file lifecycle", "[daemon][socket][filesystem]") {
     SECTION("daemon stops on shutdown request") {
         // This test needs its own daemon to shutdown
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
         REQUIRE(std::filesystem::exists(harness.socketPath()));
 
         // Allow time for GlobalIOContext to stabilize
@@ -2484,7 +2236,7 @@ TEST_CASE("Daemon socket file lifecycle", "[daemon][socket][filesystem]") {
     SECTION("socket file removed on stop") {
         // This test needs its own daemon to stop
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
         REQUIRE(std::filesystem::exists(harness.socketPath()));
 
         harness.stop();
@@ -2497,7 +2249,7 @@ TEST_CASE("Daemon socket file lifecycle", "[daemon][socket][filesystem]") {
 
     SECTION("multiple clients can connect to same socket") {
         DaemonHarness harness;
-        startHarnessWithRetry(harness);
+        requireStarted(harness);
 
         auto client1 = createClient(harness.socketPath());
         auto client2 = createClient(harness.socketPath());

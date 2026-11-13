@@ -44,13 +44,6 @@ public:
         std::shared_ptr<const daemon::ResolvedEmbeddingConfig> embeddingPolicy = nullptr);
 
     /**
-     * @brief Generate embedding for a single document (synchronous)
-     * @param documentHash SHA256 hash of the document
-     * @return Success or error result
-     */
-    Result<void> generateEmbeddingForDocument(const std::string& documentHash);
-
-    /**
      * @brief Check if embeddings are missing and trigger repair if needed
      *
      * Checks system health and, if needed, starts a managed background worker (std::jthread)
@@ -59,7 +52,6 @@ public:
     void triggerRepairIfNeeded();
     bool startRepairAsync();
     void stopRepair();
-    bool isRepairRunning() const;
 
     /**
      * @brief Generate embeddings for multiple documents (synchronous)

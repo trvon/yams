@@ -291,6 +291,9 @@ private:
     // acts on a data directory's yams.db, only deletes grammar libraries, and never follows a
     // symlink out of the data directory.
     static Migration removeLegacyGrammarArtifacts();
+
+    // Version 44: Local per-path heads and metadata, independent of CAS hash identity.
+    static Migration createDocumentPathHeads();
 };
 
 /**
@@ -323,7 +326,6 @@ public:
 
     // Custom functions
     MigrationBuilder& upFunction(std::function<Result<void>(Database&)> func);
-    MigrationBuilder& downFunction(std::function<Result<void>(Database&)> func);
     MigrationBuilder& wrapInTransaction(bool enabled);
 
     // Build the migration

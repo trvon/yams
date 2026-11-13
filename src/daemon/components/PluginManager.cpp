@@ -193,7 +193,7 @@ PluginManager::PluginManager(Dependencies deps) {
 }
 
 PluginManager::~PluginManager() {
-    shutdown();
+    PluginManager::shutdown();
 }
 
 Result<void> PluginManager::initialize() {
@@ -1344,19 +1344,9 @@ std::shared_ptr<IModelProvider> PluginManager::getModelProvider() const {
     return modelProvider_;
 }
 
-std::string PluginManager::getAdoptedProviderPluginName() const {
-    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
-    return adoptedProviderPluginName_;
-}
-
 std::string PluginManager::getEmbeddingModelName() const {
     std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     return embeddingModelName_;
-}
-
-void PluginManager::setEmbeddingModelName(const std::string& name) {
-    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
-    embeddingModelName_ = name;
 }
 
 bool PluginManager::isModelProviderDegraded() const {

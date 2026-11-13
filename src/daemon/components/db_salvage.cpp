@@ -33,6 +33,13 @@ Result<void> execRaw(sqlite3* db, const char* sql) {
     return {};
 }
 
+// The documents columns salvage copies: everything except id, which the live DB assigns.
+constexpr const char* kSalvageDocumentColumns =
+    "file_path, file_name, file_extension, file_size, sha256_hash, "
+    "mime_type, created_time, modified_time, indexed_time, content_extracted, "
+    "extraction_status, extraction_error, path_prefix, reverse_path, path_hash, "
+    "parent_hash, path_depth, repair_status, repair_attempted_at, repair_attempts";
+
 Result<void> attachCorruptDb(sqlite3* freshDb, const fs::path& corruptPath) {
     std::string path = corruptPath.string();
     // Escape single-quote characters for SQLite string literal.
@@ -54,11 +61,16 @@ Result<void> copyDocumentsViaAttach(sqlite3* freshDb, const fs::path& corruptPat
         return attachResult.error();
     }
 
-    const char* copySql = "INSERT OR IGNORE INTO main.documents "
-                          "SELECT * FROM corrupt.documents";
+    // Copy by column, never by id. SELECT * carried the corrupt DB's ids, and INSERT OR IGNORE
+    // then silently dropped every document whose id was already taken: by another salvaged DB,
+    // or by anything ingested into the live DB since recovery. Duplicates are recognised by the
+    // unique sha256_hash instead, as in the row-by-row fallback.
+    const std::string copySql = std::string("INSERT OR IGNORE INTO main.documents (") +
+                                kSalvageDocumentColumns + ") SELECT " + kSalvageDocumentColumns +
+                                " FROM corrupt.documents";
 
     char* errMsg = nullptr;
-    int rc = sqlite3_exec(freshDb, copySql, nullptr, nullptr, &errMsg);
+    int rc = sqlite3_exec(freshDb, copySql.c_str(), nullptr, nullptr, &errMsg);
     if (rc != SQLITE_OK) {
         std::string err = errMsg ? errMsg : "unknown error";
         spdlog::warn("[db_salvage] ATTACH-based copy failed: {}", err);
@@ -242,6 +254,9 @@ Result<void> runIntegrityCheck(sqlite3* db, std::vector<std::string>& diagnostic
         ++rowCount;
         if (rowCount >= 32)
             break;
+    }
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+        diagnostics.push_back(std::string("integrity_check step failed: ") + sqlite3_errmsg(db));
     }
     sqlite3_finalize(stmt);
     return {};

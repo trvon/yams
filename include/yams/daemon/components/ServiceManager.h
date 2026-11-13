@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <future>
@@ -11,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -25,8 +28,11 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/common/pattern_utils.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/SessionWatcher.h>
 #include <yams/daemon/components/AsyncInitOrchestrator.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
@@ -82,9 +88,6 @@ class Database;
 class ConnectionPool;
 class MetadataRepository;
 } // namespace yams::metadata
-namespace yams::integrity {
-class RepairManager;
-} // namespace yams::integrity
 namespace yams::memory_sync {
 class MemorySyncService;
 } // namespace yams::memory_sync
@@ -96,6 +99,10 @@ namespace yams::vector {
 class EmbeddingGenerator;
 class VectorDatabase;
 } // namespace yams::vector
+namespace simeon {
+class StaticEmbedding;
+}
+
 namespace yams::daemon {
 
 class ExternalPluginHost;
@@ -174,9 +181,6 @@ public:
                                  int timeoutMs = 0, bool keepHot = true, bool warmup = true);
     bool startEmbeddingWarmupIfConfigured();
     std::shared_ptr<yams::search::SearchEngine> getSearchEngineSnapshot() const;
-    SearchEngineSnapshot getSearchEngineStatusSnapshot() const {
-        return searchEngineManager_.getSnapshot();
-    }
     const std::string& getEmbeddingModelName() const { return embeddingLifecycle_.modelName(); }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
         return vectorSystemManager_ ? vectorSystemManager_->getVectorDatabase() : nullptr;
@@ -219,6 +223,9 @@ public:
         std::uint64_t outboundFailures{0};
         std::string lastOutboundFailure;
         std::uint64_t lastOutboundFailureAgeMs{0};
+        /// Error of the current run of failed reconciliation cycles; empty after a success.
+        std::string lastSyncError;
+        std::uint64_t lastSyncErrorAgeMs{0};
     };
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);
@@ -268,8 +275,6 @@ public:
     }
     void onSearchRequestFinished() { searchAdmission_.onFinished(); }
     void onSearchRequestRejected() { searchAdmission_.onRejected(); }
-    std::uint32_t getSearchActiveRequests() const { return searchAdmission_.active(); }
-    SearchAdmissionController& getSearchAdmissionController() { return searchAdmission_; }
     void onSnapshotPersisted() { metricsPublisher_.onSnapshotPersisted(); }
     std::uint64_t getSnapshotsPersistedCount() const {
         return metricsPublisher_.snapshotsPersistedCount();
@@ -302,14 +307,11 @@ public:
         metricsPublisher_.publishIngest(queued, active);
     }
     void publishIngestQueued(std::size_t queued) { metricsPublisher_.publishQueued(queued); }
-    void publishIngestActive(std::size_t active) { metricsPublisher_.publishActive(active); }
     void setIngestWorkerTarget(std::size_t target) { metricsPublisher_.setWorkerTarget(target); }
-    std::size_t ingestWorkerTarget() const { return metricsPublisher_.workerTarget(); }
     IngestMetricsSnapshot getIngestMetricsSnapshot() const {
         auto s = metricsPublisher_.snapshot();
         return {s.queued, s.active, s.target};
     }
-    IngestMetricsPublisher& getIngestMetricsPublisher() { return metricsPublisher_; }
     void enqueuePostIngest(const std::string& hash, const std::string& mime);
     void enqueuePostIngestBatch(const std::vector<std::string>& hashes, const std::string& mime);
     void enqueuePostIngestTasks(std::vector<PostIngestQueue::Task> tasks);
@@ -455,6 +457,12 @@ public:
     WriteCoordinator* getWriteCoordinator() const { return writeCoordinator_.get(); }
     // NOLINTBEGIN(bugprone-reserved-identifier): repo test-helper surface intentionally uses
     // historical __test_* names across many suites; rename is tracked separately.
+    using SessionWatchTarget = SessionWatcher::Target;
+    /// Every directory pinned by a session with watching enabled.
+    static std::vector<SessionWatchTarget>
+    sessionWatchTargets(const app::services::ISessionService& sessions) {
+        return SessionWatcher::targets(sessions);
+    }
 #ifdef YAMS_TESTING
     void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
         writeCoordinator_ = std::move(coordinator);
@@ -487,8 +495,14 @@ public:
     /// Let the next apply cycle reach the rate-limited outbound backfill immediately, so a test
     /// can drive a bounded number of full sync cycles without wall-clock waits.
     void testingExpireMemorySyncBackfillSchedule() {
-        std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
-        nextMemorySyncBackfill_ = {};
+        {
+            std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
+            nextMemorySyncBackfill_ = {};
+        }
+        std::lock_guard<std::mutex> lock(memorySyncBackfillMutex_);
+        for (auto& backoff : memorySyncBackfillState_.domainBackoff) {
+            backoff.notBefore = {};
+        }
     }
     /// Keep background apply cycles from running the outbound backfill, so a test that drives
     /// backfill by hand sees only its own cycles.
@@ -500,6 +514,12 @@ public:
     void testingExpireMemorySyncFullApply() {
         std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
         nextMemorySyncFullApply_ = {};
+        lastMemorySyncFullApplyStart_.reset();
+    }
+    /// When the next full apply pass is due.
+    std::chrono::steady_clock::time_point testingMemorySyncFullApplyDeadline() {
+        std::lock_guard<std::mutex> lock(memorySyncApplyMutex_);
+        return nextMemorySyncFullApply_;
     }
     /// Run every inbound stage on every cycle, for tests that observe stages per call. Lock-free,
     /// so it is safe while an apply cycle holds memorySyncApplyMutex_.
@@ -526,6 +546,23 @@ public:
     }
     std::uint64_t testingMemorySyncBackfillAttempts() const noexcept {
         return memorySyncBackfillAttempts_.load(std::memory_order_acquire);
+    }
+    static std::vector<SessionWatchTarget>
+    __test_sessionWatchTargets(const app::services::ISessionService& sessions) {
+        return sessionWatchTargets(sessions);
+    }
+    void __test_requestSessionWatcherStop() {
+        sessionWatcherStopRequested_.store(true, std::memory_order_release);
+    }
+    SessionWatcher& __test_sessionWatcher() { return sessionWatcher_; }
+    void __test_startSessionWatcherOn(const boost::asio::any_io_executor& executor) {
+        startSessionWatcherOn(executor);
+    }
+    /// Runs the shutdown step and reports whether the watcher coroutine had finished.
+    bool __test_stopSessionWatcher() {
+        stopSessionWatcherForShutdown();
+        std::lock_guard lock(sessionWatcherTimerMutex_);
+        return sessionWatcherTimer_ == nullptr;
     }
     static bool __test_shouldStartSessionWatcher(std::string_view disableValue) {
         return shouldStartSessionWatcher(disableValue);
@@ -572,9 +609,6 @@ public:
         return databaseManager_ ? databaseManager_->getWalMetricsProvider()
                                 : std::shared_ptr<WalMetricsProvider>{};
     }
-    std::shared_ptr<yams::integrity::RepairManager> getRepairManager() const {
-        return repairManager_;
-    }
 
     std::shared_ptr<RepairService> getRepairServiceShared() const {
         return repairServiceHost_.get();
@@ -604,7 +638,6 @@ public:
     TopologyTelemetrySnapshot getTopologyTelemetrySnapshot() const {
         return topologyManager_.getTelemetrySnapshot();
     }
-    bool isTopologyRebuildInProgress() const { return topologyManager_.isRebuildInProgress(); }
     TopologyManager& getTopologyManager() { return topologyManager_; }
 
     void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
@@ -613,17 +646,16 @@ public:
         }
     }
 
-    // Session watchers: polling mtime/size for pinned directories
-    struct SessionWatchState {
-        std::unordered_map<std::string,
-                           std::unordered_map<std::string, std::pair<std::uint64_t, std::uint64_t>>>
-            dirFiles; // dir -> (file -> (mtime,size))
-        std::unordered_map<std::string, std::vector<std::string>> gitignorePatterns;
-        std::unordered_map<std::string, std::uint64_t> gitignoreMtime;
-        // Paths whose indexing or removal failed; warned once, retried quietly.
-        std::unordered_set<std::string> failingPaths;
-    };
-    SessionWatchState sessionWatch_;
+    // Keeps the directories of watch-enabled sessions indexed (polling).
+    SessionWatcher sessionWatcher_;
+    bool sessionWatcherConfigured_{false};
+    // Not the stop_source: its fallback on platforms without std::stop_source never reports
+    // a requested stop, and a pass must be able to see one.
+    std::atomic<bool> sessionWatcherStopRequested_{false};
+    // The watcher's wait timer, so shutdown can cancel a wait in progress.
+    std::mutex sessionWatcherTimerMutex_;
+    std::shared_ptr<boost::asio::steady_timer> sessionWatcherTimer_;
+    void configureSessionWatcher(bool forDaemonLoop);
     yams::compat::stop_source sessionWatchStopSource_;
     std::future<void> sessionWatcherFuture_;
 
@@ -637,13 +669,10 @@ public:
 
     // PBI-088: New component accessors
     PluginManager* getPluginManager() const { return pluginManager_.get(); }
-    VectorSystemManager* getVectorSystemManager() const { return vectorSystemManager_.get(); }
     DatabaseManager* getDatabaseManager() const { return databaseManager_.get(); }
     SearchComponent* getSearchComponent() const { return searchComponent_.get(); }
 
     std::size_t getWorkerActive() const { return metricsPublisher_.workerActive(); }
-    std::size_t getWorkerPosted() const { return metricsPublisher_.workerPosted(); }
-    std::size_t getWorkerCompleted() const { return metricsPublisher_.workerCompleted(); }
     std::size_t getWorkerThreads() const {
         return workCoordinator_ ? workCoordinator_->getWorkerCount() : 0;
     }
@@ -735,7 +764,6 @@ public:
         return vectorDb ? vectorDb->getConfig().database_path : std::string{};
     }
     Result<bool> adoptModelProviderFromHosts(const std::string& preferredName = "");
-    bool isEmbeddingsAutoOnAdd() const { return embeddingLifecycle_.isAutoOnAdd(); }
 
     boost::asio::awaitable<Result<size_t>> autoloadPluginsNow();
     boost::asio::awaitable<void> preloadPreferredModelIfConfigured();
@@ -756,15 +784,6 @@ public:
     void clearModelProviderError();
 
     boost::asio::awaitable<void> co_enableEmbeddingsAndRebuild();
-
-    bool triggerSearchEngineRebuildIfNeeded();
-
-    bool requestSearchEngineRebuild(const std::string& reason, bool includeVector = true,
-                                    bool waitForDrain = true) {
-        return searchEngineManager_.requestRebuild(reason, includeVector, waitForDrain);
-    }
-
-    bool isSearchEngineAwaitingDrain() const { return searchEngineManager_.isAwaitingDrain(); }
 
     Result<void> ensureEmbeddingGeneratorFor(const std::string& modelName);
 
@@ -832,6 +851,9 @@ public:
                                        std::string_view contents);
     YAMS_DAEMON_TEST_HOOK void testing_setModelProviderDegraded(bool degraded,
                                                                 const std::string& error = {});
+    /// Runs on the direct-P2P recovery thread just before its local op-store scan. Install
+    /// before the daemon starts; release it before stopping the daemon.
+    YAMS_DAEMON_TEST_HOOK static void testingSetDirectP2pRecoveryGate(std::function<void()> gate);
 #endif
 
 #ifdef YAMS_TESTING
@@ -901,7 +923,15 @@ private:
     Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
     Result<void> initializeMemorySync(const std::filesystem::path& dataDir);
-    Result<void> initializeDirectP2p(const std::filesystem::path& dataDir);
+    /// Recover the local op store and start the listener. Returns null when direct P2P is
+    /// not configured. Blocking (corpus-sized scan): run only on the recovery thread.
+    Result<std::shared_ptr<yams::daemon::p2p::P2pManager>>
+    initializeDirectP2p(const std::filesystem::path& dataDir);
+    /// Start direct P2P recovery off the startup path, admitted by the resource governor.
+    void startDirectP2pRecovery(std::filesystem::path dataDir);
+    /// Cancel and join recovery, then stop any published listener. Idempotent.
+    void stopDirectP2pRecovery() noexcept;
+    std::shared_ptr<yams::daemon::p2p::P2pManager> p2pManagerSnapshot() const;
     Result<void> configureMemorySyncApply();
     void applyMemorySyncWinners() noexcept;
     bool drainMemorySyncDocumentDeleteOutbox() noexcept;
@@ -945,12 +975,17 @@ private:
                               const std::shared_ptr<metadata::Database>& database);
 
     void stopBackgroundTaskManagerForShutdown();
+    void startSessionWatcherOn(const boost::asio::any_io_executor& executor);
     void stopSessionWatcherForShutdown();
     void
     quiesceServicesBeforeWorkerShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void stopWorkCoordinatorForShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void clearCachedServiceState();
     void configureTopologyRuntime();
+    /// Embeds query texts with the active embedding model for the topology route fit. Fails
+    /// when no model is available or it returns fewer vectors than texts.
+    Result<std::vector<std::vector<float>>>
+    embedTextsForTopology(std::span<const std::string> texts);
     void snapshotRuntimeTuningSources(TuningConfig& tuning, const TuningConfig* previous) const;
     void refreshRuntimeTuningStatus();
     void seedBuiltinContentExtractors();
@@ -984,6 +1019,11 @@ private:
     std::shared_ptr<app::services::IGraphQueryService> graphQueryServiceOverride_;
     std::shared_ptr<IModelProvider> modelProvider_;
     std::shared_ptr<IModelProvider> simeonRerankerProvider_;
+    // Static-embedding table from <dataDir>/models/static/*.smstat, loaded once (see
+    // loadStaticEmbeddingTable()).
+    std::shared_ptr<const simeon::StaticEmbedding> staticEmbeddingTable_;
+    std::once_flag staticEmbeddingTableOnce_;
+    std::shared_ptr<const simeon::StaticEmbedding> loadStaticEmbeddingTable();
 
     // ServiceManager owns the shared ABI host storage. PluginManager owns its
     // configuration, loading, interface adoption, and one-time shutdown lifecycle.
@@ -1017,7 +1057,6 @@ private:
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
     mutable std::mutex resolvedDataDirMutex_;
     std::filesystem::path resolvedDataDir_;
-    std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;
     std::unique_ptr<WriteCoordinator> writeCoordinator_;
@@ -1061,7 +1100,14 @@ private:
     // P2P memory-sync service (version-vector + LWW over a shared store).
     // Started after storage/content-store init, stopped during shutdown.
     std::unique_ptr<yams::memory_sync::MemorySyncService> memorySync_;
-    std::unique_ptr<yams::daemon::p2p::P2pManager> p2pManager_;
+    // Published by the recovery thread; read by IPC status/peer commands. Guarded by
+    // p2pManagerMutex_. Lock order: p2pRecoveryMutex_ before p2pManagerMutex_.
+    std::shared_ptr<yams::daemon::p2p::P2pManager> p2pManager_;
+    mutable std::mutex p2pManagerMutex_;
+    std::thread p2pRecoveryThread_;
+    std::mutex p2pRecoveryMutex_;
+    std::condition_variable p2pRecoveryCv_;
+    bool p2pRecoveryStop_{false}; // guarded by p2pRecoveryMutex_
     mutable std::mutex memorySyncDeleteOutboxMutex_;
     mutable std::mutex memorySyncDeleteOutboxObserverMutex_;
     std::function<void(std::string_view)> memorySyncDeleteOutboxObserver_;
@@ -1138,18 +1184,38 @@ private:
         std::int64_t topologyNodeIdCursor{0};
         std::int64_t topologyEdgeIdCursor{0};
         std::string topologyRetractionKeyCursor;
+        // Completed topology passes; a record that can never publish is reported on the first.
+        std::uint64_t topologySweepPasses{0};
         SweepGeneration topologySweep;
         std::size_t itemBudgetPerCycle{256};
         std::chrono::milliseconds timeBudgetPerCycle{100};
+        // A domain that throws sits out until notBefore. The wait doubles with each consecutive
+        // failure (from the 5 s cycle up to 10 min) and resets once the domain makes progress or
+        // runs out of work, so a failure that is not per-record (backend outage, writer history
+        // that needs a bootstrap) is not retried and logged on every cycle.
+        struct DomainBackoff {
+            std::uint32_t failures{0};
+            std::chrono::steady_clock::time_point notBefore{};
+            std::string lastError;
+        };
+        std::array<DomainBackoff, 4> domainBackoff{};
     } memorySyncBackfillState_;
     std::chrono::steady_clock::time_point nextMemorySyncBackfill_{};
-    // Inbound apply skips a cycle whose adapter inputs match the last complete, clean pass. A
-    // full pass still runs every kMemorySyncFullApplyInterval, so local drift (a replicated record
-    // deleted or changed locally) is repaired within that bound. Guarded by memorySyncApplyMutex_.
-    static constexpr std::chrono::minutes kMemorySyncFullApplyInterval{5};
-    // Holds the last clean pass's overlay rows (bounded by the merged-cache limit).
-    std::optional<memory_sync::MemorySyncService::AdapterInputs> lastCleanMemorySyncApplyInputs_;
+    // Inbound apply skips a cycle whose adapter inputs match the last settled pass (complete, no
+    // failures, only topology deferrals). A
+    // full pass still runs every TuneAdvisor::memorySyncFullApplyInterval(), so local drift (a
+    // replicated record deleted or changed locally) is repaired within that bound. Guarded by
+    // memorySyncApplyMutex_. Holds the last settled pass's overlay rows (bounded by the
+    // merged-cache limit).
+    std::optional<memory_sync::MemorySyncService::AdapterInputs> lastSettledMemorySyncApplyInputs_;
+    // Graph change generation after the last settled pass, set only when that pass deferred
+    // topology edges; a different reading means an endpoint may have appeared locally.
+    std::optional<std::uint64_t> lastSettledTopologyDeferredKgGeneration_;
     std::chrono::steady_clock::time_point nextMemorySyncFullApply_{};
+    // When the last full pass started and the interval its deadline used, so a profile change
+    // can move the pending deadline.
+    std::optional<std::chrono::steady_clock::time_point> lastMemorySyncFullApplyStart_;
+    std::chrono::minutes memorySyncFullApplyInterval_{0};
     std::atomic<std::uint64_t> memorySyncApplySkippedCycles_{0};
     std::atomic<bool> memorySyncApplySkipDisabled_{false};
 

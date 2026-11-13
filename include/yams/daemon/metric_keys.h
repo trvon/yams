@@ -259,6 +259,7 @@ constexpr std::string_view kRepairIdleTicks = "repair_idle_ticks";
 constexpr std::string_view kRepairBusyTicks = "repair_busy_ticks";
 constexpr std::string_view kRepairTotalBacklog = "repair_total_backlog";
 constexpr std::string_view kRepairProcessed = "repair_processed";
+constexpr std::string_view kRepairPathTreeRepaired = "repair_path_tree_repaired";
 constexpr std::string_view kRepairCurrentOperationCode = "repair_current_operation_code";
 constexpr std::string_view kRepairCurrentOperationElapsedMs = "repair_current_operation_elapsed_ms";
 
@@ -348,9 +349,6 @@ constexpr std::string_view kEmbeddingDegraded = "embedding_degraded";
 constexpr std::string_view kPluginsReady = "plugins_ready";
 constexpr std::string_view kPluginsDegraded = "plugins_degraded";
 constexpr std::string_view kContentExtractorsReady = "content_extractors_ready";
-constexpr std::string_view kEntityExtractorsReady = "entity_extractors_ready";
-constexpr std::string_view kTitleExtractorReady = "title_extractor_ready";
-constexpr std::string_view kPluginWarningsPresent = "plugin_warnings_present";
 constexpr std::string_view kTopologyArtifactsFresh = "topology_artifacts_fresh";
 constexpr std::string_view kTopologyRebuildRunning = "topology_rebuild_running";
 constexpr std::string_view kVectorEmbeddingsAvailable = "vector_embeddings_available";
@@ -417,6 +415,7 @@ constexpr std::string_view kHostIoPressurePct = "host_io_pressure_pct";
 constexpr std::string_view kHostMemoryPressurePct = "host_memory_pressure_pct";
 constexpr std::string_view kHostLoadPerCpu = "host_load_per_cpu";
 constexpr std::string_view kDeferredBackgroundWork = "deferred_background_work";
+constexpr std::string_view kSupportsPathUnlink = "supports_path_unlink_v1";
 
 } // namespace yams::daemon::status_keys
 

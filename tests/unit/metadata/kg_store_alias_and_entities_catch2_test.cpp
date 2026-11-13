@@ -276,3 +276,57 @@ TEST_CASE("KGStoreAliasAndEntities: neighbors and doc entities round trip",
         CHECK(after.value().empty());
     }
 }
+
+// Re-extraction clears a document's entities through a write batch, which also adjusts the
+// cached entity counts. Only that document's rows may go, and the count must drop by exactly
+// what was deleted.
+TEST_CASE("KGStoreAliasAndEntities: batch entity delete removes one document and keeps counts",
+          "[unit][metadata][kg][entities][batch]") {
+    KGStoreAliasAndEntitiesFixture fix;
+    auto ids = fix.store_->upsertNodes(
+        {KGNode{.nodeKey = "ent:x", .label = std::string("X"), .type = std::string("entity")}});
+    REQUIRE(ids.has_value());
+    const auto insertDoc = [&](const std::string& name) {
+        DocumentInfo d;
+        d.filePath = "/tmp/" + name;
+        d.fileName = name;
+        d.fileExtension = ".txt";
+        d.fileSize = 1;
+        d.sha256Hash = "hash-" + name;
+        d.mimeType = "text/plain";
+        d.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        d.modifiedTime = d.createdTime;
+        d.indexedTime = d.createdTime;
+        auto id = fix.repo_->insertDocument(d);
+        REQUIRE(id.has_value());
+        return id.value();
+    };
+    const auto first = insertDoc("first.txt");
+    const auto second = insertDoc("second.txt");
+    const auto entity = [&](std::int64_t doc, int offset) {
+        return DocEntity{.documentId = doc,
+                         .entityText = std::string("X"),
+                         .nodeId = ids.value()[0],
+                         .startOffset = offset,
+                         .endOffset = offset + 1,
+                         .confidence = 0.9f,
+                         .extractor = std::string("test")};
+    };
+    REQUIRE(fix.store_->addDocEntities({entity(first, 0), entity(first, 5), entity(second, 0)}));
+    fix.store_->initializeEntityCountSnapshot();
+    const auto before = fix.store_->getEntityCountSnapshot().totalCount;
+    REQUIRE(before == 3);
+
+    auto batch = fix.store_->beginWriteBatch();
+    REQUIRE(batch.has_value());
+    REQUIRE(batch.value()->deleteDocEntitiesForDocument(first));
+    REQUIRE(batch.value()->commit());
+
+    auto firstLeft = fix.store_->getDocEntitiesForDocument(first, 10, 0);
+    auto secondLeft = fix.store_->getDocEntitiesForDocument(second, 10, 0);
+    REQUIRE(firstLeft.has_value());
+    REQUIRE(secondLeft.has_value());
+    CHECK(firstLeft.value().empty());
+    CHECK(secondLeft.value().size() == 1);
+    CHECK(fix.store_->getEntityCountSnapshot().totalCount == before - 2);
+}
