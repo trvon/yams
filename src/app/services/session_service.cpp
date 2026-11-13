@@ -524,6 +524,12 @@ public:
         return SessionState::Closed;
     }
 
+    std::string sessionUuid(const std::string& name) const override {
+        if (!exists(name))
+            return {};
+        return load_json(sessions_dir() / (name + ".json")).value("uuid", std::string{});
+    }
+
     std::optional<SessionInfo> getSessionInfo(const std::string& name) const override {
         if (!exists(name))
             return std::nullopt;

@@ -22,8 +22,8 @@ public:
             return Error{ErrorCode::IOError, "simulated indexing failure"};
         }
         app::services::AddDirectoryResponse response;
-        response.filesProcessed = request.includePatterns.size();
-        for (const auto& relative : request.includePatterns) {
+        response.filesProcessed = request.explicitFiles.size();
+        for (const auto& relative : request.explicitFiles) {
             app::services::IndexedFileResult result;
             result.path = (std::filesystem::path(request.directoryPath) / relative).string();
             result.success = !failingFiles.contains(relative);

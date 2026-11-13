@@ -73,7 +73,32 @@ public:
                 }
             }
 
-            if (!explicitEntries.empty()) {
+            if (!req.explicitFiles.empty()) {
+                // The caller named the files: take exactly those, nothing matched by name.
+                entries.reserve(req.explicitFiles.size());
+                for (const auto& relative : req.explicitFiles) {
+                    // Relative to the directory and inside it: an absolute path would
+                    // replace the root, and ".." would climb out of it.
+                    const auto normal = std::filesystem::path(relative).lexically_normal();
+                    const bool escapes = normal.is_absolute() || normal.has_root_name() ||
+                                         normal.empty() || *normal.begin() == "..";
+                    if (escapes) {
+                        ++response.filesProcessed;
+                        ++response.filesFailed;
+                        IndexedFileResult rejected;
+                        rejected.path = relative;
+                        rejected.success = false;
+                        rejected.error = "explicit file is not inside the directory";
+                        response.results.push_back(std::move(rejected));
+                        continue;
+                    }
+                    std::filesystem::path file = dirPath / normal;
+                    std::error_code fileError;
+                    if (std::filesystem::is_regular_file(file, fileError) && !fileError) {
+                        entries.emplace_back(file);
+                    }
+                }
+            } else if (!explicitEntries.empty()) {
                 entries = std::move(explicitEntries);
             } else {
                 std::error_code ec;
@@ -514,6 +539,7 @@ private:
             ++response.filesProcessed;
             const auto filePath = entry.path().string();
             const bool included =
+                !req.explicitFiles.empty() ||
                 shouldIncludeFile(req.directoryPath, filePath, req.includePatterns,
                                   req.excludePatterns, gitignorePatterns);
             spdlog::debug("[IndexingService] candidate: '{}' -> {}", filePath,

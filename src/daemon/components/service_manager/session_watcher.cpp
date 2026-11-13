@@ -52,7 +52,9 @@ ServiceManager::makeSessionWatchRequest(std::string_view session,
 void ServiceManager::configureSessionWatcher(bool forDaemonLoop) {
     auto options = sessionWatcher_.options();
     if (!options.stopRequested) {
-        options.stopRequested = [this] { return sessionWatchStopSource_.stop_requested(); };
+        options.stopRequested = [this] {
+            return sessionWatcherStopRequested_.load(std::memory_order_acquire);
+        };
     }
     if (forDaemonLoop && !sessionWatcherConfigured_) {
         // The snapshot describes what this store has indexed, so it lives in the data dir.
@@ -76,7 +78,9 @@ bool ServiceManager::scanSessionWatchDirectory(app::services::IIndexingService& 
                                                std::string_view session,
                                                const std::filesystem::path& directory) {
     configureSessionWatcher(false);
-    const SessionWatcher::Target target{std::string(session), directory, 0};
+    SessionWatcher::Target target;
+    target.session = std::string(session);
+    target.directory = directory;
     return sessionWatcher_.scan(indexingService, documentService, target,
                                 SessionWatcher::WallClock::now()) ==
            SessionWatcher::ScanOutcome::Clean;

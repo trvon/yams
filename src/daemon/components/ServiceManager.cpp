@@ -1094,6 +1094,7 @@ void ServiceManager::stopBackgroundTaskManagerForShutdown() {
 void ServiceManager::stopSessionWatcherForShutdown() {
     spdlog::info("[ServiceManager] Phase 2: Signaling session watcher stop");
     try {
+        sessionWatcherStopRequested_.store(true, std::memory_order_release);
         if (sessionWatchStopSource_.stop_possible()) {
             sessionWatchStopSource_.request_stop();
         }
@@ -2184,6 +2185,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         try {
             auto exec = getWorkerExecutor();
             sessionWatchStopSource_ = yams::compat::stop_source{};
+            sessionWatcherStopRequested_.store(false, std::memory_order_release);
             auto watcherToken = sessionWatchStopSource_.get_token();
             sessionWatcherFuture_ = boost::asio::co_spawn(
                 exec,

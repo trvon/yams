@@ -942,6 +942,12 @@ struct AddDirectoryRequest {
     std::vector<std::string> tags; // tags to apply to each stored document
     std::vector<std::string> includePatterns;
     std::vector<std::string> excludePatterns;
+    /// Exact files to index, relative to directoryPath. When set these are the only
+    /// candidates: the directory is not walked and include, exclude and .gitignore patterns
+    /// are not applied. For callers that already know which files changed. (A relative
+    /// path in includePatterns is a pattern: a bare name also matches every nested file of
+    /// that name, and one with a separator hides the bare names beside it.)
+    std::vector<std::string> explicitFiles;
     std::unordered_map<std::string, std::string> metadata;
     bool recursive{true};
     bool followSymlinks{false};
