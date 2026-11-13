@@ -63,11 +63,11 @@ SessionWatcher::targets(const app::services::ISessionService& sessions) {
             continue;
         }
         const auto intervalMs = sessions.watchIntervalMs(name);
-        const auto info = sessions.getSessionInfo(name);
+        const auto uuid = sessions.sessionUuid(name);
         for (const auto& directory : sessions.getPinnedPatterns(name)) {
             Target target;
             target.session = name;
-            target.sessionUuid = info ? info->uuid : std::string{};
+            target.sessionUuid = uuid;
             target.directory = directory;
             target.intervalMs = intervalMs;
             targets.push_back(std::move(target));
@@ -175,13 +175,16 @@ void SessionWatcher::saveSnapshot(const Target& target, TargetState& state) cons
     }
     std::error_code error;
     fs::rename(temporary, path, error);
+#ifdef _WIN32
     if (error) {
-        // Some platforms refuse to rename over an existing file.
+        // Renaming over an existing file can be refused here. Elsewhere rename replaces, so
+        // a failure is something else and the snapshot already on disk is left alone.
         std::error_code removeError;
         fs::remove(path, removeError);
         error.clear();
         fs::rename(temporary, path, error);
     }
+#endif
     if (!error) {
         state.dirty = false;
     }
@@ -200,9 +203,14 @@ bool SessionWatcher::walk(const Target& target, TargetState& state, WalkResult& 
         std::error_code error;
         for (fs::directory_iterator it(absolute, error), end; !error && it != end;
              it.increment(error)) {
-            // One huge directory must not hold up shutdown while it is listed.
+            // One huge directory must not hold up shutdown while it is listed, or be held
+            // in memory whole before the size limit is applied.
             if (stopRequested()) {
                 result.abandoned = true;
+                return false;
+            }
+            if (entries.size() >= options_.maxFilesPerTarget) {
+                result.tooLarge = true;
                 return false;
             }
             entries.push_back(*it);

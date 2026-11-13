@@ -364,6 +364,31 @@ TEST_CASE("IndexingService indexes exactly the files it is given", "[indexing][s
     CHECK(result.value().filesFailed == 0);
 }
 
+TEST_CASE("IndexingService refuses explicit files outside the directory",
+          "[indexing][service][files]") {
+    IndexingFixture fixture;
+    fixture.createFile("inside/ok.cpp", "inside");
+    fixture.createFile("outside.cpp", "outside the requested directory");
+
+    AddDirectoryRequest request;
+    request.directoryPath = (fixture.testDir_ / "inside").string();
+    request.explicitFiles = {"ok.cpp", "../outside.cpp", "sub/../../outside.cpp",
+                             (fixture.testDir_ / "outside.cpp").string()};
+    request.noGitignore = true;
+
+    auto result = fixture.indexingService_->addDirectory(request);
+
+    REQUIRE(result);
+    std::set<std::string> indexed;
+    for (const auto& file : result.value().results) {
+        if (file.success) {
+            indexed.insert(std::filesystem::path(file.path).filename().string());
+        }
+    }
+    CHECK(indexed == std::set<std::string>{"ok.cpp"});
+    CHECK(result.value().filesFailed == 3);
+}
+
 TEST_CASE("IndexingService - File Handling", "[indexing][service][files]") {
     IndexingFixture fixture;
 

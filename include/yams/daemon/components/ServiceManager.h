@@ -551,7 +551,9 @@ public:
     __test_sessionWatchTargets(const app::services::ISessionService& sessions) {
         return sessionWatchTargets(sessions);
     }
-    void __test_requestSessionWatcherStop() { sessionWatchStopSource_.request_stop(); }
+    void __test_requestSessionWatcherStop() {
+        sessionWatcherStopRequested_.store(true, std::memory_order_release);
+    }
     SessionWatcher& __test_sessionWatcher() { return sessionWatcher_; }
     static bool __test_shouldStartSessionWatcher(std::string_view disableValue) {
         return shouldStartSessionWatcher(disableValue);
@@ -638,6 +640,9 @@ public:
     // Keeps the directories of watch-enabled sessions indexed (polling).
     SessionWatcher sessionWatcher_;
     bool sessionWatcherConfigured_{false};
+    // Not the stop_source: its fallback on platforms without std::stop_source never reports
+    // a requested stop, and a pass must be able to see one.
+    std::atomic<bool> sessionWatcherStopRequested_{false};
     void configureSessionWatcher(bool forDaemonLoop);
     yams::compat::stop_source sessionWatchStopSource_;
     std::future<void> sessionWatcherFuture_;
