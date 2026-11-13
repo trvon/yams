@@ -54,6 +54,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
@@ -1095,8 +1096,10 @@ void ServiceManager::startSessionWatcherOn(const boost::asio::any_io_executor& e
     sessionWatchStopSource_ = yams::compat::stop_source{};
     sessionWatcherStopRequested_.store(false, std::memory_order_release);
     auto watcherToken = sessionWatchStopSource_.get_token();
+    // On a strand, so the cancel posted by shutdown cannot run alongside the coroutine's
+    // own use of the timer, or slip in between its stop check and the wait being armed.
     sessionWatcherFuture_ = boost::asio::co_spawn(
-        executor,
+        boost::asio::make_strand(executor),
         [this, watcherToken]() -> boost::asio::awaitable<void> {
             co_await co_runSessionWatcher(std::move(watcherToken));
         },
@@ -1110,8 +1113,11 @@ void ServiceManager::stopSessionWatcherForShutdown() {
         if (sessionWatchStopSource_.stop_possible()) {
             sessionWatchStopSource_.request_stop();
         }
-        // Wake the watcher if it is waiting for its next pass. A timer is not safe to cancel
-        // from another thread, so the cancel runs on the timer's own executor.
+        // Wake the watcher if it is waiting for its next pass. The cancel runs on the
+        // watcher's strand: a timer is not safe to cancel from another thread. If the pool
+        // is too busy to run it within the wait below, the coroutine stays suspended and is
+        // never resumed: the worker threads are stopped and joined later in shutdown, while
+        // this object is still alive.
         std::shared_ptr<boost::asio::steady_timer> timer;
         {
             std::lock_guard lock(sessionWatcherTimerMutex_);

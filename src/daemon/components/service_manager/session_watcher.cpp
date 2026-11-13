@@ -142,7 +142,9 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
         }
         boost::system::error_code error;
         timer->expires_after(waitDuration);
+        sessionWatcherWaiting_.store(true, std::memory_order_release);
         co_await timer->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, error));
+        sessionWatcherWaiting_.store(false, std::memory_order_release);
         if (stopping() || error == boost::asio::error::operation_aborted) {
             break;
         }
