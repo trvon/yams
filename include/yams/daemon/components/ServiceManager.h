@@ -555,6 +555,15 @@ public:
         sessionWatcherStopRequested_.store(true, std::memory_order_release);
     }
     SessionWatcher& __test_sessionWatcher() { return sessionWatcher_; }
+    void __test_startSessionWatcherOn(const boost::asio::any_io_executor& executor) {
+        startSessionWatcherOn(executor);
+    }
+    /// Runs the shutdown step and reports whether the watcher coroutine had finished.
+    bool __test_stopSessionWatcher() {
+        stopSessionWatcherForShutdown();
+        std::lock_guard lock(sessionWatcherTimerMutex_);
+        return sessionWatcherTimer_ == nullptr;
+    }
     static bool __test_shouldStartSessionWatcher(std::string_view disableValue) {
         return shouldStartSessionWatcher(disableValue);
     }
@@ -643,6 +652,9 @@ public:
     // Not the stop_source: its fallback on platforms without std::stop_source never reports
     // a requested stop, and a pass must be able to see one.
     std::atomic<bool> sessionWatcherStopRequested_{false};
+    // The watcher's wait timer, so shutdown can cancel a wait in progress.
+    std::mutex sessionWatcherTimerMutex_;
+    std::shared_ptr<boost::asio::steady_timer> sessionWatcherTimer_;
     void configureSessionWatcher(bool forDaemonLoop);
     yams::compat::stop_source sessionWatchStopSource_;
     std::future<void> sessionWatcherFuture_;
@@ -963,6 +975,7 @@ private:
                               const std::shared_ptr<metadata::Database>& database);
 
     void stopBackgroundTaskManagerForShutdown();
+    void startSessionWatcherOn(const boost::asio::any_io_executor& executor);
     void stopSessionWatcherForShutdown();
     void
     quiesceServicesBeforeWorkerShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);

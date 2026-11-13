@@ -271,6 +271,17 @@ TEST_CASE("Session watcher gives up a pass when stopped or refused", "[daemon][s
         CHECK(watcher.scan(indexing, &documents, tree.target(), tree.now + 1s) == Outcome::Clean);
         CHECK(lastSubmitted(indexing) == std::set<std::string>{".gitignore", "a.cpp"});
     }
+    SECTION("ignored files do not count toward the limit") {
+        writeFile(tree.root / ".gitignore", "*.tmp\n");
+        for (int i = 0; i < 30; ++i) {
+            writeFile(tree.root / ("scratch" + std::to_string(i) + ".tmp"), "x");
+        }
+        auto options = tree.options();
+        options.maxFilesPerTarget = 10;
+        SessionWatcher watcher(options);
+        CHECK(watcher.scan(indexing, &documents, tree.target(), tree.now) == Outcome::Clean);
+        CHECK(lastSubmitted(indexing) == std::set<std::string>{".gitignore", "a.cpp"});
+    }
     SECTION("a selector that is not a directory is reported, not scanned") {
         SessionWatcher watcher(tree.options());
         auto glob = tree.target();

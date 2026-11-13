@@ -199,59 +199,42 @@ bool SessionWatcher::walk(const Target& target, TargetState& state, WalkResult& 
     const std::function<bool(const fs::path&, const std::string&, std::size_t)> visit =
         [&](const fs::path& absolute, const std::string& relativeDirectory,
             std::size_t depth) -> bool {
-        std::vector<fs::directory_entry> entries;
+        // A .gitignore applies to its own directory, so it is read before the directory is
+        // walked. Entries are then handled as they are listed: nothing is held in memory,
+        // and the file limit counts only files that survive the ignore rules.
+        bool pushed = false;
+        {
+            const auto gitignorePath = absolute / ".gitignore";
+            std::error_code statError;
+            const auto mtime = fs::last_write_time(gitignorePath, statError);
+            if (!statError) {
+                const auto size = fs::file_size(gitignorePath, statError);
+                const auto stamp =
+                    statError ? std::uint64_t{0}
+                              : (static_cast<std::uint64_t>(mtime.time_since_epoch().count()) ^
+                                 (static_cast<std::uint64_t>(size) << 1)) |
+                                    1U;
+                // The stack keeps pointers into this map across deeper insertions. That is
+                // safe for unordered_map: rehashing moves buckets, never the stored elements.
+                auto& cached = state.gitignores[relativeDirectory];
+                if (cached.stamp != stamp || stamp == 0) {
+                    std::ifstream input(gitignorePath);
+                    cached.rules = input ? yams::common::parseGitignoreRules(input)
+                                         : std::vector<yams::common::GitignoreRule>{};
+                    cached.stamp = stamp;
+                }
+                gitignoreDirectories.insert(relativeDirectory);
+                if (!cached.rules.empty()) {
+                    ignore.push(depth, &cached.rules);
+                    pushed = true;
+                }
+            }
+        }
+
         std::error_code error;
         for (fs::directory_iterator it(absolute, error), end; !error && it != end;
              it.increment(error)) {
-            // One huge directory must not hold up shutdown while it is listed, or be held
-            // in memory whole before the size limit is applied.
-            if (stopRequested()) {
-                result.abandoned = true;
-                return false;
-            }
-            if (entries.size() >= options_.maxFilesPerTarget) {
-                result.tooLarge = true;
-                return false;
-            }
-            entries.push_back(*it);
-        }
-        if (error) {
-            result.error = error;
-            return false;
-        }
-
-        // A .gitignore applies to its own directory, so it is read before its siblings.
-        bool pushed = false;
-        for (const auto& entry : entries) {
-            if (entry.path().filename() != ".gitignore") {
-                continue;
-            }
-            std::error_code statError;
-            const auto mtime = entry.last_write_time(statError);
-            const auto size = statError ? std::uintmax_t{0} : entry.file_size(statError);
-            const auto stamp = statError
-                                   ? std::uint64_t{0}
-                                   : (static_cast<std::uint64_t>(mtime.time_since_epoch().count()) ^
-                                      (static_cast<std::uint64_t>(size) << 1)) |
-                                         1U;
-            // The stack keeps pointers into this map across deeper insertions. That is safe
-            // for unordered_map: rehashing moves buckets, never the stored elements.
-            auto& cached = state.gitignores[relativeDirectory];
-            if (cached.stamp != stamp || stamp == 0) {
-                std::ifstream input(entry.path());
-                cached.rules = input ? yams::common::parseGitignoreRules(input)
-                                     : std::vector<yams::common::GitignoreRule>{};
-                cached.stamp = stamp;
-            }
-            gitignoreDirectories.insert(relativeDirectory);
-            if (!cached.rules.empty()) {
-                ignore.push(depth, &cached.rules);
-                pushed = true;
-            }
-            break;
-        }
-
-        for (const auto& entry : entries) {
+            const auto& entry = *it;
             // Shutdown waits a bounded time for the watcher, and pressure can rise during a
             // long walk. Either way the pass is dropped with the snapshot untouched.
             if (stopRequested() || ((++visited & 0xFFU) == 0 && !admitted())) {
@@ -295,6 +278,10 @@ bool SessionWatcher::walk(const Target& target, TargetState& state, WalkResult& 
             result.current[relative] =
                 FileState{static_cast<std::uint64_t>(mtime.time_since_epoch().count()),
                           static_cast<std::uint64_t>(size), 0};
+        }
+        if (error) {
+            result.error = error;
+            return false;
         }
         if (pushed) {
             ignore.pop();

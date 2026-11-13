@@ -80,8 +80,11 @@ public:
                     // Relative to the directory and inside it: an absolute path would
                     // replace the root, and ".." would climb out of it.
                     const auto normal = std::filesystem::path(relative).lexically_normal();
+                    // has_root_directory covers "\\x" on Windows: not absolute, yet it
+                    // discards the directory part of a drive-qualified root when joined.
                     const bool escapes = normal.is_absolute() || normal.has_root_name() ||
-                                         normal.empty() || *normal.begin() == "..";
+                                         normal.has_root_directory() || normal.empty() ||
+                                         *normal.begin() == "..";
                     if (escapes) {
                         ++response.filesProcessed;
                         ++response.filesFailed;
