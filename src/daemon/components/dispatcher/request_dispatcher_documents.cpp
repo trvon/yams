@@ -1803,6 +1803,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
             GrepResponse response;
             response.filesSearched = serviceResp.filesSearched;
             response.matches = std::move(selection.matches);
+            if (req.filesOnly || req.countOnly) {
+                // These modes carry no line records; without this a client reading
+                // `matches` sees an empty answer.
+                response.matches = grep_result_window::summarize(
+                    serviceResp.results, serviceResp.filesWith, req.filesOnly);
+            }
             response.totalMatches = serviceResp.totalMatches;
             response.regexMatches = static_cast<uint64_t>(serviceResp.regexMatches);
             response.semanticMatches = static_cast<uint64_t>(serviceResp.semanticMatches);

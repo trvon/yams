@@ -799,6 +799,9 @@ public:
         std::atomic<std::uint64_t> matchesRendered{0};
         std::atomic<std::uint64_t> contentRetrievalMs{0};
         std::atomic<bool> stop{false};
+        // Set only when the time budget ended the scan; `stop` also covers the result cap and
+        // cancellation.
+        std::atomic<bool> budgetExpired{false};
         std::mutex errorMutex;
         std::vector<Error> workerErrors;
         workerErrors.reserve(workers);
@@ -844,6 +847,7 @@ public:
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                         GrepClock::now() - start_time);
                     if (elapsed.count() >= budget_ms) {
+                        budgetExpired.store(true, std::memory_order_relaxed);
                         stop.store(true, std::memory_order_relaxed);
                         break;
                     }
@@ -962,6 +966,7 @@ public:
                             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 GrepClock::now() - start_time);
                             if (elapsed.count() >= budget_ms) {
+                                budgetExpired.store(true, std::memory_order_relaxed);
                                 stop.store(true, std::memory_order_relaxed);
                                 return;
                             }
@@ -997,6 +1002,7 @@ public:
                         }
 
                         fileResult.matchCount += n;
+                        ++fileResult.matchedLines;
                         if (req.count)
                             return;
                         const auto renderFieldsStart = GrepClock::now();
@@ -1045,6 +1051,7 @@ public:
                         auto e3 = std::chrono::duration_cast<std::chrono::milliseconds>(
                             GrepClock::now() - start_time);
                         if (e3.count() >= budget_ms) {
+                            budgetExpired.store(true, std::memory_order_relaxed);
                             stop.store(true, std::memory_order_relaxed);
                             break;
                         }
@@ -1120,6 +1127,7 @@ public:
                                 auto e2 = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     GrepClock::now() - start_time);
                                 if (e2.count() >= budget_ms) {
+                                    budgetExpired.store(true, std::memory_order_relaxed);
                                     stop.store(true, std::memory_order_relaxed);
                                     break;
                                 }
@@ -1551,6 +1559,8 @@ public:
             response.searchStats["budget_ms"] = std::to_string(budget_ms);
             response.searchStats["timeout_triggered"] =
                 stop.load(std::memory_order_relaxed) ? "1" : "0";
+            response.searchStats["budget_exhausted"] =
+                budgetExpired.load(std::memory_order_relaxed) ? "1" : "0";
         }
 
         auto total_grep_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
