@@ -53,7 +53,8 @@ TEST_CASE("grep says when the daemon result window cut output", "[cli][grep][out
 
 TEST_CASE("grep -l and -c report what the plain mode found", "[cli][grep][output]") {
     EmbeddedCorpus corpus("yams_grep_modes_");
-    corpus.addText("two.txt", "needle one\nfiller\nneedle two\n");
+    // Two matching lines, one of which holds the pattern twice.
+    corpus.addText("two.txt", "needle one needle\nfiller\nneedle two\n");
     corpus.addText("none.txt", "filler only\n");
 
     const auto plain = corpus.run({"grep", "needle"});
@@ -70,6 +71,7 @@ TEST_CASE("grep -l and -c report what the plain mode found", "[cli][grep][output
     const auto count = corpus.run({"grep", "-c", "needle"});
     INFO(count.out << count.err);
     CHECK(count.out.find("2") != std::string::npos);
+    CHECK(count.out.find("3") == std::string::npos); // lines, not occurrences
     CHECK(count.out.find("no results") == std::string::npos);
 }
 
@@ -84,6 +86,25 @@ TEST_CASE("grep says when it stopped at its time budget", "[cli][grep][output]")
     // An answer cut short by the clock must not read as "nothing matches".
     CHECK((r.out + r.err).find("time budget") != std::string::npos);
     CHECK((r.out + r.err).find("incomplete") != std::string::npos);
+
+    const auto json = corpus.run({"grep", "needle", "--json"});
+    INFO(json.out << json.err);
+    CHECK(json.err.find("time budget") != std::string::npos);
+}
+
+TEST_CASE("grep does not blame the time budget for a result cap", "[cli][grep][output]") {
+    EmbeddedCorpus corpus("yams_grep_cap_not_budget_");
+    std::string body;
+    for (int i = 0; i < 40; ++i)
+        body += "needle " + std::to_string(i) + "\n";
+    corpus.addText("many.txt", body);
+    // The scan stops at the result cap long before any time budget.
+    yams::test::ScopedEnvVar cap{"YAMS_GREP_MAX_RESULTS", std::string("5")};
+
+    const auto r = corpus.run({"grep", "needle"});
+    INFO(r.out << r.err);
+    REQUIRE(r.rc == 0);
+    CHECK((r.out + r.err).find("time budget") == std::string::npos);
 }
 
 TEST_CASE("paths outside the working directory display in full", "[cli][grep][output]") {

@@ -430,7 +430,8 @@ struct GrepMatch {
 struct GrepFileResult {
     std::string file;
     std::string fileName;
-    std::size_t matchCount{0};
+    std::size_t matchCount{0};   // matching occurrences; a line can hold several
+    std::size_t matchedLines{0}; // lines with at least one match (what `grep -c` reports)
     std::vector<GrepMatch> matches;
 
     // File metadata for LLM context

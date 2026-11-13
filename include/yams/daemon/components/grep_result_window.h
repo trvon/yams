@@ -31,7 +31,8 @@ struct Selection {
 ///
 /// The grep service answers those with a file set and per-file counts and builds no line
 /// records, but clients read `matches`. Files-only yields one "path" record per matching
-/// file; count yields one record per matching line, with no line text or number.
+/// file; count yields one record per matching line (not per occurrence), with no line text
+/// or number. Records a result already carries, such as semantic suggestions, pass through.
 [[nodiscard]] std::vector<GrepMatch>
 summarize(const std::vector<app::services::GrepFileResult>& fileResults,
           const std::vector<std::string>& filesWith, bool filesOnly);

@@ -126,9 +126,19 @@ std::vector<GrepMatch> summarize(const std::vector<app::services::GrepFileResult
         return matches;
     }
     for (const auto& fileResult : fileResults) {
-        for (std::size_t i = 0; i < fileResult.matchCount; ++i) {
+        // Results that carry their own records (semantic suggestions) keep them and their
+        // match type: they are not matching lines and must not be counted as such.
+        for (const auto& existing : fileResult.matches) {
+            matches.push_back(toDaemonMatch(fileResult, existing));
+        }
+        if (!fileResult.matches.empty() || fileResult.wasSemanticSearch) {
+            continue;
+        }
+        // matchCount counts occurrences; `grep -c` counts lines.
+        for (std::size_t i = 0; i < fileResult.matchedLines; ++i) {
             GrepMatch match;
             match.file = fileResult.file;
+            match.hash = fileResult.hash;
             match.matchType = "regex";
             match.confidence = 1.0;
             matches.push_back(std::move(match));
