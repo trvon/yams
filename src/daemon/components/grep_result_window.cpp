@@ -111,4 +111,30 @@ Selection select(const std::vector<app::services::GrepFileResult>& fileResults,
     return selection;
 }
 
+std::vector<GrepMatch> summarize(const std::vector<app::services::GrepFileResult>& fileResults,
+                                 const std::vector<std::string>& filesWith, bool filesOnly) {
+    std::vector<GrepMatch> matches;
+    if (filesOnly) {
+        matches.reserve(filesWith.size());
+        for (const auto& file : filesWith) {
+            GrepMatch match;
+            match.file = file;
+            match.matchType = "path";
+            match.confidence = 1.0;
+            matches.push_back(std::move(match));
+        }
+        return matches;
+    }
+    for (const auto& fileResult : fileResults) {
+        for (std::size_t i = 0; i < fileResult.matchCount; ++i) {
+            GrepMatch match;
+            match.file = fileResult.file;
+            match.matchType = "regex";
+            match.confidence = 1.0;
+            matches.push_back(std::move(match));
+        }
+    }
+    return matches;
+}
+
 } // namespace yams::daemon::grep_result_window

@@ -146,3 +146,34 @@ TEST_CASE("Grep result window rejects binary-like indexed lines", "[daemon][grep
     REQUIRE(selection.matches.size() == 1);
     CHECK(selection.matches.front().file == "source.cpp");
 }
+
+TEST_CASE("Grep summary gives files-only requests one record per matching file",
+          "[daemon][grep][result-window]") {
+    const auto matches =
+        yams::daemon::grep_result_window::summarize({}, {"a.cpp", "b.cpp"}, /*filesOnly=*/true);
+
+    REQUIRE(matches.size() == 2);
+    CHECK(matches[0].file == "a.cpp");
+    CHECK(matches[1].file == "b.cpp");
+    CHECK(matches[0].matchType == "path");
+}
+
+TEST_CASE("Grep summary gives count requests one record per matching line",
+          "[daemon][grep][result-window]") {
+    // Count mode reports matchCount without building line records.
+    auto two = makeFileResult("a.cpp", {});
+    two.matchCount = 2;
+    auto none = makeFileResult("b.cpp", {});
+    none.matchCount = 0;
+    auto one = makeFileResult("c.cpp", {});
+    one.matchCount = 1;
+
+    const auto matches = yams::daemon::grep_result_window::summarize(
+        {two, none, one}, {"a.cpp", "c.cpp"}, /*filesOnly=*/false);
+
+    REQUIRE(matches.size() == 3);
+    CHECK(matches[0].file == "a.cpp");
+    CHECK(matches[1].file == "a.cpp");
+    CHECK(matches[2].file == "c.cpp");
+    CHECK(matches[0].matchType == "regex");
+}

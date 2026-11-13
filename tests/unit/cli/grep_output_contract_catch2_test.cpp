@@ -51,6 +51,41 @@ TEST_CASE("grep says when the daemon result window cut output", "[cli][grep][out
     CHECK(r.out.find("of 30") != std::string::npos);
 }
 
+TEST_CASE("grep -l and -c report what the plain mode found", "[cli][grep][output]") {
+    EmbeddedCorpus corpus("yams_grep_modes_");
+    corpus.addText("two.txt", "needle one\nfiller\nneedle two\n");
+    corpus.addText("none.txt", "filler only\n");
+
+    const auto plain = corpus.run({"grep", "needle"});
+    INFO(plain.out << plain.err);
+    REQUIRE(plain.rc == 0);
+    REQUIRE(plain.out.find("needle one") != std::string::npos);
+
+    const auto files = corpus.run({"grep", "-l", "needle"});
+    INFO(files.out << files.err);
+    CHECK(files.out.find("two.txt") != std::string::npos);
+    CHECK(files.out.find("none.txt") == std::string::npos);
+    CHECK(files.out.find("no results") == std::string::npos);
+
+    const auto count = corpus.run({"grep", "-c", "needle"});
+    INFO(count.out << count.err);
+    CHECK(count.out.find("2") != std::string::npos);
+    CHECK(count.out.find("no results") == std::string::npos);
+}
+
+TEST_CASE("grep says when it stopped at its time budget", "[cli][grep][output]") {
+    EmbeddedCorpus corpus("yams_grep_budget_");
+    corpus.addText("notes.txt", "first line\nsecond needle line\n");
+    // One millisecond is spent before the first document is read.
+    yams::test::ScopedEnvVar budget{"YAMS_GREP_TIME_BUDGET_MS", std::string("1")};
+
+    const auto r = corpus.run({"grep", "needle"});
+    INFO(r.out << r.err);
+    // An answer cut short by the clock must not read as "nothing matches".
+    CHECK((r.out + r.err).find("time budget") != std::string::npos);
+    CHECK((r.out + r.err).find("incomplete") != std::string::npos);
+}
+
 TEST_CASE("paths outside the working directory display in full", "[cli][grep][output]") {
     const auto cwd = std::filesystem::temp_directory_path() / "yams_display_cwd";
     const auto other =

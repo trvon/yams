@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 #include <yams/app/services/services.hpp>
@@ -25,5 +26,14 @@ struct Selection {
 /// line number, and whitespace-normalized line text. The first occurrence wins.
 [[nodiscard]] Selection select(const std::vector<app::services::GrepFileResult>& fileResults,
                                std::size_t maxTotalMatches);
+
+/// Matches for a request that asked for files or counts rather than lines.
+///
+/// The grep service answers those with a file set and per-file counts and builds no line
+/// records, but clients read `matches`. Files-only yields one "path" record per matching
+/// file; count yields one record per matching line, with no line text or number.
+[[nodiscard]] std::vector<GrepMatch>
+summarize(const std::vector<app::services::GrepFileResult>& fileResults,
+          const std::vector<std::string>& filesWith, bool filesOnly);
 
 } // namespace yams::daemon::grep_result_window

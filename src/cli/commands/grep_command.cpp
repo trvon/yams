@@ -612,6 +612,17 @@ public:
                             ran << " --paths-only";
                         spdlog::debug(ran.str());
                     }
+                    // The scan stops at a time budget on large stores. Say so on stderr in
+                    // every output mode: a partial answer must not read as a complete one.
+                    if (const auto stopped = resp.searchStats.find("timeout_triggered");
+                        stopped != resp.searchStats.end() && stopped->second == "1") {
+                        const auto budget = resp.searchStats.find("budget_ms");
+                        std::cerr << "note: grep stopped at its "
+                                  << (budget != resp.searchStats.end() ? budget->second + " ms "
+                                                                       : std::string{})
+                                  << "time budget; results are incomplete. Narrow the scope "
+                                     "(--cwd, --include or a path) to search it fully.\n";
+                    }
                     // Handle different output modes
                     if (pathsOnly_ || filesOnly_) {
                         const auto aggregates = collectDaemonFileAggregates(resp.matches);

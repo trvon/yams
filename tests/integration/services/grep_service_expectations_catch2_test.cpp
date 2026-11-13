@@ -15,6 +15,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <set>
+#include <map>
 #include <thread>
 #include <vector>
 
@@ -766,6 +768,76 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
     auto grepResult = retrievalSvc.grep(grepOpts, retrievalOpts);
     REQUIRE(grepResult);
     static_cast<void>(grepResult.value().filesSearched);
+}
+
+TEST_CASE_METHOD(GrepServiceExpectationsFixture,
+                 "GrepService: files-only and count modes return what the plain mode found",
+                 "[integration][services][grep]") {
+    // `yams grep -l X` and `yams grep -c X` printed "(no results)" for a pattern the plain
+    // mode matched: the daemon answered with file sets and counts the client never read.
+    start();
+
+    fs::create_directories(root() / "modes");
+    std::ofstream(root() / "modes" / "two.txt") << "needleqz one\nfiller\nneedleqz two\n";
+    std::ofstream(root() / "modes" / "one.txt") << "filler\nneedleqz only\n";
+    std::ofstream(root() / "modes" / "none.txt") << "filler only\n";
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath();
+    opts.explicitDataDir = storageDir();
+    opts.path = (root() / "modes").string();
+    opts.recursive = true;
+    opts.noEmbeddings = true;
+    REQUIRE(ing.addViaDaemon(opts));
+
+    yams::app::services::RetrievalService retrievalSvc;
+    yams::app::services::RetrievalOptions retrievalOpts;
+    retrievalOpts.socketPath = socketPath();
+    retrievalOpts.explicitDataDir = storageDir();
+
+    yams::app::services::GrepOptions plain;
+    plain.pattern = "needleqz";
+    plain.regexOnly = true;
+
+    const auto filesOf = [](const yams::daemon::GrepResponse& response) {
+        std::set<std::string> names;
+        for (const auto& match : response.matches) {
+            names.insert(fs::path(match.file).filename().string());
+        }
+        return names;
+    };
+
+    // Ingestion is asynchronous: wait until the plain mode sees both files.
+    bool indexed = false;
+    for (int attempt = 0; attempt < 100 && !indexed; ++attempt) {
+        auto found = retrievalSvc.grep(plain, retrievalOpts);
+        indexed = found && filesOf(found.value()).size() == 2;
+        if (!indexed) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    REQUIRE(indexed);
+    const std::set<std::string> expected{"one.txt", "two.txt"};
+
+    SECTION("files-only lists every matching file") {
+        auto request = plain;
+        request.filesOnly = true;
+        auto listed = retrievalSvc.grep(request, retrievalOpts);
+        REQUIRE(listed);
+        CHECK(filesOf(listed.value()) == expected);
+    }
+    SECTION("count reports matching lines per file") {
+        auto request = plain;
+        request.countOnly = true;
+        auto counted = retrievalSvc.grep(request, retrievalOpts);
+        REQUIRE(counted);
+        std::map<std::string, std::size_t> counts;
+        for (const auto& match : counted.value().matches) {
+            ++counts[fs::path(match.file).filename().string()];
+        }
+        CHECK(counts == std::map<std::string, std::size_t>{{"one.txt", 1}, {"two.txt", 2}});
+    }
 }
 
 TEST_CASE_METHOD(GrepServiceExpectationsFixture,
