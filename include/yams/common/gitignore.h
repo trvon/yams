@@ -67,4 +67,14 @@ inline bool matchesGitignore(std::string_view relativePath, std::span<const std:
     return matches_any_path(normalize_path(relativePath), patterns);
 }
 
+/// Prepared form of loadGitignorePatterns() for callers that test many paths, such as a
+/// directory walk. Gives the same answers as matchesGitignore() on the pattern list.
+inline PathPatternSet loadGitignoreMatcher(const std::filesystem::path& root) {
+    return PathPatternSet(loadGitignorePatterns(root));
+}
+
+inline bool matchesGitignore(std::string_view relativePath, const PathPatternSet& patterns) {
+    return patterns.matches(relativePath);
+}
+
 } // namespace yams::common

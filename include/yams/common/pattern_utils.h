@@ -215,86 +215,117 @@ inline void brace_expand_impl(std::string_view pat, std::vector<std::string>& ou
     return pi == plen;
 }
 
-/** Glob match for normalized paths supporting ** across segments and brace sets. */
-[[nodiscard]] inline bool glob_match_path(std::string_view path, std::string_view pattern) {
-    // Anchor handling: leading '^' anchors at beginning
-    bool anchored = false;
-    if (!pattern.empty() && pattern.front() == '^') {
-        anchored = true;
-        pattern.remove_prefix(1);
+namespace detail {
+
+/** Splits on '/'; an empty input yields one empty segment. Views point into `text`. */
+inline void split_path_segments(std::string_view text, std::vector<std::string_view>& out) {
+    out.clear();
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t pos = text.find('/', start);
+        out.emplace_back(
+            text.substr(start, pos == std::string_view::npos ? text.size() - start : pos - start));
+        if (pos == std::string_view::npos) {
+            break;
+        }
+        start = pos + 1;
     }
+}
 
-    std::string npath = normalize_path(path);
-    std::string npat = normalize_path(pattern);
-
-    // Brace expand into alternatives
-    auto expanded = brace_expand(npat);
-    for (const auto& patAlt : expanded) {
-        // Split into segments
-        std::vector<std::string_view> pseg;
-        size_t start = 0;
-        std::string_view pv{patAlt};
-        while (start <= pv.size()) {
-            size_t pos = pv.find('/', start);
-            pseg.emplace_back(
-                pv.substr(start, pos == std::string_view::npos ? pv.size() - start : pos - start));
-            if (pos == std::string_view::npos) {
-                break;
-            }
-            start = pos + 1;
-        }
-        // Path segments
-        std::vector<std::string_view> tseg;
-        std::string_view tv{npath};
-        start = 0;
-        while (start <= tv.size()) {
-            size_t pos = tv.find('/', start);
-            tseg.emplace_back(
-                tv.substr(start, pos == std::string_view::npos ? tv.size() - start : pos - start));
-            if (pos == std::string_view::npos) {
-                break;
-            }
-            start = pos + 1;
-        }
-
-        // DP-style match with '**'
-        size_t i = 0, j = 0; // i: tseg, j: pseg
-        size_t starI = std::string_view::npos, starJ = std::string_view::npos;
-        // If anchored, pattern must match from beginning; else allow leading skip via implicit
-        // '**'. Insert an implicit leading '**' so the matcher can backtrack across multiple
-        // possible starting positions (e.g., matching "b/c" against "a/b/x/b/c").
-        static constexpr std::string_view kStarStar = "**";
-        if (!anchored && (pseg.empty() || pseg[0] != kStarStar)) {
-            pseg.insert(pseg.begin(), kStarStar);
-        }
-
-        while (i < tseg.size()) {
-            if (j < pseg.size()) {
-                if (pseg[j] == "**") {
-                    starI = i;
-                    starJ = j++;
-                    continue;
-                }
-                if (match_segment(tseg[i], pseg[j])) {
-                    ++i;
-                    ++j;
-                    continue;
-                }
-            }
-            if (starJ != std::string_view::npos) {
-                i = ++starI;
-                j = starJ + 1;
+/** Matches path segments against pattern segments, where "**" spans any number of them. */
+[[nodiscard]] inline bool match_path_segments(const std::vector<std::string_view>& tseg,
+                                              const std::vector<std::string_view>& pseg) {
+    size_t i = 0, j = 0; // i: tseg, j: pseg
+    size_t starI = std::string_view::npos, starJ = std::string_view::npos;
+    while (i < tseg.size()) {
+        if (j < pseg.size()) {
+            if (pseg[j] == "**") {
+                starI = i;
+                starJ = j++;
                 continue;
             }
-            goto next_alt;
+            if (match_segment(tseg[i], pseg[j])) {
+                ++i;
+                ++j;
+                continue;
+            }
         }
-        while (j < pseg.size() && pseg[j] == "**")
-            ++j;
-        if (j == pseg.size())
-            return true;
-    next_alt:;
+        if (starJ != std::string_view::npos) {
+            i = ++starI;
+            j = starJ + 1;
+            continue;
+        }
+        return false;
     }
-    return false;
+    while (j < pseg.size() && pseg[j] == "**")
+        ++j;
+    return j == pseg.size();
+}
+
+} // namespace detail
+
+/**
+ * A set of path globs prepared once and matched many times.
+ *
+ * glob_match_path normalizes and brace-expands its pattern on every call. That is fine for
+ * one-off checks and dominated the cost of walking a tree against a .gitignore. This does
+ * that work once per pattern; matches() gives the same answer as matches_any_path().
+ */
+class PathPatternSet {
+public:
+    PathPatternSet() = default;
+
+    template <std::ranges::input_range Range>
+    requires StringLike<std::ranges::range_value_t<Range>>
+    explicit PathPatternSet(const Range& patterns) {
+        for (const auto& raw : patterns) {
+            std::string_view pattern{raw};
+            // Leading '^' anchors at the beginning; otherwise an implicit leading "**" lets
+            // the pattern start at any segment.
+            const bool anchored = !pattern.empty() && pattern.front() == '^';
+            if (anchored) {
+                pattern.remove_prefix(1);
+            }
+            for (auto& alternative : brace_expand(normalize_path(pattern))) {
+                alternatives_.push_back(Alternative{std::move(alternative), anchored});
+            }
+        }
+    }
+
+    [[nodiscard]] bool empty() const noexcept { return alternatives_.empty(); }
+
+    [[nodiscard]] bool matches(std::string_view path) const {
+        if (alternatives_.empty()) {
+            return false;
+        }
+        const std::string normalized = normalize_path(path);
+        std::vector<std::string_view> tseg;
+        detail::split_path_segments(normalized, tseg);
+        std::vector<std::string_view> pseg;
+        for (const auto& alternative : alternatives_) {
+            detail::split_path_segments(alternative.text, pseg);
+            static constexpr std::string_view kStarStar = "**";
+            if (!alternative.anchored && (pseg.empty() || pseg[0] != kStarStar)) {
+                pseg.insert(pseg.begin(), kStarStar);
+            }
+            if (detail::match_path_segments(tseg, pseg)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    struct Alternative {
+        std::string text; // normalized, brace-expanded
+        bool anchored{false};
+    };
+    std::vector<Alternative> alternatives_;
+};
+
+/** Glob match for normalized paths supporting ** across segments and brace sets. */
+[[nodiscard]] inline bool glob_match_path(std::string_view path, std::string_view pattern) {
+    return PathPatternSet(std::span<const std::string_view>(&pattern, 1)).matches(path);
 }
 
 /**

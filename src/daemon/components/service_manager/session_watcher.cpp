@@ -27,6 +27,7 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 
 namespace yams::daemon {
@@ -85,13 +86,25 @@ bool ServiceManager::scanSessionWatchDirectory(app::services::IIndexingService& 
                                : static_cast<std::uint64_t>(mtime.time_since_epoch().count());
         auto known = sessionWatch_.gitignoreMtime.find(dirKey);
         if (known == sessionWatch_.gitignoreMtime.end() || known->second != stamp) {
-            sessionWatch_.gitignorePatterns[dirKey] =
-                yams::common::loadGitignorePatterns(directory);
+            sessionWatch_.gitignorePatterns[dirKey] = yams::common::loadGitignoreMatcher(directory);
             sessionWatch_.gitignoreMtime[dirKey] = stamp;
         }
     }
     const auto& ignorePatterns = sessionWatch_.gitignorePatterns[dirKey];
+    // Entries come from iterating `directory`, so each path starts with it: strip the prefix
+    // rather than canonicalizing both paths per entry.
+    const std::string directoryPrefix = [&] {
+        auto prefix = directory.generic_string();
+        if (!prefix.empty() && prefix.back() != '/') {
+            prefix.push_back('/');
+        }
+        return prefix;
+    }();
     const auto relativeTo = [&](const std::filesystem::path& path) {
+        auto generic = path.generic_string();
+        if (generic.size() > directoryPrefix.size() && generic.starts_with(directoryPrefix)) {
+            return generic.substr(directoryPrefix.size());
+        }
         std::error_code relativeError;
         const auto relative = std::filesystem::relative(path, directory, relativeError);
         return relativeError ? path.filename().generic_string() : relative.generic_string();
@@ -103,7 +116,13 @@ bool ServiceManager::scanSessionWatchDirectory(app::services::IIndexingService& 
     std::vector<std::string> changedAbsolute; // same order, to hold back failures
     auto it = std::filesystem::recursive_directory_iterator(directory, error);
     const auto end = std::filesystem::recursive_directory_iterator();
+    std::size_t visited = 0;
     for (; !error && it != end; it.increment(error)) {
+        // Shutdown must not wait for a large tree: abandon the pass with the snapshot
+        // untouched, so nothing is recorded as seen or removed.
+        if ((++visited & 0xFF) == 0 && sessionWatchStopSource_.stop_requested()) {
+            return false;
+        }
         std::error_code metadataError;
         const auto relative = relativeTo(it->path());
         if (it->is_directory(metadataError)) {
@@ -268,17 +287,41 @@ bool ServiceManager::scanSessionWatchDirectory(app::services::IIndexingService& 
     return allSucceeded;
 }
 
+std::vector<ServiceManager::SessionWatchTarget>
+ServiceManager::sessionWatchTargets(const app::services::ISessionService& sessions) {
+    // Watching belongs to each session, not to whichever one is current: `yams watch` in a
+    // second project must not stop the first, and closing the current session must not stop
+    // them all.
+    std::vector<SessionWatchTarget> targets;
+    for (const auto& name : sessions.listSessions()) {
+        if (!sessions.watchEnabled(name)) {
+            continue;
+        }
+        const auto intervalMs = sessions.watchIntervalMs(name);
+        for (const auto& directory : sessions.getPinnedPatterns(name)) {
+            targets.push_back({name, directory, intervalMs});
+        }
+    }
+    return targets;
+}
+
 std::chrono::milliseconds ServiceManager::runSessionWatcherIteration() {
     yams::app::services::AppContext appCtx = getAppContext();
     auto sessionService = yams::app::services::makeSessionService(&appCtx);
-    const auto current = sessionService->current();
-    if (!current) {
+    const auto targets = sessionWatchTargets(*sessionService);
+    if (targets.empty()) {
         return sessionWatcherDelay(false, 0);
     }
+    // One timer serves every target, so it runs at the shortest requested interval.
+    auto intervalMs = targets.front().intervalMs;
+    for (const auto& target : targets) {
+        intervalMs = std::min(intervalMs, target.intervalMs);
+    }
+    const auto delay = sessionWatcherDelay(true, intervalMs);
 
-    const bool watchEnabled = sessionService->watchEnabled(current);
-    const auto delay = sessionWatcherDelay(watchEnabled, sessionService->watchIntervalMs(current));
-    if (!watchEnabled) {
+    // A pass walks every watched tree and may queue indexing. Under memory or CPU pressure
+    // it waits for the next tick; changes are found then, since the snapshot did not move.
+    if (!ResourceGovernor::instance().canAdmitWork()) {
         return delay;
     }
 
@@ -288,8 +331,12 @@ std::chrono::milliseconds ServiceManager::runSessionWatcherIteration() {
     }
     auto documentService = yams::app::services::makeDocumentService(appCtx);
 
-    for (const auto& pattern : sessionService->getPinnedPatterns(current)) {
-        scanSessionWatchDirectory(*indexingService, documentService.get(), *current, pattern);
+    for (const auto& target : targets) {
+        if (sessionWatchStopSource_.stop_requested()) {
+            break;
+        }
+        scanSessionWatchDirectory(*indexingService, documentService.get(), target.session,
+                                  target.directory);
     }
     return delay;
 }

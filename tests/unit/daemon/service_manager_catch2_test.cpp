@@ -1211,6 +1211,50 @@ TEST_CASE("ServiceManager session watcher uses configured intervals without busy
     CHECK((ServiceManager::__test_sessionWatcherDelay(true, 20) == 100ms));
 }
 
+TEST_CASE("ServiceManager session watcher follows every session with watching enabled",
+          "[daemon][service_manager][session_watch]") {
+    // `yams watch` in a second project made it the current session and silently stopped the
+    // first; closing the current session stopped all watching while every session still
+    // reported "enabled".
+    const auto root = yams::test::make_temp_dir("yams_watch_targets_");
+    yams::test::ScopedEnvVar stateHome{"XDG_STATE_HOME", root.string()};
+    yams::test::ScopedEnvVar noCurrent{"YAMS_SESSION_CURRENT", std::nullopt};
+    auto sessions = app::services::makeSessionService(nullptr);
+    REQUIRE(sessions);
+
+    sessions->init("first", "");
+    sessions->addPathSelector("/work/first", {}, {});
+    sessions->enableWatch(true, "first");
+    sessions->setWatchIntervalMs(4000, "first");
+
+    sessions->init("second", "");
+    sessions->addPathSelector("/work/second", {}, {});
+    sessions->enableWatch(true, "second");
+
+    sessions->init("unwatched", "");
+    sessions->addPathSelector("/work/unwatched", {}, {});
+
+    const auto directoriesOf = [&] {
+        std::set<std::string> directories;
+        for (const auto& target : ServiceManager::__test_sessionWatchTargets(*sessions)) {
+            directories.insert(target.session + ":" + target.directory.generic_string());
+        }
+        return directories;
+    };
+    const std::set<std::string> expected{"first:/work/first", "second:/work/second"};
+
+    SECTION("with another session current") {
+        sessions->use("unwatched");
+        CHECK(directoriesOf() == expected);
+    }
+    SECTION("with no current session") {
+        sessions->close();
+        CHECK(directoriesOf() == expected);
+    }
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
 TEST_CASE("ServiceManager session watcher refreshes every retrieval index",
           "[daemon][service_manager][session_watch]") {
     auto request = ServiceManager::__test_makeSessionWatchRequest("coding", "/workspace/yams",
@@ -1267,6 +1311,28 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                           "coding", watchedDirectory));
     CHECK((documentService.deleteRequests.size() == 2));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager session watcher abandons a pass when asked to stop",
+                 "[daemon][service_manager][session_watch]") {
+    ServiceManager serviceManager(config_, state_, lifecycleFsm_);
+    SessionWatchIndexingService indexingService;
+    SessionWatchDocumentService documentService;
+    const auto watchedDirectory = testDir_ / "watched_stop";
+    fs::create_directories(watchedDirectory);
+    for (int i = 0; i < 600; ++i) {
+        std::ofstream(watchedDirectory / ("f" + std::to_string(i) + ".txt")) << i;
+    }
+
+    serviceManager.__test_requestSessionWatcherStop();
+
+    // Shutdown waits a bounded time for the watcher, so a pass over a large tree gives up
+    // rather than indexing, and records nothing as seen.
+    CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                                "coding", watchedDirectory));
+    CHECK(indexingService.requests.empty());
+    CHECK(documentService.deleteRequests.empty());
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
