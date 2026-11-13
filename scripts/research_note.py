@@ -61,10 +61,27 @@ def full_hash(value):
     return value
 
 
+def changed_since(item, since_epoch) -> bool:
+    """Whether a listed document was indexed or modified inside the window."""
+    stamps = [
+        item.get(key)
+        for key in ("indexed", "modified")
+        if isinstance(item.get(key), int) and not isinstance(item.get(key), bool)
+    ]
+    if not stamps:
+        raise RetrievalError("list did not report when a document changed")
+    return max(stamps) >= since_epoch
+
+
 def collect_sources(
-    client, filters, page_size=100, max_documents=1000
+    client, filters, page_size=100, max_documents=1000, since_epoch=None
 ) -> dict[str, Any]:
-    """List all pages first, then hydrate each unique content hash exactly once."""
+    """List all pages first, then hydrate each unique content hash exactly once.
+
+    The window is enforced here from the timestamps list returns, not left to
+    list's own --since: a list that ignores the filter would otherwise put
+    every matching document, however old, into the report.
+    """
     if page_size <= 0 or max_documents <= 0:
         raise ValueError("page size and document limit must be positive")
     documents = []
@@ -111,7 +128,11 @@ def collect_sources(
         if identity in seen_pages:
             raise ValueError("list pagination made no progress")
         seen_pages.add(identity)
-        documents.extend(entries)
+        documents.extend(
+            item
+            for item in entries
+            if since_epoch is None or changed_since(item, since_epoch)
+        )
         if len(documents) > max_documents:
             raise ValueError(
                 "document limit exceeded; narrow selection or raise --max-documents"
@@ -297,6 +318,9 @@ def main(argv=None):
             filters,
             args.page_size,
             args.max_documents,
+            since_epoch=int(
+                datetime.fromisoformat(since.replace("Z", "+00:00")).timestamp()
+            ),
         )
         bundle.update(
             {

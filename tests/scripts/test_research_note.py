@@ -167,6 +167,23 @@ class ResearchNoteTests(unittest.TestCase):
             self.assertEqual(output.read_text(), "previous report")
             self.assertFalse(Path(str(output) + ".sources.json").exists())
 
+    def test_window_is_enforced_even_when_list_ignores_since(self):
+        recent, old, edited = source("recent\n"), source("old\n"), source("edited\n")
+        listed = [
+            dict(entry(recent), indexed=2000, modified=100),
+            dict(entry(old), indexed=500, modified=400),
+            dict(entry(edited), indexed=300, modified=1500),
+        ]
+        client = Mock()
+        client.json.side_effect = [{"documents": listed, "total": 3}, recent, edited]
+        result = report.collect_sources(client, [], since_epoch=1000)
+        self.assertEqual(result["sources"], [recent, edited])
+
+        undated = Mock()
+        undated.json.side_effect = [{"documents": [entry(old)], "total": 1}]
+        with self.assertRaises(report.RetrievalError):
+            report.collect_sources(undated, [], since_epoch=1000)
+
     def test_relative_window_is_resolved_once(self):
         now = report.datetime(2026, 10, 29, 12, tzinfo=report.timezone.utc)
         self.assertEqual(report.resolve_since("7d", now), "2026-10-22T12:00:00Z")

@@ -125,7 +125,10 @@ public:
     }
 
     Result<void> execute() override {
-        OutputBudget outputBudget(std::cout, cli_ ? cli_->outputBudgetChars() : 0);
+        // A JSON document cut at the budget, with a marker appended, is not JSON. JSON mode
+        // writes the whole document or fails.
+        const bool jsonDocument = cli_ && cli_->getJsonOutput();
+        OutputBudget outputBudget(std::cout, cli_ && !jsonDocument ? cli_->outputBudgetChars() : 0);
         YAMS_ZONE_SCOPED_N("GetCommand::execute");
 
         try {
@@ -218,6 +221,13 @@ public:
             }
 
             const bool jsonOutput = cli_->getJsonOutput();
+            if (jsonOutput && !metadataOnly_ && (maxBytes_ != 0 || slice_.active())) {
+                // Schema v1 promises the complete original bytes; emitting the whole
+                // document while a limit was asked for would ignore the request silently.
+                return Error{ErrorCode::InvalidArgument,
+                             "JSON get returns the complete document; omit --max-bytes, --lines "
+                             "and --around, or use --metadata-only"};
+            }
             if (jsonOutput && extract_) {
                 return Error{ErrorCode::InvalidArgument,
                              "JSON get currently supports original UTF-8 content only; "

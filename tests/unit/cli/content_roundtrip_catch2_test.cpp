@@ -224,6 +224,26 @@ TEST_CASE("CLI acknowledged stdin content hydrates immediately by full hash", "[
     REQUIRE(nlohmann::json::accept(trailingJsonOutput));
     CHECK(nlohmann::json::parse(trailingJsonOutput).at("hash") == hash);
 
+    // The text output budget must not cut a JSON document and append its marker.
+    const auto [budgetCode, budgetOutput] =
+        runCli({"yams", "--data-dir", (root / "data").string(), "--budget-chars", "40", "--json",
+                "get", "--hash", hash});
+    REQUIRE(budgetCode == 0);
+    REQUIRE(nlohmann::json::accept(budgetOutput));
+    CHECK(nlohmann::json::parse(budgetOutput).at("content") == payload);
+
+    // Schema v1 is the complete document: a content limit is refused, not ignored.
+    for (const auto& limit : {std::vector<std::string>{"--max-bytes", "1"},
+                              std::vector<std::string>{"--lines", "1:1"}}) {
+        std::vector<std::string> args{
+            "yams", "--data-dir", (root / "data").string(), "--json", "get", "--hash", hash};
+        args.insert(args.end(), limit.begin(), limit.end());
+        const auto [limitedCode, limitedOutput] = runCli(args);
+        INFO(limit.front() << ": " << limitedOutput);
+        CHECK(limitedCode != 0);
+        CHECK_FALSE(nlohmann::json::accept(limitedOutput));
+    }
+
     const auto [prefixCode, prefixOutput] = runCli({"yams", "--data-dir", (root / "data").string(),
                                                     "--json", "get", "--hash", hash.substr(0, 12)});
     REQUIRE(prefixCode == 0);
