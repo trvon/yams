@@ -77,8 +77,18 @@ TEST_CASE("grep -l and -c report what the plain mode found", "[cli][grep][output
 
 TEST_CASE("grep says when it stopped at its time budget", "[cli][grep][output]") {
     EmbeddedCorpus corpus("yams_grep_budget_");
-    corpus.addText("notes.txt", "first line\nsecond needle line\n");
-    // One millisecond is spent before the first document is read.
+    // The clock is read every 64 lines, so the scan has to outlast the budget on any
+    // machine. A one-line document was scanned in under a millisecond on a fast runner and
+    // the budget never triggered. Eight megabytes of lines cannot be.
+    std::string body;
+    body.reserve(8U << 20U);
+    const std::string filler(99, 'x');
+    for (int line = 0; line < 80'000; ++line) {
+        body += filler;
+        body += '\n';
+    }
+    body += "the needle is on the last line\n";
+    corpus.addText("notes.txt", body);
     yams::test::ScopedEnvVar budget{"YAMS_GREP_TIME_BUDGET_MS", std::string("1")};
 
     const auto r = corpus.run({"grep", "needle"});
