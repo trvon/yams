@@ -558,6 +558,9 @@ public:
     void __test_startSessionWatcherOn(const boost::asio::any_io_executor& executor) {
         startSessionWatcherOn(executor);
     }
+    bool __test_sessionWatcherWaiting() const {
+        return sessionWatcherWaiting_.load(std::memory_order_acquire);
+    }
     /// Runs the shutdown step and reports whether the watcher coroutine had finished.
     bool __test_stopSessionWatcher() {
         stopSessionWatcherForShutdown();
@@ -652,6 +655,7 @@ public:
     // Not the stop_source: its fallback on platforms without std::stop_source never reports
     // a requested stop, and a pass must be able to see one.
     std::atomic<bool> sessionWatcherStopRequested_{false};
+    std::atomic<bool> sessionWatcherWaiting_{false}; // asleep between passes
     // The watcher's wait timer, so shutdown can cancel a wait in progress.
     std::mutex sessionWatcherTimerMutex_;
     std::shared_ptr<boost::asio::steady_timer> sessionWatcherTimer_;

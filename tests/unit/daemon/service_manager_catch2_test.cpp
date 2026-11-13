@@ -1273,7 +1273,11 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     serviceManager.__test_startSessionWatcherOn(io.get_executor());
     // Nothing is watched here, so after its first pass the watcher waits two seconds.
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // Shutdown is requested once it is actually asleep, so the wake-up is what is tested.
+    REQUIRE(
+        yams::test::wait_for_condition(std::chrono::seconds(10), std::chrono::milliseconds(5), [&] {
+            return serviceManager.__test_sessionWatcherWaiting();
+        }));
 
     const auto started = std::chrono::steady_clock::now();
     const bool finished = serviceManager.__test_stopSessionWatcher();
