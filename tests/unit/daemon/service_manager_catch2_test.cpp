@@ -33,6 +33,7 @@
 #endif
 
 #include "../../common/test_helpers_catch2.h"
+#include "session_watch_fakes.h"
 
 #include "../../../include/yams/daemon/components/db_integrity_stamp.h"
 #include "../../../src/daemon/components/service_manager/bootstrap_status.h"
@@ -256,84 +257,6 @@ bool walSidecarStillMatchesPayload(const fs::path& dbPath, const std::string& pa
     in.read(actual.data(), static_cast<std::streamsize>(actual.size()));
     return in.good() && actual == payload;
 }
-
-class SessionWatchIndexingService final : public app::services::IIndexingService {
-public:
-    Result<app::services::AddDirectoryResponse>
-    addDirectory(const app::services::AddDirectoryRequest& request) override {
-        requests.push_back(request);
-        if (failuresRemaining > 0) {
-            --failuresRemaining;
-            return Error{ErrorCode::IOError, "simulated indexing failure"};
-        }
-        app::services::AddDirectoryResponse response;
-        response.filesProcessed = request.includePatterns.size();
-        for (const auto& relative : request.includePatterns) {
-            app::services::IndexedFileResult result;
-            result.path = (fs::path(request.directoryPath) / relative).string();
-            result.success = !failingFiles.contains(relative);
-            if (result.success) {
-                ++response.filesIndexed;
-            } else {
-                ++response.filesFailed;
-                result.error = "simulated per-file failure";
-            }
-            response.results.push_back(std::move(result));
-        }
-        return response;
-    }
-
-    std::size_t failuresRemaining{0};
-    std::set<std::string> failingFiles;
-    std::vector<app::services::AddDirectoryRequest> requests;
-};
-
-class SessionWatchDocumentService final : public app::services::IDocumentService {
-public:
-    Result<app::services::StoreDocumentResponse>
-    store(const app::services::StoreDocumentRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<app::services::RetrieveDocumentResponse>
-    retrieve(const app::services::RetrieveDocumentRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<app::services::CatDocumentResponse>
-    cat(const app::services::CatDocumentRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<app::services::ListDocumentsResponse>
-    list(const app::services::ListDocumentsRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<app::services::UpdateMetadataResponse>
-    updateMetadata(const app::services::UpdateMetadataRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<std::string> resolveNameToHash(const std::string&, bool) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<app::services::DeleteByNameResponse>
-    deleteByName(const app::services::DeleteByNameRequest& request) override {
-        deleteRequests.push_back(request);
-        if (failuresRemaining > 0) {
-            --failuresRemaining;
-            return Error{ErrorCode::IOError, "simulated deletion failure"};
-        }
-        app::services::DeleteByNameResponse response;
-        response.count = 1;
-        response.deleted.push_back(
-            {.name = request.name, .deleted = true, .errorCode = ErrorCode::Success});
-        return response;
-    }
-    Result<app::services::DeleteByNameResponse>
-    pruneVersions(const app::services::PruneVersionsRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-
-    std::size_t failuresRemaining{0};
-    std::vector<app::services::DeleteByNameRequest> deleteRequests;
-};
 
 void requireReadyDatabaseState(const StateComponent& state) {
     CHECK(state.readiness.databaseReady.load());
@@ -1271,6 +1194,8 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager session watcher retries failed indexing and deletion",
                  "[daemon][service_manager][session_watch]") {
     ServiceManager serviceManager(config_, state_, lifecycleFsm_);
+    // These cases are about retrying a removal, not about when one becomes due.
+    serviceManager.__test_sessionWatcher().setRemovalGrace(std::chrono::seconds{0});
     SessionWatchIndexingService indexingService;
     SessionWatchDocumentService documentService;
     const auto watchedDirectory = testDir_ / "watched";
@@ -1339,6 +1264,8 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager session watcher keeps progressing past a failing path",
                  "[daemon][service_manager][session_watch]") {
     ServiceManager serviceManager(config_, state_, lifecycleFsm_);
+    // These cases are about retrying a removal, not about when one becomes due.
+    serviceManager.__test_sessionWatcher().setRemovalGrace(std::chrono::seconds{0});
     SessionWatchIndexingService indexingService;
     SessionWatchDocumentService documentService;
     const auto watchedDirectory = testDir_ / "watched_progress";

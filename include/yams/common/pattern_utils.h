@@ -233,8 +233,8 @@ inline void split_path_segments(std::string_view text, std::vector<std::string_v
 }
 
 /** Matches path segments against pattern segments, where "**" spans any number of them. */
-[[nodiscard]] inline bool match_path_segments(const std::vector<std::string_view>& tseg,
-                                              const std::vector<std::string_view>& pseg) {
+[[nodiscard]] inline bool match_path_segments(std::span<const std::string_view> tseg,
+                                              const std::vector<std::string>& pseg) {
     size_t i = 0, j = 0; // i: tseg, j: pseg
     size_t starI = std::string_view::npos, starJ = std::string_view::npos;
     while (i < tseg.size()) {
@@ -267,9 +267,10 @@ inline void split_path_segments(std::string_view text, std::vector<std::string_v
 /**
  * A set of path globs prepared once and matched many times.
  *
- * glob_match_path normalizes and brace-expands its pattern on every call. That is fine for
- * one-off checks and dominated the cost of walking a tree against a .gitignore. This does
- * that work once per pattern; matches() gives the same answer as matches_any_path().
+ * glob_match_path normalizes, brace-expands and splits its pattern on every call. That is
+ * fine for one-off checks and dominated the cost of walking a tree against a .gitignore.
+ * This does that work once per pattern; matches() gives the same answer as
+ * matches_any_path().
  */
 class PathPatternSet {
 public:
@@ -286,8 +287,18 @@ public:
             if (anchored) {
                 pattern.remove_prefix(1);
             }
-            for (auto& alternative : brace_expand(normalize_path(pattern))) {
-                alternatives_.push_back(Alternative{std::move(alternative), anchored});
+            std::vector<std::string_view> views;
+            for (const auto& alternative : brace_expand(normalize_path(pattern))) {
+                detail::split_path_segments(alternative, views);
+                std::vector<std::string> segments;
+                segments.reserve(views.size() + 1);
+                if (!anchored && (views.empty() || views.front() != "**")) {
+                    segments.emplace_back("**");
+                }
+                for (const auto view : views) {
+                    segments.emplace_back(view);
+                }
+                alternatives_.push_back(std::move(segments));
             }
         }
     }
@@ -299,16 +310,15 @@ public:
             return false;
         }
         const std::string normalized = normalize_path(path);
-        std::vector<std::string_view> tseg;
-        detail::split_path_segments(normalized, tseg);
-        std::vector<std::string_view> pseg;
+        std::vector<std::string_view> segments;
+        detail::split_path_segments(normalized, segments);
+        return matchesSegments(segments);
+    }
+
+    /// For callers that already hold a normalized path split on '/', such as a tree walk.
+    [[nodiscard]] bool matchesSegments(std::span<const std::string_view> segments) const {
         for (const auto& alternative : alternatives_) {
-            detail::split_path_segments(alternative.text, pseg);
-            static constexpr std::string_view kStarStar = "**";
-            if (!alternative.anchored && (pseg.empty() || pseg[0] != kStarStar)) {
-                pseg.insert(pseg.begin(), kStarStar);
-            }
-            if (detail::match_path_segments(tseg, pseg)) {
+            if (detail::match_path_segments(segments, alternative)) {
                 return true;
             }
         }
@@ -316,11 +326,7 @@ public:
     }
 
 private:
-    struct Alternative {
-        std::string text; // normalized, brace-expanded
-        bool anchored{false};
-    };
-    std::vector<Alternative> alternatives_;
+    std::vector<std::vector<std::string>> alternatives_; // pattern segments per alternative
 };
 
 /** Glob match for normalized paths supporting ** across segments and brace sets. */

@@ -205,7 +205,7 @@ tests/benchmarks/write_coordinator_bench.cpp:72:portability/env-read # reviewed 
 tests/benchmarks/write_coordinator_bench.cpp:419:portability/env-read # reviewed raw environment read
 tests/integration/daemon/onnx_tuning_integration_test.cpp:437:portability/env-read # reviewed raw environment read
 tests/integration/daemon/onnx_tuning_integration_test.cpp:438:portability/env-read # reviewed raw environment read
-tests/integration/services/grep_service_expectations_catch2_test.cpp:678:portability/env-read # reviewed raw environment read
+tests/integration/services/grep_service_expectations_catch2_test.cpp:681:portability/env-read # reviewed raw environment read
 tests/integration/services/ipc_conformance_catch2_test.cpp:193:portability/env-read # reviewed raw environment read
 tests/integration/services/retrieval_and_ingestion_catch2_test.cpp:217:portability/env-read # reviewed raw environment read
 tests/integration/services/retrieval_and_ingestion_catch2_test.cpp:1210:portability/env-read # reviewed raw environment read

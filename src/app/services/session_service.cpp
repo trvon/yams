@@ -488,6 +488,14 @@ public:
         use(name);
     }
 
+    void clearCurrent() override {
+        json idx = load_json(index_path());
+        if (idx.contains("current")) {
+            idx.erase("current");
+            save_json(index_path(), idx);
+        }
+    }
+
     void close() override {
         auto cur = current();
         if (!cur)

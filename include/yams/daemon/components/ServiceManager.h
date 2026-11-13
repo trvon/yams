@@ -32,6 +32,7 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/common/pattern_utils.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/SessionWatcher.h>
 #include <yams/daemon/components/AsyncInitOrchestrator.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
@@ -456,15 +457,12 @@ public:
     WriteCoordinator* getWriteCoordinator() const { return writeCoordinator_.get(); }
     // NOLINTBEGIN(bugprone-reserved-identifier): repo test-helper surface intentionally uses
     // historical __test_* names across many suites; rename is tracked separately.
-    /// One directory the session watcher keeps indexed.
-    struct SessionWatchTarget {
-        std::string session;
-        std::filesystem::path directory;
-        std::uint32_t intervalMs{0};
-    };
+    using SessionWatchTarget = SessionWatcher::Target;
     /// Every directory pinned by a session with watching enabled.
     static std::vector<SessionWatchTarget>
-    sessionWatchTargets(const app::services::ISessionService& sessions);
+    sessionWatchTargets(const app::services::ISessionService& sessions) {
+        return SessionWatcher::targets(sessions);
+    }
 #ifdef YAMS_TESTING
     void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
         writeCoordinator_ = std::move(coordinator);
@@ -554,6 +552,7 @@ public:
         return sessionWatchTargets(sessions);
     }
     void __test_requestSessionWatcherStop() { sessionWatchStopSource_.request_stop(); }
+    SessionWatcher& __test_sessionWatcher() { return sessionWatcher_; }
     static bool __test_shouldStartSessionWatcher(std::string_view disableValue) {
         return shouldStartSessionWatcher(disableValue);
     }
@@ -636,17 +635,10 @@ public:
         }
     }
 
-    // Session watchers: polling mtime/size for pinned directories
-    struct SessionWatchState {
-        std::unordered_map<std::string,
-                           std::unordered_map<std::string, std::pair<std::uint64_t, std::uint64_t>>>
-            dirFiles; // dir -> (file -> (mtime,size))
-        std::unordered_map<std::string, yams::common::PathPatternSet> gitignorePatterns;
-        std::unordered_map<std::string, std::uint64_t> gitignoreMtime;
-        // Paths whose indexing or removal failed; warned once, retried quietly.
-        std::unordered_set<std::string> failingPaths;
-    };
-    SessionWatchState sessionWatch_;
+    // Keeps the directories of watch-enabled sessions indexed (polling).
+    SessionWatcher sessionWatcher_;
+    bool sessionWatcherConfigured_{false};
+    void configureSessionWatcher(bool forDaemonLoop);
     yams::compat::stop_source sessionWatchStopSource_;
     std::future<void> sessionWatcherFuture_;
 

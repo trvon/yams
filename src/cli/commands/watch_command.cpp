@@ -41,10 +41,11 @@ public:
         cmd->add_option("--interval", intervalMs_, "Polling interval in ms (set)");
         cmd->add_option("--root", rootPath_, "Project root to watch (default: git root or cwd)");
         cmd->add_option("--session", sessionName_, "Session name (default: auto)");
-        cmd->add_flag("--no-use", noUse_, "Do not set the session as current");
+        cmd->add_flag("--use", use_, "Also make the session current for later commands");
+        cmd->add_flag("--no-use", noUse_, "Keep the current session unchanged (the default)");
         cmd->add_flag("--no-selector", noSelector_, "Do not add root selector to the session");
         cmd->add_option("--daemon-ready-timeout-ms", daemonReadyTimeoutMs_,
-                        "Max time to wait for daemon readiness (ms, 0 to skip)")
+                        "Max time to wait for daemon readiness (ms, 0: do not contact the daemon)")
             ->default_val(10000);
 
         cmd->callback([this]() { cli_->setPendingCommand(this); });
@@ -99,6 +100,10 @@ public:
                             yams::core::shortHash(rootStr);
         }
 
+        // Watching is per session, so enabling it leaves the current session alone: making
+        // a project current changed how later commands were scoped. Creating a session and
+        // adding its selector go through "current", which is put back afterwards.
+        const auto originalSession = svc->current();
         if (!svc->exists(targetSession)) {
             if (stop_) {
                 return Error{ErrorCode::NotFound, "Session not found: " + targetSession};
@@ -106,7 +111,9 @@ public:
             svc->init(targetSession, "auto: " + rootStr);
         }
 
-        if (!stop_) {
+        // Watching is a setting in the session file that the daemon reads on its next pass,
+        // so a zero timeout skips the daemon entirely instead of failing without one.
+        if (!stop_ && daemonReadyTimeoutMs_ > 0) {
             yams::daemon::ClientConfig cfg;
             if (cli_->hasExplicitDataDir()) {
                 cfg.dataDir = cli_->getDataPath();
@@ -145,47 +152,25 @@ public:
             }
         }
 
-        std::optional<std::string> previousSession;
-        bool changedCurrent = false;
-        auto ensureCurrent = [&]() {
-            if (!noUse_) {
-                svc->use(targetSession);
-                changedCurrent = true;
-                return;
-            }
-            previousSession = svc->current();
-            if (!previousSession || *previousSession != targetSession) {
-                svc->use(targetSession);
-                changedCurrent = true;
-            }
-        };
-
         if (intervalMs_ > 0)
             svc->setWatchIntervalMs(intervalMs_, targetSession);
 
-        if (!stop_) {
-            if (!noSelector_) {
-                ensureCurrent();
-                auto selectors = svc->listPathSelectors(targetSession);
-                if (std::find(selectors.begin(), selectors.end(), rootStr) == selectors.end()) {
-                    svc->addPathSelector(rootStr, {}, {});
-                }
-            } else if (!noUse_) {
-                ensureCurrent();
+        if (!stop_ && !noSelector_) {
+            auto selectors = svc->listPathSelectors(targetSession);
+            if (std::find(selectors.begin(), selectors.end(), rootStr) == selectors.end()) {
+                svc->use(targetSession);
+                svc->addPathSelector(rootStr, {}, {});
             }
-            svc->enableWatch(true, targetSession);
-        } else {
-            if (!noUse_) {
-                ensureCurrent();
-            }
-            svc->enableWatch(false, targetSession);
         }
+        svc->enableWatch(!stop_, targetSession);
 
-        if (noUse_ && changedCurrent) {
-            if (previousSession && *previousSession != targetSession) {
-                svc->use(*previousSession);
-            } else if (!previousSession) {
-                svc->close();
+        if (use_ && !noUse_) {
+            svc->use(targetSession);
+        } else if (svc->current() != originalSession) {
+            if (originalSession) {
+                svc->use(*originalSession);
+            } else {
+                svc->clearCurrent(); // not close(): that would mark the session closed
             }
         }
 
@@ -200,6 +185,7 @@ private:
     YamsCLI* cli_{nullptr};
     bool start_{false};
     bool stop_{false};
+    bool use_{false};
     bool noUse_{false};
     bool noSelector_{false};
     uint32_t intervalMs_{0};
