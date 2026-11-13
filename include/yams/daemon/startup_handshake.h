@@ -76,7 +76,7 @@ public:
         struct sigaction ignore{};
         struct sigaction previous{};
         ignore.sa_handler = SIG_IGN;
-        ::sigemptyset(&ignore.sa_mask);
+        sigemptyset(&ignore.sa_mask);
         const bool guarded = ::sigaction(SIGPIPE, &ignore, &previous) == 0;
         const char status = started ? '0' : '1';
         ssize_t written = 0;
