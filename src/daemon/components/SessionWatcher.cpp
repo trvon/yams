@@ -207,22 +207,40 @@ bool SessionWatcher::walk(const Target& target, TargetState& state, WalkResult& 
             const auto gitignorePath = absolute / ".gitignore";
             std::error_code statError;
             const auto mtime = fs::last_write_time(gitignorePath, statError);
-            if (!statError) {
-                const auto size = fs::file_size(gitignorePath, statError);
-                const auto stamp =
-                    statError ? std::uint64_t{0}
-                              : (static_cast<std::uint64_t>(mtime.time_since_epoch().count()) ^
-                                 (static_cast<std::uint64_t>(size) << 1)) |
-                                    1U;
-                // The stack keeps pointers into this map across deeper insertions. That is
-                // safe for unordered_map: rehashing moves buckets, never the stored elements.
-                auto& cached = state.gitignores[relativeDirectory];
-                if (cached.stamp != stamp || stamp == 0) {
-                    std::ifstream input(gitignorePath);
-                    cached.rules = input ? yams::common::parseGitignoreRules(input)
-                                         : std::vector<yams::common::GitignoreRule>{};
-                    cached.stamp = stamp;
+            const bool absent = statError == std::errc::no_such_file_or_directory ||
+                                statError == std::errc::not_a_directory;
+            if (!absent) {
+                const auto size =
+                    statError ? std::uintmax_t{0} : fs::file_size(gitignorePath, statError);
+                const auto known = state.gitignores.find(relativeDirectory);
+                bool usable = known != state.gitignores.end();
+                if (!statError) {
+                    const auto stamp =
+                        (static_cast<std::uint64_t>(mtime.time_since_epoch().count()) ^
+                         (static_cast<std::uint64_t>(size) << 1)) |
+                        1U;
+                    if (!usable || known->second.stamp != stamp) {
+                        if (std::ifstream input(gitignorePath); input) {
+                            // The stack keeps pointers into this map across deeper
+                            // insertions. That is safe for unordered_map: rehashing moves
+                            // buckets, never the stored elements.
+                            auto& cached = state.gitignores[relativeDirectory];
+                            cached.rules = yams::common::parseGitignoreRules(input);
+                            cached.stamp = stamp;
+                            usable = true;
+                        }
+                    }
                 }
+                if (!usable) {
+                    // There is a .gitignore and it cannot be read. Walking on without it
+                    // would index what it excludes, so the pass is retried instead.
+                    result.error =
+                        statError ? statError : std::make_error_code(std::errc::io_error);
+                    return false;
+                }
+                // Reached with fresh rules, or with the rules from an earlier pass when
+                // the file could not be read this time.
+                auto& cached = state.gitignores[relativeDirectory];
                 gitignoreDirectories.insert(relativeDirectory);
                 if (!cached.rules.empty()) {
                     ignore.push(depth, &cached.rules);
