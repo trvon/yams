@@ -37,7 +37,7 @@ std::set<std::string> lastSubmitted(const SessionWatchIndexingService& indexing)
     if (indexing.requests.empty()) {
         return {};
     }
-    const auto& patterns = indexing.requests.back().includePatterns;
+    const auto& patterns = indexing.requests.back().explicitFiles;
     return {patterns.begin(), patterns.end()};
 }
 
@@ -50,7 +50,11 @@ struct Tree {
     Tree() { fs::create_directories(root); }
     [[nodiscard]] SessionWatcher::Target target(std::string session = "coding",
                                                 std::uint32_t intervalMs = 1000) const {
-        return {std::move(session), root, intervalMs};
+        SessionWatcher::Target target;
+        target.session = std::move(session);
+        target.directory = root;
+        target.intervalMs = intervalMs;
+        return target;
     }
     [[nodiscard]] SessionWatcher::Options options() const {
         SessionWatcher::Options options;
@@ -86,6 +90,14 @@ TEST_CASE("Session watcher does not resubmit a tree after a restart", "[daemon][
         SessionWatchIndexingService indexing;
         CHECK(again.scan(indexing, &documents, tree.target(), tree.now) == Outcome::Clean);
         CHECK(lastSubmitted(indexing) == std::set<std::string>{"a.cpp"});
+    }
+    SECTION("a session created again under the same name gets its own first index") {
+        // Removing a session leaves its snapshot behind; the new one has a new uuid.
+        auto recreated = tree.target();
+        recreated.sessionUuid = "second-incarnation";
+        SessionWatchIndexingService indexing;
+        CHECK(restarted.scan(indexing, &documents, recreated, tree.now) == Outcome::Clean);
+        CHECK(lastSubmitted(indexing) == std::set<std::string>{"a.cpp", "src/b.cpp"});
     }
     SECTION("another session pinning the same directory gets its own first index") {
         // One snapshot per directory would let the first session's scan hide the tree
@@ -175,6 +187,7 @@ TEST_CASE("Session watcher applies every .gitignore in the tree", "[daemon][sess
                                 "sub/wanted.gen.cpp", "other/secret.txt"});
     // The walk already filtered; the indexer's own root-only filter must not undo a rule.
     CHECK(indexing.requests.front().noGitignore);
+    CHECK(indexing.requests.front().includePatterns.empty()); // exact files, not patterns
 
     SECTION("an edited .gitignore takes effect on the next pass") {
         writeFile(tree.root / "sub" / ".gitignore", "nothing-matches-this\n");
@@ -240,9 +253,28 @@ TEST_CASE("Session watcher gives up a pass when stopped or refused", "[daemon][s
         CHECK(indexing.requests.empty());
         CHECK(asked == 2);
     }
+    SECTION("a tree with too many files is not fed into the index") {
+        // A session pinned a 137,000-file temporary directory and the watcher began
+        // ingesting all of it.
+        for (int i = 0; i < 12; ++i) {
+            writeFile(tree.root / "bulk" / ("f" + std::to_string(i) + ".txt"), "x");
+        }
+        auto options = tree.options();
+        options.maxFilesPerTarget = 10;
+        SessionWatcher watcher(options);
+        CHECK(watcher.scan(indexing, &documents, tree.target(), tree.now) == Outcome::Incomplete);
+        CHECK(indexing.requests.empty());
+        CHECK(documents.deleteRequests.empty());
+
+        // Under the limit again (a .gitignore for the bulk), it is watched normally.
+        writeFile(tree.root / ".gitignore", "bulk/\n");
+        CHECK(watcher.scan(indexing, &documents, tree.target(), tree.now + 1s) == Outcome::Clean);
+        CHECK(lastSubmitted(indexing) == std::set<std::string>{".gitignore", "a.cpp"});
+    }
     SECTION("a selector that is not a directory is reported, not scanned") {
         SessionWatcher watcher(tree.options());
-        const SessionWatcher::Target glob{"coding", tree.root / "src" / "**" / "*.cpp", 1000};
+        auto glob = tree.target();
+        glob.directory = tree.root / "src" / "**" / "*.cpp";
         CHECK(watcher.scan(indexing, &documents, glob, tree.now) == Outcome::Incomplete);
         CHECK(indexing.requests.empty());
     }

@@ -73,7 +73,17 @@ public:
                 }
             }
 
-            if (!explicitEntries.empty()) {
+            if (!req.explicitFiles.empty()) {
+                // The caller named the files: take exactly those, nothing matched by name.
+                entries.reserve(req.explicitFiles.size());
+                for (const auto& relative : req.explicitFiles) {
+                    std::filesystem::path file = dirPath / std::filesystem::path(relative);
+                    std::error_code fileError;
+                    if (std::filesystem::is_regular_file(file, fileError) && !fileError) {
+                        entries.emplace_back(file);
+                    }
+                }
+            } else if (!explicitEntries.empty()) {
                 entries = std::move(explicitEntries);
             } else {
                 std::error_code ec;
@@ -514,6 +524,7 @@ private:
             ++response.filesProcessed;
             const auto filePath = entry.path().string();
             const bool included =
+                !req.explicitFiles.empty() ||
                 shouldIncludeFile(req.directoryPath, filePath, req.includePatterns,
                                   req.excludePatterns, gitignorePatterns);
             spdlog::debug("[IndexingService] candidate: '{}' -> {}", filePath,

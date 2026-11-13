@@ -22,6 +22,7 @@ namespace fs = std::filesystem;
 constexpr auto kWarnInterval = std::chrono::minutes(10);
 constexpr std::string_view kSnapshotMagic = "yams-watch-snapshot 1";
 constexpr auto kNotDirectoryRetry = std::chrono::seconds(60);
+constexpr auto kOversizeRetry = std::chrono::minutes(10);
 
 std::int64_t epochSeconds(SessionWatcher::WallClock::time_point when) {
     return std::chrono::duration_cast<std::chrono::seconds>(when.time_since_epoch()).count();
@@ -48,6 +49,7 @@ struct SessionWatcher::WalkResult {
     std::unordered_map<std::string, FileState> current; // by relative path
     std::error_code error;
     bool abandoned{false};
+    bool tooLarge{false};
 };
 
 std::vector<SessionWatcher::Target>
@@ -61,8 +63,14 @@ SessionWatcher::targets(const app::services::ISessionService& sessions) {
             continue;
         }
         const auto intervalMs = sessions.watchIntervalMs(name);
+        const auto info = sessions.getSessionInfo(name);
         for (const auto& directory : sessions.getPinnedPatterns(name)) {
-            targets.push_back({name, directory, intervalMs});
+            Target target;
+            target.session = name;
+            target.sessionUuid = info ? info->uuid : std::string{};
+            target.directory = directory;
+            target.intervalMs = intervalMs;
+            targets.push_back(std::move(target));
         }
     }
     return targets;
@@ -82,17 +90,20 @@ app::services::AddDirectoryRequest SessionWatcher::makeRequest(std::string_view 
                                                                std::vector<std::string> changed) {
     app::services::AddDirectoryRequest request;
     request.directoryPath = directory.string();
-    request.includePatterns = std::move(changed);
+    // Exact files, not patterns: a pattern list dropped top-level files whenever a nested
+    // one changed with them, and a bare name re-indexed every nested file of that name.
+    request.explicitFiles = std::move(changed);
     request.recursive = true;
     request.sessionId = std::string(session);
-    // The walk already applied every .gitignore in the tree, negations included. The
-    // indexer reads only the root file and would drop paths a nested rule re-included.
+    // The walk already applied every .gitignore in the tree, negations included.
     request.noGitignore = true;
     return request;
 }
 
 std::string SessionWatcher::keyOf(const Target& target) {
-    return target.session + '\n' + target.directory.generic_string();
+    // The uuid tells a session apart from an earlier one that had the same name: a session
+    // removed and created again must index its tree, not inherit the old snapshot.
+    return target.session + '\n' + target.sessionUuid + '\n' + target.directory.generic_string();
 }
 
 fs::path SessionWatcher::snapshotPath(const Target& target) const {
@@ -114,8 +125,8 @@ void SessionWatcher::loadSnapshot(const Target& target, TargetState& state) cons
     std::string line;
     // The file name is a short hash, so the header says which target the snapshot is for.
     if (!std::getline(input, line) || line != kSnapshotMagic || !std::getline(input, line) ||
-        line != "session " + target.session || !std::getline(input, line) ||
-        line != "directory " + target.directory.generic_string()) {
+        line != "session " + target.session + ' ' + target.sessionUuid ||
+        !std::getline(input, line) || line != "directory " + target.directory.generic_string()) {
         return;
     }
     std::unordered_map<std::string, FileState> files;
@@ -147,7 +158,7 @@ void SessionWatcher::saveSnapshot(const Target& target, TargetState& state) cons
             return; // still dirty: retried on the next pass
         }
         output << kSnapshotMagic << '\n'
-               << "session " << target.session << '\n'
+               << "session " << target.session << ' ' << target.sessionUuid << '\n'
                << "directory " << target.directory.generic_string() << '\n';
         for (const auto& [relative, file] : state.files) {
             // One record per line; a name with a line break is left out and is simply
@@ -164,6 +175,13 @@ void SessionWatcher::saveSnapshot(const Target& target, TargetState& state) cons
     }
     std::error_code error;
     fs::rename(temporary, path, error);
+    if (error) {
+        // Some platforms refuse to rename over an existing file.
+        std::error_code removeError;
+        fs::remove(path, removeError);
+        error.clear();
+        fs::rename(temporary, path, error);
+    }
     if (!error) {
         state.dirty = false;
     }
@@ -182,6 +200,11 @@ bool SessionWatcher::walk(const Target& target, TargetState& state, WalkResult& 
         std::error_code error;
         for (fs::directory_iterator it(absolute, error), end; !error && it != end;
              it.increment(error)) {
+            // One huge directory must not hold up shutdown while it is listed.
+            if (stopRequested()) {
+                result.abandoned = true;
+                return false;
+            }
             entries.push_back(*it);
         }
         if (error) {
@@ -203,6 +226,8 @@ bool SessionWatcher::walk(const Target& target, TargetState& state, WalkResult& 
                                    : (static_cast<std::uint64_t>(mtime.time_since_epoch().count()) ^
                                       (static_cast<std::uint64_t>(size) << 1)) |
                                          1U;
+            // The stack keeps pointers into this map across deeper insertions. That is safe
+            // for unordered_map: rehashing moves buckets, never the stored elements.
             auto& cached = state.gitignores[relativeDirectory];
             if (cached.stamp != stamp || stamp == 0) {
                 std::ifstream input(entry.path());
@@ -253,6 +278,10 @@ bool SessionWatcher::walk(const Target& target, TargetState& state, WalkResult& 
             const auto mtime = entry.last_write_time(statError);
             if (statError) {
                 result.error = statError;
+                return false;
+            }
+            if (result.current.size() >= options_.maxFilesPerTarget) {
+                result.tooLarge = true;
                 return false;
             }
             result.current[relative] =
@@ -307,7 +336,23 @@ SessionWatcher::ScanOutcome SessionWatcher::scan(app::services::IIndexingService
     }
 
     WalkResult walked;
-    if (!walk(target, state, walked)) {
+    const bool walkedAll = walk(target, state, walked);
+    if (walkedAll) {
+        state.warnedTooLarge = false;
+    }
+    if (!walkedAll) {
+        if (walked.tooLarge) {
+            if (!state.warnedTooLarge) {
+                state.warnedTooLarge = true;
+                spdlog::warn("[SessionWatcher] session '{}' directory '{}' has more than {} "
+                             "files; it is not watched. Watch a project's source directory, "
+                             "or add a .gitignore for generated content.",
+                             target.session, target.directory.string(), options_.maxFilesPerTarget);
+            }
+            // Nothing is indexed or removed. Look again later in case it shrank.
+            state.nextDue = now + kOversizeRetry;
+            return ScanOutcome::Incomplete;
+        }
         if (walked.error) {
             // Retried every pass until the directory is readable again.
             static yams::common::LogRateLimiter scanFailureLog{kWarnInterval};

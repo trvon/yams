@@ -76,7 +76,9 @@ bool ServiceManager::scanSessionWatchDirectory(app::services::IIndexingService& 
                                                std::string_view session,
                                                const std::filesystem::path& directory) {
     configureSessionWatcher(false);
-    const SessionWatcher::Target target{std::string(session), directory, 0};
+    SessionWatcher::Target target;
+    target.session = std::string(session);
+    target.directory = directory;
     return sessionWatcher_.scan(indexingService, documentService, target,
                                 SessionWatcher::WallClock::now()) ==
            SessionWatcher::ScanOutcome::Clean;

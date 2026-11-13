@@ -32,6 +32,7 @@ public:
     /// One directory a session wants kept indexed.
     struct Target {
         std::string session;
+        std::string sessionUuid; ///< distinguishes a session from an earlier one of that name
         std::filesystem::path directory;
         std::uint32_t intervalMs{0};
     };
@@ -43,6 +44,10 @@ public:
         /// rebase makes files vanish and reappear, and a short visit to another branch
         /// should not cost a re-index of everything that branch lacks.
         std::chrono::seconds removalGrace{std::chrono::minutes(10)};
+        /// A tree with more files than this is not watched. Watching is for a project's
+        /// sources; a temporary or data directory with hundreds of thousands of files would
+        /// otherwise be fed into the index whole.
+        std::size_t maxFilesPerTarget{50'000};
         /// While a target sees no change its interval doubles, this many times at most.
         std::uint32_t maxBackoffDoublings{3};
         /// Polled for every directory entry; a true answer abandons the pass.
@@ -116,6 +121,7 @@ private:
         WallClock::time_point nextDue;
         std::uint32_t idleStreak{0};
         bool warnedNotDirectory{false};
+        bool warnedTooLarge{false};
     };
 
     struct WalkResult;

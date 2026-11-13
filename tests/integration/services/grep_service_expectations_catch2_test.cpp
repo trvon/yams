@@ -856,6 +856,12 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
 
     const auto watched = yams::test::make_temp_dir("yams_watch_live_");
     std::ofstream(watched / "first.txt") << "watchneedlealpha in the first file\n";
+    // A changed set that mixes top-level and nested files, with a same-named ignored file
+    // below: the indexer must take exactly the files the watcher names.
+    fs::create_directories(watched / "sub" / "skipped");
+    std::ofstream(watched / "sub" / "nested.txt") << "watchneedlegamma in a nested file\n";
+    std::ofstream(watched / ".gitignore") << "skipped/\n";
+    std::ofstream(watched / "sub" / "skipped" / "first.txt") << "watchneedleomega ignored\n";
 
     // No current session: watching belongs to the session, not to "current".
     auto sessions = yams::app::services::makeSessionService(nullptr);
@@ -876,7 +882,7 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
         yams::app::services::GrepOptions request;
         request.pattern = pattern;
         request.regexOnly = true;
-        for (int attempt = 0; attempt < 300; ++attempt) {
+        for (int attempt = 0; attempt < 150; ++attempt) {
             if (auto found = retrievalSvc.grep(request, retrievalOpts)) {
                 for (const auto& match : found.value().matches) {
                     if (fs::path(match.file).filename() == fileName) {
@@ -889,11 +895,22 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
         return false;
     };
 
+    CHECK(grepFinds("watchneedlegamma", "nested.txt"));
     CHECK(grepFinds("watchneedlealpha", "first.txt"));
 
     // A file created while the daemon runs is picked up by a later pass.
     std::ofstream(watched / "second.txt") << "watchneedlebeta in the second file\n";
     CHECK(grepFinds("watchneedlebeta", "second.txt"));
+
+    // Everything else is indexed by now, so the ignored file would be too if it leaked.
+    {
+        yams::app::services::GrepOptions ignored;
+        ignored.pattern = "watchneedleomega";
+        ignored.regexOnly = true;
+        auto found = retrievalSvc.grep(ignored, retrievalOpts);
+        REQUIRE(found);
+        CHECK(found.value().matches.empty());
+    }
 
     // What the watcher has seen is persisted next to the store it describes.
     std::error_code ec;

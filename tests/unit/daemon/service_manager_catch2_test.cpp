@@ -1184,7 +1184,7 @@ TEST_CASE("ServiceManager session watcher refreshes every retrieval index",
                                                                   {"src/search/search_engine.cpp"});
 
     CHECK((request.directoryPath == "/workspace/yams"));
-    CHECK((request.includePatterns == std::vector<std::string>{"src/search/search_engine.cpp"}));
+    CHECK((request.explicitFiles == std::vector<std::string>{"src/search/search_engine.cpp"}));
     CHECK(request.recursive);
     CHECK((request.sessionId == "coding"));
     CHECK_FALSE(request.noEmbeddings);
@@ -1211,7 +1211,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                                 "coding", watchedDirectory));
     REQUIRE((indexingService.requests.size() == 1));
-    CHECK((indexingService.requests.front().includePatterns ==
+    CHECK((indexingService.requests.front().explicitFiles ==
            std::vector<std::string>{"changed.cpp"}));
 
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
@@ -1294,7 +1294,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(
             indexingService, &documentService, "coding", watchedDirectory));
         REQUIRE((indexingService.requests.size() == 2));
-        CHECK((indexingService.requests.back().includePatterns ==
+        CHECK((indexingService.requests.back().explicitFiles ==
                std::vector<std::string>{"added.cpp"}));
 
         // Before the fix the stale snapshot made added.cpp "changed" on every pass.
@@ -1324,8 +1324,8 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                               "coding", watchedDirectory));
         REQUIRE((indexingService.requests.size() == 3));
-        CHECK((indexingService.requests.back().includePatterns ==
-               std::vector<std::string>{"bad.cpp"}));
+        CHECK(
+            (indexingService.requests.back().explicitFiles == std::vector<std::string>{"bad.cpp"}));
     }
 }
 
