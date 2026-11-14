@@ -999,12 +999,15 @@ void ConnectionPool::startMaintenanceThread() {
     using namespace std::chrono_literals;
     maintenanceThread_ = std::jthread([this](std::stop_token st) {
         yams::setCurrentThreadName("yams-db-maint");
+        // An interruptible wait returns as soon as stop is requested, so destroying the pool
+        // (and exiting a CLI command) does not wait out a sleep step.
+        std::mutex waitMutex;
+        std::condition_variable_any waitCv;
         while (!st.stop_requested()) {
             (void)this->healthCheck();
             this->pruneIdleConnections();
-            for (int i = 0; i < 60 && !st.stop_requested(); ++i) {
-                std::this_thread::sleep_for(1s);
-            }
+            std::unique_lock lock(waitMutex);
+            (void)waitCv.wait_for(lock, st, 60s, [] { return false; });
         }
     });
 }
