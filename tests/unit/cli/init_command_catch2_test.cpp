@@ -528,6 +528,41 @@ embedding_dim = 384
     CHECK(*dims.index == 384);
 }
 
+TEST_CASE("InitCommand: initializing another data directory keeps the existing config",
+          "[cli][init][catch2]") {
+    // `yams --data-dir /tmp/scratch init --auto` replaced the user's config with a fresh
+    // template pointing at the scratch store, and the daemon then served that store.
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    CliTestHelper helper;
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+    {
+        std::ofstream config(helper.configPath, std::ios::app);
+        config << "\n# a setting the user added by hand\n";
+    }
+    const auto readConfig = [&] {
+        std::ifstream in(helper.configPath);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const auto before = readConfig();
+    REQUIRE(before.find(helper.dataDir.string()) != std::string::npos);
+    const auto scratch = helper.tempDir / "scratch-store";
+
+    SECTION("without --force the config is left exactly as it was") {
+        CaptureStdout capture;
+        REQUIRE(helper.runCommand({"yams", "--data-dir", scratch.string(), "init",
+                                   "--non-interactive", "--no-keygen"}) == 0);
+        CHECK(readConfig() == before);
+        // The new store is still set up, ready for --data-dir or YAMS_DATA_DIR.
+        CHECK(fs::exists(scratch / "yams.db"));
+        CHECK(capture.str().find("kept") != std::string::npos);
+    }
+    SECTION("--force replaces it") {
+        REQUIRE(helper.runCommand({"yams", "--data-dir", scratch.string(), "init", "--force",
+                                   "--non-interactive", "--no-keygen"}) == 0);
+        CHECK(readConfig().find(scratch.string()) != std::string::npos);
+    }
+}
+
 TEST_CASE("InitCommand: re-init does not overwrite an existing vector dimension sentinel",
           "[cli][init][catch2]") {
     const auto vectorEnv = VectorStoreEnv::onDisk();
