@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 
 namespace {
@@ -50,12 +51,12 @@ runtime.batch_size = 64
 )toml");
 
     const auto values = yams::config::parse_simple_toml(path);
-    CHECK((values.at("root") == R"(C:\\Users\\alice\\yams)"));
+    CHECK((values.at("root") == R"(C:\Users\alice\yams)"));
     CHECK((values.at("list") == R"(["alpha", "beta#value"])"));
     CHECK((values.at("search.path_tree.mode") == "preferred"));
     CHECK((values.at("search.path_tree.quoted_hash") == "# not a comment"));
     CHECK((values.at("search.path_tree.mixed_quote") == "O'Brien#docs"));
-    CHECK((values.at("search.path_tree.escaped_quote") == R"(quoted \"#\" text)"));
+    CHECK((values.at("search.path_tree.escaped_quote") == R"(quoted "#" text)"));
     CHECK((values.at("search.path_tree.single_mixed") == "say \"hello\"#inside"));
     CHECK((values.at("embeddings.runtime.batch_size") == "64"));
 }
@@ -64,8 +65,31 @@ TEST_CASE("path-list decoding preserves quoted commas and platform paths",
           "[config][flat_toml][paths]") {
     const auto paths = yams::config::parse_path_list(R"(["C:\\corpus,old", 'D:\\corpus'])");
     REQUIRE((paths.size() == 2));
-    CHECK((paths[0].string() == R"(C:\\corpus,old)"));
+    CHECK((paths[0].string() == R"(C:\corpus,old)"));
+    // A single-quoted TOML literal string has no escapes; its backslashes are kept as written.
     CHECK((paths[1].string() == R"(D:\\corpus)"));
+}
+
+TEST_CASE_METHOD(FlatTomlFixture,
+                 "flat TOML reader decodes the escapes YAMS writes and keeps other backslashes",
+                 "[config][flat_toml][escapes]") {
+    // `yams init` writes `\\` and `\"` escapes; reading them back raw doubled every Windows
+    // separator in the data directory. Hand-written Windows paths with single backslashes
+    // (not valid TOML, but common) must keep working, so other sequences stay as written.
+    const auto path = write(R"toml(
+escaped_path = "C:\\Users\\alice\\yams"
+unc_path = "\\\\server\\share"
+hand_written = "C:\temp\new\Users"
+quote_inside = "say \"hi\""
+literal = 'C:\\kept\\as\\is'
+)toml");
+
+    const auto values = yams::config::parse_simple_toml(path);
+    CHECK((values.at("escaped_path") == R"(C:\Users\alice\yams)"));
+    CHECK((values.at("unc_path") == R"(\\server\share)"));
+    CHECK((values.at("hand_written") == R"(C:\temp\new\Users)"));
+    CHECK((values.at("quote_inside") == R"(say "hi")"));
+    CHECK((values.at("literal") == R"(C:\\kept\\as\\is)"));
 }
 
 TEST_CASE_METHOD(FlatTomlFixture, "single-value lookup delegates to flat TOML semantics",
@@ -103,4 +127,27 @@ TEST_CASE_METHOD(FlatTomlFixture, "config path aliases share one documented prec
     REQUIRE(runtimePaths.has_value());
     CHECK((runtimePaths.value().configFile.value == canonical));
     CHECK((runtimePaths.value().configFile.sourceName == "YAMS_CONFIG"));
+}
+
+TEST_CASE_METHOD(FlatTomlFixture,
+                 "writing config values keeps existing escaped values and escapes new ones",
+                 "[config][flat_toml][escapes][write]") {
+    // write_config_values reads the file, merges, and rewrites every value. Once reads decode
+    // escapes, writes must re-encode them, or setting one key corrupts an init-written path.
+    const auto path = write(R"toml(
+[core]
+data_dir = "C:\\Users\\alice\\yams"
+greeting = "say \"hi\""
+)toml");
+
+    REQUIRE(yams::config::write_config_values(path, {{"core.added", R"(D:\corpus "new")"}}));
+
+    const auto values = yams::config::parse_simple_toml(path);
+    CHECK((values.at("core.data_dir") == R"(C:\Users\alice\yams)"));
+    CHECK((values.at("core.greeting") == R"(say "hi")"));
+    CHECK((values.at("core.added") == R"(D:\corpus "new")"));
+
+    std::ifstream in(path);
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(text.find(R"(data_dir = "C:\\Users\\alice\\yams")") != std::string::npos);
 }

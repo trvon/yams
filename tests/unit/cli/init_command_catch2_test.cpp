@@ -573,6 +573,20 @@ TEST_CASE("InitCommand: initializing another data directory keeps the existing c
     }
 }
 
+TEST_CASE("InitCommand: the data directory written to the config reads back unchanged",
+          "[cli][init][catch2]") {
+    // On Windows every separator came back doubled (`C:\\Users\\...`): init escapes the path
+    // for TOML and the config reader returned the escapes raw. A backslash in a directory
+    // name reproduces that on every platform.
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    CliTestHelper helper;
+    const auto store = helper.tempDir / "back\\slash-store";
+    REQUIRE(helper.runCommand({"yams", "--data-dir", store.string(), "init", "--force",
+                               "--non-interactive", "--no-keygen"}) == 0);
+    CHECK(yams::config::parse_config_value(helper.configPath, "core", "data_dir") ==
+          store.string());
+}
+
 TEST_CASE("InitCommand: re-init does not overwrite an existing vector dimension sentinel",
           "[cli][init][catch2]") {
     const auto vectorEnv = VectorStoreEnv::onDisk();
