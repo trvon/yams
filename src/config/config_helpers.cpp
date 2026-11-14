@@ -1095,7 +1095,7 @@ std::vector<std::filesystem::path> parse_path_list(const std::string& raw) {
     std::string item;
     const auto appendItem = [&] {
         trim(item);
-        item = unquote(item);
+        item = unquote_toml_value(item);
         if (!item.empty()) {
             out.emplace_back(expand_tilde(item));
         }
@@ -1178,14 +1178,14 @@ std::map<std::string, std::string> parse_simple_toml(const std::filesystem::path
             trim(value);
 
             // Remove inline comments while respecting the active quote type and escaped double
-            // quotes. The flat reader deliberately preserves escape sequences in returned values.
+            // quotes, then decode the escapes YAMS writes (see unquote_toml_value).
             if (const auto comment = findFlatTomlComment(value);
                 comment != std::string_view::npos) {
                 value.resize(comment);
                 trim(value);
             }
 
-            value = unquote(value);
+            value = unquote_toml_value(value);
             config[currentSection + key] = value;
         }
     }
