@@ -18,9 +18,12 @@ The flat reader returns `section.key` strings. It preserves single- and
 double-quoted scalar values, ignores quote-aware inline comments (including
 mixed and escaped quotes), retains dotted keys, and leaves arrays as raw strings
 for typed callers to decode. Path-list decoding splits only on unquoted commas.
-It is not a
+Double-quoted values decode `\\` and `\"`, the escapes YAMS
+writes (Windows paths are stored as `"C:\\Users\\..."`); other backslash
+sequences are kept as written so hand-written paths such as `"C:\temp"` keep
+working, and single-quoted literal strings are returned verbatim. It is not a
 complete TOML implementation: multiline strings, quoted keys, nested objects,
-escape interpretation, and schema validation are outside this seam.
+the remaining escapes, and schema validation are outside this seam.
 
 Daemon policies may retain typed resolver methods, but those methods read the
 same flat map. An explicit daemon config normalizes both `YAMS_CONFIG` and the

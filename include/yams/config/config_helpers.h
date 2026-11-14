@@ -117,6 +117,26 @@ inline std::string unquote(std::string val) {
     return val;
 }
 
+/// Strip TOML quotes from a scalar. A double-quoted value also decodes `\\` and `\"`, the
+/// escapes YAMS writes (Windows paths are stored as `"C:\\Users\\..."`). Other backslash
+/// sequences stay as written, so hand-written paths such as `"C:\temp"` keep working.
+/// Single-quoted literal strings have no escapes in TOML and are returned verbatim.
+inline std::string unquote_toml_value(std::string val) {
+    trim(val);
+    if (val.size() < 2 || val.front() != '"' || val.back() != '"') {
+        return unquote(std::move(val));
+    }
+    std::string decoded;
+    decoded.reserve(val.size() - 2);
+    for (std::size_t i = 1; i + 1 < val.size(); ++i) {
+        if (val[i] == '\\' && i + 2 < val.size() && (val[i + 1] == '\\' || val[i + 1] == '"')) {
+            ++i;
+        }
+        decoded.push_back(val[i]);
+    }
+    return decoded;
+}
+
 // Tilde expansion
 std::filesystem::path expand_tilde(const std::string& path);
 
