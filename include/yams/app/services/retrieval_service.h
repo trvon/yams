@@ -17,13 +17,6 @@
 
 namespace yams::app::services {
 
-// PathTreeOptions for path-tree-enabled grep
-struct PathTreeOptions {
-    bool enabled = false;
-    std::string mode = "fallback";
-    std::size_t childLimit = 5;
-};
-
 struct RetrievalOptions {
     // Optional explicit daemon socket path (overrides default resolver)
     std::optional<std::filesystem::path> socketPath;
@@ -205,10 +198,6 @@ public:
 
     Result<yams::daemon::GrepResponse> grep(const GrepOptions& req,
                                             const RetrievalOptions& opts) const;
-
-    // Overload to support optional PathTreeOptions (PBI-058)
-    Result<yams::daemon::GrepResponse> grep(const GrepOptions& req, const RetrievalOptions& opts,
-                                            const std::optional<PathTreeOptions>& pathTree) const;
 
     Result<yams::daemon::ListResponse> list(const ListOptions& req,
                                             const RetrievalOptions& opts) const;

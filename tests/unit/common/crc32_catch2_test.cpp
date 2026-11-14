@@ -75,4 +75,54 @@ TEST_CASE("crc32 slice-by-8 matches bit-by-bit reference for all tail lengths", 
     }
 }
 
+TEST_CASE("crc32Update agrees with the portable tables at every length and alignment",
+          "[common][crc32]") {
+    // Long enough to cross the four-lane loop, the single-lane loop and the scalar tail of an
+    // accelerated kernel several times.
+    std::vector<std::byte> data;
+    data.reserve(1300);
+    std::uint32_t seed = 0x9E3779B9U;
+    for (int i = 0; i < 1300; ++i) {
+        seed = seed * 1664525U + 1013904223U;
+        data.push_back(static_cast<std::byte>(seed >> 24));
+    }
+
+    for (const std::uint32_t running : {0xFFFFFFFFU, 0x00000000U, 0x12345678U}) {
+        for (std::size_t offset = 0; offset < 17; ++offset) {
+            for (std::size_t len = 0; offset + len <= 1280; ++len) {
+                const std::span<const std::byte> input(data.data() + offset, len);
+                const auto got = yams::common::crc32Update(running, input);
+                const auto want = yams::common::crc32UpdatePortable(running, input);
+                if (got != want) {
+                    FAIL("mismatch at offset " << offset << " length " << len << " seed 0x"
+                                               << std::hex << running);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("crc32 of a chunk-sized buffer matches the bit-by-bit reference", "[common][crc32]") {
+    std::vector<std::byte> data(256 * 1024 + 13);
+    std::uint32_t seed = 0xC0FFEE11U;
+    for (auto& b : data) {
+        seed = seed * 1664525U + 1013904223U;
+        b = static_cast<std::byte>(seed >> 24);
+    }
+    CHECK(yams::common::crc32(std::span<const std::byte>(data)) ==
+          referenceBitByBit(data.data(), data.size()));
+
+    // Splitting the input anywhere must not change the result, including splits that leave
+    // one side too short for an accelerated kernel.
+    for (const std::size_t split : {std::size_t{1}, std::size_t{63}, std::size_t{64},
+                                    std::size_t{65}, std::size_t{4096}, data.size() - 7}) {
+        const std::span<const std::byte> all(data);
+        const auto chunked =
+            yams::common::crc32Update(yams::common::crc32Update(0xFFFFFFFFU, all.first(split)),
+                                      all.subspan(split)) ^
+            0xFFFFFFFFU;
+        CHECK(chunked == yams::common::crc32(all));
+    }
+}
+
 } // namespace

@@ -18,7 +18,10 @@
 #include <atomic>
 #include <charconv>
 #include <fstream>
+#include <functional>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -208,6 +211,16 @@ public:
         }
         recordContentStorePhase("hash", hashStart);
         spdlog::debug("File hash: {} for {}", fileHash, path.string());
+        const std::scoped_lock contentLock(contentStripes_[contentStripe(fileHash)]);
+
+        const auto readFileRange = fileRangeReader(path);
+        if (auto existing = storeAgainstExistingManifest(fileHash, fileSize, metadata,
+                                                         readFileRange, startTime);
+            !existing) {
+            return Result<StoreResult>(existing.error());
+        } else if (existing.value()) {
+            return *existing.value();
+        }
 
         // Create file info
         FileInfo fileInfo{.hash = fileHash,
@@ -565,12 +578,138 @@ public:
         return result;
     }
 
+    // Content whose manifest already exists keeps that manifest's chunk layout. Every store is
+    // one logical reference (remove() drops one per call and keeps the manifest while a chunk is
+    // still referenced), so this adds a reference to each chunk the manifest lists instead of
+    // chunking the content again: after a chunker change, a fresh cut would write a second chunk
+    // set that no manifest points to. A listed chunk missing from storage is restored from the
+    // source bytes at its manifest offset. Returns nullopt when there is no manifest.
+    using RangeReader =
+        std::function<Result<std::vector<std::byte>>(uint64_t offset, uint32_t size)>;
+    struct ExistingManifest {
+        manifest::Manifest manifest;
+        std::vector<std::byte> bytes;
+    };
+
+    // The stored manifest for `hash`, or nullopt when the content is not stored yet.
+    Result<std::optional<ExistingManifest>> loadExistingManifest(const std::string& hash,
+                                                                 uint64_t size) {
+        auto manifestBytes = storage_->retrieve(hash + ".manifest");
+        if (!manifestBytes) {
+            const auto code = manifestBytes.error().code;
+            if (code == ErrorCode::FileNotFound || code == ErrorCode::ChunkNotFound ||
+                code == ErrorCode::NotFound) {
+                return std::optional<ExistingManifest>{};
+            }
+            return manifestBytes.error();
+        }
+        auto manifest =
+            manifestManager_->deserialize(std::span<const std::byte>(manifestBytes.value()));
+        if (!manifest) {
+            return manifest.error();
+        }
+        if (manifest.value().fileSize != size) {
+            return Error{ErrorCode::CorruptedData,
+                         "Stored manifest for " + hash + " records a different size"};
+        }
+        return std::optional<ExistingManifest>{
+            ExistingManifest{std::move(manifest).value(), std::move(manifestBytes).value()}};
+    }
+
+    // The source bytes of one manifest chunk, checked against the chunk's hash.
+    static Result<std::vector<std::byte>> readManifestChunk(const manifest::ChunkRef& chunk,
+                                                            const RangeReader& readRange) {
+        auto bytes = readRange(chunk.offset, chunk.size);
+        if (!bytes) {
+            return bytes.error();
+        }
+        if (crypto::SHA256Hasher::hash(std::span<const std::byte>(bytes.value())) != chunk.hash) {
+            return Error{ErrorCode::CorruptedData,
+                         "Source bytes do not match manifest chunk " + chunk.hash};
+        }
+        return bytes;
+    }
+
+    static RangeReader fileRangeReader(const std::filesystem::path& path) {
+        return [path](uint64_t offset, uint32_t size) -> Result<std::vector<std::byte>> {
+            std::ifstream in(path, std::ios::binary);
+            std::vector<std::byte> bytes(size);
+            if (!in.seekg(static_cast<std::streamoff>(offset)) ||
+                !in.read(reinterpret_cast<char*>(bytes.data()),
+                         static_cast<std::streamsize>(size))) {
+                return Error{ErrorCode::IOError, "Failed to read " + path.string() + " at offset " +
+                                                     std::to_string(offset)};
+            }
+            return bytes;
+        };
+    }
+
+    Result<std::optional<StoreResult>>
+    storeAgainstExistingManifest(const std::string& hash, uint64_t size,
+                                 const ContentMetadata& metadata, const RangeReader& readRange,
+                                 std::chrono::steady_clock::time_point startTime) {
+        auto existing = loadExistingManifest(hash, size);
+        if (!existing) {
+            return existing.error();
+        }
+        if (!existing.value()) {
+            return std::optional<StoreResult>{};
+        }
+        const auto& manifest = existing.value()->manifest;
+
+        storage::RefTransactionBatch refBatch;
+        refBatch.operations.reserve(manifest.chunks.size());
+        uint64_t bytesStored = 0;
+        uint64_t bytesDeduped = 0;
+        for (const auto& chunk : manifest.chunks) {
+            auto exists = storage_->exists(chunk.hash);
+            if (!exists) {
+                return exists.error();
+            }
+            if (exists.value()) {
+                bytesDeduped += chunk.size;
+            } else {
+                auto bytes = readManifestChunk(chunk, readRange);
+                if (!bytes) {
+                    return bytes.error();
+                }
+                if (auto stored =
+                        storage_->store(chunk.hash, std::span<const std::byte>(bytes.value()));
+                    !stored) {
+                    return stored.error();
+                }
+                bytesStored += chunk.size;
+            }
+            auto blockSize = storage_->getBlockSize(chunk.hash);
+            refBatch.operations.push_back(
+                {.type = storage::RefDelta::Type::Increment,
+                 .blockHash = chunk.hash,
+                 .compressedSize = blockSize ? static_cast<size_t>(blockSize.value()) : chunk.size,
+                 .uncompressedSize = chunk.size});
+        }
+        if (auto committed = commitReferenceBatch(std::move(refBatch)); !committed) {
+            return committed.error();
+        }
+        {
+            std::unique_lock lock(metadataMutex_);
+            metadataStore_[hash] = sanitizeStoredMetadata(metadata, hash, size);
+        }
+        updateStats(bytesStored, bytesDeduped, 0, 1, 1, 0, 0);
+        return std::optional<StoreResult>{
+            StoreResult{.contentHash = hash,
+                        .bytesStored = size,
+                        .bytesDeduped = bytesDeduped,
+                        .duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - startTime)}};
+    }
+
     // Memory-based store operation
     Result<StoreResult> storeBytes(std::span<const std::byte> data,
                                    const ContentMetadata& metadata) override {
         auto startTime = std::chrono::steady_clock::now();
 
         const std::string dataHash = crypto::SHA256Hasher::hash(data);
+        const std::scoped_lock contentLock(contentStripes_[contentStripe(dataHash)]);
 
         // For small data, store directly without chunking
         if (data.size() <= config_.chunkSize) {
@@ -595,6 +734,22 @@ public:
                                .bytesStored = data.size(),
                                .bytesDeduped = 0,
                                .duration = duration};
+        }
+
+        auto readDataRange = [data](uint64_t offset,
+                                    uint32_t size) -> Result<std::vector<std::byte>> {
+            if (offset > data.size() || size > data.size() - offset) {
+                return Error{ErrorCode::CorruptedData, "Manifest chunk lies outside the data"};
+            }
+            auto range = data.subspan(static_cast<std::size_t>(offset), size);
+            return std::vector<std::byte>(range.begin(), range.end());
+        };
+        if (auto existing = storeAgainstExistingManifest(dataHash, data.size(), metadata,
+                                                         readDataRange, startTime);
+            !existing) {
+            return Result<StoreResult>(existing.error());
+        } else if (existing.value()) {
+            return *existing.value();
         }
 
         // For larger data, use in-memory chunking directly (avoid temp file I/O).
@@ -842,6 +997,7 @@ public:
 
     // Remove content
     Result<bool> remove(const std::string& hash) override {
+        const std::scoped_lock contentLock(contentStripes_[contentStripe(hash)]);
         // Retrieve manifest first
         auto manifestHash = hash + ".manifest";
         auto manifestResult = storage_->retrieve(manifestHash);
@@ -993,6 +1149,26 @@ public:
             }
             prepared[i] = std::move(item).value();
         }
+        std::set<std::size_t> stripes;
+        for (const auto& item : prepared) {
+            if (item) {
+                stripes.insert(contentStripe(item->fileHash));
+            }
+        }
+        std::vector<std::unique_lock<std::mutex>> contentLocks;
+        contentLocks.reserve(stripes.size());
+        for (const auto stripe : stripes) {
+            contentLocks.emplace_back(contentStripes_[stripe]);
+        }
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            if (!prepared[i]) {
+                continue;
+            }
+            if (auto layout = prepareBatchLayout(*prepared[i], paths[i]); !layout) {
+                outcomes[i] = layout.error();
+                prepared[i].reset();
+            }
+        }
         recordContentStorePhase("batch_prepare", batchPrepareStart);
 
         std::vector<std::pair<std::string, std::vector<std::byte>>> chunkWrites;
@@ -1122,7 +1298,9 @@ public:
                 if (!item || outcomes[i]) {
                     continue;
                 }
-                cleanupStoredObject(item->manifestHash);
+                if (!item->manifestPreexisting) {
+                    cleanupStoredObject(item->manifestHash);
+                }
                 outcomes[i] = refsCommitted.error();
             }
         } else {
@@ -1503,6 +1681,8 @@ private:
         std::vector<chunking::Chunk> chunks;
         std::string manifestHash;
         std::vector<std::byte> manifestData;
+        // The manifest was already stored before this batch: a failed batch must not delete it.
+        bool manifestPreexisting{false};
         storage::RefTransactionBatch refBatch;
         std::uint64_t bytesStored{0};
         std::uint64_t bytesDeduped{0};
@@ -1521,6 +1701,16 @@ private:
 
     // Metadata storage (in-memory for now)
     mutable std::shared_mutex metadataMutex_;
+
+    // store(), storeBytes(), storeBatch() and remove() of one content hash run one at a time:
+    // each reads the manifest, changes chunk references and then keeps or deletes the manifest,
+    // and interleaving those steps can leave referenced chunks without a manifest. Striped by
+    // hash so unrelated content does not contend; a batch locks its stripes in index order.
+    static constexpr std::size_t kContentStripes = 256;
+    std::array<std::mutex, kContentStripes> contentStripes_;
+    static std::size_t contentStripe(const std::string& hash) {
+        return std::hash<std::string>{}(hash) % kContentStripes;
+    }
     std::unordered_map<std::string, ContentMetadata> metadataStore_;
 
     // Statistics
@@ -1558,6 +1748,47 @@ private:
             prepared.fileHash = fileHasher->hashFile(path);
         }
 
+        return prepared;
+    }
+
+    // Second half of batch preparation, run with the item's content stripe held: choose the
+    // chunk layout and build the manifest.
+    Result<void> prepareBatchLayout(PreparedBatchStore& prepared,
+                                    const std::filesystem::path& path) {
+        // Stored content keeps its manifest's chunk layout (see storeAgainstExistingManifest):
+        // the batch then adds one reference per listed chunk and rewrites nothing.
+        auto existing = loadExistingManifest(prepared.fileHash, prepared.fileSize);
+        if (!existing) {
+            return existing.error();
+        }
+        if (existing.value()) {
+            const auto readRange = fileRangeReader(path);
+            prepared.chunks.reserve(existing.value()->manifest.chunks.size());
+            for (const auto& ref : existing.value()->manifest.chunks) {
+                chunking::Chunk chunk{.data = {},
+                                      .hash = ref.hash,
+                                      .offset = static_cast<size_t>(ref.offset),
+                                      .size = ref.size};
+                auto stored = storage_->exists(ref.hash);
+                if (!stored) {
+                    return stored.error();
+                }
+                if (!stored.value()) {
+                    auto bytes = readManifestChunk(ref, readRange);
+                    if (!bytes) {
+                        return bytes.error();
+                    }
+                    chunk.data = std::move(bytes).value();
+                }
+                prepared.chunks.push_back(std::move(chunk));
+            }
+            prepared.manifestHash = prepared.fileHash + ".manifest";
+            prepared.manifestData = std::move(existing.value()->bytes);
+            prepared.manifestPreexisting = true;
+            prepared.refBatch.operations.reserve(prepared.chunks.size());
+            return {};
+        }
+
         try {
             prepared.chunks = chunker_->chunkFile(path);
         } catch (const std::exception& e) {
@@ -1580,7 +1811,7 @@ private:
         prepared.manifestHash = prepared.fileHash + ".manifest";
         prepared.manifestData = std::move(manifest).value();
         prepared.refBatch.operations.reserve(prepared.chunks.size());
-        return prepared;
+        return {};
     }
 
     // Update statistics

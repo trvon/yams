@@ -328,6 +328,11 @@ void EmbeddingService::setEmbeddingsCommittedCallback(
     embeddingsCommittedCallback_ = std::move(cb);
 }
 
+void EmbeddingService::setSemanticNeighborsBackfilledCallback(
+    std::function<void(const std::vector<std::string>&)> cb) {
+    semanticNeighborsBackfilledCallback_ = std::move(cb);
+}
+
 bool EmbeddingService::semanticBackfillEligible(bool daemonIdle) const {
     if (!daemonIdle || stop_.load(std::memory_order_acquire) || !getStartupState_) {
         return false;
@@ -408,7 +413,8 @@ void EmbeddingService::updateSemanticNeighborGraph(
 void EmbeddingService::updateSemanticNeighborGraphUnlocked(
     const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
     const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
-    const std::vector<std::pair<std::string, std::string>>& sourceDocuments, bool sourceAllCorpus) {
+    const std::vector<std::pair<std::string, std::string>>& sourceDocuments, bool sourceAllCorpus,
+    std::vector<std::string>* linkedSources) {
     if (!kgStore || !vdb || (!sourceAllCorpus && sourceDocuments.empty())) {
         return;
     }
@@ -795,6 +801,9 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
                     continue;
                 }
 
+                if (linkedSources && kept == 0) {
+                    linkedSources->push_back(source.hash);
+                }
                 metadata::KGEdge edge;
                 edge.srcNodeId = *srcNodeId;
                 edge.dstNodeId = *dstNodeId;
@@ -1040,6 +1049,9 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
                 continue;
             }
 
+            if (linkedSources && kept == 0) {
+                linkedSources->push_back(*source.hash);
+            }
             metadata::KGEdge edge;
             edge.srcNodeId = *srcNodeId;
             edge.dstNodeId = *dstNodeId;
@@ -1161,7 +1173,25 @@ Result<std::size_t> EmbeddingService::backfillSemanticNeighborGraph(const std::s
     if (!missing) {
         return missing.error();
     }
+    // Report documents whose edges were written by earlier passes. Called when a pass adds no
+    // edges (the backlog is drained) or enough documents have accumulated. Documents with no
+    // qualifying neighbour come back on every pass, so "edges added" is the signal, not "documents
+    // returned"; otherwise an idle daemon would request a rebuild on every pass.
+    const auto reportBackfilled = [this](bool backlogDrained) {
+        if (semanticBackfillUnreported_.empty() ||
+            (!backlogDrained &&
+             semanticBackfillUnreported_.size() < kSemanticBackfillReportThreshold)) {
+            return;
+        }
+        std::vector<std::string> hashes;
+        hashes.swap(semanticBackfillUnreported_);
+        if (semanticNeighborsBackfilledCallback_) {
+            semanticNeighborsBackfilledCallback_(hashes);
+        }
+    };
+
     if (missing.value().empty()) {
+        reportBackfilled(/*backlogDrained=*/true);
         return std::size_t{0};
     }
 
@@ -1176,11 +1206,23 @@ Result<std::size_t> EmbeddingService::backfillSemanticNeighborGraph(const std::s
         sources.emplace_back(node.nodeKey.substr(kDocPrefix.size()), std::string{});
     }
     if (sources.empty()) {
+        reportBackfilled(/*backlogDrained=*/true);
         return std::size_t{0};
     }
 
+    // Only documents that gained an edge are reported; the counter guards the case where the
+    // edges were built but could not be handed to the write coordinator.
+    const auto edgesBefore = semanticEdgesCreated_.load(std::memory_order_relaxed);
+    std::vector<std::string> linked;
     updateSemanticNeighborGraphUnlocked(kgStore, vdb, modelName, sources,
-                                        /*sourceAllCorpus=*/false);
+                                        /*sourceAllCorpus=*/false, &linked);
+    const bool addedEdges = semanticEdgesCreated_.load(std::memory_order_relaxed) != edgesBefore;
+    if (addedEdges && semanticNeighborsBackfilledCallback_) {
+        semanticBackfillUnreported_.insert(semanticBackfillUnreported_.end(),
+                                           std::make_move_iterator(linked.begin()),
+                                           std::make_move_iterator(linked.end()));
+    }
+    reportBackfilled(/*backlogDrained=*/!addedEdges);
     return sources.size();
 }
 

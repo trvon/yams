@@ -220,6 +220,17 @@ void cleanupChild(pid_t pid) {
 
 TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive",
           "[smoke][daemonclistartstatusregression]") {
+    // This case has never run on Windows. cmd.exe strips the outer quotes of the quoted command
+    // line built below, and a detached daemon may keep the _popen pipe open; neither has been
+    // worked through on a Windows host.
+#ifdef _WIN32
+    const bool commandLineAdapted = false;
+#else
+    const bool commandLineAdapted = true;
+#endif
+    if (!commandLineAdapted) {
+        SKIP("Skipping: start/status command line is not adapted to cmd.exe");
+    }
     auto yamsBinary = findYamsBinary();
     auto daemonBinary = findYamsDaemonBinary();
     if (!yamsBinary.has_value()) {
@@ -230,7 +241,14 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
     }
 
     const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    // Keep AF_UNIX paths below macOS's sockaddr_un limit (104) even when TMPDIR is long. Under
+    // the runner's TMPDIR this socket path was 114 characters, the daemon never started, and
+    // `daemon start` exiting 0 regardless hid it.
+#ifdef _WIN32
     const fs::path root = fs::temp_directory_path() / ("yams_cli_status_regression_" + unique);
+#else
+    const fs::path root = fs::path("/tmp") / ("yams_start_" + unique);
+#endif
     const fs::path dataDir = root / "data";
     const fs::path runtimeDir = root / "runtime";
     const fs::path socketPath = runtimeDir / "yams-daemon.sock";
@@ -245,7 +263,28 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
     fs::create_directories(binDir);
 #endif
 
+    // Own config file: without one the CLI and daemon read the developer's config, resolve the
+    // real data directory and collide with (or get refused by) a daemon already running there.
+    const fs::path configPath = root / "config.toml";
+    {
+        std::ofstream cfg(configPath);
+        cfg << "[version]\n";
+        cfg << "config_version = 3\n";
+        cfg << "[core]\n";
+        cfg << "data_dir = \"" << dataDir.generic_string() << "\"\n";
+        cfg << "[storage]\n";
+        cfg << "path = \"" << dataDir.generic_string() << "\"\n";
+        cfg << "[daemon]\n";
+        cfg << "socket_path = \"" << socketPath.generic_string() << "\"\n";
+        cfg << "pid_file = \"" << pidFile.generic_string() << "\"\n";
+    }
+    ScopedEnvVar cfgEnv("YAMS_CONFIG", configPath.string());
+    // These take precedence over YAMS_CONFIG and the config's socket when a shell exports them.
+    ScopedEnvVar cfgPathEnv("YAMS_CONFIG_PATH", configPath.string());
+    ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", socketPath.string());
+    ScopedEnvVar socketPathEnv("YAMS_DAEMON_SOCKET_PATH", socketPath.string());
     ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
+    ScopedEnvVar storageEnv("YAMS_STORAGE", dataDir.string());
     ScopedEnvVar runtimeEnv("XDG_RUNTIME_DIR", runtimeDir.string());
     ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "0");
     ScopedEnvVar daemonBinEnv("YAMS_DAEMON_BIN", daemonBinary->string());
@@ -293,7 +332,7 @@ TEST_CASE("DaemonCliStartStatusRegression.StatusWorksAfterListBecomesResponsive"
 #ifndef _WIN32
     ScopedEnvVar pathEnv("PATH", binDir.string());
 #endif
-    auto statusRes = runCommandCapture(yams + " daemon status -d" + socketArg + pidArg);
+    auto statusRes = runCommandCapture(yams + " daemon status -d" + socketArg);
     INFO("daemon status -d failed after list succeeded:\n" << statusRes.output);
     CHECK(statusRes.exitCode == 0);
     INFO("status command reported IPC unavailable after daemon was already serving list:\n"
@@ -333,10 +372,10 @@ TEST_CASE("DaemonCliStartStatusRegression.StopTimeoutPathDoesNotEmitWarnNoise",
         cfg << "[version]\n";
         cfg << "config_version = 3\n";
         cfg << "[storage]\n";
-        cfg << "path = \"" << dataDir.string() << "\"\n";
+        cfg << "path = \"" << dataDir.generic_string() << "\"\n";
         cfg << "[daemon]\n";
-        cfg << "socket_path = \"" << socketPath.string() << "\"\n";
-        cfg << "pid_file = \"" << pidFile.string() << "\"\n";
+        cfg << "socket_path = \"" << socketPath.generic_string() << "\"\n";
+        cfg << "pid_file = \"" << pidFile.generic_string() << "\"\n";
     }
 
     ScopedEnvVar cfgEnv("YAMS_CONFIG", configPath.string());
@@ -407,10 +446,10 @@ TEST_CASE("DaemonCliStartStatusRegression.StartRefusesUnverifiedDataDirLockHolde
         cfg << "[version]\n";
         cfg << "config_version = 3\n";
         cfg << "[core]\n";
-        cfg << "data_dir = \"" << dataDir.string() << "\"\n";
+        cfg << "data_dir = \"" << dataDir.generic_string() << "\"\n";
         cfg << "[daemon]\n";
-        cfg << "socket_path = \"" << socketPath.string() << "\"\n";
-        cfg << "pid_file = \"" << pidFile.string() << "\"\n";
+        cfg << "socket_path = \"" << socketPath.generic_string() << "\"\n";
+        cfg << "pid_file = \"" << pidFile.generic_string() << "\"\n";
     }
 
     ScopedEnvVar cfgEnv("YAMS_CONFIG", configPath.string());

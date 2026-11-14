@@ -13,9 +13,11 @@
 #include <yams/metadata/migration.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/profiling.h>
+#include <yams/search/search_engine_builder.h>
 #include <yams/storage/corpus_stats.h>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
@@ -734,6 +736,7 @@ struct MobileState {
     std::unique_ptr<ConnectionPool> connection_pool;
     std::shared_ptr<MetadataRepository> metadata_repo;
     std::shared_ptr<yams::api::IContentStore> content_store;
+    std::string search_engine_detail;
     AppContext app_context;
     std::shared_ptr<yams::app::services::IDocumentService> document_service;
     std::shared_ptr<yams::app::services::ISearchService> search_service;
@@ -1069,14 +1072,53 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
                 yams::app::services::makeGraphQueryService(ctx->state.app_context);
             ctx->state.app_context.workerExecutor = ctx->state.worker_pool->get_executor();
 
+            // Embedded mobile currently has no app-owned embedding/model pipeline, but the
+            // SearchService still needs a SearchEngine to keep the hybrid path on the rich
+            // lexical/KG pipeline instead of degrading every hybrid request to metadata FTS.
+            // Disable vector weights until the mobile embedding pipeline can populate vectors.
+            try {
+                yams::search::SearchEngineBuilder builder;
+                builder.withMetadataRepo(ctx->state.metadata_repo)
+                    .withKGStore(ctx->state.app_context.kgStore);
+                auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+                opts.autoTune = false;
+                opts.config.vectorWeight = 0.0f;
+                opts.config.graphVectorWeight = 0.0f;
+                opts.config.entityVectorWeight = 0.0f;
+                opts.config.semanticRescueSlots = 0;
+                opts.config.conceptExtractionBackend =
+                    yams::search::SearchEngineConfig::ConceptExtractionBackend::Fallback;
+                auto engRes = builder.buildEmbedded(opts);
+                if (engRes) {
+                    ctx->state.app_context.searchEngine = engRes.value();
+                    ctx->state.search_engine_detail =
+                        "lexical hybrid ready; vector search disabled";
+                } else {
+                    ctx->state.app_context.searchRepairInProgress = true;
+                    ctx->state.app_context.searchRepairDetails = engRes.error().message;
+                    ctx->state.search_engine_detail = engRes.error().message;
+                    spdlog::warn("Mobile SearchEngine initialization failed: {}",
+                                 engRes.error().message);
+                }
+            } catch (const std::exception& e) {
+                ctx->state.app_context.searchRepairInProgress = true;
+                ctx->state.app_context.searchRepairDetails = e.what();
+                ctx->state.search_engine_detail = e.what();
+                spdlog::warn("Mobile SearchEngine initialization error: {}", e.what());
+            }
+
             // Services
             ctx->state.document_service =
                 yams::app::services::makeDocumentService(ctx->state.app_context);
             ctx->state.search_service =
                 yams::app::services::makeSearchService(ctx->state.app_context);
             ctx->state.grep_service = yams::app::services::makeGrepService(ctx->state.app_context);
+            // Keep downloaded objects under the directory the host gave us. The service default
+            // ($YAMS_STORAGE, else ~/yams) would write outside an embedding app's data directory.
+            yams::app::services::DownloadServiceOptions downloadOptions;
+            downloadOptions.storageRoot = ctx->state.config.working_directory / "downloads";
             ctx->state.download_service =
-                yams::app::services::makeDownloadService(ctx->state.app_context);
+                yams::app::services::makeDownloadService(ctx->state.app_context, downloadOptions);
         }
 
         ctx->state.telemetry_sink = ctx->state.config.telemetry_sink;
@@ -2395,6 +2437,21 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_get_vector_status(
     nlohmann::json j =
         build_corpus_status_json(docCount, docCount, stats.totalBytes, stats.deduplicatedBytes, 0,
                                  0.0, corpusStats, true, true, warmupRequested, "embedded");
+    const bool searchReady = ctx->state.app_context.searchEngine != nullptr;
+    const bool hasEmbeddings = j.value("hasEmbeddings", false);
+    j["searchEngineReady"] = searchReady;
+    j["hybridAvailable"] = searchReady;
+    j["semanticAvailable"] =
+        searchReady && hasEmbeddings && ctx->state.app_context.vectorDatabase != nullptr;
+    j["searchEngineDetail"] = ctx->state.search_engine_detail;
+    j["readiness"] = {
+        {"corpus", true},
+        {"index", true},
+        {"search_engine", searchReady},
+        {"hybrid_search", searchReady},
+        {"semantic_search", j["semanticAvailable"]},
+        {"embeddings", hasEmbeddings},
+    };
 
     if (out_result) {
         auto res = std::make_unique<yams_mobile_vector_status_result_t>();

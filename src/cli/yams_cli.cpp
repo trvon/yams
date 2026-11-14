@@ -153,6 +153,10 @@ std::string YamsCLI::closestCommandName(std::string_view typed) {
 std::vector<std::string> YamsCLI::unrecognizedArguments(const RunParsePlan& plan,
                                                         std::string_view subcmd) const {
     YamsCLI probe(executor_);
+    // The probe collects what no command recognises instead of throwing, so the caller can
+    // name the argument and suggest a command. Set before the commands are created: they
+    // inherit it.
+    probe.app_->allow_extras();
     probe.registerCommandsForRun(subcmd);
     clearCallbacks(*probe.app_);
     try {
@@ -208,7 +212,11 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
     }
 
     app_ = std::make_unique<CLI::App>("YAMS", "yams");
-    app_->prefix_command(); // Allow global options before and after subcommands
+    // Fallthrough lets global options follow a subcommand (`yams get X --json`).
+    app_->fallthrough();
+    // A later token that happens to name a command is an argument to the selected
+    // command, not a second top-level invocation (`yams grep completion`).
+    app_->require_subcommand(0, 1);
     // Prefer generated effective version if present; otherwise fallback to existing macros.
 #if __has_include(<version_generated.h>)
     {
@@ -747,7 +755,6 @@ int YamsCLI::run(int argc, char* argv[]) {
             }
             return 2;
         }
-        // prefix_command() leaves options no command recognised in remaining().
         // CLI11 runs command callbacks during parse, so check a callback-free
         // parse first: `daemon stop --nope` must fail before it stops anything.
         if (const auto extra = unrecognizedArguments(parsePlan, routedSubcmd); !extra.empty()) {

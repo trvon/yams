@@ -344,13 +344,11 @@ TEST_CASE("SimeonLexicalBackend chunks oversized docs before applying corpus byt
     CHECK(backend.doc_count() == 1u);
 }
 
-TEST_CASE("SimeonLexicalBackend concept mining honours the corpus byte budget",
-          "[search][simeon][concepts][catch2]") {
-    // 120 documents of ~4 KiB each. Chunking keeps the BM25 pass under 64 KiB of processed
-    // text, but concept mining used to re-read every raw document into memory at once.
-    // A strongly associated pair ("quantum entanglement") near the front of each document,
-    // so both the chunked BM25 pass and the raw concept pass see it, followed by a wide filler
-    // vocabulary whose bigrams carry no association.
+namespace {
+
+// 120 documents of ~4 KiB each. A strongly associated pair ("quantum entanglement") opens each
+// document, followed by a wide filler vocabulary whose bigrams carry no association.
+std::vector<std::pair<std::string, std::string>> conceptCorpusDocs() {
     std::vector<std::pair<std::string, std::string>> docs;
     docs.reserve(120);
     std::uint32_t lcg = 12345u;
@@ -362,6 +360,18 @@ TEST_CASE("SimeonLexicalBackend concept mining honours the corpus byte budget",
         }
         docs.emplace_back("hash_concept_" + std::to_string(i), std::move(text));
     }
+    return docs;
+}
+
+} // namespace
+
+TEST_CASE("SimeonLexicalBackend mines concepts from the text BM25 indexed",
+          "[search][simeon][concepts][catch2]") {
+    // Chunking reduces each ~4 KiB document to two 128-byte windows, so the indexed text is
+    // about 31 KiB while the raw corpus is about 480 KiB. Concept mining used to re-read every
+    // raw document into memory at once; it now reads the reduced text, so the corpus budget
+    // that admits the index admits the concepts too.
+    const auto docs = conceptCorpusDocs();
     std::size_t rawCorpusBytes = 0;
     for (const auto& doc : docs)
         rawCorpusBytes += doc.second.size();
@@ -373,38 +383,94 @@ TEST_CASE("SimeonLexicalBackend concept mining honours the corpus byte budget",
     cfg.build_doc_max_chunks = 2;
     cfg.fragment_geometry_enabled = false;
 
-    SECTION("raw corpus over budget skips concept mining but keeps the index") {
+    SECTION("a budget below the raw corpus but above the indexed text still mines concepts") {
         cfg.max_corpus_bytes = 64ULL * 1024ULL;
-        SimeonLexicalBackend backend(cfg);
-        REQUIRE(backend.buildAsync(corpus.repo).has_value());
-        REQUIRE(waitReady(backend, std::chrono::seconds(30)));
-        CHECK(backend.doc_count() == 120u);
-        CHECK(backend.concept_count() == 0u);
-    }
-    SECTION("exact raw byte boundary still mines concepts") {
-        cfg.max_corpus_bytes = rawCorpusBytes;
+        REQUIRE(rawCorpusBytes > cfg.max_corpus_bytes);
         SimeonLexicalBackend backend(cfg);
         REQUIRE(backend.buildAsync(corpus.repo).has_value());
         REQUIRE(waitReady(backend, std::chrono::seconds(30)));
         CHECK(backend.doc_count() == 120u);
         CHECK(backend.concept_count() > 0u);
     }
-    SECTION("one byte below raw corpus skips all concepts") {
-        cfg.max_corpus_bytes = rawCorpusBytes - 1;
-        SimeonLexicalBackend backend(cfg);
-        REQUIRE(backend.buildAsync(corpus.repo).has_value());
-        REQUIRE(waitReady(backend, std::chrono::seconds(30)));
-        CHECK(backend.doc_count() == 120u);
-        CHECK(backend.concept_count() == 0u);
-    }
-    SECTION("raw corpus within budget mines concepts") {
+    SECTION("a generous budget mines the same concepts") {
+        cfg.max_corpus_bytes = 64ULL * 1024ULL;
+        SimeonLexicalBackend tight(cfg);
+        REQUIRE(tight.buildAsync(corpus.repo).has_value());
+        REQUIRE(waitReady(tight, std::chrono::seconds(30)));
+
         cfg.max_corpus_bytes = 4ULL * 1024ULL * 1024ULL;
-        SimeonLexicalBackend backend(cfg);
-        REQUIRE(backend.buildAsync(corpus.repo).has_value());
-        REQUIRE(waitReady(backend, std::chrono::seconds(30)));
-        CHECK(backend.doc_count() == 120u);
-        CHECK(backend.concept_count() > 0u);
+        SimeonLexicalBackend generous(cfg);
+        REQUIRE(generous.buildAsync(corpus.repo).has_value());
+        REQUIRE(waitReady(generous, std::chrono::seconds(30)));
+
+        CHECK(generous.concept_count() > 0u);
+        CHECK(generous.concept_count() == tight.concept_count());
     }
+    SECTION("fewer than 100 documents mine nothing") {
+        auto smallCorpus = makeCorpus(
+            std::vector<std::pair<std::string, std::string>>(docs.begin(), docs.begin() + 99));
+        SimeonLexicalBackend backend(cfg);
+        REQUIRE(backend.buildAsync(smallCorpus.repo).has_value());
+        REQUIRE(waitReady(backend, std::chrono::seconds(30)));
+        CHECK(backend.doc_count() == 99u);
+        CHECK(backend.concept_count() == 0u);
+    }
+}
+
+TEST_CASE("SimeonLexicalBackend concept scoring survives a document with no content",
+          "[search][simeon][concepts][catch2]") {
+    // A document that is FTS5-indexed but has no content row is skipped by the index. Concepts
+    // used to be numbered over every listed document, so one such document left the concept
+    // index a different size from the BM25 index and concept scoring was silently dropped.
+    auto corpus = makeCorpus(conceptCorpusDocs());
+    {
+        DocumentInfo d;
+        d.filePath = "/tmp/hash_contentless.txt";
+        d.fileName = "hash_contentless.txt";
+        d.fileExtension = ".txt";
+        d.fileSize = 0;
+        d.sha256Hash = "hash_contentless";
+        d.mimeType = "text/plain";
+        d.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        d.modifiedTime = d.createdTime;
+        d.indexedTime = d.createdTime;
+        auto did = corpus.repo->insertDocument(d);
+        REQUIRE(did.has_value());
+        REQUIRE(corpus.repo
+                    ->indexDocumentContent(did.value(), "hash_contentless", "placeholder words",
+                                           "text/plain")
+                    .has_value());
+    }
+
+    SimeonLexicalBackend::Config cfg;
+    cfg.concept_mining_enabled = true;
+    cfg.fragment_geometry_enabled = false;
+
+    cfg.concept_weight = 0.0f;
+    SimeonLexicalBackend plain(cfg);
+    REQUIRE(plain.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(plain, std::chrono::seconds(30)));
+    REQUIRE(plain.doc_count() == 120u);
+
+    cfg.concept_weight = 0.5f;
+    SimeonLexicalBackend blended(cfg);
+    REQUIRE(blended.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(blended, std::chrono::seconds(30)));
+    REQUIRE(blended.doc_count() == 120u);
+    REQUIRE(blended.concept_count() > 0u);
+
+    const auto plainScores = plain.score("quantum entanglement", corpus.docIds);
+    const auto blendedScores = blended.score("quantum entanglement", corpus.docIds);
+    REQUIRE(plainScores.has_value());
+    REQUIRE(blendedScores.has_value());
+    REQUIRE(plainScores.value().size() == blendedScores.value().size());
+    std::size_t raised = 0;
+    for (std::size_t i = 0; i < plainScores.value().size(); ++i) {
+        if (blendedScores.value()[i] > plainScores.value()[i]) {
+            ++raised;
+        }
+    }
+    CHECK(raised > 0u);
 }
 
 TEST_CASE("SimeonLexicalBackend score returns one float per candidate",

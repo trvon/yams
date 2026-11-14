@@ -60,7 +60,7 @@ meson install -C build/release
 ```
 
 Run `./setup.sh --help`, `./setup.ps1 -?`, and inspect
-[`meson_options.txt`](../meson_options.txt) for the current option set.
+[`meson_options.txt`](https://github.com/trvon/yams/blob/main/meson_options.txt) for the current option set.
 
 ## Local quality gate
 

@@ -564,6 +564,24 @@ TEST_CASE("BEIR loader drops grade-0 qrels from relevant sets", "[bench][retriev
     CHECK(queries[0].relevantDocIds == std::set<std::string>{"d1"});
 }
 
+TEST_CASE("BEIR corpus loader counts distinct file contents", "[benchmark][retrieval][beir]") {
+    // A content-addressed store keeps one document per distinct text, so the benchmark's
+    // readiness target is the distinct-content count, not the id count.
+    yams::bench::BEIRDataset ds;
+    ds.documents.emplace("a", yams::bench::BEIRDocument{.id = "a", .title = "T", .text = "same"});
+    ds.documents.emplace("b", yams::bench::BEIRDocument{.id = "b", .title = "T", .text = "same"});
+    ds.documents.emplace("c", yams::bench::BEIRDocument{.id = "c", .title = "", .text = "same"});
+    ds.documents.emplace("d", yams::bench::BEIRDocument{.id = "d", .title = "", .text = "other"});
+    yams::test::TempDirGuard tempDir{"retrieval_beir_unique_"};
+    yams::bench::BEIRCorpusLoader loader(ds, tempDir.path());
+    CHECK(loader.uniqueContentDocuments == 0);
+
+    loader.writeDocumentsAsFiles();
+
+    CHECK(loader.docIdToHash.size() == 4);
+    CHECK(loader.uniqueContentDocuments == 3);
+}
+
 namespace {
 
 yams::bench::BEIRDataset subsetFixture() {

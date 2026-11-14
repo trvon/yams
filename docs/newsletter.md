@@ -2,14 +2,6 @@
 
 Product updates and occasional deep-dives.
 
-## Site update
-
-The YAMS site and documentation are being rebuilt around a smaller, maintained
-surface. Historical plans, duplicated guides, and speculative design pages are
-being removed. During the transition, use the README, command help, build guide,
-roadmap, benchmark ledger, and machine-readable schemas as the canonical
-references.
-
 ## Subscribe
 
 - SourceHut list: https://lists.sr.ht/~trvon/newsletter
@@ -20,6 +12,34 @@ references.
 - Release notes and breaking changes
 - Benchmark updates
 - Design notes (search, storage, plugins)
+
+## 2026-11: Watching, honest grep and measured routing
+
+A week of work on how YAMS keeps up with a project and how it answers.
+
+- **`yams watch` works for every project.** Watching used to follow only the
+  current session, so enabling it in a second project quietly stopped the first.
+  Every watch-enabled session is now followed. The watcher remembers what it has
+  seen across restarts, reads every `.gitignore` in the tree, waits ten minutes
+  before removing a file that disappeared (so a branch switch does not churn the
+  index), backs off when nothing changes, and pauses under memory or CPU
+  pressure. A no-change pass over a 2,400-file repository went from 122 ms to
+  19 ms.
+- **Grep says when it is incomplete.** `yams grep -l` and `-c` returned nothing
+  for patterns the plain mode found; they now list files and count lines. A scan
+  cut short by its time budget now says so instead of reading as "no matches".
+- **`yams list` time filters work.** `--since`, `--indexed-after` and the other
+  date filters were accepted and ignored; they now select documents.
+- **`yams get --json`** returns a document's complete content together with its
+  hash, metadata and timestamps, for scripts and agents that need provenance.
+- **`yams init` keeps your config.** Initializing a second data directory no
+  longer replaces the existing configuration.
+- **Learned routing, measured.** We tried the learned cluster router from
+  Apple's [faster retrieval](https://machinelearning.apple.com/research/faster-retrieval)
+  work. It improves how often the right topology cluster is picked, but not
+  end-to-end quality on the current topology, so it ships off by default. Default
+  hybrid search measures 67.3 nDCG@10 on scifact and 31.4 on nfcorpus; see
+  [benchmarks](benchmarks/index.md).
 
 ## 2026-04-25: Simeon Is Now The Default Embedding Backend
 

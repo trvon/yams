@@ -11,6 +11,8 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include "sweep_file.h"
 #include <yams/memory_sync/memory_sync.h>
 
@@ -97,13 +99,22 @@ private:
         while (statement.step()) {
         }
     }
+    static std::size_t workspacePages(std::size_t maxBytes) noexcept {
+        return std::max<std::size_t>(64, std::min<std::size_t>(maxBytes / 4096, 0x0fffffff) * 8);
+    }
+    static constexpr std::string_view kWorkspaceFullPrefix = "memory sync sweep workspace full: ";
     static Error failure(const std::exception& error) {
         if (const auto* file = dynamic_cast<const detail::SweepFileError*>(&error)) {
             return Error{file->code, "memory sync sweep workspace: " + std::string(error.what())};
         }
         const auto* sql = dynamic_cast<const SqlError*>(&error);
-        return Error{sql && (sql->code & 0xff) == SQLITE_FULL ? ErrorCode::ResourceExhausted
-                                                              : ErrorCode::IOError,
+        if (sql && (sql->code & 0xff) == SQLITE_FULL) {
+            // The page cap is sized from the scan budget, so only this case can be helped by a
+            // larger budget; see isWorkspaceFull.
+            return Error{ErrorCode::ResourceExhausted,
+                         std::string(kWorkspaceFullPrefix) + std::string(error.what())};
+        }
+        return Error{ErrorCode::IOError,
                      "memory sync sweep workspace: " + std::string(error.what())};
     }
     SweepStore(const std::filesystem::path& directory, std::size_t maxBytes, Verifier verifier,
@@ -128,8 +139,7 @@ private:
         sql("PRAGMA synchronous=OFF");
         // Bound index/encoding amplification as well as resident cache. All ordering uses
         // an explicit index, so no unbounded ORDER BY spill lands in the OS tmpfs.
-        const auto pages =
-            std::max<std::size_t>(64, std::min<std::size_t>(maxBytes / 4096, 0x0fffffff) * 8);
+        const auto pages = workspacePages(maxBytes);
         const auto pageCountPragma = "PRAGMA max_page_count=" + std::to_string(pages);
         sql(pageCountPragma.c_str());
         sql("CREATE TABLE operations(op TEXT PRIMARY KEY, hash TEXT, logical TEXT) WITHOUT ROWID");
@@ -146,6 +156,19 @@ private:
     }
 
 public:
+    /// The workspace hit its page cap (SQLITE_FULL). Unlike the scratch lease, generation and
+    /// row-size limits, which also report ResourceExhausted, a larger scan budget raises this cap.
+    static bool isWorkspaceFull(const Error& error) noexcept {
+        return error.code == ErrorCode::ResourceExhausted &&
+               std::string_view(error.message).starts_with(kWorkspaceFullPrefix);
+    }
+
+    /// The workspace's SQLite page cap for a scan budget, in bytes. Kept in one place so the
+    /// caller can check free space against the size the workspace may actually reach.
+    static std::size_t workspaceCapBytes(std::size_t maxBytes) noexcept {
+        return workspacePages(maxBytes) * std::size_t{4096};
+    }
+
     static Result<std::shared_ptr<SweepStore>>
     create(const std::filesystem::path& directory, std::size_t maxBytes, Verifier verifier = {},
            std::size_t pageLimit = 512, std::size_t maxRowBytes = std::size_t{1024} * 1024,

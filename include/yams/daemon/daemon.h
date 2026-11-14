@@ -124,6 +124,10 @@ struct DaemonConfig {
         std::chrono::hours vectorVacuumInterval{24};
         /// Session files nobody has touched for this long are deleted; 0 disables.
         std::chrono::days sessionExpiry{30};
+        /// How often a path-tree repair pass re-scans all documents; 0 disables.
+        std::chrono::hours pathTreeRepairInterval{24};
+        /// Documents examined per path-tree repair batch (one batch per loop tick).
+        std::size_t pathTreeRepairBatch{256};
     } maintenance;
 
     /// Opt-in document-history retention. Newest versions are always retained;

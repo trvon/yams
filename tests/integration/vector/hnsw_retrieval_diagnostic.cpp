@@ -14,6 +14,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "tests/integration/daemon/require_daemon_started.h"
 #include "tests/integration/daemon/test_async_helpers.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
 #include <yams/daemon/client/daemon_client.h>
@@ -178,22 +179,9 @@ public:
         opts.pluginConfigs["onnx_plugin"] = onnxConfig.dump();
 
         spdlog::info("Plugin directory: {}", opts.pluginDir->string());
-        bool started = false;
-        for (int attempt = 0; attempt < 3 && !started; ++attempt) {
-            harness_ = std::make_unique<test::DaemonHarness>(opts);
-            started = harness_->start(60s);
-            if (!started) {
-                spdlog::warn("Daemon start attempt {} failed in HNSW diagnostic; retrying",
-                             attempt + 1);
-                harness_->stop();
-                harness_.reset();
-                std::this_thread::sleep_for(500ms);
-            }
-        }
-        if (!started) {
-            SKIP("Daemon failed to start for HNSW diagnostic after retries (likely TSAN/CI "
-                 "contention)");
-        }
+        harness_ = std::make_unique<test::DaemonHarness>(opts);
+        // 3 x 60 s stays inside the 300 s hnsw_retrieval_diagnostic registration timeout.
+        test::requireStarted(*harness_, 3, 60s, 500ms);
         spdlog::info("Daemon started");
 
         // Ingest test corpus

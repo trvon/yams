@@ -1,108 +1,98 @@
 # Benchmarks
 
-The tables below are the latest recorded snapshot of the **default system**
-(no experiment matrices). They were produced with an xplan harness that is now
-kept as optional, gitignored local tooling. Per-run detail:
-`build/benchmarks/<plan>/<timestamp>-<config-hash>/` (`run_manifest.json`, `REPORT.md`,
-`ablation.md`, `metrics.csv`). Tracked API/core/search/tree-diff benchmarks use the same default
-`build/benchmarks/<suite>/<timestamp>-<config-hash>/` layout and record effective CLI values,
-field-level sources, and execution provenance in `run_manifest.json`; `--out-dir` remains exact.
+What YAMS achieves with its **default settings**, and what its background work
+costs. Each table says when and how it was measured; numbers from different
+dates or hosts are not compared with each other.
 
-| | |
-|--|--|
-| Local harness | `tests/benchmarks/xplan/` (optional; not distributed) |
-| Artifacts | `build/benchmarks/<plan>/<timestamp>-<config-hash>/` (gitignored) |
-| Micro baselines (code) | `tests/benchmarks/baseline/*.json` |
-| Full Simeon ingestion oracle | [`ingestion_oracle.md`](ingestion_oracle.md) |
+## Retrieval quality
 
-**Corpora:** quality plans use **BEIR scifact** (`dataset=scifact`, 2000 docs × 50
-queries) by default. Cache: `~/.cache/yams/benchmarks/<name>` (auto-download).
-`dataset=synthetic` is only for ingest/load/ops throughput — not ranking.
+**Measured 2026-11-12** · default hybrid search (full-text + Simeon embeddings +
+graph, topology assist on) · top 10 · three repeats, mean shown · AMD Ryzen AI
+Max+ PRO 395, Linux, optimized build.
 
-**Topology construction defaults (when topology rebuild runs):**
-`min_edge_score=0.25`, `max_component_docs=64`, engine `connected`.
+| Corpus | Documents | Queries | nDCG@10 | Recall@10 | MRR |
+|---|---:|---:|---:|---:|---:|
+| BEIR scifact | 5,183 | 300 | 67.3 | 79.1 | 64.1 |
+| BEIR nfcorpus | 3,633 | 323 | 31.4 | 15.0 | 52.0 |
 
----
+Repeats varied by at most 0.35 points. nfcorpus recall is low for every system:
+its queries have many relevant documents each, so ten results cannot hold most
+of them.
 
-## Latest snapshot
+Two options were measured against this default in the same run and left off:
 
-**Stamp:** `kpi-20260709T031007Z` (search quality) · `kpi-20260709T003228Z` (ingest / load / repair / ops)\
-**Host:** local macOS
-**Builds:** `build/release` (ingest, repair, quality); `build/prepush-macos` (load, ops — Catch2)
+| Option (scifact) | nDCG@10 | Recall@10 | Verdict |
+|---|---:|---:|---|
+| Vector search restricted to routed topology clusters | 68.3 | 80.6 | Better on scifact, mixed on nfcorpus (+0.2 nDCG, −0.3 MRR); not promoted |
+| Learned cluster routing (fitted route vectors) | 68.3 | 80.5 | No end-to-end gain over centroid routing; off by default |
 
-### Ingest — `ingest_pipeline` (80 docs × 1 KB, synthetic throughput)
+Query latency was not recorded in this run.
 
-This historical snapshot predates the full Simeon identity, persistence, and lifecycle contract in
-[`ingestion_oracle.md`](ingestion_oracle.md); do not use it as the comprehensive optimization
-baseline.
+## Embedding throughput
 
-| Arm | docs/s | wall_ms | complete |
-|-----|------:|--------:|----------|
-| baseline | 96.6 | 828 | yes |
-| no_kg | 95.6 | 837 | yes |
-| no_vectors | 87.0 | 920 | yes |
-| no_vectors_no_kg | 97.2 | 823 | yes |
-| no_gliner | 97.8 | 818 | yes |
-| minimal | 111.0 | 721 | yes |
+**Measured 2026-04** · daemon embedding path, batches of 100 documents.
 
-Artifacts: `build/benchmarks/ingest_pipeline/kpi-20260709T003228Z-ingest/`
+| Backend | Dimensions | Throughput | p50 batch latency |
+|---|---:|---:|---:|
+| Simeon (default) | 1024 | 9,032 docs/s | 10.9 ms |
+| ONNX MiniLM-L6 | 384 | 463 docs/s | 230.8 ms |
 
-### Retrieval load — `retrieval_load`
+Simeon needs no model download and is deterministic. It is a lexical and
+topical encoder that composes well with BM25; on scifact it matches MiniLM's
+quality, but that does not hold on every corpus (see the
+[Simeon announcement](../newsletter.md#2026-04-25-simeon-is-now-the-default-embedding-backend)).
 
-| Arm | p50_ms | p95_ms | QPS | searches |
-|-----|------:|------:|----:|---------:|
-| baseline_hybrid | 28.0 | 41.3 | 123 | 189 |
-| keyword_only | 1.20 | 5.45 | 362 | 189 |
+## Background work
 
-Artifacts: `build/benchmarks/retrieval_load/kpi-20260709T003228Z-load/`
+**Measured 2026-11-12/13** on the host above.
 
-### Search quality — BEIR scifact (default hybrid)
+| Operation | Workload | Time | Peak memory |
+|---|---|---:|---:|
+| Full vector index rebuild (product quantization) | 147,712 vectors × 1024 dims, a real store | 6.8 s | 280 MB |
+| Watch pass, nothing changed | 2,379-file source tree | 19 ms | — |
 
-2000 docs · 50 queries · topk=10 · topology routing **off** (historical control; the current
-product default is `hybrid_assist` + `shadow`)
+The rebuild streams vectors instead of loading them all; before that change it
+took 6.5 s at 870 MB. The watch pass took 122 ms before its pattern matching
+was reworked, and a project that is not changing is polled progressively less
+often.
 
-This table is historical quality evidence, not a current latency baseline. Keep
-current product default, topology-disabled, and traced-shadow runs distinct.
-Stage tracing can perform an additional exact document-complete retrieval;
-use untraced runs for product latency and paired traced runs for attribution.
+## Reproduce
 
-| Metric | Value |
-|--------|------:|
-| MRR | 0.613 |
-| nDCG | 0.634 |
-| MAP | 0.608 |
-| recall@10 | 0.713 |
-| precision@10 | 0.076 |
+Retrieval quality comes from `retrieval_quality_bench`, which starts an
+isolated daemon, ingests a BEIR corpus, waits until it is fully indexed, then
+scores every query against the dataset's relevance judgments with `trec_eval`
+definitions.
 
-Artifacts: `build/benchmarks/topology_optimize_v2/kpi-20260709T031007Z-topo-optv2b/` (`topo_off` arm)
+```bash
+# BEIR datasets are read from ~/.cache/yams/benchmarks/<name>
+mkdir -p ~/.cache/yams/benchmarks && cd ~/.cache/yams/benchmarks
+curl -LO https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip
+unzip scifact.zip && cd -
 
-### Repair — `repair_ability` (20 faults)
+# Needs Google Benchmark; the build skips the target without it
+./setup.sh Release
+meson configure build/release -Dbuild-tests=true -Dbuild-benchmarks=true
+meson compile -C build/release retrieval_quality_bench
 
-| Arm | injected | repaired | status |
-|-----|--------:|---------:|--------|
-| fts5 | 20 | 20 | ok |
-| graph | 20 | 225* | ok |
-| embed | 20 | 0 | fail (timeout ~120s) |
-| embed_all_ops | 20 | 0 | fail (timeout ~120s) |
+# The guard keeps the benchmark's isolated daemon from resetting shared IO state
+YAMS_TEST_SAFE_SINGLE_INSTANCE=1 YAMS_BENCH_DATASET=scifact \
+  build/release/tests/benchmarks/retrieval_quality_bench
+```
 
-\* graph arm counts operations, not 1:1 documents.
+Raw results land under `build/benchmarks/` (not tracked). The
+[ingestion oracle](ingestion_oracle.md) defines the correctness gates for
+ingest throughput work. Maintainers with the optional local `xplan` harness run
+multi-arm plans through it; it is not part of a clean checkout.
 
-Artifacts: `build/benchmarks/repair_ability/kpi-20260709T003228Z-repair/`
+??? note "Earlier snapshot (2026-07-09, local macOS)"
 
-### Ops / idle — `ops_timeline`
+    Recorded before Simeon became the default and before the topology work;
+    kept for reference, not comparable with the tables above.
 
-| Arm | ingest docs/s | idle_fraction |
-|-----|-------------:|--------------:|
-| baseline_no_vectors | 212 | 1.0 |
-| with_vectors | 212 | 1.0 |
-
-Artifacts: `build/benchmarks/ops_timeline/kpi-20260709T003228Z-ops/`
-
----
-
-## Refresh
-
-1. Prepare the relevant corpus.
-2. Run equivalent benchmark workloads under a common stamp.
-3. Replace tables above from each `summary.md` / `REPORT.md` (default arms only).
-4. Update the stamp line.
+    | Workload | Result |
+    |---|---|
+    | Ingest, 80 × 1 KB synthetic documents | 97 docs/s (111 with vectors, graph and entity extraction off) |
+    | Retrieval load, hybrid | p50 28 ms, p95 41 ms, 123 queries/s |
+    | Retrieval load, keyword only | p50 1.2 ms, p95 5.5 ms, 362 queries/s |
+    | scifact, 50 queries, topology off | nDCG 63.4, recall@10 71.3, MRR 61.3 |
+    | Repair, 20 injected faults | full-text and graph repaired; embedding repair timed out at 120 s in that run |

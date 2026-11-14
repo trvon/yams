@@ -130,4 +130,55 @@ std::string encodeBase64(std::span<const std::byte> bytes);
  */
 Result<std::vector<std::byte>> decodeBase64(std::string_view base64Str);
 
+/**
+ * @brief Route-fit sidecar: the persisted form of the clusters' `fittedRouteVector`s.
+ *
+ * Like roads, fitted vectors live beside the main snapshot so its payload and fingerprints are
+ * unchanged with fitting on or off. Only fitted clusters have an entry. The binary form has its
+ * own magic ('Y','A','M','F') and version, and records the snapshot and the embedding space
+ * the vectors belong to.
+ */
+struct TopologyRouteFitSidecar {
+    struct Entry {
+        std::string clusterId;
+        std::vector<float> vector;
+        friend bool operator==(const Entry&, const Entry&) = default;
+    };
+    std::string snapshotId;
+    std::string embeddingSpaceIdentity;
+    uint32_t dim{0};
+    RouteFitProvenance provenance{};
+    /// In cluster-id order.
+    std::vector<Entry> vectors;
+};
+
+/// The batch's fitted clusters as a sidecar; `vectors` is empty when no cluster is fitted.
+[[nodiscard]] TopologyRouteFitSidecar collectTopologyRouteFit(const TopologyArtifactBatch& batch);
+
+Result<std::vector<std::byte>>
+serializeTopologyRouteFitSidecarBinary(const TopologyRouteFitSidecar& sidecar);
+Result<TopologyRouteFitSidecar>
+deserializeTopologyRouteFitSidecarBinary(std::span<const std::byte> bytes);
+/// Route-fit sidecar in a Zstd JSON envelope (`format = "topology_route_fit_zstd_v1"`), the form
+/// stored in the `topology:routefit:<snapshotId>` knowledge-graph node.
+Result<std::string>
+serializeTopologyRouteFitSidecarCompressed(const TopologyRouteFitSidecar& sidecar,
+                                           int compressionLevel = 3);
+Result<TopologyRouteFitSidecar>
+deserializeTopologyRouteFitSidecarCompressed(std::string_view payload);
+
+/**
+ * @brief Attach the sidecar's vectors to the matching clusters of `batch`.
+ *
+ * Every cluster's fitted vector and the batch provenance are reset first. The whole sidecar is
+ * rejected, with a reason token in `batch.routeFitUnavailableReason`, when it belongs to
+ * another snapshot (`route_fit_snapshot_mismatch`) or another embedding space
+ * (`route_fit_space_mismatch`), or has no dimension (`route_fit_dim_invalid`). Otherwise each
+ * entry is checked on its own and a bad one is skipped: the cluster must exist, have a centroid
+ * of the sidecar's dimension, appear once, and the vector must be finite. Skipped entries are
+ * counted in the reason as `route_fit_entries_skipped:<n>`. Returns the number attached.
+ */
+std::size_t attachTopologyRouteFit(TopologyArtifactBatch& batch,
+                                   const TopologyRouteFitSidecar& sidecar);
+
 } // namespace yams::topology

@@ -33,6 +33,7 @@
 #endif
 
 #include "../../common/test_helpers_catch2.h"
+#include "session_watch_fakes.h"
 
 #include "../../../include/yams/daemon/components/db_integrity_stamp.h"
 #include "../../../src/daemon/components/service_manager/bootstrap_status.h"
@@ -50,6 +51,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/shutdown_budget.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/writer_auth.h>
@@ -255,84 +257,6 @@ bool walSidecarStillMatchesPayload(const fs::path& dbPath, const std::string& pa
     in.read(actual.data(), static_cast<std::streamsize>(actual.size()));
     return in.good() && actual == payload;
 }
-
-class SessionWatchIndexingService final : public app::services::IIndexingService {
-public:
-    Result<app::services::AddDirectoryResponse>
-    addDirectory(const app::services::AddDirectoryRequest& request) override {
-        requests.push_back(request);
-        if (failuresRemaining > 0) {
-            --failuresRemaining;
-            return Error{ErrorCode::IOError, "simulated indexing failure"};
-        }
-        app::services::AddDirectoryResponse response;
-        response.filesProcessed = request.includePatterns.size();
-        for (const auto& relative : request.includePatterns) {
-            app::services::IndexedFileResult result;
-            result.path = (fs::path(request.directoryPath) / relative).string();
-            result.success = !failingFiles.contains(relative);
-            if (result.success) {
-                ++response.filesIndexed;
-            } else {
-                ++response.filesFailed;
-                result.error = "simulated per-file failure";
-            }
-            response.results.push_back(std::move(result));
-        }
-        return response;
-    }
-
-    std::size_t failuresRemaining{0};
-    std::set<std::string> failingFiles;
-    std::vector<app::services::AddDirectoryRequest> requests;
-};
-
-class SessionWatchDocumentService final : public app::services::IDocumentService {
-public:
-    Result<app::services::StoreDocumentResponse>
-    store(const app::services::StoreDocumentRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<app::services::RetrieveDocumentResponse>
-    retrieve(const app::services::RetrieveDocumentRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<app::services::CatDocumentResponse>
-    cat(const app::services::CatDocumentRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<app::services::ListDocumentsResponse>
-    list(const app::services::ListDocumentsRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<app::services::UpdateMetadataResponse>
-    updateMetadata(const app::services::UpdateMetadataRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<std::string> resolveNameToHash(const std::string&, bool) override {
-        return ErrorCode::NotImplemented;
-    }
-    Result<app::services::DeleteByNameResponse>
-    deleteByName(const app::services::DeleteByNameRequest& request) override {
-        deleteRequests.push_back(request);
-        if (failuresRemaining > 0) {
-            --failuresRemaining;
-            return Error{ErrorCode::IOError, "simulated deletion failure"};
-        }
-        app::services::DeleteByNameResponse response;
-        response.count = 1;
-        response.deleted.push_back(
-            {.name = request.name, .deleted = true, .errorCode = ErrorCode::Success});
-        return response;
-    }
-    Result<app::services::DeleteByNameResponse>
-    pruneVersions(const app::services::PruneVersionsRequest&) override {
-        return ErrorCode::NotImplemented;
-    }
-
-    std::size_t failuresRemaining{0};
-    std::vector<app::services::DeleteByNameRequest> deleteRequests;
-};
 
 void requireReadyDatabaseState(const StateComponent& state) {
     CHECK(state.readiness.databaseReady.load());
@@ -1210,13 +1134,57 @@ TEST_CASE("ServiceManager session watcher uses configured intervals without busy
     CHECK((ServiceManager::__test_sessionWatcherDelay(true, 20) == 100ms));
 }
 
+TEST_CASE("ServiceManager session watcher follows every session with watching enabled",
+          "[daemon][service_manager][session_watch]") {
+    // `yams watch` in a second project made it the current session and silently stopped the
+    // first; closing the current session stopped all watching while every session still
+    // reported "enabled".
+    const auto root = yams::test::make_temp_dir("yams_watch_targets_");
+    yams::test::ScopedEnvVar stateHome{"XDG_STATE_HOME", root.string()};
+    yams::test::ScopedEnvVar noCurrent{"YAMS_SESSION_CURRENT", std::nullopt};
+    auto sessions = app::services::makeSessionService(nullptr);
+    REQUIRE(sessions);
+
+    sessions->init("first", "");
+    sessions->addPathSelector("/work/first", {}, {});
+    sessions->enableWatch(true, "first");
+    sessions->setWatchIntervalMs(4000, "first");
+
+    sessions->init("second", "");
+    sessions->addPathSelector("/work/second", {}, {});
+    sessions->enableWatch(true, "second");
+
+    sessions->init("unwatched", "");
+    sessions->addPathSelector("/work/unwatched", {}, {});
+
+    const auto directoriesOf = [&] {
+        std::set<std::string> directories;
+        for (const auto& target : ServiceManager::__test_sessionWatchTargets(*sessions)) {
+            directories.insert(target.session + ":" + target.directory.generic_string());
+        }
+        return directories;
+    };
+    const std::set<std::string> expected{"first:/work/first", "second:/work/second"};
+
+    SECTION("with another session current") {
+        sessions->use("unwatched");
+        CHECK(directoriesOf() == expected);
+    }
+    SECTION("with no current session") {
+        sessions->close();
+        CHECK(directoriesOf() == expected);
+    }
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
 TEST_CASE("ServiceManager session watcher refreshes every retrieval index",
           "[daemon][service_manager][session_watch]") {
     auto request = ServiceManager::__test_makeSessionWatchRequest("coding", "/workspace/yams",
                                                                   {"src/search/search_engine.cpp"});
 
     CHECK((request.directoryPath == "/workspace/yams"));
-    CHECK((request.includePatterns == std::vector<std::string>{"src/search/search_engine.cpp"}));
+    CHECK((request.explicitFiles == std::vector<std::string>{"src/search/search_engine.cpp"}));
     CHECK(request.recursive);
     CHECK((request.sessionId == "coding"));
     CHECK_FALSE(request.noEmbeddings);
@@ -1226,6 +1194,8 @@ TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager session watcher retries failed indexing and deletion",
                  "[daemon][service_manager][session_watch]") {
     ServiceManager serviceManager(config_, state_, lifecycleFsm_);
+    // These cases are about retrying a removal, not about when one becomes due.
+    serviceManager.__test_sessionWatcher().setRemovalGrace(std::chrono::seconds{0});
     SessionWatchIndexingService indexingService;
     SessionWatchDocumentService documentService;
     const auto watchedDirectory = testDir_ / "watched";
@@ -1241,7 +1211,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                                 "coding", watchedDirectory));
     REQUIRE((indexingService.requests.size() == 1));
-    CHECK((indexingService.requests.front().includePatterns ==
+    CHECK((indexingService.requests.front().explicitFiles ==
            std::vector<std::string>{"changed.cpp"}));
 
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
@@ -1269,9 +1239,63 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager session watcher abandons a pass when asked to stop",
+                 "[daemon][service_manager][session_watch]") {
+    ServiceManager serviceManager(config_, state_, lifecycleFsm_);
+    SessionWatchIndexingService indexingService;
+    SessionWatchDocumentService documentService;
+    const auto watchedDirectory = testDir_ / "watched_stop";
+    fs::create_directories(watchedDirectory);
+    for (int i = 0; i < 600; ++i) {
+        std::ofstream(watchedDirectory / ("f" + std::to_string(i) + ".txt")) << i;
+    }
+
+    serviceManager.__test_requestSessionWatcherStop();
+
+    // Shutdown waits a bounded time for the watcher, so a pass over a large tree gives up
+    // rather than indexing, and records nothing as seen.
+    CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                                "coding", watchedDirectory));
+    CHECK(indexingService.requests.empty());
+    CHECK(documentService.deleteRequests.empty());
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager shutdown wakes a session watcher that is waiting",
+                 "[daemon][service_manager][session_watch]") {
+    // The watcher sleeps between passes, up to minutes for a tree it refused. Shutdown set
+    // a stop flag nothing was looking at, waited three seconds, and left the coroutine
+    // asleep with a pointer to the ServiceManager.
+    ServiceManager serviceManager(config_, state_, lifecycleFsm_);
+    boost::asio::io_context io;
+    auto work = boost::asio::make_work_guard(io);
+    std::thread runner([&io] { io.run(); });
+
+    serviceManager.__test_startSessionWatcherOn(io.get_executor());
+    // Nothing is watched here, so after its first pass the watcher waits two seconds.
+    // Shutdown is requested once it is actually asleep, so the wake-up is what is tested.
+    REQUIRE(
+        yams::test::wait_for_condition(std::chrono::seconds(10), std::chrono::milliseconds(5), [&] {
+            return serviceManager.__test_sessionWatcherWaiting();
+        }));
+
+    const auto started = std::chrono::steady_clock::now();
+    const bool finished = serviceManager.__test_stopSessionWatcher();
+    const auto took = std::chrono::steady_clock::now() - started;
+
+    work.reset();
+    io.stop();
+    runner.join();
+    CHECK(finished);
+    CHECK(took < std::chrono::milliseconds(1000));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager session watcher keeps progressing past a failing path",
                  "[daemon][service_manager][session_watch]") {
     ServiceManager serviceManager(config_, state_, lifecycleFsm_);
+    // These cases are about retrying a removal, not about when one becomes due.
+    serviceManager.__test_sessionWatcher().setRemovalGrace(std::chrono::seconds{0});
     SessionWatchIndexingService indexingService;
     SessionWatchDocumentService documentService;
     const auto watchedDirectory = testDir_ / "watched_progress";
@@ -1300,7 +1324,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(
             indexingService, &documentService, "coding", watchedDirectory));
         REQUIRE((indexingService.requests.size() == 2));
-        CHECK((indexingService.requests.back().includePatterns ==
+        CHECK((indexingService.requests.back().explicitFiles ==
                std::vector<std::string>{"added.cpp"}));
 
         // Before the fix the stale snapshot made added.cpp "changed" on every pass.
@@ -1330,8 +1354,8 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                               "coding", watchedDirectory));
         REQUIRE((indexingService.requests.size() == 3));
-        CHECK((indexingService.requests.back().includePatterns ==
-               std::vector<std::string>{"bad.cpp"}));
+        CHECK(
+            (indexingService.requests.back().explicitFiles == std::vector<std::string>{"bad.cpp"}));
     }
 }
 
@@ -2012,6 +2036,11 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     sm->startAsyncInit();
     const auto readySnap = sm->waitForServiceManagerTerminalState(30);
     REQUIRE((readySnap.state == ServiceManagerState::Ready));
+
+    // Repair gives up at once without an embedding provider. Install one so the repair
+    // reaches the full embed queue, which is the wait this test cancels.
+    sm->testing_setModelProvider(
+        std::shared_ptr<IModelProvider>(createModelProvider(std::string{}, true)));
 
     auto meta = sm->getMetadataRepo();
     REQUIRE((meta != nullptr));

@@ -137,6 +137,11 @@ struct AppContext {
     // Optional: externally-provided content extractors (plugins)
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors;
 
+    // Local query log (`[search.query_log]`): how many recent queries SearchService keeps in
+    // the metadata store. Zero, the default for embedded and test contexts, records nothing;
+    // the daemon sets it from config.
+    std::size_t queryLogMaxEntries{0};
+
     // Degraded search / repair status (allows services to fallback during repairs)
     bool searchRepairInProgress{false};
     std::string searchRepairDetails{};
@@ -425,7 +430,8 @@ struct GrepMatch {
 struct GrepFileResult {
     std::string file;
     std::string fileName;
-    std::size_t matchCount{0};
+    std::size_t matchCount{0};   // matching occurrences; a line can hold several
+    std::size_t matchedLines{0}; // lines with at least one match (what `grep -c` reports)
     std::vector<GrepMatch> matches;
 
     // File metadata for LLM context
@@ -919,6 +925,11 @@ public:
 
 struct DownloadServiceOptions {
     std::uint64_t maxFileBytes{0}; // 0 = unlimited
+    // Root for the downloader's own object and staging directories
+    // (<storageRoot>/storage/{objects,staging}). Empty keeps the process-wide default:
+    // $YAMS_STORAGE, else ~/yams. Embedded hosts set this so downloads stay inside the
+    // directory they gave the context instead of the user's home.
+    std::filesystem::path storageRoot;
 };
 
 // ===========================
@@ -931,6 +942,12 @@ struct AddDirectoryRequest {
     std::vector<std::string> tags; // tags to apply to each stored document
     std::vector<std::string> includePatterns;
     std::vector<std::string> excludePatterns;
+    /// Exact files to index, relative to directoryPath. When set these are the only
+    /// candidates: the directory is not walked and include, exclude and .gitignore patterns
+    /// are not applied. For callers that already know which files changed. (A relative
+    /// path in includePatterns is a pattern: a bare name also matches every nested file of
+    /// that name, and one with a separator hides the bare names beside it.)
+    std::vector<std::string> explicitFiles;
     std::unordered_map<std::string, std::string> metadata;
     bool recursive{true};
     bool followSymlinks{false};

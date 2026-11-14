@@ -110,6 +110,8 @@ struct DaemonStats {
     std::atomic<uint64_t> repairQueueDepth{0};
     std::atomic<uint64_t> repairTotalBacklog{0};
     std::atomic<uint64_t> repairProcessed{0};
+    // Path-tree nodes restored by the background path-tree repair pass (cumulative).
+    std::atomic<uint64_t> repairPathTreeRepaired{0};
     std::atomic<uint64_t> repairCurrentOperationCode{0};
     std::atomic<uint64_t> repairCurrentOperationStartedMs{0};
     std::atomic<bool> repairRunning{false};

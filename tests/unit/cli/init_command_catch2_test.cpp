@@ -10,13 +10,14 @@
 #include <iostream>
 #include <optional>
 #include <random>
-#include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include <yams/cli/doctor/checks/dim_consistency.h>
 #include <yams/cli/doctor/doctor_context.h>
+#include <yams/cli/init_assets.hpp>
 #include <yams/cli/static_tables.h>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
@@ -37,30 +38,6 @@ size_t resolveModelDimension(std::string_view modelName);
 } // namespace yams::cli
 
 namespace fs = std::filesystem;
-
-// =============================================================================
-// Test the EMBEDDING_MODELS definition used by init command.
-// These tests verify that the model list is valid and consistent.
-// =============================================================================
-
-// Model info structure matching init_command.cpp
-struct EmbeddingModelInfo {
-    std::string name;
-    std::string url;
-    std::string description;
-    size_t size_mb;
-    int dimensions;
-};
-
-// Expected models (mirrors the static list in init_command.cpp)
-static const std::vector<EmbeddingModelInfo> EXPECTED_MODELS = {
-    {"all-MiniLM-L6-v2",
-     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
-     "Lightweight model for semantic search", 90, 384},
-    {"multi-qa-MiniLM-L6-cos-v1",
-     "https://huggingface.co/sentence-transformers/multi-qa-MiniLM-L6-cos-v1/resolve/main/onnx/"
-     "model.onnx",
-     "Optimized for semantic search on QA pairs (215M training samples)", 90, 384}};
 
 namespace {
 
@@ -170,56 +147,40 @@ private:
 
 } // namespace
 
-TEST_CASE("InitCommand: All models have valid HuggingFace URLs", "[cli][init][models]") {
-    const std::regex hfUrlPattern(
-        R"(^https://huggingface\.co/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+/resolve/main/.+\.onnx$)");
+TEST_CASE("InitCommand: offered model tables are well-formed", "[cli][init][models]") {
+    namespace assets = yams::cli::init_assets;
 
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model: " << model.name);
-        INFO("URL: " << model.url);
-        REQUIRE(std::regex_match(model.url, hfUrlPattern));
+    std::set<std::string> names; // unique within each table
+    const auto checkCommon = [&names](const auto& model) {
+        INFO("model: " << model.name);
+        CHECK_FALSE(model.name.empty());
+        CHECK_FALSE(model.description.empty());
+        CHECK(model.size_mb > 0);
+        CHECK(names.insert(model.name).second);
+    };
+
+    REQUIRE_FALSE(assets::embeddingModels().empty());
+    for (const auto& model : assets::embeddingModels()) {
+        checkCommon(model);
+        CHECK(model.url.starts_with("https://"));
+        CHECK(model.dimensions > 0);
     }
-}
 
-TEST_CASE("InitCommand: All models have consistent 384 dimensions", "[cli][init][models]") {
-    // All models should have dim=384 for consistency with default vector DB setup
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model: " << model.name);
-        REQUIRE(model.dimensions == 384);
+    names.clear();
+    REQUIRE_FALSE(assets::glinerModels().empty());
+    for (const auto& model : assets::glinerModels()) {
+        checkCommon(model);
+        CHECK_FALSE(model.repo.empty());
+        CHECK_FALSE(model.model_file.empty());
     }
-}
 
-TEST_CASE("InitCommand: All models have valid names", "[cli][init][models]") {
-    // Model names should follow naming convention
-    const std::regex namePattern(R"(^[a-zA-Z0-9][a-zA-Z0-9_-]*[a-zA-Z0-9]$)");
-
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model name: " << model.name);
-        REQUIRE(std::regex_match(model.name, namePattern));
-    }
-}
-
-TEST_CASE("InitCommand: All models have reasonable sizes", "[cli][init][models]") {
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model: " << model.name);
-        // Models should be between 10MB and 1GB
-        REQUIRE(model.size_mb >= 10);
-        REQUIRE(model.size_mb <= 1024);
-    }
-}
-
-TEST_CASE("InitCommand: All models have descriptions", "[cli][init][models]") {
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model: " << model.name);
-        REQUIRE_FALSE(model.description.empty());
-        REQUIRE(model.description.length() >= 10);
-    }
-}
-
-TEST_CASE("InitCommand: Models are from sentence-transformers", "[cli][init][models]") {
-    for (const auto& model : EXPECTED_MODELS) {
-        INFO("Checking model: " << model.name);
-        REQUIRE(model.url.find("sentence-transformers") != std::string::npos);
+    names.clear();
+    REQUIRE_FALSE(assets::rerankerModels().empty());
+    for (const auto& model : assets::rerankerModels()) {
+        checkCommon(model);
+        CHECK_FALSE(model.repo.empty());
+        CHECK_FALSE(model.model_file.empty());
+        CHECK(model.max_tokens > 0);
     }
 }
 
@@ -565,6 +526,41 @@ embedding_dim = 384
     CHECK(*dims.embeddings == 384);
     CHECK(*dims.vectorDb == 384);
     CHECK(*dims.index == 384);
+}
+
+TEST_CASE("InitCommand: initializing another data directory keeps the existing config",
+          "[cli][init][catch2]") {
+    // `yams --data-dir /tmp/scratch init --auto` replaced the user's config with a fresh
+    // template pointing at the scratch store, and the daemon then served that store.
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    CliTestHelper helper;
+    REQUIRE(helper.runCommand({"yams", "init", "--non-interactive", "--no-keygen"}) == 0);
+    {
+        std::ofstream config(helper.configPath, std::ios::app);
+        config << "\n# a setting the user added by hand\n";
+    }
+    const auto readConfig = [&] {
+        std::ifstream in(helper.configPath);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const auto before = readConfig();
+    REQUIRE(before.find(helper.dataDir.string()) != std::string::npos);
+    const auto scratch = helper.tempDir / "scratch-store";
+
+    SECTION("without --force the config is left exactly as it was") {
+        CaptureStdout capture;
+        REQUIRE(helper.runCommand({"yams", "--data-dir", scratch.string(), "init",
+                                   "--non-interactive", "--no-keygen"}) == 0);
+        CHECK(readConfig() == before);
+        // The new store is still set up, ready for --data-dir or YAMS_DATA_DIR.
+        CHECK(fs::exists(scratch / "yams.db"));
+        CHECK(capture.str().find("kept") != std::string::npos);
+    }
+    SECTION("--force replaces it") {
+        REQUIRE(helper.runCommand({"yams", "--data-dir", scratch.string(), "init", "--force",
+                                   "--non-interactive", "--no-keygen"}) == 0);
+        CHECK(readConfig().find(scratch.string()) != std::string::npos);
+    }
 }
 
 TEST_CASE("InitCommand: re-init does not overwrite an existing vector dimension sentinel",

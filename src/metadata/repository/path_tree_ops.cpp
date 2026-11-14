@@ -13,6 +13,7 @@
 #include <yams/core/assert.hpp>
 #include <yams/metadata/metadata_repository.h>
 
+#include "path_tree_write.hpp"
 #include "result_helpers.hpp"
 #include "transaction_helpers.hpp"
 
@@ -298,58 +299,143 @@ MetadataRepository::findPathTreeNodeByFullPath(std::string_view fullPath) {
 // Repair helpers (concrete-class only)
 // ---------------------------------------------------------------------------
 
-Result<uint64_t> MetadataRepository::countDocsMissingPathTree() {
-    return executeReadQuery<uint64_t>([&](Database& db) -> Result<uint64_t> {
-        auto stmtResult = db.prepare("SELECT COUNT(*) FROM documents d "
-                                     "LEFT JOIN path_tree_nodes p ON p.full_path = d.file_path "
-                                     "WHERE d.file_path != '' AND p.node_id IS NULL");
-        if (!stmtResult)
-            return stmtResult.error();
+namespace {
 
-        auto stmt = std::move(stmtResult).value();
-        auto stepRes = stmt.step();
-        if (!stepRes)
-            return stepRes.error();
-        if (!stepRes.value())
-            return uint64_t(0);
+struct PathTreeWindowDoc {
+    int64_t id{0};
+    std::string filePath;
+    std::uint64_t position{0}; // documents examined before this one in the window
+};
 
-        return static_cast<uint64_t>(stmt.getInt64(0));
+// Reads the window and fills `window`; `missing` receives the missing documents' paths.
+Result<void> scanPathTreeWindowInDb(Database& db, int64_t afterId, std::size_t windowSize,
+                                    MetadataRepository::PathTreeRepairWindow& window,
+                                    std::vector<PathTreeWindowDoc>* missing) {
+    window.lastScannedId = afterId;
+    std::vector<PathTreeWindowDoc> docs;
+    {
+        YAMS_TRY_UNWRAP(stmtHolder, db.prepareCached("SELECT id, file_path FROM documents "
+                                                     "WHERE id > ? ORDER BY id LIMIT ?"));
+        auto& stmt = *stmtHolder;
+        YAMS_TRY(stmt.reset());
+        YAMS_TRY(stmt.bind(1, afterId));
+        YAMS_TRY(stmt.bind(2, static_cast<int64_t>(windowSize)));
+        while (true) {
+            YAMS_TRY_UNWRAP(hasRow, stmt.step());
+            if (!hasRow)
+                break;
+            docs.push_back({stmt.getInt64(0), stmt.isNull(1) ? std::string{} : stmt.getString(1)});
+        }
+    }
+    if (docs.empty())
+        return Result<void>();
+    window.scanned = docs.size();
+    window.lastScannedId = docs.back().id;
+
+    YAMS_TRY_UNWRAP(linkHolder,
+                    db.prepareCached("SELECT 1 FROM path_tree_nodes p "
+                                     "JOIN path_tree_node_documents l ON l.node_id = p.node_id "
+                                     "WHERE p.full_path = ? AND l.document_id = ? LIMIT 1"));
+    auto& linkStmt = *linkHolder;
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        auto& doc = docs[i];
+        doc.position = i;
+        const auto leaf = repository::pathTreeLeafPath(doc.filePath);
+        if (leaf.empty())
+            continue; // no segments: nothing to link
+        YAMS_TRY(linkStmt.reset());
+        YAMS_TRY(linkStmt.bind(1, leaf));
+        YAMS_TRY(linkStmt.bind(2, doc.id));
+        YAMS_TRY_UNWRAP(linked, linkStmt.step());
+        if (linked)
+            continue;
+        window.missingIds.push_back(doc.id);
+        if (missing)
+            missing->push_back(std::move(doc));
+    }
+    return Result<void>();
+}
+
+} // namespace
+
+Result<MetadataRepository::PathTreeRepairWindow>
+MetadataRepository::scanPathTreeWindow(std::int64_t afterId, std::size_t windowSize) {
+    if (windowSize == 0)
+        return Error{ErrorCode::InvalidArgument, "path tree scan window must be positive"};
+    return executeReadQuery<PathTreeRepairWindow>(
+        [&](Database& db) -> Result<PathTreeRepairWindow> {
+            PathTreeRepairWindow window;
+            YAMS_TRY(scanPathTreeWindowInDb(db, afterId, windowSize, window, nullptr));
+            return window;
+        });
+}
+
+Result<MetadataRepository::PathTreeRepairWindow>
+MetadataRepository::repairPathTreeWindow(std::int64_t afterId, std::size_t windowSize,
+                                         const std::function<bool()>& shouldAbort) {
+    if (windowSize == 0)
+        return Error{ErrorCode::InvalidArgument, "path tree scan window must be positive"};
+    return executeQuery<PathTreeRepairWindow>([&](Database& db) -> Result<PathTreeRepairWindow> {
+        if (auto begin = beginTransactionWithRetry(db); !begin)
+            return begin.error();
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed)
+                rollbackIgnoringErrors(db);
+        });
+
+        PathTreeRepairWindow window;
+        std::vector<PathTreeWindowDoc> missing;
+        YAMS_TRY(scanPathTreeWindowInDb(db, afterId, windowSize, window, &missing));
+
+        for (std::size_t k = 0; k < missing.size(); ++k) {
+            const auto& doc = missing[k];
+            if (shouldAbort && shouldAbort()) {
+                // Report only what was handled; the next window starts at this document.
+                window.aborted = true;
+                window.scanned = doc.position;
+                window.lastScannedId = doc.id - 1;
+                window.missingIds.resize(k);
+                break;
+            }
+            YAMS_TRY(db.execute("SAVEPOINT yams_path_tree_repair"));
+            DocumentInfo info;
+            info.id = doc.id;
+            info.filePath = doc.filePath;
+            auto upsert = repository::upsertPathTreeForDocumentInTransaction(db, info, doc.id);
+            if (upsert) {
+                YAMS_TRY(db.execute("RELEASE SAVEPOINT yams_path_tree_repair"));
+                ++window.repaired;
+            } else {
+                (void)db.execute("ROLLBACK TO SAVEPOINT yams_path_tree_repair");
+                (void)db.execute("RELEASE SAVEPOINT yams_path_tree_repair");
+                ++window.failed;
+                spdlog::warn("Path tree repair: failed for '{}': {}", doc.filePath,
+                             upsert.error().message);
+            }
+        }
+
+        if (auto commit = commitOrRollback(db); !commit)
+            return commit.error();
+        committed = true;
+        return window;
     });
 }
 
-Result<std::vector<DocumentInfo>> MetadataRepository::findDocsMissingPathTree(int limit) {
-    return executeReadQuery<std::vector<DocumentInfo>>(
-        [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            std::string sql = "SELECT ";
-            sql += documentColumnList(false);
-            sql += " FROM documents d "
-                   "LEFT JOIN path_tree_nodes p ON p.full_path = d.file_path "
-                   "WHERE d.file_path != '' AND p.node_id IS NULL";
-            if (limit > 0) {
-                sql += " LIMIT ?";
-            }
-
-            auto stmtResult = db.prepare(sql);
-            if (!stmtResult)
-                return stmtResult.error();
-
-            auto stmt = std::move(stmtResult).value();
-            if (limit > 0) {
-                if (auto r = stmt.bind(1, static_cast<int64_t>(limit)); !r)
-                    return r.error();
-            }
-
-            std::vector<DocumentInfo> docs;
-            while (true) {
-                auto stepRes = stmt.step();
-                if (!stepRes)
-                    return stepRes.error();
-                if (!stepRes.value())
-                    break;
-                docs.push_back(mapDocumentRow(stmt));
-            }
-            return docs;
-        });
+Result<uint64_t> MetadataRepository::countDocsMissingPathTree() {
+    constexpr std::size_t kCountWindow = 1000;
+    return executeReadQuery<uint64_t>([&](Database& db) -> Result<uint64_t> {
+        uint64_t missing = 0;
+        int64_t cursor = 0;
+        while (true) {
+            PathTreeRepairWindow window;
+            YAMS_TRY(scanPathTreeWindowInDb(db, cursor, kCountWindow, window, nullptr));
+            missing += window.missingIds.size();
+            if (window.scanned < kCountWindow)
+                return missing;
+            cursor = window.lastScannedId;
+        }
+    });
 }
 
 Result<std::vector<PathTreeNode>>

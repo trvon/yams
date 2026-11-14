@@ -49,6 +49,8 @@
                                           Roads kept per cluster at topology build (0 = none)
     YAMS_BENCH_TOPOLOGY_ROAD_ORDER=none|time|session|similarity_chain
                                           Cluster walk order stored at topology build
+    YAMS_BENCH_TOPOLOGY_ROUTE_FIT=1        Fit query-aware route vectors on full rebuilds
+                                          (topology.route_fit), trained on document titles only
     YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP=N.N
                                           Grow route prefix while scores remain near the best
     YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN=N.N
@@ -6236,6 +6238,8 @@ struct BenchFixture {
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_MAX_PER_CLUSTER");
             const auto topologyRoadOrderEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROAD_ORDER");
+            const auto topologyRouteFitEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_FIT");
             const auto topologyBqCandidateLimitEnv =
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT");
             const auto topologyBqPrefixDimEnv =
@@ -6855,6 +6859,13 @@ struct BenchFixture {
                                 << "\n";
                         }
                     }
+                    // Fitted route vectors, trained on document titles only: the bench's own
+                    // evaluation queries must never reach the training set.
+                    if (envSet(topologyRouteFitEnv) && *topologyRouteFitEnv != "0") {
+                        configOut << "\n[topology.route_fit]\n";
+                        configOut << "enabled = true\n";
+                        configOut << "max_logged_queries = 0\n";
+                    }
                     configOut.close();
                     harnessOptions.configPath = configPath;
                     spdlog::info("Using isolated benchmark config: {}", configPath.string());
@@ -6882,7 +6893,7 @@ struct BenchFixture {
             beirCorpus = std::make_unique<BEIRCorpusLoader>(dataset, corpusDir);
             beirCorpus->writeDocumentsAsFiles();
             benchCorpusDir = corpusDir;
-            corpusSize = static_cast<int>(dataset.documents.size());
+            corpusSize = static_cast<int>(beirCorpus->uniqueContentDocuments);
             numQueries = static_cast<int>(dataset.queries.size());
             expectedCacheMetadata.expectedDocs = corpusSize;
             expectedCacheMetadata.expectedQueries = numQueries;

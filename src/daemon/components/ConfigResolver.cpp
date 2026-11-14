@@ -869,6 +869,35 @@ ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePo
     return policy;
 }
 
+ConfigResolver::QueryLogPolicy ConfigResolver::resolveQueryLogPolicy() {
+    QueryLogPolicy policy;
+    try {
+        namespace fs = std::filesystem;
+        const fs::path cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            const auto kv = yams::config::parse_simple_toml(cfgPath);
+            if (auto it = kv.find("search.query_log.enabled"); it != kv.end()) {
+                policy.enabled = parseBoolValue(it->second).value_or(policy.enabled);
+            }
+            if (auto it = kv.find("search.query_log.max_entries"); it != kv.end()) {
+                // The whole value must be an unsigned number no larger than the hard cap;
+                // anything else keeps the default instead of silently changing retention.
+                const auto parsed = parseSize(trimView(it->second));
+                if (parsed && *parsed <= QueryLogPolicy::kMaxEntriesLimit) {
+                    policy.maxEntries = *parsed;
+                } else {
+                    spdlog::warn("[search.query_log] max_entries must be a number up to {}; "
+                                 "keeping {}",
+                                 QueryLogPolicy::kMaxEntriesLimit, policy.maxEntries);
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("[search.query_log] config read failed: {}", e.what());
+    }
+    return policy;
+}
+
 ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPolicy() {
     TopologyRoutingPolicy policy;
 
@@ -1095,6 +1124,15 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         }
         if (auto it = kv.find("topology.routing_representatives"); it != kv.end()) {
             policy.routingRepresentativeCount = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.route_fit.enabled"); it != kv.end()) {
+            policy.routeFitEnabled = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("topology.route_fit.max_logged_queries"); it != kv.end()) {
+            policy.routeFitMaxLoggedQueries = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.route_fit.max_generated_queries"); it != kv.end()) {
+            policy.routeFitMaxGeneratedQueries = parseSize(it->second);
         }
         if (auto it = kv.find("topology.representative_rule"); it != kv.end()) {
             policy.representativeRule =
@@ -1898,6 +1936,51 @@ void ConfigResolver::applySearchMaintenance(const ConfigSections& sections, Daem
     config.searchMaintenance.automaticRebuildsSource = "config:search.automatic_rebuilds";
 }
 
+void ConfigResolver::applyEmbeddingProviderPolicy(const ConfigSections& sections,
+                                                  bool pluginsDisabledByFlag,
+                                                  DaemonConfig& config) {
+    bool enableProvider = true;
+    bool autoLoad = true;
+
+    const auto readBool = [&sections](const char* sectionName, const char* key, bool& out) -> bool {
+        const auto section = sections.find(sectionName);
+        if (section == sections.end()) {
+            return false;
+        }
+        const auto value = section->second.find(key);
+        if (value == section->second.end()) {
+            return false;
+        }
+        const auto parsed = parseBoolValue(value->second);
+        if (!parsed.has_value()) {
+            spdlog::warn("Config: failed to parse {}.{} as boolean; keeping {}", sectionName, key,
+                         out);
+            return false;
+        }
+        out = *parsed;
+        return true;
+    };
+
+    readBool("daemon", "enable", enableProvider);
+    readBool("daemon", "auto_load_plugins", autoLoad);
+
+    bool embeddingsEnabled = true;
+    if (readBool("embeddings", "enable", embeddingsEnabled) && !embeddingsEnabled) {
+        // Embeddings are off: no provider, and no plugin scan to slow startup.
+        spdlog::info("Embeddings disabled in config ([embeddings].enable=false); disabling model "
+                     "provider and plugin auto-loading");
+        enableProvider = false;
+        autoLoad = false;
+    }
+
+    if (pluginsDisabledByFlag) {
+        autoLoad = false;
+    }
+
+    config.enableModelProvider = enableProvider;
+    config.autoLoadPlugins = autoLoad;
+}
+
 bool ConfigResolver::applyStorageDiskPressure(const ConfigSections& sections,
                                               DaemonConfig& config) {
     const auto section = sections.find("storage.disk_pressure");
@@ -1972,6 +2055,40 @@ void ConfigResolver::applyDaemonMaintenance(const ConfigSections& sections, Daem
             spdlog::warn("Config: daemon.maintenance.session_expiry_days must be an unsigned "
                          "integer; keeping {}",
                          config.maintenance.sessionExpiry.count());
+        }
+    }
+    if (const auto it = section->second.find("path_tree_repair_interval_hours");
+        it != section->second.end()) {
+        // A year is long enough to mean "rarely" and keeps `now + interval` far from
+        // steady_clock overflow.
+        constexpr std::uint32_t kMaxPathTreeRepairIntervalHours = 24 * 365;
+        if (const auto parsed = parseUnsignedIntegral<std::uint32_t>(it->second)) {
+            if (*parsed > kMaxPathTreeRepairIntervalHours) {
+                spdlog::warn("Config: daemon.maintenance.path_tree_repair_interval_hours {} "
+                             "exceeds {}; using {}",
+                             *parsed, kMaxPathTreeRepairIntervalHours,
+                             kMaxPathTreeRepairIntervalHours);
+            }
+            config.maintenance.pathTreeRepairInterval =
+                std::chrono::hours{std::min(*parsed, kMaxPathTreeRepairIntervalHours)};
+        } else {
+            spdlog::warn("Config: daemon.maintenance.path_tree_repair_interval_hours must be an "
+                         "unsigned integer; keeping {}h",
+                         config.maintenance.pathTreeRepairInterval.count());
+        }
+    }
+    if (const auto it = section->second.find("path_tree_repair_batch");
+        it != section->second.end()) {
+        // One batch runs per repair-loop tick, so a large batch holds the loop (and the
+        // metadata write path) for longer; cap it well below "the whole table".
+        constexpr std::size_t kMaxPathTreeRepairBatch = 10000;
+        const auto parsed = parseUnsignedIntegral<std::uint32_t>(it->second);
+        if (parsed && *parsed > 0 && *parsed <= kMaxPathTreeRepairBatch) {
+            config.maintenance.pathTreeRepairBatch = *parsed;
+        } else {
+            spdlog::warn("Config: daemon.maintenance.path_tree_repair_batch must be in [1, {}]; "
+                         "keeping {}",
+                         kMaxPathTreeRepairBatch, config.maintenance.pathTreeRepairBatch);
         }
     }
 }
@@ -2138,7 +2255,8 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
         !applyLimit("max_merged_keys", policy.limits.maxMergedKeys) ||
         !applyLimit("max_cache_bytes", policy.limits.maxCacheBytes) ||
         !applyLimit("max_tracked_identities", policy.limits.maxTrackedIdentities) ||
-        !applyLimit("max_scan_bytes", policy.limits.maxScanBytes)) {
+        !applyLimit("max_scan_bytes", policy.limits.maxScanBytes) ||
+        !applyLimit("max_scan_bytes_ceiling", policy.limits.maxScanBytesCeiling)) {
         config.memorySync.enabled = false;
         return false;
     }

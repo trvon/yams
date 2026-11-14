@@ -12,16 +12,31 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/common/file_lock.h>
+#include <yams/crypto/hasher.h>
+#include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/plugin_installer.hpp>
 #include <yams/plugins/plugin_repo_client.hpp>
 
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cctype>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
+
+#include <zlib.h>
 
 #include "tests/support/temp_dir_scope.hpp"
 
@@ -56,6 +71,184 @@ public:
 
     Result<bool> exists(const std::string& /*name*/) override { return false; }
 };
+
+namespace {
+
+/**
+ * @brief Repository client that serves one fixed release, so install() runs end to end.
+ */
+class FixedPluginRepoClient : public IPluginRepoClient {
+public:
+    Result<std::vector<RemotePluginSummary>> list(const std::string& /*filter*/) override {
+        return std::vector<RemotePluginSummary>{};
+    }
+
+    Result<RemotePluginInfo> get(const std::string& name,
+                                 const std::optional<std::string>& /*version*/) override {
+        if (name != info.name) {
+            return Error{ErrorCode::NotFound, "Fixed repo: plugin not found"};
+        }
+        return info;
+    }
+
+    Result<std::vector<std::string>> versions(const std::string& /*name*/) override {
+        return std::vector<std::string>{info.version};
+    }
+
+    Result<bool> exists(const std::string& name) override { return name == info.name; }
+
+    RemotePluginInfo info;
+};
+
+enum class TarType { File, Directory, Symlink, Hardlink };
+
+struct TarEntry {
+    std::string name;
+    std::string body; // regular files only
+    TarType type{TarType::File};
+    std::string linkTarget; // symlinks and hard links only
+    unsigned mode{0};       // 0: 0755 for directories, 0644 otherwise
+};
+
+char tarTypeflag(TarType type) {
+    switch (type) {
+        case TarType::Directory:
+            return '5';
+        case TarType::Symlink:
+            return '2';
+        case TarType::Hardlink:
+            return '1';
+        case TarType::File:
+            break;
+    }
+    return '0';
+}
+
+// Serializes `entries` as an uncompressed ustar stream. Built in-process so the tests need no
+// external tar tool or binary fixture.
+std::string makeTar(const std::vector<TarEntry>& entries) {
+    constexpr size_t kBlock = 512;
+    std::string tar;
+    for (const auto& entry : entries) {
+        REQUIRE((entry.name.size() < 100u));
+        REQUIRE((entry.linkTarget.size() < 100u));
+        const std::string body = entry.type == TarType::File ? entry.body : std::string{};
+
+        std::array<char, kBlock> header{};
+        std::memcpy(header.data(), entry.name.data(), entry.name.size());
+        auto putOctal = [&header](size_t offset, size_t width, std::uint64_t value) {
+            std::snprintf(header.data() + offset, width, "%0*llo", static_cast<int>(width - 1),
+                          static_cast<unsigned long long>(value));
+        };
+        putOctal(100, 8,
+                 entry.mode != 0 ? entry.mode : (entry.type == TarType::Directory ? 0755 : 0644));
+        putOctal(108, 8, 0);                   // uid
+        putOctal(116, 8, 0);                   // gid
+        putOctal(124, 12, body.size());        // size
+        putOctal(136, 12, 0);                  // mtime
+        header[156] = tarTypeflag(entry.type); // typeflag
+        std::memcpy(header.data() + 157, entry.linkTarget.data(), entry.linkTarget.size());
+        std::memcpy(header.data() + 257, "ustar", 6);
+        std::memcpy(header.data() + 263, "00", 2);
+        std::memset(header.data() + 148, ' ', 8);
+        unsigned int sum = 0;
+        for (char ch : header) {
+            sum += static_cast<unsigned char>(ch);
+        }
+        std::snprintf(header.data() + 148, 7, "%06o", sum);
+        header[155] = ' ';
+
+        tar.append(header.data(), header.size());
+        tar += body;
+        tar.append((kBlock - body.size() % kBlock) % kBlock, '\0');
+    }
+    tar.append(2 * kBlock, '\0'); // end-of-archive marker
+    return tar;
+}
+
+std::vector<unsigned char> gzipBytes(std::string data) {
+    z_stream zs{};
+    REQUIRE((deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) ==
+             Z_OK));
+    std::vector<unsigned char> gz(deflateBound(&zs, static_cast<uLong>(data.size())) + 64);
+    zs.next_in = reinterpret_cast<Bytef*>(data.data());
+    zs.avail_in = static_cast<uInt>(data.size());
+    zs.next_out = gz.data();
+    zs.avail_out = static_cast<uInt>(gz.size());
+    const int rc = deflate(&zs, Z_FINISH);
+    gz.resize(zs.total_out);
+    deflateEnd(&zs);
+    REQUIRE((rc == Z_STREAM_END));
+    return gz;
+}
+
+fs::path writeBytes(const fs::path& path, const std::vector<unsigned char>& bytes) {
+    fs::create_directories(path.parent_path());
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+    out.close();
+    REQUIRE((fs::file_size(path) == bytes.size()));
+    return path;
+}
+
+// Writes `entries` as a gzip-compressed ustar archive to `archivePath`.
+fs::path writePluginArchive(const fs::path& archivePath, const std::vector<TarEntry>& entries) {
+    return writeBytes(archivePath, gzipBytes(makeTar(entries)));
+}
+
+// A single-file plugin archive: "fake-plugin/yams-plugin.json" at version 1.0.0.
+fs::path writeFakePluginArchive(const fs::path& archivePath) {
+    return writePluginArchive(archivePath, {{"fake-plugin/yams-plugin.json",
+                                             R"({"name": "fake-plugin", "version": "1.0.0"})"
+                                             "\n"}});
+}
+
+std::string sha256Of(const fs::path& path) {
+    return "sha256:" + yams::crypto::SHA256Hasher{}.hashFile(path);
+}
+
+// The installer downloads through libcurl, which serves file:// URLs locally.
+std::string fileUrl(const fs::path& path) {
+    std::string generic = fs::absolute(path).generic_string();
+    if (generic.empty() || generic.front() != '/') {
+        generic.insert(generic.begin(), '/'); // Windows drive paths: file:///C:/...
+    }
+    return "file://" + generic;
+}
+
+bool isTrusted(const fs::path& trustFile, const fs::path& pluginDir) {
+    std::set<fs::path> entries;
+    if (!yams::daemon::plugin_trust::readTrustStore(trustFile, entries)) {
+        return false;
+    }
+    return entries.count(yams::daemon::plugin_trust::normalizePath(pluginDir)) > 0;
+}
+
+// Whether this process can create symlinks in `dir`. Windows needs Developer Mode or
+// SeCreateSymbolicLinkPrivilege, which CI runners usually lack.
+bool canCreateSymlinks(const fs::path& dir) {
+    std::error_code ec;
+    const fs::path probe = dir / "symlink-probe";
+    fs::create_symlink("symlink-probe-target", probe, ec);
+    if (ec) {
+        return false;
+    }
+    fs::remove(probe, ec);
+    return true;
+}
+
+// For cases where the archive's symlinks must actually be created: either the install should
+// succeed with them, or they are only rejected after extraction. Cases rejected before any
+// link is written run everywhere.
+void skipWithoutSymlinkSupport(const fs::path& dir) {
+    if (!canCreateSymlinks(dir)) {
+        SKIP("this process cannot create symlinks (on Windows: Developer Mode or the "
+             "'Create symbolic links' privilege)");
+    }
+}
+
+} // namespace
 
 /**
  * @brief Test fixture for PluginInstaller tests
@@ -117,6 +310,18 @@ TEST_CASE_METHOD(PluginInstallerFixture, "listInstalled behavior", "[plugins][in
         auto& plugins = result.value();
         CHECK((std::find(plugins.begin(), plugins.end(), "plugin-a") != plugins.end()));
         CHECK((std::find(plugins.begin(), plugins.end(), "plugin-b") != plugins.end()));
+    }
+
+    SECTION("skips the installer's staging area and other dot-prefixed entries") {
+        fs::create_directories(installDir / "plugin-a");
+        fs::create_directories(installDir / ".yams-staging" / "plugin-a@1@0");
+        fs::create_directories(installDir / ".hidden");
+
+        auto installer = makePluginInstaller(stubClient, installDir, trustFile);
+        auto result = installer->listInstalled();
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value() == std::vector<std::string>{"plugin-a"}));
     }
 }
 
@@ -182,6 +387,50 @@ TEST_CASE_METHOD(PluginInstallerFixture, "installedVersion behavior",
 // =============================================================================
 // Uninstall Tests
 // =============================================================================
+
+TEST_CASE_METHOD(PluginInstallerFixture, "uninstall clears read-only trees and leftover staging",
+                 "[plugins][installer][uninstall]") {
+    const fs::path pluginDir = installDir / "old-plugin";
+    fs::create_directories(pluginDir / "lib");
+    std::ofstream(pluginDir / "lib" / "dep.so") << "DEP";
+    const fs::path leftover = installDir / ".yams-staging" / "old-plugin@7";
+    const fs::path otherPlugin = installDir / ".yams-staging" / "other-plugin@8";
+    fs::create_directories(leftover / "previous");
+    fs::create_directories(otherPlugin);
+#if !defined(_WIN32)
+    // As an install from an older build could leave it: directories without owner write.
+    fs::permissions(pluginDir / "lib", fs::perms::owner_read | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+    fs::permissions(pluginDir, fs::perms::owner_read | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+#endif
+
+    auto installer = makePluginInstaller(stubClient, installDir, trustFile);
+    auto result = installer->uninstall("old-plugin");
+
+    REQUIRE((result.has_value()));
+    CHECK_FALSE(fs::exists(pluginDir));
+    CHECK_FALSE(fs::exists(leftover));
+    CHECK((fs::exists(otherPlugin)));
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "ExclusiveFileLock excludes a second holder",
+                 "[plugins][installer][lock]") {
+    const fs::path lockFile = testDir / "install.lock";
+    {
+        yams::common::ExclusiveFileLock first;
+        REQUIRE((first.acquire(lockFile, std::chrono::milliseconds(0)).has_value()));
+        CHECK((first.held()));
+
+        yams::common::ExclusiveFileLock second;
+        auto busy = second.acquire(lockFile, std::chrono::milliseconds(100));
+        REQUIRE_FALSE(busy.has_value());
+        CHECK((busy.error().code == ErrorCode::ResourceExhausted));
+        CHECK_FALSE(second.held());
+    }
+    yams::common::ExclusiveFileLock third;
+    CHECK((third.acquire(lockFile, std::chrono::milliseconds(0)).has_value()));
+}
 
 TEST_CASE_METHOD(PluginInstallerFixture, "uninstall behavior", "[plugins][installer][uninstall]") {
     SECTION("removes plugin directory") {
@@ -276,32 +525,678 @@ TEST_CASE("InstallOptions defaults", "[plugins][installer][security]") {
     }
 }
 
-TEST_CASE("Checksum format requirements", "[plugins][installer][security]") {
-    // Valid SHA-256 checksum (empty file hash)
-    const std::string emptyFileSha256 =
-        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+TEST_CASE_METHOD(PluginInstallerFixture, "install verifies the archive checksum before trusting it",
+                 "[plugins][installer][security]") {
+    const fs::path archive = writeFakePluginArchive(testDir / "source" / "fake-plugin.tar.gz");
+    const std::string actualChecksum = sha256Of(archive);
+    const fs::path pluginDir = installDir / "fake-plugin";
 
-    SECTION("prefix is sha256:") {
-        CHECK((emptyFileSha256.substr(0, 7) == "sha256:"));
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+    repo->info.downloadUrl = fileUrl(archive);
+
+    InstallOptions options;
+    REQUIRE((options.autoTrust)); // trust is the default, so verification must gate it
+
+    SECTION("checksum mismatch is rejected and nothing is installed or trusted") {
+        repo->info.checksum = "sha256:" + std::string(64, '0');
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::HashMismatch));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
     }
 
-    SECTION("total length is 71 characters") {
-        CHECK((emptyFileSha256.length() == 7 + 64));
+    SECTION("a release without a published checksum is refused") {
+        repo->info.checksum.clear();
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidData));
+        CHECK((result.error().message.find("--checksum") != std::string::npos));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+    }
+
+    SECTION("a matching repository checksum installs and trusts the plugin") {
+        repo->info.checksum = actualChecksum;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().checksum == actualChecksum));
+        CHECK((fs::exists(pluginDir / "yams-plugin.json")));
+        auto version = installer->installedVersion("fake-plugin");
+        REQUIRE((version.has_value()));
+        REQUIRE((version.value().has_value()));
+        CHECK((*version.value() == "1.0.0"));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("a caller-supplied checksum verifies a release the repository left unsigned") {
+        repo->info.checksum.clear();
+        // Bare upper-case hex, as copied from `sha256sum` output, is accepted.
+        std::string bareHex = actualChecksum.substr(std::string("sha256:").size());
+        for (auto& ch : bareHex) {
+            ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        }
+        options.checksum = bareHex;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().checksum == actualChecksum));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("a malformed caller checksum is rejected") {
+        repo->info.checksum = actualChecksum;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        options.checksum = "sha256:" + std::string(63, 'a'); // one hex digit short
+        auto shortResult = installer->install("fake-plugin", options);
+        REQUIRE_FALSE(shortResult.has_value());
+        CHECK((shortResult.error().code == ErrorCode::InvalidArgument));
+
+        options.checksum = "sha256:" + std::string(64, 'g'); // not hex
+        auto nonHexResult = installer->install("fake-plugin", options);
+        REQUIRE_FALSE(nonHexResult.has_value());
+        CHECK((nonHexResult.error().code == ErrorCode::InvalidArgument));
+
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+    }
+
+    SECTION("a direct URL install without --checksum is refused") {
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install(fileUrl(archive), options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidData));
+        CHECK_FALSE(fs::exists(installDir / "fake-plugin.tar"));
+        CHECK_FALSE(fs::exists(pluginDir));
+    }
+
+    SECTION("a caller checksum that matches the repository's is accepted") {
+        repo->info.checksum = actualChecksum;
+        options.checksum = actualChecksum;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("a caller checksum that contradicts the repository's is refused") {
+        repo->info.checksum = actualChecksum;
+        options.checksum = "sha256:" + std::string(64, 'a');
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidData));
+        CHECK((result.error().message.find(actualChecksum) != std::string::npos));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+    }
+
+    SECTION("a malformed repository checksum defers to a valid caller checksum") {
+        repo->info.checksum = "sha256:not-a-digest";
+        options.checksum = actualChecksum;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().checksum == actualChecksum));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("a malformed repository checksum is reported as bad repository data") {
+        repo->info.checksum = "sha256:not-a-digest";
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidData));
+        CHECK((result.error().message.find("repository") != std::string::npos));
+        CHECK_FALSE(fs::exists(pluginDir));
+    }
+
+    SECTION("reinstalling the installed version reports that, not the missing checksum") {
+        fs::create_directories(pluginDir);
+        std::ofstream(pluginDir / "yams-plugin.json") << R"({"version": "1.0.0"})";
+        repo->info.checksum.clear();
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidOperation));
+    }
+
+    SECTION("a dry run without a checksum reports that one will be required") {
+        repo->info.checksum.clear();
+        options.dryRun = true;
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().checksumRequired));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
     }
 }
 
-TEST_CASE("InstallResult contains security info", "[plugins][installer][security]") {
-    InstallResult result;
-    result.pluginName = "test-plugin";
-    result.version = "1.0.0";
-    result.checksum = "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd";
-    result.sizeBytes = 1024ULL * 1024ULL; // 1MB
-    result.wasUpgrade = false;
-    result.elapsed = std::chrono::milliseconds{500};
+TEST_CASE_METHOD(PluginInstallerFixture, "install extracts tar-style archive entries safely",
+                 "[plugins][installer][security]") {
+    const fs::path pluginDir = installDir / "fake-plugin";
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
 
-    CHECK_FALSE(result.checksum.empty());
-    CHECK((result.checksum.substr(0, 7) == "sha256:"));
-    CHECK((result.sizeBytes > 0u));
+    auto installFrom = [&](const std::vector<TarEntry>& entries) {
+        const fs::path archive =
+            writePluginArchive(testDir / "source" / "fake-plugin.tar.gz", entries);
+        repo->info.downloadUrl = fileUrl(archive);
+        repo->info.checksum = sha256Of(archive);
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+        auto result = installer->install("fake-plugin", InstallOptions{});
+        if (!result) {
+            UNSCOPED_INFO("install error: " << result.error().message);
+        }
+        return result;
+    };
+
+    SECTION("a directory entry with a trailing slash installs") {
+        // What `tar czf out.tar.gz plugin` produces.
+        auto result = installFrom({{"plugin/", "", TarType::Directory}, {"plugin/lib.so", "ELF"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "lib.so")));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("'./' entries install") {
+        // What `tar -C dir -czf out.tar.gz .` produces.
+        auto result = installFrom({{"./", "", TarType::Directory}, {"./plugin.so", "ELF"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "plugin.so")));
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("a '..' entry is rejected and nothing escapes the extraction root") {
+        // The installer extracts into <install>/.yams-staging/<install>/extracted, so
+        // "../../<name>" would land in the shared staging directory if it were honored.
+        const std::string escapeName = "esc-" + testDir.filename().string();
+        const fs::path escapeTarget = installDir / ".yams-staging" / escapeName;
+        REQUIRE_FALSE(fs::exists(escapeTarget));
+
+        auto result = installFrom({{"../../" + escapeName, "evil"}});
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidPath));
+        CHECK_FALSE(fs::exists(escapeTarget));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+    }
+
+    SECTION("a `tar -C dir .` layout keeps its top-level files") {
+        auto result = installFrom({{"./", "", TarType::Directory},
+                                   {"./plugin.so", "ELF"},
+                                   {"./yams-plugin.json", R"({"version": "1.0.0"})"},
+                                   {"./lib/", "", TarType::Directory},
+                                   {"./lib/dep.so", "DEP"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "plugin.so")));
+        CHECK((fs::is_regular_file(pluginDir / "yams-plugin.json")));
+        CHECK((fs::is_regular_file(pluginDir / "lib" / "dep.so")));
+    }
+
+    SECTION("versioned library symlinks inside the plugin install as symlinks") {
+        skipWithoutSymlinkSupport(testDir);
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/libfoo.so.1", "FOO"},
+                                   {"plugin/libfoo.so", "", TarType::Symlink, "libfoo.so.1"},
+                                   {"plugin/lib/", "", TarType::Directory},
+                                   {"plugin/lib/libbar.so", "", TarType::Symlink, "../libfoo.so.1"},
+                                   {"plugin/current", "", TarType::Symlink, "lib"}});
+
+        REQUIRE((result.has_value()));
+        const fs::path realLib = fs::canonical(pluginDir / "libfoo.so.1");
+
+        CHECK((fs::is_symlink(pluginDir / "libfoo.so")));
+        CHECK((fs::canonical(pluginDir / "libfoo.so") == realLib));
+
+        CHECK((fs::is_symlink(pluginDir / "lib" / "libbar.so")));
+        CHECK((fs::canonical(pluginDir / "lib" / "libbar.so") == realLib));
+
+        CHECK((fs::is_symlink(pluginDir / "current")));
+        CHECK((fs::is_directory(pluginDir / "current")));
+        CHECK((fs::canonical(pluginDir / "current") == fs::canonical(pluginDir / "lib")));
+
+        CHECK((result.value().sizeBytes == 3u)); // only libfoo.so.1 ("FOO"); links not counted
+        CHECK((isTrusted(trustFile, pluginDir)));
+    }
+
+    SECTION("macOS archive metadata does not hide a single top-level directory") {
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"},
+                                   {"._plugin", "resource fork"},
+                                   {".DS_Store", "finder"},
+                                   {"__MACOSX/", "", TarType::Directory},
+                                   {"__MACOSX/._x", "fork"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "yams-plugin.json")));
+        CHECK_FALSE(fs::exists(pluginDir / "._plugin"));
+        CHECK_FALSE(fs::exists(pluginDir / ".DS_Store"));
+        CHECK_FALSE(fs::exists(pluginDir / "__MACOSX"));
+    }
+
+    SECTION("an upgrade replaces the previous installation") {
+        fs::create_directories(pluginDir);
+        std::ofstream(pluginDir / "yams-plugin.json") << R"({"version": "0.9.0"})";
+        std::ofstream(pluginDir / "stale.so") << "OLD";
+
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().wasUpgrade));
+        CHECK((result.value().previousVersion == "0.9.0"));
+        CHECK_FALSE(fs::exists(pluginDir / "stale.so"));
+        CHECK_FALSE(fs::exists(installDir / ".yams-staging")); // previous version cleaned up
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+        auto listed = installer->listInstalled();
+        REQUIRE((listed.has_value()));
+        CHECK((listed.value() == std::vector<std::string>{"fake-plugin"}));
+    }
+
+    SECTION("a successful install removes leftover staging for the same plugin only") {
+        // Staging directories are "<plugin>@<n>". Installs into one directory are serialized,
+        // so any other staging directory of this plugin is a leftover, e.g. the previous
+        // version a failed upgrade preserved.
+        const fs::path staging = installDir / ".yams-staging";
+        const fs::path leftover = staging / "fake-plugin@123";
+        const fs::path otherLeftover = staging / "fake-plugin@456";
+        const fs::path otherPlugin = staging / "other-plugin@1";
+        fs::create_directories(leftover / "previous");
+        std::ofstream(leftover / "previous" / "yams-plugin.json") << R"({"version": "0.1"})";
+        fs::create_directories(otherLeftover);
+        fs::create_directories(otherPlugin);
+
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
+
+        REQUIRE((result.has_value()));
+        CHECK_FALSE(fs::exists(leftover));
+        CHECK_FALSE(fs::exists(otherLeftover));
+        CHECK((fs::exists(otherPlugin)));
+    }
+
+    SECTION("macOS metadata is stripped at every depth") {
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/libfoo.so", "ELF"},
+                                   {"plugin/._libfoo.so", "resource fork"},
+                                   {"plugin/sub/", "", TarType::Directory},
+                                   {"plugin/sub/.DS_Store", "finder"},
+                                   {"plugin/sub/__MACOSX/", "", TarType::Directory},
+                                   {"plugin/sub/__MACOSX/._x", "fork"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "libfoo.so")));
+        CHECK_FALSE(fs::exists(pluginDir / "._libfoo.so"));
+        CHECK((fs::is_directory(pluginDir / "sub")));
+        CHECK_FALSE(fs::exists(pluginDir / "sub" / ".DS_Store"));
+        CHECK_FALSE(fs::exists(pluginDir / "sub" / "__MACOSX"));
+        CHECK((result.value().sizeBytes == 3u)); // only libfoo.so ("ELF")
+    }
+
+    SECTION("a single top-level directory is used even with files beside it") {
+        auto result = installFrom({{"myplugin/", "", TarType::Directory},
+                                   {"myplugin/yams-plugin.json", R"({"version": "1.0.0"})"},
+                                   {"myplugin/libyams_x.so", "ELF"},
+                                   {"LICENSE", "MIT"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "yams-plugin.json")));
+        CHECK((fs::is_regular_file(pluginDir / "libyams_x.so")));
+    }
+
+    SECTION("a manifest at the archive root keeps the root as the plugin") {
+        auto result = installFrom({{"yams-plugin.json", R"({"version": "1.0.0"})"},
+                                   {"lib/", "", TarType::Directory},
+                                   {"lib/dep.so", "DEP"}});
+
+        REQUIRE((result.has_value()));
+        CHECK((fs::is_regular_file(pluginDir / "yams-plugin.json")));
+        CHECK((fs::is_regular_file(pluginDir / "lib" / "dep.so")));
+    }
+
+#if !defined(_WIN32)
+    SECTION("read-only directories from the archive stay removable") {
+        auto result = installFrom({{"plugin/", "", TarType::Directory},
+                                   {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"},
+                                   {"plugin/lib/", "", TarType::Directory, "", 0555},
+                                   {"plugin/lib/dep.so", "DEP", TarType::File, "", 0444}});
+
+        REQUIRE((result.has_value()));
+        REQUIRE((fs::is_regular_file(pluginDir / "lib" / "dep.so")));
+        const auto libPerms = fs::status(pluginDir / "lib").permissions();
+        CHECK(((libPerms & fs::perms::owner_all) == fs::perms::owner_all));
+
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+        REQUIRE((installer->uninstall("fake-plugin").has_value()));
+        CHECK_FALSE(fs::exists(pluginDir));
+    }
+#endif
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture,
+                 "an install that waited for the lock re-checks what is installed",
+                 "[plugins][installer][lock]") {
+    const fs::path pluginDir = installDir / "fake-plugin";
+    const fs::path archive =
+        writePluginArchive(testDir / "source" / "fake-plugin.tar.gz",
+                           {{"plugin/", "", TarType::Directory},
+                            {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+    repo->info.downloadUrl = fileUrl(archive);
+    repo->info.checksum = sha256Of(archive);
+    auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+    // Hold the target directory's install lock, as a concurrent install would.
+    yams::common::ExclusiveFileLock otherInstall;
+    REQUIRE((otherInstall.acquire(installDir / ".yams-install.lock", std::chrono::milliseconds(0))
+                 .has_value()));
+
+    // The download and checksum run before the lock, so "Verifying" proves this install
+    // passed its early "already installed" check and is headed for the lock.
+    std::promise<void> verifying;
+    auto verifyingSeen = verifying.get_future();
+    std::atomic<bool> signalled{false};
+    InstallOptions options;
+    options.onProgress = [&](const InstallProgress& progress) {
+        if (progress.stage == InstallProgress::Stage::Verifying && !signalled.exchange(true)) {
+            verifying.set_value();
+        }
+    };
+    auto pending =
+        std::async(std::launch::async, [&] { return installer->install("fake-plugin", options); });
+
+    REQUIRE((verifyingSeen.wait_for(std::chrono::seconds(10)) == std::future_status::ready));
+    // The concurrent install finishes the same version while this one waits.
+    fs::create_directories(pluginDir);
+    std::ofstream(pluginDir / "yams-plugin.json") << R"({"version": "1.0.0"})";
+    std::ofstream(pluginDir / "first.so") << "FIRST";
+    otherInstall.release();
+
+    REQUIRE((pending.wait_for(std::chrono::seconds(30)) == std::future_status::ready));
+    auto result = pending.get();
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error().code == ErrorCode::InvalidOperation));
+    CHECK((result.error().message.find("already installed") != std::string::npos));
+    CHECK((fs::exists(pluginDir / "first.so"))); // not reinstalled
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install honors --force in a custom install directory",
+                 "[plugins][installer][install]") {
+    const fs::path customDir = testDir / "custom-plugins";
+    const fs::path pluginDir = customDir / "fake-plugin";
+    fs::create_directories(pluginDir);
+    std::ofstream(pluginDir / "yams-plugin.json") << R"({"version": "1.0.0"})";
+    std::ofstream(pluginDir / "keep.so") << "KEEP";
+
+    const fs::path archive =
+        writePluginArchive(testDir / "source" / "fake-plugin.tar.gz",
+                           {{"plugin/", "", TarType::Directory},
+                            {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+    repo->info.downloadUrl = fileUrl(archive);
+    repo->info.checksum = sha256Of(archive);
+    auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+    InstallOptions options;
+    options.installDir = customDir;
+
+    SECTION("the same version there is not replaced without --force") {
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidOperation));
+        CHECK((fs::exists(pluginDir / "keep.so")));
+    }
+
+    SECTION("--force replaces it") {
+        options.force = true;
+        auto result = installer->install("fake-plugin", options);
+
+        REQUIRE((result.has_value()));
+        CHECK((result.value().wasUpgrade));
+        CHECK_FALSE(fs::exists(pluginDir / "keep.so"));
+    }
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install rejects archive links and root replacement",
+                 "[plugins][installer][security]") {
+    const fs::path pluginDir = installDir / "fake-plugin";
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+
+    auto installFrom = [&](const std::vector<TarEntry>& entries) {
+        const fs::path archive =
+            writePluginArchive(testDir / "source" / "fake-plugin.tar.gz", entries);
+        repo->info.downloadUrl = fileUrl(archive);
+        repo->info.checksum = sha256Of(archive);
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+        auto result = installer->install("fake-plugin", InstallOptions{});
+        if (!result) {
+            UNSCOPED_INFO("install error: " << result.error().message);
+        }
+        return result;
+    };
+
+    // If a link were honored, the follow-up entry would be written outside the extraction
+    // root: to the shared staging directory or, through an absolute link, the system temp dir.
+    const std::string escapeName = "esc-" + testDir.filename().string();
+    const fs::path escapeTarget = installDir / ".yams-staging" / escapeName;
+    const fs::path tempEscapeTarget = fs::temp_directory_path() / escapeName;
+    REQUIRE_FALSE(fs::exists(tempEscapeTarget));
+
+    auto expectRejected = [&](const Result<InstallResult>& result) {
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidPath));
+        CHECK_FALSE(fs::exists(escapeTarget));
+        CHECK_FALSE(fs::exists(tempEscapeTarget));
+        CHECK_FALSE(fs::exists(pluginDir));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+    };
+
+    SECTION("a symlink with an absolute target") {
+        expectRejected(installFrom(
+            {{"plugin/out", "", TarType::Symlink, "/tmp"}, {"plugin/out/" + escapeName, "evil"}}));
+    }
+
+    SECTION("a symlink with a '..' target") {
+        // extracted/plugin/up -> ../../.. resolves to the shared staging directory.
+        expectRejected(installFrom({{"plugin/up", "", TarType::Symlink, "../../.."},
+                                    {"plugin/up/" + escapeName, "evil"}}));
+    }
+
+    SECTION("a hard link entry") {
+        expectRejected(installFrom({{"plugin/lib.so", "ELF"},
+                                    {"plugin/alias.so", "", TarType::Hardlink, "plugin/lib.so"}}));
+    }
+
+    SECTION("a symlink that leaves the plugin directory for a sibling") {
+        skipWithoutSymlinkSupport(testDir);
+        // In the extraction root, but would point next to the plugin once installed.
+        expectRejected(installFrom({{"plugin/", "", TarType::Directory},
+                                    {"plugin/sibling", "", TarType::Symlink, "../other"}}));
+    }
+
+    SECTION("a symlink with '..' after a name") {
+        expectRejected(installFrom({{"plugin/lib/", "", TarType::Directory},
+                                    {"plugin/odd", "", TarType::Symlink, "lib/../lib"}}));
+    }
+
+    SECTION("a symlink entry named '.'") {
+        expectRejected(installFrom({{".", "", TarType::Symlink, "plugin"}}));
+    }
+
+    SECTION("a symlink that climbs out of the plugin directory and back in by name") {
+        skipWithoutSymlinkSupport(testDir);
+        // Resolves to evil/x lexically, but after the move into <install>/fake-plugin it would
+        // name <install>/evil/x, another plugin.
+        expectRejected(installFrom({{"evil/", "", TarType::Directory},
+                                    {"evil/x", "X"},
+                                    {"evil/lib.so", "", TarType::Symlink, "../evil/x"}}));
+    }
+
+    SECTION("an archive-root symlink that climbs out through the extraction directory name") {
+        expectRejected(installFrom({{"x", "X"}, {"l", "", TarType::Symlink, "../extracted/x"}}));
+    }
+
+    SECTION("a symlink to its own directory") {
+        expectRejected(installFrom(
+            {{"plugin/", "", TarType::Directory}, {"plugin/sub", "", TarType::Symlink, "."}}));
+    }
+
+    SECTION("a symlink to its parent directory") {
+        expectRejected(installFrom(
+            {{"plugin/d/", "", TarType::Directory}, {"plugin/d/up", "", TarType::Symlink, ".."}}));
+    }
+
+    SECTION("a symlink back to its own directory by name") {
+        expectRejected(installFrom(
+            {{"plugin/d/", "", TarType::Directory}, {"plugin/d/x", "", TarType::Symlink, "../d"}}));
+    }
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install rejects looping symlinks without throwing",
+                 "[plugins][installer][security]") {
+    const std::string name = "loop-" + testDir.filename().string();
+    const fs::path pluginDir = installDir / name;
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = name;
+    repo->info.version = "1.0.0";
+
+    // A failed install removes its staging directory (and the then-empty staging root).
+    auto leftoverStaging = [&] { return fs::exists(installDir / ".yams-staging"); };
+
+    auto installFrom = [&](const std::vector<TarEntry>& entries) {
+        const fs::path archive = writePluginArchive(testDir / "source" / "loop.tar.gz", entries);
+        repo->info.downloadUrl = fileUrl(archive);
+        repo->info.checksum = sha256Of(archive);
+        auto installer = makePluginInstaller(repo, installDir, trustFile);
+        auto result = installer->install(name, InstallOptions{});
+        if (!result) {
+            UNSCOPED_INFO("install error: " << result.error().message);
+        }
+        return result;
+    };
+
+    SECTION("a link to itself") {
+        Result<InstallResult> result = Error{ErrorCode::Unknown, "not run"};
+        REQUIRE_NOTHROW(result = installFrom({{"plugin/", "", TarType::Directory},
+                                              {"plugin/l", "", TarType::Symlink, "l"}}));
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidPath));
+        CHECK_FALSE(fs::exists(fs::symlink_status(pluginDir)));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+        CHECK_FALSE(leftoverStaging());
+    }
+
+    SECTION("two links that point at each other") {
+        skipWithoutSymlinkSupport(testDir);
+        Result<InstallResult> result = Error{ErrorCode::Unknown, "not run"};
+        REQUIRE_NOTHROW(result = installFrom({{"plugin/", "", TarType::Directory},
+                                              {"plugin/a", "", TarType::Symlink, "b"},
+                                              {"plugin/b", "", TarType::Symlink, "a"}}));
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error().code == ErrorCode::InvalidPath));
+        CHECK_FALSE(fs::exists(fs::symlink_status(pluginDir)));
+        CHECK_FALSE(isTrusted(trustFile, pluginDir));
+        CHECK_FALSE(leftoverStaging());
+    }
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install refuses a symlinked staging directory",
+                 "[plugins][installer][security]") {
+    skipWithoutSymlinkSupport(testDir);
+    const fs::path elsewhere = testDir / "elsewhere";
+    fs::create_directories(elsewhere);
+    fs::create_directory_symlink(elsewhere, installDir / ".yams-staging");
+
+    const fs::path archive =
+        writePluginArchive(testDir / "source" / "fake-plugin.tar.gz",
+                           {{"plugin/", "", TarType::Directory},
+                            {"plugin/yams-plugin.json", R"({"version": "1.0.0"})"}});
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+    repo->info.downloadUrl = fileUrl(archive);
+    repo->info.checksum = sha256Of(archive);
+    auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+    auto result = installer->install("fake-plugin", InstallOptions{});
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error().code == ErrorCode::InvalidPath));
+    CHECK((fs::is_empty(elsewhere)));
+    CHECK_FALSE(fs::exists(installDir / "fake-plugin"));
+    CHECK((fs::is_symlink(installDir / ".yams-staging"))); // left alone, not followed
+}
+
+TEST_CASE_METHOD(PluginInstallerFixture, "install rejects a truncated archive",
+                 "[plugins][installer][security]") {
+    const fs::path pluginDir = installDir / "fake-plugin";
+
+    // Incompressible body so that cutting the gzip stream in half cuts the file data too.
+    std::string body(64 * 1024, '\0');
+    std::uint32_t state = 0x12345678u;
+    for (auto& ch : body) {
+        state = state * 1664525u + 1013904223u;
+        ch = static_cast<char>(state >> 24);
+    }
+    auto gz = gzipBytes(makeTar({{"plugin/lib.so", body}}));
+    gz.resize(gz.size() / 2);
+    const fs::path archive = writeBytes(testDir / "source" / "fake-plugin.tar.gz", gz);
+
+    auto repo = std::make_shared<FixedPluginRepoClient>();
+    repo->info.name = "fake-plugin";
+    repo->info.version = "1.0.0";
+    repo->info.downloadUrl = fileUrl(archive);
+    repo->info.checksum = sha256Of(archive); // matches the truncated bytes
+    auto installer = makePluginInstaller(repo, installDir, trustFile);
+
+    auto result = installer->install("fake-plugin", InstallOptions{});
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error().code == ErrorCode::CorruptedData));
+    CHECK_FALSE(fs::exists(pluginDir));
+    CHECK_FALSE(isTrusted(trustFile, pluginDir));
 }
 
 // =============================================================================
@@ -330,25 +1225,6 @@ TEST_CASE("InstallProgress default values", "[plugins][installer][progress]") {
     CHECK((progress.progress == 0.0f));
     CHECK((progress.bytesDownloaded == 0u));
     CHECK((progress.totalBytes == 0u));
-}
-
-// =============================================================================
-// Trust List Tests
-// =============================================================================
-
-TEST_CASE_METHOD(PluginInstallerFixture, "Trust file location", "[plugins][installer][trust]") {
-    // Create a plugin to reference trust file location
-    fs::create_directories(installDir / "trusted-plugin");
-    std::ofstream manifestFile(installDir / "trusted-plugin" / "manifest.json");
-    manifestFile << R"({"version": "1.0.0"})";
-    manifestFile.close();
-
-    auto installer = makePluginInstaller(stubClient, installDir, trustFile);
-
-    SECTION("trust file is in config directory") {
-        CHECK((trustFile.parent_path().filename() == "data"));
-        CHECK((trustFile.filename() == "plugins.trust"));
-    }
 }
 
 // =============================================================================
@@ -396,30 +1272,6 @@ TEST_CASE("Default paths", "[plugins][installer][defaults]") {
         CHECK_FALSE(defaultFile.empty());
         CHECK((defaultFile.string().find("yams") != std::string::npos));
         CHECK((defaultFile.filename().string() == "plugins.trust"));
-    }
-}
-
-// =============================================================================
-// Security Best Practices Verification Tests
-// =============================================================================
-
-TEST_CASE("Security best practices for plugin installer", "[plugins][installer][security]") {
-    SECTION("SHA-256 used for integrity verification") {
-        const size_t sha256HexLength = 64;
-        const size_t expectedTotalLength = 7 + sha256HexLength;
-
-        const std::string sampleChecksum =
-            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        CHECK((sampleChecksum.length() == expectedTotalLength));
-    }
-
-    SECTION("HTTPS is enforced for downloads") {
-        CHECK((std::string(DEFAULT_PLUGIN_REPO_URL).substr(0, 8) == "https://"));
-    }
-
-    SECTION("TLS verification enabled by default") {
-        PluginRepoConfig config;
-        CHECK((config.verifyTls));
     }
 }
 

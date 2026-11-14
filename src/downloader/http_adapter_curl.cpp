@@ -18,8 +18,10 @@
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -251,6 +253,36 @@ static curl_slist* build_header_list(const std::vector<Header>& headers) {
     return list;
 }
 
+// libcurl embeds a CA bundle path when it is built, but its configure step skips the detection
+// when cross-compiling. The macOS x86_64 release is cross-built on an arm64 runner, so its curl
+// had no CA source and failed every TLS handshake. macOS ships its system roots as a PEM file;
+// name it explicitly so verification does not depend on how curl was built.
+std::span<const std::string_view> platformCaBundleCandidates() {
+#ifdef __APPLE__
+    static constexpr std::array<std::string_view, 1> kCandidates{"/etc/ssl/cert.pem"};
+    return kCandidates;
+#else
+    return {};
+#endif
+}
+
+// The CA bundle to pass as CURLOPT_CAINFO, or empty to keep libcurl's built-in default.
+std::string resolveCaBundle(const TlsConfig& tls, std::span<const std::string_view> candidates) {
+    if (!tls.caPath.empty()) {
+        return tls.caPath;
+    }
+    if (tls.insecure) {
+        return {};
+    }
+    for (const auto candidate : candidates) {
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(std::filesystem::path(candidate), ec)) {
+            return std::string(candidate);
+        }
+    }
+    return {};
+}
+
 // Common CURL easy handle configuration
 static void configure_common(CURL* curl, std::chrono::milliseconds timeout, const TlsConfig& tls,
                              const std::optional<std::string>& proxy, bool followRedirects) {
@@ -267,8 +299,10 @@ static void configure_common(CURL* curl, std::chrono::milliseconds timeout, cons
     curl_easy_setopt(curl, CURLOPT_USE_SSL, CURLUSESSL_ALL);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, tls.insecure ? 0L : 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, tls.insecure ? 0L : 2L);
-    if (!tls.caPath.empty()) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, tls.caPath.c_str());
+    // libcurl copies string options, so the temporary may go away after the call.
+    if (const auto caBundle = resolveCaBundle(tls, platformCaBundleCandidates());
+        !caBundle.empty()) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
     }
 #ifdef _WIN32
     // On Windows with OpenSSL backend, use native Windows CA store

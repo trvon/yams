@@ -102,6 +102,21 @@ public:
         EmbeddingChunkingPolicy chunking{};
     };
 
+    /// `[search.query_log]`: a local record of search queries, kept in the metadata store, that
+    /// query-aware components (for example fitted topology routing) can learn from. Nothing
+    /// leaves the machine.
+    struct QueryLogPolicy {
+        bool enabled{true};
+        /// Largest accepted `max_entries`.
+        static constexpr std::size_t kMaxEntriesLimit = 10'000'000;
+        /// Newest queries retained; older rows are deleted as new ones arrive.
+        std::size_t maxEntries{20000};
+        /// Rows SearchService should keep: zero when disabled.
+        [[nodiscard]] std::size_t effectiveMaxEntries() const noexcept {
+            return enabled ? maxEntries : 0;
+        }
+    };
+
     struct TopologyRoutingPolicy {
         std::optional<std::string> mode;
         // augment | narrow | shadow | route_only
@@ -162,6 +177,13 @@ public:
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
         std::optional<std::size_t> routingRepresentativeCount;
+        /// `topology.route_fit.enabled`: fit query-aware routing vectors on full rebuilds.
+        /// Unset keeps it off.
+        std::optional<bool> routeFitEnabled;
+        /// `topology.route_fit.max_logged_queries` / `max_generated_queries`: training set
+        /// bounds. Unset keeps the manager's defaults.
+        std::optional<std::size_t> routeFitMaxLoggedQueries;
+        std::optional<std::size_t> routeFitMaxGeneratedQueries;
         /// `topology.representative_rule` = degree|medoid. Unset keeps Degree.
         std::optional<topology::RepresentativeRule> representativeRule;
         /// SGC feature-smoothing hops before clustering (0 disables).
@@ -293,6 +315,15 @@ public:
     /// Apply the canonical [search].automatic_rebuilds startup policy. Compatibility environment
     /// is resolved later only when this typed value remains absent.
     static void applySearchMaintenance(const ConfigSections& sections, DaemonConfig& config);
+
+    /// Resolve whether the daemon binary enables a model provider and loads plugins.
+    ///
+    /// Both default to on, matching the config that `yams init` and config migration write, so a
+    /// hand-written config that omits the keys still gets embeddings. `[daemon] enable` and
+    /// `[daemon] auto_load_plugins` override the defaults, `[embeddings] enable = false` turns
+    /// both off, and @p pluginsDisabledByFlag (--no-plugins) always turns plugin loading off.
+    static void applyEmbeddingProviderPolicy(const ConfigSections& sections,
+                                             bool pluginsDisabledByFlag, DaemonConfig& config);
 
     /// Apply [storage.disk_pressure] without environment overlays. Returns false when an
     /// explicitly supplied policy is invalid; config remains unchanged on failure.
@@ -561,6 +592,8 @@ public:
      * - search.topology.rrf_k = float
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
+    /// Reads `search.query_log.enabled` and `search.query_log.max_entries`.
+    static QueryLogPolicy resolveQueryLogPolicy();
 
     /**
      * @brief Resolve topology cluster-engine selection from config file.

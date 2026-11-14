@@ -17,6 +17,7 @@ namespace yamsfmt = fmt;
 #include <deque>
 #include <fstream>
 #include <limits>
+#include <list>
 #include <mutex>
 #include <span>
 #include <thread>
@@ -167,14 +168,15 @@ struct ManifestManager::Impl {
     mutable int64_t serCount = 0;
     mutable int64_t deserCount = 0;
 
-    // Simple LRU cache for manifests
+    // LRU cache of deserialized manifests: most recently used at the front of the list, with
+    // the map pointing into it so a hit, an insert and an eviction are all constant time.
     struct CacheEntry {
         std::string key;
         Manifest manifest;
-        std::chrono::steady_clock::time_point lastAccess;
     };
 
-    mutable std::unordered_map<std::string, std::unique_ptr<CacheEntry>> cache;
+    mutable std::list<CacheEntry> cacheOrder;
+    mutable std::unordered_map<std::string_view, std::list<CacheEntry>::iterator> cache;
     mutable std::mutex cacheMutex;
 
     explicit Impl(Config cfg) : config(std::move(cfg)) {}
@@ -218,31 +220,35 @@ struct ManifestManager::Impl {
     }
 
     void addToCache(const std::string& key, const Manifest& manifest) const {
-        if (!config.enableCaching)
+        if (!config.enableCaching || config.cacheSize == 0)
             return;
 
         std::lock_guard lock(cacheMutex);
 
-        // Remove oldest entries if cache is full
-        if (cache.size() >= config.cacheSize) {
-            auto oldest = std::ranges::min_element(cache, [](const auto& a, const auto& b) {
-                return a.second->lastAccess < b.second->lastAccess;
-            });
-            cache.erase(oldest);
+        if (auto it = cache.find(key); it != cache.end()) {
+            it->second->manifest = manifest;
+            cacheOrder.splice(cacheOrder.begin(), cacheOrder, it->second);
+            return;
         }
 
-        cache[key] = std::make_unique<CacheEntry>(CacheEntry{
-            .key = key, .manifest = manifest, .lastAccess = std::chrono::steady_clock::now()});
+        while (cache.size() >= config.cacheSize) {
+            cache.erase(cacheOrder.back().key);
+            cacheOrder.pop_back();
+        }
+
+        cacheOrder.push_front(CacheEntry{.key = key, .manifest = manifest});
+        // The map key views the string owned by the list node, which never moves.
+        cache.emplace(cacheOrder.front().key, cacheOrder.begin());
     }
 
     std::optional<Manifest> getFromCache(const std::string& key) const {
-        if (!config.enableCaching)
+        if (!config.enableCaching || config.cacheSize == 0)
             return std::nullopt;
 
         std::lock_guard lock(cacheMutex);
         auto it = cache.find(key);
         if (it != cache.end()) {
-            it->second->lastAccess = std::chrono::steady_clock::now();
+            cacheOrder.splice(cacheOrder.begin(), cacheOrder, it->second);
             // Count cache hits toward deserialization stats (use minimal non-zero duration)
             updateStats(std::chrono::milliseconds(0), std::chrono::milliseconds(1));
             return it->second->manifest;

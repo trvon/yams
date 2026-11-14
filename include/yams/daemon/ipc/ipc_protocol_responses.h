@@ -4689,6 +4689,9 @@ struct MemorySyncResponse {
     std::uint64_t outboundFailures{0};
     std::string lastOutboundFailure;
     std::uint64_t lastOutboundFailureAgeMs{0};
+    // Error of the current run of failed reconciliation cycles; empty after a success.
+    std::string lastSyncError;
+    std::uint64_t lastSyncErrorAgeMs{0};
     // Apply-path health, also protobuf-only. applyFailedCycles counts reconciled cycles in which
     // an inbound apply stage hard-failed; failedCycles keeps meaning reconciliation failures.
     std::uint64_t applyCycles{0};

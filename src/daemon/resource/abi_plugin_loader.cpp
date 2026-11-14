@@ -49,6 +49,7 @@ static const char* dlerror() {
 #include <yams/daemon/resource/plugin_host_services.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/abi.h>
+#include <yams/plugins/plugin_dir_names.h>
 
 namespace yams::daemon {
 
@@ -264,6 +265,10 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
             continue;
         }
         if (!entry.is_directory()) {
+            continue;
+        }
+        // Installer bookkeeping such as .yams-staging may hold a stale or partial copy.
+        if (yams::plugins::isReservedPluginDirName(entry.path().filename().string())) {
             continue;
         }
         for (const auto& nested : std::filesystem::directory_iterator(entry.path())) {

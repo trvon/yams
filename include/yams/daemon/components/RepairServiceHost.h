@@ -39,6 +39,8 @@ public:
         std::size_t maxPendingRepairs{1000};
         std::chrono::hours vectorVacuumInterval{24};
         std::chrono::days sessionExpiry{30};
+        std::chrono::hours pathTreeRepairInterval{24};
+        std::size_t pathTreeRepairBatch{256};
     };
 
     RepairServiceHost();

@@ -1531,4 +1531,239 @@ std::size_t attachTopologyMemberOrders(TopologyArtifactBatch& batch,
     return attached;
 }
 
+// Read one field or return its error.
+#define ROUTE_FIT_READ(name, expression)                                                           \
+    auto name##Read = (expression);                                                                \
+    if (!name##Read) {                                                                             \
+        return name##Read.error();                                                                 \
+    }                                                                                              \
+    auto name = std::move(name##Read.value())
+
+namespace {
+constexpr uint32_t kTopologyRouteFitMagic = 0x464D4159; // 'Y','A','M','F'
+constexpr uint32_t kTopologyRouteFitVersion = 1;
+constexpr std::string_view kTopologyRouteFitEnvelopeFormat = "topology_route_fit_zstd_v1";
+} // namespace
+
+TopologyRouteFitSidecar collectTopologyRouteFit(const TopologyArtifactBatch& batch) {
+    TopologyRouteFitSidecar sidecar;
+    sidecar.snapshotId = batch.snapshotId;
+    sidecar.embeddingSpaceIdentity = batch.embeddingSpaceIdentity;
+    sidecar.provenance = batch.routeFit;
+    for (const auto& cluster : batch.clusters) {
+        if (cluster.fittedRouteVector.empty()) {
+            continue;
+        }
+        if (sidecar.dim == 0) {
+            sidecar.dim = toU32(cluster.fittedRouteVector.size());
+        }
+        // One dimension per sidecar; a cluster that disagrees is not persisted.
+        if (cluster.fittedRouteVector.size() == sidecar.dim) {
+            sidecar.vectors.push_back({cluster.clusterId, cluster.fittedRouteVector});
+        }
+    }
+    std::ranges::sort(sidecar.vectors, {}, &TopologyRouteFitSidecar::Entry::clusterId);
+    return sidecar;
+}
+
+Result<std::vector<std::byte>>
+serializeTopologyRouteFitSidecarBinary(const TopologyRouteFitSidecar& sidecar) {
+    YAMS_ZONE_SCOPED_N("topology::codec::serializeRouteFitSidecarBinary");
+    for (const auto& entry : sidecar.vectors) {
+        if (entry.vector.size() != sidecar.dim) {
+            return Error{ErrorCode::InvalidArgument,
+                         "route-fit vector does not match the sidecar dimension"};
+        }
+    }
+    ByteWriter writer;
+    writer.reserve(64 + sidecar.vectors.size() * (32 + sidecar.dim * sizeof(float)));
+    writer.writeU32(kTopologyRouteFitMagic);
+    writer.writeU32(kTopologyRouteFitVersion);
+    writer.writeString(sidecar.snapshotId);
+    writer.writeString(sidecar.embeddingSpaceIdentity);
+    writer.writeU32(sidecar.dim);
+    writer.writeDouble(sidecar.provenance.chosenStrength);
+    writer.writeDouble(sidecar.provenance.centroidHoldoutRecall);
+    writer.writeDouble(sidecar.provenance.fittedHoldoutRecall);
+    writer.writeU32(sidecar.provenance.fitQueries);
+    writer.writeU32(sidecar.provenance.holdoutQueries);
+    writer.writeU32(sidecar.provenance.loggedQueries);
+    writer.writeU32(sidecar.provenance.generatedQueries);
+    writer.writeU64(sidecar.provenance.fittedAtEpoch);
+    writer.writeU32(toU32(sidecar.vectors.size()));
+    for (const auto& entry : sidecar.vectors) {
+        writer.writeString(entry.clusterId);
+        for (const float value : entry.vector) {
+            writer.writeFloat(value);
+        }
+    }
+    return writer.take();
+}
+
+Result<TopologyRouteFitSidecar>
+deserializeTopologyRouteFitSidecarBinary(std::span<const std::byte> bytes) {
+    YAMS_ZONE_SCOPED_N("topology::codec::deserializeRouteFitSidecarBinary");
+    ByteReader reader(bytes);
+    auto magic = reader.readU32();
+    if (!magic) {
+        return magic.error();
+    }
+    if (magic.value() != kTopologyRouteFitMagic) {
+        return Error{ErrorCode::InvalidData, "Invalid magic in topology route-fit sidecar"};
+    }
+    auto version = reader.readU32();
+    if (!version) {
+        return version.error();
+    }
+    if (version.value() != kTopologyRouteFitVersion) {
+        return Error{ErrorCode::InvalidData, "Unsupported topology route-fit sidecar version: " +
+                                                 std::to_string(version.value())};
+    }
+    TopologyRouteFitSidecar sidecar;
+    ROUTE_FIT_READ(snapshotId, reader.readString());
+    sidecar.snapshotId = std::move(snapshotId);
+    ROUTE_FIT_READ(spaceIdentity, reader.readString());
+    sidecar.embeddingSpaceIdentity = std::move(spaceIdentity);
+    ROUTE_FIT_READ(dim, reader.readU32());
+    sidecar.dim = dim;
+    ROUTE_FIT_READ(strength, reader.readDouble());
+    ROUTE_FIT_READ(centroidRecall, reader.readDouble());
+    ROUTE_FIT_READ(fittedRecall, reader.readDouble());
+    ROUTE_FIT_READ(fitQueries, reader.readU32());
+    ROUTE_FIT_READ(holdoutQueries, reader.readU32());
+    ROUTE_FIT_READ(loggedQueries, reader.readU32());
+    ROUTE_FIT_READ(generatedQueries, reader.readU32());
+    ROUTE_FIT_READ(fittedAtEpoch, reader.readU64());
+    sidecar.provenance = RouteFitProvenance{.chosenStrength = strength,
+                                            .centroidHoldoutRecall = centroidRecall,
+                                            .fittedHoldoutRecall = fittedRecall,
+                                            .fitQueries = fitQueries,
+                                            .holdoutQueries = holdoutQueries,
+                                            .loggedQueries = loggedQueries,
+                                            .generatedQueries = generatedQueries,
+                                            .fittedAtEpoch = fittedAtEpoch};
+    // Each entry is at least a string length plus its floats, which bounds the count.
+    const std::size_t minEntryBytes = sizeof(uint32_t) + std::size_t{sidecar.dim} * sizeof(float);
+    ROUTE_FIT_READ(count, reader.readCount(minEntryBytes, "route-fit vector"));
+    sidecar.vectors.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        TopologyRouteFitSidecar::Entry entry;
+        ROUTE_FIT_READ(clusterId, reader.readString());
+        entry.clusterId = std::move(clusterId);
+        if (!reader.hasRemaining(std::size_t{sidecar.dim} * sizeof(float))) {
+            return Error{ErrorCode::InvalidData, "Truncated topology route-fit vector"};
+        }
+        entry.vector.resize(sidecar.dim);
+        for (auto& value : entry.vector) {
+            ROUTE_FIT_READ(component, reader.readFloat());
+            value = component;
+        }
+        sidecar.vectors.push_back(std::move(entry));
+    }
+    if (!reader.atEnd()) {
+        return Error{ErrorCode::InvalidData, "Trailing bytes in topology route-fit sidecar"};
+    }
+    return sidecar;
+}
+
+#undef ROUTE_FIT_READ
+
+Result<std::string>
+serializeTopologyRouteFitSidecarCompressed(const TopologyRouteFitSidecar& sidecar,
+                                           int compressionLevel) {
+    YAMS_ZONE_SCOPED_N("topology::codec::serializeRouteFitSidecarCompressed");
+    auto binary = serializeTopologyRouteFitSidecarBinary(sidecar);
+    if (!binary) {
+        return binary.error();
+    }
+    auto envelope =
+        compressToEnvelope(binary.value(), compressionLevel, kTopologyRouteFitEnvelopeFormat);
+    if (!envelope) {
+        return envelope.error();
+    }
+    envelope.value()["snapshot_id"] = sidecar.snapshotId;
+    envelope.value()["fitted_clusters"] = sidecar.vectors.size();
+    envelope.value()["dim"] = sidecar.dim;
+    return envelope.value().dump();
+}
+
+Result<TopologyRouteFitSidecar>
+deserializeTopologyRouteFitSidecarCompressed(std::string_view payload) {
+    YAMS_ZONE_SCOPED_N("topology::codec::deserializeRouteFitSidecarCompressed");
+    if (payload.empty()) {
+        return Error{ErrorCode::InvalidArgument, "Empty topology route-fit sidecar payload"};
+    }
+    auto parsed = json::parse(payload, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object()) {
+        return Error{ErrorCode::SerializationError,
+                     "Failed to parse topology route-fit sidecar JSON"};
+    }
+    auto format = envelopeString(parsed, "format", "");
+    if (!format) {
+        return format.error();
+    }
+    if (format.value() != kTopologyRouteFitEnvelopeFormat) {
+        return Error{ErrorCode::InvalidData,
+                     "Unsupported topology route-fit sidecar format: " + format.value()};
+    }
+    auto bytes = decompressEnvelopeBytes(parsed, kTopologyRouteFitMagic);
+    if (!bytes) {
+        return bytes.error();
+    }
+    return deserializeTopologyRouteFitSidecarBinary(bytes.value());
+}
+
+std::size_t attachTopologyRouteFit(TopologyArtifactBatch& batch,
+                                   const TopologyRouteFitSidecar& sidecar) {
+    YAMS_ZONE_SCOPED_N("topology::codec::attachRouteFit");
+    for (auto& cluster : batch.clusters) {
+        cluster.fittedRouteVector.clear();
+    }
+    batch.routeFit = RouteFitProvenance{};
+    batch.routeFitUnavailableReason.clear();
+    if (sidecar.vectors.empty()) {
+        return 0;
+    }
+    if (sidecar.snapshotId != batch.snapshotId) {
+        batch.routeFitUnavailableReason = "route_fit_snapshot_mismatch";
+        return 0;
+    }
+    if (sidecar.embeddingSpaceIdentity != batch.embeddingSpaceIdentity) {
+        batch.routeFitUnavailableReason = "route_fit_space_mismatch";
+        return 0;
+    }
+    if (sidecar.dim == 0) {
+        batch.routeFitUnavailableReason = "route_fit_dim_invalid";
+        return 0;
+    }
+    std::unordered_map<std::string_view, ClusterArtifact*> byId;
+    byId.reserve(batch.clusters.size());
+    for (auto& cluster : batch.clusters) {
+        byId.emplace(cluster.clusterId, &cluster);
+    }
+    std::size_t attached = 0;
+    std::size_t skipped = 0;
+    for (const auto& entry : sidecar.vectors) {
+        const auto it = byId.find(entry.clusterId);
+        const bool usable =
+            it != byId.end() && it->second->fittedRouteVector.empty() &&
+            entry.vector.size() == sidecar.dim &&
+            it->second->centroidEmbedding.size() == sidecar.dim &&
+            std::ranges::all_of(entry.vector, [](float value) { return std::isfinite(value); });
+        if (!usable) {
+            ++skipped;
+            continue;
+        }
+        it->second->fittedRouteVector = entry.vector;
+        ++attached;
+    }
+    if (attached > 0) {
+        batch.routeFit = sidecar.provenance;
+    }
+    if (skipped > 0) {
+        batch.routeFitUnavailableReason = "route_fit_entries_skipped:" + std::to_string(skipped);
+    }
+    return attached;
+}
+
 } // namespace yams::topology

@@ -9,7 +9,7 @@
 #include <yams/downloader/downloader.hpp>
 
 #include <algorithm>
-#include <cctype>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,6 +34,7 @@ std::unique_ptr<IIntegrityVerifier> makeIntegrityVerifierSha256Only();
 std::unique_ptr<IResumeStore> makeInMemoryResumeStore();
 std::unique_ptr<IRateLimiter> makeRateLimiter();
 std::unique_ptr<IHttpAdapter> makeCurlHttpAdapter();
+std::string resolveCaBundle(const TlsConfig& tls, std::span<const std::string_view> candidates);
 } // namespace yams::downloader
 
 namespace {
@@ -58,149 +60,6 @@ fs::path make_temp_dir(const std::string& prefix = "yams-dl-test-") {
     }
     return dir;
 }
-
-// HTTP metadata parser helper
-struct ParsedHttpMeta {
-    std::optional<std::string> etag;
-    std::optional<std::string> lastModified;
-};
-
-static inline std::string trim(std::string_view sv) {
-    size_t b = 0, e = sv.size();
-    while (b < e && std::isspace(static_cast<unsigned char>(sv[b])))
-        ++b;
-    while (e > b && std::isspace(static_cast<unsigned char>(sv[e - 1])))
-        --e;
-    return std::string(sv.substr(b, e - b));
-}
-
-ParsedHttpMeta parse_http_headers_for_meta(const std::vector<std::string>& headers) {
-    ParsedHttpMeta out;
-    for (const auto& raw : headers) {
-        auto pos = raw.find(':');
-        if (pos == std::string::npos)
-            continue;
-        std::string key = trim(std::string_view(raw.data(), pos));
-        std::string val = trim(std::string_view(raw.data() + pos + 1, raw.size() - pos - 1));
-        std::transform(key.begin(), key.end(), key.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-        if (key == "etag" && !out.etag.has_value()) {
-            if (val.size() >= 2 && ((val.front() == '"' && val.back() == '"') ||
-                                    (val.front() == '\'' && val.back() == '\''))) {
-                out.etag = val.substr(1, val.size() - 2);
-            } else {
-                out.etag = val;
-            }
-        } else if (key == "last-modified" && !out.lastModified.has_value()) {
-            out.lastModified = val;
-        }
-    }
-    return out;
-}
-
-// Persistent JSON-based ResumeStore (test implementation)
-class PersistentResumeStore final : public yams::downloader::IResumeStore {
-public:
-    explicit PersistentResumeStore(fs::path json_path) : path_(std::move(json_path)) {
-        (void)loadFile();
-    }
-
-    yams::downloader::Expected<std::optional<State>> load(std::string_view url) override {
-        auto j = loadFile();
-        if (!j.ok())
-            return j.error();
-        auto& root = j.value();
-        const auto it = root.find(std::string(url));
-        if (it == root.end())
-            return std::optional<State>{std::nullopt};
-
-        State st;
-        const auto& entry = it.value();
-        if (entry.contains("etag") && entry["etag"].is_string()) {
-            st.etag = entry["etag"].get<std::string>();
-        }
-        if (entry.contains("last_modified") && entry["last_modified"].is_string()) {
-            st.lastModified = entry["last_modified"].get<std::string>();
-        }
-        if (entry.contains("total_bytes") && entry["total_bytes"].is_number_unsigned()) {
-            st.totalBytes = entry["total_bytes"].get<std::uint64_t>();
-        }
-        if (entry.contains("completed_ranges") && entry["completed_ranges"].is_array()) {
-            for (const auto& r : entry["completed_ranges"]) {
-                if (r.is_array() && r.size() == 2 && r[0].is_number_unsigned() &&
-                    r[1].is_number_unsigned()) {
-                    st.completedRanges.emplace_back(r[0].get<std::uint64_t>(),
-                                                    r[1].get<std::uint64_t>());
-                }
-            }
-        }
-        return std::optional<State>{st};
-    }
-
-    yams::downloader::Expected<void> save(std::string_view url, const State& state) override {
-        auto j = loadFile();
-        if (!j.ok())
-            return j.error();
-        auto& root = j.value();
-
-        json entry;
-        if (state.etag)
-            entry["etag"] = *state.etag;
-        if (state.lastModified)
-            entry["last_modified"] = *state.lastModified;
-        entry["total_bytes"] = state.totalBytes;
-        entry["completed_ranges"] = json::array();
-        for (const auto& [off, len] : state.completedRanges) {
-            entry["completed_ranges"].push_back(json::array({off, len}));
-        }
-
-        root[std::string(url)] = entry;
-        return writeFile(root);
-    }
-
-    void remove(std::string_view url) noexcept override {
-        auto j = loadFile();
-        if (!j.ok())
-            return;
-        auto& root = j.value();
-        root.erase(std::string(url));
-        (void)writeFile(root);
-    }
-
-private:
-    yams::downloader::Expected<json> loadFile() const {
-        if (!fs::exists(path_)) {
-            return json::object();
-        }
-        std::ifstream in(path_);
-        if (!in) {
-            return yams::downloader::Error{yams::downloader::ErrorCode::IoError,
-                                           "Failed to open resume JSON for read"};
-        }
-        try {
-            json root;
-            in >> root;
-            if (!root.is_object())
-                root = json::object();
-            return root;
-        } catch (const std::exception&) {
-            return json::object();
-        }
-    }
-
-    yams::downloader::Expected<void> writeFile(const json& root) const {
-        std::ofstream out(path_, std::ios::trunc);
-        if (!out) {
-            return yams::downloader::Error{yams::downloader::ErrorCode::IoError,
-                                           "Failed to open resume JSON for write"};
-        }
-        out << root.dump(2);
-        return {};
-    }
-
-    fs::path path_;
-};
 
 // Tracking resume store for test verification
 class TrackingResumeStore final : public IResumeStore {
@@ -423,158 +282,6 @@ fs::path meta_path_for(const fs::path& exportPath) {
 }
 
 } // namespace
-
-// =============================================================================
-// HTTP Header Parsing Tests
-// =============================================================================
-
-TEST_CASE("HTTP Header Parsing: Basic extraction", "[downloader][http][headers]") {
-    SECTION("Extracts ETag and Last-Modified") {
-        std::vector<std::string> headers = {"Date: Tue, 19 Aug 2025 10:11:12 GMT",
-                                            "Server: test-http",
-                                            "ETag: \"abc123-xyz\"",
-                                            "Last-Modified: Tue, 19 Aug 2025 09:00:00 GMT",
-                                            "Accept-Ranges: bytes",
-                                            "Content-Length: 1048576"};
-
-        auto parsed = parse_http_headers_for_meta(headers);
-        REQUIRE(parsed.etag.has_value());
-        REQUIRE(parsed.lastModified.has_value());
-        CHECK((*parsed.etag == "abc123-xyz"));
-        CHECK((*parsed.lastModified == "Tue, 19 Aug 2025 09:00:00 GMT"));
-    }
-
-    SECTION("Handles missing values") {
-        std::vector<std::string> headers = {"date: Tue, 19 Aug 2025 10:11:12 GMT",
-                                            "server: test-http", "content-length: 512"};
-
-        auto parsed = parse_http_headers_for_meta(headers);
-        CHECK_FALSE(parsed.etag.has_value());
-        CHECK_FALSE(parsed.lastModified.has_value());
-    }
-
-    SECTION("Case insensitive header names") {
-        std::vector<std::string> headers = {"eTaG: 'W/\"weak-etag-value\"'",
-                                            "LAST-MODIFIED:   Wed, 20 Aug 2025 00:00:00 GMT  "};
-
-        auto parsed = parse_http_headers_for_meta(headers);
-        REQUIRE(parsed.etag.has_value());
-        REQUIRE(parsed.lastModified.has_value());
-        CHECK((*parsed.etag == "W/\"weak-etag-value\""));
-        CHECK((*parsed.lastModified == "Wed, 20 Aug 2025 00:00:00 GMT"));
-    }
-
-    SECTION("First occurrence wins") {
-        std::vector<std::string> headers = {"ETag: first-etag", "ETag: second-etag"};
-
-        auto parsed = parse_http_headers_for_meta(headers);
-        REQUIRE(parsed.etag.has_value());
-        CHECK((*parsed.etag == "first-etag"));
-    }
-
-    SECTION("Strips quotes from ETag") {
-        std::vector<std::string> headers = {"ETag: \"quoted-etag\""};
-        auto parsed = parse_http_headers_for_meta(headers);
-        REQUIRE(parsed.etag.has_value());
-        CHECK((*parsed.etag == "quoted-etag"));
-    }
-
-    SECTION("Handles unquoted ETag") {
-        std::vector<std::string> headers = {"ETag: unquoted-etag"};
-        auto parsed = parse_http_headers_for_meta(headers);
-        REQUIRE(parsed.etag.has_value());
-        CHECK((*parsed.etag == "unquoted-etag"));
-    }
-}
-
-// =============================================================================
-// Persistent Resume Store Tests
-// =============================================================================
-
-TEST_CASE("PersistentResumeStore: Round-trip", "[downloader][resume]") {
-    auto dir = make_temp_dir();
-    auto jsonPath = dir / "resume.json";
-
-    SECTION("Save and load single URL") {
-        PersistentResumeStore store(jsonPath);
-
-        yams::downloader::IResumeStore::State state;
-        state.etag = std::string("abc123etag");
-        state.lastModified = std::string("Tue, 19 Aug 2025 09:00:00 GMT");
-        state.totalBytes = 1024ull * 1024ull * 5ull;
-        state.completedRanges = {{0, 256ull * 1024ull}, {256ull * 1024ull, 512ull * 1024ull}};
-
-        auto saveRes = store.save("https://example.com/file.bin", state);
-        REQUIRE(saveRes.ok());
-
-        PersistentResumeStore store2(jsonPath);
-        auto loadRes = store2.load("https://example.com/file.bin");
-        REQUIRE(loadRes.ok());
-        REQUIRE(loadRes.value().has_value());
-
-        const auto& got = *loadRes.value();
-        REQUIRE(got.etag.has_value());
-        REQUIRE(got.lastModified.has_value());
-        CHECK((*got.etag == *state.etag));
-        CHECK((*got.lastModified == *state.lastModified));
-        CHECK((got.totalBytes == state.totalBytes));
-        REQUIRE((got.completedRanges.size() == state.completedRanges.size()));
-    }
-
-    SECTION("Remove entry") {
-        PersistentResumeStore store(jsonPath);
-
-        yams::downloader::IResumeStore::State state;
-        state.etag = std::string("to-be-removed");
-        state.totalBytes = 42;
-
-        REQUIRE(store.save("http://example.com/a", state).ok());
-        REQUIRE(store.save("http://example.com/b", state).ok());
-
-        store.remove("http://example.com/a");
-
-        PersistentResumeStore store2(jsonPath);
-        auto la = store2.load("http://example.com/a");
-        auto lb = store2.load("http://example.com/b");
-
-        REQUIRE(la.ok());
-        REQUIRE(lb.ok());
-        CHECK_FALSE(la.value().has_value());
-        REQUIRE(lb.value().has_value());
-        CHECK(lb.value()->etag.has_value());
-        CHECK((*lb.value()->etag == "to-be-removed"));
-    }
-
-    SECTION("Multiple URLs") {
-        PersistentResumeStore store(jsonPath);
-
-        for (int i = 0; i < 5; ++i) {
-            yams::downloader::IResumeStore::State state;
-            state.etag = "etag-" + std::to_string(i);
-            state.totalBytes = 1000L * (i + 1);
-            REQUIRE(store.save("http://example.com/file" + std::to_string(i), state).ok());
-        }
-
-        PersistentResumeStore store2(jsonPath);
-        for (int i = 0; i < 5; ++i) {
-            auto result = store2.load("http://example.com/file" + std::to_string(i));
-            REQUIRE(result.ok());
-            REQUIRE(result.value().has_value());
-            CHECK((*result.value()->etag == "etag-" + std::to_string(i)));
-        }
-    }
-
-    SECTION("Load non-existent URL") {
-        PersistentResumeStore store(jsonPath);
-        auto result = store.load("http://nonexistent.com/file");
-        REQUIRE(result.ok());
-        CHECK_FALSE(result.value().has_value());
-    }
-
-    // Cleanup
-    std::error_code ec;
-    fs::remove_all(dir, ec);
-}
 
 // =============================================================================
 // CAS Helpers Tests
@@ -1023,101 +730,6 @@ TEST_CASE("CurlHttpAdapter: a user cancel is reported as OperationCancelled",
 }
 
 // =============================================================================
-// Test HTTP Adapter Tests
-// =============================================================================
-
-TEST_CASE("TestHttpAdapter: Behavior verification", "[downloader][adapter]") {
-    SECTION("Tracks probe calls") {
-        TestHttpAdapter adapter;
-        adapter.contentLength = 1000;
-
-        bool resumeSupported = false;
-        std::optional<std::uint64_t> contentLength;
-        std::optional<std::string> etag, lastModified, contentType, filename;
-
-        adapter.probe("http://test.com", {}, resumeSupported, contentLength, etag, lastModified,
-                      contentType, filename, TlsConfig{}, std::nullopt, true,
-                      std::chrono::milliseconds{1000});
-
-        CHECK((adapter.probeCallCount == 1));
-        CHECK((resumeSupported == true));
-        CHECK(contentLength.has_value());
-        CHECK((*contentLength == 1000));
-    }
-
-    SECTION("Tracks fetch calls") {
-        TestHttpAdapter adapter;
-        adapter.payload = to_bytes("test data");
-
-        std::vector<std::byte> received;
-        auto sink = [&received](std::span<const std::byte> data) -> Expected<void> {
-            received.insert(received.end(), data.begin(), data.end());
-            return {};
-        };
-
-        adapter.fetchRange("http://test.com", {}, 0, 9, TlsConfig{}, std::nullopt,
-                           std::chrono::milliseconds{1000}, sink, nullptr, nullptr);
-
-        CHECK((adapter.fetchCallCount == 1));
-        CHECK((adapter.requestedOffsets.size() == 1));
-        CHECK((adapter.requestedOffsets[0] == 0));
-        CHECK((adapter.requestedSizes[0] == 9));
-        CHECK((received.size() == 9));
-    }
-}
-
-// =============================================================================
-// Tracking Resume Store Tests
-// =============================================================================
-
-TEST_CASE("TrackingResumeStore: Tracking verification", "[downloader][resume][tracking]") {
-    TrackingResumeStore store;
-
-    SECTION("Tracks load calls") {
-        store.load("http://url1.com");
-        store.load("http://url2.com");
-        store.load("http://url1.com");
-
-        CHECK((store.loadUrls.size() == 3));
-        CHECK((store.loadUrls[0] == "http://url1.com"));
-        CHECK((store.loadUrls[1] == "http://url2.com"));
-    }
-
-    SECTION("Tracks save calls") {
-        IResumeStore::State state;
-        state.totalBytes = 100;
-
-        store.save("http://url1.com", state);
-        state.totalBytes = 200;
-        store.save("http://url2.com", state);
-
-        CHECK((store.savedUrls.size() == 2));
-        CHECK((store.savedStates.size() == 2));
-        CHECK((store.savedStates[0].totalBytes == 100));
-        CHECK((store.savedStates[1].totalBytes == 200));
-    }
-
-    SECTION("Tracks remove calls") {
-        store.remove("http://removed.com");
-        REQUIRE(store.removedUrl.has_value());
-        CHECK((*store.removedUrl == "http://removed.com"));
-    }
-
-    SECTION("Initial state returned on load") {
-        IResumeStore::State initial;
-        initial.totalBytes = 500;
-        initial.etag = "initial-etag";
-        store.initialState = initial;
-
-        auto result = store.load("http://any.com");
-        REQUIRE(result.ok());
-        REQUIRE(result.value().has_value());
-        CHECK((result.value()->totalBytes == 500));
-        CHECK((*result.value()->etag == "initial-etag"));
-    }
-}
-
-// =============================================================================
 // Concrete downloader component tests
 // =============================================================================
 
@@ -1233,111 +845,6 @@ TEST_CASE("Concrete downloader components cover storage resume integrity and rat
     }
 }
 
-// =============================================================================
-// FakeDiskWriter Tests
-// =============================================================================
-
-TEST_CASE("FakeDiskWriter: Operations", "[downloader][disk]") {
-    auto tempDir = make_temp_dir();
-    StorageConfig storage{tempDir / "objects", tempDir / "staging"};
-    FakeDiskWriter writer(storage);
-
-    SECTION("Creates staging file") {
-        auto result = writer.createStagingFile(storage, "session-123", ".part");
-        REQUIRE(result.ok());
-        CHECK(fs::exists(result.value()));
-    }
-
-    SECTION("Writes at offset") {
-        auto staging = writer.createStagingFile(storage, "session-456", ".part");
-        REQUIRE(staging.ok());
-
-        auto data = to_bytes("hello");
-        auto writeResult = writer.writeAt(staging.value(), 0, data);
-        REQUIRE(writeResult.ok());
-
-        auto data2 = to_bytes("world");
-        writeResult = writer.writeAt(staging.value(), 5, data2);
-        REQUIRE(writeResult.ok());
-
-        CHECK((writer.stagedData().size() == 10));
-    }
-
-    SECTION("Handles initial data") {
-        writer.setInitialData(to_bytes("PREFIX"));
-        std::uint64_t currentSize = 0;
-        auto result =
-            writer.createOrOpenStagingFile(storage, "session-789", ".part", 100, currentSize);
-        REQUIRE(result.ok());
-        CHECK((currentSize == 6));
-    }
-
-    // Cleanup
-    std::error_code ec;
-    fs::remove_all(tempDir, ec);
-}
-
-// =============================================================================
-// Edge Cases and Error Handling
-// =============================================================================
-
-TEST_CASE("Downloader: Edge cases", "[downloader][edge]") {
-    SECTION("Empty URL handling") {
-        TrackingResumeStore store;
-        auto result = store.load("");
-        CHECK(result.ok());
-    }
-
-    SECTION("Very long URL") {
-        std::string longUrl = "http://example.com/" + std::string(1000, 'x');
-        TrackingResumeStore store;
-        auto result = store.load(longUrl);
-        CHECK(result.ok());
-        CHECK((store.loadUrls[0] == longUrl));
-    }
-
-    SECTION("Unicode in URL") {
-        std::string unicodeUrl = "http://example.com/文件/файл.bin";
-        TrackingResumeStore store;
-        IResumeStore::State state;
-        state.totalBytes = 100;
-        auto saveResult = store.save(unicodeUrl, state);
-        CHECK(saveResult.ok());
-        CHECK((store.savedUrls[0] == unicodeUrl));
-    }
-}
-
-TEST_CASE("HTTP header parsing edge cases", "[downloader][http][edge]") {
-    SECTION("Empty headers list") {
-        std::vector<std::string> headers;
-        auto parsed = parse_http_headers_for_meta(headers);
-        CHECK_FALSE(parsed.etag.has_value());
-        CHECK_FALSE(parsed.lastModified.has_value());
-    }
-
-    SECTION("Malformed headers (no colon)") {
-        std::vector<std::string> headers = {"InvalidHeaderNoColon", "ETag: valid-etag"};
-        auto parsed = parse_http_headers_for_meta(headers);
-        REQUIRE(parsed.etag.has_value());
-        CHECK((*parsed.etag == "valid-etag"));
-    }
-
-    SECTION("Empty header value") {
-        std::vector<std::string> headers = {"ETag: ", "Last-Modified:    "};
-        auto parsed = parse_http_headers_for_meta(headers);
-        // Empty values should still be captured
-        REQUIRE(parsed.etag.has_value());
-        CHECK(parsed.etag->empty());
-    }
-
-    SECTION("Whitespace only value") {
-        std::vector<std::string> headers = {"ETag:     "};
-        auto parsed = parse_http_headers_for_meta(headers);
-        REQUIRE(parsed.etag.has_value());
-        CHECK(parsed.etag->empty());
-    }
-}
-
 // The cross-device fallback copies a finished download into its content-addressed path. That path
 // is trusted by name: once something exists there, later downloads of the same hash are skipped.
 // A failed copy must therefore leave nothing at the destination, never a truncated object.
@@ -1383,6 +890,42 @@ TEST_CASE("Durable replace leaves no partial object when the copy fails",
             ++entries;
         CHECK(entries == 1);
     }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("CA bundle: an explicit path wins over the platform candidates", "[downloader][tls]") {
+    const auto dir = fs::temp_directory_path() / "yams_ca_bundle_test";
+    fs::create_directories(dir);
+    const auto bundle = dir / "roots.pem";
+    std::ofstream(bundle) << "-----BEGIN CERTIFICATE-----\n";
+    const std::string bundleStr = bundle.string();
+    const std::array<std::string_view, 2> candidates{"/nonexistent/yams/cert.pem", bundleStr};
+
+    SECTION("configured path is used as given") {
+        TlsConfig tls;
+        tls.caPath = "/custom/ca.pem";
+        CHECK(resolveCaBundle(tls, candidates) == "/custom/ca.pem");
+    }
+    SECTION("first existing candidate is used when none is configured") {
+        CHECK(resolveCaBundle(TlsConfig{}, candidates) == bundleStr);
+    }
+    SECTION("insecure mode does not name a bundle") {
+        TlsConfig tls;
+        tls.insecure = true;
+        CHECK(resolveCaBundle(tls, candidates).empty());
+    }
+    SECTION("no existing candidate keeps libcurl's default") {
+        const std::array<std::string_view, 1> missing{"/nonexistent/yams/cert.pem"};
+        CHECK(resolveCaBundle(TlsConfig{}, missing).empty());
+        CHECK(resolveCaBundle(TlsConfig{}, {}).empty());
+    }
+    SECTION("a directory is not a bundle") {
+        const std::string dirStr = dir.string();
+        const std::array<std::string_view, 1> dirOnly{dirStr};
+        CHECK(resolveCaBundle(TlsConfig{}, dirOnly).empty());
+    }
+
     std::error_code ec;
     fs::remove_all(dir, ec);
 }

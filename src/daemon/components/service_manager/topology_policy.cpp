@@ -6,8 +6,10 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <span>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <spdlog/spdlog.h>
 
@@ -15,8 +17,52 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TopologyTuner.h>
 #include <yams/topology/topology_factory.h>
+#include <yams/vector/embedding_generator.h>
 
 namespace yams::daemon {
+
+Result<std::vector<std::vector<float>>>
+ServiceManager::embedTextsForTopology(std::span<const std::string> texts) {
+    auto modelProvider = loadModelProvider();
+    if (!modelProvider || !modelProvider->isAvailable()) {
+        return Error{ErrorCode::NotInitialized, "no embedding model available"};
+    }
+    std::shared_ptr<vector::EmbeddingGenerator> generator;
+    try {
+        generator = embeddingLifecycle_.modelName().empty()
+                        ? modelProvider->getEmbeddingGenerator()
+                        : modelProvider->getEmbeddingGenerator(embeddingLifecycle_.modelName());
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::NotInitialized,
+                     std::string("embedding generator lookup failed: ") + e.what()};
+    }
+    if (!generator) {
+        return Error{ErrorCode::NotInitialized, "no embedding generator available"};
+    }
+    // Bounded batches keep one request from holding the model for the whole query set.
+    constexpr std::size_t kBatch = 64;
+    std::vector<std::vector<float>> embeddings;
+    embeddings.reserve(texts.size());
+    try {
+        for (std::size_t offset = 0; offset < texts.size(); offset += kBatch) {
+            const auto count = std::min(kBatch, texts.size() - offset);
+            const std::vector<std::string> batch(
+                texts.begin() + static_cast<std::ptrdiff_t>(offset),
+                texts.begin() + static_cast<std::ptrdiff_t>(offset + count));
+            auto vectors = generator->generateEmbeddings(batch);
+            if (vectors.size() != batch.size()) {
+                return Error{ErrorCode::InternalError,
+                             "embedding generator returned fewer vectors than texts"};
+            }
+            for (auto& vector : vectors) {
+                embeddings.push_back(std::move(vector));
+            }
+        }
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError, std::string("embedding failed: ") + e.what()};
+    }
+    return embeddings;
+}
 
 void ServiceManager::configureTopologyRuntime() {
     {
@@ -32,6 +78,16 @@ void ServiceManager::configureTopologyRuntime() {
                 *enginePolicy.routingRepresentativeCount);
             spdlog::info("Topology routing representatives applied via config: {}",
                          topologyManager_.routingRepresentativeCount());
+        }
+        if (enginePolicy.routeFitEnabled || enginePolicy.routeFitMaxLoggedQueries ||
+            enginePolicy.routeFitMaxGeneratedQueries) {
+            const bool enabled = enginePolicy.routeFitEnabled.value_or(false);
+            const auto maxLogged = enginePolicy.routeFitMaxLoggedQueries.value_or(4000);
+            const auto maxGenerated = enginePolicy.routeFitMaxGeneratedQueries.value_or(2000);
+            topologyManager_.setRouteFitPolicy(enabled, maxLogged, maxGenerated);
+            spdlog::info("Topology route fit applied via config: enabled={} max_logged_queries={} "
+                         "max_generated_queries={}",
+                         enabled, maxLogged, maxGenerated);
         }
         if (enginePolicy.representativeRule) {
             topologyManager_.setRepresentativeRule(*enginePolicy.representativeRule);

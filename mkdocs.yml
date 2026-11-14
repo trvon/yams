@@ -1,8 +1,8 @@
 site_name: YAMS
 site_description: Yet Another Memory System — local, persistent memory for documents and applications.
-site_url: https://trvon.github.io/yams
-repo_url: https://git.trevon.dev/trevon/yams
-repo_name: git.trevon.dev/trevon/yams
+site_url: https://yamsmemory.ai/
+repo_url: https://github.com/trvon/yams
+repo_name: trvon/yams
 docs_dir: docs
 site_dir: site
 use_directory_urls: true
@@ -14,13 +14,25 @@ exclude_docs: |
 
 nav:
   - Home: index.md
-  - Install: install.md
-  - Build: BUILD.md
-  - Benchmarks: benchmarks/index.md
-  - Roadmap: roadmap.md
-  - Newsletter: newsletter.md
-  - Operations:
+  - Get started:
+      - Install and setup: install.md
+      - Guide: guide.md
+      - Build from source: BUILD.md
+  - Reference:
+      - Retrieval and freshness: cli-retrieval.md
+      - P2P corpus sync: p2p.md
+      - Runtime paths: architecture/runtime-paths.md
+      - Configuration reading: architecture/config-reading.md
+      - Environment overrides: architecture/environment-overrides.md
+      - Retrieval contracts: architecture/retrieval_contracts.md
+  - Benchmarks:
+      - Results: benchmarks/index.md
+      - Ingestion oracle: benchmarks/ingestion_oracle.md
+  - Project:
+      - Roadmap: roadmap.md
+      - Newsletter: newsletter.md
       - Source mirroring: source-mirroring.md
+      - Startup fuzzing: developer/startup_fuzzing.md
 
 theme:
   name: material

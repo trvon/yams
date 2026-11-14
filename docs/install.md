@@ -123,6 +123,11 @@ yams daemon status
 `--no-keygen`. The CLI starts a per-user daemon on demand; you do not need to
 run a service for normal use.
 
+Running `yams init` again with another data directory (`yams --data-dir
+<dir> init`) sets up a store there and leaves your existing config alone; use
+that store with `--data-dir` or `YAMS_DATA_DIR`. `--force` replaces the config
+with one for the new store.
+
 ## Where things live
 
 YAMS resolves every path once, in the same order for the CLI, daemon and MCP
@@ -192,9 +197,13 @@ elsewhere with `--socket`, `--data-dir`, `YAMS_DAEMON_SOCKET`, `YAMS_DATA_DIR`
 or `YAMS_CONFIG`. To keep the daemon running without a login session (for
 example on a server), enable lingering once: `sudo loginctl enable-linger "$USER"`.
 
-Plugins (ONNX embeddings, the glint entity extractor) load when your config
-enables them; `yams init` writes `auto_load_plugins = true` under `[daemon]`.
-Restart the unit after changing the config.
+Plugins (ONNX embeddings, the glint entity extractor) load by default. `yams
+init` writes `enable = true` and `auto_load_plugins = true` under `[daemon]`,
+and a config that omits either key gets the same behavior. Set
+`auto_load_plugins = false` (or start the daemon with `--no-plugins`) to skip
+external plugins; built-in embedding backends such as Simeon still work. Set
+`[embeddings] enable = false` to turn embeddings off altogether. Restart the
+unit after changing the config.
 
 The ONNX and glint plugins load the first ONNX Runtime 1.23 or newer from:
 
@@ -278,7 +287,7 @@ yams daemon doctor
 
 ## Settings worth knowing
 
-All settings live in `config.toml`. [`examples/config.toml`](../examples/config.toml)
+All settings live in `config.toml`. [`examples/config.toml`](https://github.com/trvon/yams/blob/main/examples/config.toml)
 lists the full set; copy only the sections you change, because a copied
 `data_dir` or socket path replaces the defaults above.
 
@@ -288,6 +297,8 @@ lists the full set; copy only the sections you change, because a copied
 | `[daemon] log_level` | `info` | Daemon log verbosity. |
 | `[embeddings] enable` | `true` | Set `false` to run text and grep search without embeddings. |
 | `[daemon.maintenance] vector_vacuum_interval_hours` | `24` | How often idle maintenance checks whether `vectors.db` is worth compacting. `0` disables. |
+| `[daemon.maintenance] path_tree_repair_interval_hours` | `24` | How often idle maintenance re-scans all documents and restores missing path-tree nodes. `0` disables; values above `8760` (one year) are clamped. |
+| `[daemon.maintenance] path_tree_repair_batch` | `256` | Documents examined per path-tree repair batch; one batch runs per repair-loop tick. Accepts `1`–`10000`. |
 | `[daemon.maintenance] session_expiry_days` | `30` | Idle session files older than this are removed. Sessions that are current, watch an existing directory, or still tag documents are kept. `0` disables. |
 | `[tuning.resource] host_pressure` | `true` | Defer background work (topology rebuilds, repair scans, vacuum, backfills) while the machine is busy. |
 | `[tuning.resource] host_cpu_pressure_pct` | from profile (`30` / `40` / `60`) | CPU pressure (Linux PSI `some avg10`) above which the host counts as busy. Raise it on shared build hosts. |

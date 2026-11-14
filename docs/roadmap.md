@@ -12,12 +12,20 @@ YAMS is pre-1.0. The roadmap describes direction, not a compatibility promise.
 
 ## Current focus
 
+- **Complete grep.** An unscoped `yams grep` on a large corpus can stop at its
+  time budget because it reads every candidate's stored text. A substring index
+  would let it pick candidates first.
+- **Learn from real queries.** The local query log records searches. Once it has
+  enough, the topology router can be refit on real questions instead of
+  document titles, and query rewriting (predicting a document vector from the
+  query) can be tested against the same baseline.
+- **Watching that can stay on.** Sessions and `yams watch` now follow every
+  enabled project, persist what they have seen and back off when idle; next is
+  measuring their cost on constrained machines.
 - Make daemon lifecycle and recovery predictable under load and crashes.
-- Improve search, graph, and grep retrieval quality per token returned.
-- Keep Simeon as the primary embedding and retrieval optimization backend.
-- Align candidate generation, fusion, and reranking with measured query classes.
+- Keep Simeon as the primary embedding backend, and promote retrieval changes
+  only when they beat the default across corpora.
 - Harden mobile corpus access through the stable local C ABI.
-- Reduce duplicated infrastructure, configuration, and documentation.
 
 ## Peer-to-peer corpus sharing
 

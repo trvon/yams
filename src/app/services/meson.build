@@ -58,6 +58,7 @@ yams_app_services_lib = static_library('yams_app_services',
     'graph_query_service.cpp',
     'graph_context_service.cpp',
     'graph_scope_service.cpp',
+    'prune_planner.cpp',
   ],
   dependencies: [
     dependency('yams_api'),

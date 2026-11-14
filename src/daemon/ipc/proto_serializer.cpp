@@ -231,6 +231,8 @@ template <> struct ProtoBinding<MemorySyncResponse> {
         out->set_outbound_failures(response.outboundFailures);
         out->set_last_outbound_failure(yams::common::sanitizeUtf8(response.lastOutboundFailure));
         out->set_last_outbound_failure_age_ms(response.lastOutboundFailureAgeMs);
+        out->set_last_sync_error(yams::common::sanitizeUtf8(response.lastSyncError));
+        out->set_last_sync_error_age_ms(response.lastSyncErrorAgeMs);
     }
     static MemorySyncResponse get(const Envelope& env) {
         const auto& in = env.memory_sync_response();
@@ -277,6 +279,8 @@ template <> struct ProtoBinding<MemorySyncResponse> {
         response.outboundFailures = in.outbound_failures();
         response.lastOutboundFailure = in.last_outbound_failure();
         response.lastOutboundFailureAgeMs = in.last_outbound_failure_age_ms();
+        response.lastSyncError = in.last_sync_error();
+        response.lastSyncErrorAgeMs = in.last_sync_error_age_ms();
         return response;
     }
 };

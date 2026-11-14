@@ -19,6 +19,7 @@
 #include <vector>
 #include "IComponent.h"
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
@@ -28,8 +29,11 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/session_service.hpp>
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/common/pattern_utils.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/SessionWatcher.h>
 #include <yams/daemon/components/AsyncInitOrchestrator.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
@@ -85,9 +89,6 @@ class Database;
 class ConnectionPool;
 class MetadataRepository;
 } // namespace yams::metadata
-namespace yams::integrity {
-class RepairManager;
-} // namespace yams::integrity
 namespace yams::memory_sync {
 class MemorySyncService;
 } // namespace yams::memory_sync
@@ -223,6 +224,9 @@ public:
         std::uint64_t outboundFailures{0};
         std::string lastOutboundFailure;
         std::uint64_t lastOutboundFailureAgeMs{0};
+        /// Error of the current run of failed reconciliation cycles; empty after a success.
+        std::string lastSyncError;
+        std::uint64_t lastSyncErrorAgeMs{0};
     };
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);
@@ -454,6 +458,12 @@ public:
     WriteCoordinator* getWriteCoordinator() const { return writeCoordinator_.get(); }
     // NOLINTBEGIN(bugprone-reserved-identifier): repo test-helper surface intentionally uses
     // historical __test_* names across many suites; rename is tracked separately.
+    using SessionWatchTarget = SessionWatcher::Target;
+    /// Every directory pinned by a session with watching enabled.
+    static std::vector<SessionWatchTarget>
+    sessionWatchTargets(const app::services::ISessionService& sessions) {
+        return SessionWatcher::targets(sessions);
+    }
 #ifdef YAMS_TESTING
     void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
         writeCoordinator_ = std::move(coordinator);
@@ -538,6 +548,26 @@ public:
     std::uint64_t testingMemorySyncBackfillAttempts() const noexcept {
         return memorySyncBackfillAttempts_.load(std::memory_order_acquire);
     }
+    static std::vector<SessionWatchTarget>
+    __test_sessionWatchTargets(const app::services::ISessionService& sessions) {
+        return sessionWatchTargets(sessions);
+    }
+    void __test_requestSessionWatcherStop() {
+        sessionWatcherStopRequested_.store(true, std::memory_order_release);
+    }
+    SessionWatcher& __test_sessionWatcher() { return sessionWatcher_; }
+    void __test_startSessionWatcherOn(const boost::asio::any_io_executor& executor) {
+        startSessionWatcherOn(executor);
+    }
+    bool __test_sessionWatcherWaiting() const {
+        return sessionWatcherWaiting_.load(std::memory_order_acquire);
+    }
+    /// Runs the shutdown step and reports whether the watcher coroutine had finished.
+    bool __test_stopSessionWatcher() {
+        stopSessionWatcherForShutdown();
+        std::lock_guard lock(sessionWatcherTimerMutex_);
+        return sessionWatcherTimer_ == nullptr;
+    }
     static bool __test_shouldStartSessionWatcher(std::string_view disableValue) {
         return shouldStartSessionWatcher(disableValue);
     }
@@ -583,9 +613,6 @@ public:
         return databaseManager_ ? databaseManager_->getWalMetricsProvider()
                                 : std::shared_ptr<WalMetricsProvider>{};
     }
-    std::shared_ptr<yams::integrity::RepairManager> getRepairManager() const {
-        return repairManager_;
-    }
 
     std::shared_ptr<RepairService> getRepairServiceShared() const {
         return repairServiceHost_.get();
@@ -623,17 +650,17 @@ public:
         }
     }
 
-    // Session watchers: polling mtime/size for pinned directories
-    struct SessionWatchState {
-        std::unordered_map<std::string,
-                           std::unordered_map<std::string, std::pair<std::uint64_t, std::uint64_t>>>
-            dirFiles; // dir -> (file -> (mtime,size))
-        std::unordered_map<std::string, std::vector<std::string>> gitignorePatterns;
-        std::unordered_map<std::string, std::uint64_t> gitignoreMtime;
-        // Paths whose indexing or removal failed; warned once, retried quietly.
-        std::unordered_set<std::string> failingPaths;
-    };
-    SessionWatchState sessionWatch_;
+    // Keeps the directories of watch-enabled sessions indexed (polling).
+    SessionWatcher sessionWatcher_;
+    bool sessionWatcherConfigured_{false};
+    // Not the stop_source: its fallback on platforms without std::stop_source never reports
+    // a requested stop, and a pass must be able to see one.
+    std::atomic<bool> sessionWatcherStopRequested_{false};
+    std::atomic<bool> sessionWatcherWaiting_{false}; // asleep between passes
+    // The watcher's wait timer, so shutdown can cancel a wait in progress.
+    std::mutex sessionWatcherTimerMutex_;
+    std::shared_ptr<boost::asio::steady_timer> sessionWatcherTimer_;
+    void configureSessionWatcher(bool forDaemonLoop);
     yams::compat::stop_source sessionWatchStopSource_;
     std::future<void> sessionWatcherFuture_;
 
@@ -953,12 +980,17 @@ private:
                               const std::shared_ptr<metadata::Database>& database);
 
     void stopBackgroundTaskManagerForShutdown();
+    void startSessionWatcherOn(const boost::asio::any_io_executor& executor);
     void stopSessionWatcherForShutdown();
     void
     quiesceServicesBeforeWorkerShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void stopWorkCoordinatorForShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void clearCachedServiceState();
     void configureTopologyRuntime();
+    /// Embeds query texts with the active embedding model for the topology route fit. Fails
+    /// when no model is available or it returns fewer vectors than texts.
+    Result<std::vector<std::vector<float>>>
+    embedTextsForTopology(std::span<const std::string> texts);
     void snapshotRuntimeTuningSources(TuningConfig& tuning, const TuningConfig* previous) const;
     void refreshRuntimeTuningStatus();
     void seedBuiltinContentExtractors();
@@ -1030,7 +1062,6 @@ private:
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
     mutable std::mutex resolvedDataDirMutex_;
     std::filesystem::path resolvedDataDir_;
-    std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;
     std::unique_ptr<WriteCoordinator> writeCoordinator_;

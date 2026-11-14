@@ -54,6 +54,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
@@ -99,7 +100,6 @@
 #include <yams/daemon/resource/simeon_model_provider.h>
 #include <yams/daemon/shutdown_budget.h>
 #include <yams/extraction/builtin_text_content_extractor.h>
-#include <yams/integrity/repair_manager.h>
 #include <yams/metadata/metadata_insert_writer.h>
 #include <yams/metadata/migration.h>
 #include <yams/storage/corpus_stats.h>
@@ -297,9 +297,11 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
               return std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
           },
           &config_, &resolvedDataDir_, [this]() { return getResolvedEmbeddingConfig(); }}),
-      topologyManager_(TopologyManager::Dependencies{[this]() { return getMetadataRepo(); },
-                                                     [this]() { return getKgStore(); },
-                                                     [this]() { return getVectorDatabase(); }}),
+      topologyManager_(TopologyManager::Dependencies{
+          [this]() { return getMetadataRepo(); }, [this]() { return getKgStore(); },
+          [this]() { return getVectorDatabase(); },
+          [this](std::span<const std::string> texts) { return embedTextsForTopology(texts); },
+          []() { return !ResourceGovernor::instance().canAdmitWork(); }}),
       lifecycleFsm_(lifecycleFsm) {
     spdlog::debug("[ServiceManager] Constructor start");
     {
@@ -1090,11 +1092,39 @@ void ServiceManager::stopBackgroundTaskManagerForShutdown() {
     }
 }
 
+void ServiceManager::startSessionWatcherOn(const boost::asio::any_io_executor& executor) {
+    sessionWatchStopSource_ = yams::compat::stop_source{};
+    sessionWatcherStopRequested_.store(false, std::memory_order_release);
+    auto watcherToken = sessionWatchStopSource_.get_token();
+    // On a strand, so the cancel posted by shutdown cannot run alongside the coroutine's
+    // own use of the timer, or slip in between its stop check and the wait being armed.
+    sessionWatcherFuture_ = boost::asio::co_spawn(
+        boost::asio::make_strand(executor),
+        [this, watcherToken]() -> boost::asio::awaitable<void> {
+            co_await co_runSessionWatcher(std::move(watcherToken));
+        },
+        boost::asio::use_future);
+}
+
 void ServiceManager::stopSessionWatcherForShutdown() {
     spdlog::info("[ServiceManager] Phase 2: Signaling session watcher stop");
     try {
+        sessionWatcherStopRequested_.store(true, std::memory_order_release);
         if (sessionWatchStopSource_.stop_possible()) {
             sessionWatchStopSource_.request_stop();
+        }
+        // Wake the watcher if it is waiting for its next pass. The cancel runs on the
+        // watcher's strand: a timer is not safe to cancel from another thread. If the pool
+        // is too busy to run it within the wait below, the coroutine stays suspended and is
+        // never resumed: the worker threads are stopped and joined later in shutdown, while
+        // this object is still alive.
+        std::shared_ptr<boost::asio::steady_timer> timer;
+        {
+            std::lock_guard lock(sessionWatcherTimerMutex_);
+            timer = sessionWatcherTimer_;
+        }
+        if (timer) {
+            boost::asio::post(timer->get_executor(), [timer] { timer->cancel(); });
         }
         spdlog::info("[ServiceManager] Phase 2: Session watcher stop requested");
     } catch (const std::exception& e) {
@@ -1309,7 +1339,6 @@ void ServiceManager::stopWorkCoordinatorForShutdown(
 void ServiceManager::clearCachedServiceState() {
     storeGraphComponent(std::shared_ptr<GraphComponent>{});
     graphQueryServiceOverride_.reset();
-    repairManager_.reset();
     {
         std::lock_guard lock(contentExtractorsMutex_);
         contentExtractors_.clear();
@@ -2182,15 +2211,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::info("[ServiceManager] Session watcher disabled by test override");
     } else {
         try {
-            auto exec = getWorkerExecutor();
-            sessionWatchStopSource_ = yams::compat::stop_source{};
-            auto watcherToken = sessionWatchStopSource_.get_token();
-            sessionWatcherFuture_ = boost::asio::co_spawn(
-                exec,
-                [this, watcherToken]() -> boost::asio::awaitable<void> {
-                    co_await co_runSessionWatcher(std::move(watcherToken));
-                },
-                boost::asio::use_future);
+            startSessionWatcherOn(getWorkerExecutor());
         } catch (const std::exception& e) {
             spdlog::debug("[ServiceManager] session watcher start failed: {}", e.what());
         } catch (...) {
@@ -2394,6 +2415,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                             // The job's vectors are committed: queue them for memory sync too.
                             self->notifyMemorySyncEmbeddingsCommitted(hashes);
                             self->requestTopologyRebuild("embedding_batch_complete", hashes);
+                        }
+                    });
+                embeddingService->setSemanticNeighborsBackfilledCallback(
+                    [weakSelf](const std::vector<std::string>& hashes) {
+                        // A snapshot built before these edges existed sees those documents as
+                        // singletons; mark them dirty so the governed rebuild picks them up.
+                        if (auto self = weakSelf.lock()) {
+                            self->requestTopologyRebuild("semantic_neighbor_backfill", hashes);
                         }
                     });
                 embeddingService->start();
@@ -4089,6 +4118,11 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
         spdlog::debug("AppContext: search repair status probe failed with unknown exception");
     }
 
+    // Read once per process; a config change takes effect on restart like the other policies.
+    static const std::size_t queryLogMaxEntries =
+        ConfigResolver::resolveQueryLogPolicy().effectiveMaxEntries();
+    ctx.queryLogMaxEntries = queryLogMaxEntries;
+
     return ctx;
 }
 
@@ -4567,6 +4601,8 @@ void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
     rcfg.maxPendingRepairs = config_.maxPendingRepairs;
     rcfg.vectorVacuumInterval = config_.maintenance.vectorVacuumInterval;
     rcfg.sessionExpiry = config_.maintenance.sessionExpiry;
+    rcfg.pathTreeRepairInterval = config_.maintenance.pathTreeRepairInterval;
+    rcfg.pathTreeRepairBatch = config_.maintenance.pathTreeRepairBatch;
     repairServiceHost_.start(std::move(rcfg), &state_, std::move(activeConnFn),
                              makeRepairServiceContext(this));
 }

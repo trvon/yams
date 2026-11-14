@@ -307,6 +307,10 @@ void renderMemorySyncSection(const yams::daemon::MemorySyncResponse* sync, std::
                        neverSynced ? std::string{"never"}
                                    : format_duration(m.lastSuccessAgeMs / 1000) + " ago"),
          ""});
+    if (!m.lastSyncError.empty()) {
+        rows.push_back({"Last sync error", severity_text(Severity::Warn, m.lastSyncError),
+                        format_duration(m.lastSyncErrorAgeMs / 1000) + " ago"});
+    }
     // A reconciled cycle can still fail to apply; report it apart from transport health.
     const auto applyOk = m.applyCycles - std::min(m.applyCycles, m.applyFailedCycles);
     rows.push_back({"Apply cycles",
@@ -1202,6 +1206,7 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
     const uint64_t repairFailed = findPostIngestCount("repair_failed_operations");
     const uint64_t repairBacklog = findPostIngestCount("repair_total_backlog");
     const uint64_t repairProcessed = findPostIngestCount("repair_processed");
+    const uint64_t repairPathTree = findPostIngestCount("repair_path_tree_repaired");
     const uint64_t repairCurrentOp = findPostIngestCount("repair_current_operation_code");
     const uint64_t repairCurrentElapsedMs =
         findPostIngestCount("repair_current_operation_elapsed_ms");
@@ -1242,6 +1247,9 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
 
     std::ostringstream repairStats;
     repairStats << repairBatches << " batches · " << repairEmbeddings << " embeddings";
+    if (repairPathTree > 0) {
+        repairStats << " · " << repairPathTree << " path-tree";
+    }
     Severity repairStatsSev = repairFailed > 0 ? Severity::Warn : Severity::Good;
     if (repairFailed > 0) {
         repairStats << " · " << repairFailed << " failed";

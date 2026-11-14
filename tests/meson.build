@@ -93,6 +93,22 @@ tracy_zone_policy_tests = files('scripts/test_check_tracy_zones.py')
 repository_metadata_policy_script = files('scripts/check_repository_metadata.py')
 forgejo_mirror_policy_script = files('scripts/check_forgejo_mirror_workflow.py')
 experimental_release_source_policy_script = files('scripts/check_experimental_release_source.py')
+if is_variable('yams_cli_exe') and host_machine.system() != 'windows'
+  test('cli_completion_runtime',
+    python_exe,
+    args: [files('scripts/test_cli_completion.py'), '--cli', yams_cli_exe.full_path()],
+    depends: [yams_cli_exe],
+    suite: ['unit', 'cli', 'completion'],
+    timeout: 60,
+  )
+endif
+
+test('research_note_unit',
+  python_exe,
+  args: [files('scripts/test_research_note.py')],
+  suite: ['unit', 'cli'],
+  timeout: 30,
+)
 release_manifest_unit_tests = files('scripts/test_generate_release_manifest.py')
 repository_publication_unit_tests = files('scripts/test_publish_repository.py')
 test('release_manifest_unit',
@@ -388,7 +404,6 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
       'integration',
       'integration/smoke',
       'integration/daemon',
-      'integration/cli',
       'integration/search',
       'integration/services',
     ]
@@ -472,6 +487,12 @@ if catch2_dep.found()
   )
 endif
 
+# One POSIX gate for every registration whose cases all SKIP or are compiled out on Windows
+# (daemon IPC, AF_UNIX socket pairs, fork). Catch2 exits 4 when every selected case is
+# skipped and the catch2_filter_policy guard rejects a registration that selects nothing, so
+# such registrations are not declared on Windows instead of passing --allow-running-no-tests.
+daemon_ipc_supported = host_machine.system() != 'windows'
+
 #Meson - native test registration via structured subdirs(no shell globs).
 #Unit tests are now individual Catch2 executables; tests / unit keeps only a
 #compatibility stub for older yams_unit_objs references.
@@ -484,7 +505,6 @@ endif
 if get_option('enable-integration-tests') or _test_debug_integrations
   subdir('integration/smoke')
   subdir('integration/daemon')
-  subdir('integration/cli')
   subdir('integration/search')
 endif
 if get_option('enable-mobile-tests')
@@ -595,9 +615,9 @@ endif
 
 # Standard Catch2 tests: one row per test in catch2_test_table, built by the loop at the
 # end of this file. Each row needs 'name', 'sources', 'deps' (added after the Catch2
-# deps), 'suite' and 'timeout'. Optional: 'target' (default 'catch2_' + name), 'args'
-# and 'is_parallel'. Tests with extra env, cpp_args or several registrations stay
-# hand-written.
+# deps), 'suite' and 'timeout'. Optional: 'target' (default 'catch2_' + name), 'args',
+# 'env' (added to the default LD_LIBRARY_PATH env) and 'is_parallel'. Tests with extra
+# cpp_args or several registrations stay hand-written.
 catch2_test_table = []
 
 # ============================================================================
@@ -685,6 +705,7 @@ if catch2_dep.found()
     'sources': files(
       'unit/daemon/daemon_components_test.cpp',
       'unit/daemon/systemd_user_unit_catch2_test.cpp',
+      'unit/daemon/daemon_client_start_catch2_test.cpp',
     ),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'components', 'concurrency'],
@@ -979,13 +1000,18 @@ if catch2_dep.found()
     install: false,
   )
 
-#FTS5 performance / stress tests(migrated from GTest, opt - in via YAMS_RUN_STRESS_TESTS = 1)
+  # FTS5 performance / stress tests. Every case SKIPs unless YAMS_RUN_STRESS_TESTS=1, and no
+  # lane exported it, so the registration passed --allow-running-no-tests and ran nothing.
+  # It now sets the variable itself and lives in the explicit 'slow'/'stress' suites, which
+  # the fast lanes (--suite unit --suite integration) do not select. The cases assert
+  # wall-clock budgets on a 50k-document corpus, so sanitizer builds do not declare it.
   catch2_test_table += [{
     'name': 'fts5_stress',
     'sources': files('unit/metadata/fts5_performance_stress_catch2_test.cpp'),
     'deps': test_deps,
-    'suite': ['catch2', 'stress', 'metadata', 'fts5'],
-    'args': ['--allow-running-no-tests'],
+    'suite': ['catch2', 'slow', 'stress', 'metadata', 'fts5'],
+    'env': {'YAMS_RUN_STRESS_TESTS': '1'},
+    'register': not (_test_thread_sanitizer or _test_address_sanitizer),
     'timeout': 300,
     'is_parallel': false,
   }]
@@ -1083,12 +1109,10 @@ if catch2_dep.found()
       install: false,
     )
 
-    test('onnx_embedding_diagnostic', catch2_onnx_embedding_diag_exe,
-      suite: ['catch2', 'unit', 'daemon', 'onnx', 'diagnostic'],
-      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-      args: ['--allow-running-no-tests'],
-      timeout: 120,
-    )
+    # Not registered: every case in onnx_embedding_diagnostic_test.cpp is hidden
+    # ([.requires_model]), so a default run selects zero tests on every platform (the CoreML
+    # provider checks are a separate binary, gpu_provider_coreml). Run it by hand with a model:
+    #   catch2_onnx_embedding_diag '[requires_model]'  (Catch2 v3: [.x] means [.][x])
   endif
 
   catch2_plugin_infrastructure_exe = executable('catch2_plugin_infrastructure',
@@ -1170,6 +1194,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'session_watcher',
+    'sources': files('unit/daemon/session_watcher_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'session-watch'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'service_manager',
     'sources': files('unit/daemon/service_manager_catch2_test.cpp'),
     'deps': test_deps,
@@ -1199,14 +1231,6 @@ if catch2_dep.found()
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'db-salvage'],
     'timeout': 30,
-  }]
-
-  catch2_test_table += [{
-    'name': 'db_recovery_vacuum',
-    'sources': files('unit/daemon/db_recovery_vacuum_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'db-recovery'],
-    'timeout': 60,
   }]
 
   catch2_test_table += [{
@@ -1246,7 +1270,7 @@ if catch2_dep.found()
     'sources': files('unit/daemon/streaming_processor_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'streaming', 'concurrency'],
-    'args': ['--allow-running-no-tests'],  # Skips entirely on Windows
+    # Two cases SKIP on Windows; the search-metadata case runs everywhere.
     'timeout': 60,
   }]
 
@@ -1265,15 +1289,6 @@ if catch2_dep.found()
     'sources': files('unit/daemon/sandbox_detection_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'sandbox'],
-    'timeout': 60,
-  }]
-
-  catch2_test_table += [{
-    'name': 'multiplex_client',
-    'sources': files('unit/daemon/multiplex_client_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'multiplex'],
-    'args': ['--allow-running-no-tests'],  # All tests have [.requires_daemon] tag
     'timeout': 60,
   }]
 
@@ -1416,7 +1431,7 @@ if catch2_dep.found()
     'sources': files('unit/daemon/embedding_provider_recovery_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon'],
-    'args': ['--allow-running-no-tests'],  # Skips entirely on Windows
+    'posix_only': true,  # the single case SKIPs on Windows
     'timeout': 120,
     'is_parallel': false,
   }]
@@ -1426,18 +1441,9 @@ if catch2_dep.found()
     'sources': files('unit/daemon/request_handler_io_edge_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'concurrency'],
-    'args': ['--allow-running-no-tests'],  # Placeholder tests - all skipped
+    'posix_only': true,  # every case uses AF_UNIX socket pairs and SKIPs on Windows
     'timeout': 120,
     'is_parallel': false,
-  }]
-
-  catch2_test_table += [{
-    'name': 'daemon_warm_bench',
-    'sources': files('unit/daemon/daemon_warm_bench_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'bench'],
-    'args': ['--allow-running-no-tests'],  # Bench only runs when YAMS_BENCH_FAST=1
-    'timeout': 120,
   }]
 
   catch2_daemon_idle_control_bench_exe = executable('catch2_daemon_idle_control_bench',
@@ -1449,22 +1455,27 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_test_table += [{
-    'name': 'request_lifetime',
-    'sources': files('unit/daemon/request_handler_lifetime_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon'],
-    'args': ['--allow-running-no-tests'],  # Skips when streaming disabled
-    'timeout': 120,
-    'is_parallel': false,
-  }]
+  # The only case is hidden ([.bench][.slow]) and env-gated, so it is selected by tag and runs
+  # only in the bench lane (-Denable-bench-tests=true).
+  if get_option('enable-bench-tests') and daemon_ipc_supported
+    test('daemon_idle_control_bench', catch2_daemon_idle_control_bench_exe,
+      suite: ['catch2', 'bench', 'daemon'],
+      args: ['[bench]'],
+      env: {
+        'YAMS_ENABLE_DAEMON_IDLE_BENCH': '1',
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      },
+      is_parallel: false,
+      timeout: bench_timeout,
+    )
+  endif
 
   catch2_test_table += [{
     'name': 'writer_drain_cleanup',
     'sources': files('unit/daemon/request_handler_writer_drain_cleanup_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'ipc', 'mux'],
-    'args': ['--allow-running-no-tests'],  # Skips entirely on Windows
+    'posix_only': true,  # the single case SKIPs on Windows
     'timeout': 60,
     'is_parallel': false,
   }]
@@ -1599,14 +1610,6 @@ if catch2_dep.found()
     'timeout': 60,
   }]
 
-  catch2_test_table += [{
-    'name': 'health_check_isolation',
-    'sources': files('unit/daemon/health_check_isolation_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'state', 'health-check'],
-    'timeout': 60,
-  }]
-
   catch2_socket_server_teardown_exe = executable('catch2_socket_server_teardown',
     files('unit/daemon/socket_server_teardown_catch2_test.cpp'),
     include_directories: incs,
@@ -1712,6 +1715,14 @@ if catch2_dep.found()
   )
 
   catch2_test_table += [{
+    'name': 'memory_sync_failure_reporter',
+    'sources': files('unit/memory_sync/sync_failure_reporter_catch2_test.cpp'),
+    'deps': [],
+    'suite': ['catch2', 'unit', 'memory-sync'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'memory_sync_records',
     'sources': files('unit/memory_sync/records_catch2_test.cpp'),
     'deps': [dependency('nlohmann_json')],
@@ -1810,13 +1821,13 @@ if catch2_dep.found()
 #Migrated from GTest as part of yams - 3s4 / yams - 8b9
   catch2_storage_submodule_exe = executable('catch2_storage_submodule',
     files(
+      'unit/storage/block_reference_repair_catch2_test.cpp',
       'unit/storage/compressed_storage_engine_catch2_test.cpp',
       'unit/storage/compressed_storage_stats_catch2_test.cpp',
       'unit/storage/storage_backend_engine_adapter_catch2_test.cpp',
       'unit/storage/object_storage_adapter_catch2_test.cpp',
       'unit/storage/reference_counter_catch2_test.cpp',
       'unit/storage/reference_counter_stress_catch2_test.cpp',
-      'unit/storage/garbage_collector_catch2_test.cpp',
       'unit/storage/sqlite_retry_catch2_test.cpp',
       'unit/storage/s3_signer_catch2_test.cpp',
       'unit/storage/storage_backend_factory_catch2_test.cpp',
@@ -2043,17 +2054,10 @@ if catch2_dep.found()
 #Migrated from GTest as part of yams - 3s4 / yams - pmf
   catch2_compression_submodule_exe = executable('catch2_compression_submodule',
     files(
-#basic_error_handler_catch2_test.cpp removed : fully covered by error_handler_catch2_test.cpp
-# basic_integrity_validator_catch2_test.cpp removed: covered by the comprehensive test.
-      'unit/compression/compression_comprehensive_catch2_test.cpp',
+      'unit/compression/compression_header_catch2_test.cpp',
       'unit/compression/compression_monitor_catch2_test.cpp',
       'unit/compression/compression_policy_catch2_test.cpp',
-      'unit/compression/error_handler_catch2_test.cpp',
       'unit/compression/framed_payload_catch2_test.cpp',
-#TODO(yams - 3s4) : Fix API mismatch - uses non - existent IntegrityValidator methods
-#'unit/compression/integrity_validator_catch2_test.cpp',
-      'unit/compression/recovery_manager_catch2_test.cpp',
-      'unit/compression/transaction_manager_catch2_test.cpp',
       'unit/compression/zstandard_compressor_catch2_test.cpp',
     ),
     include_directories: incs,
@@ -2096,7 +2100,6 @@ if catch2_dep.found()
       'unit/mcp/mcp_tool_registry_wrappers_catch2_test.cpp',
       'unit/mcp/mcp_tools_schema_and_smoke_catch2_test.cpp',
       'unit/mcp/stdio_transport_catch2_test.cpp',
-      'unit/mcp/websocket_transport_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -2181,8 +2184,9 @@ if catch2_dep.found()
       'unit/cli/error_format_contract_catch2_test.cpp',
       'unit/cli/exit_code_contract_catch2_test.cpp',
       'unit/cli/grep_output_contract_catch2_test.cpp',
+      'unit/cli/list_time_filters_catch2_test.cpp',
+      'unit/cli/watch_command_catch2_test.cpp',
       # init_command_catch2_test.cpp runs in its own cli_init_command target (serial).
-      'unit/cli/list_command_catch2_test.cpp',
       'unit/cli/name_resolution_contract_catch2_test.cpp',
       'unit/cli/search_no_match_contract_catch2_test.cpp',
       'unit/cli/status_data_dir_catch2_test.cpp',
@@ -2237,7 +2241,6 @@ if catch2_dep.found()
       'unit/cli/graph_helpers_catch2_test.cpp',
       'unit/cli/graph_query_presenter_catch2_test.cpp',
       'unit/cli/graph_topology_support_catch2_test.cpp',
-      'unit/cli/grep_command_path_tree_catch2_test.cpp',
       'unit/cli/vector_db_util_catch2_test.cpp',
     ),
     include_directories: incs,
@@ -2301,6 +2304,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'vector_schema_repair',
+    'sources': files('unit/vector/vector_schema_repair_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'vector'],
+    'timeout': 120,
+  }]
+
+  catch2_test_table += [{
     'name': 'vector_sync_adapter',
     'sources': files('unit/vector/vector_sync_adapter_catch2_test.cpp'),
     'deps': test_deps,
@@ -2349,19 +2360,6 @@ if catch2_dep.found()
     'timeout': 180,
   }]
 
-#Resolve Test Suites(Catch2) - resolver, backend implementations
-#Migrated from GTest as part of yams - 3s4 / resolve
-#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-#Resolve submodule tests(resolver, backends)
-#Migrated from GTest as part of yams - 3s4 / resolve
-  catch2_test_table += [{
-    'name': 'resolve_submodule',
-    'sources': files('unit/resolve/resolver_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'resolve'],
-    'timeout': 180,
-  }]
-
 #Manifest Test Suites(Catch2) - manifest manager, serialization, reconstruction
 #Migrated from GTest as part of yams - 3s4 / yams - 1jm
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
@@ -2386,7 +2384,6 @@ if catch2_dep.found()
     'sources': files('unit/repair/embedding_repair_scan_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'repair'],
-    'args': ['--allow-running-no-tests'],
     'timeout': 180,
   }]
 
@@ -2507,13 +2504,11 @@ if catch2_dep.found()
     'timeout': 120,
   }]
 
-#FTS5 Tests(Catch2) - FTS5 support detection and fallback
-#Migrated from GTest as part of yams - 3s4 / yams - aqc
+#FTS5 query sanitizer and search query helper tests(Catch2)
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
   catch2_test_table += [{
-    'name': 'fts5',
+    'name': 'fts5_query_sanitizer',
     'sources': files(
-      'unit/metadata/fts5_catch2_test.cpp',
       'unit/metadata/fts5_query_sanitizer_catch2_test.cpp',
       'unit/metadata/search_query_helpers_catch2_test.cpp',
     ),
@@ -2553,6 +2548,14 @@ if catch2_dep.found()
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'metadata', 'path-tree'],
     'timeout': 120,
+  }]
+
+  catch2_test_table += [{
+    'name': 'path_tree_repair',
+    'sources': files('unit/metadata/path_tree_repair_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'path-tree'],
+    'timeout': 60,
   }]
 
 #Session Isolation Tests(Catch2) - session - isolated memory operations
@@ -2648,6 +2651,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'topology_route_fit',
+    'sources': files('unit/topology/topology_route_fit_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'topology_representative_rule',
     'sources': files('unit/topology/topology_representative_rule_catch2_test.cpp'),
     'deps': test_deps,
@@ -2661,6 +2672,22 @@ if catch2_dep.found()
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'topology'],
     'timeout': 30,
+  }]
+
+  catch2_test_table += [{
+    'name': 'topology_route_fit_stage',
+    'sources': files('unit/topology/topology_route_fit_stage_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
+    'name': 'topology_route_fit_sidecar',
+    'sources': files('unit/topology/topology_route_fit_sidecar_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 60,
   }]
 
   catch2_test_table += [{
@@ -2725,17 +2752,6 @@ if catch2_dep.found()
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'vector'],
     'timeout': 30,
-  }]
-
-#Fuzzy Index Prioritization Tests(Catch2) - fuzzy index scoring
-#Migrated from GTest as part of yams - 3s4 / yams - aqc
-#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-  catch2_test_table += [{
-    'name': 'fuzzy_index_prioritization',
-    'sources': files('unit/metadata/fuzzy_index_prioritization_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'metadata', 'fuzzy'],
-    'timeout': 60,
   }]
 
 #KG Store Alias and Entities Tests(Catch2) - KG alias and entity operations
@@ -2961,6 +2977,7 @@ if catch2_dep.found()
     'sources': files(
       'unit/plugins/plugin_installer_test.cpp',
       'unit/plugins/plugin_repo_client_test.cpp',
+      'unit/plugins/loopback_url_catch2_test.cpp',
       'unit/plugins/onnx_request_test.cpp',
     ),
     'deps': test_deps,
@@ -2984,10 +3001,8 @@ if catch2_dep.found()
 
   integrity_catch2_exe = executable('integrity_catch2',
     files(
-      'unit/integrity/chunk_validator_test.cpp',
-      'unit/integrity/integrity_verifier_simple_test.cpp',
       'unit/integrity/integrity_verifier_catch2_test.cpp',
-      'unit/integrity/repair_manager_test.cpp',
+      'unit/integrity/block_repairer_catch2_test.cpp',
       'unit/integrity/verification_monitor_test.cpp',
       'unit/integrity/verification_scheduler_test.cpp',
     ),
@@ -3047,6 +3062,15 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'language_detector',
+    'target': 'language_detector',
+    'sources': files('unit/extraction/language_detector_catch2_test.cpp'),
+    'deps': content_test_deps,
+    'suite': ['catch2', 'unit', 'extraction'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'text_basic_handler',
     'target': 'text_basic_handler',
     'sources': files('unit/extraction/text_basic_handler_catch2_test.cpp'),
@@ -3091,16 +3115,6 @@ if catch2_dep.found()
     'timeout': 120,
   }]
 
-  catch2_test_table += [{
-    'name': 'plugin_process_minimal',
-    'target': 'plugin_process_minimal',
-    'sources': files('unit/extraction/plugin_process_minimal_test.cpp'),
-    'deps': plugin_process_test_deps,
-    'suite': ['catch2', 'unit', 'extraction', 'plugins', 'debug'],
-    'timeout': 120,
-    'is_parallel': false,
-  }]
-
   plugin_process_launcher_exe = executable('plugin_process_launcher',
     files('unit/extraction/plugin_process_launcher_test.cpp'),
     include_directories: incs,
@@ -3140,7 +3154,8 @@ if catch2_dep.found()
   catch2_test_table += [{
     'name': 'chunking',
     'target': 'chunking',
-    'sources': files('unit/chunking/chunking_test.cpp'),
+    'sources': files('unit/chunking/chunking_test.cpp',
+                     'unit/chunking/gear_cdc_catch2_test.cpp'),
     'deps': chunking_test_deps,
     'suite': ['catch2', 'unit', 'chunking'],
     'timeout': 60,
@@ -3221,6 +3236,15 @@ if catch2_dep.found()
     'suite': ['catch2', 'unit', 'services', 'utilities'],
     'timeout': 60,
     'is_parallel': false,
+  }]
+
+  catch2_test_table += [{
+    'name': 'prune_planner',
+    'target': 'prune_planner',
+    'sources': files('unit/app/services/prune_planner_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'prune'],
+    'timeout': 30,
   }]
 
   catch2_test_table += [{
@@ -3310,14 +3334,14 @@ if catch2_dep.found()
 
   test('metadata_schema', catch2_metadata_schema_exe,
     suite: ['catch2', 'unit', 'metadata', 'schema'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
   )
 
   test('metadata_schema_slow', catch2_metadata_schema_exe,
     suite: ['catch2', 'slow', 'metadata', 'schema'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300,
     is_parallel: false
@@ -3359,7 +3383,7 @@ if catch2_dep.found()
 #Search tests
   test('hybrid_search', hybrid_search_exe,
     suite: ['catch2', 'unit', 'search', 'hybrid', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'YAMS_DISABLE_VECTORS': '1',
@@ -3367,15 +3391,21 @@ if catch2_dep.found()
     timeout: 120
   )
 
-  test('hybrid_search_slow', hybrid_search_exe,
-    suite: ['catch2', 'slow', 'search', 'hybrid', 'concurrency'],
-    args: ['[slow]', '--allow-running-no-tests'],
-    env: {
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'YAMS_DISABLE_VECTORS': '1',
-    },
-    timeout: 120
-  )
+  # On Windows the source compiles only a stub case (no [slow]) unless the ONNX Runtime header
+  # it finds reports API >= 23. Meson cannot see which header that __has_include picks (and the
+  # Windows CI lane builds without ONNX, so the stub is what it gets), so '[slow]' would select
+  # zero cases there: POSIX only.
+  if daemon_ipc_supported
+    test('hybrid_search_slow', hybrid_search_exe,
+      suite: ['catch2', 'slow', 'search', 'hybrid', 'concurrency'],
+      args: ['[slow]'],
+      env: {
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'YAMS_DISABLE_VECTORS': '1',
+      },
+      timeout: 120
+    )
+  endif
 
   if not _test_address_sanitizer
     test('corpus_stats_search_integration', corpus_stats_search_integration_exe,
@@ -3456,39 +3486,41 @@ if catch2_dep.found()
 
   test('daemon_background_processing', catch2_daemon_background_exe,
     suite: ['catch2', 'unit', 'daemon', 'background', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
 
   test('daemon_background_processing_slow', catch2_daemon_background_exe,
     suite: ['catch2', 'slow', 'daemon', 'background', 'concurrency'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
 
   test('work_coordinator', catch2_work_coordinator_exe,
     suite: ['catch2', 'unit', 'daemon', 'work-coordinator', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
 
   test('work_coordinator_slow', catch2_work_coordinator_exe,
     suite: ['catch2', 'slow', 'daemon', 'work-coordinator', 'concurrency'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
 
-  test('assert_val', catch2_assert_val_exe,
-    suite: ['catch2', 'unit', 'core', 'assert'],
-    args: ['--allow-running-no-tests'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: host_machine.system() == 'windows' ? 60 : 30,
-    is_parallel: false
-  )
+  # Every case forks and SKIPs on Windows; Catch2 exits 4 when all selected cases skip.
+  if daemon_ipc_supported
+    test('assert_val', catch2_assert_val_exe,
+      suite: ['catch2', 'unit', 'core', 'assert'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 30,
+      is_parallel: false
+    )
+  endif
 
   test('search_service', catch2_search_service_exe,
     suite: ['catch2', 'unit', 'services', 'search', 'concurrency'],
@@ -3505,9 +3537,20 @@ if catch2_dep.found()
     is_parallel: false
   )
 
+  # "Plugin: provenance root smoke" SKIPs without YAMS_EXPECT_PLUGIN_ROOT, which no lane set.
+  # When the ONNX plugin is built, expect it to load from its build directory.
+  _daemon_plugin_harness_env = { 'LD_LIBRARY_PATH': _test_env_ld_library_path }
+  _daemon_plugin_harness_depends = []
+  if is_variable('yams_onnx_plugin')
+    _daemon_plugin_harness_env += {
+      'YAMS_EXPECT_PLUGIN_ROOT': meson.project_build_root() / 'plugins' / 'onnx',
+    }
+    _daemon_plugin_harness_depends += [yams_onnx_plugin]
+  endif
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugins'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    env: _daemon_plugin_harness_env,
+    depends: _daemon_plugin_harness_depends,
     timeout: 60,
     is_parallel: false
   )
@@ -3537,7 +3580,7 @@ if catch2_dep.found()
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugins', 'infrastructure', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
@@ -3545,7 +3588,7 @@ if catch2_dep.found()
 
   test('plugin_infrastructure_slow', catch2_plugin_infrastructure_exe,
     suite: ['catch2', 'slow', 'daemon', 'plugins', 'infrastructure', 'concurrency'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
@@ -3558,12 +3601,14 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  test('in_process_transport', catch2_in_process_transport_exe,
-    suite: ['catch2', 'unit', 'daemon', 'streaming', 'inprocess', 'concurrency'],
-    args: ['--allow-running-no-tests'],  # Skips entirely on Windows
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
+  # Every case SKIPs on Windows (the executor-drain case runs under UBSan/TSAN too).
+  if daemon_ipc_supported
+    test('in_process_transport', catch2_in_process_transport_exe,
+      suite: ['catch2', 'unit', 'daemon', 'streaming', 'inprocess', 'concurrency'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 60
+    )
+  endif
 
   test('asio_transport_exhaustion', catch2_asio_transport_exhaustion_exe,
     suite: ['catch2', 'unit', 'daemon', 'transport', 'max-inflight', 'concurrency'],
@@ -3605,19 +3650,22 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  test('socket_proxy_request_activity', catch2_socket_proxy_request_activity_exe,
-    suite: ['catch2', 'slow', 'daemon', 'socket', 'proxy', 'activity'],
-    env: {
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
-      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
-      'YAMS_TESTING': '1',
-    },
-    timeout: 120,
-    is_parallel: false
-  )
+  # The only case is inside #ifndef _WIN32: on Windows the binary has zero cases.
+  if daemon_ipc_supported
+    test('socket_proxy_request_activity', catch2_socket_proxy_request_activity_exe,
+      suite: ['catch2', 'slow', 'daemon', 'socket', 'proxy', 'activity'],
+      env: {
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+        'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+        'YAMS_TESTING': '1',
+      },
+      timeout: 120,
+      is_parallel: false
+    )
+  endif
 
-  if host_machine.system() != 'windows'
+  if daemon_ipc_supported
     test('socket_server_teardown', catch2_socket_server_teardown_exe,
       suite: ['catch2', 'unit', 'daemon', 'socket', 'shutdown'],
       env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -3653,8 +3701,21 @@ if catch2_dep.found()
 
   test('memory_sync_service', catch2_memory_sync_service_exe,
     suite: ['catch2', 'unit', 'memory-sync', 'concurrency'],
+    args: ['~[stress]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  # The [stress] lifecycle case SKIPs unless YAMS_RUN_STRESS_TESTS=1, which no lane exported.
+  # It gets its own registration in the explicit 'slow'/'stress' suites (not the fast unit lane).
+  test('memory_sync_service_stress', catch2_memory_sync_service_exe,
+    suite: ['catch2', 'slow', 'stress', 'memory-sync', 'concurrency'],
+    args: ['[stress]'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_RUN_STRESS_TESTS': '1',
+    },
+    timeout: 120
   )
 
   test('memory_sync_config', catch2_memory_sync_config_exe,
@@ -3671,14 +3732,14 @@ if catch2_dep.found()
 
   test('storage_submodule', catch2_storage_submodule_exe,
     suite: ['catch2', 'unit', 'storage', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
   )
 
   test('storage_submodule_slow', catch2_storage_submodule_exe,
     suite: ['catch2', 'slow', 'storage', 'concurrency'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
   )
@@ -3706,14 +3767,14 @@ if catch2_dep.found()
 
   test('mcp_submodule', catch2_mcp_submodule_exe,
     suite: ['catch2', 'unit', 'mcp', 'concurrency'],
-    args: ['~[slow]', '--allow-running-no-tests'],
+    args: ['~[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
   )
 
   test('mcp_submodule_slow', catch2_mcp_submodule_exe,
     suite: ['catch2', 'slow', 'mcp', 'concurrency'],
-    args: ['[slow]', '--allow-running-no-tests'],
+    args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
   )
@@ -3789,6 +3850,10 @@ if catch2_dep.found()
 
 endif
 
+# Table keys beyond the basics:
+#   'posix_only': true  every selected case SKIPs on Windows; Catch2 exits 4 when all selected
+#                       cases skip, so the test is not declared there. Prefer this over
+#                       --allow-running-no-tests, which also passes a run that selected nothing.
 foreach t : catch2_test_table
   t_exe = executable(t.get('target', 'catch2_' + t['name']), t['sources'],
     include_directories: incs,
@@ -3797,11 +3862,38 @@ foreach t : catch2_test_table
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-  test(t['name'], t_exe,
-    suite: t['suite'],
-    args: t.get('args', []),
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: t['timeout'],
-    is_parallel: t.get('is_parallel', true),
-  )
+  if not t.get('posix_only', false) or daemon_ipc_supported
+    test(t['name'], t_exe,
+      suite: t['suite'],
+      args: t.get('args', []),
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path } + t.get('env', {}),
+      timeout: t['timeout'],
+      is_parallel: t.get('is_parallel', true),
+    )
+  endif
 endforeach
+
+# Catch2 registration guard: every test() in a 'catch2' suite must select at least one case.
+# The registrations are read from this build directory's Meson introspection data at run time,
+# so the check covers every subdir and cannot drift from what is declared. It lists cases with
+# the registered binaries, so it belongs to the integration lane, where the full test build
+# exists; an unbuilt registered binary fails it (ad-hoc runs on a partial build: --allow-missing).
+test('catch2_filter_policy_unit',
+  python_exe,
+  args: [files('scripts/test_check_test_filters.py')],
+  suite: ['unit', 'policy', 'catch2-filters'],
+  timeout: 30,
+)
+# Without Catch2 there are no Catch2 registrations to check (the script would report "nothing
+# checked" and fail a valid configuration), so the guard exists only alongside them.
+if catch2_dep.found()
+  test('catch2_filter_policy',
+    python_exe,
+    args: [
+      files('scripts/check_test_filters.py'),
+      '--build-dir', meson.project_build_root(),
+    ],
+    suite: ['integration', 'policy', 'catch2-filters'],
+    timeout: 600,
+  )
+endif

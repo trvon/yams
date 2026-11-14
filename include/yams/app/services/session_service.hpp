@@ -78,8 +78,16 @@ public:
     virtual void create(const std::string& name, const std::string& desc) = 0;
     virtual void open(const std::string& name) = 0;
     virtual void close() = 0;
+    /// Forget which session is current without closing it or changing its state.
+    virtual void clearCurrent() {}
     virtual SessionState getState(const std::string& name) const = 0;
     virtual std::optional<SessionInfo> getSessionInfo(const std::string& name) const = 0;
+    /// The session's uuid, read from its file alone. getSessionInfo() also counts the
+    /// session's documents, which is too much for a caller that polls.
+    virtual std::string sessionUuid(const std::string& name) const {
+        (void)name;
+        return {};
+    }
     virtual std::vector<SessionInfo> listAllSessions() const = 0;
     virtual MergeResult merge(const std::string& name, const MergeOptions& opts = {}) = 0;
     virtual std::size_t discard(const std::string& name, bool confirm = false) = 0;

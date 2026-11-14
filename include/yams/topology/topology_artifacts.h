@@ -341,6 +341,14 @@ struct ClusterArtifact {
     std::vector<float> centroidEmbedding{};
     // Additional bounded representatives; centroidEmbedding is always the implicit first one.
     std::vector<ClusterRoutingRepresentative> routingRepresentatives{};
+    /// Query-fitted routing vector (see topology_route_fit.h). A cluster that carries one of
+    /// the query's dimension is scored on the dense route by the dot product of the unit query
+    /// with it, in place of cosine to its centroid and representatives. Its length is
+    /// meaningful, so it is never normalized. Both scores estimate the same quantity (the best
+    /// member's cosine to the query), so fitted and unfitted clusters rank on one scale; small
+    /// clusters are left unfitted because their centroid is already that estimate.
+    /// In-memory only: no codec or fingerprint reads it, and a decoded snapshot has none.
+    std::vector<float> fittedRouteVector{};
     /// Walk order over the hash-sorted `memberDocumentHashes`: `orderedMembers[i]` is the index
     /// of the i-th member along the walk, each index exactly once. Empty, with `orderKind` None,
     /// when no order was requested or the cluster has fewer than two members. Persisted in the
@@ -358,6 +366,22 @@ struct ClusterRoad {
     double weight{0.0};
 
     friend bool operator==(const ClusterRoad&, const ClusterRoad&) = default;
+};
+
+/// How the fitted route vectors of a batch were produced (see topology_route_fit.h).
+struct RouteFitProvenance {
+    double chosenStrength{0.0};
+    /// Held-out routing recall under centroids and under the adopted vectors.
+    double centroidHoldoutRecall{0.0};
+    double fittedHoldoutRecall{0.0};
+    uint32_t fitQueries{0};
+    uint32_t holdoutQueries{0};
+    /// Training queries by source: the local query log, and queries generated from documents.
+    uint32_t loggedQueries{0};
+    uint32_t generatedQueries{0};
+    /// `TopologyArtifactBatch::topologyEpoch` of the batch the fit ran on.
+    uint64_t fittedAtEpoch{0};
+    friend bool operator==(const RouteFitProvenance&, const RouteFitProvenance&) = default;
 };
 
 struct TopologyArtifactBatch {
@@ -408,6 +432,13 @@ struct TopologyArtifactBatch {
     /// dropped (see attachTopologyMemberOrders). Only the offending cluster loses its order; the
     /// roads and the other orders stay.
     std::string orderUnavailableReason;
+    /// Provenance of the clusters' `fittedRouteVector`s; default when none are attached. The
+    /// vectors and this record persist in the route-fit sidecar node, never in the main
+    /// snapshot payload or any fingerprint.
+    RouteFitProvenance routeFit{};
+    /// Why a stored route-fit sidecar was not attached (stable reason token), else empty.
+    /// Routing then uses centroids; a bad sidecar never makes the snapshot unusable.
+    std::string routeFitUnavailableReason;
 };
 
 struct TopologyUpdateStats {

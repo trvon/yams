@@ -1021,6 +1021,69 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
     }
 }
 
+TEST_CASE("DocumentService - Listing applies time filters", "[document][service][listing]") {
+    // `yams list --since 1h` returned every document: the request carried the filters and
+    // the service never looked at them.
+    DocumentFixture fixture;
+    ListDocumentsRequest everything;
+    everything.limit = 100;
+    auto all = fixture.documentService_->list(everything);
+    REQUIRE(all);
+    REQUIRE(all.value().documents.size() >= 2);
+
+    const auto countFor = [&](const ListDocumentsRequest& request) {
+        auto listed = fixture.documentService_->list(request);
+        REQUIRE(listed);
+        return listed.value().documents.size();
+    };
+    const auto total = all.value().documents.size();
+    // Every fixture document was created, modified and indexed between these two.
+    const std::string longAgo = "2000-01-01T00:00:00Z";
+    const std::string farAhead = "2100-01-01T00:00:00Z";
+
+    SECTION("since keeps only what changed after the cutoff") {
+        auto request = everything;
+        request.since = farAhead;
+        CHECK(countFor(request) == 0);
+        request.since = longAgo;
+        CHECK(countFor(request) == total);
+    }
+    SECTION("before filters keep only what is older") {
+        for (auto field :
+             {&ListDocumentsRequest::indexedBefore, &ListDocumentsRequest::modifiedBefore,
+              &ListDocumentsRequest::createdBefore}) {
+            auto request = everything;
+            request.*field = longAgo;
+            CHECK(countFor(request) == 0);
+            request.*field = farAhead;
+            CHECK(countFor(request) == total);
+        }
+    }
+    SECTION("after filters keep only what is newer") {
+        for (auto field :
+             {&ListDocumentsRequest::indexedAfter, &ListDocumentsRequest::modifiedAfter,
+              &ListDocumentsRequest::createdAfter}) {
+            auto request = everything;
+            request.*field = farAhead;
+            CHECK(countFor(request) == 0);
+            request.*field = longAgo;
+            CHECK(countFor(request) == total);
+        }
+    }
+    SECTION("relative times are understood") {
+        auto request = everything;
+        request.since = "1h";
+        CHECK(countFor(request) == total);
+    }
+    SECTION("a time that cannot be read is an error, not an unfiltered list") {
+        auto request = everything;
+        request.since = "the day before never";
+        auto listed = fixture.documentService_->list(request);
+        REQUIRE_FALSE(listed);
+        CHECK(listed.error().code == ErrorCode::InvalidArgument);
+    }
+}
+
 TEST_CASE("DocumentService - Listing stops when the host cancels",
           "[document][service][listing][cancellation]") {
     DocumentFixture fixture;
@@ -1071,7 +1134,17 @@ TEST_CASE("DocumentService - Retrieval", "[document][service][retrieval]") {
 
         REQUIRE(result);
         REQUIRE(result.value().document.has_value());
-        CHECK((result.value().document->hash == fixture.testHash1_));
+        const auto& document = *result.value().document;
+        CHECK(document.hash == fixture.testHash1_);
+        CHECK(document.name == "test1.txt");
+        CHECK(document.fileName == "test1.txt");
+        CHECK(document.fileType == "text");
+        CHECK(document.created > 0);
+        CHECK(document.modified > 0);
+        CHECK(document.indexed > 0);
+        CHECK(document.metadata.at("owner") == "trace");
+        CHECK(document.metadata.at("task") == "alpha");
+        CHECK(document.metadata.at("source") == "note");
     }
 
     SECTION("Retrieve with compressed content and metadata") {

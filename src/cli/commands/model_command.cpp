@@ -34,9 +34,9 @@
 #include <yams/config/static_embedding_table.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/downloader/downloader.hpp>
-#include <yams/integrity/repair_utils.h>
 #include <yams/profiling.h>
 #include <yams/vector/simeon_embedding_backend.h>
+#include <yams/vector/vector_schema_repair.h>
 
 namespace yams::cli {
 
@@ -1094,7 +1094,7 @@ private:
                 try {
                     auto dataDir = cli_ ? cli_->getDataPath() : std::filesystem::path{};
                     if (!dataDir.empty() && props.dim > 0) {
-                        auto al = yams::integrity::ensureVectorSchemaAligned(
+                        auto al = yams::vector::ensureVectorSchemaAligned(
                             dataDir, props.dim, /*recreateIfMismatch=*/true);
                         if (!al) {
                             spdlog::warn("Vector schema alignment failed: {}", al.error().message);
