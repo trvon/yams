@@ -1278,6 +1278,19 @@ bool write_config_values(const std::filesystem::path& config_path,
             }
         }
 
+        // parse_simple_toml decoded `\\` and `\"`; encode them again so the rewrite is exact.
+        const auto quoted = [](const std::string& value) {
+            std::string out = "\"";
+            for (const char c : value) {
+                if (c == '\\' || c == '"') {
+                    out.push_back('\\');
+                }
+                out.push_back(c);
+            }
+            out.push_back('"');
+            return out;
+        };
+
         // Write back to file
         std::ofstream file(config_path, std::ios::trunc);
         if (!file) {
@@ -1287,7 +1300,7 @@ bool write_config_values(const std::filesystem::path& config_path,
         // Write top-level keys first (if any)
         if (auto it = sections.find(""); it != sections.end()) {
             for (const auto& [key, val] : it->second) {
-                file << key << " = \"" << val << "\"\n";
+                file << key << " = " << quoted(val) << "\n";
             }
             sections.erase(it);
         }
@@ -1296,7 +1309,7 @@ bool write_config_values(const std::filesystem::path& config_path,
         for (const auto& [section, kvs] : sections) {
             file << "\n[" << section << "]\n";
             for (const auto& [key, val] : kvs) {
-                file << key << " = \"" << val << "\"\n";
+                file << key << " = " << quoted(val) << "\n";
             }
         }
 

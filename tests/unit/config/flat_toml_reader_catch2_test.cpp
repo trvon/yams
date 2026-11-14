@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 
 namespace {
@@ -126,4 +127,27 @@ TEST_CASE_METHOD(FlatTomlFixture, "config path aliases share one documented prec
     REQUIRE(runtimePaths.has_value());
     CHECK((runtimePaths.value().configFile.value == canonical));
     CHECK((runtimePaths.value().configFile.sourceName == "YAMS_CONFIG"));
+}
+
+TEST_CASE_METHOD(FlatTomlFixture,
+                 "writing config values keeps existing escaped values and escapes new ones",
+                 "[config][flat_toml][escapes][write]") {
+    // write_config_values reads the file, merges, and rewrites every value. Once reads decode
+    // escapes, writes must re-encode them, or setting one key corrupts an init-written path.
+    const auto path = write(R"toml(
+[core]
+data_dir = "C:\\Users\\alice\\yams"
+greeting = "say \"hi\""
+)toml");
+
+    REQUIRE(yams::config::write_config_values(path, {{"core.added", R"(D:\corpus "new")"}}));
+
+    const auto values = yams::config::parse_simple_toml(path);
+    CHECK((values.at("core.data_dir") == R"(C:\Users\alice\yams)"));
+    CHECK((values.at("core.greeting") == R"(say "hi")"));
+    CHECK((values.at("core.added") == R"(D:\corpus "new")"));
+
+    std::ifstream in(path);
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(text.find(R"(data_dir = "C:\\Users\\alice\\yams")") != std::string::npos);
 }
