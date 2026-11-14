@@ -1095,7 +1095,7 @@ std::vector<std::filesystem::path> parse_path_list(const std::string& raw) {
     std::string item;
     const auto appendItem = [&] {
         trim(item);
-        item = unquote(item);
+        item = unquote_toml_value(item);
         if (!item.empty()) {
             out.emplace_back(expand_tilde(item));
         }
@@ -1178,14 +1178,14 @@ std::map<std::string, std::string> parse_simple_toml(const std::filesystem::path
             trim(value);
 
             // Remove inline comments while respecting the active quote type and escaped double
-            // quotes. The flat reader deliberately preserves escape sequences in returned values.
+            // quotes, then decode the escapes YAMS writes (see unquote_toml_value).
             if (const auto comment = findFlatTomlComment(value);
                 comment != std::string_view::npos) {
                 value.resize(comment);
                 trim(value);
             }
 
-            value = unquote(value);
+            value = unquote_toml_value(value);
             config[currentSection + key] = value;
         }
     }
@@ -1278,6 +1278,19 @@ bool write_config_values(const std::filesystem::path& config_path,
             }
         }
 
+        // parse_simple_toml decoded `\\` and `\"`; encode them again so the rewrite is exact.
+        const auto quoted = [](const std::string& value) {
+            std::string out = "\"";
+            for (const char c : value) {
+                if (c == '\\' || c == '"') {
+                    out.push_back('\\');
+                }
+                out.push_back(c);
+            }
+            out.push_back('"');
+            return out;
+        };
+
         // Write back to file
         std::ofstream file(config_path, std::ios::trunc);
         if (!file) {
@@ -1287,7 +1300,7 @@ bool write_config_values(const std::filesystem::path& config_path,
         // Write top-level keys first (if any)
         if (auto it = sections.find(""); it != sections.end()) {
             for (const auto& [key, val] : it->second) {
-                file << key << " = \"" << val << "\"\n";
+                file << key << " = " << quoted(val) << "\n";
             }
             sections.erase(it);
         }
@@ -1296,7 +1309,7 @@ bool write_config_values(const std::filesystem::path& config_path,
         for (const auto& [section, kvs] : sections) {
             file << "\n[" << section << "]\n";
             for (const auto& [key, val] : kvs) {
-                file << key << " = \"" << val << "\"\n";
+                file << key << " = " << quoted(val) << "\n";
             }
         }
 
