@@ -160,7 +160,13 @@ class CompletionRuntimeTests(unittest.TestCase):
             os.close(master)
             os.close(read_fd)
             if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    # macOS refuses killpg for a group whose members are already exiting.
+                    process.kill()
             process.wait(timeout=5)
 
 

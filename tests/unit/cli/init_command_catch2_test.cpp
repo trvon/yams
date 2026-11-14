@@ -543,8 +543,18 @@ TEST_CASE("InitCommand: initializing another data directory keeps the existing c
         std::ifstream in(helper.configPath);
         return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     };
+    // The config stores paths as TOML strings, so Windows backslashes appear doubled.
+    const auto asToml = [](const fs::path& path) {
+        std::string escaped;
+        for (const char c : path.string()) {
+            if (c == '\\')
+                escaped += '\\';
+            escaped += c;
+        }
+        return escaped;
+    };
     const auto before = readConfig();
-    REQUIRE(before.find(helper.dataDir.string()) != std::string::npos);
+    REQUIRE(before.find(asToml(helper.dataDir)) != std::string::npos);
     const auto scratch = helper.tempDir / "scratch-store";
 
     SECTION("without --force the config is left exactly as it was") {
@@ -559,7 +569,7 @@ TEST_CASE("InitCommand: initializing another data directory keeps the existing c
     SECTION("--force replaces it") {
         REQUIRE(helper.runCommand({"yams", "--data-dir", scratch.string(), "init", "--force",
                                    "--non-interactive", "--no-keygen"}) == 0);
-        CHECK(readConfig().find(scratch.string()) != std::string::npos);
+        CHECK(readConfig().find(asToml(scratch)) != std::string::npos);
     }
 }
 

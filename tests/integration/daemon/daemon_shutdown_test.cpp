@@ -110,12 +110,14 @@ TEST_CASE("Daemon shutdown timing", "[daemon][shutdown][timing]") {
     REQUIRE(connectWithRetry(client));
 
     SECTION("shutdown request returns immediately") {
-        auto start = std::chrono::steady_clock::now();
         auto result = yams::cli::run_sync(client.shutdown(true), 5s);
-        auto elapsed = std::chrono::steady_clock::now() - start;
-
         REQUIRE(result.has_value());
-        REQUIRE((elapsed < 500ms));
+
+        // The reply must not wait for teardown. A wall-clock bound flaked on shared macOS
+        // runners: delivering the request alone took over 400 ms there, while the teardown it
+        // has to beat took about a second. The daemon's own state tells the two apart.
+        REQUIRE(harness.daemon() != nullptr);
+        CHECK(harness.daemon()->getLifecycle().snapshot().state != LifecycleState::Stopped);
     }
 
     SECTION("shutdown request still works after restarting the same daemon instance") {
