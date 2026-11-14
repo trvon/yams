@@ -35,6 +35,7 @@
 #include <yams/metadata/query_helpers.h>
 #include <yams/vector/vector_database.h>
 
+#include <tuple>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -2660,6 +2661,39 @@ public:
             queryOpts.limit =
                 queryOpts.limit > 0 ? std::min(queryOpts.limit, *req.recent) : *req.recent;
         queryOpts.offset = std::max(0, req.offset);
+        // Time filters arrive as text (ISO 8601, "7d", "yesterday"). They were carried in the
+        // request and never applied, so `list --since 1h` returned everything. A value that
+        // cannot be read is an error: an unfiltered list would look like a valid answer.
+        {
+            const auto bound = [](const std::string& text, std::string_view name,
+                                  std::optional<int64_t>& out) -> Result<void> {
+                if (text.empty()) {
+                    return {};
+                }
+                // The same parser search uses for its time filters.
+                auto parsed = utils::parseTimeExpression(text);
+                if (!parsed) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "Invalid time for " + std::string(name) + ": '" + text + "' (" +
+                                     parsed.error().message + ")"};
+                }
+                out = parsed.value();
+                return {};
+            };
+            for (const auto& [text, name, out] :
+                 {std::tuple<const std::string&, std::string_view, std::optional<int64_t>&>{
+                      req.createdAfter, "created-after", queryOpts.createdAfter},
+                  {req.createdBefore, "created-before", queryOpts.createdBefore},
+                  {req.modifiedAfter, "modified-after", queryOpts.modifiedAfter},
+                  {req.modifiedBefore, "modified-before", queryOpts.modifiedBefore},
+                  {req.indexedAfter, "indexed-after", queryOpts.indexedAfter},
+                  {req.indexedBefore, "indexed-before", queryOpts.indexedBefore},
+                  {req.since, "since", queryOpts.changedSince}}) {
+                if (auto applied = bound(text, name, out); !applied) {
+                    return applied.error();
+                }
+            }
+        }
         queryOpts.pathsOnly = req.pathsOnly;
 
         if (auto normExt = normalizeSingleListExtension(req.extension))
