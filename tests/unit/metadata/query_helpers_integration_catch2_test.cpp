@@ -199,6 +199,8 @@ TEST_CASE("QueryHelpersIntegration: globs with a literal underscore match exactl
     REQUIRE((repo.insertDocument(make_doc("/src/cli/initXcommand.cpp", "hashU2")).has_value()));
     REQUIRE((repo.insertDocument(make_doc("/src/cli/grep_command.cpp", "hashU3")).has_value()));
     REQUIRE((repo.insertDocument(make_doc("/src/cli/status.cpp", "hashU4")).has_value()));
+    REQUIRE((repo.insertDocument(make_doc("/src/cli/100%done.txt", "hashU5")).has_value()));
+    REQUIRE((repo.insertDocument(make_doc("/src/cli/100Xdone.txt", "hashU6")).has_value()));
     const std::set<std::string> initOnly{"/src/cli/init_command.cpp"};
     const std::set<std::string> commands{"/src/cli/init_command.cpp", "/src/cli/grep_command.cpp"};
 
@@ -208,6 +210,10 @@ TEST_CASE("QueryHelpersIntegration: globs with a literal underscore match exactl
              {"/src/cli/init_*", initOnly},
              {"*_command.cpp", commands},
              {"*/?nit_command.cpp", initOnly},
+             // Translated to a reversed-path contains query, where `_` is also a wildcard.
+             {"*/init_command.cpp", initOnly},
+             // No glob wildcard at all: a literal '%' must not become a SQL wildcard.
+             {"/src/cli/100%done.txt", {"/src/cli/100%done.txt"}},
          }) {
         INFO("glob=" << glob);
         auto documents = queryDocumentsByGlobPatterns(repo, {glob});

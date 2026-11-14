@@ -244,11 +244,21 @@ bool globMatchesLikeLiterally(std::string_view text, std::string_view glob) {
     return g == glob.size();
 }
 
-// Only the generic LIKE translation over-matches a literal '%' or '_'; the prefix, extension
-// and file-name translations compare those characters exactly.
+// The generic LIKE and the contains (`%/name`) translations both bind the text to a LIKE, where a
+// literal '%' or '_' over-matches; the prefix and extension translations compare it exactly.
 bool needsExactGlobRecheck(std::string_view globPattern, const DocumentQueryOptions& sqlOptions) {
     return globPattern.find_first_of("%_") != std::string_view::npos &&
-           sqlOptions.likePattern.has_value();
+           (sqlOptions.likePattern.has_value() || sqlOptions.containsFragment.has_value());
+}
+
+// A pattern with no glob wildcard names one path. Looked up through the SQL-LIKE helper, a
+// literal '%' in it became a wildcard, so look it up exactly instead.
+DocumentQueryOptions exactPathQuery(std::string_view path, int limit) {
+    DocumentQueryOptions opts;
+    opts.exactPath = computePathDerivedValues(std::string(path)).normalizedPath;
+    if (limit > 0)
+        opts.limit = limit;
+    return opts;
 }
 
 template <typename Row>
@@ -260,6 +270,9 @@ void keepExactGlobMatches(std::vector<Row>& rows, std::string_view globPattern) 
 Result<std::vector<DocumentInfo>>
 queryDocumentsForGlobPattern(IMetadataRepository& repo, std::string_view globPattern, int limit) {
     if (!hasGlobWildcards(globPattern)) {
+        if (globPattern.find('%') != std::string_view::npos) {
+            return repo.queryDocuments(exactPathQuery(globPattern, limit));
+        }
         return queryDocumentsByPattern(repo, std::string(globPattern), limit);
     }
 
@@ -288,6 +301,13 @@ Result<std::vector<GrepCandidateProjection>>
 queryGrepCandidatesForGlobPattern(IMetadataRepository& repo, std::string_view globPattern,
                                   int limit) {
     if (!hasGlobWildcards(globPattern)) {
+        if (globPattern.find('%') != std::string_view::npos) {
+            auto opts = exactPathQuery(globPattern, limit);
+            opts.usePathLocations = true;
+            opts.currentPathsOnly = true;
+            opts.excludeBinaryMimeTypes = true;
+            return repo.queryDocumentsForGrepCandidates(opts);
+        }
         return queryGrepCandidatesByPattern(repo, std::string(globPattern), limit);
     }
 
