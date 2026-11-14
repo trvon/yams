@@ -214,6 +214,14 @@ public:
                 return handleAlreadyInitialized(dataPath, configPath);
             }
 
+            // A config already exists, but not for this data directory (that was the check
+            // above). Writing a fresh template here replaced the user's settings and pointed
+            // every later command, and the daemon, at whatever store was being set up, such
+            // as a scratch directory. Set the store up and leave the config alone.
+            if (fs::exists(configPath) && !force_) {
+                return initializeAdditionalStore(dataPath, configPath);
+            }
+
             // Fresh setup (including --force re-init): collect the tuning profile once here.
             if (!nonInteractive_) {
                 tuningProfile_ = promptForTuningProfile();
@@ -575,6 +583,22 @@ private:
         opts.defaultIndex = 0;
         auto choice = prompt_choice("\nSelect a tuning profile:", items, opts);
         return items[choice].value;
+    }
+
+    Result<void> initializeAdditionalStore(const fs::path& dataPath, const fs::path& configPath) {
+        if (auto ensured = cli_->ensureStorageInitialized(); !ensured) {
+            return ensured;
+        }
+        const auto configuredDataDir = config::parse_config_value(configPath, "core", "data_dir");
+        std::cout << ui::status_ok("Store initialized at " + dataPath.string()) << "\n"
+                  << "Existing config kept: " << configPath.string();
+        if (!configuredDataDir.empty()) {
+            std::cout << " (data_dir = " << configuredDataDir << ")";
+        }
+        std::cout << "\nTo use the new store pass --data-dir " << dataPath.string()
+                  << " or set YAMS_DATA_DIR. To replace the config with one for it, re-run "
+                     "with --force.\n";
+        return Result<void>();
     }
 
     void maybeBootstrapProjectSession() {
