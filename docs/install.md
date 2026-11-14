@@ -123,6 +123,11 @@ yams daemon status
 `--no-keygen`. The CLI starts a per-user daemon on demand; you do not need to
 run a service for normal use.
 
+Running `yams init` again with another data directory (`yams --data-dir
+<dir> init`) sets up a store there and leaves your existing config alone; use
+that store with `--data-dir` or `YAMS_DATA_DIR`. `--force` replaces the config
+with one for the new store.
+
 ## Where things live
 
 YAMS resolves every path once, in the same order for the CLI, daemon and MCP
@@ -282,7 +287,7 @@ yams daemon doctor
 
 ## Settings worth knowing
 
-All settings live in `config.toml`. [`examples/config.toml`](../examples/config.toml)
+All settings live in `config.toml`. [`examples/config.toml`](https://github.com/trvon/yams/blob/main/examples/config.toml)
 lists the full set; copy only the sections you change, because a copied
 `data_dir` or socket path replaces the defaults above.
 
