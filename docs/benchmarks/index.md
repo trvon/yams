@@ -13,7 +13,7 @@ Max+ PRO 395, Linux, optimized build.
 | Corpus | Documents | Queries | nDCG@10 | Recall@10 | MRR |
 |---|---:|---:|---:|---:|---:|
 | BEIR scifact | 5,183 | 300 | 67.3 | 79.1 | 64.1 |
-| BEIR nfcorpus | 3,633 | 3,237 | 31.4 | 15.0 | 52.0 |
+| BEIR nfcorpus | 3,633 | 323 | 31.4 | 15.0 | 52.0 |
 
 Repeats varied by at most 0.35 points. nfcorpus recall is low for every system:
 its queries have many relevant documents each, so ten results cannot hold most
@@ -74,7 +74,9 @@ unzip scifact.zip && cd -
 meson configure build/release -Dbuild-tests=true -Dbuild-benchmarks=true
 meson compile -C build/release retrieval_quality_bench
 
-YAMS_BENCH_DATASET=scifact build/release/tests/benchmarks/retrieval_quality_bench
+# The guard keeps the benchmark's isolated daemon from resetting shared IO state
+YAMS_TEST_SAFE_SINGLE_INSTANCE=1 YAMS_BENCH_DATASET=scifact \
+  build/release/tests/benchmarks/retrieval_quality_bench
 ```
 
 Raw results land under `build/benchmarks/` (not tracked). The
