@@ -2184,6 +2184,7 @@ if catch2_dep.found()
       'unit/cli/error_format_contract_catch2_test.cpp',
       'unit/cli/exit_code_contract_catch2_test.cpp',
       'unit/cli/grep_output_contract_catch2_test.cpp',
+      'unit/cli/list_time_filters_catch2_test.cpp',
       'unit/cli/watch_command_catch2_test.cpp',
       # init_command_catch2_test.cpp runs in its own cli_init_command target (serial).
       'unit/cli/name_resolution_contract_catch2_test.cpp',
