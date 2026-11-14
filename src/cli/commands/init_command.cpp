@@ -585,10 +585,14 @@ private:
         return items[choice].value;
     }
 
-    Result<void> initializeAdditionalStore(const fs::path& dataPath, const fs::path& configPath) {
+    Result<void> initializeAdditionalStore(const fs::path& requestedPath,
+                                           const fs::path& configPath) {
         if (auto ensured = cli_->ensureStorageInitialized(); !ensured) {
             return ensured;
         }
+        // Storage bootstrap may fall back to another directory (an S3 config with a local
+        // fallback); report where the store actually is.
+        const fs::path dataPath = cli_ ? cli_->getDataPath() : requestedPath;
         const auto configuredDataDir = config::parse_config_value(configPath, "core", "data_dir");
         std::cout << ui::status_ok("Store initialized at " + dataPath.string()) << "\n"
                   << "Existing config kept: " << configPath.string();
