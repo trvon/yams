@@ -132,6 +132,23 @@ static std::string normalizeForGlobMatch(const std::string& value) {
 
 using GrepClock = std::chrono::steady_clock;
 
+// The path filter below matches an include pattern without wildcards as a substring of the
+// path. The SQL candidate query treats such a pattern as an exact path, so `--include
+// init_command.cpp` found nothing; widen it to the same substring match.
+static std::vector<std::string>
+includePatternsForCandidateQuery(const std::vector<std::string>& patterns) {
+    std::vector<std::string> out;
+    out.reserve(patterns.size());
+    for (const auto& pattern : patterns) {
+        if (pattern.empty() || yams::common::hasWildcard(pattern)) {
+            out.push_back(pattern);
+        } else {
+            out.push_back("*" + pattern + "*");
+        }
+    }
+    return out;
+}
+
 static void recordPhaseMetric(std::map<std::string, std::int64_t>& phaseTimings,
                               const char* statKey, const char* plotKey,
                               const GrepClock::time_point start) {
@@ -521,7 +538,8 @@ public:
                     auto patternDocsRes = retryMetadataOp(
                         [&]() {
                             return metadata::queryGrepCandidatesByGlobPatterns(
-                                *ctx_.metadataRepo, req.includePatterns, 0);
+                                *ctx_.metadataRepo,
+                                includePatternsForCandidateQuery(req.includePatterns), 0);
                         },
                         4, std::chrono::milliseconds(25), &metadataTelemetry);
                     if (patternDocsRes) {
@@ -540,8 +558,9 @@ public:
             } else if (!req.includePatterns.empty()) {
                 auto patternDocsRes = retryMetadataOp(
                     [&]() {
-                        return metadata::queryGrepCandidatesByGlobPatterns(*ctx_.metadataRepo,
-                                                                           req.includePatterns, 0);
+                        return metadata::queryGrepCandidatesByGlobPatterns(
+                            *ctx_.metadataRepo,
+                            includePatternsForCandidateQuery(req.includePatterns), 0);
                     },
                     4, std::chrono::milliseconds(25), &metadataTelemetry);
                 if (patternDocsRes) {

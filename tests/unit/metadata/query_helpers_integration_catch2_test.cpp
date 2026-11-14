@@ -181,3 +181,44 @@ TEST_CASE("QueryHelpersIntegration: query documents by pattern basic",
     std::error_code ec;
     std::filesystem::remove(dbPath, ec);
 }
+
+TEST_CASE("QueryHelpersIntegration: globs with a literal underscore match exactly",
+          "[unit][metadata][query_helpers][glob]") {
+    // `yams grep --include "*init_command.cpp"` found nothing: the glob was translated to
+    // `%init\_command.cpp`, and the LIKE clause has no ESCAPE, so `\_` matched a literal
+    // backslash. `initXcommand.cpp` checks that `_` does not become a one-character wildcard.
+    auto dbPath = make_temp_db();
+    ConnectionPoolConfig cfg;
+    cfg.enableWAL = false;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 2;
+    ConnectionPool pool(dbPath.string(), cfg);
+    REQUIRE((pool.initialize().has_value()));
+    MetadataRepository repo(pool);
+    REQUIRE((repo.insertDocument(make_doc("/src/cli/init_command.cpp", "hashU1")).has_value()));
+    REQUIRE((repo.insertDocument(make_doc("/src/cli/initXcommand.cpp", "hashU2")).has_value()));
+    REQUIRE((repo.insertDocument(make_doc("/src/cli/grep_command.cpp", "hashU3")).has_value()));
+    REQUIRE((repo.insertDocument(make_doc("/src/cli/status.cpp", "hashU4")).has_value()));
+    const std::set<std::string> initOnly{"/src/cli/init_command.cpp"};
+    const std::set<std::string> commands{"/src/cli/init_command.cpp", "/src/cli/grep_command.cpp"};
+
+    for (const auto& [glob, expected] : std::vector<std::pair<std::string, std::set<std::string>>>{
+             {"*init_command.cpp", initOnly},
+             {"**/init_command.cpp", initOnly},
+             {"/src/cli/init_*", initOnly},
+             {"*_command.cpp", commands},
+             {"*/?nit_command.cpp", initOnly},
+         }) {
+        INFO("glob=" << glob);
+        auto documents = queryDocumentsByGlobPatterns(repo, {glob});
+        REQUIRE((documents.has_value()));
+        CHECK((collectPaths(documents.value()) == expected));
+        auto candidates = queryGrepCandidatesByGlobPatterns(repo, {glob});
+        REQUIRE((candidates.has_value()));
+        CHECK((collectPaths(candidates.value()) == expected));
+    }
+
+    pool.shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}

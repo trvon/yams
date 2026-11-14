@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <numeric>
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 #include <yams/metadata/query_helpers.h>
 
 namespace yams::metadata::sql {
@@ -186,11 +188,10 @@ std::string globToSqlLike(const std::string& glob) {
         } else if (c == '?') {
             // ? in glob = _ in SQL LIKE (single character)
             result += '_';
-        } else if (c == '%' || c == '_') {
-            // Escape SQL LIKE wildcards if they appear literally in glob
-            result += '\\';
-            result += c;
         } else {
+            // A literal '%' or '_' stays as written. The LIKE clause has no ESCAPE, so escaping
+            // them made `\_` match a backslash; left alone they match a superset, and
+            // keepExactGlobMatches() removes the extra rows.
             result += c;
         }
     }
@@ -200,6 +201,60 @@ std::string globToSqlLike(const std::string& glob) {
 
 bool hasGlobWildcards(std::string_view globPattern) {
     return globPattern.find_first_of("*?") != std::string_view::npos;
+}
+
+char asciiLower(char c) {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+// Matches a glob with the same rules as the LIKE clause it was translated to (whole string,
+// ASCII case-insensitive, `*` and `**` match any run including '/', `?` one character), but
+// with '%' and '_' taken literally.
+bool globMatchesLikeLiterally(std::string_view text, std::string_view glob) {
+    std::size_t t = 0;
+    std::size_t g = 0;
+    std::size_t starGlob = std::string_view::npos;
+    std::size_t starText = 0;
+    while (t < text.size()) {
+        if (g < glob.size() && glob[g] == '*') {
+            const std::size_t first = g;
+            while (g < glob.size() && glob[g] == '*') {
+                ++g;
+            }
+            // globToSqlLike drops the '/' after `**`, so it is optional here too.
+            if (g - first >= 2 && g < glob.size() && glob[g] == '/') {
+                ++g;
+            }
+            starGlob = g;
+            starText = t;
+        } else if (g < glob.size() &&
+                   (glob[g] == '?' || asciiLower(glob[g]) == asciiLower(text[t]))) {
+            ++g;
+            ++t;
+        } else if (starGlob != std::string_view::npos) {
+            g = starGlob;
+            t = ++starText;
+        } else {
+            return false;
+        }
+    }
+    while (g < glob.size() && glob[g] == '*') {
+        ++g;
+    }
+    return g == glob.size();
+}
+
+// Only the generic LIKE translation over-matches a literal '%' or '_'; the prefix, extension
+// and file-name translations compare those characters exactly.
+bool needsExactGlobRecheck(std::string_view globPattern, const DocumentQueryOptions& sqlOptions) {
+    return globPattern.find_first_of("%_") != std::string_view::npos &&
+           sqlOptions.likePattern.has_value();
+}
+
+template <typename Row>
+void keepExactGlobMatches(std::vector<Row>& rows, std::string_view globPattern) {
+    std::erase_if(
+        rows, [&](const Row& row) { return !globMatchesLikeLiterally(row.filePath, globPattern); });
 }
 
 Result<std::vector<DocumentInfo>>
@@ -214,10 +269,19 @@ queryDocumentsForGlobPattern(IMetadataRepository& repo, std::string_view globPat
         opts.likePattern = sqlPattern;
         if (limit > 0)
             opts.limit = limit;
-        return repo.queryDocuments(opts);
+        auto result = repo.queryDocuments(opts);
+        if (result && needsExactGlobRecheck(globPattern, opts)) {
+            keepExactGlobMatches(result.value(), globPattern);
+        }
+        return result;
     }
 
-    return queryDocumentsByPattern(repo, sqlPattern, limit);
+    auto result = queryDocumentsByPattern(repo, sqlPattern, limit);
+    if (result &&
+        needsExactGlobRecheck(globPattern, buildQueryOptionsForSqlLikePattern(sqlPattern))) {
+        keepExactGlobMatches(result.value(), globPattern);
+    }
+    return result;
 }
 
 Result<std::vector<GrepCandidateProjection>>
@@ -239,10 +303,19 @@ queryGrepCandidatesForGlobPattern(IMetadataRepository& repo, std::string_view gl
         opts.excludeBinaryMimeTypes = true;
         if (limit > 0)
             opts.limit = limit;
-        return repo.queryDocumentsForGrepCandidates(opts);
+        auto result = repo.queryDocumentsForGrepCandidates(opts);
+        if (result && needsExactGlobRecheck(globPattern, opts)) {
+            keepExactGlobMatches(result.value(), globPattern);
+        }
+        return result;
     }
 
-    return queryGrepCandidatesByPattern(repo, sqlPattern, limit);
+    auto result = queryGrepCandidatesByPattern(repo, sqlPattern, limit);
+    if (result &&
+        needsExactGlobRecheck(globPattern, buildQueryOptionsForSqlLikePattern(sqlPattern))) {
+        keepExactGlobMatches(result.value(), globPattern);
+    }
+    return result;
 }
 } // namespace
 
