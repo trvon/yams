@@ -20,7 +20,8 @@ EXPECTED_TEXT = {
         f'repository-artifact: "{FORGEJO_URL}"',
     ),
     "mkdocs.yml": (
-        f"repo_url: {FORGEJO_URL}",
+        # The header links to GitHub; the Forgejo mirror stays in the footer links.
+        f"repo_url: {GITHUB_URL}",
         f"link: {GITHUB_URL}",
         f"link: {FORGEJO_URL}",
     ),
