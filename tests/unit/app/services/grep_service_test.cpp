@@ -1033,4 +1033,25 @@ TEST_CASE("GrepService include patterns match file names that contain an undersc
     }
 }
 
+TEST_CASE("GrepService finds every alternative and optional form of a pattern",
+          "[grep][service][regex][prefilter]") {
+    // The line pre-filter required the pattern's longest literal of every line. For
+    // `admitDeferrable|NoSuchSymbolXYZQ` that was NoSuchSymbolXYZQ, so grep found nothing.
+    SKIP_GREP_ON_WINDOWS();
+    GrepFixture fixture;
+    fixture.addDocument("alternation.cpp", "if (admitDeferrable(work)) run();\n");
+    fixture.addDocument("spelling.txt", "the color is red\nthe colour is blue\n");
+
+    const auto count = [&](const char* pattern) {
+        auto result = fixture.grep({.pattern = pattern, .regexOnly = true});
+        REQUIRE(result.has_value());
+        return result.value().totalMatches;
+    };
+    CHECK(count("admitDeferrable|NoSuchSymbolXYZQ") == 1);
+    CHECK(count("NoSuchSymbolXYZQ|admitDeferrable") == 1);
+    CHECK(count("colou?r") == 2);
+    CHECK(count("colou*r") == 2);
+    CHECK(count("(colour|color) is") == 2);
+}
+
 #endif // _WIN32
