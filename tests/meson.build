@@ -2807,6 +2807,15 @@ if catch2_dep.found()
     'timeout': 60,
   }]
 
+  catch2_test_table += [{
+    'name': 'grep_trigram_index',
+    'target': 'catch2_grep_trigram_index',
+    'sources': files('unit/metadata/grep_trigram_index_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'grep'],
+    'timeout': 60,
+  }]
+
 #Metadata Schema Tests(Catch2) - comprehensive schema, CRUD, FTS, migrations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --

@@ -389,6 +389,29 @@ public:
                                                      const std::string& content,
                                                      const std::string& contentType) = 0;
     virtual Result<void> removeFromIndex(int64_t documentId) = 0;
+
+    // Grep trigram index (migration v45). It records, per document, the trigrams of the bytes
+    // grep scans, so grep can skip documents that cannot contain a required literal. Defaults
+    // report it unavailable; grep then scans every document as before.
+    virtual bool grepTrigramIndexAvailable() { return false; }
+    /// Replace a document's indexed trigrams with those of `bytes` (the content grep scans) and
+    /// record `sha256Hash` as the covered content.
+    virtual Result<void> indexGrepTrigrams(int64_t /*documentId*/, std::string_view /*sha256Hash*/,
+                                           std::string_view /*bytes*/) {
+        return Error{ErrorCode::NotSupported, "grep trigram index unavailable"};
+    }
+    virtual Result<void> removeGrepTrigrams(int64_t /*documentId*/) { return {}; }
+    /// Indexed documents and the content hash each was indexed at. A document missing here, or
+    /// covered at a different hash, must be scanned.
+    virtual Result<std::unordered_map<int64_t, std::string>> grepTrigramCoverage() {
+        return std::unordered_map<int64_t, std::string>{};
+    }
+    /// Indexed documents whose bytes contain every trigram of every literal (case-insensitively).
+    /// nullopt when no literal is long enough (3+ characters) to narrow the search.
+    virtual Result<std::optional<std::vector<int64_t>>>
+    grepTrigramMatches(std::span<const std::string> /*literals*/) {
+        return std::optional<std::vector<int64_t>>{};
+    }
     virtual Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>& hashes) = 0;
     virtual Result<bool> hasFtsEntry(int64_t documentId) = 0;
     virtual Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() = 0;
@@ -749,6 +772,13 @@ public:
                                              const std::string& content,
                                              const std::string& contentType) override;
     Result<void> removeFromIndex(int64_t documentId) override;
+    bool grepTrigramIndexAvailable() override;
+    Result<void> indexGrepTrigrams(int64_t documentId, std::string_view sha256Hash,
+                                   std::string_view bytes) override;
+    Result<void> removeGrepTrigrams(int64_t documentId) override;
+    Result<std::unordered_map<int64_t, std::string>> grepTrigramCoverage() override;
+    Result<std::optional<std::vector<int64_t>>>
+    grepTrigramMatches(std::span<const std::string> literals) override;
     Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>& hashes) override;
     Result<bool> hasFtsEntry(int64_t documentId) override;
     Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() override;
@@ -1097,6 +1127,8 @@ private:
     TreeDiffAppliedCallback treeDiffAppliedCallback_; // PBI-009: centralized graph ops hook
 
     // Component-owned metrics (updated on insert/delete, read by DaemonMetrics)
+    // -1 unknown, 0 absent, 1 present: whether the grep trigram table exists in this database.
+    std::atomic<int> grepTrigramAvailable_{-1};
     mutable std::atomic<uint64_t> cachedDocumentCount_{0};
     mutable std::atomic<uint64_t> cachedIndexedCount_{0};
     mutable std::atomic<uint64_t> cachedExtractedCount_{0};
