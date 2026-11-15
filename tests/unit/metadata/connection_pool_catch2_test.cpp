@@ -934,6 +934,9 @@ TEST_CASE("Connection pool interrupts statements running on leased connections",
 }
 TEST_CASE("Connection pool destruction does not wait out the maintenance sleep",
           "[metadata][connection_pool][shutdown]") {
+#if !(defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L)
+    SKIP("The pool starts no maintenance thread without std::jthread");
+#endif
     // The maintenance thread slept in one-second steps and checked its stop token only between
     // them, and the jthread joins on destruction. Every CLI command that opened the database
     // locally paid up to a second at exit (390 ms of a 2.1 s `yams grep`).
