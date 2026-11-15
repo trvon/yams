@@ -247,8 +247,6 @@ TEST_CASE("CLI live grep keeps requested context at a global cap", "[cli][live]"
     CHECK(result.hits[0].contextAfter == std::vector<std::string>{"after"});
 }
 
-#endif // !_WIN32
-
 TEST_CASE("CLI freshness trusts size and mtime for files indexed after their last change",
           "[cli][repo][freshness]") {
     // Every repo-scoped `yams grep` hashed every tracked file in the repository (50-80 ms for
@@ -284,3 +282,5 @@ TEST_CASE("CLI freshness trusts size and mtime for files indexed after their las
     CHECK_FALSE(compareRepoIndex(files, index, countingHash).stale());
     CHECK(hashed == 2);
 }
+
+#endif // !_WIN32
