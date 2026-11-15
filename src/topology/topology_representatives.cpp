@@ -250,7 +250,8 @@ std::size_t applyOrthogonalBoundarySpill(std::span<const TopologyDocumentInput> 
         std::max({kMinimumOverlapCandidateLimit, config.maxNeighborsPerDocument,
                   config.overlapLimit + static_cast<std::size_t>(1)});
     std::vector<std::size_t> indexedClusterIds;
-    std::vector<std::vector<float>> indexedCentroids;
+    // Views into the artifacts' centroids rather than copies; the index keeps its own.
+    std::vector<std::span<const float>> indexedCentroids;
     indexedClusterIds.reserve(artifacts.clusters.size());
     indexedCentroids.reserve(artifacts.clusters.size());
     for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size(); ++clusterIndex) {
