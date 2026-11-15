@@ -641,12 +641,13 @@ bool PathScope::contains(std::string_view path) const {
     if (path.empty() || roots_.empty()) {
         return false;
     }
+    // Resolve the parent directory, once per directory, before comparing. A lexical match alone
+    // would accept /root/link/file when `link` points outside the root, which
+    // isPathWithinScope rejects; resolving also matches /var -> /private/var aliases.
     const std::filesystem::path normalized = std::filesystem::path(path).lexically_normal();
-    if (underRoot(comparablePath(normalized.generic_string()))) {
-        return true;
+    if (!normalized.has_parent_path() || normalized == normalized.root_path()) {
+        return underRoot(comparablePath(normalized.generic_string()));
     }
-    // Not lexically inside: resolve the parent directory (symlinks such as /var ->
-    // /private/var), once per directory.
     const auto parent = normalized.parent_path().generic_string();
     auto found = resolvedParents_.find(parent);
     if (found == resolvedParents_.end()) {
